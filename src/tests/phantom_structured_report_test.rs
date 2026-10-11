@@ -16,11 +16,12 @@
 //!
 //! Deliberate trade-off, owner-ruled: #1423's fabricated table report would
 //! now be delivered instead of discarded, with a WARN trail instead of
-//! silence. The zero-tool turn-end verdict (#752) now honors the same
-//! exemption (#1541): a structured deliverable is never stripped at turn-end
-//! either, so the in-loop exemption and the turn-end verdict cannot disagree.
-//! Every prose-shaped detector keeps full authority over non-structured
-//! narration.
+//! silence. The zero-tool turn-end verdict (#752) does NOT exempt structured
+//! reports (#1541 fix): a structured report with zero tools is fabricated by
+//! construction, so the turn-end note fires. The in-loop exemption at #1506
+//! is gated on `tool_calls_completed_this_turn > 0`, so it only protects
+//! legitimate post-tool summaries. Every prose-shaped detector keeps full
+//! authority over non-structured narration.
 //!
 //! Fixtures are synthetic and carry no user identifiers.
 
@@ -235,13 +236,13 @@ fn the_suppressed_report_logs_its_branches_for_forensics() {
 // ─── wiring sentinel: the turn-end verdict honors the exemption (#1541) ───
 
 #[test]
-fn the_turn_end_verdict_honors_the_structured_exemption() {
-    // #1541: the #752 turn-end verdict must consult is_structured_report, or a
-    // structured deliverable exempted by the #1506 in-loop kill is stripped
-    // here anyway and swapped for the prose note. Zero tools means no retry
-    // fired (the exemption spent no budget), so the work is lost and the user
-    // sees a dead-end. The in-loop exemption and the turn-end verdict must
-    // agree: a structured report ships untouched from both.
+fn the_turn_end_verdict_does_not_exempt_structured_reports_with_zero_tools() {
+    // #1541 fix: the turn-end verdict is already gated on
+    // `tool_calls_completed_this_turn == 0`. A structured completion report
+    // with zero tools is fabricated by construction — the #1541 exemption
+    // was only valid post-tool, where it belongs (see the in-loop gate at
+    // #1506, which now checks `tool_calls_completed_this_turn > 0`).
+    // The old test asserted the exemption existed here; that WAS the bug.
     let verdict = TOOL_LOOP_SRC
         .split("Turn-end phantom verdict (#752)")
         .nth(1)
@@ -251,8 +252,13 @@ fn the_turn_end_verdict_honors_the_structured_exemption() {
         .next()
         .expect("#752 note assignment not found");
     assert!(
-        verdict.contains("!super::phantom::is_structured_report(&final_text)"),
-        "the #752 turn-end verdict strips structured reports (the #1541 bug)"
+        !verdict.contains("!super::phantom::is_structured_report(&final_text)"),
+        "the #752 turn-end verdict must NOT exempt structured reports — zero tools means fabricated"
+    );
+    // The exemption DOES belong in-loop, gated on tools having run.
+    assert!(
+        TOOL_LOOP_SRC.contains("kill && structured_report && tool_calls_completed_this_turn > 0"),
+        "the #1506 in-loop exemption must be gated on tool_calls_completed_this_turn > 0"
     );
 }
 

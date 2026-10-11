@@ -5287,12 +5287,17 @@ impl AgentService {
                 // streamed buffer; the would-be branches land in the WARN
                 // for forensics, so #1423's fabricated-table shape trades a
                 // silent discard for a visible delivery with a trail.
+                //
+                // Gate on tool_calls_completed_this_turn > 0: the exemption
+                // protects post-tool reports (real work ran, summary is
+                // legitimate). With zero tools, a structured report is
+                // fabricated by construction and must not ship.
                 let structured_report = super::phantom::is_structured_report(&iteration_text);
                 let kill = phantom_retries_used < MAX_PHANTOM_RETRIES
                     && phantom_detections_total < MAX_PHANTOM_DETECTIONS_TOTAL
                     && phantom_eligible
                     && !fired_branches.is_empty();
-                if kill && structured_report {
+                if kill && structured_report && tool_calls_completed_this_turn > 0 {
                     tracing::warn!(
                         branches = ?fired_branches,
                         text_len = iteration_text.len(),
@@ -8002,14 +8007,11 @@ impl AgentService {
         // a truthful message instead of telling the user it was done.
         if tool_calls_completed_this_turn == 0
             && !final_text.trim().is_empty()
-            // #1541: a structured report ships untouched, the same owner
-            // directive the #1506 in-loop kill enforces ("a report with tables
-            // and structured data is NEVER discarded"). Without this the report
-            // is exempted in-loop, then stripped here and swapped for the prose
-            // note; zero tools means no retry fired (the exemption spent no
-            // budget), so the deliverable is lost. The note is for genuine
-            // prose narration only.
-            && !super::phantom::is_structured_report(&final_text)
+            // #1541 carve-out REMOVED: this block already requires zero tool
+            // calls. A structured completion report with zero tools ran is
+            // fabricated by construction — the exemption was only valid
+            // post-tool, where it belongs (see the in-loop gate at #1506,
+            // which now checks tool_calls_completed_this_turn > 0).
             && (super::phantom::has_phantom_tool_intent_no_tools(&final_text)
                 || super::phantom::claims_unbacked_side_effects(&final_text)
                 || super::phantom::claims_unbacked_media_result(&final_text)
