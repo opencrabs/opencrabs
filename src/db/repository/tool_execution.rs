@@ -271,4 +271,73 @@ impl ToolExecutionRepository {
             .map_err(interact_err)?
             .context("Failed to query tool failure stats")
     }
+
+    /// Count tool executions recorded for a session.
+    ///
+    /// Used by the phantom-detection gate: zero rows means nothing ran,
+    /// so a "completion report" is fabricated by construction.
+    pub async fn count_for_session(&self, session_id: &str) -> Result<usize> {
+        let session_id = session_id.to_string();
+        self.pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM tool_executions WHERE session_id = ?1",
+                    params![session_id],
+                    |row| row.get::<_, i64>(0),
+                )
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to count tool executions for session")
+            .map(|n| n as usize)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::Database;
+
+    async fn test_repo() -> ToolExecutionRepository {
+        let db = Database::connect_in_memory()
+            .await
+            .expect("in-memory db");
+        db.run_migrations().await.expect("migrations");
+        ToolExecutionRepository::new(db.pool().clone())
+    }
+
+    #[tokio::test]
+    async fn count_for_session_counts_only_that_session() {
+        let repo = test_repo().await;
+
+        // No rows yet.
+        let n = repo.count_for_session("sess-a").await.unwrap();
+        assert_eq!(n, 0);
+
+        // Two rows for sess-a, one for sess-b.
+        for i in 0..2 {
+            repo.record(
+                &format!("id-a-{i}"),
+                "msg-1",
+                "sess-a",
+                "read_file",
+                "success",
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        }
+        repo.record("id-b-0", "msg-2", "sess-b", "bash", "success", None, None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(repo.count_for_session("sess-a").await.unwrap(), 2);
+        assert_eq!(repo.count_for_session("sess-b").await.unwrap(), 1);
+        assert_eq!(repo.count_for_session("sess-c").await.unwrap(), 0);
+    }
 }
