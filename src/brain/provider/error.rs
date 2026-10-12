@@ -175,6 +175,12 @@ pub fn is_quota_exhausted_message(msg: &str) -> bool {
     QUOTA_EXHAUSTION_PHRASES.iter().any(|p| l.contains(p))
 }
 
+/// A declared wait longer than this is not retried in place. The retry loop
+/// would otherwise burn its whole budget sleeping 30 s at a time against an
+/// endpoint that has already told us when it will be back; the chain is
+/// consulted instead and the provider is parked for the declared window.
+pub const INLINE_RETRY_CEILING: std::time::Duration = std::time::Duration::from_secs(60);
+
 impl ProviderError {
     /// Check if error is retryable
     pub fn is_retryable(&self) -> bool {
@@ -182,6 +188,15 @@ impl ProviderError {
         // bail straight to the fallback chain instead of burning the whole
         // backoff budget against a wall (#952).
         if self.is_quota_exhausted() {
+            return false;
+        }
+        // A 429 that declares a wait longer than the inline budget is the
+        // provider saying when it will serve again. Retrying it in place means
+        // minutes of silence for a request another provider can answer now.
+        if self
+            .declared_cooldown()
+            .is_some_and(|d| d > INLINE_RETRY_CEILING)
+        {
             return false;
         }
         match self {
@@ -348,6 +363,23 @@ impl ProviderError {
             _ => false,
         }
     }
+
+    /// The wait the server itself declared, UNCAPPED.
+    ///
+    /// `retry_after()` is the in-place retry hint, clamped so a turn cannot
+    /// stall; this is the cooldown window: how long the provider said not to
+    /// come back. Same parse, no ceiling. A provider that answers "retry after
+    /// 157000 s" is out for 157000 s.
+    pub fn declared_cooldown(&self) -> Option<std::time::Duration> {
+        let msg = match self {
+            ProviderError::RateLimitExceeded(m) => m.as_str(),
+            ProviderError::ApiError {
+                status, message, ..
+            } if *status == 429 => message.as_str(),
+            _ => return None,
+        };
+        parse_retry_seconds(msg).map(std::time::Duration::from_secs)
+    }
 }
 
 /// Does this failure justify handing the request to the NEXT provider in a
@@ -365,6 +397,15 @@ impl ProviderError {
 pub fn should_try_next_provider(err: &ProviderError) -> bool {
     // Transient (rate limit, 5xx, timeout) — the next provider may be healthy.
     if err.is_retryable() {
+        return true;
+    }
+    // A 429 naming a wait longer than the inline budget: not retryable in
+    // place (see `INLINE_RETRY_CEILING`), but the next provider bills a
+    // different account and should answer now.
+    if err
+        .declared_cooldown()
+        .is_some_and(|d| d > INLINE_RETRY_CEILING)
+    {
         return true;
     }
     // Hard quota / billing cap. Never retried in place, always worth handing
@@ -601,18 +642,13 @@ impl crate::utils::retry::RetryableError for ProviderError {
     }
 
     fn retry_after(&self) -> Option<std::time::Duration> {
-        // Parse a server Retry-After hint from rate-limit errors, clamped
-        // to 30s so a pathological "retry after 300s" can't stall a turn.
+        // The in-place retry hint, clamped so a pathological "retry after
+        // 300s" cannot stall a turn. The uncapped number the provider declared
+        // is `declared_cooldown()`, which is what parks the provider instead.
         // Other error kinds have no hint — the caller falls back to the
         // exponential schedule.
-        let msg = match self {
-            ProviderError::RateLimitExceeded(m) => m.as_str(),
-            ProviderError::ApiError {
-                status, message, ..
-            } if *status == 429 => message.as_str(),
-            _ => return None,
-        };
-        parse_retry_seconds(msg).map(|secs| std::time::Duration::from_secs(secs.min(30)))
+        self.declared_cooldown()
+            .map(|d| d.min(std::time::Duration::from_secs(30)))
     }
 }
 

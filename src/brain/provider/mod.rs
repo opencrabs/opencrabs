@@ -4,6 +4,7 @@
 //! This file is declarations only — no function definitions live here
 //! (CONTRIBUTING.md).
 
+pub mod cooldown;
 pub mod error;
 pub mod json_repair;
 pub mod placeholder;
@@ -14,6 +15,7 @@ pub mod types;
 mod which;
 
 // Re-exports
+pub use cooldown::CooldownRegistry;
 pub use error::{ProviderError, Result};
 pub use placeholder::PlaceholderProvider;
 pub use r#trait::{Provider, ProviderCapabilities, ProviderStream};
