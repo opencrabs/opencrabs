@@ -356,6 +356,21 @@ pub enum ChannelCommands {
         #[arg(long)]
         code: bool,
     },
+    /// Download a document through the Telegram userbot (up to 2 GB)
+    #[command(name = "userbot-download")]
+    UserbotDownload {
+        /// Peer: @username or numeric chat/channel id
+        peer: String,
+        /// Message id, or "latest" for the most recent document
+        #[arg(default_value = "latest")]
+        message: String,
+        /// Output directory (defaults to the current directory)
+        #[arg(short, long)]
+        outdir: Option<String>,
+        /// List recent document messages instead of downloading
+        #[arg(long)]
+        list: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]

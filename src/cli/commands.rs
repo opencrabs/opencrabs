@@ -1420,6 +1420,28 @@ pub(crate) async fn cmd_channel(
                 "this build lacks the telegram-userbot feature — rebuild with --features telegram-userbot"
             );
         }
+        #[cfg(feature = "telegram-userbot")]
+        ChannelCommands::UserbotDownload {
+            peer,
+            message,
+            outdir,
+            list,
+        } => {
+            crate::channels::telegram::userbot::download::cmd_userbot_download(
+                config,
+                &peer,
+                &message,
+                outdir.as_deref(),
+                list,
+            )
+            .await
+        }
+        #[cfg(not(feature = "telegram-userbot"))]
+        ChannelCommands::UserbotDownload { .. } => {
+            anyhow::bail!(
+                "this build lacks the telegram-userbot feature — rebuild with --features telegram-userbot"
+            );
+        }
     }
 }
 

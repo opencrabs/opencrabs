@@ -4,6 +4,7 @@
 //! invokes the agent and exposes no outbound-as-user path.
 
 pub(crate) mod capture;
+pub(crate) mod download;
 pub(crate) mod login;
 pub(crate) mod runner;
 pub(crate) mod session;
