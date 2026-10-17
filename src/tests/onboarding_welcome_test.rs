@@ -101,9 +101,9 @@ fn advanced_keeps_the_existing_welcome() {
 
 #[test]
 fn quick_start_welcome_fills_the_session_provider_and_model() {
-    let p = quick_start_welcome("opencrabs", "deepseek-v4.1-flash", &[]);
-    assert!(p.contains("the opencrabs provider with model deepseek-v4.1-flash"));
-    assert!(p.contains("brain is online on deepseek-v4.1-flash"));
+    let p = quick_start_welcome("opencrabs", "cb/deepseek-v4.1-flash", &[]);
+    assert!(p.contains("the opencrabs provider with model cb/deepseek-v4.1-flash"));
+    assert!(p.contains("brain is online on cb/deepseek-v4.1-flash"));
     assert!(!p.contains("{provider}"));
     assert!(!p.contains("{model}"));
 }
@@ -112,13 +112,14 @@ fn quick_start_welcome_fills_the_session_provider_and_model() {
 fn quick_start_welcome_follows_the_session_not_a_hardcoded_model() {
     let p = quick_start_welcome("anthropic", "claude-sonnet-5-5", &[]);
     assert!(p.contains("claude-sonnet-5-5"));
+    assert!(!p.contains("cb/deepseek-v4.1-flash"));
     assert!(!p.contains("deepseek-v4.1-flash"));
 }
 
 #[test]
 fn welcome_prompts_have_no_em_dash() {
     assert!(!WELCOME_MESSAGE.contains('\u{2014}'));
-    assert!(!quick_start_welcome("opencrabs", "deepseek-v4.1-flash", &[]).contains('\u{2014}'));
+    assert!(!quick_start_welcome("opencrabs", "cb/deepseek-v4.1-flash", &[]).contains('\u{2014}'));
 }
 
 #[test]
@@ -147,7 +148,7 @@ fn quick_start_prompt_asks_only_about_gaps() {
 fn quick_start_welcome_lists_the_remaining_gaps() {
     let p = quick_start_welcome(
         "opencrabs",
-        "deepseek-v4.1-flash",
+        "cb/deepseek-v4.1-flash",
         &[SetupGap::Name, SetupGap::ImageGeneration],
     );
     assert!(p.contains("Still missing: name (USER.md), image generation."));
@@ -156,13 +157,13 @@ fn quick_start_welcome_lists_the_remaining_gaps() {
 
 #[test]
 fn quick_start_welcome_says_when_nothing_is_missing() {
-    let p = quick_start_welcome("opencrabs", "deepseek-v4.1-flash", &[]);
+    let p = quick_start_welcome("opencrabs", "cb/deepseek-v4.1-flash", &[]);
     assert!(p.contains("Still missing: nothing, everything is set."));
 }
 
 #[test]
 fn quick_start_welcome_points_to_models_and_advanced() {
-    let p = quick_start_welcome("opencrabs", "deepseek-v4.1-flash", &[]);
+    let p = quick_start_welcome("opencrabs", "cb/deepseek-v4.1-flash", &[]);
     assert!(p.contains("/models"));
     assert!(p.contains("/onboard"));
     assert!(p.contains("Advanced"));

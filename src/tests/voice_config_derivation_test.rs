@@ -141,7 +141,7 @@ fn active_provider_audio_models_turn_voice_on_with_no_stt_blocks() {
 [providers.opencrabs]
 enabled = true
 api_key = "ocp_test_token"
-default_model = "deepseek-v4.1-flash"
+default_model = "cb/deepseek-v4.1-flash"
 stt_model = "qwen3.8-omni-flash"
 tts_model = "qwen3.8-omni-flash"
 "#)
@@ -176,7 +176,7 @@ fn provider_audio_models_win_over_a_user_fallback_chain() {
 [providers.opencrabs]
 enabled = true
 api_key = "ocp_test_token"
-default_model = "deepseek-v4.1-flash"
+default_model = "cb/deepseek-v4.1-flash"
 stt_model = "qwen3.8-omni-flash"
 tts_model = "qwen3.8-omni-flash"
 [providers.stt]
@@ -204,7 +204,7 @@ fn keyless_provider_audio_models_do_not_enable_voice() {
     let vc = cfg(r#"
 [providers.opencrabs]
 enabled = true
-default_model = "deepseek-v4.1-flash"
+default_model = "cb/deepseek-v4.1-flash"
 stt_model = "qwen3.8-omni-flash"
 tts_model = "qwen3.8-omni-flash"
 "#)

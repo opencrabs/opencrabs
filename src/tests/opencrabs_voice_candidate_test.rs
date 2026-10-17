@@ -35,7 +35,7 @@ fn opencrabs_toml(api_key: Option<&str>, with_audio_models: bool) -> String {
 [providers.opencrabs]
 enabled = true
 {key_line}
-default_model = "deepseek-v4.1-flash"
+default_model = "cb/deepseek-v4.1-flash"
 {audio_lines}"#
     )
 }

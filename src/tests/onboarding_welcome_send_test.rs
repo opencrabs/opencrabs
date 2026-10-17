@@ -75,7 +75,7 @@ async fn welcome_reads_provider_and_model_from_the_session_row() {
         .create_session_with_provider(
             Some("onboarding".into()),
             Some("opencrabs".into()),
-            Some("deepseek-v4.1-flash".into()),
+            Some("cb/deepseek-v4.1-flash".into()),
             None,
         )
         .await
@@ -85,5 +85,5 @@ async fn welcome_reads_provider_and_model_from_the_session_row() {
     let (provider, model) = app.welcome_provider_and_model().await;
 
     assert_eq!(provider, "opencrabs");
-    assert_eq!(model, "deepseek-v4.1-flash");
+    assert_eq!(model, "cb/deepseek-v4.1-flash");
 }
