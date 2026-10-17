@@ -1,14 +1,17 @@
 //! The Discord session turn slot and the mid-turn follow-up queue (#1990).
 //!
 //! Telegram's `active_turns` / `pending_reactions` twin (#501, #1213, #1837).
-//! Two facts made this necessary: `store_cancel_token` CANCELS the token it
-//! finds (`cancel.rs`), so a second inbound message on a busy session killed
-//! the live or recovered turn; and the follow-up had nowhere to queue, so it
-//! forked a second concurrent tool loop on the same session, whose answer
-//! read the first turn's prompt as "another task in flight" and said so
-//! (#1990). The slot makes the claim atomic; the queue gives the loser
-//! somewhere to wait: injected between tool rounds by the queue callback,
-//! flushed into a fresh tracked turn by whoever held the slot last.
+//! Two facts made this necessary: `store_cancel_token` used to CANCEL the
+//! token it found (`cancel.rs`), so a second inbound message on a busy
+//! session killed the live or recovered turn; and the follow-up had nowhere
+//! to queue, so it forked a second concurrent tool loop on the same session,
+//! whose answer read the first turn's prompt as "another task in flight" and
+//! said so (#1990). The store no longer cancels (it only overwrites, #652's
+//! Discord twin), but the slot is still what makes the claim atomic: without
+//! it two turns run at once and only the last token stored is reachable by
+//! /stop. The queue gives the loser somewhere to wait: injected between tool
+//! rounds by the queue callback, flushed into a fresh tracked turn by whoever
+//! held the slot last.
 
 use std::sync::Arc;
 use uuid::Uuid;

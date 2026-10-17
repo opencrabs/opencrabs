@@ -5304,12 +5304,31 @@ impl AgentService {
                 // matchers only. A fired fact check (unbacked facts, uncalled
                 // commands, unbacked evidence) kills the report whatever its
                 // shape, because a fabricated table is still fabricated.
+                //
+                // Sign-off after an option-surface halt (#31). The halt
+                // already handed the turn back with the options rendered, so
+                // the trailing text-only iteration is the model closing the
+                // turn, not narrating work it skipped. Phrase matchers read
+                // that prose as a promise and the retry they bought posted a
+                // second answer to a channel whose first answer had already
+                // landed (2026-10-17 Discord). Same branch class as the
+                // report exemption: a fired fact check still kills it.
                 let structured_report = super::phantom::is_structured_report(&iteration_text);
                 let kill = phantom_retries_used < MAX_PHANTOM_RETRIES
                     && phantom_detections_total < MAX_PHANTOM_DETECTIONS_TOTAL
                     && phantom_eligible
                     && !fired_branches.is_empty();
                 if kill
+                    && option_surface_halt_seen
+                    && super::phantom::option_halt_exempts(&fired_branches)
+                {
+                    tracing::warn!(
+                        branches = ?fired_branches,
+                        text_len = iteration_text.len(),
+                        "phantom suppressed: sign-off after an option-surface halt delivered \
+                         despite fired detectors (#31)",
+                    );
+                } else if kill
                     && super::phantom::structured_report_exempts(structured_report, &fired_branches)
                 {
                     tracing::warn!(

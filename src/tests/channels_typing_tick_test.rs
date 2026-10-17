@@ -121,9 +121,9 @@ async fn stop_token_ends_a_live_tick() {
 
 #[tokio::test]
 async fn cancelled_stop_before_entry_sends_nothing() {
-    // The takeover case: the next turn's `store_cancel_token` cancels the
-    // previous token before the old tail ever starts. A dead session must
-    // not get a single post-handover ping.
+    // The takeover case: the previous turn's stop token is already dead
+    // before the old tail ever starts. A dead session must not get a single
+    // post-handover ping.
     let mgr = Arc::new(SubAgentManager::new());
     let session = Uuid::new_v4();
     mgr.insert(child(session, false));

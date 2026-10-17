@@ -140,6 +140,12 @@ pub(crate) async fn route_interaction_turn(
 /// The other [`route_interaction_turn`] callers (modal form, select menu)
 /// deliberately stay on the bare single-call contract: they are synthetic
 /// steering prompts, not user-intent turns.
+///
+/// The turn claims the session slot before it touches the cancel token, the
+/// same rule `handle_message` and the tracked runner follow (#1990). This
+/// path was the one entry point `3f0086081` missed, so a tap arriving while
+/// a turn was live could start a SECOND concurrent tool loop on the same
+/// session instead of queueing behind the live one.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn route_followup_turn(
     ctx: &Context,
@@ -158,6 +164,28 @@ pub(crate) async fn route_followup_turn(
     else {
         return;
     };
+
+    // Claim the session's turn slot before anything else (#1990). A tap is a
+    // user-intent turn like a typed message, and it must never fork a second
+    // loop onto a session that already has one: losing the claim queues the
+    // pick for the live turn, which injects it between tool rounds or flushes
+    // it at turn end, exactly like a typed follow-up.
+    let Some(_turn_guard) = discord_state.try_begin_turn(session_id) else {
+        tracing::info!(
+            "Discord: follow-up tap queued for session {session_id}, a turn is in flight (#1990)"
+        );
+        discord_state.enqueue_followup(
+            session_id,
+            crate::brain::agent::QueuedUserMessage {
+                context_text: context_text.clone(),
+                display_text: context_text,
+                origin: crate::brain::agent::PushOrigin::Ingress,
+                bg_meta: None,
+            },
+        );
+        return;
+    };
+
     let channel = serenity::model::id::ChannelId::new(channel_id);
     let http = ctx.http.clone();
 

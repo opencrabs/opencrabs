@@ -637,7 +637,13 @@ jobs:
         # verified against crates.io on 2026-09-04, so there is no version to
         # move to from here. A routine `cargo update` will not shift them; only
         # an upstream release or dropping the dependency will.
-        run: cargo audit --ignore RUSTSEC-2024-0436 --ignore RUSTSEC-2025-0119 --ignore RUSTSEC-2025-0134 --ignore RUSTSEC-2025-0141 --ignore RUSTSEC-2026-0002 --ignore RUSTSEC-2026-0173 --ignore RUSTSEC-2026-0192 --ignore RUSTSEC-2026-0253 --ignore RUSTSEC-2026-0258
+        # zip (RUSTSEC-2026-0367/0368/0369, #2091, #2092): fixed in zip 9.0.0.
+        #   Our code only reads archives (ZipArchive::new, by_name, by_index) and
+        #   never calls extract(), the path these advisories concern. Our direct
+        #   zip and rust_xlsxwriter are on zip 9. Two copies stay until upstream
+        #   releases: candle-core 0.8 via rwhisper 0.4.1 (latest) pins zip 1.1,
+        #   and calamine 0.36 and docx-rs 0.4 (both latest) pin zip 8.6.
+        run: cargo audit --ignore RUSTSEC-2024-0436 --ignore RUSTSEC-2025-0119 --ignore RUSTSEC-2025-0134 --ignore RUSTSEC-2025-0141 --ignore RUSTSEC-2026-0002 --ignore RUSTSEC-2026-0173 --ignore RUSTSEC-2026-0192 --ignore RUSTSEC-2026-0253 --ignore RUSTSEC-2026-0258 --ignore RUSTSEC-2026-0367 --ignore RUSTSEC-2026-0368 --ignore RUSTSEC-2026-0369
 
   # ── Stage 5: Coverage (on-demand only) ───────────────────────────────────
   # Tarpaulin is the slowest job (~12 min). Running it on every main push

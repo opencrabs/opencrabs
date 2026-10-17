@@ -294,7 +294,8 @@ fn extract_from_zip(data: &[u8], file_name: &str) -> Result<Vec<u8>> {
 
     for i in 0..archive.len() {
         let mut file = archive.by_index(i)?;
-        if file.name().ends_with(file_name) {
+        let name = file.name()?.into_owned();
+        if name.ends_with(file_name) {
             let mut buf = Vec::new();
             file.read_to_end(&mut buf)?;
             return Ok(buf);

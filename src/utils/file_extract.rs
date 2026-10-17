@@ -693,7 +693,13 @@ fn extract_zip_contents(bytes: &[u8], archive_name: &str, config: &Config) -> Fi
             }
         };
 
-        let name = file.name().to_string();
+        let name = match file.name() {
+            Ok(name) => name.to_string(),
+            Err(e) => {
+                parts.push(format!("[Error reading entry name {i}: {e}]"));
+                continue;
+            }
+        };
 
         // Skip directories
         if file.is_dir() {

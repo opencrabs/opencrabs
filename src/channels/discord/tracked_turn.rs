@@ -11,8 +11,9 @@
 //! (#1990).
 //!
 //! The runner claims the session slot FIRST, before `store_cancel_token`:
-//! that call CANCELS the token it finds (`cancel.rs`), so a resume turn that
-//! lost the claim race would otherwise kill the live turn it meant to join.
+//! a resume turn that lost the claim race would otherwise take over the live
+//! turn's cancel slot (and, before the store stopped cancelling, kill the
+//! turn it meant to join).
 //! The dispatch is injectable because the same visible turn is the right
 //! shape for all three producers: the boot-recovery replay, the
 //! background-completion turn (#1986), and the follow-up flush.

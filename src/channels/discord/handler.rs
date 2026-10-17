@@ -775,9 +775,9 @@ pub(crate) async fn handle_message(
 
     // Fast-cancel: any recognised stop intent, in any supported language (#965).
     //
-    // Cancellation is scoped to explicit stop requests and genuine follow-up
-    // messages (handled at dispatch by store_cancel_token, which cancels the
-    // prior token before starting new work). Channel commands like /models,
+    // Cancellation is scoped to explicit stop requests. A follow-up message
+    // never cancels: it joins the live turn's queue through the turn slot
+    // (#1990). Channel commands like /models,
     // /help, /usage, /new must NEVER abort an in-flight task: switching models
     // applies to the next run, it does not drop current work (#266).
     if crate::utils::stop_intent::is_stop_command_or_intent(&msg.content) {
@@ -1254,9 +1254,9 @@ pub(crate) async fn handle_message(
     // this message must NOT fork a second concurrent loop. Queue it, ack with
     // 👀, and let the live loop inject it between rounds (the queue callback
     // wired in manager.rs) or this turn's end-of-turn flush pick it up. The
-    // claim precedes `store_cancel_token` below on purpose: that call CANCELS
-    // any token it finds (`cancel.rs`), and a lost claim must never kill the
-    // turn it meant to join.
+    // claim precedes `store_cancel_token` below on purpose: a lost claim must
+    // never replace the live turn's cancel token, or /stop would reach a turn
+    // that is not the one running.
     let Some(_turn_guard) = discord_state.try_begin_turn(session_id) else {
         tracing::info!("Discord: mid-turn follow-up queued for session {session_id} (#1990)");
         discord_state.enqueue_followup(

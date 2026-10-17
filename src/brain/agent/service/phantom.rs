@@ -2043,3 +2043,17 @@ pub fn is_fact_check_branch(branch: &str) -> bool {
 pub fn structured_report_exempts(structured: bool, fired_branches: &[&str]) -> bool {
     structured && !fired_branches.iter().any(|b| is_fact_check_branch(b))
 }
+
+/// Whether a text-only iteration that follows an option-surface halt escapes
+/// the phantom kill (#31). The halt already handed the turn back with the
+/// options rendered, so the trailing text closes the turn: it is a sign-off,
+/// never a promised action. Phrase matchers false-positive on exactly that
+/// prose, and the self-heal retry they triggered posted a second answer to a
+/// channel whose first answer was already delivered (2026-10-17, Discord:
+/// "Research delivered, file written, nothing generated ..." was killed on
+/// `intent_no_tools` after the turn had run 11 tools). Fact checks still kill
+/// it, the same rule structured reports follow (#2039): a sign-off that
+/// states a sha the conversation cannot back is still invented.
+pub fn option_halt_exempts(fired_branches: &[&str]) -> bool {
+    !fired_branches.iter().any(|b| is_fact_check_branch(b))
+}
