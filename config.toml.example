@@ -34,9 +34,10 @@ models = ["deepseek-v4.1-flash"]
 # context_window is not honoured here: the built-in endpoint is free and fixed
 # at 200k, so any value set in this section is ignored.
 vision_model = "deepseek-v4.1-flash"  # Multimodal: attached images work on day 0
-generation_model = "gemini-3.1-flash-image"  # Image generation on day 0, served only on /v1/images/*
-stt_model = "qwen3.8-omni-flash"  # Speech-to-text on day 0, served on /v1/audio/transcriptions
-tts_model = "qwen3.8-omni-flash"  # Text-to-speech on day 0, served on /v1/audio/speech
+generation_model = "cb/gemini-2.5-flash-image"  # Image generation on day 0, served only on /v1/images/*
+# No stt_model / tts_model here: the built-in endpoint serves no audio routes, so
+# a preset would only turn every voice note into a refusal. Set them on a
+# provider that exposes /v1/audio/transcriptions and /v1/audio/speech.
 
 # ========================================
 # Xiaomi MiMo
@@ -554,10 +555,10 @@ model = "gemini-3.1-flash-image-preview"   # Gemini image-gen model ("Nano Banan
 #
 # Voice works the same way: set `stt_model` and `tts_model` on your active
 # [providers.<name>] block and voice notes transcribe and replies speak on
-# that provider's own endpoint. Works for every built-in and custom
-# provider, not only the built-in one — any [OI]-compatible provider that
-# exposes `/v1/audio/transcriptions` and `/v1/audio/speech`. `stt_model`
-# drives `transcribe`, `tts_model` drives `synthesize`; no
+# that provider's own endpoint. Any [OI]-compatible provider works, built-in
+# or custom, as long as its endpoint exposes `/v1/audio/transcriptions` and
+# `/v1/audio/speech`; the built-in OpenCrabs provider does not expose them
+# yet. `stt_model` drives `transcribe`, `tts_model` drives `synthesize`; no
 # `[providers.stt.*]` / `[providers.tts.*]` block is needed when the active
 # provider carries them.
 

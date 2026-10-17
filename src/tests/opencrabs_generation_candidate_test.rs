@@ -7,7 +7,7 @@ use crate::brain::provider::factory::generation_candidates_for;
 use crate::brain::provider::opencrabs_install::OPENCRABS_BASE_URL;
 use crate::config::{Config, ProviderConfig, ProviderConfigs};
 
-const IMAGE_MODEL: &str = "gemini-3.1-flash-image";
+const IMAGE_MODEL: &str = "cb/gemini-2.5-flash-image";
 
 fn opencrabs_config(api_key: Option<&str>) -> Config {
     Config {

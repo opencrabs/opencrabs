@@ -35,20 +35,24 @@ fn example_config_sets_the_built_in_image_model() {
 
     assert_eq!(
         section.generation_model.as_deref(),
-        Some("gemini-3.1-flash-image")
+        Some("cb/gemini-2.5-flash-image")
     );
     assert!(
-        !section.models.iter().any(|m| m == "gemini-3.1-flash-image"),
+        !section
+            .models
+            .iter()
+            .any(|m| m == "cb/gemini-2.5-flash-image"),
         "image model must not appear in the chat model list"
     );
 }
 
-/// Voice ships on day 0 the same way: the built-in provider carries the
-/// transcription and synthesis model ids, so a fresh install has STT and TTS
-/// with nothing to configure. The id is bare (no `alicn/` provider prefix),
-/// matching the image model's #2054 treatment.
+/// Voice is deliberately NOT preset on the built-in provider. The endpoint
+/// serves no `/v1/audio/transcriptions` or `/v1/audio/speech` route, so a
+/// shipped default id could only produce a refusal on every voice note. Voice
+/// stays unconfigured until the user sets `stt_model` / `tts_model` on a
+/// provider whose endpoint actually serves audio.
 #[test]
-fn example_config_sets_the_built_in_voice_models() {
+fn example_config_sets_no_built_in_voice_models() {
     let config: Config = toml::from_str(include_str!("../../config.toml.example"))
         .expect("config.toml.example parses");
     let section = config
@@ -56,10 +60,12 @@ fn example_config_sets_the_built_in_voice_models() {
         .opencrabs
         .expect("[providers.opencrabs] present in the example");
 
-    assert_eq!(section.stt_model.as_deref(), Some("qwen3.8-omni-flash"));
-    assert_eq!(section.tts_model.as_deref(), Some("qwen3.8-omni-flash"));
-    assert!(
-        !section.models.iter().any(|m| m == "qwen3.8-omni-flash"),
-        "voice model must not appear in the chat model list"
+    assert_eq!(
+        section.stt_model, None,
+        "no STT default: the built-in endpoint has no audio route to serve it"
+    );
+    assert_eq!(
+        section.tts_model, None,
+        "no TTS default: the built-in endpoint has no audio route to serve it"
     );
 }
