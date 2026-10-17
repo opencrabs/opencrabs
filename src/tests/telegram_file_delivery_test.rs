@@ -23,13 +23,15 @@
 //!    NAME, never as a silent drop. The two failure classes are distinct: a
 //!    path that cannot be READ is a reference problem (`Unreadable`), while
 //!    a file the API refuses is a delivery problem (`DeliveryFailed`).
-//! 3. **The bubble links** (`mod links`, #1918). A delivered file's `📎`
+//! 3. **The bubble links** (`mod links`, #1918, #773). A delivered file's `📎`
 //!    marker becomes a `t.me` link to the document bubble, so a channel
 //!    reader can tap the marker and land on the file. Links exist only for
 //!    public supergroup and channel chats; a private chat keeps the plain
-//!    marker. A link is spliced only where the recorded span still matches
-//!    the buffer; a moved span degrades to the plain marker rather than
-//!    link unrelated words.
+//!    marker. The recorded span is a record of WHAT the scanner wrote, never
+//!    of WHERE it sits — `strip_llm_artifacts` shortens the buffer at every
+//!    em dash (#1745), so a marker that merely MOVED still links (#773). A
+//!    marker that vanished, or that the model also wrote itself (#2001),
+//!    stays plain rather than splicing a link over unrelated words.
 //! 4. **The rich rewrite** (`mod rich`, #1918). On the rich plane the file
 //!    goes one better than a marker: each resolvable reference is rewritten
 //!    IN PLACE into a `tg://document?id=` reference and the document rides
@@ -752,7 +754,8 @@ mod floor {
 
 mod links {
     use crate::channels::telegram::delivery::{file_message_link, link_file_markers};
-    use crate::utils::image::extract_local_files;
+    use crate::utils::image::{extract_local_files, LocalFile, LocalFileScan};
+    use crate::utils::sanitize::strip_llm_artifacts;
     use std::path::Path;
 
     const PDF_BYTES: &[u8] = b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n";
@@ -856,20 +859,137 @@ mod links {
     }
 
     #[test]
-    fn a_moved_span_degrades_to_the_plain_marker() {
+    fn a_marker_that_moved_still_links() {
+        // #773. The recorded span is a record of WHAT the scanner wrote, not
+        // of WHERE it now sits. `text` starts as a copy of `scan.text` and is
+        // then rewritten — the artifact strip, the secret redaction, the dedup
+        // ladder — and any of those can move a marker. The old guard compared
+        // the span against the marker's bytes, read the mismatch as "the
+        // marker is gone" and left it plain; searching for the marker's own
+        // bytes finds it where it actually is.
         let dir = tempfile::tempdir().expect("tempdir");
         let pdf = write_fixture(dir.path(), "q3.pdf");
-        let scan = extract_local_files("Here is [Q3 report](q3.pdf).", Some(dir.path()));
-        // The buffer moved under the span (a prefix landed): cutting the
-        // recorded range would splice a link over unrelated words, so the
-        // rewrite must decline and the marker stays plain.
-        let shifted = format!(">> {}", scan.text);
+        let scan = extract_local_files("Report [Q3 report](q3.pdf).", Some(dir.path()));
+        assert_eq!(scan.text, "Report 📎 Q3 report.");
+
+        let moved = format!("(redacted) {}", scan.text);
         let linked = link_file_markers(
-            &shifted,
+            &moved,
             &scan,
             &[(pdf, "https://t.me/c/1/701".to_string())],
         );
-        assert_eq!(linked, shifted, "a moved span is never spliced");
+        assert_eq!(
+            linked, "(redacted) Report [📎 Q3 report](https://t.me/c/1/701).",
+            "the span is stale but the marker is still there exactly once, so it \
+             links to the bubble that holds the file"
+        );
+    }
+
+    #[test]
+    fn a_marker_after_a_real_rewrite_still_links() {
+        // The live defect (#773) driven through the REAL transform rather than
+        // a hand-made shift. `strip_llm_artifacts` runs on every delivered
+        // reply and its `normalize_dashes` pass rewrites " —" to ":" (#1745),
+        // SHORTENING the buffer, so every span past the first em dash goes
+        // stale by exactly the bytes the dash gave up.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pdf = write_fixture(dir.path(), "q3.pdf");
+        let scan = extract_local_files(
+            "Here is the report — the one you asked for: [Q3 report](q3.pdf).",
+            Some(dir.path()),
+        );
+        let rewritten = strip_llm_artifacts(&scan.text);
+
+        assert_ne!(rewritten, scan.text, "the transform has to actually fire");
+        assert!(
+            rewritten.len() < scan.text.len(),
+            "the em dash gives up bytes, so the buffer shortens: {rewritten:?}"
+        );
+        // The span the scanner recorded no longer names the marker — the exact
+        // condition the old guard refused on, so this test fails on the pre-fix
+        // code instead of passing for the wrong reason.
+        let span = scan.attachments[0]
+            .marker_span
+            .clone()
+            .expect("the scan records the span it emitted the marker at");
+        let real = rewritten
+            .find("📎 Q3 report")
+            .expect("the marker itself survives the rewrite");
+        assert!(
+            real < span.start,
+            "the rewrite moved the marker to {real}, left of the recorded span {span:?}"
+        );
+
+        let linked = link_file_markers(
+            &rewritten,
+            &scan,
+            &[(pdf, "https://t.me/c/1/701".to_string())],
+        );
+        assert_eq!(
+            linked,
+            "Here is the report: the one you asked for: \
+             [📎 Q3 report](https://t.me/c/1/701).",
+            "the marker links even though the transform moved it out from under \
+             its own span"
+        );
+    }
+
+    #[test]
+    fn a_marker_whose_text_vanished_stays_plain() {
+        // The other half of the same rule: a rewrite that does not merely move
+        // the marker but REMOVES it — the redaction pass, the dedup ladder —
+        // leaves no bytes to find, and nothing may be spliced over whatever
+        // took their place. The refusal the old guard made for the wrong
+        // reason is still the right answer here.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pdf = write_fixture(dir.path(), "q3.pdf");
+        let scan = extract_local_files("Report [Q3 report](q3.pdf).", Some(dir.path()));
+        let rewritten = "Report attached.".to_string();
+        let linked = link_file_markers(
+            &rewritten,
+            &scan,
+            &[(pdf, "https://t.me/c/1/701".to_string())],
+        );
+        assert_eq!(
+            linked, rewritten,
+            "no marker bytes survive the rewrite, so there is nothing to link"
+        );
+    }
+
+    #[test]
+    fn an_ambiguous_marker_is_left_plain() {
+        // #2001: the model can write the marker's own bytes into its prose —
+        // the very `📎 <label>` the scanner emits for the file it attached.
+        // Two occurrences are indistinguishable by search, and the one the
+        // recorded span names is not necessarily the scanner's, so cutting the
+        // first hit would drop a document link over the model's own words.
+        // Both stay plain.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pdf = write_fixture(dir.path(), "q3.pdf");
+        let body = "I wrote 📎 Q3 report in the draft. Attached: 📎 Q3 report";
+        let marker = "📎 Q3 report";
+        // The span names the marker the SCANNER emitted — the second one; the
+        // model's copy sits earlier in the prose.
+        let emitted_at = body.rfind(marker).expect("the body carries it twice");
+        let scan = LocalFileScan {
+            text: body.to_string(),
+            attachments: vec![LocalFile {
+                path: pdf.clone(),
+                caption: Some("Q3 report".to_string()),
+                marker_span: Some(emitted_at..emitted_at + marker.len()),
+            }],
+            failures: Vec::new(),
+        };
+        assert_eq!(
+            link_file_markers(
+                body,
+                &scan,
+                &[(pdf, "https://t.me/c/1/701".to_string())]
+            ),
+            body,
+            "an ambiguous marker is not cut — the link would land on whichever \
+             copy the search happened to reach first"
+        );
     }
 
     #[test]

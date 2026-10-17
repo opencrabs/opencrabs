@@ -1304,8 +1304,18 @@ pub(crate) fn file_message_link(
 /// moved the text degrades to the plain marker instead of splicing a link
 /// over unrelated words.
 ///
-/// Spans are cut from the LAST to the FIRST, so a link's extra bytes can
-/// never invalidate a span that has not been cut yet.
+/// `text` is the buffer being rewritten, which STARTS as a copy of `scan.text`
+/// and is then run through the artifact strip, the secret redaction and the
+/// dedup ladder — any of which can move a marker, and `strip_llm_artifacts`
+/// alone shortens the buffer at every em dash (#1745). The recorded span is
+/// therefore a record of WHAT the scanner wrote, never of WHERE it sits: the
+/// marker's own bytes are searched for in `text`, and the link is spliced only
+/// on an unambiguous single occurrence. A marker that moved still links; one
+/// that vanished, or that the model also wrote itself (#2001), keeps the plain
+/// form rather than splicing a link over unrelated words.
+///
+/// Spans are cut from the LAST to the FIRST, so a link's extra bytes can never
+/// invalidate a span that has not been cut yet.
 pub(crate) fn link_file_markers(
     text: &str,
     scan: &crate::utils::image::LocalFileScan,
@@ -1320,21 +1330,22 @@ pub(crate) fn link_file_markers(
             // Not from a scan: nothing to cut.
             continue;
         };
-        let (start, end) = (span.start, span.end);
-        let Some(marker) = text.get(start..end) else {
+        // The span indexes `scan.text`, the scanner's own output, so it still
+        // names the marker the scanner wrote there. Read the marker FROM it
+        // rather than from `text`, whose bytes have since moved.
+        let Some(marker) = scan.text.get(span.start..span.end) else {
             continue;
         };
-        if scan.text.get(start..end) != Some(marker) {
-            // The text moved under the span: the marker stays plain.
+        let Some(start) = locate_marker(text, marker) else {
             continue;
-        }
+        };
         let Some((_, link)) = links
             .iter()
             .find(|(path, _)| path.as_path() == file.path.as_path())
         else {
             continue;
         };
-        spans.push((start, end, marker, link.as_str()));
+        spans.push((start, start + marker.len(), marker, link.as_str()));
     }
     if spans.is_empty() {
         return text.to_string();
@@ -1348,6 +1359,26 @@ pub(crate) fn link_file_markers(
         linked.replace_range(*start..*end, &format!("[{marker}]({link})"));
     }
     linked
+}
+
+/// Find the single occurrence of `marker` in `text` (#773).
+///
+/// `Some(offset)` only when the marker occurs EXACTLY once. Two occurrences are
+/// ambiguous: the scanner wrote one, and the model may have written the other
+/// itself (#2001), so splicing a link onto the model's own words would be worse
+/// than leaving the marker plain. Zero means the text was rewritten beyond
+/// recognition. Both fall back to the plain marker — the same refusal the old
+/// span-equality guard made, kept for a reason that still holds once the text
+/// has moved.
+fn locate_marker(text: &str, marker: &str) -> Option<usize> {
+    if marker.is_empty() {
+        return None;
+    }
+    let first = text.find(marker)?;
+    if text[first + marker.len()..].contains(marker) {
+        return None;
+    }
+    Some(first)
 }
 
 /// The filename Telegram should display for a document read from `path`.
