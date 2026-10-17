@@ -53,7 +53,7 @@ fn advanced_first_run_preselects_the_built_in_provider_and_model() {
 
         assert_eq!(wizard.step, OnboardingStep::ProviderAuth);
         assert_eq!(wizard.ps.selected_provider, provider_index("opencrabs"));
-        assert_eq!(wizard.ps.selected_model_name(), "deepseek-v4.1-flash");
+        assert_eq!(wizard.ps.selected_model_name(), "cb/deepseek-v4.1-flash");
         assert!(wizard.ps.is_keyless(), "the built-in key is never typed");
     });
 }
@@ -148,6 +148,6 @@ fn prepare_quick_start_selects_the_built_in_provider() {
             .expect("files and selection prepared");
 
         assert_eq!(wizard.ps.selected_provider, provider_index("opencrabs"));
-        assert_eq!(wizard.ps.selected_model_name(), "deepseek-v4.1-flash");
+        assert_eq!(wizard.ps.selected_model_name(), "cb/deepseek-v4.1-flash");
     });
 }

@@ -29,11 +29,11 @@
 # OpenCrabs in onboarding, not by hand. The proxy serves one model today.
 [providers.opencrabs]
 enabled = false
-default_model = "deepseek-v4.1-flash"
-models = ["deepseek-v4.1-flash"]
+default_model = "cb/deepseek-v4.1-flash"
+models = ["cb/deepseek-v4.1-flash"]
 # context_window is not honoured here: the built-in endpoint is free and fixed
 # at 200k, so any value set in this section is ignored.
-vision_model = "deepseek-v4.1-flash"  # Multimodal: attached images work on day 0
+vision_model = "cb/deepseek-v4.1-flash"  # Multimodal: attached images work on day 0
 generation_model = "cb/gemini-2.5-flash-image"  # Image generation on day 0, served only on /v1/images/*
 # No stt_model / tts_model here: the built-in endpoint serves no audio routes, so
 # a preset would only turn every voice note into a refusal. Set them on a

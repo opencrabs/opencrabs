@@ -117,7 +117,7 @@ fn the_seeded_built_in_provider_starts_disabled() {
         );
         assert_eq!(
             opencrabs.default_model.as_deref(),
-            Some("deepseek-v4.1-flash"),
+            Some("cb/deepseek-v4.1-flash"),
             "the built-in provider serves one model"
         );
     });
@@ -134,7 +134,10 @@ fn enabling_the_built_in_provider_makes_it_the_active_pair() {
         let config = Config::load().expect("config loads");
         assert_eq!(
             config.providers.active_provider_and_model(),
-            ("opencrabs".to_string(), "deepseek-v4.1-flash".to_string()),
+            (
+                "opencrabs".to_string(),
+                "cb/deepseek-v4.1-flash".to_string()
+            ),
             "with the section on and a token present, the built-in provider is \
              the pair the session runs on"
         );

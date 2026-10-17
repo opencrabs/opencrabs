@@ -12,8 +12,8 @@ fn opencrabs_config(api_key: Option<&str>) -> Config {
             opencrabs: Some(ProviderConfig {
                 enabled: false,
                 api_key: api_key.map(|k| k.to_string()),
-                default_model: Some("deepseek-v4.1-flash".into()),
-                vision_model: Some("deepseek-v4.1-flash".into()),
+                default_model: Some("cb/deepseek-v4.1-flash".into()),
+                vision_model: Some("cb/deepseek-v4.1-flash".into()),
                 ..Default::default()
             }),
             ..Default::default()
@@ -30,7 +30,7 @@ fn opencrabs_with_token_is_a_vision_candidate() {
         vec![(
             "ocp_test_token".to_string(),
             format!("{OPENCRABS_BASE_URL}/chat/completions"),
-            "deepseek-v4.1-flash".to_string(),
+            "cb/deepseek-v4.1-flash".to_string(),
         )]
     );
 }
@@ -51,5 +51,5 @@ fn shipped_example_enables_vision_for_opencrabs() {
     let vision = parsed["providers"]["opencrabs"]["vision_model"]
         .as_str()
         .expect("example sets providers.opencrabs.vision_model");
-    assert_eq!(vision, "deepseek-v4.1-flash");
+    assert_eq!(vision, "cb/deepseek-v4.1-flash");
 }

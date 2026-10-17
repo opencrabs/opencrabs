@@ -15,7 +15,7 @@ fn opencrabs_config(api_key: Option<&str>) -> Config {
             opencrabs: Some(ProviderConfig {
                 enabled: false,
                 api_key: api_key.map(|k| k.to_string()),
-                default_model: Some("deepseek-v4.1-flash".into()),
+                default_model: Some("cb/deepseek-v4.1-flash".into()),
                 generation_model: Some(IMAGE_MODEL.into()),
                 ..Default::default()
             }),
