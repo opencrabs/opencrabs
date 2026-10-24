@@ -226,7 +226,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # Pinned, never ubuntu-latest. The hosted label rolls forward on its
+          # own schedule: it moved to Ubuntu 26.04 (glibc 2.43) between v0.5.12
+          # and v0.5.13, and the asset built after the roll refuses to start on
+          # Ubuntu 24.04 and every older distribution with "GLIBC_2.43 not
+          # found" (#2206). The arm64 job below is pinned for the same reason;
+          # both stay on the oldest image we intend to support.
+          - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             artifact_name: opencrabs
             asset_suffix: linux-amd64
