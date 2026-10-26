@@ -1679,6 +1679,10 @@ impl AgentService {
         // (#2088). Without text there is no answer on screen, so the turn asks
         // the model once more instead of ending empty.
         let mut option_halt_iteration_has_text = false;
+        // The text of the halting iteration, which is the answer on a halt
+        // (#2239). `accumulated_text` holds every iteration's narration and is
+        // not the answer.
+        let mut option_halt_answer: Option<String> = None;
         // Consecutive identical tool rounds (#1030). Observes only; the
         // repeated call still runs and its result still reaches the model.
         // Reset on a provider swap below, because a fallback replays the
@@ -7283,6 +7287,7 @@ impl AgentService {
                                     option_surface_halt_seen = true;
                                     option_halt_iteration_has_text =
                                         !iteration_text.trim().is_empty();
+                                    option_halt_answer = Some(iteration_text.clone());
                                     break;
                                 }
 
@@ -7581,6 +7586,7 @@ impl AgentService {
                     // tag it for the phantom-gate exemption.
                     option_surface_halt_seen = true;
                     option_halt_iteration_has_text = !iteration_text.trim().is_empty();
+                    option_halt_answer = Some(iteration_text.clone());
                     break;
                 }
             }
@@ -7950,19 +7956,20 @@ impl AgentService {
         // If the loop broke without a final_response but we have accumulated text,
         // synthesize a partial response instead of erroring — the user already saw the
         // text streamed in real-time, so returning it keeps the TUI consistent.
+        let partial_text = super::halt_answer::partial_response_text(
+            option_halt_answer.as_deref(),
+            &accumulated_text,
+        );
         let response = match final_response {
             Some(resp) => resp,
             None if !accumulated_text.is_empty() => {
                 tracing::warn!(
-                    "Synthesizing partial response from {} chars of accumulated text \
-                     (loop broke without final LLM response)",
-                    accumulated_text.len()
+                    "Synthesizing partial response from {} chars (loop broke without final LLM response)",
+                    partial_text.len()
                 );
                 LLMResponse {
                     id: String::new(),
-                    content: vec![ContentBlock::Text {
-                        text: accumulated_text.clone(),
-                    }],
+                    content: vec![ContentBlock::Text { text: partial_text }],
                     model: model_name.clone(),
                     usage: crate::brain::provider::TokenUsage {
                         input_tokens: total_input_tokens,

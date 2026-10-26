@@ -22,6 +22,7 @@ pub(crate) mod fallback_suggest;
 pub(crate) mod feedback;
 pub(crate) mod fenced_command;
 mod gaslighting;
+pub(crate) mod halt_answer;
 pub(crate) mod helpers;
 pub(crate) mod loop_break;
 mod messaging;
