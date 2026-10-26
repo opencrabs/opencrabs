@@ -702,10 +702,10 @@ impl App {
     /// single row can eat a count window.
     ///
     /// Anything older stays behind the "N older messages hidden" marker and
-    /// remains reachable through Ctrl+O paging.
+    /// remains reachable through PageUp paging.
     pub(crate) const DISPLAY_MESSAGE_WINDOW: usize = 200;
 
-    /// Upper bound on how many rows Ctrl+O paging will load in total. A count
+    /// Upper bound on how many rows PageUp paging will load in total. A count
     /// for the same reason the window is one: the old guard stopped paging
     /// once `display_token_count` passed 300k, and a single tool-ledger row can
     /// pass that on its own, which left every older message unreachable
@@ -736,7 +736,7 @@ impl App {
         DisplayMessage {
             id: Uuid::new_v4(),
             role: "history_marker".to_string(),
-            content: format!("↑ {} older messages hidden · Ctrl+O to load more", count),
+            content: format!("↑ {} older messages hidden · PageUp to load more", count),
             timestamp: chrono::Utc::now(),
             token_count: None,
             cost: None,
@@ -751,12 +751,12 @@ impl App {
     }
 
     /// Load one more window of older messages from the DB and prepend them to
-    /// the current display list. Called by Ctrl+O when `hidden_older_messages`
+    /// the current display list. Called by PageUp when `hidden_older_messages`
     /// is above zero.
     ///
     /// A count, matching the display window: a token budget here measured raw
     /// DB rows, and one persisted tool-ledger row could fill it on its own, so
-    /// every Ctrl+O added exactly one row (#2155).
+    /// every PageUp added exactly one row (#2155).
     pub(crate) async fn load_more_history(&mut self) -> Result<()> {
         tracing::debug!(
             "[SCROLL] load_more_history called: hidden={}, display_tokens={}",
@@ -3833,7 +3833,7 @@ impl App {
 /// are dropped from that front. Pure so the shift arithmetic is testable: the
 /// earlier version measured the prepended count after `append` had already
 /// drained the source, which reported the whole history and clamped the anchor
-/// past the end, so a cancel after Ctrl+O persisted nothing (#2127).
+/// past the end, so a cancel after PageUp paging persisted nothing (#2127).
 pub(crate) fn shift_turn_start(
     turn_start: usize,
     prepended: usize,

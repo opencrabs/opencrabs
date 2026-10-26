@@ -966,6 +966,13 @@ pub struct App {
     /// the message-keyed anchor above can never resolve it and folding a turn
     /// would jump the viewport by however many rows it hid.
     pub chat_expand_anchor_turn: Option<(String, u16)>,
+    /// Set whenever a click or ctrl+o toggles a block, even when the header sits
+    /// above the viewport and there is no row to pin (#2241). Growth
+    /// compensation is suppressed for that frame: the block's new lines land
+    /// where the user is looking, not appended below the viewport, so
+    /// compensating would shift the transcript by the number of lines it
+    /// gained. Consumed (cleared) on the render that applies it.
+    pub chat_expand_growth_pending: bool,
 
     /// Drag selection: anchor point in terminal-screen coords (col, row), set on first drag event.
     pub drag_anchor: Option<(u16, u16)>,
@@ -1192,6 +1199,7 @@ impl App {
             turn_expanded: std::collections::HashMap::new(),
             chat_expand_anchor: None,
             chat_expand_anchor_turn: None,
+            chat_expand_growth_pending: false,
             chat_render_scroll: 0,
             chat_area_y: 0,
             chat_area_x: 0,

@@ -1,10 +1,12 @@
-//! #2237: the input box has to say that Enter queues while a turn runs, and
-//! the queue row has to say what the queue does and which key edits it.
+//! #2237: the queue row has to say what the queue does and which key edits it.
 //!
 //! Two layers. The pure helpers decide the wording and the truncation, so the
 //! maths is checked at any terminal width without a frame. The rendered test
-//! then proves the wording actually reaches the input box: the helpers being
-//! right means nothing if the title is never attached to the block.
+//! then proves the wording actually reaches the frame: the helpers being right
+//! means nothing if the row is never drawn.
+//!
+//! The in-flight "turn running · Enter queues" border title this module used
+//! to pin was removed in #2243. A guard below keeps it from creeping back.
 
 use std::sync::Arc;
 
@@ -17,8 +19,8 @@ use crate::db::models::Session;
 use crate::services::ServiceContext;
 use crate::tests::agent_service_mocks::MockProvider;
 use crate::tui::app::App;
+use crate::tui::render::queue_line_parts;
 use crate::tui::render::render;
-use crate::tui::render::{queue_line_parts, turn_in_flight_hint};
 use unicode_width::UnicodeWidthStr;
 
 const WIDTH: u16 = 80;
@@ -158,50 +160,45 @@ fn a_multiline_queued_message_is_flattened_to_one_row() {
     assert_eq!(parts.preview, "hello bre ping bre");
 }
 
-// --- the in-flight hint on the input border --------------------------------
-
-#[test]
-fn the_hint_is_dropped_rather_than_overwriting_the_context_title() {
-    assert!(
-        turn_in_flight_hint(80, 13).is_some_and(|h| h.contains("Enter queues")),
-        "a normal terminal gets the full sentence"
-    );
-    assert_eq!(
-        turn_in_flight_hint(40, 13),
-        Some(" ⏳ Enter queues "),
-        "a narrow terminal gets the short form"
-    );
-    assert_eq!(
-        turn_in_flight_hint(25, 13),
-        None,
-        "too narrow for both titles: the hint yields, it does not draw over the context budget"
-    );
-}
-
-// --- rendered frames -------------------------------------------------------
+// --- the removed in-flight border title (#2243) ----------------------------
 
 #[tokio::test]
-async fn an_idle_input_box_does_not_claim_enter_queues() {
-    let (mut app, _sid) = app_with_session().await;
+async fn the_input_box_never_claims_enter_queues() {
+    // #2243: the border title that read "turn running · Enter queues" sat
+    // next to a thinking line, a step counter and a background-task title
+    // that already said the same thing, and it made the box louder than the
+    // text being typed into it. It must not come back, in either state.
+    let (mut app, sid) = app_with_session().await;
+    queue(&app, sid, &["ping bre"]);
     let mut terminal = Terminal::new(TestBackend::new(WIDTH, HEIGHT)).unwrap();
-    terminal.draw(|f| render(f, &mut app)).unwrap();
-    let rows = input_rows(terminal.backend().buffer(), &app);
-    assert!(
-        !rows.contains("Enter queues"),
-        "the hint belongs to a turn in flight only:\n{rows}"
-    );
-}
 
-#[tokio::test]
-async fn a_turn_in_flight_says_enter_queues_on_the_input_box() {
-    let (mut app, _sid) = app_with_session().await;
+    terminal.draw(|f| render(f, &mut app)).unwrap();
+    let idle = input_rows(terminal.backend().buffer(), &app);
+    assert!(
+        !idle.contains("Enter queues") && !idle.contains("turn running"),
+        "an idle box must carry no queue hint:\n{idle}"
+    );
+
     app.is_processing = true;
-    let mut terminal = Terminal::new(TestBackend::new(WIDTH, HEIGHT)).unwrap();
     terminal.draw(|f| render(f, &mut app)).unwrap();
-    let rows = input_rows(terminal.backend().buffer(), &app);
+    let in_flight = input_rows(terminal.backend().buffer(), &app);
     assert!(
-        rows.contains("Enter queues"),
-        "the box looks identical to the idle state without this:\n{rows}"
+        !in_flight.contains("Enter queues") && !in_flight.contains("turn running"),
+        "the in-flight border title was removed in #2243:\n{in_flight}"
+    );
+
+    // The queue row is the feedback that earns its space, so dropping the
+    // title must not have taken the row with it.
+    let buffer = terminal.backend().buffer();
+    let frame: String = (0..HEIGHT)
+        .map(|y| row_text(buffer, y))
+        .collect::<Vec<_>>()
+        .join("\n");
+    // One message renders the bare label ("queued", no count); the count only
+    // appears from two up, so pin the label and the preview, not a count.
+    assert!(
+        frame.contains("queued") && frame.contains("ping bre"),
+        "the queued row must survive the title removal:\n{frame}"
     );
 }
 

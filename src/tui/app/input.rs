@@ -225,8 +225,10 @@ impl App {
     /// sits right now; `render_chat` restores it there after the height change.
     fn set_expand_anchor(&mut self, idx: usize) {
         if let Some(line_top) = self.chat_line_to_msg.iter().position(|m| *m == Some(idx)) {
-            let row = line_top.saturating_sub(self.chat_render_scroll) as u16;
-            self.chat_expand_anchor = Some((idx, row));
+            self.chat_expand_growth_pending = true;
+            self.chat_expand_anchor =
+                crate::tui::render::chat::turn_anchor_row(line_top, self.chat_render_scroll)
+                    .map(|row| (idx, row));
         }
     }
 
@@ -241,8 +243,10 @@ impl App {
             .iter()
             .position(|t| t.as_deref() == Some(anchor))
         {
-            let row = line_top.saturating_sub(self.chat_render_scroll) as u16;
-            self.chat_expand_anchor_turn = Some((anchor.to_string(), row));
+            self.chat_expand_growth_pending = true;
+            self.chat_expand_anchor_turn =
+                crate::tui::render::chat::turn_anchor_row(line_top, self.chat_render_scroll)
+                    .map(|row| (anchor.to_string(), row));
         }
     }
 

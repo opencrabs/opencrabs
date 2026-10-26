@@ -148,24 +148,6 @@ pub(crate) fn queue_line_parts(
     }
 }
 
-/// Bottom-left title for the input box while a turn is in flight (#2237).
-///
-/// `reserved` is the width the right-aligned context budget title already
-/// occupies. Returns `None` when what is left cannot fit a readable hint, so
-/// the two titles never overwrite each other on a narrow terminal.
-pub(crate) fn turn_in_flight_hint(available: u16, reserved: u16) -> Option<&'static str> {
-    const FULL: &str = " ⏳ turn running · Enter queues ";
-    const SHORT: &str = " ⏳ Enter queues ";
-    let room = available.saturating_sub(reserved) as usize;
-    if room >= unicode_width::UnicodeWidthStr::width(FULL) {
-        Some(FULL)
-    } else if room >= unicode_width::UnicodeWidthStr::width(SHORT) {
-        Some(SHORT)
-    } else {
-        None
-    }
-}
-
 /// Render queued messages above the input area.
 /// Returns the height consumed (0 if no queue).
 pub(super) fn render_queue(f: &mut Frame, app: &App, area: Rect) -> u16 {
@@ -650,33 +632,10 @@ pub(super) fn render_input(f: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    // A turn in flight changes what Enter does: it queues instead of sending.
-    // The box used to look identical to the idle state, so text typed here
-    // appeared to vanish (#2237). Bottom-left, so it shares the border row
-    // with the right-aligned context budget title; the width check keeps the
-    // two from overwriting each other.
-    let in_flight_title = if app.is_processing {
-        turn_in_flight_hint(area.width, context_title.width() as u16).map(|text| {
-            Line::from(Span::styled(
-                text,
-                Style::default()
-                    .fg(theme::role(Role::Warning))
-                    .add_modifier(Modifier::BOLD),
-            ))
-            .alignment(Alignment::Left)
-        })
-    } else {
-        None
-    };
-
     let mut block = Block::default()
         .borders(Borders::TOP | Borders::BOTTOM)
         .title_bottom(context_title)
         .border_style(border_style);
-
-    if let Some(title) = in_flight_title {
-        block = block.title_bottom(title);
-    }
 
     // Attachments rightmost, background task to their left (#836).
     if !app.attachments.is_empty() {

@@ -167,9 +167,10 @@ fn input_renderer_owns_the_notice() {
 #[test]
 fn notice_is_appended_to_the_cursor_row_not_a_border_title() {
     // The ask was "inside the input": trailing ghost text on the cursor's
-    // row, never a title hung on the bottom border. Exactly two things are
-    // allowed to be a border title: the ctx budget, and the #2237 in-flight
-    // "Enter queues" hint on the opposite corner. A third fails here.
+    // row, never a title hung on the bottom border. Exactly one thing is
+    // allowed to be a border title: the ctx budget. The #2237 in-flight
+    // "Enter queues" hint used to make it two and was removed in #2243, so a
+    // second title fails here again.
     let input = include_str!("../tui/render/input.rs");
     let body = input
         .split("pub(super) fn render_input(")
@@ -182,16 +183,12 @@ fn notice_is_appended_to_the_cursor_row_not_a_border_title() {
     );
     assert_eq!(
         body.matches(".title_bottom(").count(),
-        2,
-        "only the ctx budget and the #2237 in-flight hint may sit on the bottom border"
+        1,
+        "only the ctx budget may sit on the bottom border"
     );
     assert!(
         body.contains(".title_bottom(context_title)"),
         "the ctx budget must still be the right-hand bottom title"
-    );
-    assert!(
-        body.contains(".title_bottom(title)"),
-        "the #2237 in-flight hint must be the left-hand bottom title"
     );
     assert!(
         !body.contains("title_bottom(notice"),

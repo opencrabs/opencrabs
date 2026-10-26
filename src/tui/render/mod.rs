@@ -54,10 +54,10 @@ pub(crate) use tools::detached_state_suffix;
 pub(crate) use tools::unescape_display_string;
 
 pub use frame::render;
-// #2237: the wording and width maths for the mid-turn queue indicator live in
+// #2237: the wording and width maths for the mid-turn queue row live in
 // `input`, which stays a private module. Re-export just what the tests pin.
 // `#[cfg(test)]` because nothing in the library reads them through this path:
-// `render_input`/`render_queue` call the helpers directly, so an ungated
-// re-export is a dead import for every non-test build and trips `-D warnings`.
+// `render_queue` calls the helper directly, so an ungated re-export is a dead
+// import for every non-test build and trips `-D warnings`.
 #[cfg(test)]
-pub(crate) use input::{queue_line_parts, turn_in_flight_hint};
+pub(crate) use input::queue_line_parts;

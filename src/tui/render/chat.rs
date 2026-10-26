@@ -59,6 +59,23 @@ pub(crate) fn anchored_scroll_offset(
     )
 }
 
+/// The screen row a header occupies, or `None` when it sits above the viewport.
+///
+/// `line_top` is the header's absolute line index and `scroll_top` the absolute
+/// index of the first visible line. This used to be a `saturating_sub` straight
+/// into a `u16`, so an off-screen header was recorded as row 0: the pin then
+/// scrolled the header to the top row and threw the transcript up by
+/// `scroll_top - line_top`, sometimes several pages (#2241). A header above the
+/// viewport has no row to pin to, so the caller skips the pin and the viewport
+/// holds still instead.
+///
+/// Exact whenever the header is on screen, which is the case the pin was built
+/// for (#728, #758).
+pub(crate) fn turn_anchor_row(line_top: usize, scroll_top: usize) -> Option<u16> {
+    let row = line_top.checked_sub(scroll_top)?;
+    Some(row.min(u16::MAX as usize) as u16)
+}
+
 /// Whether this frame's extra lines are content that arrived at the bottom,
 /// so the from-bottom scroll offset must absorb them to keep the viewport
 /// still.
@@ -1582,12 +1599,21 @@ pub(super) fn render_chat(f: &mut Frame, app: &mut App, area: Rect) {
     // Only add the delta (new lines since last render), not the total, to avoid
     // the accumulation bug that inflated scroll_offset by 1000+ in seconds.
     // Skip if prev_rendered_lines == 0 (first render) to avoid massive jump.
+    // A toggle with no row to pin still counts as user-driven growth. The lines
+    // a fold or unfold adds land where the user is looking, not appended below
+    // the viewport, so compensating for them would move the transcript by
+    // however many lines the block gained (#2241). Cleared here, once.
+    let expand_pending = app.chat_expand_anchor.is_some()
+        || app.chat_expand_anchor_turn.is_some()
+        || app.chat_expand_growth_pending;
+    app.chat_expand_growth_pending = false;
+
     if should_compensate_for_growth(
         app.auto_scroll,
         app.scroll_offset,
         app.prev_rendered_lines,
         total_lines,
-        app.chat_expand_anchor.is_some() || app.chat_expand_anchor_turn.is_some(),
+        expand_pending,
     ) {
         let delta = total_lines - app.prev_rendered_lines;
         app.scroll_offset += delta;
