@@ -2126,13 +2126,13 @@ curl -sL "$(curl -s https://api.github.com/repos/opencrabs/opencrabs/releases/la
 iwr -useb https://opencrabs.com/install.ps1 | iex
 ```
 
-The Windows script installs `opencrabs.exe` and `rtk.exe` into `%LOCALAPPDATA%\OpenCrabs\bin`, adds that directory to your user PATH, and tells already-open programs about the change, so a new terminal picks it up without a restart and `Get-Command opencrabs` resolves. Pass `-NoPathUpdate` to leave PATH untouched, which needs the script block form:
+The Windows script installs every file the release archive ships, which is `opencrabs.exe`, `rtk.exe` and the four MSVC runtime DLLs, into `%LOCALAPPDATA%\OpenCrabs\bin`, adds that directory to your user PATH, and tells already-open programs about the change, so a new terminal picks it up without a restart and `Get-Command opencrabs` resolves. Pass `-NoPathUpdate` to leave PATH untouched, which needs the script block form:
 
 ```powershell
 & ([scriptblock]::Create((iwr -useb https://opencrabs.com/install.ps1))) -NoPathUpdate
 ```
 
-> **The Windows zip carries its own MSVC runtime.** `msvcp140.dll`, `vcruntime140.dll`, `vcruntime140_1.dll` and `vcomp140.dll` sit next to `opencrabs.exe` and `rtk.exe`, because Windows loads them from the folder the exe lives in. That is the whole reason the archive starts on a machine that never installed Visual Studio or the vc_redist. If you unpack by hand, keep all four DLLs beside the exes: an exe copied out on its own fails with `VCRUNTIME140_1.dll was not found`, which is what v0.5.15 did to everyone (#2257). The PowerShell one-liner above copies only the two exes out of the archive today, so on that path download the zip and unpack it yourself until #2260 lands.
+> **The Windows zip carries its own MSVC runtime.** `msvcp140.dll`, `vcruntime140.dll`, `vcruntime140_1.dll` and `vcomp140.dll` sit next to `opencrabs.exe` and `rtk.exe`, because Windows loads them from the folder the exe lives in. That is the whole reason the archive starts on a machine that never installed Visual Studio or the vc_redist. The PowerShell one-liner installs every file in the archive, so all four arrive in `%LOCALAPPDATA%\OpenCrabs\bin` with the exes. If you unpack by hand, keep the DLLs beside the exes: an exe copied out on its own fails with `VCRUNTIME140_1.dll was not found`, which is what v0.5.15 did to everyone (#2257).
 
 ```bash
 # Linux (x86_64) — binary plus a desktop entry and icon

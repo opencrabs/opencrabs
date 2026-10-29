@@ -356,6 +356,7 @@ pub mod help_catalog_test;
 pub mod help_mode_entry_test;
 pub mod init_command_test;
 pub mod install_homebrew_test;
+pub mod install_ps1_test;
 pub mod install_script_test;
 pub mod instance_lock_test;
 pub mod intermediate_text_strip_guard_test;
