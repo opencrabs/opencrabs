@@ -196,3 +196,19 @@ fn test_preset_configs() {
     let no_retry = RetryConfig::no_retry();
     assert_eq!(no_retry.max_attempts, 0);
 }
+
+#[test]
+fn in_place_retry_attempts_track_the_retry_config() {
+    // The user-facing retry count must track the ladder, never a literal
+    // (#2270): the June alert said "retried 3x in-place" while the budget was
+    // already 5 sends, on a path that retried zero times.
+    let cfg = RetryConfig::default();
+    assert_eq!(in_place_attempt_budget(), cfg.max_attempts + 1);
+    assert_eq!(in_place_attempt_budget(), 5);
+    // The built-in endpoint keeps the same budget (it only adds the handshake
+    // timeout cutoff), so the count stays honest for the opencrabs provider.
+    assert_eq!(
+        RetryConfig::opencrabs_endpoint().max_attempts + 1,
+        in_place_attempt_budget()
+    );
+}

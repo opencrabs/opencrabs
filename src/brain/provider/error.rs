@@ -575,6 +575,40 @@ pub(crate) fn is_temporary_unavailable_signal(message: &str, error_type: Option<
     TRANSIENT_HINTS.iter().any(|h| m.contains(h))
 }
 
+/// True when an inline stream error is the proxy's CAPACITY SATURATION signal
+/// rather than a real rate limit (#2270).
+///
+/// The built-in endpoint answers 200 OK and then reports a full upstream pool
+/// inside the SSE body: `type=capacity_saturated`, "... out of quota or cooling
+/// down ...; retry shortly". Retrying in place is the right response because the
+/// proxy rotates upstream providers on every attempt, so the next send can land
+/// on a healthy one. Classifying it as a rate limit instead walked the fallback
+/// chain 0.5 ms later with zero in-place attempts (2026-10-30 log).
+///
+/// Hard quota phrases stay out of this matcher on purpose: a monthly cap or an
+/// exhausted credit balance does not lift inside any retry window, so those keep
+/// falling back immediately (#952).
+pub(crate) fn is_capacity_saturation_signal(message: &str, error_type: Option<&str>) -> bool {
+    if is_quota_exhausted_message(message) {
+        return false;
+    }
+    if error_type
+        .unwrap_or("")
+        .trim()
+        .eq_ignore_ascii_case("capacity_saturated")
+    {
+        return true;
+    }
+    let m = message.to_ascii_lowercase();
+    const CAPACITY_HINTS: &[&str] = &[
+        "capacity_saturated",
+        "cooling down",
+        "retry shortly",
+        "no capacity",
+    ];
+    CAPACITY_HINTS.iter().any(|h| m.contains(h))
+}
+
 /// True when an error body is an HTML page rather than a JSON API error.
 /// A 4xx that returns HTML came from a CDN / load balancer / reverse proxy
 /// (an infrastructure error page), not the API itself — these are

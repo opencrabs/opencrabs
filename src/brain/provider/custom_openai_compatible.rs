@@ -4592,13 +4592,26 @@ impl Provider for OpenAIProvider {
                                         if c != 0 { c } else { read_status("http_code") }
                                     };
                                     tracing::error!("[STREAM_ERROR] Inline SSE error: type={:?}, code={}, msg={}", err_type, code, message);
+                                    // Capacity saturation (#2270): the proxy answered 200 and then
+                                    // reported a full upstream pool inline ("out of quota or cooling
+                                    // down ...; retry shortly"). It rotates upstream providers on
+                                    // every attempt, so this is transient and must ride the in-place
+                                    // retry ladder instead of walking the fallback chain with zero
+                                    // attempts. Hard quota phrases stay excluded from that matcher
+                                    // and keep falling back immediately.
+                                    let is_capacity_saturated =
+                                        crate::brain::provider::error::is_capacity_saturation_signal(
+                                            &message,
+                                            err_type.as_deref(),
+                                        );
                                     // Map 429/quota-style messages to RateLimitExceeded so the
                                     // fallback chain kicks in immediately instead of retrying.
                                     let msg_lc = message.to_lowercase();
-                                    let is_rate_limit = code == 429
-                                        || err_type.as_deref() == Some("rate_limit_exceeded")
-                                        || msg_lc.contains("rate limit")
-                                        || msg_lc.contains("quota");
+                                    let is_rate_limit = !is_capacity_saturated
+                                        && (code == 429
+                                            || err_type.as_deref() == Some("rate_limit_exceeded")
+                                            || msg_lc.contains("rate limit")
+                                            || msg_lc.contains("quota"));
                                     // Qwen portal (and Cloudflare-fronted upstreams in general)
                                     // emits 529 / `overloaded_error` / 503 when the shared
                                     // cluster is temporarily saturated. It's the exact case
@@ -4607,7 +4620,8 @@ impl Provider for OpenAIProvider {
                                     // provider. Mapping to StreamError routes it there —
                                     // mapping to ApiError{500} sent it to the catch-all that
                                     // bubbled straight to the TUI.
-                                    let is_overloaded = code == 529
+                                    let is_overloaded = is_capacity_saturated
+                                        || code == 529
                                         || code == 503
                                         || err_type.as_deref() == Some("overloaded_error")
                                         || msg_lc.contains("overloaded")

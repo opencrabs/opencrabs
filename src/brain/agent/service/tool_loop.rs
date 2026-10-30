@@ -2572,10 +2572,24 @@ impl AgentService {
                             )
                         } else if is_auth {
                             format!("Auth error on '{}/{}'", primary_from_name, model_name)
-                        } else {
+                        } else if e.is_quota_exhausted() {
+                            // A hard quota does not lift inside any retry window, so the
+                            // chain walks on the first hit by design (#952). Claiming
+                            // in-place retries that never ran is the lie #2270 removed.
                             format!(
-                                "Rate limit on '{}/{}' (retried 3x in-place)",
+                                "Rate limit on '{}/{}' (hard quota, no in-place retry)",
                                 primary_from_name, model_name
+                            )
+                        } else {
+                            // The provider layer spent its full in-place ladder (one send
+                            // plus `max_attempts` retries, each of which the proxy can
+                            // rotate onto a different upstream) before this error reached
+                            // the loop. Derived from the config, never a literal (#2270).
+                            let in_place_retry_attempts =
+                                crate::utils::retry::in_place_attempt_budget();
+                            format!(
+                                "Rate limit on '{}/{}' (retried up to {}x in-place)",
+                                primary_from_name, model_name, in_place_retry_attempts
                             )
                         };
                         let message = if !self.has_fallback_provider() {
