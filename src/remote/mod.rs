@@ -8,6 +8,7 @@
 //! `research/remote-phase1-plan.md` in the OpenCrabs home.
 
 pub mod pairing;
+pub mod route_client;
 pub mod route_store;
 pub mod routes;
 pub mod scopes;

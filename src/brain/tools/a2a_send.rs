@@ -8,6 +8,8 @@ use super::r#trait::{Tool, ToolCapability, ToolExecutionContext, ToolHints, Tool
 use async_trait::async_trait;
 use serde_json::Value;
 
+use crate::remote::{route_client, route_store::RouteStore};
+
 /// Tool for communicating with remote A2A agents.
 #[derive(Default)]
 pub struct A2aSendTool;
@@ -124,11 +126,27 @@ impl Tool for A2aSendTool {
                 ));
             }
         };
-        let base_url: &str = &base_url;
         let api_key = input.get("api_key").and_then(|v| v.as_str());
 
+        // Route-aware resolution: race when the store knows 2+ ways to
+        // reach this host; otherwise pass through untouched (no store
+        // entry = exactly the pre-Phase-2 behavior).
+        let route_store = RouteStore::new(RouteStore::default_path());
+        let base_url = route_client::resolve_best_url(&route_store, &base_url).await;
+        let base_url: &str = &base_url;
+
         match action {
-            "discover" => discover(base_url, api_key).await,
+            "discover" => {
+                let result = discover(base_url, api_key).await;
+                // Harvest announced routes while we're here (auth-gated on
+                // the server; silently no-ops for keyless/anonymous remotes).
+                if let Ok(Some((host_id, n))) =
+                    route_client::harvest(&route_store, base_url, api_key).await
+                {
+                    tracing::debug!(host = %host_id, routes = n, "learned routes via discover");
+                }
+                result
+            }
             "send" => {
                 let message = match input.get("message").and_then(|v| v.as_str()) {
                     Some(m) if !m.is_empty() => m,
