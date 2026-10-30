@@ -429,7 +429,7 @@ impl PricingConfig {
             Ok(c) => c,
             Err(_) => {
                 // Fall back to embedded example (tests, CI, fresh installs)
-                let example = include_str!("../../usage_pricing.toml.example");
+                let example = include_str!("../../../usage_pricing.toml.example");
                 return Self::parse_content(example, "embedded example");
             }
         };
@@ -437,7 +437,7 @@ impl PricingConfig {
         // Additive merge with embedded baseline. Skip on parse failure
         // of the baseline — we never want a bad bundled example to
         // mask a working user file.
-        let baseline_example = include_str!("../../usage_pricing.toml.example");
+        let baseline_example = include_str!("../../../usage_pricing.toml.example");
         if let Ok(baseline_cfg) = Self::parse_content(baseline_example, "embedded example baseline")
         {
             let added = user_cfg.merge_missing_from(&baseline_cfg);
@@ -598,7 +598,7 @@ impl PricingConfig {
             return; // User owns this file. Never overwrite.
         }
 
-        let example_content = include_str!("../../usage_pricing.toml.example");
+        let example_content = include_str!("../../../usage_pricing.toml.example");
         if let Err(e) = std::fs::write(&path, example_content) {
             tracing::error!("Failed to seed usage_pricing.toml from example: {}", e);
         } else {

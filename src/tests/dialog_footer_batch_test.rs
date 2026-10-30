@@ -176,8 +176,9 @@ fn ssh_password_footer_is_minimal() {
 /// keymap.
 #[test]
 fn usage_dashboard_footer_follows_the_focused_card() {
+    use crate::ui_core::usage::input::CACHE_CARD;
     use crate::usage::cards;
-    use crate::usage::dashboard::{CACHE_CARD, DashboardState};
+    use crate::usage::dashboard::DashboardState;
 
     let footer_row = |state: &DashboardState| {
         let backend = TestBackend::new(80, 3);

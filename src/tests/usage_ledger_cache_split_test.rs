@@ -128,12 +128,19 @@ async fn the_share_divides_by_the_rows_that_recorded_a_split() {
 
 /// Render `render_models` into a TestBackend and return the buffer as text.
 fn model_card_text(models: &[ModelEntry]) -> String {
+    let view = crate::ui_core::usage::view_model::UsageViewModel::build(
+        &crate::usage::data::DashboardData {
+            models: models.to_vec(),
+            ..Default::default()
+        },
+        crate::usage::data::Period::AllTime,
+    );
     let backend = TestBackend::new(90, 6);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal
         .draw(|f| {
             let area = f.area();
-            cards::render_models(f, models, area, false);
+            cards::render_models(f, &view.models, area, false);
         })
         .unwrap();
     terminal

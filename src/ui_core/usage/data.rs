@@ -4,7 +4,7 @@
 //! Queries hit the DB pool directly — no dependency on repository structs.
 
 use crate::db::{Pool, interact_err};
-use crate::usage::pricing::{CacheCost, CostOrigin, PricingConfig};
+use crate::ui_core::usage::pricing::{CacheCost, CostOrigin, PricingConfig};
 use anyhow::{Context, Result};
 use rusqlite::params;
 
@@ -625,7 +625,7 @@ struct RawModelRow {
 }
 
 async fn fetch_model_entries(pool: &Pool, since: Option<i64>) -> Result<Vec<ModelEntry>> {
-    let pricing = crate::usage::pricing::PricingConfig::load().ok();
+    let pricing = crate::ui_core::usage::pricing::PricingConfig::load().ok();
 
     let conn = pool.get().await.context("pool")?;
     let raw = conn.interact(move |conn| {
@@ -810,7 +810,8 @@ async fn fetch_model_entries(pool: &Pool, since: Option<i64>) -> Result<Vec<Mode
                     // cost_origin, not the old cost == 0.0 sinkhole: a genuinely
                     // free model is Priced and renders $0.00 unmarked.
                     let origin_estimated = pricing.as_ref().is_some_and(|p| {
-                        p.cost_origin(&full_name) == crate::usage::pricing::CostOrigin::Estimated
+                        p.cost_origin(&full_name)
+                            == crate::ui_core::usage::pricing::CostOrigin::Estimated
                     });
                     (estimate, origin_estimated)
                 };
