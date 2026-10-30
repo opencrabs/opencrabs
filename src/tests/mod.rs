@@ -623,6 +623,7 @@ pub mod fallback_swap_model_report_test;
 pub mod fallback_vision_test;
 pub mod feedback_policy_test;
 pub mod file_extract_test;
+pub mod footer_pair_coherence_test;
 pub mod force_default_test;
 pub mod handshake_timeout_test;
 pub mod hashline_crlf_2227_test;

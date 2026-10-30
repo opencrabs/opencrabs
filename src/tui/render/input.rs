@@ -1081,13 +1081,11 @@ pub(super) fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
         .to_string();
 
     // --- Provider / model ---
-    // Read from the authoritative source: agent_service.session_providers.
-    // DB records (current_session.provider_name/model) can lag behind
-    // after sticky fallbacks or /models swaps. session_providers is always
-    // live and per-session isolated.
+    // One coherent pair (#2264): name and model must come from the same
+    // source. Reading them from the two separate getters mixes the chain's
+    // active fallback with the primary's stale pick after a sticky fallback.
     let (provider_str, model_str) = if let Some(ref session) = app.current_session {
-        let prov = app.agent_service.provider_name_for_session(session.id);
-        let model = app.agent_service.provider_model_for_session(session.id);
+        let (prov, model) = app.agent_service.provider_pair_for_session(session.id);
         let prefix = format!("{}/", prov);
         let stripped = model.strip_prefix(&prefix).unwrap_or(&model);
         (
