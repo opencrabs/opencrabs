@@ -9,3 +9,12 @@
 
 pub mod pairing;
 pub mod scopes;
+pub mod tunnel;
+
+/// Unix seconds. Shared clock read for pairing + tunnel state files.
+pub(crate) fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
