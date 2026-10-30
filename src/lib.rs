@@ -89,6 +89,7 @@ pub mod acp;
 pub mod channels;
 pub mod cron;
 pub mod rtk;
+pub mod ui_core;
 pub mod usage;
 
 /// Offline evaluation harness for context engineering and memory quality.

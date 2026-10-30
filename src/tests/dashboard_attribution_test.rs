@@ -32,7 +32,11 @@ fn render_summary_buf_at(data: &DashboardData, w: u16) -> Buffer {
     let mut terminal = Terminal::new(backend).unwrap();
     let area = Rect::new(0, 0, w, h);
     terminal
-        .draw(|f| render_summary(f, data, area, "All Time"))
+        .draw(|f| {
+            let view =
+                crate::ui_core::usage::view_model::UsageViewModel::build(data, Period::AllTime);
+            render_summary(f, &view, area)
+        })
         .unwrap();
     terminal.backend().buffer().clone()
 }

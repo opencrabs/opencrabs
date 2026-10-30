@@ -13,7 +13,11 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
 /// Cards in the dashboard, in focus order: 0 daily, 1 project, 2 model,
 /// 3 tools, 4 activity, 5 cache.
-pub const CARD_COUNT: usize = 6;
+///
+/// The count is a fact of the view model's data, so it is defined once in
+/// `ui_core::usage::view_model` and re-exported here: the grid shape follows
+/// the model, never the other way round.
+pub use crate::ui_core::usage::view_model::USAGE_CARD_COUNT as CARD_COUNT;
 
 /// Narrowest content area the cards still read at. Below this the text in
 /// the cards is wider than the cards.

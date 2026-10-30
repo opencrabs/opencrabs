@@ -3,11 +3,10 @@
 //! Each card is a self-contained render function that takes data + area and draws into a Frame.
 
 use super::dashboard::{DashboardState, advertised_keys};
-use super::data::{
-    ActivityStats, CacheStats, DailyStats, DashboardData, ModelEntry, ProjectStats, SummaryStats,
-    ToolStats, fmt_cost, fmt_tokens,
-};
 use crate::tui::render::theme::{self, Role};
+use crate::ui_core::usage::view_model::{
+    ActivityRow, CacheView, DailyRow, HitBand, ModelRow, ProjectRow, ToolRow, UsageViewModel,
+};
 use ratatui::{
     Frame,
     layout::{Alignment, Rect},
@@ -40,45 +39,35 @@ fn card_block(title: &str, focused: bool) -> Block<'_> {
 
 // ── Summary Bar ──────────────────────────────────────────────────────────────
 
-pub fn render_summary(f: &mut Frame, data: &DashboardData, area: Rect, period_label: &str) {
-    let s = &data.summary;
-    let version = crate::VERSION;
-    // The figure is what each call recorded, with a table estimate standing in
-    // for rows that recorded nothing, and it always equals the sum of the By
-    // Model rows. Two markers keep it from reading as total spend (#2249):
-    // `~` when any part of it is an estimate, and the share of tokens that
-    // carry no recorded cost at all.
-    let cost_str = if data.models.iter().any(|m| m.estimated) {
-        format!("~{}", fmt_cost(s.total_cost))
-    } else {
-        fmt_cost(s.total_cost)
-    };
+pub fn render_summary(f: &mut Frame, view: &UsageViewModel, area: Rect) {
+    let s = &view.summary;
+    // The cost cell carries the `~` estimate marker itself (#2249): `~` when
+    // any part of the figure is an estimate, so it never reads as total
+    // spend. The unpriced share marker is the first thing dropped when the
+    // bar would have to clip: the line is centred, so an overflow eats the
+    // version off the left and the period label off the right.
     let mut head = vec![
-        Span::styled(format!("v{version}  "), accent()),
+        Span::styled(format!("v{}  ", view.version), accent()),
         Span::styled("Tokens: ", LABEL),
-        Span::styled(fmt_tokens(s.total_tokens), BOLD),
+        Span::styled(s.tokens_str.clone(), BOLD),
         Span::styled("  Cost: ", LABEL),
-        Span::styled(cost_str, BOLD),
+        Span::styled(s.cost_str.clone(), BOLD),
     ];
     let tail = [
         Span::styled("  Sessions: ", LABEL),
-        Span::styled(format!("{}", s.session_count), BOLD),
+        Span::styled(s.sessions_str.clone(), BOLD),
         Span::styled("  Calls: ", LABEL),
-        Span::styled(format!("{}", s.call_count), BOLD),
-        Span::styled(format!("  [{}]", period_label), accent()),
+        Span::styled(s.calls_str.clone(), BOLD),
+        Span::styled(format!("  [{}]", view.period_label), accent()),
     ];
-    // The share is worth having, but it is the first thing to drop when the bar
-    // would have to clip: the line is centred, so an overflow eats the version
-    // off the left and the period label off the right.
-    if let Some(pct) = unpriced_share(s) {
-        let marker = format!(" ({pct:.0}% unpriced)");
+    if let Some(marker) = &s.unpriced_marker {
         let used: usize = head
             .iter()
             .chain(tail.iter())
             .map(|sp| sp.content.chars().count())
             .sum();
         if used + marker.chars().count() <= area.width as usize {
-            head.push(Span::styled(marker, DIM));
+            head.push(Span::styled(marker.clone(), DIM));
         }
     }
     head.extend(tail);
@@ -92,18 +81,9 @@ pub fn render_summary(f: &mut Frame, data: &DashboardData, area: Rect, period_la
     f.render_widget(paragraph, area);
 }
 
-/// Share (0-100) of tokens whose calls recorded no cost, or `None` when the
-/// ledger holds no such tokens, so a clean ledger renders no marker.
-fn unpriced_share(s: &SummaryStats) -> Option<f64> {
-    if s.total_tokens <= 0 || s.unpriced_tokens <= 0 {
-        return None;
-    }
-    Some(s.unpriced_tokens as f64 / s.total_tokens as f64 * 100.0)
-}
-
 // ── Daily Activity ───────────────────────────────────────────────────────────
 
-pub fn render_daily(f: &mut Frame, daily: &[DailyStats], area: Rect, focused: bool) {
+pub fn render_daily(f: &mut Frame, daily: &[DailyRow], area: Rect, focused: bool) {
     let block = card_block("Daily Activity", focused);
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -114,44 +94,31 @@ pub fn render_daily(f: &mut Frame, daily: &[DailyStats], area: Rect, focused: bo
         return;
     }
 
-    let max_tokens = daily.iter().map(|d| d.tokens).max().unwrap_or(1);
-
-    // Compute actual cost column width from data
-    let max_cost_len = daily
-        .iter()
-        .map(|d| fmt_tokens(d.tokens).len())
-        .max()
-        .unwrap_or(8);
+    // Rows arrive most recent first; the model already scaled every bar
+    // against the busiest day.
+    let max_cost_len = daily.iter().map(|d| d.tokens_str.len()).max().unwrap_or(8);
     let date_width = 6usize; // " 04-15 "
     let data_cols = max_cost_len + 2; // " {cost}"
     let bar_width = inner.width.saturating_sub((date_width + data_cols) as u16) as usize;
 
     let mut lines: Vec<Line> = Vec::new();
-    // Show most recent days first (reversed), N that fit
     let visible = (inner.height as usize).min(daily.len());
-    let start = daily.len().saturating_sub(visible);
 
-    for day in daily[start..].iter().rev() {
-        let bar_len = if max_tokens > 0 && bar_width > 0 {
-            ((day.tokens as f64 / max_tokens as f64) * bar_width as f64).ceil() as usize
+    for day in daily.iter().take(visible) {
+        let bar_len = if bar_width > 0 {
+            (day.bar_ratio * bar_width as f64).ceil() as usize
         } else {
             0
         };
         let bar_len = bar_len.max(1).min(bar_width);
         let bar: String = "\u{2584}".repeat(bar_len); // ▄ lower-half block for visual separation
         let pad: String = " ".repeat(bar_width.saturating_sub(bar_len));
-        // Show short date (MM-DD)
-        let short_date = if day.date.len() >= 10 {
-            &day.date[5..10]
-        } else {
-            &day.date
-        };
         lines.push(Line::from(vec![
-            Span::styled(format!(" {:>5} ", short_date), DIM),
+            Span::styled(format!(" {:>5} ", day.short_date), DIM),
             Span::styled(bar, accent()),
             Span::raw(pad),
             Span::styled(
-                format!(" {:>width$}", fmt_tokens(day.tokens), width = max_cost_len),
+                format!(" {:>width$}", day.tokens_str, width = max_cost_len),
                 LABEL,
             ),
         ]));
@@ -163,7 +130,7 @@ pub fn render_daily(f: &mut Frame, daily: &[DailyStats], area: Rect, focused: bo
 
 // ── By Project ───────────────────────────────────────────────────────────────
 
-pub fn render_projects(f: &mut Frame, projects: &[ProjectStats], area: Rect, focused: bool) {
+pub fn render_projects(f: &mut Frame, projects: &[ProjectRow], area: Rect, focused: bool) {
     let block = card_block("By Project", focused);
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -175,19 +142,15 @@ pub fn render_projects(f: &mut Frame, projects: &[ProjectStats], area: Rect, foc
     }
 
     // Compute column widths from actual data
-    let max_cost_len = projects
-        .iter()
-        .map(|p| fmt_cost(p.cost).len())
-        .max()
-        .unwrap_or(6);
+    let max_cost_len = projects.iter().map(|p| p.cost_str.len()).max().unwrap_or(6);
     let max_tok_len = projects
         .iter()
-        .map(|p| fmt_tokens(p.tokens).len())
+        .map(|p| p.tokens_str.len())
         .max()
         .unwrap_or(6);
     let max_sess_len = projects
         .iter()
-        .map(|p| p.sessions.to_string().len())
+        .map(|p| p.sessions_str.len())
         .max()
         .unwrap_or(1);
 
@@ -203,32 +166,32 @@ pub fn render_projects(f: &mut Frame, projects: &[ProjectStats], area: Rect, foc
     let mut lines: Vec<Line> = Vec::new();
     let visible = (inner.height as usize).min(projects.len());
     for proj in projects.iter().take(visible) {
-        let name = if proj.project.len() > name_width {
+        let name = if proj.name.len() > name_width {
             format!(
                 "{}...",
-                proj.project
+                proj.name
                     .chars()
                     .take(name_width.saturating_sub(3))
                     .collect::<String>()
             )
         } else {
-            proj.project.clone()
+            proj.name.clone()
         };
         lines.push(Line::from(vec![
             Span::styled(format!(" {:<width$}", name, width = name_width), BOLD),
             Span::raw("  "),
             Span::styled(
-                format!("{:>width$}", fmt_cost(proj.cost), width = cost_width),
+                format!("{:>width$}", proj.cost_str, width = cost_width),
                 LABEL,
             ),
             Span::raw("  "),
             Span::styled(
-                format!("{:>width$}", fmt_tokens(proj.tokens), width = tok_width),
+                format!("{:>width$}", proj.tokens_str, width = tok_width),
                 DIM,
             ),
             Span::raw("  "),
             Span::styled(
-                format!("{:>width$}s", proj.sessions, width = sess_width),
+                format!("{:>width$}s", proj.sessions_str, width = sess_width),
                 DIM,
             ),
         ]));
@@ -240,7 +203,7 @@ pub fn render_projects(f: &mut Frame, projects: &[ProjectStats], area: Rect, foc
 
 // ── By Model ─────────────────────────────────────────────────────────────────
 
-pub fn render_models(f: &mut Frame, models: &[ModelEntry], area: Rect, focused: bool) {
+pub fn render_models(f: &mut Frame, models: &[ModelRow], area: Rect, focused: bool) {
     let block = card_block("By Model", focused);
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -253,21 +216,16 @@ pub fn render_models(f: &mut Frame, models: &[ModelEntry], area: Rect, focused: 
 
     // Compute column widths from ALL visible data (parent + child rows)
     let visible = (inner.height as usize).min(models.len());
-    let all_models: Vec<&ModelEntry> = models.iter().take(visible).collect();
+    let all_models: Vec<&ModelRow> = models.iter().take(visible).collect();
 
     let max_cost_len = all_models
         .iter()
         .flat_map(|m| {
-            let parent_cost = fmt_cost(m.cost);
-            let mut costs = if m.estimated {
-                vec![format!("~{}", parent_cost)]
-            } else {
-                vec![parent_cost]
-            };
+            let mut costs = vec![m.cost_str.len()];
             for v in &m.variants {
-                costs.push(fmt_cost(v.cost));
+                costs.push(v.cost_str.len());
             }
-            costs.iter().map(|s| s.len()).collect::<Vec<_>>()
+            costs
         })
         .max()
         .unwrap_or(6);
@@ -275,9 +233,9 @@ pub fn render_models(f: &mut Frame, models: &[ModelEntry], area: Rect, focused: 
     let max_tok_len = all_models
         .iter()
         .flat_map(|m| {
-            let mut lens = vec![fmt_tokens(m.tokens).len()];
+            let mut lens = vec![m.tokens_str.len()];
             for v in &m.variants {
-                lens.push(fmt_tokens(v.tokens).len());
+                lens.push(v.tokens_str.len());
             }
             lens
         })
@@ -287,9 +245,9 @@ pub fn render_models(f: &mut Frame, models: &[ModelEntry], area: Rect, focused: 
     let max_calls_len = all_models
         .iter()
         .flat_map(|m| {
-            let mut lens = vec![m.calls.to_string().len()];
+            let mut lens = vec![m.calls_str.len()];
             for v in &m.variants {
-                lens.push(v.calls.to_string().len());
+                lens.push(v.calls_str.len());
             }
             lens
         })
@@ -301,12 +259,11 @@ pub fn render_models(f: &mut Frame, models: &[ModelEntry], area: Rect, focused: 
     // carries a split, because a column of blanks on a ledger written before
     // the cache-read column existed would be pure noise. A model with no
     // recorded split renders blank there, never a zero it did not measure.
-    let cache_cell = |m: &ModelEntry| m.cache_read_pct().map(|pct| format!("{pct:.0}% cache"));
-    let show_cache = all_models.iter().any(|m| m.cache_read_tokens.is_some());
+    let show_cache = all_models.iter().any(|m| m.cache_cell.is_some());
     let cache_width = if show_cache {
         all_models
             .iter()
-            .filter_map(|m| cache_cell(m).map(|s| s.len()))
+            .filter_map(|m| m.cache_cell.as_ref().map(|s| s.len()))
             .max()
             .unwrap_or(0)
     } else {
@@ -329,7 +286,7 @@ pub fn render_models(f: &mut Frame, models: &[ModelEntry], area: Rect, focused: 
         // (`family-X.Y-tier`, all lowercase, dashes between segments).
         // Prettified labels ("Qwen 3.7 Max") belong in /models and
         // onboarding, not the usage ledger.
-        let display = m.model.clone();
+        let display = m.name.clone();
         let name = if display.len() > name_width {
             format!(
                 "{}...",
@@ -342,32 +299,25 @@ pub fn render_models(f: &mut Frame, models: &[ModelEntry], area: Rect, focused: 
             display
         };
 
-        // Parent row (bold model name, no prefix)
+        // Parent row (bold model name, no prefix). The estimate state picks
+        // the style; the `~` itself already rides in the cost cell.
         let cost_style = if m.estimated { accent() } else { LABEL };
-        let cost_str = if m.estimated {
-            format!("~{}", fmt_cost(m.cost))
-        } else {
-            fmt_cost(m.cost)
-        };
         let mut spans = vec![
             Span::styled(format!(" {:<width$}", name, width = name_width), BOLD),
             Span::raw("  "),
             Span::styled(
-                format!("{:>width$}", cost_str, width = cost_width),
+                format!("{:>width$}", m.cost_str, width = cost_width),
                 cost_style,
             ),
             Span::raw("  "),
-            Span::styled(
-                format!("{:>width$}", fmt_tokens(m.tokens), width = tok_width),
-                DIM,
-            ),
+            Span::styled(format!("{:>width$}", m.tokens_str, width = tok_width), DIM),
             Span::raw("  "),
         ];
         // The cache share, when the model has one recorded (#2027). A row with
         // no split stays blank rather than reading 0%.
         if show_cache {
-            let (text, style) = match cache_cell(m) {
-                Some(s) => (s, LABEL),
+            let (text, style) = match &m.cache_cell {
+                Some(s) => (s.clone(), LABEL),
                 None => (String::new(), DIM),
             };
             spans.push(Span::styled(
@@ -377,39 +327,25 @@ pub fn render_models(f: &mut Frame, models: &[ModelEntry], area: Rect, focused: 
             spans.push(Span::raw("  "));
         }
         spans.push(Span::styled(
-            format!("{:>width$} req", m.calls, width = calls_width),
+            format!("{:>width$} req", m.calls_str, width = calls_width),
             DIM,
         ));
         lines.push(Line::from(spans));
 
-        // Child rows (variant breakdown) — only show the tree when
-        // there's something MEANINGFUL to break down. A variant
-        // whose name is a cosmetic alias of the parent (only
-        // separator/case differences, e.g. `qwen3.7-max` vs
-        // `qwen-3.7-max`) carries zero information and just
-        // duplicates the parent line visually.
-        let meaningful_variants: Vec<&_> = m
-            .variants
-            .iter()
-            .filter(|v| {
-                crate::usage::data::normalize_model_for_grouping(&v.name) != m.model
-                    && !crate::usage::data::is_cosmetic_alias_of_parent(&v.name, &m.model)
-            })
-            .collect();
-        let has_real_variants = !meaningful_variants.is_empty();
-
-        if has_real_variants {
-            // Tree prefix: box-drawing glyph + 1 trailing space = 3 display
-            // chars. The `├─` / `└─` glyphs are themselves the depth signal;
-            // adding leading whitespace just shoves the name off the natural
-            // alignment with the parent and wastes horizontal room without
-            // clarifying anything. Reserve those 3 chars from `name_width`
-            // so child cost / tokens / calls columns still share the parent
-            // row's right-hand column edges.
+        // Child rows (variant breakdown). The view model already dropped
+        // cosmetic aliases, so every variant here carries real information.
+        // Tree prefix: box-drawing glyph + 1 trailing space = 3 display
+        // chars. The `├─` / `└─` glyphs are themselves the depth signal;
+        // adding leading whitespace just shoves the name off the natural
+        // alignment with the parent and wastes horizontal room without
+        // clarifying anything. Reserve those 3 chars from `name_width`
+        // so child cost / tokens / calls columns still share the parent
+        // row's right-hand column edges.
+        if !m.variants.is_empty() {
             const TREE_PREFIX_CHARS: usize = 3;
             let max_child_name = name_width.saturating_sub(TREE_PREFIX_CHARS);
-            for (vidx, v) in meaningful_variants.iter().enumerate() {
-                let is_last = vidx == meaningful_variants.len() - 1;
+            for (vidx, v) in m.variants.iter().enumerate() {
+                let is_last = vidx == m.variants.len() - 1;
                 let prefix = if is_last { "└─ " } else { "├─ " };
                 // Keep child variant names as the raw API id so the
                 // operator sees exactly what was recorded (e.g.
@@ -434,15 +370,9 @@ pub fn render_models(f: &mut Frame, models: &[ModelEntry], area: Rect, focused: 
                     // start at the same column for both.
                     Span::styled(format!(" {:<width$}", v_name, width = name_width), DIM),
                     Span::raw("  "),
-                    Span::styled(
-                        format!("{:>width$}", fmt_cost(v.cost), width = cost_width),
-                        LABEL,
-                    ),
+                    Span::styled(format!("{:>width$}", v.cost_str, width = cost_width), LABEL),
                     Span::raw("  "),
-                    Span::styled(
-                        format!("{:>width$}", fmt_tokens(v.tokens), width = tok_width),
-                        DIM,
-                    ),
+                    Span::styled(format!("{:>width$}", v.tokens_str, width = tok_width), DIM),
                     Span::raw("  "),
                     // A variant row carries no cache split of its own (the
                     // ledger records one per turn, not per spelling), so the
@@ -453,7 +383,10 @@ pub fn render_models(f: &mut Frame, models: &[ModelEntry], area: Rect, focused: 
                     } else {
                         String::new()
                     }),
-                    Span::styled(format!("{:>width$} req", v.calls, width = calls_width), DIM),
+                    Span::styled(
+                        format!("{:>width$} req", v.calls_str, width = calls_width),
+                        DIM,
+                    ),
                 ]));
             }
         }
@@ -465,7 +398,7 @@ pub fn render_models(f: &mut Frame, models: &[ModelEntry], area: Rect, focused: 
 
 // ── Core Tools ───────────────────────────────────────────────────────────────
 
-pub fn render_tools(f: &mut Frame, tools: &[ToolStats], area: Rect, focused: bool) {
+pub fn render_tools(f: &mut Frame, tools: &[ToolRow], area: Rect, focused: bool) {
     let block = card_block("Core Tools", focused);
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -482,7 +415,7 @@ pub fn render_tools(f: &mut Frame, tools: &[ToolStats], area: Rect, focused: boo
     let max_name_len = tools
         .iter()
         .take(visible)
-        .map(|t| t.tool_name.len())
+        .map(|t| t.name.len())
         .max()
         .unwrap_or(8);
     let max_count_len = tools
@@ -491,7 +424,6 @@ pub fn render_tools(f: &mut Frame, tools: &[ToolStats], area: Rect, focused: boo
         .map(|t| t.call_count.to_string().len())
         .max()
         .unwrap_or(1);
-    let max_count = tools.first().map(|t| t.call_count).unwrap_or(1);
 
     // Reserve space for actual name and count, bar gets the rest
     let data_cols = max_name_len + max_count_len + 3; // 3 spacer chars
@@ -508,24 +440,24 @@ pub fn render_tools(f: &mut Frame, tools: &[ToolStats], area: Rect, focused: boo
 
     let mut lines: Vec<Line> = Vec::new();
     for tool in tools.iter().take(visible) {
-        let bar_len = if max_count > 0 && bar_width > 0 {
-            ((tool.call_count as f64 / max_count as f64) * bar_width as f64).ceil() as usize
+        let bar_len = if bar_width > 0 {
+            (tool.bar_ratio * bar_width as f64).ceil() as usize
         } else {
             0
         };
         let bar_len = bar_len.max(1).min(bar_width);
         let bar: String = "\u{2584}".repeat(bar_len);
         let pad: String = " ".repeat(bar_width.saturating_sub(bar_len));
-        let name = if tool.tool_name.len() > name_width {
+        let name = if tool.name.len() > name_width {
             format!(
                 "{}...",
-                tool.tool_name
+                tool.name
                     .chars()
                     .take(name_width.saturating_sub(3))
                     .collect::<String>()
             )
         } else {
-            tool.tool_name.clone()
+            tool.name.clone()
         };
         lines.push(Line::from(vec![
             Span::styled(format!(" {:<width$}", name, width = name_width), BOLD),
@@ -558,11 +490,12 @@ pub(crate) struct ActivityColumnWidths {
     pub pct: usize,
 }
 
-/// Pure column-width calculator for the "By Activity" card. Pulled out
-/// so `src/tests/usage_activity_columns_test.rs` can exercise the
-/// header-label floor that prevents "1-shot" / "Turns" from being
-/// clipped when their data values are narrower than the header.
-pub(crate) fn activity_column_widths(activities: &[ActivityStats]) -> ActivityColumnWidths {
+/// Pure column-width calculator for the "By Activity" card. Consumes the
+/// view model's rows (raw cost and pct ride on them for exactly this
+/// math). Pulled out so `src/tests/usage_activity_columns_test.rs` can
+/// exercise the header-label floor that prevents "1-shot" / "Turns" from
+/// being clipped when their data values are narrower than the header.
+pub(crate) fn activity_column_widths(activities: &[ActivityRow]) -> ActivityColumnWidths {
     let max_cat_len = activities
         .iter()
         .map(|a| a.category.len())
@@ -570,7 +503,7 @@ pub(crate) fn activity_column_widths(activities: &[ActivityStats]) -> ActivityCo
         .unwrap_or(8);
     let max_cost_len = activities
         .iter()
-        .map(|a| fmt_cost(a.cost).len())
+        .map(|a| a.cost_str.len())
         .max()
         .unwrap_or(6);
     let max_turns_len = activities
@@ -593,7 +526,7 @@ pub(crate) fn activity_column_widths(activities: &[ActivityStats]) -> ActivityCo
     }
 }
 
-pub fn render_activities(f: &mut Frame, activities: &[ActivityStats], area: Rect, focused: bool) {
+pub fn render_activities(f: &mut Frame, activities: &[ActivityRow], area: Rect, focused: bool) {
     let block = card_block("By Activity", focused);
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -628,11 +561,9 @@ pub fn render_activities(f: &mut Frame, activities: &[ActivityStats], area: Rect
     ]);
     let mut lines: Vec<Line> = vec![header_line];
 
-    let max_cost = activities.iter().map(|a| a.cost).fold(0.0_f64, f64::max);
-
     for act in activities.iter().take(visible) {
-        let bar_len = if max_cost > 0.0 && bar_width > 0 {
-            ((act.cost / max_cost) * bar_width as f64).ceil() as usize
+        let bar_len = if bar_width > 0 {
+            (act.bar_ratio * bar_width as f64).ceil() as usize
         } else {
             0
         };
@@ -652,17 +583,19 @@ pub fn render_activities(f: &mut Frame, activities: &[ActivityStats], area: Rect
         } else {
             act.category.clone()
         };
-        let one_shot = format!("{}%", act.one_shot_pct as u32);
         lines.push(Line::from(vec![
             Span::styled(format!(" {:<width$}", category, width = cat_width), BOLD),
             Span::styled(bar, accent()),
             Span::raw(pad),
             Span::styled(
-                format!(" {:>width$}", fmt_cost(act.cost), width = cost_width),
+                format!(" {:>width$}", act.cost_str, width = cost_width),
                 LABEL,
             ),
             Span::styled(format!(" {:>width$}", act.turns, width = turns_width), DIM),
-            Span::styled(format!(" {:>width$}", one_shot, width = pct_width), DIM),
+            Span::styled(
+                format!(" {:>width$}", act.one_shot_str, width = pct_width),
+                DIM,
+            ),
         ]));
     }
 
@@ -674,7 +607,7 @@ pub fn render_activities(f: &mut Frame, activities: &[ActivityStats], area: Rect
 
 pub fn render_cache_efficiency(
     f: &mut Frame,
-    cache: &Option<CacheStats>,
+    cache: Option<&CacheView>,
     area: Rect,
     focused: bool,
 ) {
@@ -691,15 +624,12 @@ pub fn render_cache_efficiency(
         }
     };
 
-    // Color-code by hit rate: green >=60%, yellow 30-60%, red <30%.
-    let pct_color = |p: f64| {
-        if p >= 60.0 {
-            Color::Green
-        } else if p >= 30.0 {
-            Color::Yellow
-        } else {
-            Color::Red
-        }
+    // Color-code by band: the thresholds live in the view model, the
+    // palette lives here (green high, yellow mid, red low).
+    let band_color = |band: HitBand| match band {
+        HitBand::High => Color::Green,
+        HitBand::Mid => Color::Yellow,
+        HitBand::Low => Color::Red,
     };
 
     let mut lines: Vec<Line> = Vec::new();
@@ -707,9 +637,9 @@ pub fn render_cache_efficiency(
     // Overall efficiency — one compact header line.
     lines.push(Line::from(vec![
         Span::styled(
-            format!("{:.0}%", cache.cache_hit_pct),
+            format!("{:.0}%", cache.overall_pct),
             Style::new()
-                .fg(pct_color(cache.cache_hit_pct))
+                .fg(band_color(cache.overall_band))
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(" overall", DIM),
@@ -718,10 +648,10 @@ pub fn render_cache_efficiency(
     // Per-model breakdown, highest hit-rate first. Each row: model … NN%.
     // No blank spacer — vertical space in this card is scarce, every row is a
     // model we'd otherwise drop.
-    if !cache.per_model.is_empty() {
+    if !cache.models.is_empty() {
         let width = inner.width as usize;
         let name_w = width.saturating_sub(5).max(6); // leave room for " 100%"
-        for ms in &cache.per_model {
+        for ms in &cache.models {
             if lines.len() as u16 >= inner.height {
                 break;
             }
@@ -729,21 +659,16 @@ pub fn render_cache_efficiency(
             lines.push(Line::from(vec![
                 Span::raw(format!("{name:<name_w$}")),
                 Span::styled(
-                    format!("{:>3}%", ms.cache_hit_pct.round() as i64),
-                    Style::new().fg(pct_color(ms.cache_hit_pct)),
+                    format!("{:>3}%", ms.hit_pct.round() as i64),
+                    Style::new().fg(band_color(ms.band)),
                 ),
             ]));
         }
     } else {
         // No per-model rows (e.g. only one provider) — keep the cached/total line.
-        lines.push(Line::from(Span::styled(
-            format!(
-                "{} / {} cached",
-                fmt_tokens(cache.cached_tokens),
-                fmt_tokens(cache.total_input_tokens)
-            ),
-            DIM,
-        )));
+        if let Some(line) = &cache.fallback_line {
+            lines.push(Line::from(Span::styled(line.clone(), DIM)));
+        }
     }
 
     f.render_widget(Paragraph::new(lines), inner);
@@ -762,14 +687,14 @@ const BREAKDOWN_COLS: usize = 1 + 8 + 8 + 9 + 9 + 9;
 /// at, what those reads cost, what they would have cost as ordinary input, and
 /// the difference. The TOTAL row adds the rows up, and the footnote says what
 /// the columns mean, so the money here answers the question the card raised.
-pub fn render_cache_breakdown(f: &mut Frame, cache: &Option<CacheStats>, area: Rect) {
+pub fn render_cache_breakdown(f: &mut Frame, cache: Option<&CacheView>, area: Rect) {
     let block = card_block("Cache Efficiency: prices", true);
     let inner = block.inner(area);
     f.render_widget(Clear, area);
     f.render_widget(block, area);
 
     let cache = match cache {
-        Some(c) if !c.per_model.is_empty() => c,
+        Some(c) if !c.models.is_empty() => c,
         _ => {
             let p = Paragraph::new(" No cache data").style(DIM);
             f.render_widget(p, inner);
@@ -790,62 +715,33 @@ pub fn render_cache_breakdown(f: &mut Frame, cache: &Option<CacheStats>, area: R
     )));
 
     // The TOTAL row and the two footnote lines are reserved first, so a long
-    // model list never pushes the explanation off the panel.
+    // model list never pushes the explanation off the panel. The `~` on
+    // money cells is already baked into the view model's cells; the
+    // estimated flag only picks the accent style.
     let max_rows = (inner.height as usize).saturating_sub(4).max(1);
-    for ms in cache.per_model.iter().take(max_rows) {
+    for ms in cache.models.iter().take(max_rows) {
         let name: String = ms.model.chars().take(name_w.saturating_sub(1)).collect();
-        // The By Model card's marker for default-table prices (#1717): `~`,
-        // in the accent color, so nobody reads an estimate as a quoted rate.
         let money_style = if ms.estimated { accent() } else { DIM };
-        let money = |c: f64| {
-            if ms.estimated {
-                format!("~{}", fmt_cost(c))
-            } else {
-                fmt_cost(c)
-            }
-        };
         lines.push(Line::from(vec![
             Span::styled(format!(" {name:<name_w$}"), LABEL),
-            Span::styled(format!("{:>8}", fmt_tokens(ms.cached_tokens)), DIM),
-            Span::styled(
-                format!("{:>8}", format!("${:.2}", ms.cache_read_per_m)),
-                money_style,
-            ),
-            Span::styled(format!("{:>9}", money(ms.cost.read_cost)), money_style),
-            Span::styled(format!("{:>9}", money(ms.cost.full_rate_cost)), money_style),
-            Span::styled(format!("{:>9}", money(ms.cost.saved)), money_style),
+            Span::styled(format!("{:>8}", ms.cached_str), DIM),
+            Span::styled(format!("{:>8}", ms.rate_str), money_style),
+            Span::styled(format!("{:>9}", ms.read_str), money_style),
+            Span::styled(format!("{:>9}", ms.full_rate_str), money_style),
+            Span::styled(format!("{:>9}", ms.saved_str), money_style),
         ]));
     }
 
-    let totals = cache.cost_totals();
-    let any_estimated = cache.per_model.iter().any(|m| m.estimated);
-    let total_money = |c: f64| {
-        if any_estimated {
-            format!("~{}", fmt_cost(c))
-        } else {
-            fmt_cost(c)
-        }
-    };
     lines.push(Line::from(vec![
         Span::styled(format!(" {:<name_w$}", "TOTAL"), BOLD),
-        Span::styled(format!("{:>8}", fmt_tokens(cache.cached_tokens)), BOLD),
+        Span::styled(format!("{:>8}", cache.total.cached_str), BOLD),
         Span::raw(" ".repeat(8)),
-        Span::styled(format!("{:>9}", total_money(totals.read_cost)), BOLD),
-        Span::styled(format!("{:>9}", total_money(totals.full_rate_cost)), BOLD),
-        Span::styled(format!("{:>9}", total_money(totals.saved)), BOLD),
+        Span::styled(format!("{:>9}", cache.total.read_str), BOLD),
+        Span::styled(format!("{:>9}", cache.total.full_rate_str), BOLD),
+        Span::styled(format!("{:>9}", cache.total.saved_str), BOLD),
     ]));
-    lines.push(Line::from(Span::styled(
-        format!(
-            " {:.0}% of input tokens were cache reads; writes cost {} on top",
-            cache.cache_hit_pct,
-            fmt_cost(totals.write_cost)
-        ),
-        DIM,
-    )));
-    lines.push(Line::from(Span::styled(
-        " saved = full rate - read rate; ~ = default table price",
-        DIM,
-    )));
+    lines.push(Line::from(Span::styled(cache.footnote1.clone(), DIM)));
+    lines.push(Line::from(Span::styled(cache.footnote2, DIM)));
 
     f.render_widget(Paragraph::new(lines), inner);
 }

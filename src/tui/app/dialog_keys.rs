@@ -873,7 +873,8 @@ mod tests {
     /// it advertises must actually close the breakdown.
     #[test]
     fn cache_breakdown_footer_key_closes_the_breakdown() {
-        use crate::usage::dashboard::{CACHE_CARD, DashboardState, UsageKeyOutcome, decide};
+        use crate::ui_core::usage::input::CACHE_CARD;
+        use crate::usage::dashboard::{DashboardState, UsageKeyOutcome, decide};
 
         for key in dialog_keys(DialogScope::UsageCacheBreakdown) {
             for (code, mods) in key.events {
