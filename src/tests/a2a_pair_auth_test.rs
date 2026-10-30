@@ -30,6 +30,7 @@ async fn state_with(api_key: Option<&str>, dir: &Path) -> A2aState {
         api_key: api_key.map(str::to_string),
         pairing: PairingStore::new(dir.join("pairing.json")),
         pair_hits: new_pair_hits(),
+        remote_state_dir: dir.to_path_buf(),
     }
 }
 
