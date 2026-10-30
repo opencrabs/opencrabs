@@ -70,7 +70,10 @@ mod tests {
     #[test]
     fn every_dispatched_method_has_a_scope() {
         for m in KNOWN_METHODS {
-            assert!(scope_for_method(m).is_some(), "{m} missing from scope table");
+            assert!(
+                scope_for_method(m).is_some(),
+                "{m} missing from scope table"
+            );
         }
     }
 
