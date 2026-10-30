@@ -197,20 +197,20 @@ async fn spawn_command_with_hook_replaces_generic_delivery() {
     assert_eq!(mgr.running_for(sid), 0);
 }
 
-// --- #2218: one task, one report ---
+// --- #2266: the receipt always reaches the session ---
 
-/// #2218: a surface that drew the row has already reported the outcome.
-/// Delivering it again sent the same completion as a second message, and
-/// because an idle session resumes on delivery, that message opened a whole
-/// agent turn with tools attached. One `cargo test` produced a row, a
-/// "background task finished" line, and a turn.
+/// #2266: the row settle and the session receipt are different consumers.
+/// The row is cosmetic paint on a surface; the receipt is what tells the
+/// agent the task finished so it can report the outcome. #2218 made the
+/// delivery a fallback skipped whenever a row callback existed, and since
+/// every interactive surface registers one, detached tasks stopped
+/// reporting at all.
 ///
-/// This asserts the suppression itself rather than the wording: the session
-/// route must stay silent while the finish reaches the callback that owns the
-/// row.
+/// This pins the contract: the finish reaches the row callback AND the
+/// session route, both, every time.
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
-async fn a_settled_row_suppresses_the_second_report() {
+async fn a_settled_row_still_delivers_the_receipt() {
     let _guard = restart_recovery::test_guard();
     #[allow(clippy::type_complexity)]
     let recorded: Arc<Mutex<Vec<(Uuid, QueuedUserMessage)>>> = Arc::new(Mutex::new(Vec::new()));
@@ -268,20 +268,24 @@ async fn a_settled_row_suppresses_the_second_report() {
         "the finish must settle the row the start drew"
     );
 
-    // Same window the other delivery tests allow: a push that should not
-    // happen has had ample time to show up here.
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    // The receipt is delivered right after the row callback fires. Wait for
+    // BOTH consumers: the row settle above and the session route here.
+    let mut waited = 0;
+    while recorded.lock().unwrap().is_empty() && waited < 50 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        waited += 1;
+    }
     assert!(
-        recorded.lock().unwrap().is_empty(),
-        "a completion the row already reported must not be delivered again"
+        !recorded.lock().unwrap().is_empty(),
+        "the receipt must reach the session even though the row settled"
     );
     assert_eq!(mgr.running_for(sid), 0);
 }
 
-/// #2218 fallback: the delivery is not gone, it is the fallback. A task whose
-/// row disappeared before the finish (the surface went away, the process
-/// restarted, no callback was ever registered) still has to reach the session,
-/// or the outcome is lost with no report at all. The row is dropped through
+/// A task whose row disappeared before the finish (the surface went away,
+/// the process restarted, no callback was ever registered) still has to
+/// reach the session. Delivery is unconditional since #2266; this pins the
+/// no-callback shape of it. The row is dropped through
 /// the same seam a surface uses when it settles one.
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]

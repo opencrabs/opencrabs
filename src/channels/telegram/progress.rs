@@ -184,7 +184,9 @@ pub(crate) fn apply_progress_event(
         // NOTHING onto `display_queue`: a display item is what causes a new
         // message, and the whole point (#2147) is that start and finish share
         // one message id. Setting `dirty` is what the edit loop picks up to
-        // rewrite the existing block in place.
+        // rewrite the existing block in place. The session receipt travels
+        // through the session route instead (deliver_to_session, #2266),
+        // never through this callback.
         //
         // A finish with no matching row is not an error: the process may have
         // restarted, or the turn ended and the block settled. Since #2218 the
