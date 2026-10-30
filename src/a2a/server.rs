@@ -2,15 +2,18 @@
 //!
 //! Serves:
 //! - `GET  /.well-known/agent.json` — Agent Card discovery
-//! - `POST /a2a/v1`                 — JSON-RPC 2.0 endpoint
+//! - `POST /a2a/v1`                 — JSON-RPC 2.0 endpoint (scoped)
+//! - `POST /a2a/pair`               — One-time code → scoped session token
 //! - `GET  /a2a/health`             — Health check
 
-use crate::a2a::{agent_card, handler, types::*};
+use crate::a2a::{agent_card, handler, pairing_http, types::*};
 use crate::brain::agent::service::AgentService;
 use crate::config::A2aConfig;
+use crate::remote::pairing::PairingStore;
+use crate::remote::scopes::{ALL_SCOPES, allows, scope_for_method};
 use crate::services::ServiceContext;
 use axum::{
-    Router,
+    Extension, Router,
     extract::State,
     http::StatusCode,
     middleware,
@@ -32,6 +35,19 @@ pub struct A2aState {
     pub agent_service: Arc<AgentService>,
     pub service_context: ServiceContext,
     pub api_key: Option<String>,
+    /// Paired-session store (codes + tokens). Path-injected for tests.
+    pub pairing: PairingStore,
+    /// Per-client rate-limit buckets for POST /a2a/pair.
+    pub pair_hits: pairing_http::PairHits,
+}
+
+/// The scopes a request's credential carries, attached by `require_bearer`
+/// and enforced per method in `handle_jsonrpc`.
+#[derive(Clone, Debug)]
+pub struct GrantedScopes(pub Vec<String>);
+
+fn all_scopes() -> Vec<String> {
+    ALL_SCOPES.iter().map(|s| s.to_string()).collect()
 }
 
 /// Compare a presented bearer token against the configured one without a
@@ -52,34 +68,52 @@ pub(crate) fn tokens_match(presented: &str, expected: &str) -> bool {
     a == b
 }
 
-/// Bearer token auth middleware. Skipped when no api_key is configured.
+/// Bearer auth middleware. Two credential kinds:
+///
+/// - The config `[a2a].api_key` → all scopes (backward compatible).
+/// - A paired `ocpair_` session token → the scopes its code carried.
+///
+/// When no api_key is configured the legacy loopback-open posture stands:
+/// everything through (`check_gate_authenticated` guarantees that posture
+/// can only bind loopback). Successful auth attaches [`GrantedScopes`] for
+/// the per-method check in `handle_jsonrpc`.
 async fn require_bearer(
     State(state): State<A2aState>,
-    req: axum::http::Request<axum::body::Body>,
+    mut req: axum::http::Request<axum::body::Body>,
     next: middleware::Next,
 ) -> axum::response::Response {
-    let Some(ref expected) = state.api_key else {
-        // No key configured, allow all requests
-        return next.run(req).await;
-    };
-
-    let authorized = req
+    let presented = req
         .headers()
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .is_some_and(|token| tokens_match(token, expected));
+        .and_then(|v| v.strip_prefix("Bearer "));
 
-    if authorized {
-        next.run(req).await
-    } else {
-        let body = serde_json::json!({
-            "jsonrpc": "2.0",
-            "error": { "code": -32001, "message": "Unauthorized: invalid or missing Bearer token" },
-            "id": null
-        });
-        (StatusCode::UNAUTHORIZED, Json(body)).into_response()
-    }
+    let scopes = match (&state.api_key, presented) {
+        // Legacy open mode: only reachable on a loopback bind (#1473 gate).
+        (None, _) => all_scopes(),
+        (Some(expected), Some(token)) if tokens_match(token, expected) => all_scopes(),
+        (Some(_), Some(token)) if token.starts_with(crate::remote::pairing::TOKEN_PREFIX) => {
+            // Paired session. Small blocking JSON read per request: fine at
+            // A2A rates, and the writer's atomic rename means never partial.
+            match state.pairing.verify_token(token) {
+                Some(session) => session.scopes,
+                None => return unauthorized_response(),
+            }
+        }
+        _ => return unauthorized_response(),
+    };
+
+    req.extensions_mut().insert(GrantedScopes(scopes));
+    next.run(req).await
+}
+
+fn unauthorized_response() -> axum::response::Response {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "error": { "code": -32001, "message": "Unauthorized: invalid or missing Bearer token" },
+        "id": null
+    });
+    (StatusCode::UNAUTHORIZED, Json(body)).into_response()
 }
 
 /// Build the axum router for the A2A gateway.
@@ -102,10 +136,13 @@ pub fn build_router(state: A2aState, allowed_origins: &[String]) -> Router {
             require_bearer,
         ));
 
-    // Public endpoints (discovery + health)
+    // Public endpoints (discovery + health + pairing). Pairing is
+    // unauthenticated by design — the one-time code IS the credential —
+    // and rate-limited in the handler.
     Router::new()
         .route("/.well-known/agent.json", get(get_agent_card))
         .route("/a2a/health", get(health_check))
+        .route("/a2a/pair", post(pairing_http::handle_pair))
         .merge(protected)
         .layer(cors)
         .with_state(state)
@@ -202,6 +239,8 @@ pub async fn start_server(
         agent_service,
         service_context,
         api_key: config.api_key.clone(),
+        pairing: PairingStore::new(PairingStore::default_path()),
+        pair_hits: pairing_http::new_pair_hits(),
     };
 
     let app = build_router(state, &config.allowed_origins);
@@ -251,6 +290,7 @@ async fn get_agent_card(State(state): State<A2aState>) -> Json<AgentCard> {
 /// Returns JSON for most methods, SSE stream for `message/stream`.
 async fn handle_jsonrpc(
     State(state): State<A2aState>,
+    Extension(granted): Extension<GrantedScopes>,
     Json(req): Json<JsonRpcRequest>,
 ) -> axum::response::Response {
     if req.jsonrpc != "2.0" {
@@ -260,6 +300,23 @@ async fn handle_jsonrpc(
                 req.id,
                 error_codes::INVALID_REQUEST,
                 "Invalid JSON-RPC version, expected 2.0",
+            )),
+        )
+            .into_response();
+    }
+
+    // Scope gate BEFORE any dispatch (and before the stream branch, so
+    // message/stream is covered). Unknown methods fall through to the
+    // dispatcher's MethodNotFound — credentials don't change that.
+    if let Some(required) = scope_for_method(&req.method)
+        && !allows(&granted.0, required)
+    {
+        return (
+            StatusCode::OK,
+            Json(JsonRpcResponse::error(
+                req.id,
+                error_codes::INSUFFICIENT_SCOPE,
+                format!("insufficient scope: {required} required"),
             )),
         )
             .into_response();

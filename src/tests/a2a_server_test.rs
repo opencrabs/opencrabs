@@ -16,6 +16,10 @@ async fn test_state() -> A2aState {
         agent_service: helpers::placeholder_agent_service().await,
         service_context: helpers::placeholder_service_context().await,
         api_key: None,
+        pairing: crate::remote::pairing::PairingStore::new(
+            std::env::temp_dir().join(format!("oc-a2a-test-pairing-{}", std::process::id())),
+        ),
+        pair_hits: crate::a2a::pairing_http::new_pair_hits(),
     }
 }
 

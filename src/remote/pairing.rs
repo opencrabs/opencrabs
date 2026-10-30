@@ -176,6 +176,7 @@ impl std::error::Error for VerifyError {}
 ///
 /// Constructed with an explicit path so tests stay hermetic (tempfile);
 /// production uses [`PairingStore::default_path`].
+#[derive(Clone)]
 pub struct PairingStore {
     path: PathBuf,
 }
