@@ -358,7 +358,9 @@ impl UsageViewModel {
 /// already short.
 fn short_date(date: &str) -> String {
     if date.len() >= 10 {
-        date[5..10].to_string()
+        date.get(5..10)
+            .map(str::to_string)
+            .unwrap_or_else(|| date.to_string())
     } else {
         date.to_string()
     }

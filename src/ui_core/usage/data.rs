@@ -542,10 +542,13 @@ pub(crate) fn sql_normalize_model(raw: &str) -> String {
     } else {
         raw.to_lowercase()
     };
-    let m2 = if m1.ends_with(":free") || m1.ends_with("-free") {
-        &m1[..m1.len() - 5]
-    } else if m1.ends_with("-thinking") {
-        &m1[..m1.len() - 9]
+    let m2 = if let Some(s) = m1
+        .strip_suffix(":free")
+        .or_else(|| m1.strip_suffix("-free"))
+    {
+        s
+    } else if let Some(s) = m1.strip_suffix("-thinking") {
+        s
     } else {
         m1.as_str()
     };
