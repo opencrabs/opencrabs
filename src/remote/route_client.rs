@@ -144,6 +144,29 @@ mod tests {
         (format!("http://{addr}"), handle)
     }
 
+    /// Bounded retry for `harvest` under full-suite CPU starvation (11k+
+    /// parallel tests can starve the 5s reqwest budget). Production `harvest`
+    /// stays a single shot; only tests can afford to re-attempt.
+    async fn harvest_retry(
+        st: &RouteStore,
+        url: &str,
+        key: Option<&str>,
+        attempts: u8,
+    ) -> Result<Option<(String, usize)>> {
+        let mut last = None;
+        for i in 0..attempts {
+            match harvest(st, url, key).await {
+                Ok(v) => return Ok(v),
+                Err(e) => {
+                    eprintln!("harvest attempt {}/{} failed: {e:#}", i + 1, attempts);
+                    last = Some(e);
+                    tokio::time::sleep(Duration::from_millis(300 * (u64::from(i) + 1))).await;
+                }
+            }
+        }
+        Err(last.expect("attempts > 0"))
+    }
+
     async fn dead_url() -> String {
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let a = l.local_addr().unwrap();
@@ -212,7 +235,7 @@ mod tests {
         })
         .to_string();
         let (url, guard) = mock_server(body).await;
-        let learned = harvest(&st, &url, Some("k")).await.unwrap();
+        let learned = harvest_retry(&st, &url, Some("k"), 3).await.unwrap();
         guard.abort();
         let (host_id, n) = learned.expect("harvest merged");
         assert_eq!(host_id, "h-remote-1");
@@ -228,7 +251,7 @@ mod tests {
         let body =
             serde_json::json!({"host_id": null, "routes": [], "note": "suppressed"}).to_string();
         let (url, guard) = mock_server(body).await;
-        let out = harvest(&st, &url, None).await.unwrap();
+        let out = harvest_retry(&st, &url, None, 3).await.unwrap();
         guard.abort();
         assert!(out.is_none());
         assert!(st.load().unwrap().hosts.is_empty());
