@@ -207,6 +207,7 @@ Build artifacts are temporary. Don't commit them. Don't leave them. The repo sho
 - Skip global state via `lazy_static!`, `Once`, or similar; prefer passing explicit context structs for any shared state.
 - **No mock tests.** Unit tests and e2e tests hit real implementations (real DB, real structs). Mocks hide bugs — if the mock passes but prod breaks, the test was worthless.
 - All tests live in `src/tests/` as dedicated `*_test.rs` files — not inline, not scattered.
+- **Rust `if let` edition trap (crates on edition < 2024):** scrutinee temporaries (lock guards, borrows, owned values) live until the END of the whole `if let ... else`, so a guard is still HELD inside `else`; re-locking the same mutex there deadlocks. If `else` touches the same value, bind the scrutinee to a named `let` above the `if let` or drop it explicitly. Rust 2024 (RFC 3606) shortened the drop; models miss this (Opus caught it in 3 min, DeepSeek not at all, user report 2026-10-30). Check `edition` in Cargo.toml BEFORE editing any `if let ... else`.
 
 ---
 
