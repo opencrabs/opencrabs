@@ -9,6 +9,7 @@
 pub mod agent_card;
 pub mod debate;
 pub mod handler;
+pub mod pairing_http;
 pub mod persistence;
 pub mod server;
 pub mod types;

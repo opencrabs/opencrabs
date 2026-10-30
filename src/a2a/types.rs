@@ -350,4 +350,7 @@ pub mod error_codes {
     pub const CONTENT_TYPE_NOT_SUPPORTED: i64 = -32002;
     /// Unsupported operation.
     pub const UNSUPPORTED_OPERATION: i64 = -32003;
+    /// Session token lacks the scope this method requires (paired remote
+    /// access; see `crate::remote::scopes`). Distinct from -32001/-32003.
+    pub const INSUFFICIENT_SCOPE: i64 = -32004;
 }
