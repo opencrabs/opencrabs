@@ -73,6 +73,8 @@ pub(super) fn render_help(f: &mut Frame, app: &mut App, area: Rect) {
         kv("← / →", "Move cursor", cyan),
         kv("Ctrl/Alt+←→", "Jump word", cyan),
         kv("Home / End", "Start / end of line", cyan),
+        kv("Alt+Backspace", "Delete word", cyan),
+        kv("Ctrl+Backspace", "Delete word (alias)", cyan),
         kv("Ctrl+W", "Delete word (vim)", cyan),
         kv("Ctrl+U", "Delete to line start (vim)", cyan),
         Line::from(""),
