@@ -6,7 +6,7 @@
 //! - `POST /a2a/pair`               — One-time code → scoped session token
 //! - `GET  /a2a/health`             — Health check
 
-use crate::a2a::{agent_card, handler, pairing_http, types::*};
+use crate::a2a::{agent_card, handler, pairing_http, routes_http, types::*};
 use crate::brain::agent::service::AgentService;
 use crate::config::A2aConfig;
 use crate::remote::pairing::PairingStore;
@@ -39,6 +39,9 @@ pub struct A2aState {
     pub pairing: PairingStore,
     /// Per-client rate-limit buckets for POST /a2a/pair.
     pub pair_hits: pairing_http::PairHits,
+    /// Where remote state lives (host_id, tunnel.json, routes.json).
+    /// Production: `<opencrabs_home>/state/remote`. Injected for tests.
+    pub remote_state_dir: std::path::PathBuf,
 }
 
 /// The scopes a request's credential carries, attached by `require_bearer`
@@ -82,29 +85,41 @@ async fn require_bearer(
     mut req: axum::http::Request<axum::body::Body>,
     next: middleware::Next,
 ) -> axum::response::Response {
-    let presented = req
-        .headers()
+    let presented = bearer_from_headers(req.headers());
+    let Some(scopes) = credential_scopes(&state, presented) else {
+        return unauthorized_response();
+    };
+    req.extensions_mut().insert(GrantedScopes(scopes));
+    next.run(req).await
+}
+
+/// Extract the token from an `Authorization: Bearer <token>` header.
+fn bearer_from_headers(headers: &axum::http::HeaderMap) -> Option<&str> {
+    headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
+        .and_then(|v| v.strip_prefix("Bearer "))
+}
 
-    let scopes = match (&state.api_key, presented) {
-        // Legacy open mode: only reachable on a loopback bind (#1473 gate).
-        (None, _) => all_scopes(),
-        (Some(expected), Some(token)) if tokens_match(token, expected) => all_scopes(),
+/// Resolve a presented credential to the scopes it grants, or `None` when
+/// it authenticates nothing. Shared by `require_bearer` (the gate) and
+/// `health_check` (the auth-gated routes block).
+///
+/// - No api_key configured → legacy loopback-open posture: everyone gets
+///   all scopes (`check_gate_authenticated` keeps that posture loopback-only).
+/// - The api_key itself → all scopes (backward compatible).
+/// - An `ocpair_` session token → the scopes its pairing code carried.
+pub(crate) fn credential_scopes(state: &A2aState, presented: Option<&str>) -> Option<Vec<String>> {
+    match (&state.api_key, presented) {
+        (None, _) => Some(all_scopes()),
+        (Some(expected), Some(token)) if tokens_match(token, expected) => Some(all_scopes()),
         (Some(_), Some(token)) if token.starts_with(crate::remote::pairing::TOKEN_PREFIX) => {
             // Paired session. Small blocking JSON read per request: fine at
             // A2A rates, and the writer's atomic rename means never partial.
-            match state.pairing.verify_token(token) {
-                Some(session) => session.scopes,
-                None => return unauthorized_response(),
-            }
+            state.pairing.verify_token(token).map(|s| s.scopes)
         }
-        _ => return unauthorized_response(),
-    };
-
-    req.extensions_mut().insert(GrantedScopes(scopes));
-    next.run(req).await
+        _ => None,
+    }
 }
 
 fn unauthorized_response() -> axum::response::Response {
@@ -131,6 +146,7 @@ pub fn build_router(state: A2aState, allowed_origins: &[String]) -> Router {
     // Auth-protected JSON-RPC endpoint
     let protected = Router::new()
         .route("/a2a/v1", post(handle_jsonrpc))
+        .route("/a2a/routes", get(routes_http::handle_routes))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_bearer,
@@ -241,6 +257,7 @@ pub async fn start_server(
         api_key: config.api_key.clone(),
         pairing: PairingStore::new(PairingStore::default_path()),
         pair_hits: pairing_http::new_pair_hits(),
+        remote_state_dir: crate::remote::tunnel::default_state_dir(),
     };
 
     let app = build_router(state, &config.allowed_origins);
@@ -365,13 +382,31 @@ async fn handle_stream(state: A2aState, req: JsonRpcRequest) -> axum::response::
     }
 }
 
-/// GET /a2a/health — Health check.
-async fn health_check() -> Json<serde_json::Value> {
-    Json(serde_json::json!({
+/// GET /a2a/health — Health check. Public; the optional `routes`/`host_id`
+/// block appears ONLY for a valid read-scoped bearer when an api_key is
+/// configured (announcement privacy invariant — see `routes_http`).
+async fn health_check(
+    State(state): State<A2aState>,
+    headers: axum::http::HeaderMap,
+) -> Json<serde_json::Value> {
+    let mut body = serde_json::json!({
         "status": "ok",
         "version": crate::VERSION,
         "protocol": "A2A",
         "protocol_version": "1.0",
         "provider": "OpenCrabs Community"
-    }))
+    });
+    if state.api_key.is_some()
+        && credential_scopes(&state, bearer_from_headers(&headers))
+            .is_some_and(|s| allows(&s, crate::remote::scopes::SCOPE_READ))
+    {
+        match routes_http::announced_routes(&state) {
+            Ok((host_id, routes)) => {
+                body["host_id"] = serde_json::json!(host_id);
+                body["routes"] = serde_json::to_value(&routes).unwrap_or_default();
+            }
+            Err(e) => tracing::warn!("health route announcement failed: {e:#}"),
+        }
+    }
+    Json(body)
 }

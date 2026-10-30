@@ -123,6 +123,13 @@ pub fn cmd_connect(
             "the A2A gateway is disabled ([a2a].enabled = false); a tunnel to a closed door helps nobody. Enable it first."
         );
     }
+    if config.a2a.api_key.as_deref().unwrap_or("").is_empty() {
+        anyhow::bail!(
+            "refusing to open a tunnel to a KEYLESS gateway: set [a2a].api_key first. \
+             Without it, anyone who learns the tunnel URL gets the agent's full tool \
+             surface (the #1473 open-gate posture), and route announcement stays suppressed."
+        );
+    }
     let port = port.unwrap_or(config.a2a.port);
     let scope_list = parse_scopes(scopes)?;
 
