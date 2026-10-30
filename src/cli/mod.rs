@@ -4,6 +4,7 @@
 
 mod args;
 pub(crate) mod commands;
+pub(crate) mod connect;
 pub(crate) mod crash_recovery;
 mod cron;
 pub(crate) mod daemon_health;

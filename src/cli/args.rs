@@ -3,7 +3,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-use super::{commands, cron, migrate, ui};
+use super::{commands, connect, cron, migrate, ui};
 use crate::config::Config;
 
 /// OpenCrabs - High-Performance Terminal AI Orchestration Agent
@@ -155,6 +155,43 @@ pub enum Commands {
     /// Run in headless daemon mode — no TUI, channel bots only (Telegram, Discord, Slack, WhatsApp)
     /// Used by the systemd/LaunchAgent service installed during onboarding
     Daemon,
+
+    /// Expose this machine's A2A gateway for remote access: managed
+    /// cloudflared quick tunnel + one-time pairing code (t3code-style).
+    ///
+    /// Prints a public HTTPS URL and a single-use code; the remote client
+    /// exchanges the code at POST /a2a/pair for a scoped session token.
+    /// Nothing is proxied through anyone: the tunnel terminates on this
+    /// machine, tokens never transit the CLI, and the code dies on first use.
+    Connect {
+        /// Local A2A port to tunnel to (default: [a2a].port from config)
+        #[arg(long)]
+        port: Option<u16>,
+
+        /// Scopes for the pairing code: "read", "send", or "read,send"
+        #[arg(long, default_value = "read,send")]
+        scopes: String,
+
+        /// Label recorded with the paired session (shown in --list-sessions)
+        #[arg(long, default_value = "connect-cli")]
+        label: String,
+
+        /// Show the running tunnel instead of starting one
+        #[arg(long)]
+        status: bool,
+
+        /// Stop the running tunnel
+        #[arg(long)]
+        stop: bool,
+
+        /// List paired sessions (ids, labels, scopes, expiry — no secrets)
+        #[arg(long)]
+        list_sessions: bool,
+
+        /// Revoke a paired session by id or label
+        #[arg(long)]
+        revoke: Option<String>,
+    },
 
     /// Serve dropped files to a TUI running on another machine.
     ///
@@ -648,6 +685,24 @@ pub async fn run() -> Result<()> {
         Some(Commands::Session { operation }) => commands::cmd_session(&config, operation).await,
         Some(Commands::Service { operation }) => commands::cmd_service(operation).await,
         Some(Commands::Daemon) => ui::cmd_daemon(&config).await,
+        Some(Commands::Connect {
+            port,
+            scopes,
+            label,
+            status,
+            stop,
+            list_sessions,
+            revoke,
+        }) => connect::cmd_connect(
+            &config,
+            port,
+            &scopes,
+            &label,
+            status,
+            stop,
+            list_sessions,
+            revoke.as_deref(),
+        ),
         Some(Commands::DropAgent { port, roots }) => crate::utils::drop_agent::serve(port, roots),
         Some(Commands::Profile { operation }) => commands::cmd_profile(operation).await,
         Some(Commands::Cron { operation }) => cron::cmd_cron(&config, operation).await,
