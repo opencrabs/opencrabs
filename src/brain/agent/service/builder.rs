@@ -1962,6 +1962,35 @@ impl AgentService {
             .unwrap_or_else(|| p.default_model().to_string())
     }
 
+    /// The coherent display pair for a session: `(provider, model)` that are
+    /// actually serving it RIGHT NOW (#2264).
+    ///
+    /// Reading name and model from the two existing getters mixes sources
+    /// after a sticky fallback: the name comes from the chain's active entry
+    /// while the model comes from `session_models`, which still holds the
+    /// pick that belonged to the failed primary. That produced footers like
+    /// `zai / deepseek-v4.1-flash` where zai was serving its own default and
+    /// the pick belonged to another provider entirely. The model here goes
+    /// through `Provider::served_model()` (the same answer #1254 logging
+    /// uses), so a fallback that does not carry the pick reports the model
+    /// it remapped to, and one that does carry it reports the pick.
+    ///
+    /// Display only. Routing and the #705 model-refresh guard keep reading
+    /// [`Self::provider_model_for_session`], which must stay pick-first.
+    pub fn provider_pair_for_session(&self, session_id: Uuid) -> (String, String) {
+        let p = self.provider_for_session(session_id);
+        let name = p
+            .active_subprovider_name()
+            .unwrap_or_else(|| p.name().to_string());
+        let pick = self
+            .session_models
+            .read()
+            .ok()
+            .and_then(|m| m.get(&session_id).cloned())
+            .unwrap_or_else(|| p.default_model().to_string());
+        (name, p.served_model(&pick))
+    }
+
     /// Derive the ambient conversation origin for a session (#148): which
     /// channel + chat (+ telegram topic) the session is currently bound to.
     ///
