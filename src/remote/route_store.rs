@@ -332,6 +332,24 @@ impl RouteStore {
         }
         Ok(None)
     }
+
+    /// Remove one host, or the whole table when `host_id` is `None`.
+    /// Returns how many hosts were removed.
+    pub fn clear(&self, host_id: Option<&str>) -> Result<usize> {
+        let mut removed = 0usize;
+        self.modify(|file| {
+            removed = match host_id {
+                Some(id) => usize::from(file.hosts.remove(id).is_some()),
+                None => {
+                    let n = file.hosts.len();
+                    file.hosts.clear();
+                    n
+                }
+            };
+            Ok(())
+        })?;
+        Ok(removed)
+    }
 }
 
 /// Race ordering: good standing first, then fastest measured latency;
