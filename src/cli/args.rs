@@ -3,7 +3,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-use super::{commands, connect, cron, migrate, ui};
+use super::{commands, connect, cron, migrate, routes, ui};
 use crate::config::Config;
 
 /// OpenCrabs - High-Performance Terminal AI Orchestration Agent
@@ -191,6 +191,12 @@ pub enum Commands {
         /// Revoke a paired session by id or label
         #[arg(long)]
         revoke: Option<String>,
+    },
+
+    /// Remote route table: inspect, seed, race and learn host routes
+    Routes {
+        #[command(subcommand)]
+        operation: RoutesCommands,
     },
 
     /// Serve dropped files to a TUI running on another machine.
@@ -392,6 +398,41 @@ pub enum ChannelCommands {
         /// Use the phone-code flow instead of QR
         #[arg(long)]
         code: bool,
+    },
+}
+
+/// Operations for `opencrabs routes` (client-side route table).
+#[derive(Subcommand, Debug)]
+pub enum RoutesCommands {
+    /// Print the whole route table (hosts, routes, EWMA, failures)
+    List,
+    /// Register a configured route for a host (never pruned by learning)
+    Add {
+        /// Host id (the remote's announced `host_id`, or any stable label)
+        host_id: String,
+        /// Route URL, e.g. http://192.168.1.5:18790
+        url: String,
+        /// Route kind: lan | tailnet | tunnel
+        #[arg(long, default_value = "lan")]
+        kind: String,
+    },
+    /// Race a host's routes (probe /a2a/health) and print the winner
+    Race {
+        /// Host id to race
+        host_id: String,
+    },
+    /// Fetch a remote's announcement (GET /a2a/routes) and learn its routes
+    Learn {
+        /// Remote base URL, e.g. https://xxx.trycloudflare.com
+        url: String,
+        /// Bearer for the remote's [a2a].api_key (announcements are auth-gated)
+        #[arg(long)]
+        api_key: Option<String>,
+    },
+    /// Drop one host, or the whole table when no host id is given
+    Clear {
+        /// Host id to remove; omit to clear everything
+        host_id: Option<String>,
     },
 }
 
@@ -703,6 +744,7 @@ pub async fn run() -> Result<()> {
             list_sessions,
             revoke.as_deref(),
         ),
+        Some(Commands::Routes { operation }) => routes::cmd_routes(operation).await,
         Some(Commands::DropAgent { port, roots }) => crate::utils::drop_agent::serve(port, roots),
         Some(Commands::Profile { operation }) => commands::cmd_profile(operation).await,
         Some(Commands::Cron { operation }) => cron::cmd_cron(&config, operation).await,
