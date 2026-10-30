@@ -16,7 +16,6 @@ use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use base64::Engine as _;
@@ -25,7 +24,7 @@ use rand::RngCore as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::scopes::is_known_scope;
+use super::{now_secs, scopes::is_known_scope};
 use crate::config::flock::{self, FlockOutcome};
 
 /// Crockford-flavoured 32-char alphabet: no I, L, O, U. Codes get read
@@ -48,13 +47,6 @@ pub const LOCKOUT_SECS: u64 = 900;
 const SESSION_RETENTION_SECS: u64 = 7 * 86_400;
 /// Label cap; longer input is truncated, not rejected.
 const MAX_LABEL_LEN: usize = 64;
-
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
 
 /// SHA-256 of a secret, base64url (43 chars). Storage form for codes+tokens.
 pub(crate) fn sha_b64(input: &str) -> String {
