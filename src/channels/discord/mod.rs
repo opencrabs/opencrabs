@@ -13,6 +13,7 @@
 //! background results. This file is declarations
 //! only — no function definitions live here (CONTRIBUTING.md).
 
+pub(crate) mod access;
 mod agent;
 mod approval;
 mod cancel;
@@ -20,10 +21,12 @@ pub(crate) mod commands;
 mod connection;
 pub(crate) mod cowork;
 pub(crate) mod governor;
+pub(crate) mod group_bubble;
 pub(crate) mod handler;
 pub(crate) mod interactions;
 pub(crate) mod options_host;
-mod pending_interactions;
+pub(crate) mod outbox;
+pub(crate) mod pending_interactions;
 pub(crate) mod plan_card;
 pub(crate) mod poll;
 pub(crate) mod reactions;
@@ -32,6 +35,8 @@ mod sessions;
 mod state;
 pub(crate) mod suggest_options;
 pub(crate) mod table_convert;
+pub(crate) mod tool_card;
+pub(crate) mod tool_card_store;
 pub(crate) mod tool_group;
 pub(crate) mod trace_answer;
 pub(crate) mod tracked_turn;

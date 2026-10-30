@@ -46,6 +46,10 @@ pub mod opencrabs_install;
 pub mod opencrabs_store;
 pub mod qwen;
 pub mod qwen_reasoning;
+pub mod responses_request;
+pub mod responses_response;
+pub mod responses_routing;
+pub mod responses_stream;
 pub mod zhipu_endpoint;
 
 pub use anthropic::AnthropicProvider;

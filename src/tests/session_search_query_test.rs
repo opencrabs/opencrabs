@@ -33,6 +33,16 @@ fn rejects_garbage() {
     assert!(parse_updated_since("-5d").is_err());
 }
 
+/// The unit is the final CHARACTER, not the final byte. Slicing at `len - 1`
+/// landed inside a multi-byte unit and panicked (#2124).
+#[test]
+fn rejects_a_multibyte_unit_without_panicking() {
+    // "°" is 2 bytes, so `len - 1` sat inside it.
+    assert!(parse_updated_since("24°").is_err());
+    // A 4-byte emoji: three of the four bytes are non-boundaries.
+    assert!(parse_updated_since("7🎯").is_err());
+}
+
 #[tokio::test]
 async fn stateless_tool_reports_no_turn_state() {
     let db = Database::connect_in_memory().await.unwrap();

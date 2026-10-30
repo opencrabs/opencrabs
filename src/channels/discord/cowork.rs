@@ -24,9 +24,15 @@ pub(crate) fn is_cowork_command(text: &str) -> bool {
 
 /// Persist the channel's open entry. Goes through the guarded `write_key`
 /// path, which Telegram's `/cowork` also uses.
+///
+/// The block is the channel's scope: `open` admits members, `respond_to = "all"`
+/// answers them, and `name` labels it. `[channels.discord.channels.<id>]` is
+/// what the gate checks, so the channel is admitted without touching the
+/// global `allowed_channels` list.
 pub(crate) fn write_channel_open(channel_id: &str, name: Option<&str>) -> Result<(), String> {
     let section = format!("channels.discord.channels.{channel_id}");
     Config::write_key(&section, "open", "true").map_err(|e| e.to_string())?;
+    Config::write_key(&section, "respond_to", "all").map_err(|e| e.to_string())?;
     if let Some(name) = name {
         Config::write_key_string(&section, "name", name).map_err(|e| e.to_string())?;
     }

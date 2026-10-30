@@ -1,7 +1,7 @@
 //! browser_act — Batched browser actions (multi_act) in ONE call.
 //!
 //! Accepts an ordered `actions` array (`click` / `fill` / `press` /
-//! `select` / `wait`) and executes it against a STABLE view: every
+//! `select` / `upload` / `wait`) and executes it against a STABLE view: every
 //! selector is resolved up front in a single JS pass BEFORE anything
 //! executes — a stale reference rejects the whole call instead of
 //! half-running a sequence. Execution aborts on first failure and
@@ -27,20 +27,42 @@ pub(crate) const BATCH_TIMEOUT_SECS: u64 = 120;
 /// One parsed, validated action.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Act {
-    Click { selector: String },
-    Fill { selector: String, text: String },
-    Press { key: String },
-    Select { selector: String, value: String },
-    Wait { ms: u64 },
+    Click {
+        selector: String,
+    },
+    Fill {
+        selector: String,
+        text: String,
+    },
+    Press {
+        key: String,
+    },
+    Select {
+        selector: String,
+        value: String,
+    },
+    /// Attach local files to a file input (#2112).
+    ///
+    /// Only the paths cross the tool call; the bytes go straight from disk to
+    /// the browser, so a 10 MB video costs one short string instead of a
+    /// base64 blob in the context window.
+    Upload {
+        selector: String,
+        files: Vec<String>,
+    },
+    Wait {
+        ms: u64,
+    },
 }
 
 impl Act {
     /// The selector this action targets, if any (drives pre-flight).
     pub(crate) fn selector(&self) -> Option<&str> {
         match self {
-            Act::Click { selector } | Act::Fill { selector, .. } | Act::Select { selector, .. } => {
-                Some(selector)
-            }
+            Act::Click { selector }
+            | Act::Fill { selector, .. }
+            | Act::Select { selector, .. }
+            | Act::Upload { selector, .. } => Some(selector),
             Act::Press { .. } | Act::Wait { .. } => None,
         }
     }
@@ -52,6 +74,7 @@ impl Act {
             Act::Fill { selector, .. } => format!("fill {selector}"),
             Act::Press { key } => format!("press {key}"),
             Act::Select { selector, .. } => format!("select {selector}"),
+            Act::Upload { selector, files } => format!("upload {selector} ({} files)", files.len()),
             Act::Wait { ms } => format!("wait {ms}ms"),
         }
     }
@@ -91,6 +114,10 @@ pub(crate) fn parse_actions(input: &Value) -> std::result::Result<Vec<Act>, Stri
                     None => String::new(),
                 },
             },
+            "upload" => Act::Upload {
+                selector: req_str(a, "selector", i, "upload")?,
+                files: req_upload_paths(a, i)?,
+            },
             "wait" => {
                 let ms = a["ms"].as_u64().unwrap_or(0);
                 if ms == 0 {
@@ -110,7 +137,7 @@ pub(crate) fn parse_actions(input: &Value) -> std::result::Result<Vec<Act>, Stri
             }
             other => {
                 return Err(format!(
-                    "action {}: unknown type '{other}' (expected click/fill/press/select/wait)",
+                    "action {}: unknown type '{other}' (expected click/fill/press/select/wait/upload)",
                     i + 1
                 ));
             }
@@ -128,6 +155,65 @@ fn req_str(a: &Value, field: &str, i: usize, kind: &str) -> std::result::Result<
             i + 1
         )),
     }
+}
+
+/// Validate an `upload` action's `files` array (#2112).
+///
+/// Every path is checked BEFORE any CDP call, so a bad batch has zero side
+/// effects. `DOM.setFileInputFiles` accepts anything the browser process can
+/// read, so a prompt-injected page asking for `~/.ssh/id_rsa` must be refused
+/// here rather than silently attached: the path must be absolute, exist, and
+/// be a regular file.
+fn req_upload_paths(a: &Value, i: usize) -> std::result::Result<Vec<String>, String> {
+    let raw = match a["files"].as_array() {
+        Some(f) if !f.is_empty() => f,
+        Some(_) => {
+            return Err(format!(
+                "action {}: 'upload' requires a non-empty \"files\" array",
+                i + 1
+            ));
+        }
+        None => {
+            return Err(format!(
+                "action {}: 'upload' requires a \"files\" array of absolute paths",
+                i + 1
+            ));
+        }
+    };
+    let mut paths = Vec::with_capacity(raw.len());
+    for entry in raw {
+        let Some(raw_path) = entry.as_str().filter(|s| !s.trim().is_empty()) else {
+            return Err(format!(
+                "action {}: 'upload' \"files\" entries must be non-empty strings",
+                i + 1
+            ));
+        };
+        let path = std::path::PathBuf::from(raw_path);
+        if !path.is_absolute() {
+            return Err(format!(
+                "action {}: upload path '{raw_path}' is not absolute: the browser \
+                 process cannot resolve a path relative to the agent's working directory",
+                i + 1
+            ));
+        }
+        match std::fs::metadata(&path) {
+            Ok(meta) if meta.is_file() => {}
+            Ok(_) => {
+                return Err(format!(
+                    "action {}: upload path '{raw_path}' is not a regular file",
+                    i + 1
+                ));
+            }
+            Err(e) => {
+                return Err(format!(
+                    "action {}: upload path '{raw_path}' does not exist ({e})",
+                    i + 1
+                ));
+            }
+        }
+        paths.push(path.to_string_lossy().into_owned());
+    }
+    Ok(paths)
 }
 
 /// Completed-prefix failure report: "actions 1-2 OK; action 3 failed: …".
@@ -217,7 +303,7 @@ impl Tool for BrowserActTool {
 
     fn description(&self) -> &str {
         "Execute a batch of browser actions in ONE call against the current page. \
-         Actions run in order: click/fill/press/select/wait (max 10). Every selector is \
+         Actions run in order: click/fill/press/select/upload/wait (max 10). Every selector is \
          resolved BEFORE anything executes — one stale reference rejects the whole call \
          with zero side effects. On mid-sequence failure the completed prefix is reported \
          and the rest is skipped. Takes ONE screenshot at the end. Use this instead of \
@@ -237,6 +323,9 @@ impl Tool for BrowserActTool {
                         {\"type\":\"fill\",\"selector\":\"…\",\"text\":\"…\"} (replaces the value, framework-safe), \
                         {\"type\":\"press\",\"key\":\"Enter\"}, \
                         {\"type\":\"select\",\"selector\":\"…\",\"value\":\"option value\"}, \
+                        {\"type\":\"upload\",\"selector\":\"input[type=file]\",\"files\":[\"/abs/path/a.mp4\"]} \
+                        (absolute paths to existing regular files; the bytes never enter the \
+                        conversation), \
                         {\"type\":\"wait\",\"ms\":500} (max 10000).",
                 }
             },
@@ -399,6 +488,9 @@ impl BrowserActTool {
                 Act::Select { selector, value } => {
                     self.exec_select(page_ref, selector, value).await
                 }
+                Act::Upload { selector, files } => {
+                    self.exec_upload(page_ref, selector, files).await
+                }
                 Act::Wait { ms } => {
                     tokio::time::sleep(std::time::Duration::from_millis(*ms)).await;
                     Ok(())
@@ -432,9 +524,26 @@ impl BrowserActTool {
             .map(|a| a.label())
             .collect::<Vec<_>>()
             .join(", ");
+        // #2112: the attached paths are echoed in full. An upload is the one
+        // action whose effect leaves this machine, so the result has to say
+        // exactly which files went out, not just how many.
+        let uploads: Vec<String> = acts
+            .iter()
+            .filter_map(|a| match a {
+                Act::Upload { selector, files } => {
+                    Some(format!("upload {selector}: {}", files.join(", ")))
+                }
+                _ => None,
+            })
+            .collect();
+        let detail = if uploads.is_empty() {
+            String::new()
+        } else {
+            format!("\nAttached files: {}", uploads.join("; "))
+        };
         let mut result = ToolResult::success(super::events::append_line(
             format!(
-                "Executed {} action{} (one call): {summary}",
+                "Executed {} action{} (one call): {summary}{detail}",
                 acts.len(),
                 if acts.len() == 1 { "" } else { "s" }
             ),
@@ -626,5 +735,31 @@ impl BrowserActTool {
             Some("no_option") => Err(format!("no option matching '{value}' in '{selector}'")),
             _ => Err(format!("select failed on '{selector}'")),
         }
+    }
+
+    /// Attach local files to a file input via CDP (#2112).
+    ///
+    /// `DOM.setFileInputFiles` sets the input's file list as if the user had
+    /// picked them, so the page's own `change` handler fires and every upload
+    /// flow that exists for a human works here too. The paths were validated
+    /// at parse time; the bytes never pass through this process.
+    async fn exec_upload(
+        &self,
+        page: &chromiumoxide::Page,
+        selector: &str,
+        files: &[String],
+    ) -> std::result::Result<(), String> {
+        let element = super::manager::resolve_element(page, selector)
+            .await
+            .map_err(|e| format!("file input '{selector}' not found: {e}"))?;
+        let params = chromiumoxide::cdp::browser_protocol::dom::SetFileInputFilesParams::builder()
+            .files(files.to_vec())
+            .backend_node_id(element.backend_node_id)
+            .build()
+            .map_err(|e| format!("cannot build the upload request: {e}"))?;
+        page.execute(params)
+            .await
+            .map_err(|e| format!("upload failed on '{selector}': {e}"))?;
+        Ok(())
     }
 }

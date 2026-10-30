@@ -65,6 +65,21 @@ pub(crate) enum BubbleBody {
     Markdown(String),
 }
 
+/// What a targeted `/stop <id>` actually found (#2108).
+///
+/// Three states, because "no operation in progress" is a lie in two of them:
+/// a turn can be running, or nothing can be running while messages still sit
+/// queued behind the last one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TargetStop {
+    /// A turn was running; its token is cancelled.
+    Delivered { queued_dropped: usize },
+    /// Nothing was running, but follow-ups were queued and are now dropped.
+    Queued { dropped: usize },
+    /// Nothing to do: idle, nothing queued.
+    Idle,
+}
+
 /// One registered follow-up suggestion keyboard: which session it belongs to,
 /// the options it offered, and — when the buttons were merged onto the answer
 /// bubble (#tg-suggest-merge) — that bubble. Keyed by an opaque short token,
@@ -207,6 +222,15 @@ pub struct TelegramState {
     menu_skills_sig: Mutex<Option<u64>>,
     /// Per-session cancel tokens for aborting in-flight agent tasks via /stop
     cancel_tokens: Mutex<HashMap<Uuid, CancellationToken>>,
+    /// Who started each live guest turn, keyed by session (#2143).
+    ///
+    /// A guest turn's session belongs to a chat the bot is not in, so the
+    /// caller can only type `/stop` somewhere else: in a DM, or in a group
+    /// where the bot IS a member. Plain `/stop` there resolves its target from
+    /// the message's own session, which is not the guest one, so without this
+    /// map a guest turn had no kill switch from chat at all. std lock because
+    /// the write happens on the turn's own path and must not await.
+    guest_owners: std::sync::Mutex<HashMap<Uuid, i64>>,
     /// Persistent plan-card message per session (#580): the single Telegram
     /// message that shows the plan title + checklist and the Approve/Discard
     /// keyboard, edited in place across the creation/execution/completion turns
@@ -438,6 +462,7 @@ impl TelegramState {
             solo_evaluated: Mutex::new(HashMap::new()),
             menu_skills_sig: Mutex::new(None),
             cancel_tokens: Mutex::new(HashMap::new()),
+            guest_owners: std::sync::Mutex::new(HashMap::new()),
             plan_cards: Mutex::new(HashMap::new()),
             plan_card_store: Mutex::new(None),
             channel_message_store: Mutex::new(None),
@@ -1107,6 +1132,104 @@ impl TelegramState {
             true
         } else {
             false
+        }
+    }
+
+    /// Record who started a guest turn, so plain `/stop` typed anywhere by the
+    /// same person can reach it (#2143). See `guest_owners`.
+    pub(crate) fn register_guest_owner(&self, session_id: Uuid, user_id: i64) {
+        if let Ok(mut owners) = self.guest_owners.lock() {
+            owners.insert(session_id, user_id);
+        }
+    }
+
+    /// Drop the ownership record once the guest turn is over, so a later
+    /// `/stop` cannot cancel a finished turn by accident.
+    pub(crate) fn forget_guest_owner(&self, session_id: Uuid) {
+        if let Ok(mut owners) = self.guest_owners.lock() {
+            owners.remove(&session_id);
+        }
+    }
+
+    /// Cancel every live guest turn `user_id` started, returning how many were
+    /// stopped (#2143).
+    ///
+    /// Plain `/stop` resolves its target from the message's own session, and a
+    /// guest turn's session belongs to a chat the bot is not in, so that lookup
+    /// could never find one. A caller who summoned the bot and then wanted it
+    /// to stop had no reachable kill switch: the turn kept editing a stranger's
+    /// reply until it ran out of query lifetime. This is the missing link.
+    ///
+    /// Only sessions with a turn in flight are touched, and the queue behind
+    /// each is dropped the same way `stop_other_session` does it, so a stopped
+    /// turn does not leave a follow-up to start a new one.
+    pub(crate) async fn cancel_guest_turns_for(&self, user_id: i64) -> usize {
+        let sessions: Vec<Uuid> = match self.guest_owners.lock() {
+            Ok(owners) => owners
+                .iter()
+                .filter(|(_, owner)| **owner == user_id)
+                .map(|(session_id, _)| *session_id)
+                .collect(),
+            Err(e) => {
+                tracing::error!("Telegram: could not read guest turn owners: {e}");
+                return 0;
+            }
+        };
+        let mut cancelled = 0;
+        for session_id in sessions {
+            if !self.is_turn_active(session_id) {
+                self.forget_guest_owner(session_id);
+                continue;
+            }
+            if self.cancel_session(session_id).await {
+                self.drain_queued_items(session_id);
+                self.forget_guest_owner(session_id);
+                cancelled += 1;
+                tracing::info!(
+                    "Telegram guest: /stop from the caller cancelled the guest turn on session \
+                     {session_id}"
+                );
+            }
+        }
+        cancelled
+    }
+
+    /// Session ids with a turn in flight right now, sorted for stable output.
+    ///
+    /// `active_turns` is the authority: `cancel_tokens` keeps a completed,
+    /// non-cancelled token until the next turn, so its keys alone would report
+    /// idle sessions as running. Used by `/stop <id>` to resolve a target and
+    /// by the ambiguous-prose guard to know whether a targeted stop is even
+    /// relevant (#2108).
+    pub(crate) fn running_session_ids(&self) -> Vec<Uuid> {
+        let mut ids: Vec<Uuid> = self
+            .active_turns
+            .lock()
+            .map(|set| set.iter().copied().collect())
+            .unwrap_or_default();
+        ids.sort();
+        ids
+    }
+
+    /// Stop another session's turn from here: cancel its token, drop whatever
+    /// was queued behind it, and report which of the three states it was in
+    /// (#2108).
+    ///
+    /// The order matters. `is_turn_active` is read BEFORE the drain, because
+    /// draining is what makes the queue empty and would otherwise erase the
+    /// evidence that this session had anything to cancel.
+    pub(crate) async fn stop_session_target(&self, session_id: Uuid) -> TargetStop {
+        let was_running = self.is_turn_active(session_id);
+        let token_cancelled = self.cancel_session(session_id).await;
+        let dropped = self.drain_queued_items(session_id).len();
+        if was_running || token_cancelled {
+            TargetStop::Delivered {
+                queued_dropped: dropped,
+            }
+        } else if dropped > 0 {
+            TargetStop::Queued { dropped }
+        } else {
+            TargetStop::Idle
         }
     }
 

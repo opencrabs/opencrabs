@@ -45,7 +45,7 @@ pub async fn judge_goal(
     // Truncate last_response to avoid blowing the judge's context window.
     // The last 4k chars is usually enough to determine completion.
     let truncated_response = if last_response.len() > 4000 {
-        &last_response[last_response.len() - 4000..]
+        crate::utils::string::truncate_str_tail(last_response, 4000)
     } else {
         last_response
     };

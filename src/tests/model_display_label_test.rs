@@ -47,16 +47,41 @@ fn no_two_claude_models_share_a_label() {
     );
 }
 
+/// The families [`model_display_label`] knows how to format. Anything else the
+/// `claude` CLI has recorded on this machine (it can be pointed at a gateway
+/// that serves another provider's model) has no formatting scheme of its own.
+fn is_claude_family(id: &str) -> bool {
+    ["fable", "sonnet", "opus", "haiku"]
+        .iter()
+        .any(|f| id == *f || id.starts_with(&format!("{f}-")))
+}
+
 #[test]
 fn every_claude_model_renders_formatted_not_raw() {
-    // No row may show a raw lower-case id while its neighbours are formatted.
+    // No Claude row may show a raw lower-case id while its neighbours are
+    // formatted. A model the CLI ran from another provider is not a Claude row:
+    // it keeps its own name, which is asserted rather than skipped, so neither
+    // branch can pass by finding nothing to check.
+    let mut claude_rows = 0;
     for id in crate::brain::provider::claude_cli::available_models() {
         let label = model_display_label(&id);
-        assert!(
-            label.starts_with(|c: char| c.is_ascii_uppercase()),
-            "model {id:?} renders un-formatted as {label:?}"
-        );
+        if is_claude_family(&id) {
+            claude_rows += 1;
+            assert!(
+                label.starts_with(|c: char| c.is_ascii_uppercase()),
+                "model {id:?} renders un-formatted as {label:?}"
+            );
+        } else {
+            assert_eq!(
+                label, id,
+                "a non-Claude model must render as its own id, not a Claude label"
+            );
+        }
     }
+    assert!(
+        claude_rows > 0,
+        "the picker must always offer at least one Claude model"
+    );
 }
 
 #[test]

@@ -474,6 +474,11 @@ pub struct ToolCallEntry {
     pub completed: bool,
     /// Full raw tool input — shown untruncated in expanded view
     pub tool_input: serde_json::Value,
+    /// #2146: the id of the detached task this row tracks, when the row is a
+    /// detached-task row rather than a tool call. A finish event finds its row
+    /// by this id and not by description, because two detached tasks can carry
+    /// the same label and a description match would settle the wrong row.
+    pub task_id: Option<String>,
 }
 
 /// A group of tool calls displayed as a collapsible bullet
@@ -581,6 +586,18 @@ pub struct App {
     /// Core state
     pub current_session: Option<Session>,
     pub messages: Vec<DisplayMessage>,
+    /// Index into `messages` where the in-flight turn begins.
+    ///
+    /// Cancel-persist reconstruction must never read above this line. Rows
+    /// above it are already durable: they were loaded from the DB by
+    /// `load_session`, or written by an earlier turn in this process. Re-
+    /// collecting them made a turn aborted during boot resume write the whole
+    /// previous turn into the fresh placeholder row, which then rendered as a
+    /// second marker-less copy of history (#2127).
+    ///
+    /// Set at every turn start (user send, system trigger, boot resume,
+    /// background-task resume) and whenever a session is (re)loaded.
+    pub(crate) turn_start_len: usize,
     pub sessions: Vec<Session>,
     /// All-time usage stats from the ledger (survives session deletes)
     pub usage_ledger_stats: Vec<crate::db::repository::usage_ledger::ModelUsageStats>,
@@ -802,6 +819,10 @@ pub struct App {
     /// Onboarding wizard state
     pub onboarding: Option<OnboardingWizard>,
     pub force_onboard: bool,
+    /// Set when this launch is a first run. `initialize_async` uses it to
+    /// provision the built-in provider and greet the user, with no wizard:
+    /// straight to chat is the design, and the wizard is opt-in (#2079).
+    pub(crate) first_run: bool,
 
     /// Sessions currently processing (have in-flight agent tasks)
     pub(crate) processing_sessions: HashSet<Uuid>,
@@ -823,8 +844,12 @@ pub struct App {
     /// Cancellation token for aborting in-progress requests
     pub(crate) cancel_token: Option<CancellationToken>,
 
-    /// Abort handle for the active agent task — hard-kills the tokio task on cancel
-    pub(crate) task_abort_handle: Option<tokio::task::AbortHandle>,
+    /// Abort handles for in-flight agent tasks, keyed by the session that owns
+    /// them. Keyed rather than a single field so cancelling one session can
+    /// never kill another session's turn: the old app-level `Option` was
+    /// overwritten by whichever task started last, so a switch followed by a
+    /// double-Escape aborted a turn the user was not even looking at (#2155).
+    pub(crate) task_abort_handles: std::collections::HashMap<Uuid, tokio::task::AbortHandle>,
 
     /// Per-session queued message stack — single source of truth for both
     /// the UI's "Queued" indicator AND the agent's mid-tool injection
@@ -907,13 +932,15 @@ pub struct App {
     /// Rendered line → the turn whose HEADER that line is (#758). Lets a click
     /// on a turn header toggle the whole turn without disturbing the
     /// line→message routing everything else uses. Rebuilt each frame.
-    pub chat_line_to_turn: Vec<Option<Uuid>>,
-    /// Explicit per-turn expand overrides, keyed by the turn's anchor message
-    /// id (#758). A Uuid — not an index — because indices shift as messages
-    /// arrive and are meaningless across sessions, so this stays correct with
-    /// split panes. Absent = the default (the newest turn is expanded, older
-    /// turns are folded).
-    pub turn_expanded: std::collections::HashMap<Uuid, bool>,
+    pub chat_line_to_turn: Vec<Option<String>>,
+    /// Explicit per-turn expand overrides, keyed by [`turn_anchor`] (#758).
+    /// Not a Uuid: live rows mint a random one and a reload stamps the database
+    /// id, so a UUID key never survives a session switch and every opened turn
+    /// came back folded (#2155). Not an index either, because indices shift as
+    /// messages arrive. Absent = the default, which is folded.
+    ///
+    /// [`turn_anchor`]: crate::tui::render::chat::turn_anchor
+    pub turn_expanded: std::collections::HashMap<String, bool>,
     /// The scroll offset used during the last render (for coordinate mapping)
     pub chat_render_scroll: usize,
     /// The top-left Y coordinate of the chat area in the terminal
@@ -933,12 +960,12 @@ pub struct App {
     /// expanding a block grows it in place instead of jumping the viewport.
     /// Consumed (cleared) on the render that applies it.
     pub chat_expand_anchor: Option<(usize, u16)>,
-    /// The same pin for a turn header: `(turn anchor id, screen row)`.
+    /// The same pin for a turn header: `(turn anchor, screen row)`.
     /// Separate from `chat_expand_anchor` because a header line maps to no
     /// message. It populates `chat_line_to_turn`, not `chat_line_to_msg`, so
     /// the message-keyed anchor above can never resolve it and folding a turn
     /// would jump the viewport by however many rows it hid.
-    pub chat_expand_anchor_turn: Option<(Uuid, u16)>,
+    pub chat_expand_anchor_turn: Option<(String, u16)>,
 
     /// Drag selection: anchor point in terminal-screen coords (col, row), set on first drag event.
     pub drag_anchor: Option<(u16, u16)>,
@@ -1045,6 +1072,7 @@ impl App {
         let this = Self {
             current_session: None,
             messages: Vec::new(),
+            turn_start_len: 0,
             sessions: Vec::new(),
             usage_ledger_stats: Vec::new(),
             dashboard_state: None,
@@ -1134,6 +1162,7 @@ impl App {
             mouse_frag_gate: crate::tui::app::mouse_frag::MouseFragGate::default(),
             onboarding: None,
             force_onboard: false,
+            first_run: false,
             processing_sessions: HashSet::new(),
             session_cancel_tokens: HashMap::new(),
             sessions_with_unread: HashSet::new(),
@@ -1142,7 +1171,7 @@ impl App {
             sessions_with_pending_approval: HashSet::new(),
             provider_cache: HashMap::new(),
             cancel_token: None,
-            task_abort_handle: None,
+            task_abort_handles: std::collections::HashMap::new(),
             queued_messages: Arc::new(std::sync::Mutex::new(HashMap::new())),
             shared_session_id: Arc::new(tokio::sync::Mutex::new(None)),
             default_model_name: agent_service.provider_model(),
@@ -1451,21 +1480,31 @@ impl App {
         crate::config::Config::cleanup_empty_custom_providers();
 
         let is_first = super::onboarding::is_first_time();
-        if self.force_onboard || is_first {
-            self.force_onboard = false;
-            tracing::info!("[init] Starting onboarding wizard");
-            // Resume where the user left off rather than restarting from step
-            // one. `resumed()` falls back to a fresh wizard when there is no
-            // recorded progress, so an explicit `--onboard` still starts clean.
-            let mut wizard = OnboardingWizard::resumed();
-            wizard.is_first_time = is_first;
-            self.onboarding = Some(wizard);
-            self.mode = AppMode::Onboarding;
-            return false;
-        }
-        self.mode = AppMode::Chat;
 
-        true
+        match plan_launch(self.force_onboard, is_first) {
+            LaunchPlan::Wizard => {
+                self.force_onboard = false;
+                tracing::info!("[init] Starting onboarding wizard");
+                // Resume where the user left off rather than restarting from
+                // step one. `resumed()` falls back to a fresh wizard when there
+                // is no recorded progress, so an explicit `--onboard` still
+                // starts clean.
+                let mut wizard = OnboardingWizard::resumed();
+                wizard.is_first_time = is_first;
+                self.onboarding = Some(wizard);
+                self.mode = AppMode::Onboarding;
+                false
+            }
+            LaunchPlan::Chat { first_run } => {
+                // A first run has to bring the built-in provider online and
+                // say hello. Flagged here, done in `initialize` once the
+                // session exists, because the greeting is a message and
+                // messages need a session.
+                self.first_run = first_run;
+                self.mode = AppMode::Chat;
+                true
+            }
+        }
     }
 
     /// Initialize the app by loading or creating a session
@@ -1547,6 +1586,14 @@ impl App {
             self.provider_model_for_current_session(),
             self.current_session.as_ref().map(|s| s.id),
         );
+
+        // Zero-setup first run (#2079): bring the built-in provider online and
+        // let the agent open the conversation. Done here rather than in
+        // `initialize_sync` because the greeting is a message, and a message
+        // needs the session that was just created.
+        if self.first_run {
+            self.provision_first_run().await;
+        }
 
         // Pre-load sessions for restored split panes so they render
         // immediately instead of showing empty until focused.
@@ -2404,6 +2451,7 @@ impl App {
                 // session rather than only for the focused one.
                 let desc = Self::format_tool_description(&tool_name, &tool_input);
                 let entry = ToolCallEntry {
+                    task_id: None,
                     description: desc,
                     success: true,
                     details: None,
@@ -2759,6 +2807,7 @@ impl App {
                     };
                     if !updated {
                         let entry = ToolCallEntry {
+                            task_id: None,
                             description: desc,
                             success,
                             details,
@@ -3027,8 +3076,75 @@ impl App {
                     self.is_processing = true;
                     self.processing_started_at = Some(std::time::Instant::now());
                     self.cancel_token = Some(cancel_token);
+                    // A resumed turn starts from the end of the loaded history.
+                    // Its own rows come after this line; everything above is
+                    // already durable and must never be re-persisted (#2127).
+                    self.turn_start_len = self.messages.len();
                 } else {
                     self.session_cancel_tokens.insert(session_id, cancel_token);
+                }
+            }
+
+            TuiEvent::DetachedTaskStarted {
+                session_id,
+                task_id,
+                label,
+            } => {
+                // #2146: the task gets ONE row in the turn's tool block, pushed
+                // synchronously while that turn is still live. The finish finds
+                // it again by `task_id`, so a task that takes a minute does not
+                // leave the block and come back as a second message.
+                let entry = ToolCallEntry {
+                    description: label,
+                    success: true,
+                    details: None,
+                    completed: false,
+                    tool_input: serde_json::Value::Null,
+                    task_id: Some(task_id),
+                };
+                let mut state = self.session_state_mut(session_id);
+                if let Some(group) = state.active_tool_group_mut() {
+                    group.calls.push(entry);
+                } else {
+                    state.set_active_tool_group(Some(ToolCallGroup {
+                        calls: vec![entry],
+                        expanded: false,
+                    }));
+                }
+                if self.is_current_session(session_id) && self.auto_scroll {
+                    self.scroll_offset = 0;
+                }
+            }
+
+            TuiEvent::DetachedTaskFinished {
+                session_id,
+                task_id,
+                label,
+                success,
+                elapsed_secs,
+            } => {
+                // #2146: settle the row the start already drew. A finish with no
+                // row is not an error: the turn may have been settled, or the
+                // task outlived a restart. Since #2218 the receipt push is the
+                // fallback for a task the manager holds no callback for, so a
+                // surface that did get this event must not expect a second
+                // `BackgroundTaskDone` to follow.
+                let found = {
+                    let mut state = self.session_state_mut(session_id);
+                    if let Some(row) = state.find_detached_row(&task_id) {
+                        row.success = success;
+                        row.completed = true;
+                        row.details = Some(format!("{label} finished in {elapsed_secs:.1}s"));
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if !found {
+                    tracing::debug!(
+                        "[TUI] DetachedTaskFinished for {task_id} has no row; \
+                         the outcome was already settled elsewhere"
+                    );
                 }
             }
 
@@ -3413,6 +3529,12 @@ impl App {
             }
             TuiEvent::AgentProcessing => {
                 // Handled by the render loop
+            }
+            TuiEvent::LauncherFailed { target, detail } => {
+                // The optimistic "Opened …" line was written when spawn
+                // succeeded; the exit status is the real answer (#2170).
+                self.notification = Some(format!("Could not open {target}: {detail}"));
+                self.notification_shown_at = Some(std::time::Instant::now());
             }
         }
         Ok(())
@@ -3810,39 +3932,22 @@ impl App {
             AppMode::FilePicker => self.handle_file_picker_key(event).await?,
             AppMode::DirectoryPicker => self.handle_directory_picker_key(event).await?,
             AppMode::UsageDashboard => {
-                use crossterm::event::KeyCode;
-                match event.code {
-                    KeyCode::Esc => {
+                use crate::usage::dashboard::{UsageKeyOutcome, decide};
+                // The dashboard's own keymap decides what is live; this arm
+                // keeps only the effects that need the App: re-fetching after
+                // a period change and leaving the mode (#2027).
+                let outcome = match &mut self.dashboard_state {
+                    Some(ds) => decide(ds, event),
+                    // Mode without state: the only sane move is out.
+                    None => UsageKeyOutcome::Close,
+                };
+                match outcome {
+                    UsageKeyOutcome::Period(period) => self.set_dashboard_period(period).await,
+                    UsageKeyOutcome::Close => {
                         self.dashboard_state = None;
                         self.switch_mode(AppMode::Chat).await?;
                     }
-                    KeyCode::Tab => {
-                        if let Some(ds) = &mut self.dashboard_state {
-                            ds.focus_next();
-                        }
-                    }
-                    KeyCode::BackTab => {
-                        if let Some(ds) = &mut self.dashboard_state {
-                            ds.focus_prev();
-                        }
-                    }
-                    KeyCode::Char('t') | KeyCode::Char('T') => {
-                        self.set_dashboard_period(crate::usage::data::Period::Today)
-                            .await;
-                    }
-                    KeyCode::Char('w') | KeyCode::Char('W') => {
-                        self.set_dashboard_period(crate::usage::data::Period::Week)
-                            .await;
-                    }
-                    KeyCode::Char('m') | KeyCode::Char('M') => {
-                        self.set_dashboard_period(crate::usage::data::Period::Month)
-                            .await;
-                    }
-                    KeyCode::Char('a') | KeyCode::Char('A') => {
-                        self.set_dashboard_period(crate::usage::data::Period::AllTime)
-                            .await;
-                    }
-                    _ => {}
+                    UsageKeyOutcome::Consumed | UsageKeyOutcome::NotConsumed => {}
                 }
             }
             AppMode::RestartPending => {
@@ -3993,6 +4098,17 @@ impl App {
         Ok(())
     }
 
+    /// Hard-abort the agent task belonging to `session_id`, if one is running.
+    ///
+    /// Scoped to the session on purpose: aborting by session means a cancel in
+    /// one pane can never kill a turn another session is still streaming, which
+    /// is what the old app-level `Option<AbortHandle>` allowed (#2155).
+    pub(crate) fn abort_session_task(&mut self, session_id: Uuid) {
+        if let Some(handle) = self.task_abort_handles.remove(&session_id) {
+            handle.abort();
+        }
+    }
+
     /// Show an error message
     pub(crate) fn show_error(&mut self, error: String) {
         self.is_processing = false;
@@ -4001,7 +4117,11 @@ impl App {
         self.streaming_render_cache = None;
         self.streaming_reasoning = None;
         self.cancel_token = None;
-        self.task_abort_handle = None;
+        // Drop only THIS session's abort handle: another session's turn may
+        // still be running and must survive an error shown here (#2155).
+        if let Some(sid) = self.current_session.as_ref().map(|s| s.id) {
+            self.task_abort_handles.remove(&sid);
+        }
         self.escape_pending_at = None;
         // Preserve context token count from real-time updates if we never got a complete response
         if self.last_input_tokens.is_none() && self.display_token_count > 0 {
@@ -4092,19 +4212,24 @@ impl App {
         {
             return;
         }
+        // On Windows the probe is a PowerShell spawn, 100 to 300ms, which is
+        // far too heavy for a 3 second tick (#2174). A focus change is the
+        // only event that justifies that cost.
+        #[cfg(windows)]
+        if !force {
+            return;
+        }
         self.clipboard_probe_at = Some(now);
-        let Some(info) = super::clipboard_route::read_clipboard_info() else {
+        let Some((kinds, probe)) = super::clipboard_route::read_clipboard_kinds() else {
             return;
         };
-        let fp = super::clipboard_route::clipboard_info_fingerprint(&info);
+        let fp = super::clipboard_route::clipboard_info_fingerprint(&probe);
         if self.clipboard_hint_fp != Some(fp) {
             // The clipboard content changed: a fresh screenshot hints again.
             self.clipboard_hint_fp = Some(fp);
             self.clipboard_hint_suppressed = false;
         }
-        if self.clipboard_hint_suppressed
-            || !super::clipboard_route::clipboard_info_is_image_only(&info)
-        {
+        if self.clipboard_hint_suppressed || !kinds.is_image_only() {
             return;
         }
         self.clipboard_hint = Some(CLIPBOARD_HINT_TEXT.to_string());
@@ -4483,6 +4608,33 @@ impl App {
             self.input_buffer.replace_range(colon..end, emoji);
             self.cursor_position = colon + emoji.len();
             self.dismiss_emoji_picker();
+        }
+    }
+}
+
+/// Which screen a launch opens on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LaunchPlan {
+    /// The opt-in wizard: `--onboard` or `/onboard`.
+    Wizard,
+    /// Straight to chat. `first_run` marks the launch that still has to bring
+    /// the built-in provider online and greet the user (#2079).
+    Chat { first_run: bool },
+}
+
+/// Decide the landing screen.
+///
+/// Zero setup is the design: a download, open, and the built-in provider is
+/// already there talking to you. So a first run goes to chat, NOT to the
+/// wizard, and the wizard only appears when the user asks for it with
+/// `--onboard` / `/onboard` (#2079). Landing a new install on step 1 of 6 is
+/// the regression this encodes against.
+pub(crate) fn plan_launch(force_onboard: bool, is_first_time: bool) -> LaunchPlan {
+    if force_onboard {
+        LaunchPlan::Wizard
+    } else {
+        LaunchPlan::Chat {
+            first_run: is_first_time,
         }
     }
 }

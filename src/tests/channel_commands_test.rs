@@ -160,6 +160,7 @@ fn variant_name(cmd: &ChannelCommand) -> &'static str {
         ChannelCommand::NewSession => "NewSession",
         ChannelCommand::Sessions(_) => "Sessions",
         ChannelCommand::Stop => "Stop",
+        ChannelCommand::StopTarget(_) => "StopTarget",
         ChannelCommand::UserPrompt(_) => "UserPrompt",
         ChannelCommand::PlanModeWithQuery(_) => "PlanModeWithQuery",
         ChannelCommand::UserSystem(_) => "UserSystem",

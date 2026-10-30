@@ -127,6 +127,7 @@ fn active_tool_group_round_trips_through_routing_helper() {
     let mut bg = BackgroundSessionState::default();
     let group = ToolCallGroup {
         calls: vec![ToolCallEntry {
+            task_id: None,
             description: "grep `IDENTITY` in ~/srv".to_string(),
             success: true,
             details: None,

@@ -13,13 +13,13 @@ async fn test_record_and_totals() {
     db.run_migrations().await.expect("Failed to run migrations");
     let repo = UsageLedgerRepository::new(db.pool().clone());
 
-    repo.record("s1", "prov", "sonnet-4-5", 100, 0.05)
+    repo.record("s1", "prov", "sonnet-4-5", 100, 0.05, None, None)
         .await
         .unwrap();
-    repo.record("s1", "prov", "sonnet-4-5", 200, 0.10)
+    repo.record("s1", "prov", "sonnet-4-5", 200, 0.10, None, None)
         .await
         .unwrap();
-    repo.record("s2", "prov", "opus-4-6", 500, 0.50)
+    repo.record("s2", "prov", "opus-4-6", 500, 0.50, None, None)
         .await
         .unwrap();
 
@@ -36,11 +36,13 @@ async fn test_stats_by_model() {
     db.run_migrations().await.expect("Failed to run migrations");
     let repo = UsageLedgerRepository::new(db.pool().clone());
 
-    repo.record("s1", "prov", "sonnet", 100, 0.05)
+    repo.record("s1", "prov", "sonnet", 100, 0.05, None, None)
         .await
         .unwrap();
-    repo.record("s2", "prov", "opus", 500, 0.50).await.unwrap();
-    repo.record("s3", "prov", "sonnet", 200, 0.10)
+    repo.record("s2", "prov", "opus", 500, 0.50, None, None)
+        .await
+        .unwrap();
+    repo.record("s3", "prov", "sonnet", 200, 0.10, None, None)
         .await
         .unwrap();
 
@@ -61,13 +63,13 @@ async fn test_stats_by_model_merges_claude_prefix() {
     db.run_migrations().await.expect("Failed to run migrations");
     let repo = UsageLedgerRepository::new(db.pool().clone());
 
-    repo.record("s1", "prov", "claude-opus-4-6", 1000, 1.0)
+    repo.record("s1", "prov", "claude-opus-4-6", 1000, 1.0, None, None)
         .await
         .unwrap();
-    repo.record("s2", "prov", "opus-4-6", 500, 0.50)
+    repo.record("s2", "prov", "opus-4-6", 500, 0.50, None, None)
         .await
         .unwrap();
-    repo.record("s3", "prov", "claude-sonnet-4-6", 200, 0.10)
+    repo.record("s3", "prov", "claude-sonnet-4-6", 200, 0.10, None, None)
         .await
         .unwrap();
 
@@ -163,22 +165,32 @@ async fn provider_breakdowns_group_filter_and_handle_unknown() {
     db.run_migrations().await.unwrap();
     let repo = crate::db::repository::UsageLedgerRepository::new(db.pool().clone());
 
-    repo.record("s1", "custom.opencode-go", "deepseek-v4-flash", 100, 1.0)
-        .await
-        .unwrap();
+    repo.record(
+        "s1",
+        "custom.opencode-go",
+        "deepseek-v4-flash",
+        100,
+        1.0,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     repo.record(
         "s2",
         "custom.nvidia-ds4flash",
         "deepseek-v4-flash",
         200,
         2.0,
+        None,
+        None,
     )
     .await
     .unwrap();
-    repo.record("s3", "custom.opencode-go", "mimo-v2.5", 50, 0.5)
+    repo.record("s3", "custom.opencode-go", "mimo-v2.5", 50, 0.5, None, None)
         .await
         .unwrap();
-    repo.record("s4", "", "mystery-model", 10, 0.1)
+    repo.record("s4", "", "mystery-model", 10, 0.1, None, None)
         .await
         .unwrap();
 

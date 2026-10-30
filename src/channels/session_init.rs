@@ -53,6 +53,23 @@ pub async fn create_channel_session(
     title: Option<String>,
     inherit_wd_from: Option<&Session>,
 ) -> Result<Session> {
+    create_channel_session_reported(session_svc, title, inherit_wd_from)
+        .await
+        .map(|(session, _)| session)
+}
+
+/// Same as [`create_channel_session`], also reporting whether a row was
+/// created (#2183).
+///
+/// The chat-key insert is an insert-OR-RESOLVE: it returns the winning row
+/// when one already exists for that chat key. A caller that logs "created"
+/// therefore has to be told which happened, or it claims creation on every
+/// message of a long-lived chat.
+pub async fn create_channel_session_reported(
+    session_svc: &SessionService,
+    title: Option<String>,
+    inherit_wd_from: Option<&Session>,
+) -> Result<(Session, bool)> {
     // First, try to inherit from the most recent session (TUI or any channel).
     let (mut inherited_provider, mut inherited_model) =
         match session_svc.get_most_recent_session().await {
@@ -60,10 +77,23 @@ pub async fn create_channel_session(
             _ => (None, None),
         };
 
+    // A provider the config does not enable is never carried forward (#2158):
+    // a disabled provider would otherwise spread into every new session.
+    let config = Config::load().ok();
+    if let (Some(name), Some(cfg)) = (inherited_provider.as_deref(), config.as_ref())
+        && !provider_enabled(cfg, name)
+    {
+        tracing::info!(
+            "Channel session: not inheriting disabled provider {name:?}; using [agent] defaults"
+        );
+        inherited_provider = None;
+        inherited_model = None;
+    }
+
     // If no recent session exists, check if [agent] has default_provider/default_model set.
     // This lets config drive the fallback instead of relying on the config priority list.
     if inherited_provider.is_none()
-        && let Ok(config) = Config::load()
+        && let Some(config) = config.as_ref()
         && config.agent.default_provider.is_some()
     {
         inherited_provider = config.agent.default_provider.clone();
@@ -88,7 +118,7 @@ pub async fn create_channel_session(
         );
     }
 
-    create_with_chat_identity(
+    create_with_chat_identity_reported(
         session_svc,
         title,
         inherited_provider,
@@ -104,13 +134,17 @@ pub async fn create_channel_session(
 /// index decides and the loser joins the winner. Titles without a suffix
 /// (should not happen on channel paths, but is legal for direct callers)
 /// fall back to the plain insert.
-async fn create_with_chat_identity(
+///
+/// Also reports whether a row was created (#2183). The chat-key insert
+/// resolves an existing row, so a caller that logs "created" has to know
+/// which happened.
+pub(crate) async fn create_with_chat_identity_reported(
     session_svc: &SessionService,
     title: Option<String>,
     provider: Option<String>,
     model: Option<String>,
     wd: Option<String>,
-) -> Result<Session> {
+) -> Result<(Session, bool)> {
     let chat_key = title.as_deref().and_then(|t| {
         let idx = t.rfind("[chat:")?;
         Some(t[idx..].to_string())
@@ -118,13 +152,83 @@ async fn create_with_chat_identity(
     match chat_key {
         Some(key) => {
             session_svc
-                .insert_or_resolve_channel_session(title, provider, model, wd, &key)
+                .insert_or_resolve_channel_session_reported(title, provider, model, wd, &key)
                 .await
         }
         None => {
-            session_svc
+            let session = session_svc
                 .create_session_with_provider(title, provider, model, wd)
-                .await
+                .await?;
+            Ok((session, true))
         }
     }
+}
+
+/// Whether `name` is a provider the config enables (#2158).
+fn provider_enabled(config: &Config, name: &str) -> bool {
+    crate::brain::provider::factory::provider_config_by_name(config, name)
+        .is_some_and(|p| p.enabled)
+}
+
+/// Start the session a channel's `/new` command asked for (#2186).
+///
+/// `/new` has to hand the chat key over to the row it creates, or the next
+/// message resolves straight back to the previous session and the new row is
+/// an orphan nobody ever writes to. Three things follow from that:
+///
+/// 1. The prior session is looked up by chat key, not by exact title. Channel
+///    titles carry a `[chat:<id>]` suffix, so an exact-title lookup misses and
+///    the working-directory inheritance (#263) silently never happens.
+/// 2. The new row is created from the suffixed title, which is what routes it
+///    through the keyed insert and stamps `channel_chat_key`.
+/// 3. The prior session must give the key up first, because the unique index
+///    is partial on live rows. Guests archive it. The owner's rows stay live
+///    so `/sessions` keeps showing their history, so those release the key
+///    instead of archiving.
+///
+/// `chat_key` is the `[chat:<id>]` suffix, `legacy_title` the visible label
+/// without it. Lookup and hand-over failures are logged and tolerated: `/new`
+/// means a fresh session is the intent, so creation proceeds either way
+/// (#442 keeps it from being silent).
+pub async fn start_new_channel_session(
+    session_svc: &SessionService,
+    chat_key: &str,
+    legacy_title: &str,
+    keep_prior_live: bool,
+    log_prefix: &str,
+) -> Result<Session> {
+    let prior_session = match session_svc.find_session_by_channel_chat_key(chat_key).await {
+        Ok(found) => found,
+        Err(e) => {
+            tracing::error!("{log_prefix}: /new prior-session lookup failed: {e:#}");
+            None
+        }
+    };
+    let prior_session = match prior_session {
+        Some(s) => Some(s),
+        None => session_svc
+            .find_session_by_title_suffix(chat_key)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::error!("{log_prefix}: /new title-suffix lookup failed: {e:#}");
+                None
+            }),
+    };
+
+    if let Some(old) = prior_session.as_ref() {
+        let handed_over = if keep_prior_live {
+            session_svc.release_channel_chat_key(old.id).await
+        } else {
+            session_svc.archive_session(old.id).await
+        };
+        if let Err(e) = handed_over {
+            tracing::error!(
+                "{log_prefix}: /new could not hand the chat key over from {}: {e:#}",
+                old.id
+            );
+        }
+    }
+
+    let current_title = format!("{legacy_title} {chat_key}");
+    create_channel_session(session_svc, Some(current_title), prior_session.as_ref()).await
 }

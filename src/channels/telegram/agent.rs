@@ -890,7 +890,7 @@ impl TelegramAgent {
                                         tokio::spawn(async move {
                                             match agent_clone.send_message(sid, prompt, None).await {
                                                 Ok(resp) => {
-                                                    let clean = crate::utils::sanitize::strip_llm_artifacts(&resp.content);
+                                                    let clean = crate::utils::sanitize::sanitize_outbound(&resp.content);
                                                     let html = crate::channels::telegram::markdown::md_to_html(&clean);
                                                     crate::channels::telegram::send::best_effort_note(
                                                         &bot_clone, chat_id, thread_id, &html,
@@ -2170,6 +2170,19 @@ impl TelegramAgent {
                 .branch(reaction_handler)
                 .branch(my_chat_member_handler);
 
+            // Guest queries (#2087) never reach the typed dispatcher: the
+            // pinned teloxide-core 0.13.0 has no `guest_message` kind, so a
+            // guest update parses into `UpdateKind::Error` and no branch
+            // matches. The runner drives those turns off the raw update and
+            // answers them with `answerGuestQuery` (telegram/guest.rs).
+            let guest_runner = super::guest::GuestRunner::new(
+                Arc::new(listener_token.clone()),
+                deps.agent.clone(),
+                deps.session_svc.clone(),
+                deps.config_rx.clone(),
+                deps.telegram_state.clone(),
+            );
+
             // Retry loop: if the dispatcher exits (network hiccup, Telegram conflict
             // from another process using the same token, etc.), wait and reconnect.
             // Without this, daemon mode silently loses the Telegram connection forever.
@@ -2182,7 +2195,10 @@ impl TelegramAgent {
                 // pipeline. The typed parse goes through from_str ONLY —
                 // from_value yields Error kinds for everything and took the
                 // whole intake down once (see telegram_raw_update_parse_test).
-                let listener = super::raw_updates::raw_polling_listener(listener_token.clone());
+                let listener = super::raw_updates::raw_polling_listener(
+                    listener_token.clone(),
+                    Some(guest_runner.clone()),
+                );
                 Dispatcher::builder(bot.clone(), tree.clone())
                     .build()
                     .dispatch_with_listener(

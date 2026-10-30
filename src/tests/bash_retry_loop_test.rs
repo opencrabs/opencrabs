@@ -294,3 +294,191 @@ fn stale_entry_does_not_block_a_different_command() {
     );
     assert!(check_recent_failure(sid, "different-cmd").is_none());
 }
+
+// ── #2211: the guard's premise is "same command, unchanged world" ─────────
+//
+// A recorded failure stops being true when something the agent did changed
+// the environment, or when the user asks again in a new turn. The reported
+// case: `cat release.cfg` fails because the file is missing, `write_file`
+// creates it, the user asks for the identical command, and the guard refuses
+// to run it.
+
+#[test]
+fn a_successful_non_bash_call_clears_the_recorded_failure() {
+    let sid = Uuid::new_v4();
+    record_bash_outcome(
+        sid,
+        "cat release.cfg".to_string(),
+        true,
+        Some("cat: release.cfg: No such file or directory".to_string()),
+    );
+    assert!(check_recent_failure(sid, "cat release.cfg").is_some());
+
+    // What the registry does after `write_file` succeeds.
+    crate::brain::tools::bash::note_environment_changed(sid);
+
+    assert!(
+        check_recent_failure(sid, "cat release.cfg").is_none(),
+        "the missing file now exists, so the recorded error is obsolete"
+    );
+}
+
+#[test]
+fn a_new_turn_clears_the_recorded_failure() {
+    let sid = Uuid::new_v4();
+    record_bash_outcome(
+        sid,
+        "cat release.cfg".to_string(),
+        true,
+        Some("cat: release.cfg: No such file or directory".to_string()),
+    );
+
+    // What run_tool_loop does at the start of every user turn.
+    crate::brain::tools::bash::note_environment_changed(sid);
+
+    assert!(check_recent_failure(sid, "cat release.cfg").is_none());
+}
+
+#[test]
+fn clearing_one_session_leaves_another_sessions_history_intact() {
+    let cleared = Uuid::new_v4();
+    let other = Uuid::new_v4();
+    record_bash_outcome(
+        cleared,
+        "make build".to_string(),
+        true,
+        Some("error".to_string()),
+    );
+    record_bash_outcome(
+        other,
+        "make build".to_string(),
+        true,
+        Some("error".to_string()),
+    );
+
+    crate::brain::tools::bash::note_environment_changed(cleared);
+
+    assert!(check_recent_failure(cleared, "make build").is_none());
+    assert!(
+        check_recent_failure(other, "make build").is_some(),
+        "another session's failure history is not this session's business"
+    );
+}
+
+#[test]
+fn a_loop_still_blocks_after_a_clear_because_bash_never_clears_itself() {
+    // The clear only fires for non-bash tools and new turns. Within a turn,
+    // bash retrying itself is exactly the loop the guard exists to stop.
+    let sid = Uuid::new_v4();
+    record_bash_outcome(
+        sid,
+        "cargo build".to_string(),
+        true,
+        Some("error[E0308]".to_string()),
+    );
+    assert!(check_recent_failure(sid, "cargo build").is_some());
+    record_bash_block(sid, "cargo build");
+    assert!(
+        check_recent_failure(sid, "cargo build").is_some(),
+        "back-to-back bash retries must stay blocked"
+    );
+}
+
+// ── #2211 wiring: which tool calls are allowed to clear the window ────────
+//
+// The clear only fires from the registry dispatch choke point, and only for a
+// call that could have changed what the blocked command sees. A read cannot,
+// so fail -> read -> retry the identical command stays blocked.
+
+mod registry_wiring {
+    use super::*;
+    use crate::brain::tools::{
+        Tool, ToolCapability, ToolExecutionContext, ToolRegistry, ToolResult,
+    };
+    use async_trait::async_trait;
+    use serde_json::Value;
+    use std::sync::Arc;
+
+    struct Stub {
+        name: &'static str,
+        capability: ToolCapability,
+    }
+
+    #[async_trait]
+    impl Tool for Stub {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn description(&self) -> &str {
+            "stub"
+        }
+        fn input_schema(&self) -> Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+        fn capabilities(&self) -> Vec<ToolCapability> {
+            vec![self.capability]
+        }
+        fn requires_approval(&self) -> bool {
+            false
+        }
+        async fn execute(
+            &self,
+            _input: Value,
+            _context: &ToolExecutionContext,
+        ) -> crate::brain::tools::Result<ToolResult> {
+            Ok(ToolResult::success("ok".to_string()))
+        }
+    }
+
+    fn registry_with(name: &'static str, capability: ToolCapability) -> ToolRegistry {
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(Stub { name, capability }));
+        registry
+    }
+
+    async fn dispatch(registry: &ToolRegistry, name: &str, session_id: Uuid) {
+        let context = ToolExecutionContext::new(session_id).with_auto_approve(true);
+        registry
+            .execute(name, serde_json::json!({}), &context)
+            .await
+            .expect("stub dispatch");
+    }
+
+    #[tokio::test]
+    async fn a_successful_write_clears_the_window() {
+        let sid = Uuid::new_v4();
+        record_bash_outcome(
+            sid,
+            "cat release.cfg".to_string(),
+            true,
+            Some("cat: release.cfg: No such file or directory".to_string()),
+        );
+        let registry = registry_with("write_file", ToolCapability::WriteFiles);
+
+        dispatch(&registry, "write_file", sid).await;
+
+        assert!(
+            check_recent_failure(sid, "cat release.cfg").is_none(),
+            "the file now exists, so the retry must be allowed"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_read_does_not_clear_the_window() {
+        let sid = Uuid::new_v4();
+        record_bash_outcome(
+            sid,
+            "cat release.cfg".to_string(),
+            true,
+            Some("cat: release.cfg: No such file or directory".to_string()),
+        );
+        let registry = registry_with("read_file", ToolCapability::ReadFiles);
+
+        dispatch(&registry, "read_file", sid).await;
+
+        assert!(
+            check_recent_failure(sid, "cat release.cfg").is_some(),
+            "nothing changed on disk, so this is still the loop the guard stops"
+        );
+    }
+}

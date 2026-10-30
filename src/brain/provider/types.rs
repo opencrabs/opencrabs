@@ -287,6 +287,12 @@ pub struct TokenUsage {
     /// Cache read input tokens (Anthropic-specific)
     #[serde(default)]
     pub cache_read_tokens: u32,
+    /// True when the provider's response carried no cache-read field at all, so
+    /// the zero in `cache_read_tokens` means "not reported", not "none" (#2139).
+    /// Stored inverted so the derived default (false) keeps every provider that
+    /// does not set it recording its value.
+    #[serde(default)]
+    pub cache_read_unreported: bool,
     /// Billing: cumulative cache creation across all CLI tool rounds.
     /// For non-CLI providers or single-round calls, this stays 0 and
     /// cache_creation_tokens is used for both context and billing.

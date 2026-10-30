@@ -1,6 +1,7 @@
 //! Configuration types, defaults, loading, and validation.
 
 use super::provider_registry::ProviderRegistryConfig;
+use super::wire_dialect::WireDialect;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -490,6 +491,17 @@ pub struct TelegramConfig {
     /// Idle session timeout in hours for non-owner sessions.
     #[serde(default)]
     pub session_idle_hours: Option<f64>,
+    /// Answer guest queries: `@botname` tags in chats the bot is NOT a member
+    /// of (Bot API 10.0 guest mode, #2087). Off by default: this is the one
+    /// inbound surface where someone can reach the bot in a chat it was never
+    /// invited to, so it is opt-in. Even when on, the caller must be the
+    /// owner, an admin (`allowed_users`), or listed in that chat's
+    /// `groups.<chat_id>.allowed_users`. A group's `open` flag grants nothing
+    /// here, because it records the owner opening THAT chat for the bot, not
+    /// permission to answer wherever that group's members tag it. See
+    /// `TelegramConfig::guest_allowed`.
+    #[serde(default)]
+    pub guest_queries: bool,
     /// Send structured replies and flow blocks as native Telegram rich
     /// messages (Bot API 10.1: tables, headings, lists, math, collapsible
     /// details). On by default (#425). Older clients and Telegram Web show
@@ -564,6 +576,7 @@ impl Default for TelegramConfig {
             allowed_channels: Vec::new(),
             respond_to: RespondTo::default(),
             session_idle_hours: None,
+            guest_queries: false,
             rich_messages: true,
             inline_markdown_documents: false,
             mermaid_render: true,
@@ -834,6 +847,28 @@ impl TelegramConfig {
             .is_some_and(|g| g.open || Self::id_in(&g.allowed_users, uid))
     }
 
+    /// Guest mode access (#2087): may this user get an answer to a tag placed
+    /// in a chat the bot is not a member of?
+    ///
+    /// Deliberately stricter than `user_allowed`. That one answers "may this
+    /// person talk to the bot HERE", so a group that is `open` passes. This
+    /// one answers "may the bot be pulled into a chat it was never invited
+    /// to", and there the `open` flag is no consent at all: it was given for
+    /// one chat, not for every chat that chat's members happen to tag the bot
+    /// in. Owner and admins act anywhere; everyone else needs an explicit
+    /// listing for the chat the tag came from, and a missing chat id means no
+    /// listing can match, so the query is refused.
+    pub fn guest_allowed(&self, user_id: &str, caller_chat_id: Option<&str>) -> bool {
+        if !self.guest_queries {
+            return false;
+        }
+        let uid = user_id.trim_start_matches('+');
+        if self.is_admin_or_owner(uid) {
+            return true;
+        }
+        caller_chat_id.is_some_and(|chat| self.group_has_user(chat, uid))
+    }
+
     /// Respond mode for a chat: the group's override if set, else the global.
     pub fn respond_to_for(&self, chat_id: &str) -> RespondTo {
         self.groups
@@ -1016,6 +1051,14 @@ impl DiscordConfig {
             .unwrap_or(self.respond_to)
     }
 
+    /// Whether `channel_id` or its parent has its own `[channels.discord.channels.<id>]`
+    /// block. Such a block is the owner's scope for that channel, so it admits the
+    /// channel without an entry in the global `allowed_channels` list.
+    pub fn has_channel_block(&self, channel_id: &str, parent_id: Option<&str>) -> bool {
+        self.channels.contains_key(channel_id)
+            || parent_id.is_some_and(|p| self.channels.contains_key(p))
+    }
+
     /// Whether `channel_id` (or its parent) is `open` (#2014). Opening a
     /// channel opens its threads; nothing else is affected.
     pub fn channel_open(&self, channel_id: &str, parent_id: Option<&str>) -> bool {
@@ -1178,7 +1221,7 @@ pub struct WhatsAppConfig {
     #[serde(default)]
     pub rate_limit: WaRateLimitConfig,
     /// `[channels.whatsapp.broadcast]` - opt-in rails for the newsletter,
-    /// status and label surfaces (#1485). Empty allowlist = nobody, on
+    /// status and label surfaces (#1485, #1827). Empty allowlist = nobody, on
     /// purpose: an unconfigured install must not be one tool call away from
     /// messaging arbitrary numbers.
     #[serde(default)]
@@ -1234,9 +1277,13 @@ impl WhatsAppConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct WaBroadcastConfig {
-    /// Numbers (E.164 or any formatting) that may receive a status update.
-    /// EMPTY MEANS NOBODY, which is the opposite of the usual convention and
-    /// is deliberate: broadcast has to be switched on by a human.
+    /// Numbers (E.164 or any formatting) that may receive a status update, and
+    /// newsletter (channel) JIDs that `post_newsletter` may publish to
+    /// (#1827). A channel entry is written as its own JID, e.g.
+    /// `120363...@newsletter`; matching keeps the digits only, so the JID form
+    /// and the bare digits are the same entry. EMPTY MEANS NOBODY, which is
+    /// the opposite of the usual convention and is deliberate: broadcast has
+    /// to be switched on by a human.
     pub allowed_targets: Vec<String>,
     /// Minimum seconds between two broadcast sends. `0` or unset falls back
     /// to the 5s default rather than disabling pacing - turning the rail off
@@ -1763,6 +1810,23 @@ pub struct AgentConfig {
     #[serde(default = "default_skill_glob_gate")]
     pub skill_glob_gate: bool,
 
+    /// Mechanical plan requirement. **On by default, 12 calls.**
+    ///
+    /// After this many tool calls in a single turn with no plan for the
+    /// session, every further call is refused until the agent calls `plan`
+    /// init. Prose in the brain files was the only thing asking for a plan
+    /// before, and it was routinely skipped on research, audits and multi-file
+    /// fixes; the gate makes the requirement mechanical instead of advisory.
+    ///
+    /// `plan` and `tool_search` always pass, so the agent can always reach the
+    /// tool that unblocks it. Sub-agent sessions and cron runs are exempt: they
+    /// execute a task someone else already planned, and a throwaway child plan
+    /// nobody sees would be worse than no plan.
+    ///
+    /// Set 0 to disable the gate entirely.
+    #[serde(default = "default_plan_gate_after_tool_calls")]
+    pub plan_gate_after_tool_calls: usize,
+
     /// Lazy tool-schema loading. **On by default.** A request ships only the
     /// CORE tool schemas (~4k tokens) plus `tool_search`, instead of all ~95
     /// (~20k counted in every request's input); the agent calls `tool_search`
@@ -1907,6 +1971,13 @@ fn default_skill_glob_gate() -> bool {
     true
 }
 
+/// Twelve calls is roughly where a turn stops being one step. Below it a
+/// read-edit-verify cycle is still a single action; above it the turn is
+/// doing multi-step work that belongs in a checklist.
+fn default_plan_gate_after_tool_calls() -> usize {
+    12
+}
+
 fn default_lazy_tools() -> bool {
     true
 }
@@ -2017,6 +2088,7 @@ impl Default for AgentConfig {
             compaction_notice: false,
             background_compaction: default_background_compaction(),
             skill_glob_gate: default_skill_glob_gate(),
+            plan_gate_after_tool_calls: default_plan_gate_after_tool_calls(),
             lazy_tools: default_lazy_tools(),
             redact_sensitive_data: default_redact_sensitive_data(),
             redact_group: None,
@@ -3146,6 +3218,19 @@ pub struct ProviderConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vision_model: Option<String>,
 
+    /// Output token cap for `analyze_image` / `analyze_video` calls on this
+    /// provider (#2120).
+    ///
+    /// Unset is the default and the right answer for almost everyone: the
+    /// request then carries no `max_tokens`, so the endpoint applies its own
+    /// default. A reasoning vision model spends part of that budget on
+    /// reasoning tokens, and a hard-coded cap used to truncate the answer or
+    /// leave `content` empty, which surfaced as "No text response from vision
+    /// model". Set this only to pin a specific figure (an endpoint with a low
+    /// default, or a cost ceiling).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vision_max_tokens: Option<u32>,
+
     /// Image-generation model override for this provider.
     ///
     /// Wins over the global `image.generation.model` when the active
@@ -3158,18 +3243,25 @@ pub struct ProviderConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub generation_model: Option<String>,
 
-    /// Speech-to-text model for this provider's [OI]-compatible
-    /// `/v1/audio/transcriptions` route. Set it and voice notes transcribe
-    /// through the active provider, the same way `vision_model` drives image
-    /// understanding and `generation_model` drives image creation. The
+    /// Speech-to-text model for the active provider. Set it and voice notes
+    /// transcribe through that provider, the same way `vision_model` drives
+    /// image understanding and `generation_model` drives image creation. The
     /// endpoint is the provider's own (`base_url`, or its known default), so
-    /// any [OI]-compatible provider can serve transcription, not only the
-    /// built-in one.
+    /// any [OI]-compatible provider can serve transcription.
+    ///
+    /// The wire depends on the endpoint. The built-in endpoint takes the audio
+    /// as an `input_audio` part on `/v1/chat/completions` and serves no
+    /// `/v1/audio/transcriptions` route at all; every other provider gets the
+    /// multipart transcription request.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stt_model: Option<String>,
 
     /// Text-to-speech model for this provider's [OI]-compatible
     /// `/v1/audio/speech` route. See `stt_model`.
+    ///
+    /// The built-in endpoint serves no speech route in any shape, so setting
+    /// this on it has no effect: synthesis falls through to the built-in local
+    /// voice, a `[providers.tts.*]` block, or Voicebox.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tts_model: Option<String>,
 
@@ -3182,6 +3274,13 @@ pub struct ProviderConfig {
     /// Endpoint type for providers with multiple API modes (e.g. zhipu: "api" or "coding")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint_type: Option<String>,
+
+    /// Which route an [OI]-compatible provider speaks: `auto`, `chat`, or
+    /// `responses`. Unset means `auto`, which resolves by provider kind (the
+    /// official host stays `auto`, every other compatible endpoint is pinned
+    /// to `chat`). See `crate::config::wire_dialect` (#2059).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wire_dialect: Option<WireDialect>,
 
     /// Kimi Code subscription-plan tier (`moderato`, `allegretto`, `allegro`,
     /// `vivace`). Only meaningful for a provider pointed at the Kimi Coding

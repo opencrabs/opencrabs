@@ -35,6 +35,7 @@ fn with_tool_group(expanded: bool) -> DisplayMessage {
     let mut msg = base_msg("tool_group");
     msg.tool_group = Some(ToolCallGroup {
         calls: vec![ToolCallEntry {
+            task_id: None,
             description: "read a file".to_string(),
             success: true,
             details: None,

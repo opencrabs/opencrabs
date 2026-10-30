@@ -64,6 +64,7 @@ pub(crate) fn build_flow_progress(
                 ProgressEvent::ToolStarted {
                     tool_name,
                     tool_input,
+                    ..
                 } => {
                     let ctx = crate::utils::tool_context_hint(&tool_name, &tool_input);
                     let thread = thread.clone();
@@ -75,6 +76,7 @@ pub(crate) fn build_flow_progress(
                                 name: tool_name,
                                 context: ctx,
                                 status: None,
+                                task_id: None,
                             });
                             t.clone()
                         };
@@ -129,7 +131,7 @@ pub(crate) fn build_flow_progress(
                 ProgressEvent::IntermediateText { text, .. } => {
                     // Same cleaning as handle_message's fold path: artifacts
                     // and media markers must not leak into the note.
-                    let text = crate::utils::sanitize::strip_llm_artifacts(&text);
+                    let text = crate::utils::sanitize::sanitize_outbound(&text);
                     let (text_clean, _img) = crate::utils::extract_img_markers(&text);
                     let (text_clean, _vid) = crate::utils::extract_vid_markers(&text_clean);
                     if text_clean.trim().is_empty() {
@@ -157,6 +159,49 @@ pub(crate) fn build_flow_progress(
                     if let Ok(mut g) = handles.lock() {
                         g.push(handle);
                     }
+                }
+                ProgressEvent::DetachedTaskStarted { task_id, label } => {
+                    // One row, updated in place (#2149). The start posts the
+                    // block when the turn has none yet; the finish only ever
+                    // rewrites, so a long task cannot leave two bubbles.
+                    let thread = thread.clone();
+                    tokio::spawn(async move {
+                        let session = client.open_session(&token);
+                        apply_detached(
+                            &session,
+                            &slack_state_grp,
+                            channel,
+                            thread,
+                            &group_ts,
+                            &tools,
+                            super::tool_group::DetachedEvent::Started {
+                                task_id: &task_id,
+                                label: &label,
+                            },
+                        )
+                        .await;
+                    });
+                }
+                ProgressEvent::DetachedTaskFinished {
+                    task_id, success, ..
+                } => {
+                    let thread = thread.clone();
+                    tokio::spawn(async move {
+                        let session = client.open_session(&token);
+                        apply_detached(
+                            &session,
+                            &slack_state_grp,
+                            channel,
+                            thread,
+                            &group_ts,
+                            &tools,
+                            super::tool_group::DetachedEvent::Finished {
+                                task_id: &task_id,
+                                success,
+                            },
+                        )
+                        .await;
+                    });
                 }
                 ProgressEvent::SelfHealingAlert { message } => {
                     tokio::spawn(async move {
@@ -245,5 +290,44 @@ pub(crate) fn build_flow_progress(
         steps,
         intermediate_handles,
         posted,
+    }
+}
+
+/// Apply one detached-task event to the turn's group message (#2149).
+///
+/// The decision comes from the pure [`super::tool_group::detached_render`], so
+/// the "one message per task" contract is the same one the tests drive without
+/// a bot. This function only performs what that decision says.
+async fn apply_detached<'a>(
+    session: &SlackClientSession<'a, slack_morphism::hyper_tokio::SlackClientHyperHttpsConnector>,
+    slack_state: &Arc<SlackState>,
+    channel: SlackChannelId,
+    thread_ts: Option<SlackTs>,
+    group_ts: &Arc<Mutex<Option<SlackTs>>>,
+    tools: &Mutex<Vec<GroupEntry>>,
+    event: super::tool_group::DetachedEvent<'_>,
+) {
+    let (action, entries) = {
+        let mut t = tools.lock().await;
+        let ts = group_ts.lock().await.as_ref().map(|ts| ts.to_string());
+        let action = super::tool_group::detached_render(&mut t, ts.as_deref(), event);
+        (action, t.clone())
+    };
+    match action {
+        super::tool_group::DetachedRender::Post => {
+            sync_step_group(session, slack_state, channel, thread_ts, group_ts, entries).await;
+        }
+        super::tool_group::DetachedRender::Edit(ts) => {
+            let ts = SlackTs::new(ts);
+            let group = slack_state
+                .upsert_tool_group(ts.to_string(), GroupState::new(channel.clone(), entries))
+                .await;
+            let content = super::tool_group::render(&group, &ts);
+            let upd = SlackApiChatUpdateRequest::new(channel, content, ts.clone());
+            if let Some(Err(e)) = session.update_chrome(&upd).await {
+                tracing::warn!("Slack: chat_update failed (detached row, ts={ts}): {e}");
+            }
+        }
+        super::tool_group::DetachedRender::Skip => {}
     }
 }

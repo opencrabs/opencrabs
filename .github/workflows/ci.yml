@@ -7,8 +7,9 @@ name: CI
 #     Docs-only commits are skipped via paths-ignore so they don't burn
 #     the matrix; rapid pushes cancel older runs via `concurrency`. The
 #     heavy cross-platform BUILD job is gated off routine main pushes
-#     (see its `if:`) so a normal commit only pays for lint + Linux test
-#     + audit (~5-8 min, cached, cancellable). This replaces the old
+#     (see its `if:`) so a normal commit only pays for lint + the two
+#     test legs (macOS self-hosted, Linux hosted) + audit. This replaces
+#     the old
 #     opt-out `[skip ci]`-on-every-commit toil with sensible defaults.
 #   - workflow_dispatch: run the build matrix on demand (e.g. to verify
 #     macOS before cutting a release tag; Windows is validated by release.yml).
@@ -51,7 +52,7 @@ jobs:
     # 36069934718); one noisy neighbor on the hosted fleet is a false red.
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Refuse to administer the host's rustup
         # dtolnay/rust-toolchain manages rustup on whatever machine it runs
@@ -83,12 +84,12 @@ jobs:
           done
 
       - name: Install Rust (from rust-toolchain.toml)
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
-          toolchain: stable
+          toolchain: 1.98.1
           components: rustfmt, clippy
 
-      - uses: swatinem/rust-cache@v2
+      - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -106,8 +107,25 @@ jobs:
         continue-on-error: true
         run: cargo fmt --all -- --check
 
-      - name: Clippy
-        run: cargo clippy --locked --lib --bins --tests --examples --all-features -- -D warnings
+      - name: Byte-slice ratchet self-test
+        # A checker that has silently learned to find nothing is worse than no
+        # checker, so it ships its own teeth (#2221).
+        run: python3 scripts/check-byte-slice-ratchet.py --self-test
+
+      - name: Clippy, with the byte-slice ratchet
+        # One clippy run does both jobs. -D warnings is still the gate for every
+        # other lint; clippy::string_slice is held at warn by --force-warn (a
+        # group -D beats a later -W, measured) so the ratchet can read the site
+        # list instead of dying on the 900 sites this repo already has. Only a
+        # site that is not in scripts/byte-slice-baseline.txt fails the job.
+        #
+        # The touch matters: on a restored cargo cache every unit reports fresh
+        # and clippy emits no diagnostics at all, which would let the ratchet
+        # pass without checking anything. Forcing our own crate to recompile
+        # keeps dependencies cached and keeps the check real.
+        run: |
+          touch src/lib.rs
+          python3 scripts/check-byte-slice-ratchet.py
 
   # ── Stage 2: Build verification (parallel, gated on lint + audit) ────────
   # Cross-platform BUILD on macOS confirms target compatibility without
@@ -122,7 +140,7 @@ jobs:
     # Cross-platform build verification. Runs where it pays off — on PRs
     # (gate contributions) and on-demand (workflow_dispatch, e.g. before a
     # release tag) — but NOT on every routine push to main. Direct main
-    # pushes still get lint + Linux test + audit.
+    # pushes still get lint + both test legs + audit.
     #
     # Windows is intentionally NOT built here (#627): it builds --all-features
     # with rust-cache skipped (always cold), so it chronically hit the 40m cap
@@ -141,7 +159,7 @@ jobs:
             target: aarch64-apple-darwin
             features: --all-features
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Refuse to administer the host's rustup
         # dtolnay/rust-toolchain manages rustup on whatever machine it runs
@@ -173,12 +191,12 @@ jobs:
           done
 
       - name: Install Rust (from rust-toolchain.toml)
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
-          toolchain: stable
+          toolchain: 1.98.1
           targets: ${{ matrix.target }}
 
-      - uses: swatinem/rust-cache@v2
+      - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -220,7 +238,7 @@ jobs:
       run: ${{ steps.relevant.outputs.run }}
     steps:
       # fetch-depth 0: the filter below diffs against the PR base sha.
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 0
 
@@ -294,27 +312,31 @@ jobs:
     # execution receipts, not silent drift.
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Install Rust (from rust-toolchain.toml)
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
-          toolchain: stable
+          toolchain: 1.98.1
           components: rustfmt, clippy
 
       # No `save-if` restriction: this job only runs on PRs and
       # workflow_dispatch, so a `refs/heads/main`-only save-if never fires —
       # the cache would stay cold forever. Saving in the run's own scope
       # lets the 2nd..Nth push of a PR hit warm artifacts.
-      - uses: swatinem/rust-cache@v2
+      - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           cache-on-failure: true
 
+      # Pinned to a released tag and an explicit tool version: the action
+      # defaults cmakeVersion to "latest" and resolves it at run time.
       - name: Install CMake (Windows)
-        uses: lukka/get-cmake@latest
+        uses: lukka/get-cmake@a89e43e22a96abafcd7a62db652a65ecd33052c9 # v4.4.4
+        with:
+          cmakeVersion: "4.4.4"
 
       - name: Install NASM (Windows)
-        uses: ilammy/setup-nasm@v1
+        uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1
 
       - name: Build
         shell: bash
@@ -446,7 +468,7 @@ jobs:
     timeout-minutes: 10
     runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) && 'ubuntu-latest' || 'self-hosted' }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Linter proves its own teeth
         run: python3 scripts/check-windows-footguns.py --self-test
@@ -454,20 +476,26 @@ jobs:
       - name: Scan the tree
         run: python3 scripts/check-windows-footguns.py --root src
 
-  # ── Stage 3: Test on Linux (gated on lint + audit, parallel with build) ──
-  # Tests run on Linux only — macOS gets build verification via
-  # the `build` job above. ZeroClaw uses the same split because the
-  # cross-platform matrix triples wall-clock for little extra coverage
-  # on this codebase (most tests are platform-independent).
+  # ── Stage 3: Test (gated on lint + audit, parallel with build) ──
+  # Two legs, one per platform. Both call .github/workflows/test-suite.yml so
+  # the command, the stall watchdog and the toolchain install exist once; the
+  # platform differences are conditions inside that file.
+  #
+  # Why two legs: the only self-hosted runner on this repo is macOS (mac-studio),
+  # so before #2216 our own PRs and every push to main were tested on macOS and
+  # nowhere else. Linux was exercised only by fork PRs, whose branch of the
+  # runner expression sends them to a hosted runner. A Linux-only break therefore
+  # shipped green, which is how the v0.5.13 linux-amd64 asset went out built for
+  # glibc 2.43 with nothing in this workflow having run the suite on Linux.
+  #
+  # `Test` keeps its name: the main-protection ruleset requires that exact
+  # status context, so renaming it would leave the required check permanently
+  # absent and unblock every PR.
   #
   # Stays on `cargo test` for now: a few timing-sensitive tests
   # (rate_limiter pacing) rely on cargo test's threadpool semantics
   # and fail under nextest's process-per-test isolation. nextest
   # migration is a follow-up once those tests are made portable.
-  # Runs on the Mac only. Linux is covered where it costs nothing: the
-  # release matrix builds both Linux targets at tag time, and the suite runs
-  # locally on demand. Paying for a hosted Linux run on every push buys very
-  # little, since almost the entire suite is platform independent.
   test:
     name: Test
     needs: [lint, audit]
@@ -477,8 +505,8 @@ jobs:
     # 36078125556 and 36069934718, both cancelled at ~30 while green code
     # waited). Warm hosted fits in 20; 60 is the cold-cache ceiling.
     timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v5
+    steps: &test-steps
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Refuse to administer the host's rustup
         # dtolnay/rust-toolchain manages rustup on whatever machine it runs
@@ -510,11 +538,11 @@ jobs:
           done
 
       - name: Install Rust (from rust-toolchain.toml)
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
-          toolchain: stable
+          toolchain: 1.98.1
 
-      - uses: swatinem/rust-cache@v2
+      - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -535,19 +563,43 @@ jobs:
         # minutes instead of 60. The command it runs is unchanged.
         run: bash scripts/test-stall-watchdog.sh cargo test --locked --profile ci --all-features --verbose
 
+  # Linux leg. The requirement is that any commit which can be tagged has at
+  # least one test run on Linux (#2216). ubuntu-24.04 rather than
+  # ubuntu-latest on purpose: the hosted label rolls forward, and 24.04 is the
+  # image release.yml builds the Linux artifacts on (glibc floor 2.39), so the
+  # suite runs where the shipped binary runs.
+  #
+  # The steps below are the anchor `&test-steps` defined on the `test` job above,
+  # so there is exactly one copy of the suite command and it cannot drift. Two
+  # mechanisms were rejected: a copied block (a drifting copy is the same bug as
+  # the comment that described a Linux test that did not run), and a reusable
+  # workflow (a called workflow reports its check as `caller / called`, which
+  # would orphan the required `Test` context in the main-protection ruleset and
+  # block every PR).
+  #
+  # Skipped for fork PRs: their `Test` leg already executes on ubuntu-latest,
+  # so running this too would be the same Linux run twice.
+  test-linux:
+    name: Test (Linux)
+    needs: [lint, audit]
+    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps: *test-steps
+
   # ── Stage 1b: Security (fast gate — runs alongside lint, before build/test)
   # cargo-audit only scans Cargo.lock; it needs no compile, so it runs in
   # PARALLEL with lint as a second fast gate rather than after it. build/test/
   # coverage all `needs: [lint, audit]`, so a fresh advisory (this fails in
-  # ~4s) skips the ~22-min Linux test and the cross-platform build matrix
-  # instead of racing them. Lockfile-only fix → no recompile to re-gate.
+  # ~4s) skips both test legs and the cross-platform build matrix instead of
+  # racing them. Lockfile-only fix → no recompile to re-gate.
 
   audit:
     name: Cargo Audit
     runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) && 'ubuntu-latest' || 'self-hosted' }}
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Refuse to administer the host's rustup
         # dtolnay/rust-toolchain manages rustup on whatever machine it runs
@@ -579,12 +631,12 @@ jobs:
           done
 
       - name: Install Rust (from rust-toolchain.toml)
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
-          toolchain: stable
+          toolchain: 1.98.1
 
       - name: Install cargo-audit
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2
         with:
           tool: cargo-audit
 
@@ -633,11 +685,32 @@ jobs:
         #                      It never had an ignore: audit does not fail on
         #                      yanked, so it had been passing silently.
         #
-        # The nine below are each at their upstream's LATEST published release,
-        # verified against crates.io on 2026-09-04, so there is no version to
-        # move to from here. A routine `cargo update` will not shift them; only
-        # an upstream release or dropping the dependency will.
-        run: cargo audit --ignore RUSTSEC-2024-0436 --ignore RUSTSEC-2025-0119 --ignore RUSTSEC-2025-0134 --ignore RUSTSEC-2025-0141 --ignore RUSTSEC-2026-0002 --ignore RUSTSEC-2026-0173 --ignore RUSTSEC-2026-0192 --ignore RUSTSEC-2026-0253 --ignore RUSTSEC-2026-0258
+        # The ten below are all blocked upstream: either the crate is at its
+        # latest published release (checked against crates.io on 2026-10-21) or
+        # the release that would fix it cannot be reached from this tree. A
+        # routine `cargo update` will not shift them; only an upstream release
+        # or dropping the dependency will.
+        # zip (RUSTSEC-2026-0367/0368/0369, #2091, #2092): fixed in zip 9.0.0
+        #   upstream, but this tree still carries a zip 8.6.0 copy, so the three
+        #   ignores stay until `cargo tree -i zip@8.6.0` prints nothing. Our
+        #   code only reads archives (ZipArchive::new, by_name, by_index) and
+        #   never calls extract(), the path these advisories concern. Our direct
+        #   zip is 9.0.4; the 8.6.0 copy is pinned by three crates, all at their
+        #   newest release: calamine 0.36.1, docx-rs 0.4.22 and rust_xlsxwriter
+        #   0.99.1. The third copy, zip 1.1.4, arrives through candle-core 0.8.4
+        #   via rwhisper 0.4.1 (latest), which pins candle 0.8, so that one is an
+        #   upstream wait too. Remove each ignore the day its blocker moves.
+        # webpki-roots 0.26.11 (RUSTSEC-2026-0381): patched in >=1.0.10, and the
+        #   tree now carries 1.0.10. The flagged copy is the 0.26 line, which is
+        #   a semver-trick shim with no certificate data of its own: its entire
+        #   library is `pub use parent::TLS_SERVER_ROOTS` over `webpki-roots
+        #   ^1`, so it serves the patched 1.0.10 roots. It arrives via hf-hub
+        #   0.3.2 -> ureq 2.12.1, and 2.12.1 is the last of the 2.x line, which
+        #   pins webpki-roots ^0.26. hf-hub 0.5.0 would use ureq ^3 and drop the
+        #   0.26 line entirely, but kalosm-common 0.4.0 (latest) pins hf-hub
+        #   ^0.3.0, so that move needs kalosm to release first. Remove this
+        #   ignore when `cargo tree -i webpki-roots@0.26.11` prints nothing.
+        run: cargo audit --ignore RUSTSEC-2024-0436 --ignore RUSTSEC-2025-0119 --ignore RUSTSEC-2025-0134 --ignore RUSTSEC-2025-0141 --ignore RUSTSEC-2026-0002 --ignore RUSTSEC-2026-0173 --ignore RUSTSEC-2026-0192 --ignore RUSTSEC-2026-0253 --ignore RUSTSEC-2026-0258 --ignore RUSTSEC-2026-0367 --ignore RUSTSEC-2026-0368 --ignore RUSTSEC-2026-0369 --ignore RUSTSEC-2026-0381
 
   # ── Stage 5: Coverage (on-demand only) ───────────────────────────────────
   # Tarpaulin is the slowest job (~12 min). Running it on every main push
@@ -655,9 +728,9 @@ jobs:
     runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) && 'ubuntu-latest' || 'self-hosted' }}
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
-      - uses: swatinem/rust-cache@v2
+      - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -692,16 +765,16 @@ jobs:
           done
 
       - name: Install Rust (from rust-toolchain.toml)
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
-          toolchain: stable
+          toolchain: 1.98.1
 
       - name: Install ALSA dev
         if: runner.os == 'Linux'
         run: sudo apt-get update -qq && sudo apt-get install -y libasound2-dev
 
       - name: Install tarpaulin
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2
         with:
           tool: cargo-tarpaulin
 
@@ -712,7 +785,7 @@ jobs:
         # local-tts added when feature lands on main.
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5
         with:
           files: ./cobertura.xml
 
@@ -723,17 +796,18 @@ jobs:
   ci-gate:
     name: CI Required Gate
     if: always()
-    # windows-build is deliberately NOT in the required set. It is the only
-    # GitHub-hosted job here (everything else runs on the self-hosted Mac),
-    # it measured 51m09s cold, and at ~160 PR runs a fortnight that is ~136h
-    # of 2x-billed runner time against the 3 Windows builds release.yml
+    # windows-build is deliberately NOT in the required set. Windows runners
+    # bill at 2x and this one measured 51m09s cold, so at ~160 PR runs a
+    # fortnight that is ~136h against the 3 Windows builds release.yml
     # actually ran in the same window. #627 removed the original job from the
     # gate for exactly that reason. It stays as an advisory signal; Windows
     # remains release-blocking via release.yml's build matrix before any tag.
+    # The Linux test leg IS in the required set: a standard Ubuntu runner, and
+    # the only thing that finds a Linux-only break before a user does (#2216).
     # windows-footguns IS in the required set, which is not in tension with
     # the paragraph above: same class of finding (Windows-specific) at a
     # python-pass cost, so blocking on it buys certainty for seconds.
-    needs: [lint, build, test, audit, windows-footguns]
+    needs: [lint, build, test, test-linux, audit, windows-footguns]
     runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) && 'ubuntu-latest' || 'self-hosted' }}
     steps:
       - name: Check results

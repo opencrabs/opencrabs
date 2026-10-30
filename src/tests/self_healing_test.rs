@@ -798,6 +798,7 @@ fn tool_call_entry_defaults_to_not_completed() {
     use crate::tui::app::ToolCallEntry;
 
     let entry = ToolCallEntry {
+        task_id: None,
         description: "Read file.rs".to_string(),
         success: true,
         details: None,
@@ -815,6 +816,7 @@ fn tool_call_entry_completed_independent_of_details() {
 
     // A tool can be completed with empty details (no summary)
     let entry = ToolCallEntry {
+        task_id: None,
         description: "bash: ls".to_string(),
         success: true,
         details: None,
@@ -827,6 +829,7 @@ fn tool_call_entry_completed_independent_of_details() {
 
     // A tool can be completed with details
     let entry2 = ToolCallEntry {
+        task_id: None,
         description: "Read foo.rs".to_string(),
         success: true,
         details: Some("42 lines".to_string()),

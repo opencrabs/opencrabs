@@ -751,6 +751,14 @@ pub struct PlanTask {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verification: Option<VerificationVerdict>,
 
+    /// Machine-locked per-task spec check (#1904). Written once at `start`
+    /// from the task's own acceptance criteria and re-hashed at `complete`
+    /// before a single command runs. `None` means no check was locked:
+    /// policy `off`, nothing extractable from the criteria, or a plan
+    /// written before this shipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spec_check: Option<SpecCheck>,
+
     /// Optional structured scope contract. When set, `build_worker_brief`
     /// renders an explicit "MAY/MUST NOT" contract the worker must honour.
     /// The harness validates the scope at brief-build time (fail-closed on
@@ -786,6 +794,124 @@ pub struct TaskScope {
     pub do_not_call: Option<Vec<String>>,
 }
 
+// ── per-task spec checks (#1904) ──────────────────────────────────────
+//
+// Acceptance criteria are prose, and nothing in the completion path ever
+// ran them: `verify_task_completion` resolved commands from the task TYPE,
+// so "Task 1 compiles" was a claim, not a receipt. A spec check is the
+// runnable half of a criterion, extracted once at `start` and frozen with
+// a sha256, so a criterion loosened after the work began cannot execute as
+// if it were the one the plan approver read.
+
+/// Where a locked spec check's commands came from (#2063).
+///
+/// The provenance decides whether the check is allowed to REJECT a
+/// completion. A command read out of the criteria is what the plan approver
+/// read, so it may block. A command a model wrote is not, so it may only
+/// advise until a human confirms it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SpecCheckSource {
+    /// Read out of the task's own acceptance criteria by
+    /// `extract_check_commands`. The default, so every plan written before
+    /// #2063 reads as criteria-derived and keeps the behaviour it had.
+    #[default]
+    Criteria,
+    /// Written by a model at `start`, from the task's title, description and
+    /// criteria. Advisory until confirmed.
+    Generated,
+}
+
+impl SpecCheckSource {
+    /// Render-ready name for a message.
+    pub fn label(&self) -> &'static str {
+        match self {
+            SpecCheckSource::Criteria => "criteria",
+            SpecCheckSource::Generated => "generated",
+        }
+    }
+}
+
+/// A per-task spec check, locked at `start` and run at `complete` (#1904).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpecCheck {
+    /// Runnable commands, in criterion order.
+    pub commands: Vec<String>,
+    /// sha256 (hex) over `commands`, written when the check was locked.
+    pub sha256: String,
+    /// Where the commands came from (#2063). Defaults to `Criteria` for
+    /// plans written before this field existed.
+    #[serde(default)]
+    pub source: SpecCheckSource,
+    /// Whether a generated check has been confirmed (#2063). Always `false`
+    /// for a criteria-derived check, which needs no confirmation: the plan
+    /// approver already read it.
+    #[serde(default)]
+    pub confirmed: bool,
+}
+
+impl SpecCheck {
+    /// Freeze a command list read out of the criteria: the commands plus the
+    /// hash that locks them.
+    pub fn lock(commands: Vec<String>) -> Self {
+        let sha256 = spec_check_hash(&commands);
+        Self {
+            commands,
+            sha256,
+            source: SpecCheckSource::Criteria,
+            confirmed: false,
+        }
+    }
+
+    /// Freeze a command list a model wrote (#2063).
+    pub fn lock_generated(commands: Vec<String>) -> Self {
+        Self {
+            source: SpecCheckSource::Generated,
+            ..Self::lock(commands)
+        }
+    }
+
+    /// Whether this lock still matches the commands now on the task.
+    ///
+    /// Deliberately independent of `source` and `confirmed`: the hash covers
+    /// `commands` only, so confirming a generated check does NOT move it. A
+    /// confirmation that voids the lock it just approved would be worse than
+    /// no lock at all.
+    pub fn matches(&self, commands: &[String]) -> bool {
+        !self.sha256.is_empty() && self.sha256 == spec_check_hash(commands)
+    }
+
+    /// Whether this check may REJECT a completion (#2063).
+    ///
+    /// A criteria-derived check may: the approver read it. A generated check
+    /// may not until a human confirms it, because a model asked for a command
+    /// will invent one for "update the docs", and a gate that rejects correct
+    /// work on invented criteria is worse than no gate.
+    pub fn may_block(&self) -> bool {
+        match self.source {
+            SpecCheckSource::Criteria => true,
+            SpecCheckSource::Generated => self.confirmed,
+        }
+    }
+}
+
+/// sha256 (hex) over a locked command list (#1904).
+///
+/// Domain separated and length prefixed: two lists that differ only in where
+/// the command boundary falls (`"a b" + "c"` against `"a" + "b c"`) must not
+/// hash alike, and a separator that happens to appear inside a command cannot
+/// forge a collision between distinct lists.
+pub fn spec_check_hash(commands: &[String]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"opencrabs.plan.spec_check.v1\0");
+    for command in commands {
+        hasher.update((command.len() as u64).to_le_bytes());
+        hasher.update(command.as_bytes());
+    }
+    format!("{:x}", hasher.finalize())
+}
+
 impl PlanTask {
     /// Create a new task
     pub fn new(order: usize, title: String, description: String, task_type: TaskType) -> Self {
@@ -802,6 +928,7 @@ impl PlanTask {
             notes: None,
             retry_count: 0,
             verification: None,
+            spec_check: None,
             scope: None,
         }
     }
@@ -976,45 +1103,252 @@ pub fn status_mark(status: &TaskStatus) -> char {
 // Absence-only, one glyph per task: the glyph reports what is MISSING, so
 // a well-formed task renders exactly as it did before.
 
+/// Command patterns that name something runnable. The trailing spaces are
+/// load bearing: they keep a bare `git` from matching inside `digit`. Shared
+/// by `is_verifiable` and `extract_check_commands` so the two definitions of
+/// "this criterion names a command" cannot drift apart.
+const COMMAND_PATTERNS: &[&str] = &[
+    "cargo", "git ", "gh ", "npm ", "pnpm ", "make ", "curl ", "pytest", "python", "node ", "grep",
+    "rg ", "sed ", "awk ", "docker", "psql", "sqlite3", "stat ", "ls ", "wc ",
+];
+
+/// Expectation stems, matched against trimmed words. Stems, not full forms:
+/// the literal "exit 0" misses "exits 0" and "report" misses "shows", so one
+/// stem covers the whole family.
+const EXPECTATION_STEMS: &[&str] = &[
+    "exit",
+    "pass",
+    "fail",
+    "return",
+    "print",
+    "output",
+    "show",
+    "report",
+    "match",
+    "contain",
+    "clean",
+    "green",
+    "no warning",
+    "0 error",
+];
+
 /// A criterion is mechanically verifiable when it names something runnable
 /// AND states what the run must produce. Either half alone is a wish.
 pub fn is_verifiable(criterion: &str) -> bool {
     let lower = criterion.to_lowercase();
+    let has_command = criterion.contains('`') || COMMAND_PATTERNS.iter().any(|p| lower.contains(p));
 
-    const RUNNABLE: &[&str] = &[
-        "cargo", "git ", "gh ", "npm ", "pnpm ", "make ", "curl ", "pytest", "python", "node ",
-        "grep", "rg ", "sed ", "awk ", "docker", "psql", "sqlite3", "stat ", "ls ", "wc ",
-    ];
-    let has_command = criterion.contains('`') || RUNNABLE.iter().any(|p| lower.contains(p));
-
-    // Stems, not full forms. Matching the literal "exit 0" misses "exits 0"
-    // and "report" misses "shows", so trim the plural / third-person ending
-    // before comparing and let one stem cover the whole family.
-    const EXPECT_STEM: &[&str] = &[
-        "exit",
-        "pass",
-        "fail",
-        "return",
-        "print",
-        "output",
-        "show",
-        "report",
-        "match",
-        "contain",
-        "clean",
-        "green",
-        "no warning",
-        "0 error",
-    ];
     let stems: Vec<String> = lower
         .split(|c: char| !c.is_ascii_alphanumeric())
         .map(|w| w.trim_end_matches("es").trim_end_matches('s').to_string())
         .collect();
-    let has_expectation = EXPECT_STEM
+    let has_expectation = EXPECTATION_STEMS
         .iter()
         .any(|p| stems.iter().any(|w| w == p) || lower.contains(p));
 
     has_command && has_expectation
+}
+
+/// Extract the runnable commands a task's acceptance criteria name (#1904).
+///
+/// Conservative on purpose: a command locked at `start` is executed at
+/// `complete`, so a wrong extraction would turn a task that was done right
+/// into a false failure. A criterion yields a command only when it names one
+/// plainly:
+///
+/// - a backtick span that starts with a known runner (`cargo fmt --all`), or
+/// - a known runner at a word boundary, cut at the expectation stem that
+///   describes the outcome (`cargo test --lib foo reports 4 passed`).
+///
+/// Anything else yields nothing, and the task behaves exactly as it did
+/// before spec checks existed. Order follows the criteria; duplicates drop.
+pub fn extract_check_commands(criteria: &[String]) -> Vec<String> {
+    let mut commands: Vec<String> = Vec::new();
+    for criterion in criteria {
+        if !is_verifiable(criterion) {
+            continue;
+        }
+        if let Some(command) = extract_one_command(criterion)
+            && !commands.contains(&command)
+        {
+            commands.push(command);
+        }
+    }
+    commands
+}
+
+/// Shell operators a locked check may not contain. The gate RUNS this text,
+/// so a compound line (a pipe, a redirect, a substitution, a second command)
+/// is refused rather than parsed: one criterion, one simple command. It also
+/// means a criterion cannot smuggle an extra command past the plan approver's
+/// reading of the first one.
+const COMPOUND_OPERATORS: &[&str] = &["&&", "||", "|", ";", ">", "<", "`", "$(", "&"];
+
+/// Bare words that mark prose rather than a command line. Only tokens that do
+/// not start with `-` are tested, so `--no-verify` and friends survive.
+const PROSE_TOKENS: &[&str] = &[
+    "then", "and", "the", "is", "are", "it", "its", "that", "which", "with", "output", "result",
+    "when", "should", "must", "to", "of", "in", "for", "on", "no", "not", "be", "has", "have",
+    "exits", "passes", "fails", "returns", "prints", "shows", "reports", "matches",
+];
+
+/// A runner with no subcommand is not a check: `cargo` alone prints help and
+/// exits 0, and the gate would read that as a pass. Only a single-token
+/// command that stands on its own gets through.
+const SINGLE_TOKEN_OK: &[&str] = &["pytest"];
+
+/// One criterion to one command, or nothing.
+fn extract_one_command(criterion: &str) -> Option<String> {
+    // 1. A backtick span that names a runner. The first such span wins, so
+    //    `slugify(s)` is skipped while `cargo test` is taken.
+    let mut rest = criterion;
+    while let Some(open) = rest.find('`') {
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('`') else {
+            break;
+        };
+        let span = after[..close].trim();
+        if starts_with_runner(span)
+            && let Some(command) = accept_candidate(span)
+        {
+            return Some(command);
+        }
+        rest = &after[close + 1..];
+    }
+
+    // 2. A runner at a word boundary, cut at the earliest expectation stem
+    //    that still leaves a command behind it.
+    let start = command_start_index(criterion)?;
+    let tail = &criterion[start..];
+    for cut in expectation_starts(tail).into_iter().chain([tail.len()]) {
+        let candidate = tail[..cut]
+            .trim()
+            .trim_end_matches(&[',', '.', ';', ':'][..])
+            .trim();
+        if let Some(command) = accept_candidate(candidate) {
+            return Some(command);
+        }
+    }
+    None
+}
+
+/// Whether a string opens with a known runner.
+fn starts_with_runner(candidate: &str) -> bool {
+    let lower = candidate.to_lowercase();
+    COMMAND_PATTERNS
+        .iter()
+        .map(|p| p.trim())
+        .any(|p| lower.starts_with(p))
+}
+
+/// Index where a known runner starts, matched case-insensitively at a word
+/// boundary. `digit` and `github` are not `git`; `python3` is.
+fn command_start_index(haystack: &str) -> Option<usize> {
+    let lower = haystack.to_lowercase();
+    if lower.len() != haystack.len() {
+        // Non-ASCII lowercasing can move byte offsets. Refuse rather than
+        // slice a command out of the wrong place.
+        return None;
+    }
+    let bytes = lower.as_bytes();
+    let mut best: Option<usize> = None;
+    for pattern in COMMAND_PATTERNS.iter().map(|p| p.trim()) {
+        let mut from = 0;
+        while let Some(offset) = lower[from..].find(pattern) {
+            let at = from + offset;
+            from = at + pattern.len();
+            let before_ok = at == 0 || !bytes[at - 1].is_ascii_alphanumeric();
+            let after_ok = match bytes.get(at + pattern.len()).copied() {
+                None => true,
+                Some(b) => !b.is_ascii_alphanumeric() || b.is_ascii_digit(),
+            };
+            if before_ok && after_ok {
+                best = Some(best.map_or(at, |seen: usize| seen.min(at)));
+            }
+        }
+    }
+    best
+}
+
+/// Byte offsets where a word (or run of consecutive words) that matches an
+/// expectation stem begins.
+fn expectation_starts(haystack: &str) -> Vec<usize> {
+    let words = word_runs(haystack);
+    let mut starts: Vec<usize> = Vec::new();
+    for stem in EXPECTATION_STEMS {
+        let parts: Vec<&str> = stem.split_whitespace().collect();
+        if parts.is_empty() || words.len() < parts.len() {
+            continue;
+        }
+        for window in 0..=(words.len() - parts.len()) {
+            let hit = parts.iter().enumerate().all(|(k, part)| {
+                words[window + k]
+                    .1
+                    .trim_end_matches("es")
+                    .trim_end_matches('s')
+                    == *part
+            });
+            if hit {
+                starts.push(words[window].0);
+            }
+        }
+    }
+    starts.sort_unstable();
+    starts.dedup();
+    starts
+}
+
+/// `(byte offset, lowercased word)` for every alphanumeric run.
+fn word_runs(haystack: &str) -> Vec<(usize, String)> {
+    let mut words: Vec<(usize, String)> = Vec::new();
+    let mut start: Option<usize> = None;
+    for (idx, ch) in haystack.char_indices() {
+        if ch.is_ascii_alphanumeric() {
+            start.get_or_insert(idx);
+        } else if let Some(from) = start.take() {
+            words.push((from, haystack[from..idx].to_lowercase()));
+        }
+    }
+    if let Some(from) = start {
+        words.push((from, haystack[from..].to_lowercase()));
+    }
+    words
+}
+
+/// The final gate: a candidate becomes a locked command only if it is one
+/// simple command, not prose and not a bare runner.
+fn accept_candidate(candidate: &str) -> Option<String> {
+    if candidate.is_empty() {
+        return None;
+    }
+    if COMPOUND_OPERATORS
+        .iter()
+        .any(|operator| candidate.contains(operator))
+    {
+        return None;
+    }
+    let tokens: Vec<&str> = candidate.split_whitespace().collect();
+    let is_prose = tokens.iter().any(|token| {
+        !token.starts_with('-') && PROSE_TOKENS.contains(&token.to_lowercase().as_str())
+    });
+    if is_prose {
+        return None;
+    }
+    if tokens.len() == 1 && !SINGLE_TOKEN_OK.contains(&tokens[0]) {
+        return None;
+    }
+    Some(candidate.to_string())
+}
+
+/// Public face of the final gate, for callers outside this module (#2063).
+///
+/// A generated command must be held to the SAME rule a criteria-derived one
+/// is: the gate runs the text either way, so a pipe or a compound line is
+/// refused no matter who wrote it. Reusing this also keeps the runner
+/// vocabulary in one place, so a model cannot introduce a runner the criteria
+/// path would never have accepted.
+pub fn is_acceptable_check_command(candidate: &str) -> bool {
+    accept_candidate(candidate.trim()).is_some()
 }
 
 /// The single glyph a task has earned, or `None` when nothing is missing.

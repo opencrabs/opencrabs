@@ -933,17 +933,6 @@ cargo test --all-features -p opencrabs -- profile_test
 
 ---
 
-## Disabled Test Modules
-
-These modules exist but are commented out in `src/tests/mod.rs` (require network or external services):
-
-| Module | Reason |
-|--------|--------|
-| `error_scenarios_test` | Requires mock API server |
-| `integration_test` | End-to-end with LLM provider |
-| `plan_mode_integration_test` | End-to-end plan workflow |
-| `streaming_test` | Requires streaming API endpoint |
-
 ## Files Absent From the Quick Reference
 
 These are registered in `src/tests/mod.rs` but contribute no tests to a
@@ -995,15 +984,11 @@ When the agent outputs one of these phrases with zero tool calls, the phantom de
 | Tests — Cron Session Target | 7 | `src/tests/cron_session_target_test.rs` |
 | Tests — Custom Provider Stream Empty Finish | 1 | `src/tests/custom_provider_stream_empty_finish_test.rs` |
 | Tests — DB Thread ID Stamp Heal | 3 | `src/tests/db_thread_id_stamp_heal_test.rs` |
-| Tests — Error Scenarios | 9 | `src/tests/error_scenarios_test.rs` |
 | Tests — Evolve Verify | 8 | `src/tests/evolve_verify_test.rs` |
 | Tests — Execution Blocklist Floor | 4 | `src/tests/execution_blocklist_floor_test.rs` |
 | Tests — Headless Tool Surface | 7 | `src/tests/headless_tool_surface_test.rs` |
-| Tests — Integration | 9 | `src/tests/integration_test.rs` |
-| Tests — Plan Mode Integration | 9 | `src/tests/plan_mode_integration_test.rs` |
 | Tests — Secret Hygiene Oc05 | 4 | `src/tests/secret_hygiene_oc05_test.rs` |
 | Tests — Service Scope | 11 | `src/tests/service_scope_test.rs` |
-| Tests — Streaming | 10 | `src/tests/streaming_test.rs` |
 | Tests — Subagent Brain | 8 | `src/tests/subagent_brain_test.rs` |
 | Tests — Tool Context Origin Target | 3 | `src/tests/tool_context_origin_target_test.rs` |
 | Tests — Work Status Output Full | 4 | `src/tests/work_status_output_full_test.rs` |

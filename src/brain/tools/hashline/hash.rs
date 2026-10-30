@@ -4,13 +4,20 @@
 //! via FNV-1a. The hash alphabet uses 16 visually-distinct letters (no O/0,
 //! I/l confusion), giving `16^HASH_LEN` possible hash values per line.
 //!
-//! The tag width matters a lot: with a 2-char tag (256 values) even a 20-line
-//! read had a ~54% chance of a FALSE collision (distinct lines that happen to
-//! share a tag), and a 60-line read ~99.9% — which made `hashline_edit` refuse
-//! most real edits. A 4-char tag (65536 values) drops those to ~0.3% / ~4%.
-//! Identical-content lines still share a tag at any width (that is inherent and
-//! is deferred to `edit_file` via the collision path), but the false collisions
-//! that drove the failure rate are gone. See #573.
+//! The tag width matters a lot. History, and the reason it is now 6:
+//!
+//! - A 2-char tag (256 values) made a 20-line read collide ~54% of the time and
+//!   a 60-line read ~99.9%, so `hashline_edit` refused most real edits (#573).
+//! - A 4-char tag (65,536 values) fixed small files but not large ones: false
+//!   collisions grow as `n^2 / (2 * 65536)`, which is ~418 expected pairs in a
+//!   7,400-line file. Two logged failures had nine lines sharing one tag at
+//!   evenly spaced positions, which is a narrow hash, not identical content.
+//! - A 6-char tag (16,777,216 values) drops that to ~1.6 expected pairs in the
+//!   same file, for two extra characters per line of `read_file` output (#2202).
+//!
+//! Identical-content lines (blank lines, a repeated `}`) still share a tag at
+//! any width. That is inherent, and it is handled by the collision path, which
+//! points the caller at `edit_file`.
 
 /// 16 visually-distinct uppercase letters for the hash alphabet.
 /// Excludes: O (looks like 0), I (looks like l/1), A (looks like 4 in some fonts),
@@ -22,10 +29,19 @@
 /// Z P M Q V R W S N K T X J B Y H
 pub(crate) const HASH_ALPHABET: &[u8; 16] = b"ZPMQVRWSNKTXJBYH";
 
-/// Number of characters in a line-hash tag. Widened from 2 to 4 (#573): a
-/// 2-char tag has only 256 values, so distinct lines collided constantly and
-/// the edit tool refused them. 4 chars gives 65536 values.
-pub(crate) const HASH_LEN: usize = 4;
+/// Number of characters in a line-hash tag. Widened from 2 to 4 in #573 (a
+/// 2-char tag has only 256 values, so distinct lines collided constantly), and
+/// from 4 to 6 in #2202 (65,536 values still collides ~418 times in a
+/// 7,400-line file). 6 chars gives 16,777,216 values.
+pub(crate) const HASH_LEN: usize = 6;
+
+// The tag is sliced out of a 32-bit FNV-1a hash, one nibble per character, so
+// widening past 8 would shift out of the integer and panic at runtime. The
+// width is a tuning knob now (#2202), so the limit is checked at compile time.
+const _: () = assert!(
+    HASH_LEN <= 8,
+    "HASH_LEN exceeds the 32 bits of the FNV-1a hash; widen the hash first"
+);
 
 /// FNV-1a 32-bit offset basis.
 const FNV_OFFSET_BASIS: u32 = 2_166_136_261;
@@ -43,7 +59,7 @@ fn fnv1a_32(data: &[u8]) -> u32 {
     hash
 }
 
-/// Compute a 2-character hash for a line.
+/// Compute a [`HASH_LEN`]-character hash for a line.
 ///
 /// The hash is computed over the line content only (stateless).
 /// This ensures **reference stability**: inserting or deleting lines
@@ -74,7 +90,7 @@ pub fn hash_line(content: &str) -> String {
 
 /// Compute hashes for all lines in a file content.
 ///
-/// Returns a Vec of (1-indexed line number, 2-char hash) pairs.
+/// Returns a Vec of (1-indexed line number, [`HASH_LEN`]-char hash) pairs.
 pub fn hash_all_lines(content: &str) -> Vec<(usize, String)> {
     content
         .lines()

@@ -682,15 +682,26 @@ pub(crate) fn reqwest_error_chain(e: &reqwest::Error) -> String {
 /// Classify a reqwest error into a short, specific phrase by walking its source
 /// chain to the deepest OS/resolver cause. Appends the host when known, e.g.
 /// "DNS lookup failed (www.dialagram.me)" or "connection refused (api.x.com)".
+/// A timeout has no usable chain, so it is split by phase instead: see
+/// [`describe_timeout`].
 pub(crate) fn describe_reqwest_error(e: &reqwest::Error) -> String {
-    let host_suffix = e
-        .url()
-        .and_then(|u| u.host_str())
+    let host = e.url().and_then(|u| u.host_str()).map(str::to_owned);
+    let host_suffix = host
+        .as_deref()
         .map(|h| format!(" ({h})"))
         .unwrap_or_default();
 
     if e.is_timeout() {
-        return format!("request timed out{host_suffix}");
+        // #2204: one deadline covers DNS, TCP and TLS together, and on expiry
+        // hyper reports "tcp connect error" whichever phase actually hung. A
+        // resolver that never answered therefore reads as a slow server. The
+        // message cannot carry the phase, so re-probe the name once and let
+        // that decide. Only a request that already failed pays for this.
+        let probe = match host.as_deref() {
+            Some(h) if e.is_connect() => probe_dns(h, DNS_PROBE_TIMEOUT),
+            _ => DnsProbe::Skipped,
+        };
+        return describe_timeout(e.is_connect(), probe, &host_suffix);
     }
 
     // The deepest source-chain entry carries the real OS/resolver error; the
@@ -736,6 +747,77 @@ pub(crate) fn describe_reqwest_error(e: &reqwest::Error) -> String {
         return format!("{trimmed}{host_suffix}");
     };
     format!("{label}{host_suffix}")
+}
+
+/// How long the error path waits for a name to resolve before it gives up on
+/// naming the cause. A healthy resolver answers in milliseconds; a broken one
+/// hits its own multi-second timeout (the reported machine saw `Resolving
+/// timed out after 10000 milliseconds`), so this only has to separate the two.
+/// Kept at one second because the probe runs while the turn is being handed
+/// back, so a failed request's diagnosis must not add more than a second.
+const DNS_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Outcome of re-resolving the host after a connect-phase timeout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DnsProbe {
+    /// Nothing to probe: the URL carried no host, or the request did not time
+    /// out in the connect phase.
+    Skipped,
+    /// The name resolved, so the wait was the connection itself.
+    Resolved,
+    /// The resolver answered with an error.
+    Failed,
+    /// The resolver did not answer inside the probe window.
+    TimedOut,
+}
+
+/// Label a timeout by the phase it fell in. `is_connect` comes from reqwest and
+/// is true only when the connection was never established, so a timeout after
+/// the socket is up keeps the plain request label.
+pub(crate) fn describe_timeout(is_connect: bool, probe: DnsProbe, host_suffix: &str) -> String {
+    if !is_connect {
+        return format!("request timed out{host_suffix}");
+    }
+    match probe {
+        DnsProbe::Failed | DnsProbe::TimedOut => format!("DNS lookup failed{host_suffix}"),
+        DnsProbe::Resolved | DnsProbe::Skipped => format!("connect timed out{host_suffix}"),
+    }
+}
+
+/// Resolve `host` once, bounded, off the caller's thread. Called only to name
+/// the cause of a request that already failed, so it never sits on a healthy
+/// request's path. A resolver that outlives the window leaves one parked
+/// thread behind; that is cheaper than reporting the wrong cause.
+pub(crate) fn probe_dns(host: &str, timeout: std::time::Duration) -> DnsProbe {
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        // An address cannot fail to resolve, so the wait was the connection.
+        return DnsProbe::Resolved;
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let name = host.to_owned();
+    let spawned = std::thread::Builder::new()
+        .name("dns-probe".into())
+        .spawn(move || {
+            use std::net::ToSocketAddrs;
+            let outcome = match (name.as_str(), 0u16).to_socket_addrs() {
+                Ok(mut addrs) => {
+                    if addrs.next().is_some() {
+                        DnsProbe::Resolved
+                    } else {
+                        DnsProbe::Failed
+                    }
+                }
+                Err(_) => DnsProbe::Failed,
+            };
+            let _ = tx.send(outcome);
+        });
+    if spawned.is_err() {
+        return DnsProbe::Skipped;
+    }
+    match rx.recv_timeout(timeout) {
+        Ok(outcome) => outcome,
+        Err(_) => DnsProbe::TimedOut,
+    }
 }
 
 /// Parse a retry-delay (seconds) out of a rate-limit error message.

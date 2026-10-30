@@ -245,6 +245,58 @@ impl FlowSections {
         out
     }
 
+    /// Markdown-plane plan chrome: [`Self::chrome_rich`] in the rich API's
+    /// markdown dialect. The rich parser reads `<details>` / `<summary>` out of
+    /// markdown too, so the per-heading prose and a multi-paragraph goal keep
+    /// their disclosure; the rich `<hr>` has no markdown equivalent, so a blank
+    /// line stands in for it (Decision 13). Section headings stay inline
+    /// `<summary>` text only, for the same reason as the rich path (nested
+    /// blocks render as a blank disclosure). `settled` drives the Decision 10
+    /// goal icon.
+    pub(crate) fn chrome_markdown(&self, settled: bool) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(ref t) = self.plan_title {
+            parts.push(format!("📋 **{}**", t.trim()));
+        }
+        if let Some(ref sections) = self.prose {
+            for sec in sections {
+                let body = sec.body.trim();
+                match &sec.heading {
+                    Some(h) => parts.push(format!(
+                        "<details><summary>{}</summary>\n\n{body}\n\n</details>",
+                        h.trim()
+                    )),
+                    // Orphan preamble: plain always-visible blocks.
+                    None => parts.push(body.to_string()),
+                }
+            }
+        }
+        if let Some(ref rows) = self.checklist {
+            parts.push(rows.join("\n"));
+        }
+        if let Some(ref g) = self.goal {
+            let paras: Vec<&str> = g
+                .text
+                .split("\n\n")
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .collect();
+            if !paras.is_empty() {
+                let prefix = g.prefix(settled);
+                if let [one] = paras.as_slice() {
+                    parts.push(format!("{prefix} {one}"));
+                } else {
+                    parts.push(format!(
+                        "<details><summary>{prefix} {}</summary>\n\n{}\n\n</details>",
+                        paras[0],
+                        paras[1..].join("\n\n")
+                    ));
+                }
+            }
+        }
+        parts.join("\n\n")
+    }
+
     /// Classic-path plan chrome: the same locked vertical order with blank
     /// lines standing in for the rich `<hr>` (Decision 13 — classic HTML has
     /// no divider primitive). Prose sections are `<blockquote expandable>`

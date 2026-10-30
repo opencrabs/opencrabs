@@ -251,7 +251,10 @@ fn format_command_proposal(p: &CommandProposal) -> String {
         name = p.command.name,
         desc = p.command.description,
         prompt = if p.command.prompt.len() > 80 {
-            format!("{}...", &p.command.prompt[..77])
+            format!(
+                "{}...",
+                crate::utils::string::truncate_str(&p.command.prompt, 77)
+            )
         } else {
             p.command.prompt.clone()
         },

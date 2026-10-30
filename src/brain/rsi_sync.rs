@@ -35,6 +35,32 @@ use crate::brain::tools::brain_file_safety;
 /// entry carries its own repo-relative path (#819).
 const TEMPLATE_BASE_URL: &str = "https://raw.githubusercontent.com/opencrabs/opencrabs/main";
 
+/// Connect budget for a template fetch, matching the house pattern already in
+/// `embedding.rs`, `gemini.rs`, `anthropic.rs` and
+/// `custom_openai_compatible.rs`. `reqwest`'s own default is no timeout at
+/// all, which is how a blackholed connection once wedged an embedding call
+/// forever (#1062). The sync runs on the RSI task ahead of the startup digest
+/// and the analysis loop, so an unbounded fetch there stalls the whole engine
+/// rather than just the download (#2169).
+const TEMPLATE_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Total budget for one fetch, headers and body together. A template is a few
+/// KB, so 60s only ever binds on a server that accepts and then stalls.
+const TEMPLATE_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Attempts per template. One retry absorbs a single DNS flap; more than that
+/// turns a real outage into a longer wall of the same error.
+const TEMPLATE_MAX_ATTEMPTS: u8 = 2;
+
+/// Build the bounded client used for every template fetch.
+fn template_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .connect_timeout(TEMPLATE_CONNECT_TIMEOUT)
+        .timeout(TEMPLATE_REQUEST_TIMEOUT)
+        .build()
+        .map_err(|e| format!("Failed to build template sync client: {e}"))
+}
+
 /// A brain file: same name locally and under the templates directory.
 macro_rules! md {
     ($name:literal) => {
@@ -250,6 +276,54 @@ pub struct FileSyncResult {
     pub bailed_for_cap: Option<CapBailReport>,
 }
 
+/// Collapse per-file sync failures into one line per distinct cause (#2169).
+///
+/// The old join produced one sentence per file, so a single DNS flap rendered
+/// eleven near-identical sentences, each naming its file twice. The cause is
+/// what varies the message, not the file, so group on it: a cause shared by
+/// every failure becomes one sentence, and several causes become one clause
+/// each, joined on a single line because the notification renders as one.
+///
+/// Returns `None` when nothing failed.
+pub(crate) fn summarize_sync_failures(results: &[FileSyncResult]) -> Option<String> {
+    let mut causes: Vec<&str> = Vec::new();
+    let mut files_by_cause: Vec<Vec<&str>> = Vec::new();
+    let mut failed = 0usize;
+
+    for result in results {
+        let Some(cause) = result.error.as_deref() else {
+            continue;
+        };
+        failed += 1;
+        match causes.iter().position(|seen| *seen == cause) {
+            Some(idx) => files_by_cause[idx].push(result.filename.as_str()),
+            None => {
+                causes.push(cause);
+                files_by_cause.push(vec![result.filename.as_str()]);
+            }
+        }
+    }
+
+    if failed == 0 {
+        return None;
+    }
+
+    if failed == 1 {
+        return Some(format!("{} failed: {}", files_by_cause[0][0], causes[0]));
+    }
+
+    if causes.len() == 1 {
+        return Some(format!("all {failed} tracked files failed: {}", causes[0]));
+    }
+
+    let clauses: Vec<String> = causes
+        .iter()
+        .zip(files_by_cause.iter())
+        .map(|(cause, files)| format!("{} ({}) failed: {cause}", files.len(), files.join(", ")))
+        .collect();
+    Some(clauses.join("; "))
+}
+
 /// Diagnostic surfaced when `sync_single_file` refuses to write because
 /// the merged content would exceed the configured per-file line cap. The
 /// user sees this via tracing + an entry appended to
@@ -456,25 +530,171 @@ pub fn upstream_changed(state: &SyncState, local_name: &str, upstream_content: &
     }
 }
 
-/// Fetch a single template. `path` is relative to the repository root.
-pub async fn fetch_template(path: &str) -> Result<String, String> {
-    let filename = path;
-    let url = format!("{TEMPLATE_BASE_URL}/{path}");
-    let response = reqwest::get(&url)
-        .await
-        .map_err(|e| format!("Failed to fetch {filename}: {e}"))?;
+/// Why a template fetch failed, and whether trying again could help (#2169).
+///
+/// The distinction is the whole point. A transport failure never reached a
+/// server, so one retry absorbs a DNS flap. A status code IS an answer, so
+/// retrying it only doubles the wait for the same no.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FetchError {
+    /// Never got an answer: DNS, refused connection, TLS, or the timeout
+    /// firing. Worth one retry.
+    Transport { detail: String },
+    /// The server answered, and the answer was no.
+    Status { code: u16 },
+    /// Headers arrived but the body did not finish. Worth one retry.
+    Body { detail: String },
+}
 
-    if !response.status().is_success() {
-        return Err(format!(
-            "Failed to fetch {filename}: HTTP {}",
-            response.status()
-        ));
+impl FetchError {
+    /// Whether a second attempt could plausibly succeed.
+    pub(crate) fn is_retryable(&self) -> bool {
+        matches!(self, FetchError::Transport { .. } | FetchError::Body { .. })
     }
 
-    response
-        .text()
+    /// The line the user sees. It names what happened and what to do next,
+    /// because "error sending request for url (...)" says neither.
+    ///
+    /// Deliberately carries no filename (#2169). The cause is shared by every
+    /// file that hit it, so the caller groups by this text and names the
+    /// affected files once. Embedding the filename here produced joins like
+    /// "AGENTS.md: could not reach the template host for AGENTS.md".
+    pub(crate) fn describe(&self) -> String {
+        match self {
+            FetchError::Transport { detail } => format!(
+                "could not reach the template host ({detail}) after \
+                 {TEMPLATE_MAX_ATTEMPTS} attempts; check the network or proxy, the next \
+                 RSI cycle retries"
+            ),
+            FetchError::Status { code } => format!(
+                "upstream answered HTTP {code}; the tracked path is stale, \
+                 which needs a code fix rather than a retry"
+            ),
+            FetchError::Body { detail } => format!(
+                "template body did not arrive ({detail}); the next RSI \
+                 cycle retries"
+            ),
+        }
+    }
+}
+
+/// Join the `source()` chain so the inner cause survives into the message.
+///
+/// `reqwest::Error`'s `Display` is only the outer wrapper ("error sending
+/// request for url (...)"), while the reason (dns error, connection refused,
+/// timed out) lives one or more levels down. Printing just the wrapper is how
+/// a DNS failure read as a generic network error in the field.
+pub(crate) fn cause_chain(err: &(dyn std::error::Error + 'static)) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    while let Some(e) = current {
+        let text = e.to_string();
+        // Drop exact repeats so a self-describing error does not print twice.
+        if parts.last() != Some(&text) {
+            parts.push(text);
+        }
+        current = e.source();
+    }
+    match parts.len() {
+        0 => String::new(),
+        1 => parts.pop().unwrap_or_default(),
+        _ => parts.join(": "),
+    }
+}
+
+/// Map a `reqwest` send failure onto the classification above.
+pub(crate) fn classify_send_error(err: &reqwest::Error) -> FetchError {
+    if let Some(status) = err.status() {
+        return FetchError::Status {
+            code: status.as_u16(),
+        };
+    }
+    if err.is_body() {
+        return FetchError::Body {
+            detail: cause_chain(err),
+        };
+    }
+    FetchError::Transport {
+        detail: cause_chain(err),
+    }
+}
+
+/// One fetch attempt, no retry.
+///
+/// Split from the retry loop on purpose: the loop is the policy under test,
+/// and a test can only drive it if the attempt is a separate unit it can
+/// replace with a fake.
+async fn fetch_once(path: &str) -> Result<String, FetchError> {
+    let url = format!("{TEMPLATE_BASE_URL}/{path}");
+    let client = template_client().map_err(|e| FetchError::Transport { detail: e })?;
+
+    let response = client
+        .get(&url)
+        .send()
         .await
-        .map_err(|e| format!("Failed to read {filename} body: {e}"))
+        .map_err(|e| classify_send_error(&e))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        return Err(FetchError::Status {
+            code: status.as_u16(),
+        });
+    }
+
+    response.text().await.map_err(|e| FetchError::Body {
+        detail: cause_chain(&e),
+    })
+}
+
+/// Run `attempt` up to `TEMPLATE_MAX_ATTEMPTS` times, retrying only what
+/// `is_retryable` allows.
+///
+/// The seam is the closure. Production closes over `fetch_once`; a test passes
+/// a fake that fails on demand, so the retry policy is asserted without a
+/// network round trip. Retrying a status code would only double the wait for
+/// the same answer, which is why the guard reads `is_retryable` rather than
+/// counting attempts alone.
+///
+/// The closure takes no argument on purpose. A `FnMut(&str) -> Fut` bound
+/// cannot be satisfied by an `async fn`: the returned future borrows the
+/// argument, so it is a different type for every lifetime, while `Fut` names
+/// exactly one. Closing over the path instead keeps each call site's future a
+/// single concrete type.
+pub(crate) async fn retry_fetch<F, Fut>(path: &str, mut attempt: F) -> Result<String, FetchError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<String, FetchError>>,
+{
+    let attempts = TEMPLATE_MAX_ATTEMPTS.max(1);
+    let mut tries = 0u8;
+    loop {
+        tries += 1;
+        match attempt().await {
+            Ok(body) => return Ok(body),
+            Err(err) => {
+                if !err.is_retryable() || tries >= attempts {
+                    return Err(err);
+                }
+                tracing::debug!(
+                    "RSI sync: {} attempt {}/{} failed, retrying: {}",
+                    path,
+                    tries,
+                    attempts,
+                    err.describe()
+                );
+            }
+        }
+    }
+}
+
+/// Fetch a single template. `path` is relative to the repository root.
+///
+/// Bounded twice over (#2169). The client caps the connect and the whole
+/// request, so a blackholed host can no longer wedge the RSI task forever,
+/// and a transport or body failure gets one more attempt so a single DNS
+/// flap does not fail every tracked file in the pass.
+pub(crate) async fn fetch_template(path: &str) -> Result<String, FetchError> {
+    retry_fetch(path, || fetch_once(path)).await
 }
 
 /// Extract sections from upstream that don't exist in local content.
@@ -744,11 +964,13 @@ pub async fn sync_templates() -> Vec<FileSyncResult> {
             continue;
         }
 
-        // Fetched here too so the fingerprint recorded is exactly what was
-        // considered, and a merge and its record cannot disagree (#820).
-        let upstream = fetch_template(tracked.upstream).await.ok();
+        // Fetched once, here, so the fingerprint recorded is exactly what was
+        // considered and a merge and its record cannot disagree (#820). The
+        // same result is handed to `sync_single_file`, which used to fetch the
+        // identical URL a second time per pass (#2169).
+        let upstream = fetch_template(tracked.upstream).await;
 
-        let result = sync_single_file(&local_path, tracked, &now).await;
+        let result = sync_single_file(&local_path, tracked, &upstream, &now);
         if result.synced {
             state
                 .file_dates
@@ -756,7 +978,7 @@ pub async fn sync_templates() -> Vec<FileSyncResult> {
             // Record what upstream looked like, so an unchanged file does
             // nothing next pass. Only on success: a failed sync must retry
             // rather than mark itself as seen.
-            if let Some(ref content) = upstream {
+            if let Ok(ref content) = upstream {
                 state
                     .file_hashes
                     .insert(tracked.local.to_string(), content_fingerprint(content));
@@ -810,7 +1032,7 @@ fn seed_missing_templates_if_blank(home: &std::path::Path) {
 
 /// Test re-export of `top_new_sections_by_size` so the regression tests
 /// under `src/tests/` can exercise the ranking without going through the
-/// async `sync_single_file` path (which needs network + disk + config).
+/// `sync_single_file` path (which needs disk + config).
 pub fn top_new_sections_by_size_for_test(new_sections: &str, n: usize) -> Vec<String> {
     top_new_sections_by_size(new_sections, n)
 }
@@ -939,9 +1161,10 @@ fn log_cap_bail_to_improvements(report: &CapBailReport) {
 }
 
 /// Sync a single brain file.
-async fn sync_single_file(
+fn sync_single_file(
     local_path: &Path,
     tracked: &TrackedTemplate,
+    upstream: &Result<String, FetchError>,
     _timestamp: &str,
 ) -> FileSyncResult {
     let filename = tracked.local;
@@ -959,15 +1182,17 @@ async fn sync_single_file(
         }
     };
 
-    // 2. Fetch upstream template
-    let upstream_content = match fetch_template(tracked.upstream).await {
+    // 2. Upstream body, already fetched once by the caller (#2169). A transport
+    // failure is reported here with its real cause instead of being flattened
+    // into `None` and lost.
+    let upstream_content = match upstream {
         Ok(c) => c,
         Err(e) => {
             return FileSyncResult {
                 filename: filename.to_string(),
                 synced: false,
                 sections_added: 0,
-                error: Some(e),
+                error: Some(e.describe()),
                 bailed_for_cap: None,
             };
         }
@@ -980,7 +1205,7 @@ async fn sync_single_file(
     // to do" on every pass buries the entries that mean something.
     {
         let state = SyncState::load();
-        if !upstream_changed(&state, filename, &upstream_content) {
+        if !upstream_changed(&state, filename, upstream_content) {
             return FileSyncResult {
                 filename: filename.to_string(),
                 synced: true,
@@ -996,11 +1221,11 @@ async fn sync_single_file(
     // appending a `## ` block to it would produce a duplicate table that stops
     // the file parsing.
     if tracked.kind == TemplateKind::Toml {
-        return sync_toml_file(local_path, filename, &local_content, &upstream_content);
+        return sync_toml_file(local_path, filename, &local_content, upstream_content);
     }
 
     // 3. Extract new sections
-    let new_sections = extract_new_sections(&local_content, &upstream_content);
+    let new_sections = extract_new_sections(&local_content, upstream_content);
     if new_sections.trim().is_empty() {
         tracing::info!("RSI sync: {filename} has no new sections, skipping");
         return FileSyncResult {

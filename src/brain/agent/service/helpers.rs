@@ -319,9 +319,15 @@ impl AgentService {
         &self,
         session_id: uuid::Uuid,
     ) -> Vec<crate::brain::provider::Tool> {
+        // #2134: a guest turn is scoped before the lazy split, so a stranger is
+        // never shown a schema the registry would refuse.
+        let guest_scope = self.is_guest_session(session_id);
         let mut defs = if self.lazy_tools {
             let active = self.tool_registry.active_tools(session_id);
-            self.tool_registry.get_tool_definitions_filtered(&active)
+            self.tool_registry
+                .get_tool_definitions_scoped(&active, guest_scope)
+        } else if guest_scope {
+            self.tool_registry.get_tool_definitions_for_guest()
         } else {
             self.tool_registry.get_tool_definitions()
         };
@@ -1006,6 +1012,7 @@ impl AgentService {
                         if is_cli {
                             let state = &mut block_states[index];
                             if let ContentBlock::ToolUse {
+                                ref id,
                                 ref name,
                                 ref input,
                                 ..
@@ -1018,6 +1025,7 @@ impl AgentService {
                                     ProgressEvent::ToolStarted {
                                         tool_name: emit_name.clone(),
                                         tool_input: input.clone(),
+                                        tool_call_id: id.clone(),
                                     },
                                 );
                                 cb(
@@ -1027,6 +1035,7 @@ impl AgentService {
                                         tool_input: input.clone(),
                                         success: true,
                                         summary: String::new(),
+                                        tool_call_id: id.clone(),
                                     },
                                 );
 
@@ -1312,9 +1321,8 @@ impl AgentService {
                     // a legitimate short instruction than a truncated preamble.
                     // Real truncations are single preamble sentences like
                     // "Let me check the current state:" — no prior punctuation.
-                    let has_prior_sentence = trimmed[..trimmed.len().saturating_sub(1)]
-                        .contains('.')
-                        || trimmed[..trimmed.len().saturating_sub(1)].contains('!');
+                    let before_last = crate::utils::string::prefix_before_last_char(trimmed);
+                    let has_prior_sentence = before_last.contains('.') || before_last.contains('!');
                     if has_prior_sentence {
                         tracing::debug!(
                             "Self-heal: skipping truncation check — text contains \
@@ -1322,7 +1330,7 @@ impl AgentService {
                         );
                     } else {
                         let preview = if trimmed.len() > 80 {
-                            &trimmed[trimmed.len() - 80..]
+                            crate::utils::string::truncate_str_tail(trimmed, 80)
                         } else {
                             trimmed
                         };

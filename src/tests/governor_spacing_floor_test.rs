@@ -392,3 +392,51 @@ async fn zero_floor_restores_pre_1927_spacing() {
     assert_eq!(snap.admitted_sends, 1);
     assert_eq!(snap.throttled_send_ms, 0, "no floor => no send hold");
 }
+
+// ---------------------------------------------------------------------------
+// Host scheduling delay must never reach the hold ledger (#2076)
+// ---------------------------------------------------------------------------
+
+/// A pacer parked on its `Defer` must record the scripted delay, never the
+/// host's scheduling delay.
+///
+/// The ledger is a wall-clock difference taken across `tokio::time::sleep`,
+/// and under the paused runtime the sleeper is resumed by a real worker
+/// thread, so real time leaks into a value the band assertions pin to the
+/// millisecond. In a full-suite run (#2076) that leak was 17 ms and pushed
+/// `throttled_rich_ms` to 1017 ms against a `900..=1010` band. Here the leak
+/// is made deterministic instead of load-dependent: real wall time is burned
+/// while the pacer sits parked on its sleep, with the virtual clock untouched.
+#[tokio::test(start_paused = true)]
+async fn a_slow_resumption_does_not_inflate_the_hold_ledger() {
+    let _guard = ts::registry_guard().await;
+    let _cooldown = crate::tests::telegram_cooldown_lock::guard().await;
+    ts::reset(1_000);
+    rl_config!(enabled: true);
+    let chat = ChatId(-900_1933);
+    assert!(governor::admit_chat_action(chat, Some(42)).await);
+
+    // Park the pacer on its floor `Defer`. The global permit path takes a
+    // token from a fresh bucket without suspending, so the first poll reaches
+    // the sleep; the precondition below proves it is parked there.
+    let pacer = tokio::spawn(async move { governor::pace_rich(chat, Some(42)).await });
+    tokio::task::yield_now().await;
+    let parked = ts::snapshot(chat).expect("peer registered");
+    assert_eq!(
+        parked.admitted_rich, 0,
+        "the pacer must still be waiting out the floor, otherwise this test \
+         burns real time outside the sleep and proves nothing"
+    );
+
+    // Real wall time the virtual clock never sees.
+    std::thread::sleep(Duration::from_millis(120));
+    pacer.await.expect("the pacer must not panic");
+
+    let snap = ts::snapshot(chat).expect("peer registered");
+    assert_eq!(snap.admitted_rich, 1, "the rich edit went out");
+    assert!(
+        (900..=1010).contains(&snap.throttled_rich_ms),
+        "120 ms of host scheduling delay must not reach the hold ledger, got {} ms",
+        snap.throttled_rich_ms
+    );
+}

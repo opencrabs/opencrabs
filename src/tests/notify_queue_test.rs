@@ -44,6 +44,7 @@ async fn push_survives_as_row_until_cleared() {
     let id = Uuid::new_v4();
     let session = Uuid::new_v4();
     let meta = BgTaskMeta {
+        task_id: "t-1".into(),
         success: true,
         label: "cargo test".into(),
         elapsed_secs: 12.0,

@@ -8,6 +8,18 @@ use uuid::Uuid;
 /// Shared pair parser (#467 uses it on channels and the TUI too).
 pub(crate) use crate::utils::provider_pair::parse_pair;
 
+/// The argument of a direct switch typed as `/models <provider/model>` (#467,
+/// #2064). `None` for a bare `/models`, which opens the picker. The argument
+/// keeps its `all` scope suffix; the caller strips it.
+pub(crate) fn direct_switch_arg(input: &str) -> Option<&str> {
+    let mut parts = input.trim().splitn(2, char::is_whitespace);
+    if parts.next()? != "/models" {
+        return None;
+    }
+    let arg = parts.next()?.trim();
+    (!arg.is_empty()).then_some(arg)
+}
+
 /// Resolve which sessions a set-model invocation targets.
 ///
 /// Exactly one selector must be used: an id prefix, a `--name` title

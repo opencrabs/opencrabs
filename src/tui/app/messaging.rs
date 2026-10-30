@@ -1,6 +1,8 @@
 //! Messaging — session CRUD, slash commands, message expansion, streaming.
 
-use super::answer_placement::last_text_precedes_tool_group;
+use super::answer_placement::{
+    answer_already_on_screen, answer_extends_row, last_text_precedes_tool_group,
+};
 use super::dialogs::ensure_whispercrabs;
 use super::events::{AppMode, ToolApprovalResponse, TuiEvent};
 use super::onboarding::OnboardingWizard;
@@ -101,6 +103,30 @@ pub(crate) fn attachment_class_for_path(path: &str) -> AttachmentClass {
         AttachmentClass::TextFile
     } else {
         AttachmentClass::UnknownBinary
+    }
+}
+
+/// Stamp the settled per-turn metadata (tokens, cost, elapsed time, reasoning)
+/// onto an assistant row that already carries this turn's text.
+///
+/// Two paths land here: the turn's text arrived as an IntermediateText and the
+/// response replaced it, or the response text is already on screen and
+/// appending it would render the same answer twice. `duration_secs` is written
+/// only when the turn clock is still known, so a missing clock never clears a
+/// value that is already on the row.
+fn stamp_settled_metadata(
+    msg: &mut DisplayMessage,
+    response: &crate::brain::agent::AgentResponse,
+    reasoning_details: &Option<String>,
+    duration_secs: Option<i64>,
+) {
+    msg.token_count = Some(response.usage.output_tokens as i64);
+    msg.cost = Some(response.cost);
+    if let Some(secs) = duration_secs {
+        msg.duration_secs = Some(secs);
+    }
+    if reasoning_details.is_some() {
+        msg.details = reasoning_details.clone();
     }
 }
 
@@ -246,6 +272,7 @@ impl App {
         self.set_plan_file_for_session(session.id).await;
         self.is_processing = false; // New session is never processing
         self.messages.clear();
+        self.turn_start_len = 0;
         self.auto_scroll = true;
         self.scroll_offset = 0;
         self.mode = AppMode::Chat;
@@ -370,7 +397,8 @@ impl App {
         // Sync is_processing flag with per-session state
         self.is_processing = self.processing_sessions.contains(&session.id);
 
-        let (display, hidden) = Self::trim_messages_to_display_budget(&messages, 200_000);
+        let (display, hidden) =
+            Self::trim_messages_to_display_window(&messages, Self::DISPLAY_MESSAGE_WINDOW);
         self.hidden_older_messages = hidden;
         self.oldest_displayed_sequence = display.first().map(|m| m.sequence).unwrap_or(0);
         self.display_token_count = display
@@ -383,6 +411,10 @@ impl App {
             expanded.insert(0, Self::make_history_marker(hidden));
         }
         self.messages = expanded;
+        // Everything loaded here is durable. A turn that starts (or resumes)
+        // from this point on begins at this index, so cancel-persist can never
+        // re-collect history into a fresh placeholder row (#2127).
+        self.turn_start_len = self.messages.len();
         self.auto_scroll = true;
         self.scroll_offset = 0;
 
@@ -631,37 +663,48 @@ impl App {
             .list_messages_for_session(session_id)
             .await
             .unwrap_or_default();
-        let (display, _) = Self::trim_messages_to_display_budget(&messages, 200_000);
+        let (display, _) =
+            Self::trim_messages_to_display_window(&messages, Self::DISPLAY_MESSAGE_WINDOW);
         let expanded: Vec<DisplayMessage> =
             display.into_iter().flat_map(Self::expand_message).collect();
         self.pane_message_cache.insert(session_id, expanded);
     }
 
-    /// Trim a list of DB messages to fit within a token budget (newest messages kept).
+    /// How many of the newest database rows a reloaded pane displays.
+    ///
+    /// A count, not a token budget. The budget was measured over raw DB rows,
+    /// which include the persisted tool-ledger JSON: one such row can carry
+    /// hundreds of thousands of tokens on its own, so a couple of oversized
+    /// rows collapsed the visible history to two or three messages and a
+    /// session switch looked like it had wiped the transcript (#2155). No
+    /// single row can eat a count window.
+    ///
+    /// Anything older stays behind the "N older messages hidden" marker and
+    /// remains reachable through Ctrl+O paging.
+    pub(crate) const DISPLAY_MESSAGE_WINDOW: usize = 200;
+
+    /// Upper bound on how many rows Ctrl+O paging will load in total. A count
+    /// for the same reason the window is one: the old guard stopped paging
+    /// once `display_token_count` passed 300k, and a single tool-ledger row can
+    /// pass that on its own, which left every older message unreachable
+    /// (#2155). This bound still keeps a very long session from loading itself
+    /// entirely into memory.
+    pub(crate) const MAX_DISPLAYED_MESSAGES: usize = 2_000;
+
+    /// Keep the newest `window` rows of a session, dropping the rest.
     /// Returns (kept_messages, hidden_count).
     ///
-    /// The newest message is always kept, even if it alone exceeds the
-    /// budget: the walk breaks at the first over-budget row, and without
-    /// the floor a freshly-delivered 200k+ token answer got hidden behind
-    /// the "older messages hidden" marker on session switch: the report
-    /// vanished while the live view had just shown it (#1944). Hiding the
-    /// one row the user most recently received is never the trade we want.
-    pub(crate) fn trim_messages_to_display_budget(
+    /// The newest row is always kept when the history is non-empty: a window
+    /// of zero would otherwise blank a pane that has messages, and the row the
+    /// user most recently received is the last thing to hide (#1944).
+    pub(crate) fn trim_messages_to_display_window(
         msgs: &[crate::db::models::Message],
-        budget: usize,
+        window: usize,
     ) -> (Vec<crate::db::models::Message>, usize) {
-        let mut tokens = 0usize;
-        let mut keep = 0usize;
-        for msg in msgs.iter().rev() {
-            let t = crate::brain::tokenizer::count_tokens(&msg.content);
-            if tokens + t > budget {
-                break;
-            }
-            tokens += t;
-            keep += 1;
+        if msgs.is_empty() {
+            return (Vec::new(), 0);
         }
-        // Keep-newest floor: an over-budget newest row is still displayed.
-        keep = keep.max(if msgs.is_empty() { 0 } else { 1 });
+        let keep = window.clamp(1, msgs.len());
         let hidden = msgs.len() - keep;
         (msgs[hidden..].to_vec(), hidden)
     }
@@ -685,8 +728,13 @@ impl App {
         }
     }
 
-    /// Load an older batch of messages (up to 100k tokens) from the DB and prepend
-    /// them to the current display list.  Called by Ctrl+O when hidden_older_messages > 0.
+    /// Load one more window of older messages from the DB and prepend them to
+    /// the current display list. Called by Ctrl+O when `hidden_older_messages`
+    /// is above zero.
+    ///
+    /// A count, matching the display window: a token budget here measured raw
+    /// DB rows, and one persisted tool-ledger row could fill it on its own, so
+    /// every Ctrl+O added exactly one row (#2155).
     pub(crate) async fn load_more_history(&mut self) -> Result<()> {
         tracing::debug!(
             "[SCROLL] load_more_history called: hidden={}, display_tokens={}",
@@ -708,29 +756,26 @@ impl App {
             .filter(|m| m.sequence < self.oldest_displayed_sequence)
             .collect(); // already ordered ASC by sequence
 
-        let budget = 100_000usize;
-        let mut tokens = 0usize;
-        let mut keep = 0usize;
-        for msg in older.iter().rev() {
-            let t = crate::brain::tokenizer::count_tokens(&msg.content);
-            if tokens + t > budget {
-                break;
-            }
-            tokens += t;
-            keep += 1;
-        }
+        let keep = older.len().min(Self::DISPLAY_MESSAGE_WINDOW);
+        let tokens: usize = older[older.len() - keep..]
+            .iter()
+            .map(|m| crate::brain::tokenizer::count_tokens(&m.content))
+            .sum();
         let hidden_still = older.len().saturating_sub(keep);
         let to_add = &older[older.len() - keep..];
 
         // Remove existing history_marker at front
-        if self
+        let removed_marker = if self
             .messages
             .first()
             .map(|m| m.role == "history_marker")
             .unwrap_or(false)
         {
             self.messages.remove(0);
-        }
+            true
+        } else {
+            false
+        };
 
         let mut new_msgs: Vec<DisplayMessage> = to_add
             .iter()
@@ -740,8 +785,18 @@ impl App {
         if hidden_still > 0 {
             new_msgs.insert(0, Self::make_history_marker(hidden_still));
         }
+        // Count the front block BEFORE `append` drains `self.messages`: `append`
+        // leaves the source empty, so measuring afterwards reports the whole
+        // history as prepended and throws the anchor past the end (#2127).
+        let prepended = new_msgs.len();
         new_msgs.append(&mut self.messages);
         self.messages = new_msgs;
+        self.turn_start_len = shift_turn_start(
+            self.turn_start_len,
+            prepended,
+            usize::from(removed_marker),
+            self.messages.len(),
+        );
         self.hidden_older_messages = hidden_still;
         self.oldest_displayed_sequence = to_add.first().map(|m| m.sequence).unwrap_or(0);
         self.display_token_count += tokens;
@@ -835,11 +890,14 @@ impl App {
                 let _ = sender.send(TuiEvent::CommandSubmitted(prompt));
                 true
             }
-            // `/models <provider/model>` — direct switch for the current
-            // session, no picker (#467). Same switch path as the keyboard
-            // flow (per-session swap + manual pin + DB persist).
-            s if s.starts_with("/models ") || s.starts_with("/model ") => {
-                let arg = input.split_once(' ').map(|x| x.1.trim()).unwrap_or("");
+            // `/models <provider/model>`: direct switch for the current session,
+            // no picker (#467, #2064). Matched on the full input, because `cmd`
+            // is only the first word. The arm sits before the setup-dialog arm,
+            // which also claims `/models`. Same switch path as the keyboard flow
+            // (per-session swap + manual pin + DB persist).
+            "/models" if crate::cli::session_set_model::direct_switch_arg(input).is_some() => {
+                let arg =
+                    crate::cli::session_set_model::direct_switch_arg(input).unwrap_or_default();
                 let Some(sid) = self.current_session.as_ref().map(|cs| cs.id) else {
                     self.push_system_message("No active session to switch.".to_string());
                     return true;
@@ -849,8 +907,9 @@ impl App {
                         .await;
                 // Reflect the switch in the in-memory session so the footer
                 // updates immediately instead of on the next session load.
+                let pair = arg.strip_suffix(" all").unwrap_or(arg);
                 if !reply.starts_with('⚠')
-                    && let Ok((provider, model)) = crate::utils::provider_pair::parse_pair(arg)
+                    && let Ok((provider, model)) = crate::utils::provider_pair::parse_pair(pair)
                     && let Some(cs) = self.current_session.as_mut()
                 {
                     cs.provider_name = Some(provider);
@@ -894,6 +953,16 @@ impl App {
                 };
                 let mut wizard = OnboardingWizard::from_config(&config);
                 wizard.step = step;
+                // `/models` opens on the provider and model this session is using
+                // (#2060), not on whatever config happens to list first.
+                if step == OnboardingStep::ProviderAuth
+                    && let Some(session) = self.current_session.as_ref()
+                {
+                    let provider = self.agent_service.provider_name_for_session(session.id);
+                    if let Some(model) = session.model.as_deref().filter(|m| !m.is_empty()) {
+                        wizard.select_session_pair(&provider, model, &config);
+                    }
+                }
                 // Deep-link a named channel directly to its setup dialog. Seeds
                 // the channel's fields just like selecting it in the menu; on an
                 // unknown name `open_channel_setup` leaves the menu step intact.
@@ -1632,7 +1701,7 @@ impl App {
                     // Show first line of code for context
                     let first_line = code.lines().next().unwrap_or(code);
                     let truncated = if first_line.len() > 80 {
-                        format!("{}…", &first_line[..80])
+                        format!("{}…", crate::utils::string::truncate_str(first_line, 80))
                     } else {
                         first_line.to_string()
                     };
@@ -2010,6 +2079,7 @@ impl App {
                             .filter(|s| !s.is_empty());
                         let tool_input = entry.get("i").cloned().unwrap_or(serde_json::Value::Null);
                         ToolCallEntry {
+                            task_id: None,
                             description: desc,
                             success,
                             details: output,
@@ -2023,6 +2093,7 @@ impl App {
                 tools_str
                     .split(" | ")
                     .map(|desc| ToolCallEntry {
+                        task_id: None,
                         description: desc.to_string(),
                         success: true,
                         details: None,
@@ -3048,6 +3119,12 @@ impl App {
                 self.messages.push(user_msg);
             }
 
+            // This turn's rows begin here. Anything above is durable history,
+            // and cancel-persist must not re-collect it (#2127). Set for system
+            // triggers too: they skip the user row, so without an explicit
+            // anchor the reconstruction would reach back into earlier turns.
+            self.turn_start_len = self.messages.len();
+
             // Auto-scroll to show the new user message and re-enable auto-scroll
             self.auto_scroll = true;
             self.scroll_offset = 0;
@@ -3066,14 +3143,15 @@ impl App {
                     if let Some(token) = self.cancel_token.take() {
                         token.cancel();
                     }
-                    if let Some(handle) = self.task_abort_handle.take() {
-                        handle.abort();
-                    }
-                    if let Some(ref session) = self.current_session {
-                        if let Some(stashed) = self.session_cancel_tokens.remove(&session.id) {
+                    if let Some(sid) = self.current_session.as_ref().map(|s| s.id) {
+                        // Only this session's task: the handle used to be a
+                        // single app-level slot, so "stop" in one session could
+                        // abort a turn running in another (#2155).
+                        self.abort_session_task(sid);
+                        if let Some(stashed) = self.session_cancel_tokens.remove(&sid) {
                             stashed.cancel();
                         }
-                        self.processing_sessions.remove(&session.id);
+                        self.processing_sessions.remove(&sid);
                     }
                     self.is_processing = false;
                     self.processing_started_at = None;
@@ -3081,7 +3159,6 @@ impl App {
                     self.streaming_reasoning = None;
                     self.streaming_render_cache = None;
                     self.cancel_token = None;
-                    self.task_abort_handle = None;
                     tracing::info!("Fast-cancel: active task killed by stop command");
                     return Ok(());
                 }
@@ -3141,8 +3218,10 @@ impl App {
                     }
                 }
             });
-            // Store abort handle so double-Escape can hard-kill the task
-            self.task_abort_handle = Some(handle.abort_handle());
+            // Store this session's abort handle so double-Escape hard-kills
+            // only the turn it is meant to kill (#2155).
+            self.task_abort_handles
+                .insert(session_id, handle.abort_handle());
 
             // Watch for panics — surface them in the UI instead of silent hang
             tokio::spawn(async move {
@@ -3181,6 +3260,9 @@ impl App {
             self.is_processing = true;
             self.processing_started_at = Some(std::time::Instant::now());
             self.cancel_token = Some(token.clone());
+            // Background-task turns carry their own system prompt and push no
+            // user row, so the anchor has to be explicit (#2127).
+            self.turn_start_len = self.messages.len();
         } else {
             self.session_cancel_tokens.insert(session_id, token.clone());
         }
@@ -3286,7 +3368,9 @@ impl App {
         self.streaming_output_tokens = 0;
         let reasoning_details = self.streaming_reasoning.take();
         self.cancel_token = None;
-        self.task_abort_handle = None;
+        if let Some(sid) = self.current_session.as_ref().map(|s| s.id) {
+            self.task_abort_handles.remove(&sid);
+        }
         self.escape_pending_at = None; // Reset so abort hint doesn't leak to input clear
 
         // Clean up stale pending approvals — send deny so agent callbacks don't hang
@@ -3369,61 +3453,82 @@ impl App {
         // where the fold hides it (see `answer_placement`).
         let answer_follows_tools =
             !response.content.is_empty() && last_text_precedes_tool_group(&self.messages);
-        if self.intermediate_text_received && !answer_follows_tools {
+        // This turn's rows only, so a stamp can never land on an earlier turn.
+        let turn_from = self.turn_start_len.min(self.messages.len());
+        // The row an answer may be written into: the last row of this turn that
+        // already carries text. Reasoning-only rows are skipped on purpose:
+        // their content is empty by design, so they are never the answer's home,
+        // and picking one left the answer sitting inside a thinking row.
+        let text_row = self.messages[turn_from..]
+            .iter()
+            .rposition(|m| m.role == "assistant" && !m.content.trim().is_empty())
+            .map(|i| i + turn_from);
+        // ... and the write only happens when the response EXTENDS what that row
+        // holds. Replacing a delivered report with a later, shorter closing line
+        // is how a report the user had already read came back as vanished while
+        // the database still held every character of it (#2165).
+        let write_row = if self.intermediate_text_received && !answer_follows_tools {
+            text_row.filter(|&i| answer_extends_row(&self.messages[i].content, &response.content))
+        } else {
+            None
+        };
+        if let Some(idx) = write_row {
             // IntermediateText only contained text BEFORE the last tool block.
             // The full response may have trailing text AFTER the last tool.
-            // Update the last intermediate assistant message with the full content
+            // Update the intermediate assistant message with the full content
             // so trailing text is not lost, and add cost/token metadata.
-            if let Some(last_assistant) = self
-                .messages
-                .iter_mut()
-                .rev()
-                .find(|m| m.role == "assistant")
+            let last_assistant = &mut self.messages[idx];
+            let old_len = last_assistant.content.len();
+            last_assistant.content = response.content.clone();
+            // Stamp the elapsed time before `processing_started_at` is
+            // cleared below (#964). Without this the settled header has
+            // nothing to show until the session is reloaded from the DB.
+            stamp_settled_metadata(
+                last_assistant,
+                &response,
+                &reasoning_details,
+                self.processing_started_at
+                    .map(|t| t.elapsed().as_secs() as i64),
+            );
+            tracing::debug!(
+                "Updated intermediate assistant message: old_len={}, new_len={}",
+                old_len,
+                last_assistant.content.len()
+            );
+        } else if let Some(idx) = text_row.filter(|_| response.content.is_empty()) {
+            // CLI providers (qwen-cli, opencode-cli) stream their full text
+            // through IntermediateText progress events and return an empty
+            // `response.content` at the end. Stamp the row that already holds
+            // the reply instead of adding a blank one.
+            stamp_settled_metadata(
+                &mut self.messages[idx],
+                &response,
+                &reasoning_details,
+                self.processing_started_at
+                    .map(|t| t.elapsed().as_secs() as i64),
+            );
+        } else if answer_already_on_screen(&self.messages, &response.content) {
+            // The answer text is already on screen as this turn's assistant row.
+            // A turn that halts on an option-surface tool streams its answer and
+            // then calls the tool, so the text row sits ABOVE the tool group and
+            // the response the loop synthesizes on that halt carries the same
+            // text again. Appending it would render the answer twice; the DB
+            // keeps one row per turn, so a reload drops the second copy anyway.
+            // Stamp the settled metadata onto the row that exists instead.
+            tracing::info!(
+                "[TUI] Duplicate answer row skipped: text already on screen (len={})",
+                response.content.len()
+            );
+            if let Some(idx) =
+                text_row.or_else(|| self.messages.iter().rposition(|m| m.role == "assistant"))
             {
-                let old_len = last_assistant.content.len();
-                // Only overwrite if the aggregated response actually has text.
-                // CLI providers (qwen-cli, opencode-cli) stream their full text
-                // through IntermediateText progress events and return an empty
-                // `response.content` at the end — blindly assigning would wipe
-                // the streamed text and make the reply vanish from the UI.
-                if !response.content.is_empty() {
-                    last_assistant.content = response.content.clone();
-                }
-                last_assistant.token_count = Some(response.usage.output_tokens as i64);
-                last_assistant.cost = Some(response.cost);
-                // Stamp the elapsed time before `processing_started_at` is
-                // cleared below (#964). Without this the settled header has
-                // nothing to show until the session is reloaded from the DB.
-                if let Some(started) = self.processing_started_at {
-                    last_assistant.duration_secs = Some(started.elapsed().as_secs() as i64);
-                }
-                if reasoning_details.is_some() {
-                    last_assistant.details = reasoning_details.clone();
-                }
-                tracing::debug!(
-                    "Updated intermediate assistant message: old_len={}, new_len={}",
-                    old_len,
-                    last_assistant.content.len()
-                );
-            } else {
-                // No intermediate message found (shouldn't happen), add as new
-                self.messages.push(DisplayMessage {
-                    id: response.message_id,
-                    role: "assistant".to_string(),
-                    content: response.content,
-                    timestamp: chrono::Utc::now(),
-                    token_count: Some(response.usage.output_tokens as i64),
-                    cost: Some(response.cost),
-                    approval: None,
-                    approve_menu: None,
-                    details: reasoning_details.clone(),
-                    expanded: false,
-                    expanded_full: false,
-                    tool_group: None,
-                    duration_secs: self
-                        .processing_started_at
+                stamp_settled_metadata(
+                    &mut self.messages[idx],
+                    &response,
+                    &reasoning_details,
+                    self.processing_started_at
                         .map(|t| t.elapsed().as_secs() as i64),
-                });
+                );
             }
         } else {
             // Add assistant message to UI
@@ -3575,7 +3680,7 @@ impl App {
         // persister (#269) is CLI-only, so text promoted out of
         // `streaming_response` into the message list is never written to the
         // DB until turn-end; a cancel would lose it entirely (#1468).
-        let memory_turn_text = collect_turn_assistant_text(&self.messages);
+        let memory_turn_text = collect_turn_assistant_text(&self.messages, self.turn_start_len);
 
         // Build the live tail: in-flight tool group + not-yet-promoted text.
         let mut content = String::new();
@@ -3685,6 +3790,24 @@ impl App {
     }
 }
 
+/// New start index for the in-flight turn after `prepended` rows are inserted
+/// at the front of the message list and `removed_front` rows (a history marker)
+/// are dropped from that front. Pure so the shift arithmetic is testable: the
+/// earlier version measured the prepended count after `append` had already
+/// drained the source, which reported the whole history and clamped the anchor
+/// past the end, so a cancel after Ctrl+O persisted nothing (#2127).
+pub(crate) fn shift_turn_start(
+    turn_start: usize,
+    prepended: usize,
+    removed_front: usize,
+    total: usize,
+) -> usize {
+    turn_start
+        .saturating_add(prepended)
+        .saturating_sub(removed_front)
+        .min(total)
+}
+
 /// Reconstruct the assistant text of the in-flight turn from the in-memory
 /// message list: every `assistant` DisplayMessage after the last `user`
 /// message, joined in order. For HTTP/streaming providers the real-time live
@@ -3695,12 +3818,24 @@ impl App {
 /// in-memory copy), so `persist_streaming_state` reconstructs it from here and
 /// writes it before the task is killed (#1468). Pure over the slice so it is
 /// unit-testable without a live terminal.
-pub(crate) fn collect_turn_assistant_text(messages: &[DisplayMessage]) -> String {
-    let start = messages
+pub(crate) fn collect_turn_assistant_text(
+    messages: &[DisplayMessage],
+    turn_start: usize,
+) -> String {
+    // Never read above the in-flight turn's start. Rows before it are already
+    // durable: loaded from the DB by `load_session`, or written by an earlier
+    // turn in this process. Re-collecting them wrote the whole previous turn
+    // into a fresh placeholder row, which then rendered as a second,
+    // marker-less copy of history that no fold could hide (#2127).
+    //
+    // The last user message stays a second floor so a caller that could not
+    // set an anchor still cannot reach into a settled turn.
+    let after_user = messages
         .iter()
         .rposition(|m| m.role == "user")
         .map(|i| i + 1)
         .unwrap_or(0);
+    let start = turn_start.max(after_user).min(messages.len());
     let mut out = String::new();
     for m in &messages[start..] {
         if m.role == "assistant" && !m.content.trim().is_empty() {

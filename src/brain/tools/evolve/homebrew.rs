@@ -17,7 +17,10 @@
 
 use super::bounded_child::{Outcome, first_version_field, run_bounded};
 use super::restart_status::RestartStatus;
-use super::systemd::{build_systemd_restart_command, select_unit_bus, sweep_stale_evolve_units};
+use super::systemd::{
+    EVOLVE_UNIT_PREFIX, RestartPlan, build_systemd_restart_command, select_restart_targets,
+    sweep_stale_evolve_units,
+};
 use crate::brain::agent::{ProgressCallback, ProgressEvent};
 use crate::brain::tools::error::{Result, ToolError};
 use crate::brain::tools::r#trait::ToolResult;
@@ -111,28 +114,36 @@ pub(crate) fn success_line(
 /// Arm the systemd delayed restart, the backstop the download branch has always
 /// had and this branch never did (#1779 defects 5 and 6).
 ///
-/// Order matters: pre-flight the bus, sweep spent transient units, then spawn
-/// `systemd-run`. The caller still emits `RestartReady` so the in-process exec
-/// stays the fast path; the timer is what brings the daemon back when that exec
-/// dies, which on a brew host is a real risk because brew mutates the Cellar
-/// symlink the process is about to re-enter.
+/// Order matters: pre-flight resolves the bus and the exact unit list, sweep
+/// spent transient units, then spawn `systemd-run`. The caller still emits
+/// `RestartReady` so the in-process exec stays the fast path; the timer is what
+/// brings the daemon back when that exec dies, which on a brew host is a real
+/// risk because brew mutates the Cellar symlink the process is about to
+/// re-enter.
+///
+/// The restart target is the resolved list, never the discovery glob: the
+/// transient unit this very call creates also matches that glob, and a
+/// glob-as-target restart set would contain its own executor (#2081).
 ///
 /// Private on purpose: calling this from a test could restart a real daemon.
 fn arm_systemd_backstop(sid: uuid::Uuid) -> RestartStatus {
     if !std::path::Path::new("/run/systemd/system").exists() {
         return RestartStatus::NotSystemd;
     }
-    let Some(use_user_units) = select_unit_bus(sid) else {
-        return RestartStatus::NoUnitsMatched;
+    let targets = match select_restart_targets(sid) {
+        RestartPlan::Targets(targets) => targets,
+        RestartPlan::NoUnitsMatched => return RestartStatus::NoUnitsMatched,
+        RestartPlan::Unresolved => return RestartStatus::Unresolved,
     };
-    sweep_stale_evolve_units(use_user_units, sid);
+    sweep_stale_evolve_units(targets.user, sid);
     let pid = std::process::id();
-    match build_systemd_restart_command(pid, use_user_units).spawn() {
+    match build_systemd_restart_command(pid, targets.user, &targets.units).spawn() {
         Ok(child) => {
             tracing::info!(
                 target: "evolve",
-                unit = %format!("opencrabs-evolve-{pid}"),
+                unit = %format!("{EVOLVE_UNIT_PREFIX}{pid}"),
                 systemd_run_pid = ?child.id(),
+                restart_units = ?targets.units,
                 session_id = %sid,
                 "evolve: systemd-run spawned; daemon will restart in 3s"
             );
@@ -141,7 +152,8 @@ fn arm_systemd_backstop(sid: uuid::Uuid) -> RestartStatus {
         Err(e) => {
             tracing::warn!(
                 target: "evolve",
-                unit = %format!("opencrabs-evolve-{pid}"),
+                unit = %format!("{EVOLVE_UNIT_PREFIX}{pid}"),
+                restart_units = ?targets.units,
                 error = %e,
                 session_id = %sid,
                 "evolve: failed to spawn systemd-run, the daemon will NOT auto-restart \

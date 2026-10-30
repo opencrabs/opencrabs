@@ -237,7 +237,9 @@ impl Tool for ResumeAgentTool {
                     .with_auto_approve_tools(true)
                     .with_working_directory(context.working_dir())
                     // #129: a resumed child is still headless (owner ruling C).
-                    .with_headless(true);
+                    .with_headless(true)
+                    // The parent already planned this work (see spawn.rs).
+                    .with_plan_gate_exempt(true);
 
             if let Some(brain) = system_brain {
                 builder = builder.with_system_brain(brain);

@@ -90,13 +90,13 @@ fn keyed_remote_custom_is_a_vision_candidate() {
         1,
         "keyed entry must survive the gate: {cands:?}"
     );
-    assert_eq!(cands[0].0, "go-key");
+    assert_eq!(cands[0].api_key, "go-key");
     assert!(
         cands[0]
-            .1
+            .base_url
             .starts_with("https://opencode.ai/zen/go/v1/chat/completions"),
         "url normalized as before: {}",
-        cands[0].1
+        cands[0].base_url
     );
 }
 
@@ -131,9 +131,9 @@ fn keyless_local_custom_is_still_a_candidate() {
         "keyless local endpoint must stay a candidate: {cands:?}"
     );
     assert!(
-        cands[0].0.is_empty(),
+        cands[0].api_key.is_empty(),
         "local stays keyless: {:?}",
-        cands[0].0
+        cands[0].api_key
     );
 }
 

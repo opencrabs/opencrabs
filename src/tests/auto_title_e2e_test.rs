@@ -34,13 +34,14 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::Duration;
 
-// Both scenarios are folded into a SINGLE `#[tokio::test]` because
-// `Database::GLOBAL_POOL` is a `OnceLock` set by the first
-// `Database::connect_in_memory()` call. The second test in the same
-// suite inherits a pool pointing at the first test's torn-down DB,
-// producing flaky `Failed to create message` errors. Running both
-// scenarios in one runtime keeps the global-pool reference stable
-// across the two phases.
+// Both scenarios run in a SINGLE `#[tokio::test]` so they share one runtime
+// and one `SessionService` instead of rebuilding both.
+//
+// The fold exists because `Database::GLOBAL_POOL` is a process-wide
+// `OnceLock`: while a file-backed `Database::connect` published into it, a
+// second test in the same suite could inherit a pool pointing at the first
+// test's torn-down DB. That publish is now gated out of test builds (#2072),
+// so the pool can no longer be inherited this way. The fold is left in place.
 
 /// Provider that returns the same canned response for both `stream` (used
 /// by the main user-message turn) and `complete` (used by the auto-title

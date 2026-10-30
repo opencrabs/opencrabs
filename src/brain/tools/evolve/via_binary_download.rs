@@ -9,8 +9,8 @@ use super::archive::{extract_from_tar_gz, extract_from_zip};
 use super::binary_health::{get_binary_migration_count, health_check_binary};
 use super::restart_status::RestartStatus;
 use super::systemd::{
-    EVOLVE_UNIT_GLOB, SYSTEMD_UNIT_PATTERN, build_systemd_cleanup_command,
-    build_systemd_restart_command, count_matching_systemd_units,
+    EVOLVE_UNIT_PREFIX, RestartPlan, build_systemd_restart_command, select_restart_targets,
+    sweep_stale_evolve_units,
 };
 use crate::brain::agent::ProgressEvent;
 use crate::utils::install::{binary_name, platform_suffix};
@@ -670,122 +670,62 @@ impl EvolveTool {
         //
         // We use systemd-run --on-active=N, which creates a transient timer
         // unit tracked by PID 1, outside our service cgroup.  This means the
-        // timer survives even after `systemctl restart opencrabs*.service`
-        // kills the current process.
+        // timer survives even after the restart kills the current process.
         //
-        // Only units matching the glob pattern are restarted, so adding a
-        // new profile (e.g. opencrabs-staging.service) picks it up
-        // automatically with no code change.
+        // The restart target is a resolved unit list, never the discovery
+        // glob. The transient unit systemd-run creates is named
+        // `opencrabs-evolve-<pid>`, which the glob also matches, so a glob
+        // used as the restart target contains its own executor: systemd
+        // SIGTERMs the transient unit mid-job, retries until
+        // `start-limit-hit`, and every retry re-issues the restart job, so
+        // the daemon is churned several times inside one second (#2081).
+        // Adding a new profile (e.g. opencrabs-staging.service) is still
+        // picked up automatically, because the glob remains the discovery
+        // pattern the resolver lists with.
         //
-        // Pre-flight: count units that match the glob. If zero match,
-        // the scheduled `systemctl restart` would be a no-op — same
-        // user-visible symptom as #136 (agent says "Evolved!", daemon
-        // never restarts) but for a different reason (unit name
-        // mismatch instead of missing restart). Skip the spawn and
-        // tell the user honestly.
+        // Pre-flight resolves the units and the bus. A confirmed zero match
+        // means the scheduled restart would be a no-op, the same
+        // user-visible symptom as #136 (agent says "Evolved!", daemon never
+        // restarts) for a different reason (unit name mismatch instead of a
+        // missing restart), so we skip the spawn and tell the user honestly.
         //
         // OpenCrabs is commonly installed as a user-level systemd service
-        // (`systemctl --user`), so if system-level units return 0 we
-        // fall through and check user-level units too.
+        // (`systemctl --user`), so if system-level units return 0 the
+        // resolver falls through and checks user-level units too.
         let mut restart_status = RestartStatus::NotSystemd;
-        let mut use_user_units = false;
         if std::path::Path::new("/run/systemd/system").exists() {
-            let mut unit_count = count_matching_systemd_units(SYSTEMD_UNIT_PATTERN, false);
-            if unit_count == Some(0) {
-                // No system-level units matched — try user-level.
-                // OpenCrabs's `install_systemd_service()` writes to
-                // ~/.config/systemd/user/ and uses `systemctl --user`.
-                let user_count = count_matching_systemd_units(SYSTEMD_UNIT_PATTERN, true);
-                match user_count {
-                    Some(n) if n > 0 => {
-                        use_user_units = true;
-                        unit_count = Some(n);
-                        tracing::info!(
-                            target: "evolve",
-                            pattern = SYSTEMD_UNIT_PATTERN,
-                            user_units = n,
-                            session_id = %sid,
-                            "evolve: no system-level units found, using {n} user-level units — scheduling restart with --user"
-                        );
-                    }
-                    _ => {
-                        // Still 0 or None — keep unit_count as Some(0)
-                    }
-                }
-            }
-            match unit_count {
-                Some(0) => {
-                    tracing::warn!(
-                        target: "evolve",
-                        pattern = SYSTEMD_UNIT_PATTERN,
-                        session_id = %sid,
-                        "evolve: no systemd units matched the pattern (checked system and user level) — skipping scheduled restart"
-                    );
+            match select_restart_targets(sid) {
+                RestartPlan::NoUnitsMatched => {
                     restart_status = RestartStatus::NoUnitsMatched;
                 }
-                _ => {
-                    // Either Some(n>=1) or None ("don't know" — systemctl
-                    // failed to spawn / returned non-zero). In the None
-                    // case, fall through and schedule the restart anyway:
-                    // a diagnostic failure shouldn't penalize the user
-                    // whose daemon DOES exist and DOES match the glob.
-                    if let Some(n) = unit_count {
-                        tracing::info!(
-                            target: "evolve",
-                            pattern = SYSTEMD_UNIT_PATTERN,
-                            matched_units = n,
-                            use_user_units,
-                            session_id = %sid,
-                            "evolve: pre-flight found matching systemd units, scheduling restart (+3s)"
-                        );
-                    } else {
-                        tracing::warn!(
-                            target: "evolve",
-                            pattern = SYSTEMD_UNIT_PATTERN,
-                            session_id = %sid,
-                            "evolve: could not determine matching unit count (systemctl spawn failed), \
-                             scheduling restart anyway"
-                        );
-                    }
+                RestartPlan::Unresolved => {
+                    restart_status = RestartStatus::Unresolved;
+                }
+                RestartPlan::Targets(targets) => {
                     let pid = std::process::id();
-                    let unit_name = format!("opencrabs-evolve-{pid}");
+                    let unit_name = format!("{EVOLVE_UNIT_PREFIX}{pid}");
                     // Garbage-collect spent evolve units from prior runs before
                     // scheduling a fresh one. Without --collect (unsupported on
                     // old systemd) finished/failed `opencrabs-evolve-<pid>`
                     // units pile up indefinitely; reset-failed clears them and
-                    // works on every systemd we target. Best-effort — a cleanup
+                    // works on every systemd we target. Best-effort: a cleanup
                     // failure must not block the restart.
-                    match build_systemd_cleanup_command(use_user_units).status() {
-                        Ok(st) => tracing::info!(
-                            target: "evolve",
-                            glob = EVOLVE_UNIT_GLOB,
-                            success = st.success(),
-                            session_id = %sid,
-                            "evolve: reset-failed swept stale evolve units"
-                        ),
-                        Err(e) => tracing::warn!(
-                            target: "evolve",
-                            glob = EVOLVE_UNIT_GLOB,
-                            error = %e,
-                            session_id = %sid,
-                            "evolve: could not sweep stale evolve units (reset-failed spawn failed) — \
-                             they will linger until manually cleared, but the restart still proceeds"
-                        ),
-                    }
+                    sweep_stale_evolve_units(targets.user, sid);
                     // Failure to spawn systemd-run is the most user-visible
                     // regression mode: the binary on disk is updated, the
                     // agent says "Evolved!", but the daemon keeps running
                     // the old inode forever because no restart was ever
                     // scheduled. Log at warn so the user has actionable
                     // forensic evidence when "evolve said success but
-                    // didn't restart" happens — exactly the symptom this
+                    // didn't restart" happens, exactly the symptom this
                     // whole code path was added to prevent (#136).
-                    match build_systemd_restart_command(pid, use_user_units).spawn() {
+                    match build_systemd_restart_command(pid, targets.user, &targets.units).spawn() {
                         Ok(child) => {
                             tracing::info!(
                                 target: "evolve",
                                 unit = %unit_name,
                                 systemd_run_pid = child.id(),
+                                restart_units = ?targets.units,
                                 session_id = %sid,
                                 "evolve: systemd-run spawned; daemon will restart in 3s"
                             );
@@ -795,11 +735,13 @@ impl EvolveTool {
                             tracing::warn!(
                                 target: "evolve",
                                 unit = %unit_name,
+                                restart_units = ?targets.units,
                                 error = %e,
                                 session_id = %sid,
-                                "evolve: failed to spawn systemd-run — daemon will NOT auto-restart, \
-                                 manual `systemctl restart opencrabs*.service` (or `systemctl --user restart` \
-                                 for user services) is required to load the new binary"
+                                "evolve: failed to spawn systemd-run, daemon will NOT auto-restart, \
+                                 a manual `systemctl --user restart <your-unit>` (or `systemctl \
+                                 restart <your-unit>` for a system service) is required to load \
+                                 the new binary"
                             );
                             restart_status = RestartStatus::SpawnFailed(e.to_string());
                         }

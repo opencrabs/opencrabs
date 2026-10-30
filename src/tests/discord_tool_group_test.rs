@@ -5,13 +5,15 @@
 use crate::channels::background_work::FlowOutcome;
 use crate::channels::discord::DiscordState;
 use crate::channels::discord::tool_group::{
-    GroupEntry, GroupState, SettledStatus, render_components, render_content,
+    GroupEntry, GroupState, SettledStatus, render_components, render_content, render_embeds,
 };
 use std::time::{Duration, Instant};
 
 fn entries(n: usize, done: bool) -> Vec<GroupEntry> {
     (0..n)
         .map(|i| GroupEntry {
+            call_id: String::new(),
+            task_id: None,
             name: format!("tool{i}"),
             context: format!(" (arg{i})"),
             status: if done { Some(true) } else { None },
@@ -21,6 +23,7 @@ fn entries(n: usize, done: bool) -> Vec<GroupEntry> {
 
 fn group(n: usize, done: bool, expanded: bool) -> GroupState {
     GroupState {
+        page: 0,
         entries: entries(n, done),
         expanded,
         notes: Vec::new(),
@@ -36,8 +39,11 @@ fn collapsed_shows_summary_expanded_lists_tools() {
     assert!(collapsed.contains("running"));
     assert!(!collapsed.contains("tool0"));
 
+    // Expanded rows live in the card embed, not the message text (#1880).
     let expanded = render_content(&group(3, true, true));
-    assert!(expanded.contains("tool0") && expanded.contains("tool2"));
+    assert!(!expanded.contains("tool0"));
+    let card = serde_json::to_string(&render_embeds(&group(3, true, true))).unwrap();
+    assert!(card.contains("tool0") && card.contains("tool2"));
 
     let single = render_content(&group(1, false, false));
     assert!(single.contains("tool0"));
@@ -68,7 +74,14 @@ async fn retention_prunes_oldest_groups() {
     for i in 0..25u64 {
         state.upsert_tool_group(i, group(2, true, false)).await;
     }
-    assert!(state.toggle_tool_group(0).await.is_none());
+    // Retention is a memory bound. A click on an evicted card legitimately
+    // restores it from SQLite whenever a pool is present (#1880), so assert on
+    // the memory map rather than on the toggle, which depends on whether some
+    // other test in the binary has opened a database.
+    let ids = state.memory_group_ids().await;
+    assert_eq!(ids.len(), 20);
+    assert!(!ids.contains(&0));
+    assert!(ids.contains(&24));
     assert!(state.toggle_tool_group(24).await.is_some());
 }
 

@@ -1,6 +1,6 @@
 //! Hashline Edit Tool
 //!
-//! Hash-anchored file editing: models reference lines by 2-char content hashes
+//! Hash-anchored file editing: models reference lines by content hashes
 //! instead of reproducing text. Eliminates stale-line errors and reduces token
 //! usage, especially for weaker models.
 
@@ -35,9 +35,9 @@ impl Tool for HashlineEditTool {
     }
 
     fn description(&self) -> &str {
-        "Edit a file using hash-anchored line references. Each line is identified by a 4-char \
-         content hash (from read_file with hashline=true). Reference lines by hash alone (e.g. \
-         'VKQM' or '#VKQM'); legacy 'LINE#HASH' format is accepted but the line number is ignored. \
+        "Edit a file using hash-anchored line references. Each line is identified by the \
+         content hash read_file prints with hashline=true. Reference lines by hash alone (e.g. \
+         'VKQMZP' or '#VKQMZP'); legacy 'LINE#HASH' format is accepted but the line number is ignored. \
          Stale hashes are rejected before any changes are applied. Supports batch edits (multiple \
          operations in one call)."
     }
@@ -63,7 +63,7 @@ impl Tool for HashlineEditTool {
                             },
                             "pos": {
                                 "type": "string",
-                                "description": "Anchor: 4-char content hash from hashline read (e.g. 'VKQM' or '#VKQM'). Legacy 'LINE#HASH' accepted; line number ignored. Required for replace, optional for append/prepend."
+                                "description": "Anchor: the content hash from hashline read (e.g. 'VKQMZP' or '#VKQMZP'), taken from before the `|` on the line. Legacy 'LINE#HASH' accepted; line number ignored. Required for replace, optional for append/prepend."
                             },
                             "end": {
                                 "type": "string",
@@ -147,7 +147,20 @@ impl Tool for HashlineEditTool {
         for (i, edit) in input.edits.iter().enumerate() {
             match resolve_edit(edit, i, &hash_to_lines, total_lines)? {
                 Ok(resolved_edit) => resolved.push(resolved_edit),
-                Err(error_msg) => return Ok(ToolResult::error(error_msg)),
+                Err(error_msg) => {
+                    // A parse failure is the caller pasting a source line where a
+                    // tag belongs. Show the real thing: two tags from the file
+                    // they named, in the exact form read_file prints them (#2201).
+                    let error_msg = if error_msg.contains("Invalid hash ref") {
+                        format!(
+                            "{error_msg}\n\n{}",
+                            ref_examples(&line_hashes, &original_lines)
+                        )
+                    } else {
+                        error_msg
+                    };
+                    return Ok(ToolResult::error(error_msg));
+                }
             }
         }
 
@@ -170,11 +183,18 @@ impl Tool for HashlineEditTool {
             apply_edit(&mut result_lines, edit);
         }
 
-        let new_content = result_lines.join("\n");
+        // Join with the file's own ending (#2227). A bare `\n` here rewrote
+        // every line of a CRLF file: editing one line converted the whole
+        // document to LF, and the result diff only listed the changed line, so
+        // nothing said so. This tool applies edits bottom-up over a line
+        // vector, so a mixed-ending file cannot keep per-line endings; the
+        // dominant ending wins, which `hashline_crlf_2227_test` pins.
+        let eol = crate::brain::tools::line_ops::dominant_eol(&content);
+        let new_content = result_lines.join(eol);
 
-        // Preserve trailing newline if original had one
+        // Preserve the final newline if the original had one
         let new_content = if content.ends_with('\n') && !new_content.ends_with('\n') {
-            format!("{}\n", new_content)
+            format!("{}{}", new_content, eol)
         } else {
             new_content
         };
@@ -185,6 +205,13 @@ impl Tool for HashlineEditTool {
             .map_err(ToolError::Io)?;
         // Release the path lock taken before the read (#593).
         drop(write_lock);
+
+        // The session now knows the file as what it just wrote, so its next
+        // write_file is not mistaken for another agent's change (#2210). The
+        // read above was whole-file, so this edit is also a basis for a later
+        // overwrite (#1168), the same as a whole-file read or a write.
+        crate::brain::tools::file_versions::record(context.session_id, &path, &new_content);
+        crate::brain::tools::read_state::mark_fully_read(context.session_id, &path);
 
         // Track file in session (fire and forget, path-only)
         if let Some(ref sc) = context.service_context {
@@ -322,6 +349,42 @@ fn resolve_edit(
             }))
         }
     }
+}
+
+/// Two or three real `HASH|content` lines from the file being edited, printed
+/// next to a parse failure. The dominant `hashline_edit` failure is a source
+/// line pasted where a tag belongs, and the old error only stated a length, so
+/// the correct form lived one tool call away. Showing it inside the failure
+/// ends the round trip (#2201).
+fn ref_examples(line_hashes: &[(usize, String)], lines: &[&str]) -> String {
+    let mut out =
+        String::from("Hash refs look like this, taken from `read_file` with hashline=true:\n");
+    let mut shown = 0;
+    for (num, hash) in line_hashes {
+        if shown == 3 {
+            break;
+        }
+        let Some(content) = lines.get(num.saturating_sub(1)) else {
+            continue;
+        };
+        if content.trim().is_empty() {
+            continue;
+        }
+        let mut sample: String = content.chars().take(60).collect();
+        if content.chars().count() > 60 {
+            sample.push_str("...");
+        }
+        out.push_str(&format!(
+            "  {}\n",
+            super::hash::format_hashline(*num, hash, &sample)
+        ));
+        shown += 1;
+    }
+    if shown == 0 {
+        out.push_str("  (this file has no non-blank lines to sample)\n");
+    }
+    out.push_str("Use the tag before the `|`, not the source line.");
+    out
 }
 
 /// Validate that a HashRef's hash exists in the file and is unique.

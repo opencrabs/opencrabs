@@ -73,6 +73,18 @@ pub fn ensure_config_seeded() -> bool {
     }
 }
 
+/// Write the shipped example over `path`, whether or not a file is there.
+///
+/// Not a first-run filler like [`ensure_config_seeded`]: `init` asks for the
+/// documented file, and with `--force` it asks for it over an existing one
+/// (#2093).
+pub fn write_config_example(path: &Path) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    atomic_write(path, CONFIG_EXAMPLE)
+}
+
 /// Ensure `keys.toml` exists, seeded from the shipped example.
 pub fn ensure_keys_seeded() -> bool {
     let path = keys_path();

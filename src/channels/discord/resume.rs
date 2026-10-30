@@ -69,6 +69,7 @@ pub(crate) fn build_enqueue_callback(
                 if let Some(group) = state.refresh_waiting_line(gmid, verb).await {
                     let edit = serenity::builder::EditMessage::new()
                         .content(super::tool_group::render_content(&group))
+                        .embeds(super::tool_group::render_embeds(&group))
                         .components(super::tool_group::render_components(&group, gmid));
                     let flip_mid = serenity::model::id::MessageId::new(gmid);
                     if let Some(Err(e)) = super::governor::edit_chrome(

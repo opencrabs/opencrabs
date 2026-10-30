@@ -81,6 +81,22 @@ fn test_core_brain_forbids_tests_writing_the_live_config() {
 }
 
 #[test]
+fn test_core_brain_keeps_secrets_out_of_the_session() {
+    // #2094: an endpoint that needs a key is called from a script that reads
+    // the key itself, so the secret never enters the conversation.
+    let dir = TempDir::new().unwrap();
+    let brain = loader(&dir).build_core_brain(None);
+    assert!(
+        brain.contains("SECRETS AND KEYED CALLS"),
+        "the keyed-call rule must be in the preamble"
+    );
+    assert!(
+        brain.contains("Python script") && brain.contains("keys.toml"),
+        "the rule must name the script and where the key is read from"
+    );
+}
+
+#[test]
 fn preamble_states_table_rendering_mechanics() {
     // #689: telling the agent to "use tables" is not enough — a weaker model
     // collapses them onto one line and Telegram renders raw pipes. The preamble

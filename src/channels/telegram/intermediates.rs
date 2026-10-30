@@ -106,7 +106,7 @@ pub(crate) async fn try_send_intermediate_rich(
 ///
 /// The fallback arm's premise is that it REPLACES the intermediates it
 /// deletes. A bubble whose media array carried documents is not in
-/// `intermediate_msg_ids`, so nothing it holds can be deleted: the arm would
+/// `intermediate_bubbles`, so nothing it holds can be deleted: the arm would
 /// delete only the smaller text bubbles and still re-send the body, leaving
 /// the reader with it twice. The normalization matches the dedup ladder in
 /// `deliver_final_response`, so both agree on what "same body" means.
@@ -353,7 +353,9 @@ pub(crate) async fn deliver_intermediate_message(
         {
             let mut s = streaming.lock().unwrap_or_else(|e| e.into_inner());
             if doc_media.is_empty() {
-                s.intermediate_msg_ids.push(id);
+                // Paired with its text so the final leg can delete exactly the
+                // bubbles its own answer already delivers (#2156).
+                s.intermediate_bubbles.push((id, dedup_text.to_string()));
             } else {
                 // The documents ride THIS bubble's media array: it is the
                 // only copy of them in the chat, so its id must never reach
@@ -391,7 +393,7 @@ pub(crate) async fn deliver_intermediate_message(
             // Each document shipped as its OWN bubble, so the pair points at
             // the document itself: the address the final leg links the
             // marker to (#1939). These ids stay out of
-            // `intermediate_msg_ids`, so the rich fallback deletes only the
+            // `intermediate_bubbles`, so the rich fallback deletes only the
             // text around them.
             s.delivered_files.extend(delivered.iter().cloned());
         }
@@ -407,12 +409,15 @@ pub(crate) async fn deliver_intermediate_message(
     if html.is_empty() {
         return false;
     }
-    let mut sent_ids: Vec<MessageId> = Vec::new();
+    let mut sent_pairs: Vec<(MessageId, String)> = Vec::new();
     for chunk in split_message(&html, 4096) {
         match send_html_or_plain(bot, chat, thread_id, chunk, "turn", None).await {
             Ok(id) => {
                 tg.note_bot_bubble(chat.0, id.0);
-                sent_ids.push(id);
+                // The chunk text rides with its id: a chunked intermediate is
+                // several bubbles, and only the pair says which words went
+                // into which one (#2156).
+                sent_pairs.push((id, chunk.to_string()));
             }
             Err(e) => {
                 tracing::warn!("Telegram: rich-intermediate send failed ({e})");
@@ -422,7 +427,7 @@ pub(crate) async fn deliver_intermediate_message(
     }
     let mut s = streaming.lock().unwrap_or_else(|e| e.into_inner());
     s.sent_intermediates.push(dedup_text.to_string());
-    s.intermediate_msg_ids.extend(sent_ids);
+    s.intermediate_bubbles.extend(sent_pairs);
     true
 }
 

@@ -58,6 +58,12 @@ pub struct ChannelFactory {
     /// interactive-only tools hard-error (belt-and-braces backstop behind the
     /// registry-level exclusion). Default `false` (interactive channel factory).
     headless: std::sync::atomic::AtomicBool,
+    /// Plan-gate exemption (#2161): every agent this factory builds skips the
+    /// mechanical plan requirement. Cron runs are the task already: there is no
+    /// user in the loop to approve a plan, so a job that crosses the tool-call
+    /// threshold mid-run would strand itself asking for one. Default `false`
+    /// (interactive channel factory), where the gate applies.
+    plan_gate_exempt: std::sync::atomic::AtomicBool,
     /// Channel-manager handle (#148): wired into every agent service so the
     /// tool loop can derive the ambient `origin_target` from the session
     /// ownership maps. Set once at startup via [`set_channel_manager`];
@@ -90,6 +96,7 @@ impl ChannelFactory {
             runtime_info: OnceLock::new(),
             subagent_manager: OnceLock::new(),
             headless: std::sync::atomic::AtomicBool::new(false),
+            plan_gate_exempt: std::sync::atomic::AtomicBool::new(false),
             channel_manager: OnceLock::new(),
         }
     }
@@ -101,6 +108,13 @@ impl ChannelFactory {
     pub fn set_headless(&self, headless: bool) {
         self.headless
             .store(headless, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Exempt every agent this factory builds from the mechanical plan gate
+    /// (#2161). Set by [`configure_cron_factory`] on the daemon's cron factory.
+    pub fn set_plan_gate_exempt(&self, exempt: bool) {
+        self.plan_gate_exempt
+            .store(exempt, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Wire in the runtime info so channel agents rebuild their system brain
@@ -202,6 +216,13 @@ impl ChannelFactory {
 
         if self.headless.load(std::sync::atomic::Ordering::Relaxed) {
             builder = builder.with_headless(true);
+        }
+
+        if self
+            .plan_gate_exempt
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            builder = builder.with_plan_gate_exempt(true);
         }
 
         if let Some(tx) = self.session_updated_tx.get() {
@@ -369,4 +390,18 @@ impl ChannelFactory {
             .and_then(|t| t.openai.as_ref())
             .and_then(|p| p.api_key.clone())
     }
+}
+
+/// Configure a factory to build agents for cron execution (#2161).
+///
+/// A scheduled job runs with no user in the loop: it is already the task
+/// someone planned, and there is nobody to approve a plan card. Both flags are
+/// set here rather than at each call site, because the daemon's factory is
+/// exactly the surface where forgetting one strands a job mid-run: the
+/// active-profile branch in `resolve_job_agent` reuses this factory, and before
+/// #2161 it inherited `headless` but carried no plan exemption at all, so a job
+/// that crossed the tool-call threshold stranded itself asking for a plan.
+pub fn configure_cron_factory(factory: &ChannelFactory) {
+    factory.set_headless(true);
+    factory.set_plan_gate_exempt(true);
 }

@@ -3,8 +3,11 @@
 //! The check is pure: USER.md text and the three capability flags go in,
 //! the list of gaps comes out. Nothing here reads the live home.
 
+use crate::config::{Config, ProviderConfig, ProviderConfigs};
 use crate::tui::onboarding::SetupGap;
-use crate::tui::onboarding::setup_gaps::{collect_gaps, profile_gaps, render_gaps};
+use crate::tui::onboarding::setup_gaps::{
+    collect_gaps, image_generation_ready, profile_gaps, render_gaps,
+};
 
 const TEMPLATE_USER_MD: &str = include_str!("../docs/reference/templates/USER.md");
 
@@ -106,4 +109,66 @@ fn gap_labels_have_no_em_dash() {
     for gap in collect_gaps("", false, false, false) {
         assert!(!gap.label().contains('\u{2014}'));
     }
+}
+
+// ── #2106: the image leg asks the tool's own resolver ────────────────
+
+/// The shape onboarding actually saves for a built-in install: the provider
+/// enabled, the install token stored, the image model pinned.
+fn builtin_install(token: Option<&str>) -> Config {
+    Config {
+        providers: ProviderConfigs {
+            opencrabs: Some(ProviderConfig {
+                enabled: true,
+                api_key: token.map(str::to_string),
+                default_model: Some("deepseek-v4.1-flash".into()),
+                generation_model: Some("gemini-2.5-flash-image".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+#[test]
+fn a_built_in_install_is_not_told_image_generation_is_missing() {
+    let config = builtin_install(Some("ocp_test_token"));
+    assert!(
+        image_generation_ready(&config),
+        "the built-in provider serves image generation on day 0"
+    );
+    let gaps = collect_gaps(FILLED_USER_MD, true, true, image_generation_ready(&config));
+    assert!(
+        !gaps.contains(&SetupGap::ImageGeneration),
+        "a capability the install already has must not be listed as missing: {gaps:?}"
+    );
+}
+
+#[test]
+fn a_config_with_no_generation_route_still_reports_the_gap() {
+    let config = Config::default();
+    assert!(!image_generation_ready(&config));
+    let gaps = collect_gaps(FILLED_USER_MD, true, true, image_generation_ready(&config));
+    assert!(gaps.contains(&SetupGap::ImageGeneration));
+}
+
+#[test]
+fn the_global_gemini_leg_alone_still_counts() {
+    let mut config = Config::default();
+    config.image.generation.enabled = true;
+    config.image.generation.api_key = Some("test-gemini-key".into());
+    assert!(
+        image_generation_ready(&config),
+        "an install configured the old way keeps the same answer"
+    );
+}
+
+#[test]
+fn a_built_in_section_without_a_token_is_not_ready() {
+    let config = builtin_install(None);
+    assert!(
+        !image_generation_ready(&config),
+        "a keyless section is not a route; the gap is honest"
+    );
 }

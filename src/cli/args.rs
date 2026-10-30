@@ -399,6 +399,21 @@ pub enum ChannelCommands {
         #[arg(long)]
         code: bool,
     },
+    /// Download a document through the Telegram userbot (up to 2 GB)
+    #[command(name = "userbot-download")]
+    UserbotDownload {
+        /// Peer: @username or numeric chat/channel id
+        peer: String,
+        /// Message id, or "latest" for the most recent document
+        #[arg(default_value = "latest")]
+        message: String,
+        /// Output directory (defaults to the current directory)
+        #[arg(short, long)]
+        outdir: Option<String>,
+        /// List recent document messages instead of downloading
+        #[arg(long)]
+        list: bool,
+    },
 }
 
 /// Operations for `opencrabs routes` (client-side route table).
@@ -605,6 +620,35 @@ pub enum MigrationSource {
     Hermes,
 }
 
+/// Whether the startup path seeds the documented `config.toml` for this
+/// command.
+///
+/// `init` is exempt (#2093). Seeding runs before the subcommand dispatch, so
+/// `cmd_init` found a file that already existed and refused to run on a fresh
+/// install. `init` creates that same documented file itself, from the same
+/// example, in `commands::cmd_init`.
+pub(crate) fn seeds_config_on_startup(command: Option<&Commands>) -> bool {
+    !matches!(command, Some(Commands::Init { .. }))
+}
+
+/// Commands that build a provider, and therefore need the built-in one
+/// provisioned on a home that has nothing else (#2151).
+///
+/// Deliberately not every command. `status`, `doctor`, `config` and the rest
+/// report on what is already there, and minting a token during a read-only
+/// report would be a network call nobody asked for. The TUI is absent too: it
+/// provisions itself in `App::provision_first_run`.
+fn command_builds_a_provider(command: Option<&Commands>) -> bool {
+    matches!(
+        command,
+        Some(Commands::Run { .. })
+            | Some(Commands::Agent { .. })
+            | Some(Commands::Acp { .. })
+            | Some(Commands::Daemon)
+            | Some(Commands::Cron { .. })
+    )
+}
+
 /// Main CLI entry point
 pub async fn run() -> Result<()> {
     let cli = Cli::parse();
@@ -641,22 +685,36 @@ pub async fn run() -> Result<()> {
     // editing config.toml; the ConfigWatcher re-applies live changes.
     crate::logging::apply_debug_logs(cli.debug, config.agent.debug_logs);
 
-    // Auto-generate config.toml if API keys exist in env but no config file yet.
-    // This prevents the onboarding wizard from triggering when .env is already set up.
-    let config_path = Config::system_config_path();
-    if let Some(ref path) = config_path
-        && !path.exists()
-        && config.has_any_api_key()
-    {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).ok();
-        }
+    // Seed the documented config.toml and keys.toml on every first run, not
+    // only when an API key happens to already be in the environment (#2079).
+    // The seeding below used to be gated on `has_any_api_key`, so a genuinely
+    // fresh install finished startup with neither file on disk: `opencrabs
+    // status` reported `Provider: none`, and the wizard had no documented
+    // file to write its answers into. `seed_if_absent` never touches a file
+    // that is already there, so this only ever fills a blank home.
+    // `init` is exempt (#2093): creating that config is the command's whole
+    // job, and seeding it here first meant `init` found its own output and
+    // refused to run on a fresh install. It writes the same documented
+    // example itself.
+    let seeds_config = seeds_config_on_startup(cli.command.as_ref());
+    let config_seeded = if seeds_config {
+        crate::config::seed::ensure_config_seeded()
+    } else {
+        false
+    };
+    if seeds_config {
+        crate::config::seed::ensure_keys_seeded();
+    }
+
+    // With keys in the environment and a config we just seeded, enable what
+    // there are keys for, so the wizard does not ask for a provider the user
+    // has already configured.
+    if config_seeded && config.has_any_api_key() {
         // Seed the documented example, then enable what there are keys for
         // (#1437). This used to serialise the whole in-memory config over the
         // path instead, and because TOML cannot represent a None, that wrote a
         // file holding only the handful of providers that happened to be set:
         // no sections for the rest, no comments, nothing to hand-edit later.
-        crate::config::seed::ensure_config_seeded();
         let enabled = crate::config::seed::enable_providers_with_keys(&config);
         if enabled.is_empty() {
             tracing::warn!(
@@ -675,6 +733,32 @@ pub async fn run() -> Result<()> {
     // must all leave the user with a working personality on first open.
     // Compiled-in templates, offline-safe, idempotent, never overwrites.
     crate::config::profile::ensure_brain_seeded();
+
+    // The config in hand was loaded before the documented example existed, so
+    // on a genuinely fresh home it carries no provider sections at all. Re-read
+    // it now that seeding has written them, or the provisioning below would
+    // find nothing to provision (#2151).
+    let mut config = if config_seeded {
+        let reloaded = commands::load_config(cli.config.as_deref()).await?;
+        Config::set_current(reloaded.clone());
+        reloaded
+    } else {
+        config
+    };
+
+    // #2151: a headless start never opens the TUI, so it never reached
+    // `provision_first_run` and never asked the proxy for this install's token.
+    // `run`, `agent`, `acp`, `daemon` and the cron scheduler all build a
+    // provider, so without this they died on a fresh home with "No provider
+    // configured" and no way out short of a TTY.
+    if command_builds_a_provider(cli.command.as_ref())
+        && crate::brain::provider::opencrabs_acquire::provision_builtin_provider(&mut config).await
+    {
+        // The token is in memory now too, so the global mirror has to agree
+        // with the config the command is about to receive.
+        Config::set_current(config.clone());
+        tracing::info!("First run: built-in provider token acquired");
+    }
 
     match cli.command {
         None | Some(Commands::Chat { .. }) => {

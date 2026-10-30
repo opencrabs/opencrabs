@@ -11,6 +11,7 @@ pub(crate) mod confidential;
 pub mod epistemic;
 pub mod error;
 pub mod registry;
+pub mod scope;
 pub(crate) mod ssrf;
 pub(crate) mod r#trait;
 
@@ -24,6 +25,7 @@ pub mod fs_util;
 pub mod glob;
 pub mod grep;
 pub mod hashline;
+pub mod line_ops;
 pub mod ls;
 pub mod read;
 pub mod read_state;

@@ -197,7 +197,7 @@ pub(crate) async fn handle_reaction_added(
     };
 
     let (text_only, _imgs) = crate::utils::extract_img_markers(&response.content);
-    let text_only = crate::utils::sanitize::strip_llm_artifacts(&text_only);
+    let text_only = crate::utils::sanitize::sanitize_outbound(&text_only);
     let (text_only, react_emoji) = crate::utils::extract_react_marker(&text_only);
     if let Some(em) = react_emoji {
         add_reaction(

@@ -21,6 +21,7 @@ use super::super::theme::{self as render_theme, Role};
 use super::theme;
 use crate::brain::mission_control::{McAnalytics, McToolStat, TimeWindow};
 use crate::tui::app::App;
+use crate::tui::render::responsive::grid_cols;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -131,18 +132,6 @@ fn active_sections(a: &McAnalytics, window: TimeWindow) -> Vec<(String, CardKind
         out.push(("Top tools".to_string(), CardKind::TopTools));
     }
     out
-}
-
-/// Responsive column count for the card grid (#900). Wide columns get a 3-across
-/// dashboard, medium get 2, narrow fall back to a single stacked column.
-fn grid_cols(w: u16) -> usize {
-    if w >= 90 {
-        3
-    } else if w >= 56 {
-        2
-    } else {
-        1
-    }
 }
 
 /// One bordered card: the section title sits in the border, the body lines

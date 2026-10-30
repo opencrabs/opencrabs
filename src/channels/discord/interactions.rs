@@ -86,12 +86,26 @@ pub(crate) async fn route_interaction_turn(
     idle_hours: Option<f64>,
     context_text: String,
     display_tag: String,
+    discord_state: Arc<super::DiscordState>,
 ) {
     let Some(session_id) =
         resolve_interaction_session(&session_svc, is_dm, user_id, channel_id, idle_hours).await
     else {
         return;
     };
+
+    // Claim the session's turn slot before the turn runs (#2191). A select
+    // pick or a modal submit is not a user-intent turn, but it still starts a
+    // tool loop against the session, so it obeys the same rule the typed path
+    // and the tap follow (#1990). Losing the claim queues the interaction for
+    // the live turn: without this, a component interaction arriving mid-turn
+    // forked a second concurrent loop onto the same session row.
+    let Some(_turn_guard) =
+        discord_state.claim_interaction_turn(session_id, context_text.clone(), display_tag.clone())
+    else {
+        return;
+    };
+
     let response = match agent
         .send_message_with_display(session_id, context_text, Some(display_tag), None)
         .await
@@ -103,7 +117,7 @@ pub(crate) async fn route_interaction_turn(
         }
     };
     let (text_only, _imgs) = crate::utils::extract_img_markers(&response.content);
-    let text_only = crate::utils::sanitize::strip_llm_artifacts(&text_only);
+    let text_only = crate::utils::sanitize::sanitize_outbound(&text_only);
     let (text_only, _react) = crate::utils::extract_react_marker(&text_only);
     let trimmed = text_only.trim();
     if trimmed.is_empty() {
@@ -140,6 +154,12 @@ pub(crate) async fn route_interaction_turn(
 /// The other [`route_interaction_turn`] callers (modal form, select menu)
 /// deliberately stay on the bare single-call contract: they are synthetic
 /// steering prompts, not user-intent turns.
+///
+/// The turn claims the session slot before it touches the cancel token, the
+/// same rule `handle_message` and the tracked runner follow (#1990). This
+/// path was the one entry point `3f0086081` missed, so a tap arriving while
+/// a turn was live could start a SECOND concurrent tool loop on the same
+/// session instead of queueing behind the live one.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn route_followup_turn(
     ctx: &Context,
@@ -158,6 +178,28 @@ pub(crate) async fn route_followup_turn(
     else {
         return;
     };
+
+    // Claim the session's turn slot before anything else (#1990). A tap is a
+    // user-intent turn like a typed message, and it must never fork a second
+    // loop onto a session that already has one: losing the claim queues the
+    // pick for the live turn, which injects it between tool rounds or flushes
+    // it at turn end, exactly like a typed follow-up.
+    let Some(_turn_guard) = discord_state.try_begin_turn(session_id) else {
+        tracing::info!(
+            "Discord: follow-up tap queued for session {session_id}, a turn is in flight (#1990)"
+        );
+        discord_state.enqueue_followup(
+            session_id,
+            crate::brain::agent::QueuedUserMessage {
+                context_text: context_text.clone(),
+                display_text: context_text,
+                origin: crate::brain::agent::PushOrigin::Ingress,
+                bg_meta: None,
+            },
+        );
+        return;
+    };
+
     let channel = serenity::model::id::ChannelId::new(channel_id);
     let http = ctx.http.clone();
 
@@ -186,8 +228,11 @@ pub(crate) async fn route_followup_turn(
     let sent_intermediates: Arc<Mutex<Vec<SentIntermediate>>> = Arc::new(Mutex::new(Vec::new()));
     let intermediate_handles: Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>> =
         Arc::new(std::sync::Mutex::new(Vec::new()));
-    let turn_group_mid: Arc<Mutex<Option<serenity::model::id::MessageId>>> =
-        Arc::new(Mutex::new(None));
+    // The bubble slot owns the id and the birth claim (#2192): a birth may
+    // sleep in the governor, so it must not hold the id lock that the settle
+    // path needs to stamp the finished bubble.
+    let bubble = Arc::new(super::group_bubble::BubbleSlot::new());
+    let turn_group_mid: Arc<Mutex<Option<serenity::model::id::MessageId>>> = bubble.mid_handle();
     // The text a suggest_options surface halted on (see options_host.rs).
     let options_host = Arc::new(std::sync::Mutex::new(
         super::options_host::OptionsHost::default(),
@@ -204,6 +249,7 @@ pub(crate) async fn route_followup_turn(
 
         let tools: Arc<Mutex<Vec<GroupEntry>>> = Arc::new(Mutex::new(Vec::new()));
         let group_msg_id = turn_group_mid.clone();
+        let bubble_cb = bubble.clone();
         let group_state_cb = discord_state.clone();
         let http = http.clone();
         let sent = sent_intermediates.clone();
@@ -217,12 +263,13 @@ pub(crate) async fn route_followup_turn(
                 ProgressEvent::ToolStarted {
                     tool_name,
                     tool_input,
+                    tool_call_id,
                 } => {
                     if let Ok(mut host) = options_host_cb.lock() {
                         host.on_tool_started(&tool_name);
                     }
                     let ctx_hint = crate::utils::tool_context_hint(&tool_name, &tool_input);
-                    let gmid = group_msg_id.clone();
+                    let bubble = bubble_cb.clone();
                     let dstate = group_state_cb.clone();
                     tokio::spawn(async move {
                         let entries = {
@@ -230,106 +277,107 @@ pub(crate) async fn route_followup_turn(
                             t.push(GroupEntry {
                                 name: tool_name,
                                 context: ctx_hint,
+                                call_id: tool_call_id.clone(),
+                                task_id: None,
                                 status: None,
                             });
                             t.clone()
                         };
-                        let mut mid_guard = gmid.lock().await;
-                        match *mid_guard {
-                            Some(mid) => {
-                                let group = dstate
-                                    .upsert_tool_group(
-                                        mid.get(),
-                                        GroupState {
-                                            entries,
-                                            notes: Vec::new(),
-                                            expanded: false,
-                                            started_at: std::time::Instant::now(),
-                                            settled: None,
-                                        },
+                        // The bubble exists: append without touching the birth
+                        // claim.
+                        if let Some(mid) = bubble.read().await {
+                            super::group_bubble::append_tool_entry(
+                                &dstate,
+                                channel,
+                                &http,
+                                mid,
+                                entries,
+                                "follow-up tap",
+                            )
+                            .await;
+                            return;
+                        }
+                        // Birth: one bubble per turn, so births serialise. The
+                        // id lock stays free while `governor::say` sleeps,
+                        // which is what #2192 fixes.
+                        let _birth = bubble.birth_claim().await;
+                        if let Some(mid) = bubble.read().await {
+                            super::group_bubble::append_tool_entry(
+                                &dstate,
+                                channel,
+                                &http,
+                                mid,
+                                entries,
+                                "follow-up tap",
+                            )
+                            .await;
+                            return;
+                        }
+                        let group = GroupState {
+                            page: 0,
+                            entries,
+                            notes: Vec::new(),
+                            expanded: false,
+                            started_at: std::time::Instant::now(),
+                            settled: None,
+                        };
+                        let content = super::tool_group::render_content(&group);
+                        match super::governor::say(
+                            &dstate.governor,
+                            channel,
+                            &http,
+                            super::governor::Surface::Send,
+                            &content,
+                        )
+                        .await
+                        {
+                            Ok(sent_msg) => {
+                                let comps =
+                                    super::tool_group::render_components(&group, sent_msg.id.get());
+                                if !comps.is_empty()
+                                    && let Some(Err(e)) = super::governor::edit_chrome(
+                                        &dstate.governor,
+                                        channel,
+                                        &http,
+                                        sent_msg.id,
+                                        EditMessage::new()
+                                            .embeds(super::tool_group::render_embeds(&group))
+                                            .components(comps),
                                     )
-                                    .await;
-                                let edit = EditMessage::new()
-                                    .content(super::tool_group::render_content(&group))
-                                    .components(super::tool_group::render_components(
-                                        &group,
-                                        mid.get(),
-                                    ));
-                                if let Some(Err(e)) = super::governor::edit_chrome(
-                                    &dstate.governor,
-                                    channel,
-                                    &http,
-                                    mid,
-                                    edit,
-                                )
-                                .await
+                                    .await
                                 {
                                     tracing::warn!(
-                                        "Discord: follow-up tap tool group edit failed (append): {e}"
+                                        "Discord: follow-up tap tool group component fixup failed: {e}"
                                     );
                                 }
+                                dstate.upsert_tool_group(sent_msg.id.get(), group).await;
+                                bubble.store(sent_msg.id).await;
                             }
-                            None => {
-                                let group = GroupState {
-                                    entries,
-                                    notes: Vec::new(),
-                                    expanded: false,
-                                    started_at: std::time::Instant::now(),
-                                    settled: None,
-                                };
-                                let content = super::tool_group::render_content(&group);
-                                match super::governor::say(
-                                    &dstate.governor,
-                                    channel,
-                                    &http,
-                                    super::governor::Surface::Send,
-                                    &content,
-                                )
-                                .await
-                                {
-                                    Ok(sent_msg) => {
-                                        let comps = super::tool_group::render_components(
-                                            &group,
-                                            sent_msg.id.get(),
-                                        );
-                                        if !comps.is_empty()
-                                            && let Some(Err(e)) = super::governor::edit_chrome(
-                                                &dstate.governor,
-                                                channel,
-                                                &http,
-                                                sent_msg.id,
-                                                EditMessage::new().components(comps),
-                                            )
-                                            .await
-                                        {
-                                            tracing::warn!(
-                                                "Discord: follow-up tap tool group component fixup failed: {e}"
-                                            );
-                                        }
-                                        dstate.upsert_tool_group(sent_msg.id.get(), group).await;
-                                        *mid_guard = Some(sent_msg.id);
-                                    }
-                                    Err(e) => tracing::warn!(
-                                        "Discord: follow-up tap failed to post tool group message: {e}"
-                                    ),
-                                }
-                            }
+                            Err(e) => tracing::warn!(
+                                "Discord: follow-up tap failed to post tool group message: {e}"
+                            ),
                         }
                     });
                 }
                 ProgressEvent::ToolCompleted {
-                    tool_name, success, ..
+                    tool_name,
+                    success,
+                    tool_call_id,
+                    ..
                 } => {
                     let gmid = group_msg_id.clone();
                     let dstate = group_state_cb.clone();
                     tokio::spawn(async move {
                         let entries = {
                             let mut t = tools.lock().await;
-                            if let Some(entry) = t
-                                .iter_mut()
-                                .rev()
-                                .find(|e| e.name == tool_name && e.status.is_none())
-                            {
+                            if let Some(entry) = t.iter_mut().rev().find(|e| {
+                                e.status.is_none()
+                                    && super::tool_card::entry_matches_completion(
+                                        e,
+                                        &tool_name,
+                                        &tool_call_id,
+                                    )
+                            }) {
                                 entry.status = Some(success);
                             }
                             t.clone()
@@ -339,6 +387,7 @@ pub(crate) async fn route_followup_turn(
                                 .upsert_tool_group(
                                     mid.get(),
                                     GroupState {
+                                        page: 0,
                                         entries,
                                         notes: Vec::new(),
                                         expanded: false,
@@ -349,6 +398,7 @@ pub(crate) async fn route_followup_turn(
                                 .await;
                             let edit = EditMessage::new()
                                 .content(super::tool_group::render_content(&group))
+                                .embeds(super::tool_group::render_embeds(&group))
                                 .components(super::tool_group::render_components(
                                     &group,
                                     mid.get(),
@@ -417,6 +467,7 @@ pub(crate) async fn route_followup_turn(
                             };
                             let edit = EditMessage::new()
                                 .content(super::tool_group::render_content(&group))
+                                .embeds(super::tool_group::render_embeds(&group))
                                 .components(super::tool_group::render_components(
                                     &group,
                                     mid.get(),
@@ -453,7 +504,7 @@ pub(crate) async fn route_followup_turn(
                             prev.push(clean.clone());
                         }
                         for chunk in super::handler::split_message(&clean, 2000) {
-                            if let Err(e) = super::governor::say(
+                            if let Err(e) = super::governor::say_recorded(
                                 &dstate.governor,
                                 channel,
                                 &http,
@@ -555,6 +606,7 @@ pub(crate) async fn route_followup_turn(
     // second zero — the whole of #1852. On a post failure the mid stays
     // None and bubble creation falls back to the first tool event.
     let turn_shell = super::tool_group::GroupState {
+        page: 0,
         entries: Vec::new(),
         notes: Vec::new(),
         expanded: false,
@@ -670,6 +722,7 @@ pub(crate) async fn route_followup_turn(
             {
                 let edit = serenity::builder::EditMessage::new()
                     .content(super::tool_group::render_content(&group))
+                    .embeds(super::tool_group::render_embeds(&group))
                     .components(super::tool_group::render_components(&group, mid.get()));
                 if let Some(Err(e)) =
                     super::governor::edit_chrome(&discord_state.governor, channel, &http, mid, edit)
@@ -706,6 +759,7 @@ pub(crate) async fn route_followup_turn(
                 }
                 let edit = serenity::builder::EditMessage::new()
                     .content(super::tool_group::render_content(&group))
+                    .embeds(super::tool_group::render_embeds(&group))
                     .components(super::tool_group::render_components(&group, mid.get()));
                 if let Err(e) = super::governor::edit_content(
                     &discord_state.governor,
@@ -732,7 +786,7 @@ pub(crate) async fn route_followup_turn(
 
             if !skip_final_post {
                 for chunk in super::handler::split_message(&text_only, 2000) {
-                    if let Err(e) = super::governor::say(
+                    if let Err(e) = super::governor::say_recorded(
                         &discord_state.governor,
                         channel,
                         &http,
@@ -757,6 +811,7 @@ pub(crate) async fn route_followup_turn(
             {
                 let edit = serenity::builder::EditMessage::new()
                     .content(super::tool_group::render_content(&group))
+                    .embeds(super::tool_group::render_embeds(&group))
                     .components(super::tool_group::render_components(&group, mid.get()));
                 if let Err(e) = super::governor::edit_content(
                     &discord_state.governor,
@@ -775,7 +830,7 @@ pub(crate) async fn route_followup_turn(
         Err(e) => {
             tracing::error!("Discord: follow-up tap agent error: {e}");
             let error_msg = format!("❌ Error\n\n{}", crate::brain::agent::format_user_error(&e));
-            if let Err(e) = super::governor::say(
+            if let Err(e) = super::governor::say_recorded(
                 &discord_state.governor,
                 channel,
                 &http,
@@ -796,6 +851,7 @@ pub(crate) async fn route_followup_turn(
             {
                 let edit = serenity::builder::EditMessage::new()
                     .content(super::tool_group::render_content(&group))
+                    .embeds(super::tool_group::render_embeds(&group))
                     .components(super::tool_group::render_components(&group, mid.get()));
                 if let Err(e) = super::governor::edit_content(
                     &discord_state.governor,

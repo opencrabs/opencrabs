@@ -216,31 +216,23 @@ fn expand_tilde(token: &str, home: Option<&Path>) -> Option<String> {
     Some(token.to_string())
 }
 
-/// Launch the target with the system default handler. Mirrors the
-/// session-files Enter launcher but uses `spawn`: the TUI draw loop must
-/// never block on a browser or Finder coming up.
-/// The system default-handler command for this platform, as a pure fn so a
-/// test can pin it. Windows uses `explorer` rather than `cmd /C start` to
-/// match the `logs open` CLI (`src/cli/commands.rs`) and to avoid flashing a
-/// console window.
-pub(crate) fn opener_command() -> &'static str {
-    #[cfg(target_os = "macos")]
-    let cmd = "open";
-    #[cfg(target_os = "linux")]
-    let cmd = "xdg-open";
-    #[cfg(target_os = "windows")]
-    let cmd = "explorer";
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    let cmd = "xdg-open";
-    cmd
-}
-
-pub(crate) fn open(target: &ClickTarget) -> std::io::Result<()> {
+/// Launch the target with the system default handler, detached (#2170).
+///
+/// `spawn` succeeding only proves the launcher binary existed. Whether the
+/// open actually worked is only known from the child's exit status, which
+/// arrives later as `TuiEvent::LauncherFailed` so the caller's optimistic
+/// "Opened …" line gets corrected instead of standing as a lie. The draw
+/// loop never blocks on a browser or Finder coming up.
+pub(crate) fn open(
+    target: &ClickTarget,
+    tx: tokio::sync::mpsc::UnboundedSender<crate::tui::events::TuiEvent>,
+) -> std::io::Result<()> {
     let arg = target.label();
-    let mut cmd = std::process::Command::new(opener_command());
-    cmd.arg(&arg)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    cmd.spawn().map(|_child| ())
+    let label = arg.clone();
+    crate::tui::launcher::open_detached(Path::new(&arg), move |detail| {
+        let _ = tx.send(crate::tui::events::TuiEvent::LauncherFailed {
+            target: label,
+            detail,
+        });
+    })
 }

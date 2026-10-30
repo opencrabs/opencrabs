@@ -112,6 +112,64 @@ impl SessionRepository {
             .context("Failed to find session by title suffix")
     }
 
+    /// The live session carrying this stable `[chat:<id>]` key (#2183).
+    ///
+    /// The key is the unique identity of a channel session, so it is the
+    /// lookup that should have been first: matching on a title suffix is a
+    /// proxy for it, and the proxy misses whenever a title was auto-renamed.
+    pub async fn find_by_channel_chat_key(&self, key: &str) -> Result<Option<Session>> {
+        let key = key.to_string();
+        self.pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                conn.prepare_cached(
+                    "SELECT * FROM sessions WHERE channel_chat_key = ?1 AND archived_at IS NULL \
+                     ORDER BY updated_at DESC LIMIT 1",
+                )?
+                .query_row(params![key], Session::from_row)
+                .optional()
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to find session by chat key")
+    }
+
+    /// Give up this session's claim on its chat key without archiving it
+    /// (#2186).
+    ///
+    /// The unique index is partial on live rows, so "one live session per
+    /// chat" is enforced by the key. A `/new` that must leave the previous
+    /// session visible (the owner case) therefore cannot just insert a second
+    /// keyed row: the insert would resolve the old one and `/new` would be a
+    /// no-op. Clearing the key frees the slot while the row stays live, so
+    /// `/sessions` keeps showing it.
+    ///
+    /// `updated_at` is deliberately untouched: the title-suffix fallback in
+    /// `resolve_or_create_channel_session` orders by `updated_at DESC`, so
+    /// bumping it here would make the released row win that fallback over the
+    /// session that just took its key.
+    pub async fn release_channel_chat_key(&self, id: Uuid) -> Result<()> {
+        let id_str = id.to_string();
+        self.pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                conn.execute(
+                    "UPDATE sessions SET channel_chat_key = NULL WHERE id = ?1",
+                    params![id_str],
+                )
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to release session chat key")?;
+
+        tracing::debug!("Released chat key for session: {}", id);
+        Ok(())
+    }
+
     /// Create a new session
     pub async fn create(&self, session: &Session) -> Result<()> {
         let s = session.clone();
@@ -159,6 +217,21 @@ impl SessionRepository {
         session: &Session,
         chat_key: &str,
     ) -> Result<Session> {
+        self.insert_or_resolve_channel_reported(session, chat_key)
+            .await
+            .map(|(session, _)| session)
+    }
+
+    /// Same as [`Self::insert_or_resolve_channel`], also reporting whether this
+    /// call created the row or joined one that already existed (#2183).
+    ///
+    /// The caller could not tell the two apart, so it logged "created" on
+    /// every message of a long-lived chat.
+    pub async fn insert_or_resolve_channel_reported(
+        &self,
+        session: &Session,
+        chat_key: &str,
+    ) -> Result<(Session, bool)> {
         let mut s = session.clone();
         s.channel_chat_key = Some(chat_key.to_string());
         let cloned = s.clone();
@@ -197,7 +270,7 @@ impl SessionRepository {
 
         if inserted > 0 {
             tracing::debug!("Created session: {} (chat key {})", s.id, chat_key);
-            return Ok(s);
+            return Ok((s, true));
         }
 
         // Lost the race: resolve the winner by key.
@@ -226,7 +299,7 @@ impl SessionRepository {
             winner.id,
             chat_key
         );
-        Ok(winner)
+        Ok((winner, false))
     }
 
     /// Update an existing session
@@ -588,11 +661,22 @@ impl SessionRepository {
     }
 
     /// Update session statistics
-    pub async fn update_stats(&self, id: Uuid, token_delta: i32, cost_delta: f64) -> Result<()> {
+    ///
+    /// Atomic by construction: the increments happen in one SQL statement, so
+    /// two turns finishing on the same session at the same time cannot lose
+    /// one of the two (#2180). The old caller read the row, added in Rust and
+    /// wrote the whole row back, which silently dropped one increment whenever
+    /// a second turn landed inside that window.
+    ///
+    /// `token_delta` is `i64` because the column is: a session's lifetime
+    /// counter passed `i32::MAX` on a long-lived install, and a narrower delta
+    /// would truncate or overflow on the way in.
+    pub async fn update_stats(&self, id: Uuid, token_delta: i64, cost_delta: f64) -> Result<()> {
         let updated_at = Utc::now();
         let id_str = id.to_string();
 
-        self.pool
+        let updated = self
+            .pool
             .get()
             .await
             .context("Failed to get connection")?
@@ -609,6 +693,14 @@ impl SessionRepository {
             .await
             .map_err(interact_err)?
             .context("Failed to update session stats")?;
+
+        // A delta that matched no row means the caller believes a session
+        // exists and it does not. The old read-modify-write surfaced that as a
+        // "session not found" error; an UPDATE that quietly matches nothing
+        // would lose the usage instead (#2180).
+        if updated == 0 {
+            anyhow::bail!("Session {id} not found while updating its usage");
+        }
 
         Ok(())
     }

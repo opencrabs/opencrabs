@@ -120,3 +120,126 @@ fn unparseable_keys_file_is_not_a_stored_install() {
         assert_eq!(load(), None);
     });
 }
+
+// --- #2198: the identity is not a secret and must not share a parser with one ---
+
+fn seed_keys(text: &str) {
+    std::fs::write(crate::config::keys_path(), text).expect("seed keys.toml");
+}
+
+#[test]
+fn a_corrupt_keys_file_keeps_the_install_id() {
+    in_temp_home(|| {
+        save(&install()).expect("save");
+        // The exact shape from the issue: a hand-edit broke keys.toml. The
+        // token is unreadable, the identity is not.
+        seed_keys("[providers.opencrabs\ninstall_id = \"abcd");
+
+        assert_eq!(load(), None, "the token really is unreachable");
+        assert_eq!(
+            crate::brain::provider::opencrabs_store::load_install_id(),
+            Some(install().install_id),
+            "a broken keys.toml must not cost the identity"
+        );
+    });
+}
+
+#[test]
+fn a_legacy_keys_id_is_migrated_into_its_own_file() {
+    in_temp_home(|| {
+        seed_keys(&format!(
+            "[providers.opencrabs]\ninstall_id = \"{}\"\napi_key = \"tok-legacy\"\n",
+            install().install_id
+        ));
+
+        // The legacy install loads with the token it was seeded with. `Debug`
+        // redacts the token, so compare it directly or a mismatch shows up as
+        // two identical-looking structs.
+        let loaded = load().expect("the legacy install still loads");
+        assert_eq!(loaded.install_id, install().install_id);
+        assert_eq!(loaded.token, "tok-legacy");
+        let migrated =
+            std::fs::read_to_string(crate::brain::provider::opencrabs_store::install_id_path())
+                .expect("migrated id file");
+        assert_eq!(migrated.trim(), install().install_id);
+
+        // The identity no longer depends on keys.toml being readable.
+        seed_keys("[providers.opencrabs\n");
+        assert_eq!(
+            crate::brain::provider::opencrabs_store::load_install_id(),
+            Some(install().install_id)
+        );
+    });
+}
+
+#[test]
+fn the_id_file_wins_over_a_stale_copy_in_keys() {
+    in_temp_home(|| {
+        let file_id = "11112222333344445555666677778888";
+        crate::brain::provider::opencrabs_store::write_install_id(file_id).expect("id file");
+        seed_keys(&format!(
+            "[providers.opencrabs]\ninstall_id = \"{}\"\napi_key = \"tok-live-123\"\n",
+            install().install_id
+        ));
+
+        assert_eq!(
+            crate::brain::provider::opencrabs_store::load_install_id(),
+            Some(file_id.to_string()),
+            "the dedicated file is the identity, keys.toml only keeps a copy"
+        );
+        let loaded = load().expect("token and identity");
+        assert_eq!(loaded.install_id, file_id);
+    });
+}
+
+#[test]
+fn an_invalid_id_file_falls_back_to_the_keys_copy_and_is_rewritten() {
+    in_temp_home(|| {
+        crate::brain::provider::opencrabs_store::write_install_id("not an id").expect("id file");
+        seed_keys(&format!(
+            "[providers.opencrabs]\ninstall_id = \"{}\"\napi_key = \"tok-live-123\"\n",
+            install().install_id
+        ));
+
+        assert_eq!(
+            crate::brain::provider::opencrabs_store::load_install_id(),
+            Some(install().install_id)
+        );
+        let rewritten =
+            std::fs::read_to_string(crate::brain::provider::opencrabs_store::install_id_path())
+                .expect("id file rewritten");
+        assert_eq!(rewritten.trim(), install().install_id);
+    });
+}
+
+#[test]
+fn the_identity_survives_a_token_write_that_fails() {
+    in_temp_home(|| {
+        // A directory where keys.toml belongs makes the token write fail for a
+        // reason the test cannot paper over.
+        std::fs::create_dir_all(crate::config::keys_path()).expect("block keys.toml");
+
+        let err = save(&install()).expect_err("the token cannot be written");
+        assert!(!err.to_string().is_empty());
+
+        assert_eq!(
+            crate::brain::provider::opencrabs_store::read_id_file(),
+            Some(install().install_id),
+            "the ID is written before the token, so losing the token costs a reissue"
+        );
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn the_id_file_is_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+    in_temp_home(|| {
+        save(&install()).expect("save");
+        let mode = std::fs::metadata(crate::brain::provider::opencrabs_store::install_id_path())
+            .expect("id file")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "install_id landed at {mode:o}");
+    });
+}

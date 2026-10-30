@@ -75,6 +75,7 @@ pub(crate) async fn post_options_host(
     {
         let edit = serenity::builder::EditMessage::new()
             .content(super::tool_group::render_content(&group))
+            .embeds(super::tool_group::render_embeds(&group))
             .components(super::tool_group::render_components(&group, mid.get()));
         if let Some(Err(e)) =
             super::governor::edit_chrome(&state.governor, channel, http, mid, edit).await

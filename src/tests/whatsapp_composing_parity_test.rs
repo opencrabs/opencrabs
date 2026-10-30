@@ -95,3 +95,71 @@ fn resume_turn_keeps_composing_until_the_delivery_path_ends() {
          is async and may be None while the socket reconnects"
     );
 }
+
+// ── #2181: composing retries back off and give up ────────────────────
+
+/// The composing loop used to retry every 5 seconds forever, connected or
+/// not. During an outage that wrote one WARN per 5 seconds per session for a
+/// call that could never succeed: 48 lines in 4 minutes, on a log that
+/// already runs past 130k lines a day.
+///
+/// The policy is pure so it can be pinned without a socket. The shape that
+/// matters is monotonic growth to a ceiling and a terminal `None`: a policy
+/// that never returns `None` is the old bug with extra steps.
+#[test]
+fn composing_retries_back_off_then_give_up() {
+    use crate::channels::whatsapp::handler::{
+        COMPOSING_BASE_DELAY, COMPOSING_MAX_DELAY, COMPOSING_MAX_FAILURES, composing_retry_delay,
+    };
+
+    // A healthy send schedules the normal cadence.
+    assert_eq!(composing_retry_delay(0), Some(COMPOSING_BASE_DELAY));
+
+    let first = composing_retry_delay(1).expect("the first retry must still happen");
+    let second = composing_retry_delay(2).expect("the second retry must still happen");
+    // The issue specifies the ladder as 5s, 10s, 20s, 30s cap: the first
+    // retry keeps the normal cadence, and growth starts from the second.
+    assert_eq!(
+        first, COMPOSING_BASE_DELAY,
+        "the first retry after a failure keeps the normal cadence"
+    );
+    assert!(
+        second > first,
+        "the delay must grow, got {second:?} after {first:?}"
+    );
+
+    // Every delay stays under the ceiling, including the last one before the
+    // cap, which is where an unclamped doubling would blow past 30s.
+    for failures in 1..COMPOSING_MAX_FAILURES {
+        let d = composing_retry_delay(failures).expect("below the cap a retry is scheduled");
+        assert!(d <= COMPOSING_MAX_DELAY, "delay {d:?} exceeds the ceiling");
+    }
+
+    // The cap terminates the loop. Without this the issue is not fixed.
+    assert_eq!(
+        composing_retry_delay(COMPOSING_MAX_FAILURES),
+        None,
+        "the loop must stop after {COMPOSING_MAX_FAILURES} consecutive failures"
+    );
+    assert_eq!(composing_retry_delay(COMPOSING_MAX_FAILURES + 10), None);
+}
+
+/// A dead connection must be skipped rather than attempted. The check is what
+/// keeps an outage from producing a WARN per tick, so its presence in the loop
+/// is the other half of the fix.
+#[test]
+fn the_composing_loop_checks_the_connection() {
+    const SRC: &str = include_str!("../channels/whatsapp/handler.rs");
+    let loop_at = SRC
+        .find("check the connection before every attempt")
+        .expect("the composing loop lost its connection check");
+    let after = &SRC[loop_at..];
+    assert!(
+        after.contains("state.is_connected().await"),
+        "the composing loop must skip a dead connection instead of pinging it"
+    );
+    assert!(
+        after.contains("composing_retry_delay(failures)"),
+        "the composing loop must use the backoff policy, not a fixed 5s sleep"
+    );
+}

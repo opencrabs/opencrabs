@@ -219,6 +219,35 @@ pub(crate) fn register_core_agent_tools(
     subagent_manager
 }
 
+/// ACP tool-surface assembly: the registry for `opencrabs acp`.
+///
+/// ACP clients (the Mi 8 phone app, Zed, monocle) are LIVE user surfaces, so
+/// the base assembly runs interactive (`headless = false`): `suggest_options`
+/// is registered and the service keeps the FOLLOW-UP SUGGESTIONS prompt
+/// paragraph that tells the model to call it. The client renders the options
+/// as tappable chips from the `tool_call` frame's `rawInput`; a tap starts a
+/// new `session/prompt`, so the tool's `halts_turn` settle (turn ends after a
+/// successful call, buttons stay live) maps cleanly onto the protocol.
+///
+/// `session_notify` is dropped afterwards: an ACP server has no turn-end
+/// relay to flush a parked notification (the event has no ACP vocabulary,
+/// `acp/turn.rs`), so registering it would advertise a tool that can never
+/// deliver. On genuinely interactive surfaces it stays reachable behind its
+/// own config gate (`[agent] session_notify_enabled`, default off).
+///
+/// Callers must still build the `AgentService` WITHOUT
+/// `with_headless(true)` — the flag would strip the prompt paragraph and
+/// hard-error the tool at the loop backstop, undoing this assembly.
+pub(crate) fn register_acp_agent_tools(
+    tool_registry: &Arc<ToolRegistry>,
+    db: &Database,
+    config: &Config,
+) -> Arc<crate::brain::tools::subagent::SubAgentManager> {
+    let subagent_manager = register_core_agent_tools(tool_registry, db, config, false);
+    tool_registry.unregister("session_notify");
+    subagent_manager
+}
+
 /// Register the headless-safe RUNTIME tools that depend only on config + the
 /// registry itself (never on live TUI or channel state): user-defined dynamic
 /// tools from `tools.toml`, the dynamic-tool manager, and browser automation.

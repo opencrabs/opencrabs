@@ -9,6 +9,8 @@
 #   enforced by policy-lint .... workflow.child_issues_not_child_prs,
 #                               commits.no_coauthor_trailers,
 #                               commits.conventional_titles,
+#                               titles.issues_conventional,
+#                               titles.prs_conventional,
 #                               prs.max_files_warn (warn only)
 #   already live elsewhere .... sync_before_commit, single_sanity_ci
 #                               (main-protection ruleset + the CI gate)
@@ -29,3 +31,13 @@ no_stub = true
 [commits]
 no_coauthor_trailers = true
 conventional_titles = true
+
+# Issue and PR titles are the same convention as commit subjects: the fixing
+# commit reuses the issue title verbatim, so a title that is not
+# `type(scope): subject` cannot become a compliant commit. A bare area prefix
+# (`TUI:`, `z.ai:`, `voice:`) is the documented ban and fails. A plain
+# explanatory title with no colon prefix passes, which is what CONTRIBUTING.md
+# allows for anything that fits no type.
+[titles]
+issues_conventional = true
+prs_conventional = true

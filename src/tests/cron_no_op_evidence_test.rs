@@ -17,6 +17,7 @@ fn started(tool: &str) -> ProgressEvent {
     ProgressEvent::ToolStarted {
         tool_name: tool.to_string(),
         tool_input: json!({}),
+        tool_call_id: String::new(),
     }
 }
 
@@ -26,6 +27,7 @@ fn completed(tool: &str) -> ProgressEvent {
         tool_input: json!({}),
         success: true,
         summary: String::new(),
+        tool_call_id: String::new(),
     }
 }
 

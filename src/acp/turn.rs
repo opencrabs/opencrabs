@@ -181,6 +181,7 @@ fn progress_callback(
             ProgressEvent::ToolStarted {
                 tool_name,
                 tool_input,
+                ..
             } => {
                 // A tool call ends the text round; round 2's stream starts
                 // fresh so its aggregate dedups against its own chunks.

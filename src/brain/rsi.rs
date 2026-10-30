@@ -1255,15 +1255,16 @@ pub fn spawn_rsi_engine(
                         crate::VERSION
                     );
                     if failed > 0 {
-                        let errors: Vec<_> = results
-                            .iter()
-                            .filter_map(|r| {
-                                r.error.as_ref().map(|e| format!("{}: {}", r.filename, e))
-                            })
-                            .collect();
-                        let _ = notification_tx.send(RsiNotification::TemplateSyncFailed {
-                            error: errors.join("; "),
-                        });
+                        // One line per distinct cause, not one per file: a
+                        // single DNS flap used to render eleven near-identical
+                        // sentences that named each file twice (#2169).
+                        if let Some(error) =
+                            crate::brain::rsi_sync::summarize_sync_failures(&results)
+                        {
+                            let _ = notification_tx.send(RsiNotification::TemplateSyncFailed {
+                                error,
+                            });
+                        }
                     }
                     if synced > 0 {
                         let _ =

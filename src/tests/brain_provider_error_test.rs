@@ -86,3 +86,64 @@ fn test_status_code() {
     let invalid_key = ProviderError::InvalidApiKey;
     assert_eq!(invalid_key.status_code(), None);
 }
+
+// #2204: the connector's single deadline covers DNS, TCP and TLS together, and
+// on expiry hyper reports "tcp connect error" whichever phase actually hung. A
+// resolver that never answered therefore read as a slow server. These pin the
+// three branches without touching the network, by feeding the classifier the
+// shapes it has to tell apart.
+
+#[test]
+fn a_connect_timeout_whose_name_does_not_resolve_names_dns() {
+    let label = describe_timeout(true, DnsProbe::Failed, " (api.example)");
+    assert_eq!(
+        label, "DNS lookup failed (api.example)",
+        "a resolver error inside the connect window must not read as a slow server"
+    );
+}
+
+#[test]
+fn a_connect_timeout_whose_resolver_hangs_names_dns() {
+    let label = describe_timeout(true, DnsProbe::TimedOut, " (api.example)");
+    assert_eq!(
+        label, "DNS lookup failed (api.example)",
+        "a resolver that never answered is a DNS failure, not a slow server"
+    );
+}
+
+#[test]
+fn a_connect_timeout_whose_name_resolves_names_the_connection() {
+    let label = describe_timeout(true, DnsProbe::Resolved, " (api.example)");
+    assert_eq!(
+        label, "connect timed out (api.example)",
+        "the name answered, so the wait was the connection"
+    );
+}
+
+#[test]
+fn a_timeout_after_the_connection_is_up_keeps_the_request_label() {
+    let label = describe_timeout(false, DnsProbe::Resolved, " (api.example)");
+    assert_eq!(
+        label, "request timed out (api.example)",
+        "a socket that was already up did not fail to resolve anything"
+    );
+}
+
+#[test]
+fn a_url_without_a_host_still_labels_the_connect_timeout() {
+    let label = describe_timeout(true, DnsProbe::Skipped, "");
+    assert_eq!(label, "connect timed out");
+}
+
+#[test]
+fn an_ip_literal_never_touches_the_resolver() {
+    assert_eq!(
+        probe_dns("192.0.2.1", std::time::Duration::from_secs(2)),
+        DnsProbe::Resolved,
+        "an address cannot fail to resolve, so the probe must not spawn a lookup"
+    );
+    assert_eq!(
+        probe_dns("::1", std::time::Duration::from_secs(2)),
+        DnsProbe::Resolved
+    );
+}

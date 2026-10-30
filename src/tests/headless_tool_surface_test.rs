@@ -32,6 +32,18 @@ async fn build_registry(headless: bool, notify_enabled: bool) -> (Arc<ToolRegist
     (registry, ())
 }
 
+/// Same, through the ACP assembly under test.
+async fn build_acp_registry(notify_enabled: bool) -> (Arc<ToolRegistry>, ()) {
+    use crate::cli::tool_setup::register_acp_agent_tools;
+    let db = Database::connect_in_memory().await.expect("in-memory db");
+    db.run_migrations().await.expect("migrations");
+    let mut config = Config::default();
+    config.agent.session_notify_enabled = notify_enabled;
+    let registry = Arc::new(ToolRegistry::new());
+    let _m = register_acp_agent_tools(&registry, &db, &config);
+    (registry, ())
+}
+
 /// (a) Headless registry: both interactive-only tools absent.
 #[tokio::test]
 async fn headless_registry_lacks_session_notify_and_suggest_options() {
@@ -88,6 +100,33 @@ async fn interactive_registry_hides_session_notify_when_kill_switch_is_off() {
     assert!(
         registry.has_tool("bash") && registry.has_tool("read_file"),
         "core tools must remain registered with the kill switch off"
+    );
+}
+
+/// (e) #1540 follow-up — the ACP surface is a LIVE user surface: the
+/// interactive registry with `session_notify` stripped (no turn-end relay
+/// to flush a parked notification over ACP), `suggest_options` present so
+/// clients render its chips from the `tool_call` rawInput. Fails on the old
+/// `cmd_acp` assembly, which passed `headless = true`.
+#[tokio::test]
+async fn acp_surface_keeps_suggest_options_and_drops_session_notify() {
+    // Kill switch ON: the assertion must hold even for an operator who
+    // opted in, because the drop is structural (no relay), not config.
+    let (registry, _) = build_acp_registry(true).await;
+    assert!(
+        registry.has_tool("suggest_options"),
+        "ACP is interactive: suggest_options must be registered so clients \
+         can render the option chips"
+    );
+    assert!(
+        !registry.has_tool("session_notify"),
+        "ACP has no turn-end relay: session_notify must never be registered, \
+         even with [agent] session_notify_enabled = true"
+    );
+    // Sanity: the core set is intact on the ACP path.
+    assert!(
+        registry.has_tool("bash") && registry.has_tool("read_file"),
+        "core tools must remain registered on the ACP surface"
     );
 }
 

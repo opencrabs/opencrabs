@@ -617,3 +617,274 @@ fn test_agent_turn_message_is_built_through_the_trigger_helper() {
     // The gate arms must NOT be restructured (edition-2024 match ergonomics).
     assert!(!SCHEDULER_SRC.contains("match &outcome"));
 }
+
+// ===========================================================================
+// #2065: the trigger gate must run on the UNSCOPED path too.
+// ===========================================================================
+//
+// The gate used to live INSIDE the `needs_scope` arm of the scheduler's
+// profile split. A job stamped with the ACTIVE profile takes the other arm, so
+// in a single-profile install every job carrying a `trigger_cmd` skipped the
+// gate entirely: full agent turn, real tokens, real cost, on every tick, and
+// the 0-token skip path never executed once.
+//
+// These tests drive `run_cron_job_body`, the function the unscoped arm now
+// calls, because `CronScheduler::tick` needs a live daemon. The structural
+// sentinel at the end pins the other half: that the split calls it on BOTH
+// arms and owns no trigger arm of its own.
+
+const GATE_SRC: &str = include_str!("../cron/scheduler.rs");
+
+async fn gate_pool() -> crate::db::Pool {
+    let db = crate::db::Database::connect_in_memory()
+        .await
+        .expect("in-memory db");
+    db.run_migrations().await.expect("migrations");
+    db.pool().clone()
+}
+
+fn gate_factory(ctx: crate::services::ServiceContext) -> crate::channels::ChannelFactory {
+    let (_, config_rx) = tokio::sync::watch::channel(crate::config::Config::default());
+    crate::channels::ChannelFactory::new(
+        std::sync::Arc::new(crate::tests::agent_service_mocks::MockProvider)
+            as std::sync::Arc<dyn crate::brain::provider::Provider>,
+        ctx,
+        "test brain".to_string(),
+        std::path::PathBuf::from("/tmp"),
+        std::path::PathBuf::from("/tmp/oc_test_brain"),
+        std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+        config_rx,
+    )
+}
+
+/// One `cron_job_runs` row: (status, content, input_tokens, output_tokens, cost).
+type RunRow = (String, String, i64, i64, f64);
+
+/// Every run row for a job, oldest first.
+async fn gate_rows(pool: &crate::db::Pool, job_id: uuid::Uuid) -> Vec<RunRow> {
+    let jid = job_id.to_string();
+    pool.get()
+        .await
+        .expect("pool")
+        .interact(move |conn| -> rusqlite::Result<Vec<RunRow>> {
+            let mut stmt = conn.prepare(
+                "SELECT status, COALESCE(content,''), input_tokens, output_tokens, cost \
+                     FROM cron_job_runs WHERE job_id = ?1 ORDER BY started_at",
+            )?;
+            let rows = stmt
+                .query_map(rusqlite::params![jid], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })
+        .await
+        .expect("interact")
+        .expect("query")
+}
+
+async fn gate_session_count(pool: &crate::db::Pool) -> i64 {
+    pool.get()
+        .await
+        .expect("pool")
+        .interact(move |conn| conn.query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0)))
+        .await
+        .expect("interact")
+        .expect("count")
+}
+
+/// The reported case: a job stamped with the ACTIVE profile. `needs_scope` is
+/// false for it, which is exactly why the gate was dead. Its trigger prints
+/// nothing, so the fire must be skipped at 0 tokens with no agent turn.
+#[tokio::test]
+async fn unmet_trigger_on_the_active_profile_records_a_zero_token_skip() {
+    let pool = gate_pool().await;
+    let repo = crate::db::CronJobRepository::new(pool.clone());
+
+    let mut job = CronJob::new_with_trigger(
+        "gate-unscoped".into(),
+        "0 0 * * *".into(),
+        "UTC".into(),
+        "do something".into(),
+        None,
+        None,
+        "off".into(),
+        true,
+        None,
+        None,
+        Some("true".into()), // prints nothing, exits 0
+        Some("non_empty".into()),
+        false,
+        None,
+    );
+    job.profile_name = Some(crate::config::profile::current_profile_name());
+
+    // Pin the test to the bug's own condition: if this job ever stops taking
+    // the unscoped arm, the test stops covering the reported case.
+    let active = crate::config::profile::active_profile().unwrap_or("default");
+    let needs_scope =
+        job.profile_name.as_deref().is_some() && job.profile_name.as_deref() != Some(active);
+    assert!(
+        !needs_scope,
+        "this test only means something while the job takes the unscoped arm"
+    );
+
+    repo.insert(&job).await.expect("insert job");
+
+    let ctx = crate::services::ServiceContext::new(pool.clone());
+    let factory = gate_factory(ctx.clone());
+    let run_repo = crate::db::CronJobRunRepository::new(pool.clone());
+
+    crate::cron::scheduler::run_cron_job_body(&job, &factory, &ctx, &run_repo)
+        .await
+        .expect("gate body");
+
+    let rows = gate_rows(&pool, job.id).await;
+    assert_eq!(rows.len(), 1, "exactly one ledger row per fire: {rows:?}");
+    let (status, content, input, output, cost) = &rows[0];
+    assert_eq!(status, "success");
+    assert!(content.contains("Trigger condition not met"), "{content}");
+    assert_eq!((*input, *output), (0, 0), "the skip must be a 0-token row");
+    assert_eq!(*cost, 0.0);
+    assert_eq!(
+        gate_session_count(&pool).await,
+        0,
+        "the agent turn must not run: no cron session may be created"
+    );
+}
+
+/// The same job on the OTHER path. `needs_scope` is true here, so the caller
+/// wraps the body in a profile home scope. The outcome must be identical, so
+/// the two paths cannot drift apart again.
+#[tokio::test]
+async fn unmet_trigger_on_a_foreign_profile_produces_the_same_skip() {
+    let pool = gate_pool().await;
+    let repo = crate::db::CronJobRepository::new(pool.clone());
+
+    let mut job = CronJob::new_with_trigger(
+        "gate-scoped".into(),
+        "0 0 * * *".into(),
+        "UTC".into(),
+        "do something".into(),
+        None,
+        None,
+        "off".into(),
+        true,
+        None,
+        None,
+        Some("true".into()),
+        Some("non_empty".into()),
+        false,
+        None,
+    );
+    job.profile_name = Some("ops".to_string());
+    repo.insert(&job).await.expect("insert job");
+
+    let ctx = crate::services::ServiceContext::new(pool.clone());
+    let factory = gate_factory(ctx.clone());
+    let run_repo = crate::db::CronJobRunRepository::new(pool.clone());
+
+    crate::config::profile::with_profile_home_async(Some("ops"), async {
+        crate::cron::scheduler::run_cron_job_body(&job, &factory, &ctx, &run_repo)
+            .await
+            .expect("gate body");
+    })
+    .await;
+
+    let rows = gate_rows(&pool, job.id).await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let (status, content, input, output, cost) = &rows[0];
+    assert_eq!(status, "success");
+    assert!(content.contains("Trigger condition not met"), "{content}");
+    assert_eq!((*input, *output), (0, 0));
+    assert_eq!(*cost, 0.0);
+    assert_eq!(gate_session_count(&pool).await, 0);
+}
+
+/// A job with an empty prompt and a FIRING trigger is the documented 0-token
+/// delivery pattern. It used to live inside the scoped arm too, so on the
+/// active profile it fell through to a full agent turn with an empty prompt.
+#[tokio::test]
+async fn firing_trigger_with_empty_prompt_delivers_directly_on_the_unscoped_path() {
+    let pool = gate_pool().await;
+    let repo = crate::db::CronJobRepository::new(pool.clone());
+
+    let mut job = CronJob::new_with_trigger(
+        "gate-direct".into(),
+        "0 0 * * *".into(),
+        "UTC".into(),
+        String::new(), // empty prompt = 0-token pass-through
+        None,
+        None,
+        "off".into(),
+        true,
+        None,
+        None,
+        Some("echo alert-body".into()),
+        Some("non_empty".into()),
+        false,
+        None,
+    );
+    job.profile_name = Some(crate::config::profile::current_profile_name());
+    repo.insert(&job).await.expect("insert job");
+
+    let ctx = crate::services::ServiceContext::new(pool.clone());
+    let factory = gate_factory(ctx.clone());
+    let run_repo = crate::db::CronJobRunRepository::new(pool.clone());
+
+    crate::cron::scheduler::run_cron_job_body(&job, &factory, &ctx, &run_repo)
+        .await
+        .expect("gate body");
+
+    let rows = gate_rows(&pool, job.id).await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let (status, content, input, output, cost) = &rows[0];
+    assert_eq!(status, "success");
+    assert!(
+        content.contains("alert-body"),
+        "the trigger payload is the report: {content}"
+    );
+    assert_eq!((*input, *output), (0, 0));
+    assert_eq!(*cost, 0.0);
+    assert_eq!(
+        gate_session_count(&pool).await,
+        0,
+        "a direct delivery runs no agent turn"
+    );
+}
+
+/// The half a behavioural test cannot reach: `CronScheduler::tick` needs a live
+/// daemon, so the SHAPE of the split is pinned here. It must call the gate body
+/// on both arms and must own no trigger arm of its own, which is the defect.
+#[test]
+fn the_needs_scope_split_does_not_own_the_trigger_gate() {
+    let start = GATE_SRC
+        .find("let result = if needs_scope {")
+        .expect("the profile split must exist");
+    let rest = &GATE_SRC[start..];
+    let end = rest
+        .find("if let Err(e) = result {")
+        .expect("the split is followed by the error report");
+    let split = &rest[..end];
+
+    assert!(
+        !split.contains("TriggerOutcome::"),
+        "#2065 REGRESSION: the trigger gate is back inside the needs_scope split, \
+         a job stamped with the active profile takes the unscoped arm and its \
+         trigger_cmd is silently dead again"
+    );
+    assert_eq!(
+        split.matches("run_cron_job_body(").count(),
+        2,
+        "both arms of the split must call the same gate body"
+    );
+
+    // And the gate body must actually evaluate, not merely exist.
+    let body_at = GATE_SRC
+        .find("pub(crate) async fn run_cron_job_body(")
+        .expect("the gate body must exist");
+    let body = &GATE_SRC[body_at..];
+    assert!(body.contains("evaluate_trigger("));
+    assert!(body.contains("record_skipped_run("));
+    assert!(body.contains("execute_direct_trigger_job("));
+}

@@ -89,6 +89,9 @@ pub struct ToolRegistry {
     /// Skill glob gate master switch (`[agent] skill_glob_gate`, #150).
     /// Default true; the AgentService wiring sets this from config.
     skill_gate_enabled: bool,
+    /// Mechanical plan requirement (`[agent] plan_gate_after_tool_calls`).
+    /// 0 disables it; the AgentService wiring sets this from config.
+    plan_gate_after_tool_calls: usize,
 }
 
 impl ToolRegistry {
@@ -99,7 +102,14 @@ impl ToolRegistry {
             session_active: RwLock::new(HashMap::new()),
             activation_seq: std::sync::atomic::AtomicU64::new(0),
             skill_gate_enabled: true,
+            plan_gate_after_tool_calls: 12,
         }
+    }
+
+    /// Set the mechanical plan requirement (`[agent] plan_gate_after_tool_calls`).
+    /// Called by the AgentService wiring with the config value; 0 disables it.
+    pub fn set_plan_gate_after_tool_calls(&mut self, calls: usize) {
+        self.plan_gate_after_tool_calls = calls;
     }
 
     /// Set the skill glob gate master switch (#150). Called by the
@@ -181,16 +191,14 @@ impl ToolRegistry {
 
     /// Get tool definitions in LLM format
     pub fn get_tool_definitions(&self) -> Vec<crate::brain::provider::Tool> {
-        self.tools
-            .read()
-            .unwrap()
-            .values()
-            .map(|tool| crate::brain::provider::Tool {
-                name: tool.name().to_string(),
-                description: tool.description().to_string(),
-                input_schema: tool.input_schema(),
-            })
-            .collect()
+        self.collect_definitions(false, None)
+    }
+
+    /// The guest-scoped set (#2134): the allowlist only, regardless of the
+    /// lazy-tools mode. Used when lazy tools are OFF, where the normal path
+    /// ships every schema, but a guest must still see only what it may call.
+    pub fn get_tool_definitions_for_guest(&self) -> Vec<crate::brain::provider::Tool> {
+        self.collect_definitions(true, None)
     }
 
     /// Lazy-tools mode: only the schemas for the CORE set plus any EXTENDED
@@ -202,6 +210,31 @@ impl ToolRegistry {
         &self,
         active_extended: &std::collections::HashSet<String>,
     ) -> Vec<crate::brain::provider::Tool> {
+        self.collect_definitions(false, Some(active_extended))
+    }
+
+    /// Lazy-tools filtering plus the per-caller scope (#2134).
+    ///
+    /// `guest_scope` narrows the set to [`super::scope::GUEST_ALLOWED_TOOLS`]
+    /// BEFORE the core/extended split, so a stranger's turn is never even shown
+    /// a schema it would be refused for calling. Default-deny: a tool added
+    /// later stays out of reach until it is listed.
+    pub fn get_tool_definitions_scoped(
+        &self,
+        active_extended: &std::collections::HashSet<String>,
+        guest_scope: bool,
+    ) -> Vec<crate::brain::provider::Tool> {
+        self.collect_definitions(guest_scope, Some(active_extended))
+    }
+
+    /// One filter, three public shapes. `lazy` is `Some(active_extended)` when
+    /// lazy tools are on (core plus what the session activated) and `None` when
+    /// every registered tool should ride.
+    fn collect_definitions(
+        &self,
+        guest_scope: bool,
+        lazy: Option<&std::collections::HashSet<String>>,
+    ) -> Vec<crate::brain::provider::Tool> {
         use crate::brain::tools::catalog;
         self.tools
             .read()
@@ -209,7 +242,13 @@ impl ToolRegistry {
             .values()
             .filter(|tool| {
                 let name = tool.name();
-                catalog::is_core(name) || active_extended.contains(name)
+                if guest_scope && !super::scope::guest_allows(name) {
+                    return false;
+                }
+                match lazy {
+                    Some(active) => catalog::is_core(name) || active.contains(name),
+                    None => true,
+                }
             })
             .map(|tool| crate::brain::provider::Tool {
                 name: tool.name().to_string(),
@@ -314,6 +353,21 @@ impl ToolRegistry {
         };
         let name = resolved_name.as_str();
 
+        // Per-caller scope (#2134). The schema filter already hides these from
+        // a guest's tool list, so reaching this branch means the model called a
+        // tool it was never shown (a remembered name, or a `tool_search` result
+        // from a shared session). Refuse before validation, before activation,
+        // and before any approval prompt: a guest must never learn what a
+        // refused tool would have done.
+        if context.is_guest() && !super::scope::guest_allows(name) {
+            tracing::info!(
+                "Guest scope refused tool '{}' for session {}",
+                name,
+                context.session_id
+            );
+            return Ok(ToolResult::error(super::scope::guest_refusal(name)));
+        }
+
         // JIT discovery (#214): when lazy_tools is on, a tool the model called
         // by name but never surfaced via `tool_search` is absent from the
         // system prompt, so the model is guessing its params blind. Activate it
@@ -369,6 +423,36 @@ impl ToolRegistry {
                     );
                     return Err(ToolError::ApprovalRequired(reason));
                 }
+            }
+        }
+
+        // Mechanical plan requirement. Distinct from the plan-MODE gate
+        // above: that one governs writes while a plan is being drafted or
+        // executed, this one decides that a long ad-hoc turn must have a plan
+        // at all. Checked here so every dispatch path (sequential, parallel,
+        // sub-agent) passes through the same choke point, and before approval
+        // so the user is never prompted for a call that cannot run.
+        match super::plan_gate::check_plan_requirement(
+            plan_sid,
+            name,
+            context.turn_tool_calls,
+            self.plan_gate_after_tool_calls,
+            context.plan_gate_exempt,
+        )
+        .await
+        {
+            super::plan_gate::GateDecision::Allow => { /* proceed */ }
+            super::plan_gate::GateDecision::Deny(reason) => {
+                tracing::info!(
+                    "Plan requirement denied tool '{}' at {} calls this turn",
+                    name,
+                    context.turn_tool_calls
+                );
+                return Ok(ToolResult::error(reason));
+            }
+            super::plan_gate::GateDecision::RequireApproval(_) => {
+                // This gate never asks for approval: the requirement is
+                // "create a plan", not "confirm this call".
             }
         }
 
@@ -453,6 +537,24 @@ impl ToolRegistry {
                 name,
                 result.error.as_deref().unwrap_or("unknown error")
             );
+        }
+
+        // A successful call that changed the world can invalidate a recorded
+        // bash failure (#2211): the write that created the missing file is the
+        // reported case, so the retry the user asked for has to run. Read-only
+        // calls do not clear it, so fail -> read -> retry the identical command
+        // stays blocked, which is the loop this guard exists to stop. Bash
+        // itself never clears the window for the same reason.
+        if result.success
+            && name != "bash"
+            && (tool
+                .capabilities()
+                .contains(&crate::brain::tools::r#trait::ToolCapability::WriteFiles)
+                || tool
+                    .capabilities()
+                    .contains(&crate::brain::tools::r#trait::ToolCapability::SystemModification))
+        {
+            super::bash::note_environment_changed(context.session_id);
         }
 
         Ok(result)

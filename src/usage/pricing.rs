@@ -64,6 +64,53 @@ pub struct CostBreakdown {
     pub origin: CostOrigin,
 }
 
+/// Per-model rates with the documented cache defaults already applied, plus how
+/// they were resolved. Unlike a raw [`PricingEntry`], every field is concrete:
+/// `cache_write_per_m` and `cache_read_per_m` never surface as `None`, because
+/// the dashboard needs a number to multiply, not an option to branch on.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ModelRates {
+    pub input_per_m: f64,
+    pub output_per_m: f64,
+    pub cache_write_per_m: f64,
+    pub cache_read_per_m: f64,
+    pub origin: CostOrigin,
+}
+
+/// Cache money for one model's cached-token volume: what the cache reads
+/// actually cost, what writing the cache cost, what those same read tokens
+/// would have cost at the plain input rate, and the difference.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct CacheCost {
+    /// Cache-READ tokens at `cache_read_per_m`.
+    pub read_cost: f64,
+    /// Cache-WRITE tokens at `cache_write_per_m`.
+    pub write_cost: f64,
+    /// What the read tokens would have cost at the plain input rate.
+    pub full_rate_cost: f64,
+    /// `full_rate_cost - read_cost`: what caching saved on the read side.
+    pub saved: f64,
+}
+
+impl CacheCost {
+    /// Money for `cached_tokens` reads plus `cache_creation_tokens` writes under
+    /// `rates`. `full_rate_cost` prices the READ tokens at the plain input rate,
+    /// so `saved` answers "what did the cache save me versus sending these
+    /// tokens as ordinary input".
+    pub fn compute(cached_tokens: i64, cache_creation_tokens: i64, rates: &ModelRates) -> Self {
+        let per_m = 1_000_000.0;
+        let read_cost = (cached_tokens as f64 / per_m) * rates.cache_read_per_m;
+        let write_cost = (cache_creation_tokens as f64 / per_m) * rates.cache_write_per_m;
+        let full_rate_cost = (cached_tokens as f64 / per_m) * rates.input_per_m;
+        CacheCost {
+            read_cost,
+            write_cost,
+            full_rate_cost,
+            saved: full_rate_cost - read_cost,
+        }
+    }
+}
+
 /// Remove version tokens (digit runs with `.`/`_` separators) from a model or
 /// prefix and collapse leftover separators, so a new release inherits the
 /// last-known price of its family/tier (#655): `qwen3.8-max-preview` ->
@@ -206,6 +253,34 @@ impl PricingConfig {
             CostOrigin::Priced
         } else {
             CostOrigin::Estimated
+        }
+    }
+
+    /// Resolve `model`'s rates with the documented cache defaults applied
+    /// (write 1.25x input, read 0.1x input), so a caller never has to know the
+    /// fallback multipliers. Unknown families bill the conservative
+    /// [`DEFAULT_UNKNOWN_INPUT_PER_M`] / [`DEFAULT_UNKNOWN_OUTPUT_PER_M`] pair
+    /// and are flagged [`CostOrigin::Estimated`] (#1717), same as
+    /// [`Self::calculate_cost_with_cache_detailed`].
+    pub fn rates_for(&self, model: &str) -> ModelRates {
+        match self.resolve_entry(model) {
+            Some(entry) => ModelRates {
+                input_per_m: entry.input_per_m,
+                output_per_m: entry.output_per_m,
+                cache_write_per_m: entry.cache_write_per_m.unwrap_or(entry.input_per_m * 1.25),
+                cache_read_per_m: entry.cache_read_per_m.unwrap_or(entry.input_per_m * 0.1),
+                origin: CostOrigin::Priced,
+            },
+            None => {
+                warn_unknown_model_once(model);
+                ModelRates {
+                    input_per_m: DEFAULT_UNKNOWN_INPUT_PER_M,
+                    output_per_m: DEFAULT_UNKNOWN_OUTPUT_PER_M,
+                    cache_write_per_m: DEFAULT_UNKNOWN_INPUT_PER_M * 1.25,
+                    cache_read_per_m: DEFAULT_UNKNOWN_INPUT_PER_M * 0.1,
+                    origin: CostOrigin::Estimated,
+                }
+            }
         }
     }
 

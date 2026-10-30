@@ -7,18 +7,16 @@ use super::WhatsAppState;
 
 impl WhatsAppState {
     /// Store a cancel token for a session (before starting agent call).
-    /// If a token already exists for this session, cancel it first to abort the
-    /// previous in-flight agent call — prevents concurrent uncancellable agents.
+    ///
+    /// Overwrites any prior token WITHOUT cancelling it (#2179, #652's
+    /// WhatsApp twin). A turn is already running for this session when a
+    /// second message arrives, and `try_begin_turn` queues that message for
+    /// the live turn instead of starting a second one, so the cancel here was
+    /// redundant and harmful: it hard-killed the user's genuinely in-flight
+    /// turn, dropping the running request and the answer with it. Genuine
+    /// cancellation stays in `cancel_session` (`/stop`, a provider swap).
     pub async fn store_cancel_token(&self, session_id: Uuid, token: CancellationToken) {
-        let mut tokens = self.cancel_tokens.lock().await;
-        if let Some(old) = tokens.remove(&session_id) {
-            tracing::warn!(
-                "WhatsApp: cancelling previous in-flight agent call for session {}",
-                session_id
-            );
-            old.cancel();
-        }
-        tokens.insert(session_id, token);
+        self.cancel_tokens.lock().await.insert(session_id, token);
     }
 
     /// Cancel and remove the token for a session. Returns true if a token existed.

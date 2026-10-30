@@ -515,6 +515,53 @@ pub(crate) async fn say(
     res
 }
 
+/// [`say`], plus a row in `channel_messages` (#2196).
+///
+/// Only the answer-delivery sites and the `discord_send` tool use this. The
+/// plain [`say`] stays the path for tool-group bubbles and flow-ticker
+/// repaints: rendered group markdown belongs on screen, not in the transcript
+/// the next turn's group-context preamble reads back.
+// serenity's `Error` is 128+ bytes and is not ours to box; the repo
+// allows this lint everywhere a write returns serenity's own Result.
+#[allow(clippy::result_large_err)]
+pub(crate) async fn say_recorded(
+    governor: &Governor,
+    channel: serenity::model::id::ChannelId,
+    http: &serenity::http::Http,
+    surface: Surface,
+    content: impl std::fmt::Display,
+) -> Result<serenity::model::channel::Message, serenity::Error> {
+    let body = content.to_string();
+    let res = say(governor, channel, http, surface, &body).await;
+    if let Ok(msg) = &res {
+        super::outbox::record_sent(None, msg, &body).await;
+    }
+    res
+}
+
+/// [`send_content`], plus a row in `channel_messages` (#2196).
+///
+/// `content` is the text the builder carries, passed separately because
+/// `CreateMessage` does not expose it back. An attachment-only send records
+/// nothing, which matches the empty-content skip in the recorder.
+// serenity's `Error` is 128+ bytes and is not ours to box; the repo
+// allows this lint everywhere a write returns serenity's own Result.
+#[allow(clippy::result_large_err)]
+pub(crate) async fn send_content_recorded(
+    governor: &Governor,
+    channel: serenity::model::id::ChannelId,
+    http: &serenity::http::Http,
+    surface: Surface,
+    builder: serenity::builder::CreateMessage,
+    content: &str,
+) -> Result<serenity::model::channel::Message, serenity::Error> {
+    let res = send_content(governor, channel, http, surface, builder).await;
+    if let Ok(msg) = &res {
+        super::outbox::record_sent(None, msg, content).await;
+    }
+    res
+}
+
 /// A chrome re-render. `None` means the governor dropped this paint: the
 /// caller skips the edit and changes nothing else, because the next tick
 /// restates the same content. An admitted paint reports its API result like

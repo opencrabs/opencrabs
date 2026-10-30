@@ -542,6 +542,22 @@ static ANSI_OSC_RE: Lazy<Regex> =
 /// (`ESC 7` save, `ESC 8` restore, `ESC c` reset, `ESC M` reverse index...).
 static ANSI_ESC_SINGLE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\x1b[0-~]").unwrap());
 
+/// The one outbound chokepoint: strip LLM artifacts, then redact secrets.
+///
+/// Every channel path that puts model prose in front of a user needs both
+/// steps, and a path that only strips artifacts leaks credentials (#2102:
+/// seven reaction/intermediate/comment paths called
+/// [`strip_llm_artifacts`] alone). Calling this instead of the two
+/// functions separately makes the pair impossible to forget, and keeps the
+/// ordering fixed: artifacts first, because a redacted-but-still-tagged body
+/// is not clean text, and because `strip_llm_artifacts` can drop a whole
+/// block that held a key, so redacting afterwards does strictly less work.
+///
+/// Idempotent for already-sanitized text, like both halves.
+pub fn sanitize_outbound(text: &str) -> String {
+    redact_secrets(&strip_llm_artifacts(text))
+}
+
 /// Redact API keys and tokens from free-form text (thinking, responses, etc.).
 ///
 /// Catches:

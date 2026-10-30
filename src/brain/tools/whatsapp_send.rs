@@ -15,6 +15,7 @@ use crate::config::Config;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Arc;
+use wacore_binary::JidExt;
 use wacore_binary::jid::Jid;
 
 /// Tool for comprehensive WhatsApp control (14 actions).
@@ -323,6 +324,216 @@ pub(crate) fn make_jpeg_thumbnail(bytes: &[u8]) -> Option<Vec<u8>> {
     Some(out.into_inner())
 }
 
+// ---------------------------------------------------------------------------
+// Status fan-out (#2177)
+// ---------------------------------------------------------------------------
+
+/// What one status fan-out actually did, recipient by recipient.
+///
+/// A status goes to a LIST, so a partial result is normal and has to be
+/// reportable: who got it, who the daily cap refused, and whose send failed.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct StatusFanOut {
+    /// Recipients that received the status.
+    pub sent: Vec<String>,
+    /// Recipients the daily cap refused. Always a tail of the list, because a
+    /// refusal ends the fan-out.
+    pub refused: Vec<String>,
+    /// Recipients whose send failed, with the error.
+    pub failed: Vec<(String, String)>,
+}
+
+impl StatusFanOut {
+    /// Recipients that did not receive the status.
+    fn missed(&self) -> usize {
+        self.refused.len() + self.failed.len()
+    }
+}
+
+/// The two per-recipient steps of a status fan-out.
+///
+/// Split out of the dispatch arm so the pacing and the cap accounting can be
+/// exercised without a WhatsApp connection: the arm supplies a live sink, a
+/// test supplies a recorder.
+#[async_trait]
+pub(crate) trait StatusSink {
+    /// Charge one slot of the shared #1407 budget for `jid`.
+    ///
+    /// `false` means the daily cap refused this recipient. Charging happens
+    /// per recipient, immediately before that recipient's send, so a refusal
+    /// can never spend a slot on a status that was not delivered.
+    async fn charge(&mut self, jid: &Jid) -> bool;
+
+    /// Deliver the status to exactly this recipient.
+    async fn deliver(&mut self, jid: &Jid) -> std::result::Result<(), String>;
+}
+
+/// Post one status per recipient, pacing between the sends (#2177).
+///
+/// The old shape charged and slept once per recipient and then posted a single
+/// status for the whole list, so every recipient got it at the same instant
+/// after one delay, and a cap hit part-way through spent the earlier slots on
+/// nothing. Here the charge and the send belong to the same recipient and the
+/// sleep sits between two sends.
+pub(crate) async fn fan_out_status<S: StatusSink>(
+    sink: &mut S,
+    jids: &[Jid],
+    pace: std::time::Duration,
+) -> StatusFanOut {
+    let mut out = StatusFanOut::default();
+    for (i, jid) in jids.iter().enumerate() {
+        if i > 0 {
+            tokio::time::sleep(pace).await;
+        }
+        if !sink.charge(jid).await {
+            // The cap is empty: the rest cannot be charged either, so report
+            // them instead of sleeping through recipients that will not get
+            // anything.
+            out.refused
+                .extend(jids[i..].iter().map(std::string::ToString::to_string));
+            break;
+        }
+        match sink.deliver(jid).await {
+            Ok(()) => out.sent.push(jid.to_string()),
+            Err(e) => out.failed.push((jid.to_string(), e)),
+        }
+    }
+    out
+}
+
+/// The report for a finished status fan-out.
+///
+/// Success only when every recipient got the status; a partial run says how
+/// many landed and names the ones a retry still owes, and a run that delivered
+/// nothing is an error that says a status cannot ride the text queue.
+pub(crate) fn status_report(
+    kind: &str,
+    total: usize,
+    out: &StatusFanOut,
+    pace: std::time::Duration,
+) -> ToolResult {
+    let misses = describe_status_misses(out);
+    if out.sent.is_empty() {
+        return ToolResult::error(format!(
+            "Status update ({kind}) reached none of the {total} allowlisted recipient(s).{misses}"
+        ));
+    }
+    if out.missed() == 0 {
+        return ToolResult::success(format!(
+            "Status update ({kind}) posted to {total} allowlisted recipient(s), one send per \
+             recipient, paced at {}s (at least {}s of wall clock).",
+            pace.as_secs(),
+            broadcast::burst_floor(total, pace).as_secs()
+        ));
+    }
+    ToolResult::success(format!(
+        "Status update ({kind}) posted to {} of {total} allowlisted recipient(s).{misses}",
+        out.sent.len()
+    ))
+}
+
+/// The "who did not get it, and why" clause shared by both report shapes.
+fn describe_status_misses(out: &StatusFanOut) -> String {
+    let mut parts = Vec::new();
+    if !out.refused.is_empty() {
+        parts.push(format!(
+            " The daily WhatsApp send cap refused {} recipient(s): {}. Unlike text, a status is \
+             not queued for retry - try again once the 24h window slides.",
+            out.refused.len(),
+            out.refused.join(", ")
+        ));
+    }
+    if !out.failed.is_empty() {
+        parts.push(format!(
+            " {} recipient(s) failed: {}.",
+            out.failed.len(),
+            out.failed
+                .iter()
+                .map(|(jid, err)| format!("{jid} ({err})"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    parts.join("")
+}
+
+/// The payload of a status, prepared once and delivered per recipient.
+enum StatusPayload {
+    Text {
+        body: String,
+    },
+    Image {
+        /// Boxed: `UploadResponse` is 232 bytes and would make every `Text`
+        /// status pay for it.
+        upload: Box<whatsapp_rust::upload::UploadResponse>,
+        thumbnail: Vec<u8>,
+        caption: Option<String>,
+    },
+}
+
+/// Live [`StatusSink`]: charges the real rate limiter and sends through the
+/// connected client.
+struct LiveStatusSink<'a> {
+    tool: &'a WhatsAppSendTool,
+    client: &'a whatsapp_rust::client::Client,
+    payload: StatusPayload,
+}
+
+#[async_trait]
+impl StatusSink for LiveStatusSink<'_> {
+    async fn charge(&mut self, jid: &Jid) -> bool {
+        let jid_str = jid.to_string();
+        let (cfg, owner) = {
+            let wa = &self.tool.config_rx.borrow().channels.whatsapp;
+            (
+                wa.rate_limit.clone(),
+                wa.is_owner(jid_str.split('@').next().unwrap_or(&jid_str)),
+            )
+        };
+        self.tool
+            .whatsapp_state
+            .rate_limiter
+            .gate_action(&cfg, owner)
+            .await
+    }
+
+    async fn deliver(&mut self, jid: &Jid) -> std::result::Result<(), String> {
+        let one = std::slice::from_ref(jid);
+        let opts = whatsapp_rust::features::StatusSendOptions::default();
+        let posted = match &self.payload {
+            StatusPayload::Text { body } => {
+                self.client
+                    .status()
+                    .send_text(
+                        body,
+                        broadcast::STATUS_BACKGROUND_ARGB,
+                        waproto::whatsapp::message::extended_text_message::FontType::SYSTEM,
+                        one,
+                        opts,
+                    )
+                    .await
+            }
+            StatusPayload::Image {
+                upload,
+                thumbnail,
+                caption,
+            } => {
+                self.client
+                    .status()
+                    .send_image(
+                        (**upload).clone(),
+                        thumbnail.clone(),
+                        caption.as_deref(),
+                        one,
+                        opts,
+                    )
+                    .await
+            }
+        };
+        posted.map(|_| ()).map_err(|e| e.to_string())
+    }
+}
+
 /// Upload media to WhatsApp servers and return the upload response.
 /// Uses the same pattern as the WhatsApp handler.
 #[allow(clippy::result_large_err)]
@@ -347,6 +558,59 @@ pub(crate) fn build_vcard(name: &str, phone: &str) -> String {
         "BEGIN:VCARD\nVERSION:3.0\nFN:{}\nTEL;TYPE=CELL:{}\nEND:VCARD",
         name, phone
     )
+}
+
+/// Parse a newsletter (channel) target for `post_newsletter` (#1827).
+///
+/// A channel JID is `120363...@newsletter`. That suffix is what the send path
+/// branches on: `whatsapp-rust` builds a plaintext SMAX stanza for it and
+/// rejects the encrypted path. A phone JID or a bare invite code is therefore
+/// refused here rather than handed to `send_message`, where it would silently
+/// take the DM path and deliver somewhere nobody asked for.
+pub(crate) fn newsletter_jid(raw: &str) -> std::result::Result<Jid, String> {
+    let jid: Jid = raw
+        .parse()
+        .map_err(|e| format!("'{raw}' is not a valid JID: {e:?}"))?;
+    if !jid.is_newsletter() {
+        return Err(format!(
+            "'{raw}' is not a newsletter JID; expected the '...@newsletter' form that \
+             list_newsletters and create_newsletter return. Nothing was sent."
+        ));
+    }
+    Ok(jid)
+}
+
+/// The proto a `post_newsletter` call puts on the wire (#1827).
+///
+/// A post is text, an image, or an image with a caption: the same shape a
+/// status takes, so `message` doubles as the caption when `media_path` is
+/// given. A post carrying neither is refused here rather than published as an
+/// empty channel update. Kept out of the dispatch arm so the proto shape is
+/// unit-testable without a live connection.
+pub(crate) fn build_post(
+    text: Option<&str>,
+    image: Option<waproto::whatsapp::message::ImageMessage>,
+) -> std::result::Result<waproto::whatsapp::Message, String> {
+    match (text, image) {
+        (None, None) => Err(
+            "a newsletter post needs 'message' (the post text, or the caption for an image \
+             post) or 'media_path' (a local image file). Nothing was sent."
+                .to_string(),
+        ),
+        (Some(body), None) => Ok(waproto::whatsapp::Message {
+            conversation: Some(body.to_string()),
+            ..Default::default()
+        }),
+        (body, Some(mut img)) => {
+            if let Some(body) = body {
+                img.caption = Some(body.to_string());
+            }
+            Ok(waproto::whatsapp::Message {
+                image_message: img.into(),
+                ..Default::default()
+            })
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -382,13 +646,14 @@ impl Tool for WhatsAppSendTool {
                         "block_contact", "unblock_contact", "list_blocked",
                         "send_buttons",
                         "status_update", "list_newsletters",
+                        "create_newsletter", "post_newsletter",
                         "create_label", "assign_label"
                     ],
                     "description": "The WhatsApp action to perform."
                 },
                 "message": {
                     "type": "string",
-                    "description": "Message text (send, reply, caption for media); the new name or status text for set_profile_name / set_profile_status. For status_update: the text status, or the caption when 'media_path' is given."
+                    "description": "Message text (send, reply, caption for media); the new name or status text for set_profile_name / set_profile_status. For status_update: the text status, or the caption when 'media_path' is given. For create_newsletter: the channel name. For post_newsletter: the post text, or the caption when 'media_path' is given."
                 },
                 "phone": {
                     "type": "string",
@@ -404,7 +669,7 @@ impl Tool for WhatsAppSendTool {
                 },
                 "media_path": {
                     "type": "string",
-                    "description": "Local file path for media (send_photo, send_document, send_audio, send_video, send_sticker). For status_update: a local image file to post as an image status instead of a text status, in which case 'message' becomes its caption."
+                    "description": "Local file path for media (send_photo, send_document, send_audio, send_video, send_sticker). For status_update: a local image file to post as an image status instead of a text status, in which case 'message' becomes its caption. For post_newsletter: a local image file to publish with the post, in which case 'message' becomes its caption."
                 },
                 "multi_select": {
                     "type": "boolean",
@@ -427,6 +692,14 @@ impl Tool for WhatsAppSendTool {
                     "type": "array",
                     "items": {"type": "string"},
                     "description": "For status_update: phone numbers to post the status to. Every one must appear in channels.whatsapp.broadcast.allowed_targets or NOTHING is sent. Omit to use the whole allowlist."
+                },
+                "newsletter": {
+                    "type": "string",
+                    "description": "For post_newsletter: the newsletter (channel) JID to post to, e.g. '120363...@newsletter' as returned by list_newsletters or create_newsletter. It must appear in channels.whatsapp.broadcast.allowed_targets or NOTHING is sent."
+                },
+                "description": {
+                    "type": "string",
+                    "description": "For create_newsletter: the channel description. Optional."
                 },
                 "label_id": {
                     "type": "string",
@@ -749,6 +1022,8 @@ impl Tool for WhatsAppSendTool {
                     .await
                 );
                 let msg_id = pget!(get_str(&input, "message_id")).to_string();
+
+                gate_send!(self, jid_str, "the message deletion");
 
                 match client
                     .revoke_message(jid, msg_id.clone(), Default::default())
@@ -1555,18 +1830,11 @@ impl Tool for WhatsAppSendTool {
                         }
                     }
                 }
-                // Pacing is the point: charge the shared budget once per
-                // recipient and sleep between them, so a status to N people
-                // costs N slots and at least (N-1) * pace seconds.
-                for (i, jid) in jids.iter().enumerate() {
-                    let jid_str = jid.to_string();
-                    gate_send!(self, jid_str, "the status update");
-                    if i > 0 {
-                        tokio::time::sleep(pace).await;
-                    }
-                }
-                let opts = whatsapp_rust::features::StatusSendOptions::default();
-                let posted = match media_path {
+                // #2177: build the payload ONCE, before any slot is
+                // charged, so a bad image or a failed upload never spends
+                // budget. Then charge and send per recipient, with the pace
+                // between two sends instead of before the first.
+                let (payload, kind) = match media_path {
                     Some(path) => {
                         let (bytes, mime, _filename) =
                             pget!(read_local_media(&path, "image/jpeg").await);
@@ -1587,39 +1855,29 @@ impl Tool for WhatsAppSendTool {
                         let upload = pget!(
                             upload_media(&client, bytes, wacore::download::MediaType::Image).await
                         );
-                        client
-                            .status()
-                            .send_image(upload, thumbnail, text.as_deref(), &jids, opts)
-                            .await
-                            .map(|_| format!("image status from {path}"))
+                        (
+                            StatusPayload::Image {
+                                upload: Box::new(upload),
+                                thumbnail,
+                                caption: text,
+                            },
+                            format!("image status from {path}"),
+                        )
                     }
-                    None => {
-                        let body = text.as_deref().unwrap_or_default();
-                        client
-                            .status()
-                            .send_text(
-                                body,
-                                broadcast::STATUS_BACKGROUND_ARGB,
-                                waproto::whatsapp::message::extended_text_message::FontType::SYSTEM,
-                                &jids,
-                                opts,
-                            )
-                            .await
-                            .map(|_| "text status".to_string())
-                    }
+                    None => (
+                        StatusPayload::Text {
+                            body: text.unwrap_or_default(),
+                        },
+                        "text status".to_string(),
+                    ),
                 };
-                match posted {
-                    Ok(kind) => Ok(ToolResult::success(format!(
-                        "Status update ({kind}) posted to {} allowlisted recipient(s), paced at \
-                         {}s (at least {}s of wall clock).",
-                        jids.len(),
-                        pace.as_secs(),
-                        broadcast::burst_floor(jids.len(), pace).as_secs()
-                    ))),
-                    Err(e) => Ok(ToolResult::error(format!(
-                        "Failed to post the status update: {e}"
-                    ))),
-                }
+                let mut sink = LiveStatusSink {
+                    tool: self,
+                    client: client.as_ref(),
+                    payload,
+                };
+                let outcome = fan_out_status(&mut sink, &jids, pace).await;
+                Ok(status_report(&kind, jids.len(), &outcome, pace))
             }
 
             // ── list_newsletters ─────────────────────────────────────────────
@@ -1641,6 +1899,144 @@ impl Tool for WhatsAppSendTool {
                     "Failed to list newsletters: {e}"
                 ))),
             },
+
+            // ── create_newsletter ────────────────────────────────────────────
+            // #1827. Creating a channel is an account-modifying broadcast-surface
+            // action: it publishes nothing, so the #1407 budget is not charged,
+            // but it is refused until a human has switched the broadcast rail on
+            // (non-empty allowlist). Same posture as status_update, because an
+            // unconfigured install must not be one tool call away from minting a
+            // channel on the owner's number.
+            "create_newsletter" => {
+                let allowlist = self
+                    .config_rx
+                    .borrow()
+                    .channels
+                    .whatsapp
+                    .broadcast
+                    .allowed_targets
+                    .clone();
+                if allowlist.is_empty() {
+                    return Ok(ToolResult::error(
+                        "Creating a newsletter is a broadcast-surface action and the broadcast \
+                         rail is off. Add at least one entry to \
+                         channels.whatsapp.broadcast.allowed_targets in config.toml first; an \
+                         unconfigured install must not be one tool call away from minting a \
+                         channel on the owner's number."
+                            .to_string(),
+                    ));
+                }
+                let name = pget!(get_str(&input, "message")).to_string();
+                let description = input
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty());
+                match client.newsletter().create(&name, description).await {
+                    Ok(meta) => {
+                        let invite = match &meta.invite_code {
+                            Some(code) => {
+                                format!(" Invite link: https://whatsapp.com/channel/{code}.")
+                            }
+                            None => String::new(),
+                        };
+                        Ok(ToolResult::success(format!(
+                            "Newsletter '{}' created ({}).{invite} Add the JID to \
+                             channels.whatsapp.newsletters to have its posts digested, and to \
+                             channels.whatsapp.broadcast.allowed_targets to post to it from \
+                             here.",
+                            meta.name, meta.jid
+                        )))
+                    }
+                    Err(e) => Ok(ToolResult::error(format!(
+                        "Failed to create the newsletter: {e}"
+                    ))),
+                }
+            }
+
+            // ── post_newsletter ──────────────────────────────────────────────
+            // #1827. This one DELIVERS a message, so it takes the same rails as
+            // every other message-delivering action: the target must be on the
+            // broadcast allowlist (opt-in per channel, like status) and the send
+            // is charged to the shared #1407 budget. There is no fire-and-forget
+            // path. The body is text or an image-with-caption, built by
+            // `build_post` so the proto shape is testable without a connection.
+            //
+            // A channel JID carries no phone, so `gate_send!` resolves the owner
+            // as false and the post paces on the non-owner budget. That is
+            // stricter than a DM, not a hole.
+            "post_newsletter" => {
+                let raw = pget!(get_str(&input, "newsletter")).to_string();
+                let jid = match newsletter_jid(&raw) {
+                    Ok(j) => j,
+                    Err(reason) => return Ok(ToolResult::error(reason)),
+                };
+                let allowlist = self
+                    .config_rx
+                    .borrow()
+                    .channels
+                    .whatsapp
+                    .broadcast
+                    .allowed_targets
+                    .clone();
+                if !broadcast::is_allowed(&raw, &allowlist) {
+                    return Ok(ToolResult::error(format!(
+                        "'{raw}' is not on channels.whatsapp.broadcast.allowed_targets, so \
+                         NOTHING was sent. Broadcast is opt-in per channel; add the JID to the \
+                         config first."
+                    )));
+                }
+                let text = input
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string);
+                let media_path = input
+                    .get("media_path")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string);
+                let image = match media_path {
+                    Some(path) => {
+                        let (bytes, mime, _filename) =
+                            pget!(read_local_media(&path, "image/jpeg").await);
+                        if !mime.starts_with("image/") {
+                            return Ok(ToolResult::error(format!(
+                                "'{path}' is {mime}; a newsletter post carries text or an \
+                                 image, and nothing was sent."
+                            )));
+                        }
+                        let upload = pget!(
+                            upload_media(&client, bytes, wacore::download::MediaType::Image).await
+                        );
+                        Some(waproto::whatsapp::message::ImageMessage {
+                            url: Some(upload.url),
+                            direct_path: Some(upload.direct_path),
+                            media_key: Some(upload.media_key.to_vec()),
+                            file_enc_sha256: Some(upload.file_enc_sha256.to_vec()),
+                            file_sha256: Some(upload.file_sha256.to_vec()),
+                            file_length: Some(upload.file_length),
+                            mimetype: Some(mime),
+                            ..Default::default()
+                        })
+                    }
+                    None => None,
+                };
+                let msg = match build_post(text.as_deref(), image) {
+                    Ok(m) => m,
+                    Err(reason) => return Ok(ToolResult::error(reason)),
+                };
+                let jid_str = jid.to_string();
+                gate_send!(self, jid_str, "the newsletter post");
+                match client.send_message(jid, msg).await {
+                    Ok(sent) => Ok(ToolResult::success(format!(
+                        "Posted to newsletter {jid_str} (message id {}).",
+                        sent.message_id
+                    ))),
+                    Err(e) => Ok(ToolResult::error(format!(
+                        "Failed to post to {jid_str}: {e}"
+                    ))),
+                }
+            }
 
             // ── create_label / assign_label ──────────────────────────────────
             // #1485. Labels are private organisation on the owner's own account:
@@ -1793,8 +2189,8 @@ impl Tool for WhatsAppSendTool {
                  send_document, send_audio, send_video, send_sticker, send_location, \
                  send_contact, react, send_poll, typing, mark_read, block_contact, \
                  unblock_contact, list_blocked, pin, unpin, forward, set_profile_name, \
-                 set_profile_status, status_update, list_newsletters, create_label, \
-                 assign_label, send_buttons",
+                 set_profile_status, status_update, list_newsletters, create_newsletter, \
+                 post_newsletter, create_label, assign_label, send_buttons",
                 unknown
             ))),
         }

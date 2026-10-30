@@ -26,12 +26,14 @@ fn activity_prefers_the_latest_narration_note() {
             name: "read_file".into(),
             context: "src/main.rs".into(),
             status: Some(true),
+            task_id: None,
         },
         GroupEntry::Note("Reading the config first.".into()),
         GroupEntry::Tool {
             name: "bash".into(),
             context: "cargo test".into(),
             status: None,
+            task_id: None,
         },
         GroupEntry::Note("*Now grepping the logs* for the failure.".into()),
     ]);
@@ -54,11 +56,13 @@ fn activity_falls_back_to_bash_hash_comments() {
             name: "bash".into(),
             context: "# Build the thing\ncargo build --release".into(),
             status: None,
+            task_id: None,
         },
         GroupEntry::Tool {
             name: "read_file".into(),
             context: "src/lib.rs".into(),
             status: None,
+            task_id: None,
         },
     ]);
     let text = text_of(&g);
@@ -77,11 +81,13 @@ fn activity_falls_back_to_latest_tool_label() {
             name: "read_file".into(),
             context: "src/main.rs".into(),
             status: Some(true),
+            task_id: None,
         },
         GroupEntry::Tool {
             name: "bash".into(),
             context: String::new(),
             status: None,
+            task_id: None,
         },
     ]);
     let text = text_of(&g);
@@ -117,6 +123,7 @@ fn activity_is_capped_and_raw_output_skipped() {
             name: "bash".into(),
             context: "src/foo.rs".into(),
             status: None,
+            task_id: None,
         },
     ]);
     let text = text_of(&g);
@@ -147,6 +154,7 @@ fn settled_line_never_carries_activity() {
             name: "bash".into(),
             context: String::new(),
             status: Some(true),
+            task_id: None,
         },
     ]);
     g.settle(TurnOutcome::Finished, None, Some("ctx".into()));

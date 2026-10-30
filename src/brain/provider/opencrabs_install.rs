@@ -10,6 +10,31 @@ use serde_json::{Value, json};
 /// Proxy base URL. The install route and the chat route both live under it.
 pub const OPENCRABS_BASE_URL: &str = "https://inference.opencrabs.com/v1";
 
+/// Context window of the built-in provider, in tokens.
+///
+/// Fixed on purpose. The endpoint is free and serves one model with a 200k
+/// window, so the budget never exceeds this and `providers.opencrabs.context_window`
+/// is not honoured. The key is dropped before the generic provider setup reads
+/// it, so it is inert in both directions rather than clamped (#2066).
+pub const OPENCRABS_CONTEXT_WINDOW: u32 = 200_000;
+
+/// Host of the built-in inference endpoint. Used to recognise the endpoint
+/// when it is reached under a provider name other than `opencrabs`.
+const OPENCRABS_HOST: &str = "inference.opencrabs.com";
+
+/// True when `base_url` points at the built-in inference endpoint.
+///
+/// Deliberately a host check and not a provider-name check, mirroring
+/// `is_official_host` in `crate::config::wire_dialect`: a `[providers.custom.*]`
+/// section that copies the install token reaches the same endpoint under a
+/// different name, and the fixed window has to hold for it too (#2067).
+pub fn is_opencrabs_endpoint(base_url: Option<&str>) -> bool {
+    base_url
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .is_some_and(|url| url.to_ascii_lowercase().contains(OPENCRABS_HOST))
+}
+
 /// Path of the install route, relative to [`OPENCRABS_BASE_URL`].
 pub const INSTALL_PATH: &str = "/install";
 
@@ -40,7 +65,7 @@ pub enum InstallError {
     /// The ID is malformed. Our own generator never produces one, so this is a bug.
     IdRejected,
     /// A token already exists for this ID. The stored token was lost, so the
-    /// caller must generate a new ID and ask again.
+    /// caller asks for a reissue against the same ID rather than a new one.
     AlreadyIssued,
     /// The proxy has turned issuance off.
     IssuanceOff,
@@ -54,7 +79,7 @@ pub enum InstallError {
     MalformedReply,
     /// The proxy could not be reached at all: DNS, connection or timeout.
     Unreachable,
-    /// The token was issued but could not be written to keys.toml.
+    /// The identity or its token could not be written on this machine.
     StorageFailed,
 }
 
@@ -80,6 +105,16 @@ pub fn is_valid_install_id(id: &str) -> bool {
 /// The JSON body for the install route.
 pub fn install_request_body(install_id: &str) -> Value {
     json!({ "install_id": install_id })
+}
+
+/// The JSON body that asks the proxy to reissue a token for a known ID (#2198).
+///
+/// The ID is the proof of ownership: a machine that still holds it is the same
+/// install that was issued the lost token. The extra field is additive, so a
+/// proxy that predates reissue ignores it and answers `409` exactly as before,
+/// which is what the acquire loop already handles.
+pub fn reissue_request_body(install_id: &str) -> Value {
+    json!({ "install_id": install_id, "reissue": true })
 }
 
 /// Read the proxy's answer to the install route.
@@ -122,7 +157,7 @@ pub fn install_error_message(err: &InstallError) -> &'static str {
             "The built-in OpenCrabs provider could not register this install: the install ID was rejected. Please report this."
         }
         InstallError::AlreadyIssued => {
-            "The built-in OpenCrabs provider already issued a token for this install. Generating a new install ID."
+            "The built-in OpenCrabs provider refused to reissue this install's token. Please report this."
         }
         InstallError::IssuanceOff => {
             "The built-in OpenCrabs provider is not issuing tokens right now. Choose another provider in Advanced setup."
@@ -143,7 +178,7 @@ pub fn install_error_message(err: &InstallError) -> &'static str {
             "Could not reach the built-in OpenCrabs provider. Check your connection, or choose another provider."
         }
         InstallError::StorageFailed => {
-            "The built-in OpenCrabs provider issued a token, but it could not be saved to keys.toml. Check the file permissions and try again."
+            "The built-in OpenCrabs provider could not save its install identity on this machine. Check the OpenCrabs home directory permissions and try again."
         }
     }
 }

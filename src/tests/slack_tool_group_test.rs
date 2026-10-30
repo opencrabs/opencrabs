@@ -13,6 +13,7 @@ fn entries(n: usize, done: bool) -> Vec<GroupEntry> {
             name: format!("tool{i}"),
             context: format!(" (arg{i})"),
             status: if done { Some(true) } else { None },
+            task_id: None,
         })
         .collect()
 }

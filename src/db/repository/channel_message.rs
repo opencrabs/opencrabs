@@ -517,12 +517,34 @@ impl ChannelMessageRepository {
         self.pool
             .get()
             .await
-            .context("Failed to get connection")?
+            .context("Failed to get a connection")?
             .interact(move |conn| {
                 conn.query_row(
+                    // One media message can carry TWO rows sharing this id
+                    // (#2121): the main store writes the caption plus
+                    // `[file: …]`, and the late "log all" pass used to write a
+                    // pathless `[photo] <caption>` twin a second later. A plain
+                    // `created_at DESC` returned the twin, so a reply to a photo
+                    // resolved to text with no way to reach the image.
+                    //
+                    // The twins are exactly the five shapes below. They sort
+                    // last, so a row carrying an attachment wins; a voice twin
+                    // (`[voice] <transcript>`) is NOT one of them, because there
+                    // the transcript is the useful half and it is the newer row.
+                    //
+                    // `created_at` is second-granular, so two inserts can land on
+                    // the same value and leave the order to chance. `id DESC`
+                    // makes the result deterministic; it never decides between a
+                    // twin and a real row, only between two rows of the same kind.
                     "SELECT content FROM channel_messages \
                      WHERE channel = ?1 AND channel_chat_id = ?2 AND platform_message_id = ?3 \
-                     ORDER BY created_at DESC LIMIT 1",
+                     ORDER BY (content LIKE '[photo] %' \
+                               OR content LIKE '[video] %' \
+                               OR content LIKE '[animation] %' \
+                               OR content LIKE '[video_note]%' \
+                               OR content LIKE '[document] %') ASC, \
+                              created_at DESC, id DESC \
+                     LIMIT 1",
                     params![ch, cid, pmid],
                     |row| row.get::<_, String>(0),
                 )

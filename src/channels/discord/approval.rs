@@ -23,4 +23,15 @@ impl DiscordState {
             false
         }
     }
+
+    /// Drop a registration without answering it (#2194).
+    ///
+    /// `resolve_pending_approval` only runs when someone clicks a button, so
+    /// every approval that timed out or lost its channel left its sender in
+    /// the map forever. The waiter calls this on the way out of every path,
+    /// click or not. Returns true when the entry was still there, which is the
+    /// normal case for a timeout.
+    pub async fn drop_pending_approval(&self, id: &str) -> bool {
+        self.pending_approvals.lock().await.remove(id).is_some()
+    }
 }

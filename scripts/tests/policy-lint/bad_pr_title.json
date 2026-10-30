@@ -1,0 +1,10 @@
+{
+  "name": "bad_pr_title_malformed_type",
+  "body": "",
+  "subjects": [],
+  "messages": "",
+  "files_count": 0,
+  "title": "fix core(channels): surface WhatsApp bans, locks and connect failures",
+  "title_kind": "pr",
+  "expected_exit": 1
+}

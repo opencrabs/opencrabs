@@ -10,12 +10,16 @@
 //! trace): one editable work-log per turn instead of one message per
 //! intermediate.
 
-use serenity::builder::{CreateActionRow, CreateButton};
+use serenity::builder::{CreateActionRow, CreateButton, CreateEmbed, CreateEmbedFooter};
 use serenity::model::application::ButtonStyle;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use super::DiscordState;
+use super::tool_card::{
+    card_color, card_footer, card_title, clamp_page, collapse_repeats, page_count, page_slice,
+    row_line,
+};
 use crate::channels::background_work::FlowOutcome;
 
 /// One tool row in a group.
@@ -23,8 +27,92 @@ use crate::channels::background_work::FlowOutcome;
 pub(crate) struct GroupEntry {
     pub name: String,
     pub context: String,
+    /// The provider's id for this call; empty when unknown (#1880). A
+    /// completion matches its own row by this id.
+    pub call_id: String,
     /// None = running, Some(success) = finished.
     pub status: Option<bool>,
+    /// Set only on a detached-task row (#2148): the background task's id.
+    /// A detached task has no provider call id, and two of them can share a
+    /// label, so this is what a finish matches on.
+    pub task_id: Option<String>,
+}
+
+impl GroupEntry {
+    /// The label this row shows. A detached row says so and says whether it
+    /// is still running; a tool row shows its tool name.
+    pub(crate) fn display_name(&self) -> String {
+        crate::channels::background_work::detached_row_label(
+            &self.name,
+            self.task_id.as_deref(),
+            self.status,
+        )
+    }
+}
+
+/// What a detached-task event does to the turn's group message (#2148).
+/// Returned by [`detached_render`] so the caller never has to decide, which
+/// is what keeps a finish from ever posting a second block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DetachedRender {
+    /// No group message yet: post it, then edit it in place from then on.
+    Post,
+    /// Rewrite the block at this message id.
+    Edit(u64),
+    /// Nothing to render: an orphan finish, or a row that is not there.
+    Skip,
+}
+
+/// One detached-task event, in the shape the renderer needs.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum DetachedEvent<'a> {
+    Started { task_id: &'a str, label: &'a str },
+    Finished { task_id: &'a str, success: bool },
+}
+
+/// Apply a detached-task event to the turn's rows and say where it renders.
+///
+/// Pure: no transport, no clock, no network. That is deliberate, because the
+/// contract worth testing is "start and finish share one message id" (#2148),
+/// and a bot cannot be stood up to prove it. A start posts only when the turn
+/// has no block yet; a finish only ever edits, so the block keeps one id for
+/// its whole life.
+pub(crate) fn detached_render(
+    entries: &mut Vec<GroupEntry>,
+    group_mid: Option<u64>,
+    event: DetachedEvent<'_>,
+) -> DetachedRender {
+    match event {
+        DetachedEvent::Started { task_id, label } => {
+            entries.push(GroupEntry {
+                name: label.to_string(),
+                context: String::new(),
+                call_id: String::new(),
+                status: None,
+                task_id: Some(task_id.to_string()),
+            });
+            match group_mid {
+                Some(mid) => DetachedRender::Edit(mid),
+                None => DetachedRender::Post,
+            }
+        }
+        DetachedEvent::Finished { task_id, success } => {
+            // Match by task id, never by label: two detached tasks can both
+            // be `cargo test`, and a label match would settle whichever row
+            // it hit first, leaving a finished task showing as running.
+            let Some(entry) = entries
+                .iter_mut()
+                .find(|e| e.task_id.as_deref() == Some(task_id))
+            else {
+                return DetachedRender::Skip;
+            };
+            entry.status = Some(success);
+            match group_mid {
+                Some(mid) => DetachedRender::Edit(mid),
+                None => DetachedRender::Skip,
+            }
+        }
+    }
 }
 
 /// A turn's tool group: contents plus display state.
@@ -38,6 +126,8 @@ pub(crate) struct GroupState {
     /// way it preserves `expanded`.
     pub notes: Vec<String>,
     pub expanded: bool,
+    /// Zero-based card page shown while expanded (#1880).
+    pub page: usize,
     /// Turn-start anchor for the live `🕒` segment and the settled `⏱` one
     /// (#1841). Stamped at first insert and preserved across updates so the
     /// clock never restarts mid-turn.
@@ -104,7 +194,7 @@ fn notes_block(notes: &[String]) -> String {
         .join("\n")
 }
 
-fn entry_icon(status: Option<bool>) -> &'static str {
+pub(crate) fn entry_icon(status: Option<bool>) -> &'static str {
     match status {
         None => "⚙️",
         Some(true) => "✅",
@@ -175,11 +265,11 @@ fn latest_activity(group: &GroupState) -> Option<String> {
         .map(|e| {
             let ctx = e.context.trim_start();
             if ctx.is_empty() {
-                e.name.clone()
+                e.display_name()
             } else {
                 // Contexts are stored with a leading space (` (arg0)`): trim,
                 // then join with one canonical space (the #1809 double-space fix).
-                format!("{} {ctx}", e.name)
+                format!("{} {ctx}", e.display_name())
             }
         })
         .next()
@@ -253,39 +343,6 @@ fn summary_line(group: &GroupState) -> String {
 /// construction.
 pub(crate) const CONTENT_MAX_CHARS: usize = 2000;
 
-/// Room reserved for the omission marker so the clamped body stays under
-/// [`CONTENT_MAX_CHARS`] once the marker is appended.
-const OMIT_MARKER_RESERVE: usize = 80;
-
-/// Keep newest rows of an expansion that overshoots the cap. Walks rows
-/// backwards (the freshest activity is what people expand for), restores
-/// chronology, and states how many rows were dropped — never silently.
-fn clamp_rows(summary: String, rows: Vec<String>) -> String {
-    let budget = CONTENT_MAX_CHARS - OMIT_MARKER_RESERVE;
-    let mut used = summary.chars().count() + 1;
-    let mut kept: Vec<String> = Vec::new();
-    let mut dropped = 0usize;
-    for row in rows.into_iter().rev() {
-        let cost = row.chars().count() + 1;
-        if used + cost > budget {
-            dropped += 1;
-            continue;
-        }
-        used += cost;
-        kept.push(row);
-    }
-    let mut out = format!(
-        "{summary}\n{}",
-        kept.into_iter().rev().collect::<Vec<_>>().join("\n")
-    );
-    if dropped > 0 {
-        out.push_str(&format!(
-            "\n_{dropped} omitted to fit Discord's message limit_"
-        ));
-    }
-    out
-}
-
 /// Final wire guard: hard-cut at the cap on a char boundary. Entry rows
 /// and notes are clipped upstream, so this only exists for pathological
 /// callers — an oversized message must never reach the API.
@@ -306,14 +363,12 @@ pub(crate) fn render_content(group: &GroupState) -> String {
     // hid the Cancelled/Error/Waiting state from the user entirely.
     let tools_part = if group.entries.len() == 1 && !group.expanded && group.settled.is_none() {
         let e = &group.entries[0];
-        format!("{} **{}**{}", entry_icon(e.status), e.name, e.context)
-    } else if group.expanded {
-        let lines: Vec<String> = group
-            .entries
-            .iter()
-            .map(|e| format!("{} **{}**{}", entry_icon(e.status), e.name, e.context))
-            .collect();
-        clamp_rows(summary_line(group), lines)
+        format!(
+            "{} **{}**{}",
+            entry_icon(e.status),
+            e.display_name(),
+            e.context
+        )
     } else {
         summary_line(group)
     };
@@ -333,80 +388,345 @@ pub(crate) fn render_content(group: &GroupState) -> String {
     hard_clip(body)
 }
 
-/// Toggle components for the group message; empty for single-tool groups
-/// (a lone line has nothing extra to reveal).
+/// Reply for a card click whose message aged out of retention (#1880).
+pub(crate) fn stale_card_reply() -> serenity::builder::CreateInteractionResponse {
+    serenity::builder::CreateInteractionResponse::Message(
+        serenity::builder::CreateInteractionResponseMessage::new()
+            .ephemeral(true)
+            .content("This status bubble is too old to use."),
+    )
+}
+
+/// Buttons under the group message. A lone line has nothing to reveal, so it
+/// gets none. Collapsed: Expand and Log. Expanded: page back and forward,
+/// Log, and Collapse (#1880).
 pub(crate) fn render_components(group: &GroupState, message_id: u64) -> Vec<CreateActionRow> {
     if group.entries.len() < 2 {
         return Vec::new();
     }
-    let label = if group.expanded {
-        "Collapse ▲"
-    } else {
-        "Expand ▼"
-    };
+    let log = CreateButton::new(format!("tglog:{message_id}"))
+        .label("Log")
+        .style(ButtonStyle::Secondary);
+    if !group.expanded {
+        return vec![CreateActionRow::Buttons(vec![
+            CreateButton::new(format!("toolgroup:{message_id}"))
+                .label("Expand ▼")
+                .style(ButtonStyle::Secondary),
+            log,
+        ])];
+    }
+    let rows = collapse_repeats(&group.entries);
+    let page = clamp_page(group.page, rows.len());
+    let last = page_count(rows.len()) - 1;
     vec![CreateActionRow::Buttons(vec![
+        CreateButton::new(format!("tgpage:{message_id}:{}", page.saturating_sub(1)))
+            .label("◀")
+            .style(ButtonStyle::Secondary)
+            .disabled(page == 0),
+        CreateButton::new(format!("tgpage:{message_id}:{}", (page + 1).min(last)))
+            .label("▶")
+            .style(ButtonStyle::Secondary)
+            .disabled(page >= last),
+        log,
         CreateButton::new(format!("toolgroup:{message_id}"))
-            .label(label)
+            .label("Collapse ▲")
             .style(ButtonStyle::Secondary),
     ])]
 }
 
+/// The card embed for an expanded group: the current page of rows, the
+/// header, the bar color, and the page footer. Empty when no card is shown
+/// (collapsed, or a lone line). Rows live here and not in the message text,
+/// so a long turn pages instead of being clipped (#1880).
+pub(crate) fn render_embeds(group: &GroupState) -> Vec<CreateEmbed> {
+    if !group.expanded || group.entries.len() < 2 {
+        return Vec::new();
+    }
+    let rows = collapse_repeats(&group.entries);
+    let page = clamp_page(group.page, rows.len());
+    let body = page_slice(&rows, page)
+        .iter()
+        .map(row_line)
+        .collect::<Vec<_>>()
+        .join("\n");
+    vec![
+        CreateEmbed::new()
+            .title(card_title(&rows))
+            .colour(card_color(&rows))
+            .description(body)
+            .footer(CreateEmbedFooter::new(card_footer(
+                &rows,
+                page,
+                group.entries.len(),
+            ))),
+    ]
+}
+
+/// Render one detached-task event into the turn's group message (#2148).
+///
+/// A start draws its row and a finish settles the row it owns. Neither ever
+/// posts a second block once one exists: both edit the same message id, which
+/// is the whole contract. A finish with no block or no matching row does
+/// nothing rather than opening a new one.
+pub(crate) async fn apply_detached_event(
+    dstate: &DiscordState,
+    channel: serenity::model::id::ChannelId,
+    http: &serenity::http::Http,
+    tools: &tokio::sync::Mutex<Vec<GroupEntry>>,
+    gmid: &tokio::sync::Mutex<Option<serenity::model::id::MessageId>>,
+    event: DetachedEvent<'_>,
+) {
+    use serenity::builder::EditMessage;
+    use serenity::model::id::MessageId;
+
+    let (render, entries) = {
+        let mut t = tools.lock().await;
+        let mid = *gmid.lock().await;
+        let render = detached_render(&mut t, mid.map(|m| m.get()), event);
+        (render, t.clone())
+    };
+
+    match render {
+        DetachedRender::Skip => {}
+        DetachedRender::Edit(mid) => {
+            let group = dstate
+                .upsert_tool_group(
+                    mid,
+                    GroupState {
+                        page: 0,
+                        entries,
+                        notes: Vec::new(),
+                        expanded: false,
+                        started_at: Instant::now(),
+                        settled: None,
+                    },
+                )
+                .await;
+            let edit = EditMessage::new()
+                .content(render_content(&group))
+                .embeds(render_embeds(&group))
+                .components(render_components(&group, mid));
+            if let Some(Err(e)) = super::governor::edit_chrome(
+                &dstate.governor,
+                channel,
+                http,
+                MessageId::new(mid),
+                edit,
+            )
+            .await
+            {
+                tracing::warn!("Discord: detached row edit failed: {e}");
+            }
+        }
+        DetachedRender::Post => {
+            let group = GroupState {
+                page: 0,
+                entries,
+                notes: Vec::new(),
+                expanded: false,
+                started_at: Instant::now(),
+                settled: None,
+            };
+            let content = render_content(&group);
+            match super::governor::say(
+                &dstate.governor,
+                channel,
+                http,
+                super::governor::Surface::Send,
+                &content,
+            )
+            .await
+            {
+                Ok(sent) => {
+                    let comps = render_components(&group, sent.id.get());
+                    if !comps.is_empty()
+                        && let Some(Err(e)) = super::governor::edit_chrome(
+                            &dstate.governor,
+                            channel,
+                            http,
+                            sent.id,
+                            EditMessage::new()
+                                .embeds(render_embeds(&group))
+                                .components(comps),
+                        )
+                        .await
+                    {
+                        tracing::warn!("Discord: detached row component fixup failed: {e}");
+                    }
+                    dstate.upsert_tool_group(sent.id.get(), group).await;
+                    *gmid.lock().await = Some(sent.id);
+                }
+                Err(e) => tracing::warn!("Discord: failed to post detached row block: {e}"),
+            }
+        }
+    }
+}
+
 impl DiscordState {
-    /// Retained tool groups; older ones stop being toggleable (their last
-    /// rendered state stays on screen, like Telegram's frozen blocks).
+    /// Retained tool groups in memory; older ones are restored from SQLite on
+    /// their next click (#1880), so a card outlives the cap as well as a restart.
     const TOOL_GROUP_CAP: usize = 20;
 
+    /// The message ids held in memory, oldest first. Test-only: the retention
+    /// test asserts on memory directly, because a click on an evicted card
+    /// legitimately restores it from SQLite whenever a pool is present (#1880).
+    #[cfg(test)]
+    pub(crate) async fn memory_group_ids(&self) -> Vec<u64> {
+        let guard = self.tool_groups.lock().await;
+        guard.0.clone()
+    }
+
+    /// Write a card's state through to SQLite (#1880). Best effort: a failed
+    /// write is logged and the in-memory card keeps working.
+    async fn persist_tool_group(&self, message_id: u64, group: &GroupState) {
+        let Some(pool) = crate::db::database::global_pool() else {
+            return;
+        };
+        let json = match serde_json::to_string(&super::tool_card_store::snapshot(group)) {
+            Ok(json) => json,
+            Err(e) => {
+                tracing::warn!("Discord: could not encode tool card {message_id}: {e}");
+                return;
+            }
+        };
+        let repo = crate::db::repository::DiscordToolCardRepository::new(pool.clone());
+        if let Err(e) = repo.set(message_id, &json).await {
+            tracing::warn!("Discord: could not save tool card {message_id}: {e}");
+        }
+    }
+
+    /// The stored card for a message that is no longer in memory, restored
+    /// into the live map so later clicks hit memory (#1880). None when there is
+    /// no stored card or it cannot be read.
+    async fn restore_tool_group(&self, message_id: u64) -> Option<GroupState> {
+        let pool = crate::db::database::global_pool()?;
+        let repo = crate::db::repository::DiscordToolCardRepository::new(pool.clone());
+        let json = match repo.get(message_id).await {
+            Ok(Some(json)) => json,
+            Ok(None) => return None,
+            Err(e) => {
+                tracing::warn!("Discord: could not read tool card {message_id}: {e}");
+                return None;
+            }
+        };
+        let stored: super::tool_card_store::StoredCard = match serde_json::from_str(&json) {
+            Ok(stored) => stored,
+            Err(e) => {
+                tracing::warn!("Discord: stored tool card {message_id} is unreadable: {e}");
+                return None;
+            }
+        };
+        let group = super::tool_card_store::restore(stored);
+        let mut guard = self.tool_groups.lock().await;
+        let (order, map) = &mut *guard;
+        if !map.contains_key(&message_id) {
+            order.push(message_id);
+            while order.len() > Self::TOOL_GROUP_CAP {
+                let oldest = order.remove(0);
+                map.remove(&oldest);
+            }
+            map.insert(message_id, group);
+        }
+        map.get(&message_id).cloned()
+    }
+
     /// Insert or update a group, PRESERVING the stored expanded/collapsed
-    /// choice on updates (a completing tool must not snap an expanded group
-    /// shut) and the stored narration notes (only `append_note`/`drop_note_if`
-    /// mutate those). Returns the stored state so callers render what is kept.
+    /// choice and page on updates (a completing tool must not snap an expanded
+    /// group shut) and the stored narration notes (only `append_note` and
+    /// `drop_note_if` mutate those). Returns the stored state so callers render
+    /// what is kept.
     pub(crate) async fn upsert_tool_group(
         &self,
         message_id: u64,
         mut group: GroupState,
     ) -> GroupState {
-        let mut guard = self.tool_groups.lock().await;
-        let (order, map) = &mut *guard;
-        match map.get(&message_id) {
-            Some(existing) => {
-                group.expanded = existing.expanded;
-                group.notes = existing.notes.clone();
-                group.started_at = existing.started_at;
-                group.settled = existing.settled.clone();
-            }
-            None => {
-                order.push(message_id);
-                while order.len() > Self::TOOL_GROUP_CAP {
-                    let oldest = order.remove(0);
-                    map.remove(&oldest);
+        {
+            let mut guard = self.tool_groups.lock().await;
+            let (order, map) = &mut *guard;
+            match map.get(&message_id) {
+                Some(existing) => {
+                    group.expanded = existing.expanded;
+                    group.page = existing.page;
+                    group.notes = existing.notes.clone();
+                    group.started_at = existing.started_at;
+                    group.settled = existing.settled.clone();
+                }
+                None => {
+                    order.push(message_id);
+                    while order.len() > Self::TOOL_GROUP_CAP {
+                        let oldest = order.remove(0);
+                        map.remove(&oldest);
+                    }
                 }
             }
+            map.insert(message_id, group.clone());
         }
-        map.insert(message_id, group.clone());
+        self.persist_tool_group(message_id, &group).await;
         group
     }
 
-    /// Flip a group's expanded state; None when it aged out of retention.
+    /// Set a group's card page; None when the card is in neither memory nor
+    /// SQLite (#1880).
+    pub(crate) async fn set_tool_group_page(
+        &self,
+        message_id: u64,
+        page: usize,
+    ) -> Option<GroupState> {
+        let updated = self
+            .edit_tool_group(message_id, |group| group.page = page)
+            .await?;
+        self.persist_tool_group(message_id, &updated).await;
+        Some(updated)
+    }
+
+    /// Flip a group's expanded state; None when the card is in neither memory
+    /// nor SQLite.
     pub(crate) async fn toggle_tool_group(&self, message_id: u64) -> Option<GroupState> {
+        let updated = self
+            .edit_tool_group(message_id, |group| group.expanded = !group.expanded)
+            .await?;
+        self.persist_tool_group(message_id, &updated).await;
+        Some(updated)
+    }
+
+    /// Apply `edit` to a card in memory, restoring it from SQLite first when it
+    /// is not there (#1880).
+    async fn edit_tool_group<F>(&self, message_id: u64, edit: F) -> Option<GroupState>
+    where
+        F: FnOnce(&mut GroupState),
+    {
+        {
+            let mut guard = self.tool_groups.lock().await;
+            let (_, map) = &mut *guard;
+            if let Some(group) = map.get_mut(&message_id) {
+                edit(group);
+                return Some(group.clone());
+            }
+        }
+        let mut restored = self.restore_tool_group(message_id).await?;
+        edit(&mut restored);
         let mut guard = self.tool_groups.lock().await;
         let (_, map) = &mut *guard;
-        let group = map.get_mut(&message_id)?;
-        group.expanded = !group.expanded;
-        Some(group.clone())
+        map.insert(message_id, restored.clone());
+        Some(restored)
     }
 
     /// Append one narration line to the stored group, keeping only the
     /// newest [`NOTE_CAP`]. Returns the updated state, or None when the
     /// message has no stored group (aged out of retention).
     pub(crate) async fn append_note(&self, message_id: u64, note: String) -> Option<GroupState> {
-        let mut guard = self.tool_groups.lock().await;
-        let (_, map) = &mut *guard;
-        let group = map.get_mut(&message_id)?;
-        group.notes.push(note);
-        if group.notes.len() > NOTE_CAP {
-            group.notes.remove(0);
-        }
-        Some(group.clone())
+        let updated = {
+            let mut guard = self.tool_groups.lock().await;
+            let (_, map) = &mut *guard;
+            let group = map.get_mut(&message_id)?;
+            group.notes.push(note);
+            if group.notes.len() > NOTE_CAP {
+                group.notes.remove(0);
+            }
+            group.clone()
+        };
+        self.persist_tool_group(message_id, &updated).await;
+        Some(updated)
     }
 
     /// Stamp the post-delivery status (#1841): freeze the clock at now and
@@ -426,17 +746,21 @@ impl DiscordState {
         waiting: Option<String>,
         outcome: Option<FlowOutcome>,
     ) -> Option<GroupState> {
-        let mut guard = self.tool_groups.lock().await;
-        let (_, map) = &mut *guard;
-        let group = map.get_mut(&message_id)?;
-        let prev_ctx = group.settled.as_ref().and_then(|s| s.ctx.clone());
-        group.settled = Some(SettledStatus {
-            elapsed: group.started_at.elapsed(),
-            ctx: ctx.or(prev_ctx),
-            waiting,
-            outcome,
-        });
-        Some(group.clone())
+        let updated = {
+            let mut guard = self.tool_groups.lock().await;
+            let (_, map) = &mut *guard;
+            let group = map.get_mut(&message_id)?;
+            let prev_ctx = group.settled.as_ref().and_then(|s| s.ctx.clone());
+            group.settled = Some(SettledStatus {
+                elapsed: group.started_at.elapsed(),
+                ctx: ctx.or(prev_ctx),
+                waiting,
+                outcome,
+            });
+            group.clone()
+        };
+        self.persist_tool_group(message_id, &updated).await;
+        Some(updated)
     }
 
     /// Narrow or clear the waiting line of a settled group (#1987): the
@@ -449,11 +773,15 @@ impl DiscordState {
         message_id: u64,
         waiting: Option<String>,
     ) -> Option<GroupState> {
-        let mut guard = self.tool_groups.lock().await;
-        let (_, map) = &mut *guard;
-        let group = map.get_mut(&message_id)?;
-        group.settled.as_mut()?.waiting = waiting;
-        Some(group.clone())
+        let updated = {
+            let mut guard = self.tool_groups.lock().await;
+            let (_, map) = &mut *guard;
+            let group = map.get_mut(&message_id)?;
+            group.settled.as_mut()?.waiting = waiting;
+            group.clone()
+        };
+        self.persist_tool_group(message_id, &updated).await;
+        Some(updated)
     }
 
     /// Remember that this session's turn settled with live background work
@@ -480,10 +808,16 @@ impl DiscordState {
     /// Clone the live or settled group for out-of-loop renderers (#1843):
     /// the flow ticker snapshots under the lock, renders outside it, and
     /// re-snapshots after its edit so the settled line keeps the last word.
+    /// A card that left memory is restored from SQLite (#1880).
     pub(crate) async fn tool_group_snapshot(&self, message_id: u64) -> Option<GroupState> {
-        let guard = self.tool_groups.lock().await;
-        let (_, map) = &*guard;
-        map.get(&message_id).cloned()
+        {
+            let guard = self.tool_groups.lock().await;
+            let (_, map) = &*guard;
+            if let Some(group) = map.get(&message_id) {
+                return Some(group.clone());
+            }
+        }
+        self.restore_tool_group(message_id).await
     }
 
     /// Remove the LAST narration line matching `pred` — the final-response
@@ -494,93 +828,15 @@ impl DiscordState {
     where
         F: Fn(&str) -> bool,
     {
-        let mut guard = self.tool_groups.lock().await;
-        let (_, map) = &mut *guard;
-        let group = map.get_mut(&message_id)?;
-        let idx = group.notes.iter().rposition(|n| pred(n))?;
-        group.notes.remove(idx);
-        Some(group.clone())
-    }
-}
-
-#[cfg(test)]
-mod cap_tests {
-    use super::*;
-
-    fn probe(entries: usize, notes: usize, expanded: bool) -> GroupState {
-        GroupState {
-            entries: (0..entries)
-                .map(|i| GroupEntry {
-                    name: format!("tool{i}"),
-                    context: format!(" (long context line to reach the cap sooner #{i})"),
-                    status: Some(true),
-                })
-                .collect(),
-            notes: (0..notes)
-                .map(|i| clip_note(&"n".repeat(NOTE_MAX_CHARS + 40 + i)))
-                .collect(),
-            expanded,
-            started_at: Instant::now(),
-            settled: Some(SettledStatus {
-                elapsed: Duration::from_secs(3),
-                ctx: None,
-                waiting: None,
-                outcome: None,
-            }),
-        }
-    }
-
-    #[test]
-    fn huge_expansion_fits_the_cap_and_states_drops() {
-        let rendered = render_content(&probe(300, 6, true));
-        let chars = rendered.chars().count();
-        assert!(chars <= CONTENT_MAX_CHARS, "expansion overshot: {chars}");
-        assert!(
-            rendered.contains("_") && rendered.contains("omitted to fit"),
-            "silent drop: {rendered}"
-        );
-        assert!(
-            rendered.contains("tool299"),
-            "the newest entry must survive the clamp"
-        );
-    }
-
-    #[test]
-    fn small_expansion_is_untouched() {
-        let rendered = render_content(&probe(3, 0, true));
-        assert!(rendered.contains("tool0") && rendered.contains("tool2"));
-        assert!(!rendered.contains("omitted to fit"));
-    }
-
-    #[test]
-    fn collapsed_note_flood_fits_the_cap() {
-        let rendered = render_content(&probe(30, 6, false));
-        assert!(rendered.chars().count() <= CONTENT_MAX_CHARS);
-    }
-
-    #[test]
-    fn multibyte_context_never_splits_a_char() {
-        let mut g = probe(2, 0, true);
-        g.entries[0].context = " (".repeat(3000);
-        let rendered = render_content(&g);
-        assert!(rendered.chars().count() <= CONTENT_MAX_CHARS);
-        assert!(!rendered.ends_with('\u{FFFD}'));
-    }
-
-    #[test]
-    fn marker_counts_exactly_the_dropped_rows() {
-        let rendered = render_content(&probe(250, 0, true));
-        // Line 0 is the summary (`✅ **250 tool calls** · …`), which also
-        // starts with an entry icon — only the entry rows count as shown.
-        let shown = rendered
-            .lines()
-            .skip(1)
-            .filter(|l| l.starts_with(['✅', '❌', '\u{2699}']))
-            .count();
-        assert!(shown > 0 && shown < 250, "clamp kept {shown} rows");
-        assert!(
-            rendered.contains(&format!("_{} omitted to fit", 250 - shown)),
-            "marker disagrees with visible rows:\n{rendered}"
-        );
+        let updated = {
+            let mut guard = self.tool_groups.lock().await;
+            let (_, map) = &mut *guard;
+            let group = map.get_mut(&message_id)?;
+            let idx = group.notes.iter().rposition(|n| pred(n))?;
+            group.notes.remove(idx);
+            group.clone()
+        };
+        self.persist_tool_group(message_id, &updated).await;
+        Some(updated)
     }
 }

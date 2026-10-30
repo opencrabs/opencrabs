@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=OpenCrabs
+GenericName=AI Agent
+Comment=AI agent for the terminal
+Exec=opencrabs
+Icon=opencrabs
+Terminal=true
+Categories=Development;
+Keywords=ai;agent;terminal;cli;
+StartupNotify=false

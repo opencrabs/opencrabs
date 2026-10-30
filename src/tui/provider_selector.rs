@@ -284,6 +284,22 @@ impl ProviderSelectorState {
     /// Detect if an API key exists in config for the current provider.
     /// Sets `has_existing_key` flag and `api_key_input` sentinel. Never loads actual key.
     pub fn detect_existing_key(&mut self) {
+        match crate::config::Config::load() {
+            Ok(config) => self.detect_existing_key_from(&config),
+            Err(_) => {
+                self.api_key_input.clear();
+                self.has_existing_key = false;
+                self.selected_model = 0;
+                self.model_filter.clear();
+            }
+        }
+    }
+
+    /// Same as [`Self::detect_existing_key`], but answers from the config it is
+    /// handed instead of the live `config.toml`. A caller that was given a
+    /// specific config must use this one: reading disk made the answer depend
+    /// on the machine running it (#2077).
+    pub fn detect_existing_key_from(&mut self, config: &crate::config::Config) {
         fn has_nonempty_key(p: Option<&ProviderConfig>) -> bool {
             p.and_then(|p| p.api_key.as_ref())
                 .is_some_and(|k| !k.is_empty())
@@ -292,7 +308,7 @@ impl ProviderSelectorState {
         self.api_key_input.clear();
         self.has_existing_key = false;
 
-        if let Ok(config) = crate::config::Config::load() {
+        {
             let has_key = if self.selected_provider < CUSTOM_PROVIDER_IDX {
                 let id = PROVIDERS[self.selected_provider].id;
                 if self.is_cli() {

@@ -53,6 +53,36 @@ pub fn uncalled_commands_nudge(commands: &[String]) -> String {
     )
 }
 
+/// Correction for claims about the session's own record that the record
+/// contradicts (#2122).
+///
+/// Distinct from the other two fact checks because the contradiction is
+/// internal: the text says a command never ran while the calls show it did, or
+/// reports an identifier as produced with nothing in the evidence behind it. No
+/// external source is needed to settle it, and the model cannot answer it by
+/// pointing at a tool it is about to run. The wording therefore asks for a
+/// retraction rather than a rerun, and only falls back to running when the
+/// identifier is genuinely missing because the call was never made.
+pub fn unbacked_actions_nudge(actions: &[String]) -> String {
+    let quoted = actions
+        .iter()
+        .map(|a| format!("`{a}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let subject = if actions.len() == 1 {
+        "this claim:"
+    } else {
+        "these claims:"
+    };
+    format!(
+        "[System: You reported {subject} {quoted}. That contradicts this session's own record: \
+         either the call is in your history, or nothing in any tool result shows the work was \
+         done. Do not restate it. Correct it in your next message with what the record actually \
+         shows, and if the work was never done, do it now through the structured tool-call API \
+         before claiming it again.{NO_EXECUTION_WHILE_REASONING}{FINISHED_ESCAPE}]"
+    )
+}
+
 /// Correction naming facts the turn asserted that exist nowhere in the
 /// conversation's evidence (#1423).
 ///

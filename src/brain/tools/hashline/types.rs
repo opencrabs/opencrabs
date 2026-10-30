@@ -50,8 +50,17 @@ impl HashRef {
         };
 
         if hash_str.len() != super::hash::HASH_LEN {
+            // A whole source line pasted where a tag belongs is the failure
+            // class this text can actually prevent, so it names both the shape
+            // and where a tag comes from (#2201). Across the 84 logged
+            // hashline_edit failures the classes are stale tag 37, collision
+            // 25, pasted source line 19, other 3: the pasted line is the
+            // smallest of the three, which is why the collision and stale-tag
+            // paths get their own wording rather than being folded in here.
             return Err(format!(
-                "Invalid hash ref '{}': hash must be exactly {} characters (got '{}')",
+                "Invalid hash ref '{}': a hash is exactly {} characters taken from the tag \
+                 `read_file` prints with hashline=true, which puts it before the `|` on each \
+                 line. Use that tag, not the source line itself (got '{}')",
                 s,
                 super::hash::HASH_LEN,
                 hash_str

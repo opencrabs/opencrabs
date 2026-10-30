@@ -143,6 +143,51 @@ pub(crate) async fn check_plan_gate(
     }
 }
 
+/// Mechanical plan requirement.
+///
+/// Prose in the brain files asked for the plan tool and was routinely
+/// skipped: research, audits and multi-file fixes ran as long ad-hoc tool
+/// sequences with nothing to review, nothing to verify a completion
+/// against, and no record of what was left. This makes the requirement
+/// mechanical: once a turn has made more than `threshold` tool calls and
+/// the session still has no plan, every further call is refused until the
+/// agent calls `plan` init.
+///
+/// Deliberate escape hatches, in order:
+/// - `threshold == 0` disables the gate (`[agent] plan_gate_after_tool_calls`).
+/// - `exempt` is set for sub-agent sessions and cron runs, which execute a
+///   task someone else already planned. A throwaway child plan nobody sees
+///   would be worse than no plan.
+/// - `plan` and `tool_search` always pass, so the agent can always reach the
+///   tool that unblocks it. Without this the gate would deadlock itself.
+/// - Any existing plan state allows the call: a live checklist, or a design
+///   being drafted, is the requirement being met.
+pub(crate) async fn check_plan_requirement(
+    session_id: Uuid,
+    tool_name: &str,
+    turn_tool_calls: usize,
+    threshold: usize,
+    exempt: bool,
+) -> GateDecision {
+    if exempt || threshold == 0 || turn_tool_calls <= threshold {
+        return GateDecision::Allow;
+    }
+    // The unblock path can never be gated, or the agent cannot comply.
+    if matches!(tool_name, "plan" | "tool_search") {
+        return GateDecision::Allow;
+    }
+    if plan_files::plan_mode_state(session_id).await != PlanModeState::NoPlan {
+        return GateDecision::Allow;
+    }
+    GateDecision::Deny(format!(
+        "Plan gate: {turn_tool_calls} tool calls in this turn and no plan. Work of \
+         this size (research, audits, multi-file fixes) runs under the plan tool, \
+         not ad hoc. Call `plan` init now with the steps you have so far and the \
+         acceptance check for each, then continue. Reads and writes resume as soon \
+         as the plan exists."
+    ))
+}
+
 /// Whether a write-capable tool call targets the session plan `.md`.
 ///
 /// The target is read from the conventional `path` / `file_path` input

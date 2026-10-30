@@ -10,7 +10,10 @@ Thank you for your interest in contributing to OpenCrabs! We welcome contributio
 
 ### 1. Bug Reports (Issues Only)
 
-Found a bug? Open an issue — **do not submit a PR yet**.
+Found a bug? Open an issue — **do not submit a PR yet**. The bug report form
+(`.github/ISSUE_TEMPLATE/bug_report.yml`) asks for every item below, so use it
+rather than a blank issue: it is the fastest route to a confirmed, fixable
+report.
 
 **Required information:**
 - Clear, descriptive title
@@ -22,7 +25,9 @@ Found a bug? Open an issue — **do not submit a PR yet**.
 
 ### 2. Feature Requests (Issues Only — No Code)
 
-Have an idea for a new feature? Open an issue with the `enhancement` label.
+Have an idea for a new feature? Open an issue with the `feature` label. The
+feature request form (`.github/ISSUE_TEMPLATE/feature_request.yml`) asks for
+exactly this information.
 
 **What to include:**
 - What problem does this solve?
@@ -88,6 +93,8 @@ refactor(memory): mod.rs is declarations-only
 
 A bare area prefix (`TUI:`, `z.ai:`, `Reasoning stream:`) is not the convention. The type makes the tracker filterable and lets the fixing commit reuse the title verbatim. Add labels on creation (`--label bug --label tui`), one for the type and one for the area.
 
+Both halves of the shape are enforced in CI: `.github/workflows/title-lint.yml` runs on issue and pull request open/edit and fails the check on a bare area prefix, using the same rule (`governance.toml` `[titles]`) that `scripts/policy-lint.py` applies to commit subjects. A title that is already wrong cannot become a compliant commit, because the fixing commit reuses it verbatim.
+
 ## Where Issues Go
 
 OpenCrabs is developed alongside a **dev factory** — the tooling, CI, and automation that build, test, and release the binary. Issues are split by what they describe:
@@ -118,6 +125,22 @@ feat core(memory): expose vector index stats to /doctor
 ```
 
 `fix core` and `feat core` are the two core prefixes; every other change uses the plain type.
+
+### Issue references in code
+
+A code comment explains what the code does and why, in words. An issue number can be added to that explanation, but it cannot replace it: a reader should understand the code without opening the ticket.
+
+- A bare `#N` in source means an issue on `opencrabs/opencrabs`. Check that the issue exists there before you cite it.
+- Do not cite numbers from the historical fork tracker. If the history behind a comment matters, recreate that issue on `opencrabs/opencrabs` and cite the new number.
+
+```rust
+// Before: the number is the only explanation
+// #2027: the per-row cache-read count behind the By Model cache share.
+
+// After: the reason is in the comment; the number is optional
+// The per-row cache-read count behind the By Model cache share. Rows
+// written before the column existed carry no count, so they are left out.
+```
 
 ## Issue & PR Lifecycle
 
@@ -157,6 +180,21 @@ feat core(memory): expose vector index stats to /doctor
 - **Rust** 1.95 or later (edition 2024; source of truth: `rust-version` in `Cargo.toml`)
 - **SQLite** (bundled via `rusqlite`)
 - **Git**
+
+### Toolchain
+
+`rust-toolchain.toml` pins an exact compiler version, and all 11 `toolchain:` inputs in `.github/workflows/` name the same version. Your local `cargo` and CI therefore compile with the same rustc, and a new Rust release cannot change the shipped binary without a commit here.
+
+The pin is deliberate. The glibc floor of the Linux binary is a property of the toolchain that built it, so a floating `stable` can raise that floor the same way a rolled runner image did in v0.5.13 (#2206).
+
+To bump it, in one commit:
+
+1. Set `channel` in `rust-toolchain.toml` to the new version.
+2. Set every `toolchain:` value in `.github/workflows/` to match (`grep -rn 'toolchain:' .github/workflows/` finds all of them).
+3. Update `rust-version` in `Cargo.toml` only if the new compiler raises the minimum the code needs.
+4. Run `cargo fmt --all -- --check`, the clippy gate below, and `cargo test --all-features`.
+
+Those four places are the whole bump, so nothing is left floating after it.
 
 ### Build & Test
 
@@ -365,6 +403,25 @@ fix: prevent duplicate message rendering for CLI providers
 refactor: simplify tool loop iteration tracking
 ```
 
+## AI Agents and Agentic Contributions
+
+Agent-written code is welcome. Agent-run accounts are not.
+
+**We reject AI agent profiles.** An account that exists to run an agent is not a contributor: vendor bot identities, `[bot]` accounts, and personal accounts created only to relay an agent's output all fall under this. Issues and PRs opened from one are closed without review. There is no separate agent profile to register, no bot badge, and no shared automation account that can stand in for a person.
+
+**A named agent account is refused even when a human vouches for it.** Some coding agents ship their own GitHub identity. Work arriving from that account is closed no matter what the linked issue or PR body says about who directed it, because the account is not attached to an owner: there is nobody accountable behind it, nobody to answer a review question, and nobody to fix it. An endorsement written in the description does not convert an unowned account into an owned one. Commit from your own profile instead, and the same diff is welcome.
+
+**Agentic commits are accepted under the human's profile.** If an agent produced the diff, the commit still carries the name and email of the person who owns that agent, and that person opens the PR from their own GitHub account. Issues follow the same rule: file them yourself, from your own account.
+
+**The owning profile carries the full responsibility.** Submitting agent-written work under your profile states that you read it, you understand it, you ran the checks, and you will answer for it in review. "The agent wrote it" is not an explanation, a defense, or a mitigation. A regression, a security hole, or a wrong claim in an issue is yours, and a maintainer asking why a line exists expects an answer from you, not a transcript.
+
+In practice:
+
+- No `Co-Authored-By` trailer naming an agent or a model, same as any other co-author line (see **Commit Discipline**).
+- No "generated by" footer, badge, or attribution in commit bodies, PR descriptions, or issue bodies.
+- No agent-written PR you have not run locally. CI is not your reviewer of first resort, and a green pipeline does not excuse a diff nobody read.
+- A PR you cannot explain in your own words is closed, however good the code is.
+
 ## What Gets Your PR Closed
 
 To be transparent, here's what will get your PR closed immediately:
@@ -376,6 +433,7 @@ To be transparent, here's what will get your PR closed immediately:
 - **No tests** — Bug fixes without a regression test, features without any tests
 - **Tests that write the live config** — A test that saves `config.toml` or `keys.toml` outside a home override
 - **AI-generated spam** — PRs that look like they were generated by an LLM with no understanding of the codebase
+- **An AI agent profile**: issues and PRs opened from an account that exists to run an agent (see **AI Agents and Agentic Contributions**)
 
 ## Don't Know How to Code?
 

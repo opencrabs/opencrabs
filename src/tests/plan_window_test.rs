@@ -29,6 +29,7 @@ fn task(order: usize, status: TaskStatus) -> PlanTask {
         notes: None,
         retry_count: 0,
         verification: None,
+        spec_check: None,
         scope: None,
     }
 }

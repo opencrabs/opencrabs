@@ -113,6 +113,9 @@ struct RawPollState {
     pending: VecDeque<RawQueued>,
     flag: StopFlag,
     stop_token: StopToken,
+    /// Guest-mode turn runner (#2087). `None` means guest updates are logged
+    /// and dropped, which is also what an older build does.
+    guest: Option<std::sync::Arc<super::guest::GuestRunner>>,
 }
 
 /// An update parked between reception and dispatcher handoff, carrying the
@@ -218,6 +221,11 @@ async fn poll_once_inner(st: &mut RawPollState) -> usize {
             "callback_query",
             "message_reaction",
             "my_chat_member",
+            // Guest mode (#2087). Bot API 10.0 added the update type; the
+            // pinned teloxide-core does not know it, so this list is the only
+            // place it can be asked for. `allowed_updates` is a FILTER: an
+            // update type missing from it is never delivered at all.
+            "guest_message",
         ],
     });
     let resp = st
@@ -283,6 +291,26 @@ async fn poll_once_inner(st: &mut RawPollState) -> usize {
     for u in updates {
         let update_id = u.get("update_id").and_then(|v| v.as_i64()).unwrap_or(-1);
         st.offset = st.offset.max(update_id + 1);
+        // Guest mode (#2087): handled off the RAW payload and skipped before
+        // the typed parse, which has no `guest_message` kind and would log a
+        // parse error for a perfectly good update.
+        if let Some(query) = super::guest::parse_guest_query(u) {
+            tracing::info!(
+                "Telegram raw poll: guest query {} from user {} in chat {:?}",
+                query.query_id,
+                query.user_id,
+                query.chat_id
+            );
+            match &st.guest {
+                Some(runner) => runner.spawn(query),
+                None => tracing::warn!(
+                    "Telegram raw poll: guest query {} arrived with no guest handler wired, \
+                     dropping it",
+                    query.query_id
+                ),
+            }
+            continue;
+        }
         let mut u = u.clone();
         // Stash the raw message BEFORE the typed parse can lose content, and
         // SYNTHESIZE readable text into messages whose content type this Bot
@@ -541,8 +569,13 @@ fn raw_stop_token(st: &mut RawPollState) -> StopToken {
 }
 
 /// Build the raw-aware update listener for the dispatcher.
+///
+/// `guest` is the guest-mode runner (#2087): a guest update carries a kind the
+/// typed dispatcher cannot represent, so the listener hands it straight to the
+/// runner and skips the typed parse.
 pub(crate) fn raw_polling_listener(
     token: String,
+    guest: Option<std::sync::Arc<super::guest::GuestRunner>>,
 ) -> impl teloxide::update_listeners::UpdateListener<Err = std::convert::Infallible> {
     let (stop_token, flag) = mk_stop_token();
     let state = RawPollState {
@@ -552,6 +585,7 @@ pub(crate) fn raw_polling_listener(
         pending: VecDeque::new(),
         flag,
         stop_token,
+        guest,
     };
     StatefulListener::new(state, raw_update_stream, raw_stop_token)
 }

@@ -99,6 +99,27 @@ pub(crate) fn char_boundary_at_width(s: &str, target_width: usize) -> usize {
     s.len()
 }
 
+/// Shorten `text` to at most `width` display cells, ending in an ellipsis
+/// when anything was dropped.
+///
+/// Width is measured in terminal cells, not bytes or chars, so a wide CJK
+/// glyph or an emoji never gets split down the middle. Text that already fits
+/// is returned unchanged (no ellipsis, no reallocation of its content).
+pub(crate) fn truncate_to_width(text: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    if text.width() <= width {
+        return text.to_string();
+    }
+    // One cell belongs to the ellipsis, the rest to the visible prefix.
+    let budget = width - 1;
+    let cut = char_boundary_at_width(text, budget);
+    let mut out = text[..cut].trim_end().to_string();
+    out.push('…');
+    out
+}
+
 /// Format token count with a custom label (e.g. "1.2M total", "150K total")
 pub(super) fn format_token_count_with_label(tokens: i64, label: &str) -> String {
     let tokens = tokens.max(0) as f64;

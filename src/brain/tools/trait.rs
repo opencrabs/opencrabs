@@ -138,11 +138,44 @@ pub struct ToolExecutionContext {
     /// ever see. `false` by default (interactive).
     pub headless: bool,
 
+    /// Tool calls already made in the CURRENT turn, stamped per call by the
+    /// tool loop. The plan requirement gate reads this to decide that a turn
+    /// has grown past the point where ad-hoc work is acceptable. `0` on
+    /// surfaces that build a context outside a turn (tests, one-shot tools).
+    pub turn_tool_calls: usize,
+
+    /// Skip the mechanical plan requirement for this execution. Set for
+    /// sub-agent sessions and cron runs: they execute a task someone else
+    /// already planned, so forcing a throwaway child plan would be worse than
+    /// no plan. Stamped from `AgentService::plan_gate_exempt`.
+    pub plan_gate_exempt: bool,
+
     /// session_notify kill switch (issue #1802, owner order). Default OFF:
     /// cross-session notification is an explicit operator opt-in read from
     /// `[agent] session_notify_enabled`. Stamped per execution by the same
     /// surfaces that stamp `headless`.
     pub session_notify_enabled: bool,
+
+    /// Test seam for tools that make their own one-shot model call (#2063).
+    ///
+    /// Production leaves this `None`, so the call resolves through the live
+    /// provider chain (`session_provider`, then the configured default) and
+    /// hot reload keeps working. Tests inject a stub so a suite never reaches
+    /// the network. Same shape `DecideCachedTool::provider_override` uses.
+    pub provider_override: Option<Arc<dyn crate::brain::provider::Provider>>,
+
+    /// This turn is serving a stranger (#2134).
+    ///
+    /// The guest allowlist answers who may ASK; this flag answers what the turn
+    /// may REACH. `channel` cannot carry it, because a guest turn and a normal
+    /// group turn both say `"telegram"`, so it rides the turn and is stamped by
+    /// the tool loop from the service's guest-session registry, the same single
+    /// site that stamps `session_provider`.
+    ///
+    /// Read it through [`ToolExecutionContext::is_guest`]: the registry refuses
+    /// a non-allowlisted tool outright and `read_file` confines itself to the
+    /// working directory. `false` everywhere else, including tests and cron.
+    pub guest_scope: bool,
 }
 
 impl std::fmt::Debug for ToolExecutionContext {
@@ -180,8 +213,36 @@ impl ToolExecutionContext {
             world: None,
             parent_tool_registry: None,
             headless: false,
+            turn_tool_calls: 0,
+            plan_gate_exempt: false,
             session_notify_enabled: false,
+            provider_override: None,
+            guest_scope: false,
         }
+    }
+
+    /// Mark this turn as serving a stranger (#2134).
+    ///
+    /// Stamped by the tool loop from the service's guest-session registry, so
+    /// every dispatch path in a guest turn (sequential, parallel, sub-agent)
+    /// inherits it without each caller remembering to pass it.
+    pub fn with_guest_scope(mut self, guest_scope: bool) -> Self {
+        self.guest_scope = guest_scope;
+        self
+    }
+
+    /// True when this turn is serving someone who is not the owner (#2134).
+    pub fn is_guest(&self) -> bool {
+        self.guest_scope
+    }
+
+    /// Inject a provider for a one-shot model call (#2063). Tests only.
+    pub fn with_provider_override(
+        mut self,
+        provider: Arc<dyn crate::brain::provider::Provider>,
+    ) -> Self {
+        self.provider_override = Some(provider);
+        self
     }
 
     /// Set the session_notify kill switch (issue #1802).

@@ -324,6 +324,7 @@ async fn receipt_cards_route_the_html_wire_issue_85() {
     };
 
     let meta = crate::brain::agent::BgTaskMeta {
+        task_id: "t-1".to_string(),
         success: true,
         label: "cmd".to_string(),
         elapsed_secs: 1.0,
@@ -335,6 +336,7 @@ async fn receipt_cards_route_the_html_wire_issue_85() {
     };
 
     let empty = crate::brain::agent::BgTaskMeta {
+        task_id: "t-2".to_string(),
         success: true,
         label: "cmd".to_string(),
         elapsed_secs: 1.0,

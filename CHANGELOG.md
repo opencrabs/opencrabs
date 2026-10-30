@@ -7,9 +7,436 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.14] - 2026-10-25
+
+26 commits since v0.5.13, 5 contributors. 64 files changed, +7,493 / -365 lines.
+
+This release reaches more people and breaks fewer files. Two new language packs land next to the existing ones, Arabic and Chinese, each with its own script detection, and the non-English packs now carry intent phrases at the same order of magnitude as English instead of a third of it. European Portuguese continuous narration is detected. Four edit-tool defects are fixed: the line operations in `edit_file` no longer drop the final newline or turn a CRLF file into LF, `hashline_edit` joins its output with the file's own line ending, the fuzzy fallback keeps the file's line endings, and a retry is no longer blocked after the missing file appears. CI gained a lint that fails the build when a new byte slice can panic, and the workflow actions, the Rust toolchain and the Linux build image are now pinned to immutable versions.
+
+### ✨ Features
+
+- `344a1959` **phantom**: add a Chinese language pack and CJK script detection (#2223)
+- `ebdc1cc9` **phantom**: add an Arabic language pack and Arabic script detection (#2222)
+
+### 🔧 Fixes
+
+- `855bd6f7` **tools**: join `hashline_edit` output with the file's own line ending (#2227)
+- `c51b6a7e` **tools**: preserve bytes in `edit_file` line operations (#2227)
+- `f07b91b5` **phantom**: bring the non-English packs to comparable coverage (#2225)
+- `03ffa11a` **phantom**: detect European Portuguese continuous narration (#2224)
+- `21f92922` **tasks**: settle a detached task on its row instead of announcing it twice (#2218)
+- `89e6494c` **phantom**: stop the URL check slicing inside multi-byte whitespace (#2220)
+- `c38bf52f` **ci**: pin the linux-amd64 release job to ubuntu-24.04 (#2206)
+- `b876f7ce` **tools**: keep the file's own line endings in the fuzzy edit fallback (#2212)
+- `d3e3758e` **tools**: clear the recent-failure guard when the world changed or a new turn starts (#2211)
+- `688365d0` **tools**: record the post-edit content so the next `write_file` is not refused (#2210)
+
+### 📖 Documentation
+
+- `cd736835` docs: name the Ubuntu 24.04 runtime packages correctly (#2219)
+- `dd7e5202` docs: document how to bump the pinned toolchain (#2215)
+- `896a3b27` docs: add the code of conduct, issue forms and pull request template (#2213)
+- `3ec99974` docs: simplify the sponsors table
+
+### 🧹 Miscellaneous
+
+- `097cf79d` test: format the new pack test modules and samples (#2225)
+- `43687f22` refactor: resolve the language registry through one table (#2226)
+- `1ecb56b5` ci: fail CI on a new `clippy::string_slice` site (#2221)
+- `5d85599a` test: run the published Linux asset before uploading it (#2214)
+- `87a9aab1` ci: run the test suite on Linux, not only on macOS (#2216)
+- `be8e4cf1` ci: pin every workflow action to an immutable commit (#2217)
+- `bb162126` ci: pin the Rust toolchain to 1.98.1 (#2215)
+- `739af815` chore: bump tokio to 1.54.1 (#2205)
+- `3cf5cd94` ci: fail the build when the shipped binary needs a newer glibc than we promise (#2209)
+- `b4dc5c57` ci: build the prerelease linux-amd64 asset on a pinned image (#2208)
+
+### 👥 Contributors
+
+5 contributors this release:
+
+- @adolfousier (Adolfo Usier)
+- @adi805 (Syafriadi)
+- @echo-xiangchen (Echo)
+- @yimengzhiyan (beizhuo li)
+- @VincentFeliciano (Vincent Feliciano)
+
+### 📊 Stats
+
+- 26 commits since v0.5.13
+- 64 files changed, +7,493 / -365 lines
+- 11,407 tests (11,369 passed, 0 failed, 38 ignored)
+
+## [0.5.13] - 2026-10-24
+
+61 commits since v0.5.12, 5 contributors. 188 files changed, +14,367 / -1,600 lines.
+
+The channels carried most of this release, and the theme is one task, one place. A detached task now updates its own row instead of posting a second message on Telegram, Slack, Discord and WhatsApp, and a Telegram turn ends with its answer in one bubble rather than two. Discord interactions were hardened end to end: they obey the session turn slot, the turn group lock is no longer held across a governor sleep, reactions get the same identity check as messages, pending approvals drop on every exit from the wait, the pending select and form maps are capped, the compaction pinger stops when the turn ends, and a menu says so when it was cut to the button cap. WhatsApp folds LID-keyed sessions into their phone-number twin, queues a mid-turn message instead of killing the live turn, drops inbound status posts instead of answering them, backs off and gives up on a failing composing indicator, gates delete through the send limiter, and posts one status per recipient. A new channel session no longer inherits a provider the config disables, and the channel provider comparison reads what the session is configured with instead of the sticky fallback. A request that dies during connection setup now says whether the name failed to resolve or the connection stalled, instead of reporting both as a slow server. The TUI got full-screen sessions and help dialogs with their commands in the footer, copy that tries every clipboard backend and writes to Wayland, an editor handoff that matches nvim, helix and `$EDITOR`, and an open that reports failure instead of claiming success. The installer now leaves a callable `opencrabs` command: it writes the shell's PATH entry once, offers `--no-path`, and verifies with `command -v` before reporting success. The install identity moved to its own file so a lost token never mints a second user, an empty `stt_model` falls through instead of overriding a configured STT provider, hashline tags widened to six characters, and a scheduled cron run is exempt from the plan gate like every other headless run.
+
+### ✨ Features
+
+- `fded4837` **tui**: the help dialog is full screen with each column scrolling on its own (#2162)
+- `f2a892e9` **tui**: the sessions dialog is full screen with its commands in the footer (#2162)
+
+### 🔧 Fixes
+
+- `4b4d4338` **provider**: name the phase when a connect timeout hides a DNS failure (#2204)
+- `45e01b75` **install**: leave a callable opencrabs command after the install (#2203)
+- `0dee0cca` **feedback**: let `feedback_analyze` filter to one tool and reach corrections (#2200)
+- `687d671d` **hashline**: show real tags when a hash ref does not parse (#2201)
+- `780cf330` **hashline**: widen line tags from four characters to six (#2202)
+- `2a99ed3f` **voice**: an empty `stt_model` falls through instead of overriding a configured STT provider (#2185)
+- `265418bc` **provider**: keep the install identity in its own file so a lost token never mints a second user (#2198)
+- `1cd00208` **discord**: give `/new` the chat key so the next message lands on it (#2186)
+- `80b05bbe` **whatsapp**: route the follow-up flush through the paired sanitize (#2179)
+- `773b8df6` **session**: make the token counter atomic and stop calling it context (#2180)
+- `ea9bf477` **whatsapp**: fold LID-keyed sessions into their phone-number twin (#2178)
+- `3edc63a9` **whatsapp**: queue a mid-turn message instead of killing the live turn (#2179)
+- `18c5f4ed` **discord**: record outbound messages where they leave the bot (#2196)
+- `f20dcafe` **discord**: make interactions obey the session turn slot (#2191)
+- `f293f403` **discord**: stop holding the turn group lock across a governor sleep (#2192)
+- `e1f31f3b` **channels**: compare the session's configured provider, not the sticky fallback (#2184, #2188)
+- `f1325525` **whatsapp**: post one status per recipient instead of one for the list (#2177)
+- `8e9fade0` **deps**: bump `ctutils` past RUSTSEC-2026-0385 (#2197)
+- `ab12d362` **channels**: stop logging "created" when a session already exists (#2183)
+- `b9ee9bdb` **discord**: gate reactions with the same identity check as messages (#2195)
+- `dad595cf` **discord**: drop pending approvals on every exit from the wait (#2194)
+- `a6ac763b` **discord**: cap the pending select and form maps (#2193)
+- `f58e9fa3` **discord**: stop the compaction pinger when the turn ends (#2189)
+- `f69ec299` **discord**: say when a menu was cut to the button cap (#2190)
+- `bfe3832e` **whatsapp**: drop inbound status posts instead of answering them (#2176)
+- `f542b96c` **whatsapp**: back off and give up on a failing composing indicator (#2181)
+- `4c643bab` **discord**: read the transcribed text in the stop gate (#2187)
+- `3e5f0d0c` **whatsapp**: gate the delete action through the send limiter (#2182)
+- `58817179` **tui**: the image clipboard hint works off macOS too (#2174)
+- `82c5d3e2` **tui**: the editor handoff matches nvim, helix and `$EDITOR` (#2173)
+- `cbfa53c1` **tui**: opening a session file no longer freezes the TUI (#2172)
+- `8da38191` **tui**: copy tries every clipboard backend and writes to Wayland (#2171)
+- `466b5f99` **tui**: a failed open is reported instead of claimed as success (#2170)
+- `2ebe7d46` **rsi**: bound the template fetch, retry once and name the cause (#2169)
+- `b445622a` **tui**: the sessions dialog insets both sides and aligns its columns (#2175)
+- `f86437d4` **acp**: let the ACP surface keep `suggest_options` instead of the headless set
+- `45f50285` **tui**: one chat floor for the plan card and the layout (#2168)
+- `42a0f419` **tui**: the closing line no longer replaces a delivered answer (#2167)
+- `e2420894` **tui**: a rule separates the sessions and help footers (#2162)
+- `9f0da073` **tui/theme**: boot builds the theme pack before looking up the saved theme (#2164)
+- `a693de4b` **tui/theme**: the chat history paints the theme background (#2163)
+- `2420f0ed` **whatsapp**: a detached task keeps one row after the edit window closes (#2150)
+- `e83ad61a` **slack**: a detached task updates its row instead of opening a second block (#2149)
+- `418b823c` **discord**: a detached task updates its card instead of posting a second one (#2148)
+- `8b4bba28` **telegram**: a detached task updates its row instead of posting a second message (#2147)
+- `e518377e` **agent**: a detached task reports its start and finish with one id, and the TUI draws it as one row (#2145, #2146)
+- `df9c49c3` **telegram**: a turn ends with its answer in one bubble, not two (#2156)
+- `fe7001cd` **cron**: a scheduled run is exempt from the plan gate like every other headless run (#2161)
+- `16a0dcc7` **bash**: a sudo invocation is found where the shell runs it, and the dialog opens only when it can be answered (#2157)
+- `2e605cb6` **tui**: a running turn folds into its tool block like any other turn (#2160)
+- `02db7d2e` **sessions**: a new channel session does not inherit a provider the config disables (#2158)
+- `0ce8c4bf` **telegram**: a guest chat resolves its session from the database like a regular chat (#2159)
+
+### 📖 Documentation
+
+- `0ac63efa` verify external facts on the web instead of answering from memory (#2199)
+- `b272466c` say how agent-written work is accepted and agent accounts are not
+
+### 🧹 Miscellaneous
+
+- `a18cbe72` test(session): serialize the provider sync suites on the config mirror (#2184)
+- `8a06ce94` test(tui): the theme cache test pins its own pane layout
+- `82006fb6` style: rustfmt the channel fix batch
+- `8ae04828` style(tests): wrap long lines in the Phase A channel tests
+- `2b1aa860` ci(titles): fail the title check on a bare area prefix
+
+### 👥 Contributors
+
+5 contributors this release:
+
+- @adolfousier (Adolfo Usier)
+- @adi805 (Syafriadi)
+- @loonix (Daniel Carneiro)
+- @antony87-x
+- @spinecki
+
+### 📊 Stats
+
+- 61 commits since v0.5.12
+- 188 files changed, +14,367 / -1,600 lines
+- 11,333 tests (11,295 passed, 0 failed, 38 ignored)
+
+## [0.5.12] - 2026-10-21
+
+78 commits since v0.5.11, 6 contributors. 180 files changed, +14,993 / -3,285 lines.
+
+Telegram guest queries went from a narrow reply path to a full surface. A tag in a chat the bot was never invited to now gets the same tools as a normal turn, the same live status block, the same rich rendering, one cancellable turn per guest session with rate limiting, and a tool set capped at what a stranger should reach. Two answer-duplication bugs went with it: a guest reply no longer carries the answer twice, and a reply with no tool calls is the answer alone. Separately, the agent now has to stop and write a plan once a turn crosses a threshold of tool calls, `browser_act` gained an `upload` action that attaches local files without putting their bytes in the context, and `bash` refuses `sleep` while a detached task is running and names the task it is waiting on. The TUI keeps the transcript visible across a session switch instead of folding every turn you had opened, and a headless install now provisions the built-in provider the way the TUI already did. Phantom detection got four corrections so a contraction, a question, a sign-off after a halt, or a denied tool call is no longer read as a promised action, and the option-surface halt path stopped issuing a follow-up request and stopped rendering the same answer twice. Usage accounting reads a top-level `cached_tokens` and records a missing cache field as not reported. Security tightened in four places: every outbound channel path sanitizes at one chokepoint, the http body is capped and its read bounded, string slicing can no longer land mid-character, and a config or keys write that would not parse is refused. Release packaging now ships `OpenCrabs.app` and a Linux desktop entry with a full-size icon ladder. The docs dropped two onboarding pages that documented a macOS GUI and a wizard this repo never had, the installer no longer prompts, and the sponsor table is generated from one ledger.
+
+### ✨ Features
+
+- `7c591584` **browser**: add an `upload` action to `browser_act` (#2112)
+- `5daad132` **plan**: require a plan after a threshold of tool calls in one turn (#2128)
+- `d04ea40d` **bash**: refuse `sleep` while a detached task is running (#2123)
+- `0b8d88da` **bash**: name the running task in the sleep refusal (#2123)
+- `05ece9eb` **telegram**: give a guest reply the live status block a normal session shows (#2109)
+- `3758e30b` **telegram**: answer guest queries so a tag works in chats the bot is not in (#2087)
+- `3373bc7d` **docs**: record the community sponsors and generate the docs from one ledger
+- `b612fe57` **prompt**: keyed and sensitive calls run from a Python script, never inside the session (#2094)
+
+### 🔧 Fixes
+
+- `4b44a5f5` **deps**: move `rustls-webpki` and `webpki-roots` to clear the audit red
+- `0d2e8faa` **provider**: provision the built-in provider on headless installs (#2151)
+- `d459beb4` **tui**: keep the transcript visible across a session switch (#2155)
+- `b1b6e96e` **docs**: replace the stale getting-started page and make the installer non-interactive (#2142)
+- `2d10534a` **telegram**: a guest reaches only the tools a stranger should (#2134)
+- `5b60f76d` **tui**: refresh whispercrabs instead of trusting the first download (#2114)
+- `f6386ba0` **telegram**: a reply to media keeps the file identity (#2121)
+- `f1c4be95` **agent**: nudge five times before a loop falls back (#2129)
+- `d5bebea5` **phantom**: a contraction is not a completed action (#2110)
+- `d473df93` **telegram**: one turn per guest session, cancellable and rate-limit aware (#2143)
+- `b88ce66c` **usage**: read a top-level `cached_tokens` field when no other cache field is present (#2140)
+- `f3cae9e6` **usage**: a response with no cache field is recorded as not reported (#2139)
+- `29df3a89` **telegram**: give a guest turn the same tools, block chrome and rich plane as a normal one (#2138)
+- `016eb2ce` **telegram**: owner-only targeted stop for another session (#2108)
+- `83cf936c` **onboard**: ask the image tool's resolver for the image gap (#2106)
+- `ac662707` **tools**: cap the http body and bound the read (#2104)
+- `d636a33f` **channels**: sanitize every outbound path at one chokepoint (#2102)
+- `e94568fc` **usage**: By Model cache share divides by prompt tokens, and DeepSeek hits are read (#2136)
+- `0b756926` **telegram**: render guest rich replies on the markdown plane (#2135)
+- `820aae3b` **telegram**: send and edit guest replies rich when enabled (#2133)
+- `640e9d1a` **voice**: send audio on the chat route and stop offering built-in speech (#2107)
+- `9bb6df69` **prompt**: drop the plan-tool prose the plan gate now enforces (#2131)
+- `a281c2db` **prompt**: rejoin the stranded TRACK SELECTION table rows (#2130)
+- `07a387ec` **tui**: bound cancel-persist to the in-flight turn (#2127)
+- `f433b8f9` **phantom**: flag denied tool calls and unbacked identifiers (#2122)
+- `d50dc3ad` **core**: stop slicing strings at byte offsets that can land mid-character (#2124)
+- `ea160668` **telegram**: one file occurrence carries one link (#2125)
+- `1559c9d1` **telegram**: locate a file marker by its own bytes, not a stale span
+- `32111403` **vision**: stop pinning the vision output cap at 1024 (#2120)
+- `a1b9487b` **release**: give the macOS icon the rounded tile shape (#2119)
+- `f5fab165` **homebrew**: state the cask path and the formula's missing icon (#2118)
+- `0308813f` **release**: ship a desktop entry and icon with the Linux build (#2116)
+- `b4d0d1af` **release**: ship `OpenCrabs.app` so macOS has an icon to show (#2115)
+- `0263383a` **assets**: rebuild `icon.icns` with the full size ladder (#2117)
+- `d1f29104` **telegram**: a guest reply with no tool calls is the answer alone (#2113)
+- `43ded2df` **telegram**: stop a guest reply carrying the answer twice (#2113)
+- `c3eed33b` **tui**: stop the same answer rendering twice on an option-surface halt (#2111)
+- `dc051e8d` **cli**: take the scheduler lock only when a scheduler is spawned (#2096)
+- `09f25a46` **cli**: write the documented example config on init (#2093)
+- `03e3ce6c` **profile**: stamp lock owners with their creation time (#2084)
+- `87864484` **config**: refuse a config or keys write that would not parse (#2099)
+- `a940d255` **phantom**: a sign-off after an option-surface halt is not a phantom (#2090)
+- `d031c074` **discord**: a follow-up tap never claims the turn slot, and the cancel token still cancels a turn that already ended (#2089)
+- `bbf021ce` **agent**: a `suggest_options` halt with no text still asks the model for a reply (#2088)
+- `da94e7d3` **agent**: an option-surface halt ends the turn with no follow-up request (#2086)
+- `470e12f4` **phantom**: a reply that asks the user something is not a promised action (#2083)
+
+### 📖 Documentation
+
+- `aeeeeeb9` delete the macOS GUI onboarding pages (#2154)
+- `8cea1f5e` delete the onboarding wizard page that documents commands we never had (#2153)
+- `f8da765f` record where each cash contribution came from
+- `82651cd1` record the October 19 inference top-up
+- `71aa1c02` say the built-in provider transcribes on day 0 (#2141)
+- `909f1b5c` say how issues are referenced in code comments (#2137)
+- `14df12ac` document the plan gate and align the TRACK SELECTION row (#2132)
+- `ee0f4816` name the three zip 8.6 blockers in the audit comment (#2092)
+- `3a5cc4ca` stop seeding an image id and speech fields the provider does not serve
+- `3784d4a3` add the contributor count to the v0.5.0 summary line
+- `aa04b7c3` add the named contributor list to v0.5.0
+- `14e6b078` add the named contributor lists to v0.5.5, v0.5.4 and v0.5.1
+- `cc85905e` credit the owner in the recent contributor lists
+
+### 🧹 Miscellaneous
+
+- `ffac6a3d` test(install): skip the bash parse check on Windows hosts
+- `90c63700` test(model): stop asserting the Claude label format on non-Claude ids
+- `6609b94c` chore(usage): log the key names of a provider usage object at debug (#2152)
+- `062187e4` test(suite): delete the four dead modules and guard the declaration list (#2103)
+- `f01ef0e0` style(plan): apply rustfmt to the plan requirement gate (#2128)
+- `d0fe0c56` test(phantom): pin the accepted trade for an unbacked kill claim (#2122)
+- `d8c47de6` test(bash): pin sleep running again after the task finishes (#2123)
+- `02bd841e` style(tests): format the three test files the fmt gate flags
+- `d44347af` test(brain): pin the anti-polling contract in the system prompt (#2101)
+- `2206bb88` chore(deps): move zip to 9 and rust_xlsxwriter to 0.99 (#2092)
+- `4e01b95d` ci(audit): ignore RUSTSEC-2026-0367/0368/0369 for zip until upgrades land (#2091)
+
+### 👥 Contributors
+
+6 contributors this release:
+
+- @adolfousier (Adolfo Usier)
+- @adi805 (Syafriadi)
+- @loonix (Daniel Carneiro)
+- @leshchenko1979 (Alexey Leshchenko)
+- @daeho-ro (Daeho Ro)
+- @moneyacademyKE (Moe)
+
+### 📊 Stats
+
+- 78 commits since v0.5.11
+- 180 files changed, +14,993 / -3,285 lines
+- 11,091 tests (11,053 passed, 0 failed, 38 ignored)
+
+## [0.5.11] - 2026-10-16
+
+4 commits since v0.5.10, 2 contributors. 19 files changed, +1,361 / -349 lines.
+
+Four fixes, each one closing a hole that a shipped release exposed. A first run lands in the chat with the built-in provider already live and the agent greeting the user, instead of on a "New Chat · none / none" screen with no provider, no config.toml and no keys.toml (#2079). The agent's worker threads get a 16 MiB stack, so the first turn can no longer abort the process with a stack overflow on the default 2 MiB one (#2080). The release workflow reads the conclusion of the commit's own CI run before it publishes anything, so a red main can never ship a tag again the way v0.5.10 did (#2078). And the scheduled evolve restart no longer hands `systemctl restart` the discovery glob `opencrabs*.service`: that glob also matched the transient unit the restart runs inside, so systemd stopped its own executor 16 ms in, retried until start-limit-hit, and churned the daemon and its browser sidecar five times inside one second. The restart target is a resolved list of exact unit names now, the unit-list parser no longer drops failed units because of systemd's status glyph, and an unreadable unit list reports `Unresolved` instead of scheduling blind (#2081).
+
+### 🔧 Fixes
+
+- `ba8dc669` **evolve**: restart the resolved units, so the restart cannot stop itself (#2081)
+- `003ee22f` **release**: gate the release tag on a green CI run for the same commit (#2078)
+- `305d1944` **tui**: provision the built-in provider and greet on a fresh install (#2079)
+- `e203d124` **runtime**: give the agent worker threads a 16 MiB stack (#2080)
+
+### 👥 Contributors
+
+2 contributors this release:
+
+- @adolfousier (Adolfo Usier)
+- @adi805 (Syafriadi)
+
+### 📊 Stats
+
+- 4 commits since v0.5.10
+- 19 files changed, +1,361 / -349 lines
+- 10,782 tests (10,744 passed, 0 failed, 38 ignored)
+
+## [0.5.10] - 2026-10-16
+
+99 commits since v0.5.5, 5 contributors. 213 files changed, +17,230 / -1,738 lines.
+
+The release that works the second you install it. OpenCrabs now ships its own provider inside the binary: no account, no API key, no sign-up. It serves DeepSeek v4.1 Flash, a 200k-context multimodal model, so text and attached images both work on the first run. Onboarding was rebuilt around that first run: a quick-start welcome interviews the user, asks only for what is missing, names the session's provider and model, and offers next steps, and the built-in provider is wired into both the quick-start and the advanced path with vision and image generation on by default. Its context window is pinned at 200k and held by host, and install tokens are redacted from logs and kept out of Debug output. The provider chain got sturdier: a 429 that declares a long wait parks that provider and routes around it instead of poisoning the fallback, a lapsed cooldown no longer drops the primary from the chain, a declared-wait cooldown no longer makes the fallback sticky, every compatible provider shares one 120s stream idle default, and providers that need it now route over the Responses API. Attachments became first-class across every channel: Discord, Slack and Trello all save inbound files to the channel attachment store, Discord and Slack store DM turns in channel_messages, and the answer now posts before its suggestion buttons on Discord, Slack and WhatsApp. Discord tool cards became durable and paginated, surviving restarts in SQLite with a Log view, collapsed repeats and a colored bar. The TUI gained a full-screen responsive /usage and a /mission-control that adapts to the terminal width, /models opens on the session's provider and model and switches directly on a full provider/model argument, and the final answer stays visible when tools run after its text. Usage accounting grew a cache-read split with prices on the cards, and model costs come from the ledger rather than a cache-blind estimate. Voice serves stt_model and tts_model from any provider and splits TTS chunks on character boundaries. The plan tool locks a per-task spec check at start and runs it at completion. motion-graphics moved to an opt-in skill template. WhatsApp gained newsletter creation from the tool surface and live tool blocks on background-completion turns, and Slack got the same live tool flow on background resume.
+
+### ✨ Features
+
+- `ed3f5e07` **debug**: log the matched pair when the announcement-loop guard trips (#2052)
+- `4dff2cd0` **tui**: make /usage a full-screen responsive screen (#2073)
+- `94b9f850` **skills**: ship motion-graphics as an opt-in template, not a built-in (#1991)
+- `dccd4b94` **whatsapp**: create and post to a newsletter from the tool surface (#1827)
+- `d809bd05` **discord**: tool cards survive restarts, stored in SQLite (#1880)
+- `0ab7dd53` **discord**: paged tool card with Log, collapsed repeats and a colored bar (#1880)
+- `99681af6` **plan**: generate a per-task spec check at start and confirm before lock (#2063)
+- `f68327ba` **plan**: lock a per-task spec check at start and run it at complete (#1904)
+- `d03ede28` **usage**: record the cache-read split in the usage ledger (#2062)
+- `069e627a` **usage**: cache breakdown with prices on the usage cards (#2027)
+- `a5625f1c` **openai**: route providers that need it over the Responses API (#2059)
+- `ea86c735` **telegram**: userbot-download CLI command
+- `d589dfb6` **voice**: serve stt_model and tts_model from any provider
+- `5819a822` **config**: set generation_model on the built-in OpenCrabs provider (#2054)
+- `11ba4d6d` **onboarding**: quick-start welcome asks only about what is missing (#2048)
+- `1020ccd5` **config**: enable vision on the built-in OpenCrabs provider (#2047)
+- `cdf39e45` **sanitize**: redact ocp_ built-in provider install tokens (#2047)
+- `75cb5f11` **onboarding**: built-in OpenCrabs provider in advanced and quick start (#2047, #2048)
+- `44e71883` **provider**: list the built-in OpenCrabs model in the example config (#2047)
+- `6fe59821` **provider**: register the built-in OpenCrabs provider (#2047)
+- `a61e5b01` **provider**: request and store the built-in provider's install token (#2047)
+- `5bfd7de9` **provider**: store the built-in provider's install ID and token (#2047)
+- `2ce43d14` **provider**: install-token client for the built-in OpenCrabs provider (#2047)
+- `98d4cc21` **onboarding**: quick-start welcome names the session's provider and model
+- `81271c5e` **onboarding**: quick-start welcome names the default model and offers next steps (#2048)
+- `884545d1` **onboarding**: quick start gets its own welcome that interviews the user
+- `5b71e2f2` **generate_image**: accept several input images on Gemini and OpenAI-compatible backends (#2045)
+- `54e300f9` **db**: add ToolExecutionRepository::count_for_session
+- `d21300b9` **onboarding**: OpenCode asks for its Go or Zen plan before the key (#2040)
+- `fa6c64d6` **whatsapp**: background-completion turns show a live tool block (#2023)
+- `cc73a9d5` **slack**: background resume turns show the live tool flow (#1986)
+
+### 🔧 Fixes
+
+- `a2d7aae4` **cron**: apply channel converters before delivery
+- `bfb090d9` **telegram**: record the scripted wait in the spacing ledger (#2076)
+- `47970a5a` **tui**: draw the new full-screen screens with theme colours
+- `fbf6ac6b` **tui**: make /mission-control adapt to the terminal width (#2074)
+- `90102245` **tui**: unfocused split panes draw tool blocks the way the focused pane does (#2075)
+- `03885a52` **db**: stop publishing GLOBAL_POOL in test builds (#2072)
+- `2b11a07f` **discord**: tool rows finish their own call by id, not by name (#1880)
+- `76e6712b` **provider**: hold the 200k cap on the built-in endpoint by host (#2067)
+- `eda566e4` **provider**: pin the built-in OpenCrabs provider to a fixed 200k context window (#2066)
+- `8c6fcf1c` **cron**: evaluate the trigger gate on the unscoped path (#2065)
+- `238f984e` **tui**: /models <provider/model> switches directly instead of opening the picker (#2064)
+- `33c74d5b` **voice**: split TTS chunks on char boundaries (#2051)
+- `99f3d07e` **discord**: the owner's /cowork and /respond_to pass the channel gate (#2061)
+- `c2594ef8` **tui**: register the /models session-pair tests and set the session pair last (#2060)
+- `1dd40b36` **tui**: /models opens on the session's provider and model (#2060)
+- `c37c767e` **telegram**: keep userbot downloads inside the output directory
+- `2820f126` **config**: use the bare gemini-3.1-flash-image id for the built-in image model (#2054)
+- `d5f02a67` **provider**: resolve the built-in OpenCrabs endpoint for image generation (#2053)
+- `05085449` **provider**: resolve the built-in OpenCrabs endpoint for vision (#2047)
+- `3add0609` **provider**: keep install tokens out of Debug output (#2047)
+- `34a3fe0b` **provider**: name the transport cause in HTTP error messages
+- `f7a8bf87` **provider**: a declared-wait cooldown does not make the fallback sticky
+- `a6716300` **provider**: a lapsed cooldown window no longer drops the primary from the chain
+- `9dbc9035` **provider**: park a provider that declares a long 429 wait, route around it
+- `4d962a97` **phantom**: turn-end verdict exempts structured reports from phrases only (#2038)
+- `a3ee4430` **phantom**: structured reports exempt phrase matchers, never fact checks (#2039)
+- `e8fbe2a0` **phantom**: run the fact checker on zero-tool turns (#2038)
+- `39735b7b` **phantom**: gate structured-report exemption on tools having run
+- `626b37dc` **tui**: show Shift+Tab Back on the provider step and in /help (#2043)
+- `fa076614` **telegram**: /models shows the live CLI list, and Current is the configured default (#2041)
+- `c6f81d6d` **telegram**: apply-to-all asks first and writes only on Confirm (#2042)
+- `57a7e579` **discord**: DM turns reach channel_messages on both sides (#2025)
+- `afddd246` **slack**: store DM user messages in channel_messages (#2034)
+- `1f378cb6` **trello**: save card attachments to the channel attachment store (#2033)
+- `3ba15c9a` **slack**: save inbound files to the channel attachment store (#2032)
+- `a2ebdf95` **discord**: save inbound files to the channel attachment store (#2031)
+- `96ed46c8` **tui**: keep the final answer visible when tools ran after its text (#2026)
+- `e4f80f6a` **whatsapp**: background-completion turns offer suggestions and post the held answer (#2030)
+- `c91869d5` **slack**: post the answer before the suggestion buttons (#2029)
+- `f7e00a22` **discord**: post the answer before the options buttons (#2028)
+- `8a034064` **usage**: model costs come from the ledger, not the cache-blind estimate (#2024)
+- `f31de15a` **onboarding**: send the welcome when /onboard completes (#2022)
+- `df0e9d52` **provider**: one 120s stream idle default for every OpenAI-compatible provider (#2021)
+
+### 📖 Documentation
+
+- `8f134a7e` templates: correct the false tier claim in commands/README (#1991)
+- `9df15404` readme: document the opt-in skill tier (#1991)
+- `3a948554` tests: correct the stale GLOBAL_POOL note in auto_title_e2e_test (#2072)
+- `6f76827e` readme: whatsapp_send carries the newsletter actions, and the rail that gates them (#1827)
+- `4e584c30` config: the broadcast allowlist also gates the newsletter surfaces (#1827)
+- `f1fda41c` readme: the Discord tool card: paging, repeats, the colored bar and Log (#1880)
+- `405c7175` readme: /cowork writes respond_to = all; channel entries pass the channel scope (#2070)
+- `fcf2b783` provider: the built-in provider's window is fixed and its key ignored (#2068)
+- `fdee09c5` note the userbot download command
+- `7bb599c1` readme: state unlimited built-in tokens with abuse protection
+- `119a359f` readme: update wizard steps and provider priority for the built-in provider (#2056)
+- `759fe34a` readme: image generation is on by default for the built-in provider (#2054)
+- `2b607271` readme: document the built-in OpenCrabs provider and first run (#2055)
+- `7958de5e` provider: describe the current vision candidate order (#1318)
+- `0a09b3d5` provider: list the built-in OpenCrabs provider in the README and provider reference
+- `b77faaa9` README: onboarding videos per OS, quick start and advanced
+
+### 🧹 Miscellaneous
+
+- `06313a0e` discord: assert tool-group retention on memory, not on a SQLite restore (#2071)
+- `a4299eb0` telegram: use a portable output directory in the download test
+- `cc128b6f` telegram: check the userbot download direction
+- `fca50d3f` deps: bump rustls to 0.23.46, clearing four RUSTSEC advisories
+- `5f1cff50` sanitize: pin redaction of 64-char hex install tokens (#2047)
+- `eea82e62` onboarding: move the completion path into finish_onboarding
+- `dfe8ce52` config: write several keys of one section in one atomic write
+- `25a08ffa` provider: a lapsed primary that fails without a wait stays in the chain
+- `5a359135` db: remove unused count_for_session (#2036)
+
+### 👥 Contributors
+
+5 contributors this release:
+
+- @adolfousier (Adolfo Usier)
+- @loonix (Daniel Carneiro)
+- @moneyacademyKE (Moe)
+- @adi805 (Syafriadi)
+- @mysteriouspants (Christopher R. Miller)
+
+### 📊 Stats
+
+- 99 commits since v0.5.5
+- 213 files changed, +17,230 / -1,738 lines
+- 10,762 tests (10,724 passed, 0 failed, 38 ignored)
+
 ## [0.5.5] - 2026-10-10
 
-283 commits since v0.5.4, 6 contributors. 471 files changed, +51,885 / -4,903 lines.
+283 commits since v0.5.4, 9 contributors. 471 files changed, +51,885 / -4,903 lines.
 
 A channel-native window. Discord became a first-class surface: native polls via send_poll (#1848), TTS replies delivered as voice messages (#1849), commands.toml projected onto native slash commands (#1850), a flow group that opens at turn start with a live clock covering thinking and activity text leading the flow line (#1841, #1843, #1844, #1845), a persistent plan card riding one shared outbound write governor with 429 park (#1910, #1912), per-channel respond_to and open modes with a /respond_to command (#2014), and /cowork opening a channel or thread to its members (#2015). Slack matched the pass: throttled flow ticker (#1807), flow group opening at turn start with live activity text (#1808, #1809), and an outbound write governor with 429 observability (#2012). Telegram got observability and rate discipline: instrumented getUpdates polls and handler handoffs for stall triage, a cross-surface sub-second spacing floor with per-second admission telemetry (#1927), a per-chat 429 pause behind one Cooldown accessor, markdown links to local files delivered as documents (#1916), a flag to keep markdown documents out of the rich media array (#1968), and mermaid fences rendering inside trailer bubbles via the hooked rich send (#583). ACP implemented the five v1 session lifecycle methods and publishes the plan as a v1 plan update (#1815), and decodes image prompt blocks into IMG attachments. The TUI unified every dialog on a shared command footer with direct a/r approval verbs (#1775), made URLs and file paths clickable (#1772), redesigned onboarding around a left-side step timeline with direct setup commands (#1979, #1980, #1981, #1982), hinted when the clipboard holds a screenshot, and stamped the banner with the running binary's build time (#1965). The claude-cli provider grew background-task lifecycle surfacing into the agent mirror, process-group isolation with group kill, and post-turn completion delivery (#1774, #1776). Cron retires one-shot jobs on delivery instead of re-firing a year later (#544), stamps every delivered run with its run id (#1703), and Discord cron reports arrive as one forum post (#1851). Windows carried a LockFileEx saga of its own (9 scoped commits) and stopped telling users to run as Administrator or use WSL2. Restart and resume paint revived turns as processing and park is a third resume outcome in the boot ledger (#1951, #1952). governance.toml plus a policy-lint CI job landed (#1934). The DB snapshots the image before migrations touch it (#1779), supervised brew evolve bounds its children and reads the installed version back (#1779), session_notify got a kill switch defaulting off (#1802), and suggest_options recovers channel-safe option chips from final text (#1774).
 
@@ -308,6 +735,20 @@ A channel-native window. Discord became a first-class surface: native polls via 
 - `110df5c4` **provider**: relocate stable_model_id tests to src/tests per contributing.md
 - `dea20183` **lint**: annotate the macOS-only launchd label parser for non-macOS builds
 
+### 👥 Contributors
+
+9 contributors this release:
+
+- @adolfousier (Adolfo Usier)
+- @leshchenko1979 (Alexey Leshchenko)
+- @adi805 (Syafriadi)
+- @kaaduu
+- @Jah-yee (RoomWithOutRoof)
+- @loonix (Daniel Carneiro)
+- @NadLad (Nader)
+- @moneyacademyKE (Moe)
+- @Absolute-Law
+
 ### 📊 Stats
 
 - 283 commits since v0.5.4
@@ -436,6 +877,18 @@ An agent-experience window. ACP sessions became first-class: the context meter i
 - `29fda59a` **tui**: /doctor routes straight to the health check, drop the hidden /onboard:health arm (#1665)
 - `1f039341` **theme**: serialise the process-global theme slot across test modules
 - `888b2307` **decisions**: rustfmt decide_cached and its test module
+
+### 👥 Contributors
+
+7 contributors this release:
+
+- @adolfousier (Adolfo Usier)
+- @moneyacademyKE (Moe)
+- @leshchenko1979 (Alexey Leshchenko)
+- @adi805 (Syafriadi)
+- @loonix (Daniel Carneiro)
+- @gefsikatsinelou
+- @djaafarishers-cloud
 
 ### 📊 Stats
 
@@ -986,6 +1439,17 @@ A hardening window: per-job cron sessions, a config write guard derived from the
 - `0936fa02` style: rustfmt the merged PR stack
 - `a08a8911` test(brain): isolate time-marker tests from live home recall
 
+### 👥 Contributors
+
+6 contributors this release:
+
+- @adolfousier (Adolfo Usier)
+- @leshchenko1979 (Alexey Leshchenko)
+- @moneyacademyKE (Moe)
+- @adi805 (Syafriadi)
+- @loonix (Daniel Carneiro)
+- @technologicalsingularity (Andy)
+
 ### 📊 Stats
 
 
@@ -999,7 +1463,7 @@ A hardening window: per-job cron sessions, a config write guard derived from the
 
 ## [0.5.0] - 2026-09-06
 
-595 commits since v0.3.83. 591 files changed, +57,403 / -11,296 lines.
+595 commits since v0.3.83, 4 contributors. 591 files changed, +57,403 / -11,296 lines.
 
 The biggest release since v0.3.9 in April, and more than six times the largest
 one since: 595 commits against a previous best of 97. Only v0.3.9 itself, at
@@ -1396,6 +1860,15 @@ version number covers.
 
 224 commits of internal work not enumerated here: 88 refactors, 59 test additions, 17 chores, 14 formatting passes, 7 CI changes, and the remainder small reverts and
 housekeeping. Run `git log v0.3.83..v0.5.0 --no-merges` for the full list.
+
+### 👥 Contributors
+
+4 contributors this release:
+
+- @adolfousier (Adolfo Usier)
+- @leshchenko1979 (Alexey Leshchenko)
+- @moneyacademyKE (Moe)
+- @adi805 (Syafriadi)
 
 ### 📊 Stats
 
@@ -9298,3 +9771,8 @@ fixes.
 [0.5.3]: https://github.com/adolfousier/opencrabs/compare/v0.5.2...v0.5.3
 [0.5.4]: https://github.com/adolfousier/opencrabs/compare/v0.5.3...v0.5.4
 [0.5.5]: https://github.com/opencrabs/opencrabs/compare/v0.5.4...v0.5.5
+[0.5.10]: https://github.com/opencrabs/opencrabs/compare/v0.5.5...v0.5.10
+[0.5.11]: https://github.com/opencrabs/opencrabs/compare/v0.5.10...v0.5.11
+[0.5.12]: https://github.com/opencrabs/opencrabs/compare/v0.5.11...v0.5.12
+[0.5.13]: https://github.com/opencrabs/opencrabs/compare/v0.5.12...v0.5.13
+[0.5.14]: https://github.com/opencrabs/opencrabs/compare/v0.5.13...v0.5.14

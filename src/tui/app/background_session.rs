@@ -51,7 +51,7 @@
 //!   token counters. Without it the inactive pane misses every
 //!   chunk between turns.
 
-use crate::tui::app::state::{DisplayMessage, StreamingTpsTracker, ToolCallGroup};
+use crate::tui::app::state::{DisplayMessage, StreamingTpsTracker, ToolCallEntry, ToolCallGroup};
 use std::time::Instant;
 
 /// Sidecar live-state cache for a non-focused session.
@@ -236,6 +236,36 @@ impl SessionStateMut<'_> {
             Self::Foreground(app) => app.active_tool_group.as_mut(),
             Self::Background(bg) => bg.active_tool_group.as_mut(),
         }
+    }
+
+    /// Find the detached-task row carrying `task_id` so a finish updates it in
+    /// place (#2146).
+    ///
+    /// The live turn's active group is checked first, then the settled
+    /// `tool_group` messages, because a finish can land after the turn ended
+    /// and its group was already flushed into the transcript. Identity is the
+    /// task id, never the label: two detached tasks can share a label, and a
+    /// label match would settle the wrong row.
+    pub fn find_detached_row(&mut self, task_id: &str) -> Option<&mut ToolCallEntry> {
+        let (group, messages) = match self {
+            Self::Foreground(app) => (&mut app.active_tool_group, &mut app.messages),
+            Self::Background(bg) => (&mut bg.active_tool_group, &mut bg.pending_messages),
+        };
+        if let Some(group) = group.as_mut()
+            && let Some(entry) = group
+                .calls
+                .iter_mut()
+                .rev()
+                .find(|c| c.task_id.as_deref() == Some(task_id))
+        {
+            return Some(entry);
+        }
+        messages
+            .iter_mut()
+            .rev()
+            .filter_map(|m| m.tool_group.as_mut())
+            .flat_map(|g| g.calls.iter_mut().rev())
+            .find(|c| c.task_id.as_deref() == Some(task_id))
     }
 
     /// Update the display-token counter (drives the footer

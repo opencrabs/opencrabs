@@ -309,17 +309,26 @@ fn empty_or_digit_only_text_is_not_a_duplicate() {
 fn trip_sequence_nudges_then_aborts() {
     // The approved #957 acceptance sequence: clean -> clean -> trip-nudge
     // -> trip-abort. Counter-only variants count as near-duplicates.
+    //
+    // #2129 changed when the abort lands: one nudge is a retry, not a
+    // verdict, so the ring nudges for five tripping turns and only cuts the
+    // sixth off. Each text here is its own turn.
     let mut ring = OutgoingTextRing::default();
-    let texts = [
-        "Отправляю 1 подтверждение по документу в ДДС и продолжаю обработку, ожидайте",
-        "Отправляю 2 подтверждение по документу в ДДС и продолжаю обработку, ожидайте",
-        "Отправляю 3 подтверждение по документу в ДДС и продолжаю обработку, ожидайте",
-        "Отправляю 4 подтверждение по документу в ДДС и продолжаю обработку, ожидайте",
-    ];
-    assert_eq!(ring.record_and_check(texts[0]), TextLoopAction::Continue);
-    assert_eq!(ring.record_and_check(texts[1]), TextLoopAction::Continue);
-    assert_eq!(ring.record_and_check(texts[2]), TextLoopAction::Nudge);
-    assert_eq!(ring.record_and_check(texts[3]), TextLoopAction::Abort);
+    let text = |n: u32| {
+        format!("Отправляю {n} подтверждение по документу в ДДС и продолжаю обработку, ожидайте")
+    };
+    assert_eq!(ring.record_and_check(&text(1)), TextLoopAction::Continue);
+    assert_eq!(ring.record_and_check(&text(2)), TextLoopAction::Continue);
+    // Five tripping turns, five nudges. Each text is one turn.
+    for n in 3..=7 {
+        assert_eq!(
+            ring.record_and_check(&text(n)),
+            TextLoopAction::Nudge,
+            "turn {n} must nudge, not abort"
+        );
+        ring.end_turn();
+    }
+    assert_eq!(ring.record_and_check(&text(8)), TextLoopAction::Abort);
 }
 
 #[test]
@@ -401,27 +410,65 @@ fn luna_bash_echoes_all_normalize_identically() {
 #[test]
 fn luna_announcements_trip_the_ring() {
     // Text layer: feeding Luna's reworded announcements through the ring
-    // must nudge once and then abort — the exact sequence that ended the
-    // real incident with 18+ undelivered repeats.
+    // must nudge and, once the five retries are spent, fall back: the sequence
+    // that ended the real incident with 18+ undelivered repeats.
+    //
+    // #2129: each fixture line is its own turn. A nudge buys the model the
+    // next turn, so a clean line after a nudge is the nudge WORKING, not a
+    // violation. What must hold is that an unbroken run of repeats ends in
+    // the abort.
     let texts = fixture_lines("text|");
     assert!(texts.len() >= 6, "fixture must carry the announcement loop");
     let mut ring = OutgoingTextRing::default();
-    let mut saw_nudge = false;
-    let mut saw_abort = false;
-    for t in &texts {
-        match ring.record_and_check(t) {
-            TextLoopAction::Nudge => saw_nudge = true,
-            TextLoopAction::Abort => {
-                assert!(saw_nudge, "abort fired before the nudge did");
-                saw_abort = true;
-            }
-            TextLoopAction::Continue => {
-                assert!(!saw_nudge, "loop continued after the nudge");
+    let mut nudged_turns = 0;
+    let mut aborted = false;
+    // Each pass over the loop is one turn. A turn is nudged at most once, so
+    // the count is per turn, not per record: every repeat inside a tripping
+    // turn answers Nudge by design.
+    for _ in 0..8 {
+        let mut this_turn = TextLoopAction::Continue;
+        for t in &texts {
+            match ring.record_and_check(t) {
+                TextLoopAction::Abort => {
+                    this_turn = TextLoopAction::Abort;
+                    break;
+                }
+                TextLoopAction::Nudge => this_turn = TextLoopAction::Nudge,
+                TextLoopAction::Continue => {}
             }
         }
+        if this_turn == TextLoopAction::Abort {
+            aborted = true;
+            break;
+        }
+        if this_turn == TextLoopAction::Nudge {
+            nudged_turns += 1;
+        }
+        ring.end_turn();
     }
-    assert!(saw_nudge, "the fixture never tripped the nudge");
-    assert!(saw_abort, "the fixture never escalated to abort");
+    assert_eq!(
+        nudged_turns, 5,
+        "the run must be nudged five times, not cut off"
+    );
+    assert!(
+        aborted,
+        "the run must end in the fallback after the retries"
+    );
+}
+
+#[test]
+fn one_noisy_turn_does_not_reach_the_abort() {
+    // #2129's second half at the text layer: a single turn that repeats must
+    // not walk the fallback chain before the model has read a single nudge.
+    let texts = fixture_lines("text|");
+    let mut ring = OutgoingTextRing::default();
+    for t in &texts {
+        assert_ne!(
+            ring.record_and_check(t),
+            TextLoopAction::Abort,
+            "one turn must never abort: {t}"
+        );
+    }
 }
 
 // ---- #961 regression: DeepSeek v4 flash zip-send loop ----
@@ -460,9 +507,12 @@ fn zip_send_fixture_lines(prefix: &str) -> Vec<String> {
 fn deepseek_zip_send_announcements_nudge_then_abort() {
     // The text layer against the real #961 shape: the eight reworded
     // "sending now" announcements from the DeepSeek v4 flash zip-send
-    // loop. With the overlap coefficient and the cap-8 ring the trip
-    // sequence is exactly three cleans, nudge at the fourth, three more
-    // cleans, abort at the eighth.
+    // loop. With the overlap coefficient and the cap-8 ring the first
+    // trip lands on the fourth announcement.
+    //
+    // #2129 moved the abort: one nudge is a retry now, so a single pass
+    // through the eight announcements nudges and stops there. The cut-off
+    // still exists, it just needs five ignored nudges first.
     let texts = zip_send_fixture_lines("text|");
     assert_eq!(texts.len(), 8, "fixture must carry all eight announcements");
     let mut ring = OutgoingTextRing::default();
@@ -474,11 +524,29 @@ fn deepseek_zip_send_announcements_nudge_then_abort() {
         TextLoopAction::Continue,
         TextLoopAction::Continue,
         TextLoopAction::Continue,
-        TextLoopAction::Abort,
+        TextLoopAction::Nudge,
     ];
     for (t, want) in texts.iter().zip(&expected) {
         assert_eq!(ring.record_and_check(t), *want, "text: {t}");
     }
+    // Same turn, so the whole pass spent exactly one retry.
+    ring.end_turn();
+    // Four more ignored nudges, then the fallback on the sixth turn.
+    for turn in 2..=5 {
+        for t in &texts {
+            assert_ne!(
+                ring.record_and_check(t),
+                TextLoopAction::Abort,
+                "turn {turn} aborted before the retries were spent: {t}"
+            );
+        }
+        ring.end_turn();
+    }
+    assert_eq!(
+        ring.record_and_check(&texts[0]),
+        TextLoopAction::Abort,
+        "the sixth nudged turn must reach the fallback"
+    );
 }
 
 #[test]

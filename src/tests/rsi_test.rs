@@ -1307,6 +1307,237 @@ mod rsi_integration {
             .unwrap();
         assert!(result.output.contains("5 entries"));
     }
+
+    // #2200: the query values were undiscoverable and `tool_stats` always
+    // dumped every dimension, so asking about one tool buried it in the list.
+
+    #[tokio::test]
+    async fn tool_stats_filters_to_one_tool() {
+        let (_db, ctx) = setup().await;
+        let record = FeedbackRecordTool;
+        let analyze = FeedbackAnalyzeTool;
+
+        for _ in 0..3 {
+            record
+                .execute(
+                    json!({"event_type": "tool_success", "dimension": "bash"}),
+                    &ctx,
+                )
+                .await
+                .unwrap();
+        }
+        record
+            .execute(
+                json!({"event_type": "tool_failure", "dimension": "edit_file"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        let result = analyze
+            .execute(json!({"query": "tool_stats", "tool": "bash"}), &ctx)
+            .await
+            .unwrap();
+        assert!(result.success);
+        assert!(result.output.contains("bash"), "{}", result.output);
+        assert!(
+            !result.output.contains("edit_file"),
+            "filtered view must not list other tools: {}",
+            result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_filter_names_the_missing_tool() {
+        let (_db, ctx) = setup().await;
+        let analyze = FeedbackAnalyzeTool;
+
+        let result = analyze
+            .execute(json!({"query": "tool_stats", "tool": "never_ran"}), &ctx)
+            .await
+            .unwrap();
+        assert!(result.success);
+        assert!(
+            result.output.contains("never_ran"),
+            "empty result must name the tool asked about: {}",
+            result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn failures_filter_to_one_tool() {
+        let (_db, ctx) = setup().await;
+        let record = FeedbackRecordTool;
+        let analyze = FeedbackAnalyzeTool;
+
+        record
+            .execute(
+                json!({"event_type": "tool_failure", "dimension": "bash", "metadata": "bash broke"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        record
+            .execute(
+                json!({"event_type": "tool_failure", "dimension": "edit_file", "metadata": "edit broke"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        let result = analyze
+            .execute(json!({"query": "failures", "tool": "edit_file"}), &ctx)
+            .await
+            .unwrap();
+        assert!(result.success);
+        assert!(result.output.contains("edit broke"), "{}", result.output);
+        assert!(
+            !result.output.contains("bash broke"),
+            "filtered failures must not include other tools: {}",
+            result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn user_corrections_query_is_reachable() {
+        let (_db, ctx) = setup().await;
+        let record = FeedbackRecordTool;
+        let analyze = FeedbackAnalyzeTool;
+
+        record
+            .execute(
+                json!({"event_type": "user_correction", "dimension": "wrong_approach"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        record
+            .execute(
+                json!({"event_type": "tool_failure", "dimension": "bash"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        let result = analyze
+            .execute(json!({"query": "user_corrections"}), &ctx)
+            .await
+            .unwrap();
+        assert!(result.success);
+        assert!(
+            result.output.contains("wrong_approach"),
+            "{}",
+            result.output
+        );
+        assert!(
+            !result.output.contains("tool_failure"),
+            "corrections view must not list tool failures: {}",
+            result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_errors_query_is_reachable() {
+        let (_db, ctx) = setup().await;
+        let record = FeedbackRecordTool;
+        let analyze = FeedbackAnalyzeTool;
+
+        record
+            .execute(
+                json!({"event_type": "provider_error", "dimension": "openai_timeout"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        let result = analyze
+            .execute(json!({"query": "provider_errors"}), &ctx)
+            .await
+            .unwrap();
+        assert!(result.success);
+        assert!(
+            result.output.contains("openai_timeout"),
+            "{}",
+            result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_query_lists_every_valid_value() {
+        let (_db, ctx) = setup().await;
+        let analyze = FeedbackAnalyzeTool;
+
+        let result = analyze
+            .execute(json!({"query": "nonsense"}), &ctx)
+            .await
+            .unwrap();
+        assert!(!result.success);
+        // ToolResult::error keeps the message in `error` and leaves `output`
+        // empty; `error` is what build_tool_result_content shows the model.
+        let msg = result
+            .error
+            .clone()
+            .unwrap_or_else(|| result.output.clone());
+        for expected in [
+            "summary",
+            "tool_stats",
+            "recent",
+            "failures",
+            "user_corrections",
+            "provider_errors",
+        ] {
+            assert!(
+                msg.contains(expected),
+                "error must name '{expected}': {msg}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn failures_filter_reads_past_the_limit() {
+        // Regression guard for the filter window: with `limit` used as the SQL
+        // bound, three newer failures from another tool hid the one failure
+        // the caller asked about, and the answer was "no failures recorded".
+        let (_db, ctx) = setup().await;
+        let record = FeedbackRecordTool;
+        let analyze = FeedbackAnalyzeTool;
+
+        record
+            .execute(
+                json!({"event_type": "tool_failure", "dimension": "wanted_tool", "metadata": "wanted failure"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        for i in 0..3 {
+            record
+                .execute(
+                    json!({"event_type": "tool_failure", "dimension": "other_tool", "metadata": format!("noise {i}")}),
+                    &ctx,
+                )
+                .await
+                .unwrap();
+        }
+
+        let result = analyze
+            .execute(
+                json!({"query": "failures", "tool": "wanted_tool", "limit": 1}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(result.success);
+        assert!(
+            result.output.contains("wanted failure"),
+            "filter must read past the SQL limit: {}",
+            result.output
+        );
+        assert!(
+            !result.output.contains("noise"),
+            "filter must not leak other tools: {}",
+            result.output
+        );
+    }
 }
 
 // --- User Correction Detection Tests ---

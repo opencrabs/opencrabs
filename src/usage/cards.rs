@@ -2,6 +2,7 @@
 //!
 //! Each card is a self-contained render function that takes data + area and draws into a Frame.
 
+use super::dashboard::{DashboardState, advertised_keys};
 use super::data::{
     ActivityStats, CacheStats, DailyStats, DashboardData, ModelEntry, ProjectStats, ToolStats,
     fmt_cost, fmt_tokens,
@@ -12,7 +13,7 @@ use ratatui::{
     layout::{Alignment, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph},
 };
 
 const LABEL: Style = Style::new().fg(Color::DarkGray);
@@ -258,12 +259,30 @@ pub fn render_models(f: &mut Frame, models: &[ModelEntry], area: Rect, focused: 
         .max()
         .unwrap_or(1);
 
+    // Cache column (#2027): of this model's recorded tokens, how many were
+    // cache reads. The column appears only when at least one visible model
+    // carries a split, because a column of blanks on a ledger written before
+    // the cache-read column existed would be pure noise. A model with no
+    // recorded split renders blank there, never a zero it did not measure.
+    let cache_cell = |m: &ModelEntry| m.cache_read_pct().map(|pct| format!("{pct:.0}% cache"));
+    let show_cache = all_models.iter().any(|m| m.cache_read_tokens.is_some());
+    let cache_width = if show_cache {
+        all_models
+            .iter()
+            .filter_map(|m| cache_cell(m).map(|s| s.len()))
+            .max()
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
     // Data columns get guaranteed space; name column fills whatever is left
     let spacing = 2;
     let cost_width = max_cost_len;
     let tok_width = max_tok_len;
     let calls_width = max_calls_len;
-    let fixed = cost_width + tok_width + calls_width + spacing * 3 + 1;
+    let cache_cols = if show_cache { cache_width + spacing } else { 0 };
+    let fixed = cost_width + tok_width + calls_width + cache_cols + spacing * 3 + 1;
     let name_width = (inner.width as usize).saturating_sub(fixed).max(4);
 
     let mut lines: Vec<Line> = Vec::new();
@@ -293,7 +312,7 @@ pub fn render_models(f: &mut Frame, models: &[ModelEntry], area: Rect, focused: 
         } else {
             fmt_cost(m.cost)
         };
-        lines.push(Line::from(vec![
+        let mut spans = vec![
             Span::styled(format!(" {:<width$}", name, width = name_width), BOLD),
             Span::raw("  "),
             Span::styled(
@@ -306,8 +325,25 @@ pub fn render_models(f: &mut Frame, models: &[ModelEntry], area: Rect, focused: 
                 DIM,
             ),
             Span::raw("  "),
-            Span::styled(format!("{:>width$} req", m.calls, width = calls_width), DIM),
-        ]));
+        ];
+        // The cache share, when the model has one recorded (#2027). A row with
+        // no split stays blank rather than reading 0%.
+        if show_cache {
+            let (text, style) = match cache_cell(m) {
+                Some(s) => (s, LABEL),
+                None => (String::new(), DIM),
+            };
+            spans.push(Span::styled(
+                format!("{text:<width$}", width = cache_width),
+                style,
+            ));
+            spans.push(Span::raw("  "));
+        }
+        spans.push(Span::styled(
+            format!("{:>width$} req", m.calls, width = calls_width),
+            DIM,
+        ));
+        lines.push(Line::from(spans));
 
         // Child rows (variant breakdown) — only show the tree when
         // there's something MEANINGFUL to break down. A variant
@@ -371,6 +407,15 @@ pub fn render_models(f: &mut Frame, models: &[ModelEntry], area: Rect, focused: 
                         DIM,
                     ),
                     Span::raw("  "),
+                    // A variant row carries no cache split of its own (the
+                    // ledger records one per turn, not per spelling), so the
+                    // cell stays blank to keep the columns aligned with the
+                    // parent row.
+                    Span::raw(if show_cache {
+                        format!("{:<width$}", "", width = cache_width + spacing)
+                    } else {
+                        String::new()
+                    }),
                     Span::styled(format!("{:>width$} req", v.calls, width = calls_width), DIM),
                 ]));
             }
@@ -667,17 +712,124 @@ pub fn render_cache_efficiency(
     f.render_widget(Paragraph::new(lines), inner);
 }
 
+// ── Cache price breakdown (#2027) ────────────────────────────────────────────
+
+/// Fixed widths of the money and count columns, plus the leading space.
+/// `model` takes whatever is left, so the table fits any terminal.
+const BREAKDOWN_COLS: usize = 1 + 8 + 8 + 9 + 9 + 9;
+
+/// The cache price breakdown, drawn where the Cache Efficiency card was when
+/// Enter opened it (#2027).
+///
+/// One row per model: the cached tokens, the cache-read rate they were billed
+/// at, what those reads cost, what they would have cost as ordinary input, and
+/// the difference. The TOTAL row adds the rows up, and the footnote says what
+/// the columns mean, so the money here answers the question the card raised.
+pub fn render_cache_breakdown(f: &mut Frame, cache: &Option<CacheStats>, area: Rect) {
+    let block = card_block("Cache Efficiency: prices", true);
+    let inner = block.inner(area);
+    f.render_widget(Clear, area);
+    f.render_widget(block, area);
+
+    let cache = match cache {
+        Some(c) if !c.per_model.is_empty() => c,
+        _ => {
+            let p = Paragraph::new(" No cache data").style(DIM);
+            f.render_widget(p, inner);
+            return;
+        }
+    };
+
+    let width = inner.width as usize;
+    let name_w = width.saturating_sub(BREAKDOWN_COLS).max(8);
+
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(Span::styled(
+        format!(
+            " {:<name_w$}{:>8}{:>8}{:>9}{:>9}{:>9}",
+            "model", "cached", "$/M", "read", "full", "saved"
+        ),
+        LABEL,
+    )));
+
+    // The TOTAL row and the two footnote lines are reserved first, so a long
+    // model list never pushes the explanation off the panel.
+    let max_rows = (inner.height as usize).saturating_sub(4).max(1);
+    for ms in cache.per_model.iter().take(max_rows) {
+        let name: String = ms.model.chars().take(name_w.saturating_sub(1)).collect();
+        // The By Model card's marker for default-table prices (#1717): `~`,
+        // in the accent color, so nobody reads an estimate as a quoted rate.
+        let money_style = if ms.estimated { accent() } else { DIM };
+        let money = |c: f64| {
+            if ms.estimated {
+                format!("~{}", fmt_cost(c))
+            } else {
+                fmt_cost(c)
+            }
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {name:<name_w$}"), LABEL),
+            Span::styled(format!("{:>8}", fmt_tokens(ms.cached_tokens)), DIM),
+            Span::styled(
+                format!("{:>8}", format!("${:.2}", ms.cache_read_per_m)),
+                money_style,
+            ),
+            Span::styled(format!("{:>9}", money(ms.cost.read_cost)), money_style),
+            Span::styled(format!("{:>9}", money(ms.cost.full_rate_cost)), money_style),
+            Span::styled(format!("{:>9}", money(ms.cost.saved)), money_style),
+        ]));
+    }
+
+    let totals = cache.cost_totals();
+    let any_estimated = cache.per_model.iter().any(|m| m.estimated);
+    let total_money = |c: f64| {
+        if any_estimated {
+            format!("~{}", fmt_cost(c))
+        } else {
+            fmt_cost(c)
+        }
+    };
+    lines.push(Line::from(vec![
+        Span::styled(format!(" {:<name_w$}", "TOTAL"), BOLD),
+        Span::styled(format!("{:>8}", fmt_tokens(cache.cached_tokens)), BOLD),
+        Span::raw(" ".repeat(8)),
+        Span::styled(format!("{:>9}", total_money(totals.read_cost)), BOLD),
+        Span::styled(format!("{:>9}", total_money(totals.full_rate_cost)), BOLD),
+        Span::styled(format!("{:>9}", total_money(totals.saved)), BOLD),
+    ]));
+    lines.push(Line::from(Span::styled(
+        format!(
+            " {:.0}% of input tokens were cache reads; writes cost {} on top",
+            cache.cache_hit_pct,
+            fmt_cost(totals.write_cost)
+        ),
+        DIM,
+    )));
+    lines.push(Line::from(Span::styled(
+        " saved = full rate - read rate; ~ = default table price",
+        DIM,
+    )));
+
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
 // ── Footer ───────────────────────────────────────────────────────────────────
 
-pub fn render_footer(f: &mut Frame, area: Rect) {
-    // The canonical dialog footer from the scoped keymap (#1775) — the
-    // reference implementation the ticket pointed at, now uniform with
-    // every other dialog: left-aligned, key: verb, bold accent keys.
-    crate::tui::render::hints::render_footer(
-        f,
-        area,
-        crate::tui::app::dialog_keys::dialog_keys(
-            crate::tui::app::dialog_keys::DialogScope::UsageDashboard,
-        ),
-    );
+/// The dashboard footer: the keys that are live in this state (#1775 / #2027).
+///
+/// Enter is only advertised on the card that has a breakdown to open, and once
+/// the breakdown is up Esc is the only key left, so the row a user reads is
+/// always a key the handler honours.
+pub fn render_footer(f: &mut Frame, area: Rect, state: &DashboardState) {
+    use crate::tui::app::dialog_keys::{DialogScope, dialog_keys};
+
+    if state.cache_detail_open {
+        crate::tui::render::hints::render_footer(
+            f,
+            area,
+            dialog_keys(DialogScope::UsageCacheBreakdown),
+        );
+    } else {
+        crate::tui::render::hints::render_footer(f, area, &advertised_keys(state));
+    }
 }

@@ -13,6 +13,27 @@ pub fn truncate_str(s: &str, max_bytes: usize) -> &str {
     &s[..end]
 }
 
+/// The longest TAIL of `s` that fits in `max_bytes` bytes, snapped UP to a
+/// valid char boundary. Sibling of [`truncate_str`], which keeps the head.
+///
+/// Every caller that wants "the last N bytes" is slicing `&s[len - n..]`, and
+/// that panics the moment `len - n` lands inside a multi-byte character. A
+/// response ending in an accent, a curly quote, an emoji or CJK text hits that
+/// on ordinary input, so the guard belongs here rather than at each call site.
+pub fn truncate_str_tail(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    &s[s.ceil_char_boundary(s.len() - max_bytes)..]
+}
+
+/// Everything before the final character of `s`, snapped down to a char
+/// boundary. Used to peek at the punctuation that ends a string without
+/// slicing inside a multi-byte character.
+pub fn prefix_before_last_char(s: &str) -> &str {
+    &s[..s.floor_char_boundary(s.len().saturating_sub(1))]
+}
+
 /// Truncate a string to at most `max_chars` characters. Unlike [`truncate_str`]
 /// which operates on bytes (halving effective length for Cyrillic, quartering
 /// for emoji), this counts actual characters so a budget of 2400 means 2400

@@ -41,11 +41,12 @@ jobs:
           - target: x86_64-apple-darwin
             asset_suffix: macos-amd64
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
+          toolchain: 1.98.1
           targets: ${{ matrix.target }}
 
       - name: Build
@@ -81,7 +82,7 @@ jobs:
           tar czf "../../../${ARCHIVE}.tar.gz" opencrabs rtk
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: prerelease-${{ matrix.asset_suffix }}
           path: opencrabs-v*-pre-*.tar.gz
@@ -96,18 +97,26 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # Pinned, never ubuntu-latest. The label rolls forward on its own
+          # schedule and takes the glibc floor with it: it moved to Ubuntu
+          # 26.04 (glibc 2.43) between v0.5.12 and v0.5.13, and the amd64 asset
+          # built after the roll refuses to start on Ubuntu 24.04 and older
+          # with "version `GLIBC_2.43' not found" (#2206). The arm64 entry below
+          # is pinned for the same reason. Both stay on the oldest image we
+          # support.
+          - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             asset_suffix: linux-amd64
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             asset_suffix: linux-arm64
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
+          toolchain: 1.98.1
           targets: ${{ matrix.target }}
 
       - name: Install dependencies
@@ -133,6 +142,20 @@ jobs:
       - name: Strip
         run: strip target/${{ matrix.target }}/release/opencrabs
 
+      # Same gate as the release workflow: assert the stripped artifact needs no
+      # newer glibc than we promise, then prove it starts. A prerelease asset
+      # that cannot run is as broken as a release one, and it reaches users
+      # through the same download path (#2209).
+      - name: Check glibc floor
+        shell: bash
+        env:
+          # The oldest glibc we support, matching ubuntu-24.04 and v0.5.12.
+          GLIBC_FLOOR: "2.39"
+        run: |
+          binary="target/${{ matrix.target }}/release/opencrabs"
+          ./scripts/check-glibc-floor.sh "$binary" "$GLIBC_FLOOR"
+          "$binary" --version
+
       - name: Create archive
         shell: bash
         run: |
@@ -142,8 +165,24 @@ jobs:
           cd target/${{ matrix.target }}/release
           tar czf "../../../${ARCHIVE}.tar.gz" opencrabs rtk
 
+      # Same gate as the release workflow: the floor check above reads what the
+      # binary asks for, this runs it on the distribution that floor names, out
+      # of the archive about to be uploaded. A prerelease asset that cannot
+      # start reaches users through the same download path as a release one
+      # (#2209, #2214).
+      - name: Check the archive starts on the oldest supported Linux
+        shell: bash
+        env:
+          # Same floor as the check above; the script maps it to an image.
+          GLIBC_FLOOR: "2.39"
+        run: |
+          SHA=$(git rev-parse --short HEAD)
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          archive="opencrabs-v${VERSION}-pre-${SHA}-${{ matrix.asset_suffix }}.tar.gz"
+          ./scripts/check-linux-asset-starts.sh "$archive" "$GLIBC_FLOOR"
+
       - name: Upload artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: prerelease-${{ matrix.asset_suffix }}
           path: opencrabs-v*-pre-*.tar.gz
@@ -155,18 +194,23 @@ jobs:
     name: Windows (windows-amd64)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
+          toolchain: 1.98.1
           targets: x86_64-pc-windows-msvc
 
+      # Pinned to a released tag and an explicit tool version: the action
+      # defaults cmakeVersion to "latest" and resolves it at run time.
       - name: Install CMake
-        uses: lukka/get-cmake@latest
+        uses: lukka/get-cmake@a89e43e22a96abafcd7a62db652a65ecd33052c9 # v4.4.4
+        with:
+          cmakeVersion: "4.4.4"
 
       - name: Install NASM
-        uses: ilammy/setup-nasm@v1
+        uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1
 
       - name: Build
         shell: bash
@@ -195,7 +239,7 @@ jobs:
           7z a "../../../${ARCHIVE}.zip" opencrabs.exe rtk.exe
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: prerelease-windows-amd64
           path: opencrabs-v*-pre-*.zip
@@ -210,10 +254,10 @@ jobs:
     steps:
       # Needed before the notes step reads Cargo.toml for the version. Without
       # it that grep runs in an empty workspace and fails the job.
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           path: artifacts
 

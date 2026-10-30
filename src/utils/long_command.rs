@@ -92,6 +92,75 @@ fn strip_heredoc_bodies(command: &str) -> String {
     out.join("\n")
 }
 
+/// Byte ranges of every heredoc body in `command`, including the delimiter
+/// line that closes it.
+///
+/// Same rule as [`strip_heredoc_bodies`]: a body is data, never a command. It
+/// differs only in shape, returning ranges over the original string so a caller
+/// can keep the byte offsets it already has. `sudo` detection needs exactly
+/// that: it has to rewrite the `sudo` word it finds, and must not touch one
+/// that only appears inside a body (#2157).
+pub(crate) fn heredoc_body_ranges(command: &str) -> Vec<std::ops::Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut pending: Option<String> = None;
+    let mut body_start: Option<usize> = None;
+    let mut offset = 0usize;
+
+    for line in command.split_inclusive('\n') {
+        let line_start = offset;
+        offset += line.len();
+        let text = line.trim_end_matches(['\n', '\r']);
+
+        match pending.as_deref() {
+            Some(delim) => {
+                body_start.get_or_insert(line_start);
+                if text.trim() == delim {
+                    ranges.push(body_start.take().unwrap_or(line_start)..offset);
+                    pending = None;
+                }
+            }
+            None => {
+                if let Some(delim) = heredoc_opened_outside_quotes(text) {
+                    pending = Some(delim);
+                }
+            }
+        }
+    }
+
+    // An unterminated heredoc runs to the end of the input, which is how the
+    // shell reads it too.
+    if let Some(start) = body_start {
+        ranges.push(start..command.len());
+    }
+    ranges
+}
+
+/// The delimiter of a heredoc opened on `line`, but only when the `<<` is shell
+/// syntax. `heredoc_delimiter` scans the raw text, so `echo "see <<EOF"` would
+/// open a body that does not exist and hide every later line from a caller.
+fn heredoc_opened_outside_quotes(line: &str) -> Option<String> {
+    let scanned = shell_scan::scan(line);
+    let chars: Vec<char> = line.chars().collect();
+    let positions: Vec<usize> = line.char_indices().map(|(at, _)| at).collect();
+
+    for i in 0..chars.len().saturating_sub(1) {
+        if chars[i] != '<' || chars[i + 1] != '<' {
+            continue;
+        }
+        if scanned[i].literal || scanned[i + 1].literal {
+            continue;
+        }
+        // `<<<` feeds a word to stdin; nothing after it opens a body.
+        if chars.get(i + 2) == Some(&'<') {
+            continue;
+        }
+        if let Some(delim) = heredoc_delimiter(&line[positions[i]..]) {
+            return Some(delim);
+        }
+    }
+    None
+}
+
 /// The delimiter word of the first heredoc opened on `line`, if any. Handles
 /// `<<EOF`, `<<-EOF`, `<<'EOF'` and `<<"EOF"`; `<<<` is a here-string, not one.
 fn heredoc_delimiter(line: &str) -> Option<String> {

@@ -1,0 +1,10 @@
+{
+  "name": "plain_title_passes_escape_hatch",
+  "body": "",
+  "subjects": [],
+  "messages": "",
+  "files_count": 0,
+  "title": "Update the roadmap for Q4",
+  "title_kind": "issue",
+  "expected_exit": 0
+}

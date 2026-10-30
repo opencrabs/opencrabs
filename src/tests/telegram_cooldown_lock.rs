@@ -29,6 +29,12 @@
 //! shared clock without holding this guard. If the rule changes, the needle
 //! list in that scan changes in the same commit, or the discipline decays
 //! back into prose.
+//!
+//! It also serializes swaps of the process-wide `Config` mirror, by history
+//! rather than by name: every governor suite holds this guard around its
+//! `Config::set_current` because a swap landing mid-body rewrites another
+//! suite's bucket math (#2012). Any test that replaces `Config::current()`
+//! takes it too, for the same reason: one mirror, one lock.
 
 use tokio::sync::{Mutex, MutexGuard};
 

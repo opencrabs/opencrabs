@@ -353,6 +353,15 @@ impl Tool for WriteOpenCrabsFileTool {
                         ));
                     }
                 };
+                // #2099: a config.toml or keys.toml that would not parse must
+                // never land. The loader falls back to auto-repair or the
+                // last-good snapshot, and if both miss the process does not
+                // start. The capability is unchanged: any config the user asks
+                // for still writes, only content that would not load is
+                // refused, and the previous bytes stay on disk.
+                if let Err(msg) = crate::config::guard::deny_if_would_break(&full_path, content) {
+                    return Ok(ToolResult::error(msg));
+                }
                 // Append-only contract: overwriting a protected brain file
                 // is only allowed when it doesn't lose bytes. The 2026-04-26
                 // RSI rewrite of TOOLS.md happened by passing the whole file
@@ -465,6 +474,18 @@ impl Tool for WriteOpenCrabsFileTool {
                 } else {
                     content.to_string()
                 };
+                // #2099: appending can corrupt the profile config just as an
+                // overwrite can, so the candidate is the whole document the
+                // file would hold afterwards, not just the appended bytes.
+                if crate::config::guard::protected_file(&full_path).is_some() {
+                    let existing = std::fs::read_to_string(&full_path).unwrap_or_default();
+                    let candidate = format!("{existing}{effective_content}");
+                    if let Err(msg) =
+                        crate::config::guard::deny_if_would_break(&full_path, &candidate)
+                    {
+                        return Ok(ToolResult::error(msg));
+                    }
+                }
                 if let Some(parent) = full_path.parent()
                     && let Err(e) = std::fs::create_dir_all(parent)
                 {
@@ -589,6 +610,11 @@ impl Tool for WriteOpenCrabsFileTool {
                 let new_text_nfc: String = new_text.nfc().collect();
                 let updated =
                     existing_nfc.replacen(old_text_nfc.as_str(), new_text_nfc.as_str(), 1);
+                // #2099: refuse a replace that would leave the profile config or
+                // keys file unparseable. Nothing is written in that case.
+                if let Err(msg) = crate::config::guard::deny_if_would_break(&full_path, &updated) {
+                    return Ok(ToolResult::error(msg));
+                }
                 let cleanup_intent = input
                     .get("cleanup_intent")
                     .and_then(|v| v.as_bool())

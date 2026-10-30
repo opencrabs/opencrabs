@@ -167,6 +167,30 @@ const FLOW_TICKER_INTERVAL: std::time::Duration = std::time::Duration::from_secs
 /// Hard stop for orphaned ticks (crashed turn): no immortal tasks.
 const FLOW_TICKER_CAP: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
+/// Compaction typing cadence (#2189). Under Discord's ~10s expiry so the dots
+/// do not flicker, and the same 8s the sustained turn pinger uses.
+const COMPACTION_PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(8);
+/// Outer bound on the compaction pinger, about 96s. The turn token ends it
+/// when the turn ends; this only covers a compaction that never reports back.
+const COMPACTION_PING_ROUNDS: usize = 12;
+
+/// Button ceiling for one Discord menu message (#2190): 5 action rows of 5.
+pub(crate) const MENU_BUTTON_CAP: usize = 25;
+
+/// Body for a menu message, with an explicit notice when the list was cut.
+///
+/// Discord allows 5 rows of 5 buttons, so 25 entries is a hard platform
+/// ceiling, not a choice. The defect was truncating silently: a user with 30
+/// providers saw 25 and no hint that five were unreachable from the menu.
+/// Returns the body unchanged when everything fits.
+pub(crate) fn menu_body(text: &str, total: usize) -> String {
+    let shown = total.min(MENU_BUTTON_CAP);
+    if total <= MENU_BUTTON_CAP {
+        return text.to_string();
+    }
+    format!("{text}\n\nShowing 1-{shown} of {total}. The rest are reachable from the TUI.")
+}
+
 /// Re-render the turn's flow group on an interval (#1843): the Discord twin
 /// of Slack's `spawn_flow_ticker` and Telegram's `spawn_edit_loop`. Without
 /// it the clock freezes between tool events. Waits for the group message to
@@ -212,6 +236,7 @@ pub(super) fn spawn_flow_ticker(
             }
             let edit = EditMessage::new()
                 .content(super::tool_group::render_content(&group))
+                .embeds(super::tool_group::render_embeds(&group))
                 .components(super::tool_group::render_components(&group, mid.get()));
             // The ticker is the one chrome writer that pays for its paint up
             // front, because a refusal here means skipping the rest of the
@@ -243,6 +268,7 @@ pub(super) fn spawn_flow_ticker(
                         .await;
                     let edit = EditMessage::new()
                         .content(super::tool_group::render_content(&re))
+                        .embeds(super::tool_group::render_embeds(&re))
                         .components(super::tool_group::render_components(&re, mid.get()));
                     // Same shape as the chrome tick: the `gate` above is what
                     // paid for this write, so the edit goes out directly and
@@ -464,7 +490,16 @@ pub(crate) async fn handle_message(
         });
     let unconfigured =
         allowed.is_empty() && dc_cfg.allowed_roles.is_empty() && dc_cfg.bot_owner.is_empty();
-    if unconfigured || !(is_owner || in_allowlist || role_granted || open_here) {
+    // One predicate, shared with the reaction path (#2195): two copies of this
+    // decision is how the reaction gate drifted narrower than the message gate
+    // in the first place.
+    if !super::commands::identity_admitted(
+        unconfigured,
+        is_owner,
+        in_allowlist,
+        role_granted,
+        open_here,
+    ) {
         tracing::debug!(
             "Discord: ignoring message from non-allowed user {} (deny-by-default, OC-02)",
             user_id
@@ -472,13 +507,19 @@ pub(crate) async fn handle_message(
         return;
     }
 
+    // The owner's /cowork and /respond_to bypass the allowed_channels scope and
+    // the dm_only policy below: they are how the owner opens or fixes the channel.
+    let owner_scope = !is_dm && super::commands::owner_scope_text(&msg.content, is_owner);
     // respond_to / allowed_channels filtering — DMs always pass
-    if !is_dm {
+    if !is_dm && !owner_scope {
         // Check allowed_channels (empty = all channels allowed). Threads and
         // forum posts (#384) carry their own channel id, so a miss falls back
         // to the PARENT channel: allow-listing a forum allows every post in
         // it, each post keeping its own per-thread session.
-        if !allowed_channels.is_empty() && !allowed_channels.contains(&channel_str) {
+        if !allowed_channels.is_empty()
+            && !allowed_channels.contains(&channel_str)
+            && !dc_cfg.has_channel_block(&channel_str, parent_id.as_deref())
+        {
             let parent_allowed = parent_id
                 .as_deref()
                 .is_some_and(|p| allowed_channels.contains(p));
@@ -493,11 +534,12 @@ pub(crate) async fn handle_message(
         }
 
         match respond_to {
-            RespondTo::DmOnly => {
+            RespondTo::DmOnly if !owner_scope => {
                 tracing::debug!("Discord: respond_to=dm_only, ignoring channel message");
                 store_channel_msg(msg.content.clone()).await;
                 return;
             }
+            RespondTo::DmOnly => {} // owner scope command in a dm_only channel
             RespondTo::Mention => {
                 let bot_id = discord_state.bot_user_id().await;
                 let mentioned =
@@ -766,12 +808,16 @@ pub(crate) async fn handle_message(
 
     // Fast-cancel: any recognised stop intent, in any supported language (#965).
     //
-    // Cancellation is scoped to explicit stop requests and genuine follow-up
-    // messages (handled at dispatch by store_cancel_token, which cancels the
-    // prior token before starting new work). Channel commands like /models,
+    // Cancellation is scoped to explicit stop requests. A follow-up message
+    // never cancels: it joins the live turn's queue through the turn slot
+    // (#1990). Channel commands like /models,
     // /help, /usage, /new must NEVER abort an in-flight task: switching models
     // applies to the next run, it does not drop current work (#266).
-    if crate::utils::stop_intent::is_stop_command_or_intent(&msg.content) {
+    //
+    // Reads `content`, not `msg.content`: the voice path above replaces
+    // `content` with the STT transcript (#2187), so a spoken "stop" is only
+    // visible here. WhatsApp and Slack already read the resolved text.
+    if crate::utils::stop_intent::is_stop_command_or_intent(&content) {
         discord_state.cancel_session(session_id).await;
         if let Err(e) = super::governor::say(
             &discord_state.governor,
@@ -896,7 +942,8 @@ pub(crate) async fn handle_message(
                         )
                     })
                     .collect();
-                let builder = CreateMessage::new().content(&resp.text).components(rows);
+                let body = menu_body(&resp.text, resp.providers.len());
+                let builder = CreateMessage::new().content(&body).components(rows);
                 // Never silent (#1019): this IS the reply. A swallowed failure
                 // here is indistinguishable from the agent choosing not to
                 // answer, and the user has no way to tell or report it.
@@ -917,40 +964,34 @@ pub(crate) async fn handle_message(
                 return;
             }
             ChannelCommand::NewSession => {
-                // MUST match the per-message resolver format above —
-                // DM titles include the author id so /new and the next
-                // typed message land on the same row (issue #89).
-                let session_title = if is_dm {
-                    format!("Discord: DM {} ({})", msg.author.name, msg.author.id.get())
+                // MUST match the per-message resolver format above: the title
+                // carries the stable `[chat:discord-…]` suffix so the row
+                // created here claims the chat key and the next typed message
+                // resolves to it (#2186). Built without the suffix, the insert
+                // took the plain path, stored `channel_chat_key: NULL`, and
+                // every following message resolved back to the previous
+                // session — /new was a no-op that left an orphan row behind.
+                let (id_str, legacy_title) = if is_dm {
+                    (
+                        format!("discord-dm-{}", msg.author.id.get()),
+                        format!("Discord: DM {} ({})", msg.author.name, msg.author.id.get()),
+                    )
                 } else {
-                    format!("Discord: #{}", msg.channel_id.get())
+                    (
+                        format!("discord-{}", msg.channel_id.get()),
+                        format!("Discord: #{}", msg.channel_id.get()),
+                    )
                 };
-                // The new session inherits its working directory from the
-                // session that received this /new (same chat), not the global
-                // most-recent session (#263).
-                let prior_session = session_svc
-                    .find_session_by_title(&session_title)
-                    .await
-                    .unwrap_or_else(|e| {
-                        // /new means a fresh session IS the intent; the
-                        // failure is logged, never silent (#442).
-                        tracing::error!("Discord: /new prior-session lookup failed: {e:#}");
-                        None
-                    });
-                // Archive the previous session on /new, except for the owner —
-                // owner sessions stay non-archived so they remain visible in
-                // /sessions for history review. Guest sessions get archived
-                // so the next title lookup resolves cleanly to the new row.
-                if !is_owner
-                    && let Some(old) = prior_session.as_ref()
-                    && let Err(e) = session_svc.archive_session(old.id).await
-                {
-                    tracing::error!("Discord: failed to archive old session {}: {}", old.id, e);
-                }
-                match crate::channels::session_init::create_channel_session(
+                let chat_key = crate::channels::session_resolve::chat_id_suffix(&id_str);
+                // Owner sessions stay non-archived so they remain visible in
+                // /sessions for history review; guests get archived so the
+                // next title lookup resolves cleanly to the new row.
+                match crate::channels::session_init::start_new_channel_session(
                     &session_svc,
-                    Some(session_title),
-                    prior_session.as_ref(),
+                    &chat_key,
+                    &legacy_title,
+                    is_owner,
+                    "Discord",
                 )
                 .await
                 {
@@ -1039,7 +1080,8 @@ pub(crate) async fn handle_message(
                         )
                     })
                     .collect();
-                let builder = CreateMessage::new().content(&resp.text).components(rows);
+                let body = menu_body(&resp.text, resp.sessions.len());
+                let builder = CreateMessage::new().content(&body).components(rows);
                 // Never silent (#1019): this IS the reply. A swallowed failure
                 // here is indistinguishable from the agent choosing not to
                 // answer, and the user has no way to tell or report it.
@@ -1072,6 +1114,23 @@ pub(crate) async fn handle_message(
                     &ctx.http,
                     super::governor::Surface::Send,
                     reply,
+                )
+                .await
+                {
+                    tracing::warn!(error = %e, "failed to send Discord message");
+                }
+                return;
+            }
+            ChannelCommand::StopTarget(_) => {
+                // #2108: targeting another session is Telegram-only for now.
+                // Answer explicitly instead of letting the message fall through
+                // to the agent as prose, which would look like the command ran.
+                if let Err(e) = super::governor::say(
+                    &discord_state.governor,
+                    msg.channel_id,
+                    &ctx.http,
+                    super::governor::Surface::Send,
+                    "Targeted stop is Telegram-only. Use /stop here.",
                 )
                 .await
                 {
@@ -1245,9 +1304,9 @@ pub(crate) async fn handle_message(
     // this message must NOT fork a second concurrent loop. Queue it, ack with
     // 👀, and let the live loop inject it between rounds (the queue callback
     // wired in manager.rs) or this turn's end-of-turn flush pick it up. The
-    // claim precedes `store_cancel_token` below on purpose: that call CANCELS
-    // any token it finds (`cancel.rs`), and a lost claim must never kill the
-    // turn it meant to join.
+    // claim precedes `store_cancel_token` below on purpose: a lost claim must
+    // never replace the live turn's cancel token, or /stop would reach a turn
+    // that is not the one running.
     let Some(_turn_guard) = discord_state.try_begin_turn(session_id) else {
         tracing::info!("Discord: mid-turn follow-up queued for session {session_id} (#1990)");
         discord_state.enqueue_followup(
@@ -1289,6 +1348,10 @@ pub(crate) async fn handle_message(
     // one ENDS the turn. Its own token, not `cancel_token`, which only fires on
     // abort — this must stop when the turn FINISHES, however it finishes.
     let typing_cancel = tokio_util::sync::CancellationToken::new();
+    // #2189: the compaction pinger must die with the turn. This clone is taken
+    // before the guard consumes the token, so the pinger and the turn share
+    // one cancellation and the pinger cannot outlive the work.
+    let turn_typing = typing_cancel.clone();
     super::typing::spawn_typing(
         ctx.http.clone(),
         msg.channel_id,
@@ -1373,18 +1436,31 @@ pub(crate) async fn handle_message(
                 // resume the indicator naturally.
                 ProgressEvent::Compacting { .. } => {
                     let http = http.clone();
+                    // #2189: bound to the turn, not to a fixed 96s window. A
+                    // compaction that finishes in 2s used to leave the client
+                    // showing "is typing" for another 90s, with no event able
+                    // to stop it. The ceiling stays as the outer bound for a
+                    // compaction that never reports back.
+                    let cancel = turn_typing.clone();
                     tokio::spawn(async move {
-                        for _ in 0..12 {
+                        for _ in 0..COMPACTION_PING_ROUNDS {
+                            if cancel.is_cancelled() {
+                                break;
+                            }
                             if let Err(e) = channel.broadcast_typing(&http).await {
                                 tracing::warn!(error = %e, "failed to broadcast Discord typing");
                             }
-                            tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+                            tokio::select! {
+                                _ = cancel.cancelled() => break,
+                                _ = tokio::time::sleep(COMPACTION_PING_INTERVAL) => {}
+                            }
                         }
                     });
                 }
                 ProgressEvent::ToolStarted {
                     tool_name,
                     tool_input,
+                    tool_call_id,
                 } => {
                     if let Ok(mut host) = options_host_cb.lock() {
                         host.on_tool_started(&tool_name);
@@ -1400,6 +1476,8 @@ pub(crate) async fn handle_message(
                             t.push(GroupEntry {
                                 name: tool_name,
                                 context: ctx_hint,
+                                call_id: tool_call_id.clone(),
+                                task_id: None,
                                 status: None,
                             });
                             t.clone()
@@ -1411,6 +1489,7 @@ pub(crate) async fn handle_message(
                                     .upsert_tool_group(
                                         mid.get(),
                                         GroupState {
+                                            page: 0,
                                             entries,
                                             notes: Vec::new(),
                                             expanded: false,
@@ -1421,6 +1500,7 @@ pub(crate) async fn handle_message(
                                     .await;
                                 let edit = EditMessage::new()
                                     .content(super::tool_group::render_content(&group))
+                                    .embeds(super::tool_group::render_embeds(&group))
                                     .components(super::tool_group::render_components(
                                         &group,
                                         mid.get(),
@@ -1439,6 +1519,7 @@ pub(crate) async fn handle_message(
                             }
                             None => {
                                 let group = GroupState {
+                                    page: 0,
                                     entries,
                                     notes: Vec::new(),
                                     expanded: false,
@@ -1466,7 +1547,11 @@ pub(crate) async fn handle_message(
                                                 channel,
                                                 &http,
                                                 sent.id,
-                                                EditMessage::new().components(comps),
+                                                EditMessage::new()
+                                                    .embeds(super::tool_group::render_embeds(
+                                                        &group,
+                                                    ))
+                                                    .components(comps),
                                             )
                                             .await
                                         {
@@ -1486,18 +1571,24 @@ pub(crate) async fn handle_message(
                     });
                 }
                 ProgressEvent::ToolCompleted {
-                    tool_name, success, ..
+                    tool_name,
+                    success,
+                    tool_call_id,
+                    ..
                 } => {
                     let gmid = group_msg_id.clone();
                     let dstate = group_state_cb.clone();
                     tokio::spawn(async move {
                         let entries = {
                             let mut t = tools.lock().await;
-                            if let Some(entry) = t
-                                .iter_mut()
-                                .rev()
-                                .find(|e| e.name == tool_name && e.status.is_none())
-                            {
+                            if let Some(entry) = t.iter_mut().rev().find(|e| {
+                                e.status.is_none()
+                                    && super::tool_card::entry_matches_completion(
+                                        e,
+                                        &tool_name,
+                                        &tool_call_id,
+                                    )
+                            }) {
                                 entry.status = Some(success);
                             }
                             t.clone()
@@ -1507,6 +1598,7 @@ pub(crate) async fn handle_message(
                                 .upsert_tool_group(
                                     mid.get(),
                                     GroupState {
+                                        page: 0,
                                         entries,
                                         notes: Vec::new(),
                                         expanded: false,
@@ -1517,6 +1609,7 @@ pub(crate) async fn handle_message(
                                 .await;
                             let edit = EditMessage::new()
                                 .content(super::tool_group::render_content(&group))
+                                .embeds(super::tool_group::render_embeds(&group))
                                 .components(super::tool_group::render_components(
                                     &group,
                                     mid.get(),
@@ -1533,6 +1626,48 @@ pub(crate) async fn handle_message(
                                 tracing::warn!("Discord: tool group edit failed (status): {e}");
                             }
                         }
+                    });
+                }
+                // A detached task gets ONE row in the turn's block, and the
+                // finish edits that row rather than sending anything (#2148).
+                // `apply_detached_event` owns the decision, so a finish can
+                // never post a second block by accident.
+                ProgressEvent::DetachedTaskStarted { task_id, label } => {
+                    let gmid = group_msg_id.clone();
+                    let dstate = group_state_cb.clone();
+                    tokio::spawn(async move {
+                        super::tool_group::apply_detached_event(
+                            &dstate,
+                            channel,
+                            &http,
+                            &tools,
+                            &gmid,
+                            super::tool_group::DetachedEvent::Started {
+                                task_id: &task_id,
+                                label: &label,
+                            },
+                        )
+                        .await;
+                    });
+                }
+                ProgressEvent::DetachedTaskFinished {
+                    task_id, success, ..
+                } => {
+                    let gmid = group_msg_id.clone();
+                    let dstate = group_state_cb.clone();
+                    tokio::spawn(async move {
+                        super::tool_group::apply_detached_event(
+                            &dstate,
+                            channel,
+                            &http,
+                            &tools,
+                            &gmid,
+                            super::tool_group::DetachedEvent::Finished {
+                                task_id: &task_id,
+                                success,
+                            },
+                        )
+                        .await;
                     });
                 }
                 ProgressEvent::SelfHealingAlert { message } => {
@@ -1596,6 +1731,7 @@ pub(crate) async fn handle_message(
                             };
                             let edit = EditMessage::new()
                                 .content(super::tool_group::render_content(&group))
+                                .embeds(super::tool_group::render_embeds(&group))
                                 .components(super::tool_group::render_components(
                                     &group,
                                     mid.get(),
@@ -1633,7 +1769,7 @@ pub(crate) async fn handle_message(
                             prev.push(clean.clone());
                         }
                         for chunk in split_message(&clean, 2000) {
-                            if let Err(e) = super::governor::say(
+                            if let Err(e) = super::governor::say_recorded(
                                 &dstate.governor,
                                 channel,
                                 &http,
@@ -1747,6 +1883,7 @@ pub(crate) async fn handle_message(
     // post failure the mid stays None and creation falls back to the first
     // tool call, the pre-#1845 behavior.
     let turn_shell = super::tool_group::GroupState {
+        page: 0,
         entries: Vec::new(),
         notes: Vec::new(),
         expanded: false,
@@ -1893,6 +2030,7 @@ pub(crate) async fn handle_message(
             {
                 let edit = serenity::builder::EditMessage::new()
                     .content(super::tool_group::render_content(&group))
+                    .embeds(super::tool_group::render_embeds(&group))
                     .components(super::tool_group::render_components(&group, mid.get()));
                 if let Some(Err(e)) = super::governor::edit_chrome(
                     &discord_state.governor,
@@ -1943,6 +2081,7 @@ pub(crate) async fn handle_message(
                 }
                 let edit = serenity::builder::EditMessage::new()
                     .content(super::tool_group::render_content(&group))
+                    .embeds(super::tool_group::render_embeds(&group))
                     .components(super::tool_group::render_components(&group, mid.get()));
                 if let Err(e) = super::governor::edit_content(
                     &discord_state.governor,
@@ -2007,8 +2146,6 @@ pub(crate) async fn handle_message(
                 }
             }
 
-            // The answer's last chunk id, for the DM lookup record below (#2025).
-            let mut reply_msg_id: Option<String> = None;
             if skip_final_post {
                 // Answer already visible via the kept intermediate (#459's
                 // keep-intermediate outcome): skip the duplicate post. The
@@ -2038,7 +2175,7 @@ pub(crate) async fn handle_message(
                                 if truncated { "…" } else { "" },
                                 thread.id
                             );
-                            if let Err(e) = super::governor::say(
+                            if let Err(e) = super::governor::say_recorded(
                                 &discord_state.governor,
                                 target,
                                 &ctx.http,
@@ -2050,7 +2187,7 @@ pub(crate) async fn handle_message(
                                 tracing::error!("Discord: auto-thread teaser failed: {e}");
                             }
                             for chunk in &chunks {
-                                if let Err(e) = super::governor::say(
+                                if let Err(e) = super::governor::say_recorded(
                                     &discord_state.governor,
                                     thread.id,
                                     &ctx.http,
@@ -2066,7 +2203,7 @@ pub(crate) async fn handle_message(
                         Err(e) => {
                             tracing::warn!("Discord: auto-thread failed, posting inline: {e}");
                             for chunk in &chunks {
-                                if let Err(e) = super::governor::say(
+                                if let Err(e) = super::governor::say_recorded(
                                     &discord_state.governor,
                                     target,
                                     &ctx.http,
@@ -2082,7 +2219,9 @@ pub(crate) async fn handle_message(
                     }
                 } else {
                     for chunk in &chunks {
-                        match super::governor::say(
+                        // #2196: recorded as it leaves, so the transcript has
+                        // the answer no matter which surface produced it.
+                        if let Err(e) = super::governor::say_recorded(
                             &discord_state.governor,
                             target,
                             &ctx.http,
@@ -2091,44 +2230,17 @@ pub(crate) async fn handle_message(
                         )
                         .await
                         {
-                            Ok(m) => reply_msg_id = Some(m.id.get().to_string()),
-                            Err(e) => tracing::error!("Discord: failed to send reply: {}", e),
+                            tracing::error!("Discord: failed to send reply: {}", e);
                         }
                     }
                 }
             }
 
-            // Record the bot's reply in channel_messages so the recent() query
-            // used for group context on the next guild turn sees both sides of
-            // the conversation, and so channel_search can find it. A DM reply is
-            // stored when it has a message id, as Telegram's DM replies are
-            // (#2025); the session's messages table still carries full history.
-            if (!is_dm || reply_msg_id.is_some()) && !text_only.trim().is_empty() {
-                let bot_id = discord_state.bot_user_id().await;
-                let bot_sender_id = bot_id
-                    .map(|id| id.to_string())
-                    .unwrap_or_else(|| "bot:opencrabs".to_string());
-                let guild_name = msg
-                    .guild_id
-                    .map(|g| g.get().to_string())
-                    .unwrap_or_else(|| "DM".to_string());
-                let cm = DbChannelMessage::new(
-                    "discord".into(),
-                    target.get().to_string(),
-                    Some(guild_name),
-                    bot_sender_id,
-                    "OpenCrabs".into(),
-                    text_only.clone(),
-                    "text".into(),
-                    reply_msg_id.clone(),
-                );
-                if let Err(e) = channel_msg_repo.insert(&cm).await {
-                    tracing::warn!(
-                        "Discord: failed to record bot reply in channel_messages: {}",
-                        e
-                    );
-                }
-            }
+            // The reply's channel_messages row is written by the governor's
+            // recorded send (#2196), not here: one call site covers this
+            // handler, resumed turns, taps, menus, reactions and tool sends,
+            // and a DM reply is recorded whether or not it carries a
+            // platform id.
 
             // TTS: send voice reply if input was audio and TTS is enabled
             if is_voice && voice_config.tts_enabled {
@@ -2158,6 +2270,7 @@ pub(crate) async fn handle_message(
             {
                 let edit = serenity::builder::EditMessage::new()
                     .content(super::tool_group::render_content(&group))
+                    .embeds(super::tool_group::render_embeds(&group))
                     .components(super::tool_group::render_components(&group, mid.get()));
                 if let Err(e) = super::governor::edit_content(
                     &discord_state.governor,
@@ -2180,7 +2293,7 @@ pub(crate) async fn handle_message(
             // too large, stream broken, repetition loop). Same wording
             // as the TUI + Telegram + Slack + WhatsApp paths.
             let error_msg = format!("❌ Error\n\n{}", crate::brain::agent::format_user_error(&e));
-            if let Err(e) = super::governor::say(
+            if let Err(e) = super::governor::say_recorded(
                 &discord_state.governor,
                 target,
                 &ctx.http,
@@ -2202,6 +2315,7 @@ pub(crate) async fn handle_message(
             {
                 let edit = serenity::builder::EditMessage::new()
                     .content(super::tool_group::render_content(&group))
+                    .embeds(super::tool_group::render_embeds(&group))
                     .components(super::tool_group::render_components(&group, mid.get()));
                 if let Err(e) = super::governor::edit_content(
                     &discord_state.governor,
@@ -2419,6 +2533,11 @@ pub(crate) fn make_approval_callback(
                 Ok(m) => m,
                 Err(e) => {
                     tracing::error!("Discord approval: failed to send message: {}", e);
+                    // #2194: the registration went in before the send to avoid
+                    // a click race, so a failed send has to take it back out.
+                    // Otherwise an approval nobody ever saw waits out the full
+                    // five minutes and leaves its sender behind.
+                    state.drop_pending_approval(&approval_id).await;
                     return Ok((false, false));
                 }
             };
@@ -2428,7 +2547,20 @@ pub(crate) fn make_approval_callback(
                 approval_id
             );
 
-            match tokio::time::timeout(std::time::Duration::from_secs(300), rx).await {
+            // #2194: the registration is dead the moment this wait returns,
+            // whichever way it returned. Dropping it here, once, is what makes
+            // it impossible for a branch to forget: the timeout and
+            // closed-channel paths used to return without cleaning up, leaking
+            // one sender per unanswered approval. A click already removed it
+            // through `resolve_pending_approval`, so this is a no-op then.
+            let outcome = tokio::time::timeout(std::time::Duration::from_secs(300), rx).await;
+            if state.drop_pending_approval(&approval_id).await {
+                tracing::debug!(
+                    "Discord approval: dropped unanswered registration id={}",
+                    approval_id
+                );
+            }
+            match outcome {
                 Ok(Ok((approved, always))) => {
                     tracing::info!(
                         "Discord approval: user responded id={}, approved={}, always={}",

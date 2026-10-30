@@ -168,7 +168,7 @@ impl TrelloClient {
     /// LLM-artifact boundary (#1745) covers Trello exactly like every other
     /// channel. Idempotent for already-sanitized text.
     pub async fn add_comment_to_card(&self, card_id: &str, text: &str) -> Result<()> {
-        let clean = crate::utils::sanitize::strip_llm_artifacts(text);
+        let clean = crate::utils::sanitize::sanitize_outbound(text);
         let path = format!("/cards/{}/actions/comments", card_id);
         let resp = self
             .authed_post(&path)

@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use super::flow::{
     DisplayItem, StreamingState, append_intermediate_to_flow, append_system_to_flow,
-    append_tool_group, restick_flow_if_buried,
+    append_tool_group, restick_flow_if_buried, row_display_name,
 };
 use super::handler::{fire_reaction, thinking_status_excerpt};
 use super::markdown::markdown_to_telegram_html;
@@ -91,7 +91,15 @@ pub(crate) fn spawn_edit_loop(
                             let tool_edits: Vec<_> = s.tool_msgs.iter().enumerate()
                                 .filter(|(_, t)| t.dirty && t.msg_id.is_some())
                                 .map(|(i, t)| {
-                                    let label = format!("**{}**{}", t.name, t.context);
+                                    let label = format!(
+                                        "**{}**{}",
+                                        row_display_name(
+                                            &t.name,
+                                            t.task_id.as_deref(),
+                                            t.completed
+                                        ),
+                                        t.context
+                                    );
                                     (i, label, t.completed, t.msg_id.unwrap())
                                 })
                                 .collect();

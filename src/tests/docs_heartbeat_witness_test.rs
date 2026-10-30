@@ -35,12 +35,23 @@ const BANNED_IMPORTED_DOC: &[&str] = &[
     "thinkingDefault",
     "health --json",
     "opencrabs setup",
+    // Commands from the same imported doc. They used to need a per-file
+    // carve-out because WIZARD.md still carried them; that file is gone
+    // (#2153), so they are banned everywhere like the rest.
+    "opencrabs gateway",
+    "opencrabs dashboard",
 ];
 
-/// Commands that exist only in the imported doc. Banned in OPENCRABS.md
-/// itself; GETTING_STARTED.md and WIZARD.md still carry related fiction
-/// tracked in #1650 (follow-up), so the tree-wide sweep must skip them.
-const BANNED_IN_OPENCRABS_MD: &[&str] = &["opencrabs gateway", "opencrabs dashboard"];
+/// Environment variables the binary has never read. They came from the
+/// imported docs, where they looked plausible enough to be copied into a
+/// systemd unit and an installation page. The real set is whatever
+/// `std::env::var` actually asks for, so these are banned tree-wide: a
+/// dead variable in a unit file is a service that quietly ignores it.
+const BANNED_ENV_VARS: &[&str] = &[
+    "OPENCRABS_HOME",
+    "OPENCRABS_STATE_DIR",
+    "OPENCRABS_CONFIG_PATH",
+];
 
 fn scanned_docs() -> Vec<(String, String)> {
     let mut out = vec![(
@@ -97,14 +108,85 @@ fn docs_never_carry_the_imported_doc_fiction() {
                  media syntax, or log path."
             );
         }
-        if name.ends_with("OPENCRABS.md") {
-            for banned in BANNED_IN_OPENCRABS_MD {
-                assert!(
-                    !content.contains(banned),
-                    "OPENCRABS.md advertises '{banned}' — no such CLI command \
-                     exists (see #1650)."
-                );
-            }
+    }
+}
+
+#[test]
+fn docs_never_name_environment_variables_the_binary_does_not_read() {
+    let docs = scanned_docs();
+    for (name, content) in &docs {
+        for banned in BANNED_ENV_VARS {
+            assert!(
+                !content.contains(banned),
+                "{name} names {banned}, but the binary never reads it (see \
+                 #2142). A dead variable in a systemd unit is a service that \
+                 silently ignores what it was told. Real ones: \
+                 OPENCRABS_PROFILE, OPENCRABS_DB_PATH, OPENCRABS_LOG_LEVEL, \
+                 OPENCRABS_LOG_FILE."
+            );
         }
     }
+}
+
+// ── the macOS GUI app doc family (#2154) ────────────────────────────────────
+//
+// `ONBOARDING.md` and `ONBOARDING_OVERVIEW.md` described a macOS app with TCC
+// permission prompts, a Local vs Remote gateway picker and OAuth flows. The
+// repo has no GUI: the first run goes straight to chat on the built-in
+// provider, and the wizard is a terminal flow under `src/tui/onboarding/`.
+// Both files are deleted (#2154), after WIZARD.md (#2153), GETTING_STARTED.md
+// (#2142) and the OPENCRABS.md rewrite (#1650). These tokens are what the
+// family kept claiming, so they are banned tree-wide: a doc that describes an
+// app that does not exist is worse than no doc at all.
+
+/// Fiction from the deleted macOS-app onboarding docs. None of it names a
+/// file, command, permission request or URL this repo contains.
+const BANNED_MACOS_APP_DOC: &[&str] = &[
+    "macos-onboarding",
+    "Onboarding (macOS App)",
+    "Gateway auth tip",
+    "TCC permissions",
+    "Local vs Remote",
+    "/start/bootstrapping",
+    "/start/onboarding",
+    "/start/wizard",
+    "/cli/onboard",
+];
+
+#[test]
+fn docs_never_describe_the_macos_app_onboarding_flow() {
+    let docs = scanned_docs();
+    for (name, content) in &docs {
+        for banned in BANNED_MACOS_APP_DOC {
+            assert!(
+                !content.contains(banned),
+                "{name} contains '{banned}': that is the macOS GUI onboarding \
+                 doc family, deleted in #2154 (after #2153, #2142, #1650). This \
+                 repo ships no GUI: a fresh install goes straight to chat, and \
+                 `opencrabs onboard` is the terminal wizard."
+            );
+        }
+    }
+}
+
+/// The deleted docs were the only thing pointing at themselves. README links
+/// the live page instead, so the wizard stays reachable from the docs index.
+#[test]
+fn the_deleted_onboarding_docs_stay_deleted() {
+    for gone in [
+        "src/docs/start/ONBOARDING.md",
+        "src/docs/start/ONBOARDING_OVERVIEW.md",
+    ] {
+        assert!(
+            !Path::new(gone).exists(),
+            "{gone} is back. It documents a macOS app this repo does not \
+             contain (see #2154); the live page is \
+             https://docs.opencrabs.com/getting-started/onboarding.html"
+        );
+    }
+    let readme = fs::read_to_string("README.md").expect("README.md readable");
+    assert!(
+        readme.contains("https://docs.opencrabs.com/getting-started/onboarding.html"),
+        "README must link the live onboarding page now that the local doc is gone"
+    );
 }

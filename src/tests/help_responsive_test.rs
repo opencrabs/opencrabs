@@ -50,19 +50,23 @@ async fn help_is_single_column_when_narrow_and_keeps_footer() {
     terminal.draw(|f| render(f, &mut app)).unwrap();
     let buf = terminal.backend().buffer().clone();
 
-    // Narrow: exactly ONE content pane. The stacked right-column sections
-    // (SESSIONS etc.) live below the fold of the combined single column, so
-    // the structural proof is the absence of a second pane border at the
-    // horizontal midpoint.
+    // Narrow: exactly ONE content pane. The right-column sections (SESSIONS
+    // etc.) are stacked below the fold of the combined single column, so the
+    // structural proof is positional: nothing may start in the right half of
+    // the screen. (The pane borders this used to look for are gone entirely
+    // since the dialogs went full-bleed, #2162, so asserting their absence
+    // would pass no matter how the columns were laid out.)
     let rows: Vec<String> = (0..height).map(|y| row_text(&buf, y, width)).collect();
     let about = rows.iter().position(|r| r.contains("ABOUT"));
     assert!(about.is_some(), "ABOUT section missing in narrow mode");
     let mid = width / 2;
-    let border_at_mid = (0..height).any(|y| buf[(mid, y)].symbol() == "│");
-    assert!(
-        !border_at_mid,
-        "narrow /help must render a single full-width column, found a pane border at x={mid}"
-    );
+    if let Some(row) = rows.iter().find(|r| r.contains("SESSIONS")) {
+        let idx = row.find("SESSIONS").unwrap();
+        assert!(
+            idx < mid as usize,
+            "narrow /help must stack sections in one column, found SESSIONS at col {idx} (right pane)"
+        );
+    }
 
     // The shared footer row: canonical key: verb spans, at the bottom of
     // the help area.

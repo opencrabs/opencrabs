@@ -4,10 +4,16 @@
 
 use anyhow::Result;
 use clap::Parser;
-use opencrabs::{cli, logging};
+use opencrabs::{cli, logging, runtime};
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    // Build the runtime here rather than with #[tokio::main]: the macro spawns
+    // its workers at the 2 MiB default, which the agent's first turn overflows
+    // in debug builds, aborting the process before the reply renders (#2080).
+    runtime::build()?.block_on(async_main())
+}
+
+async fn async_main() -> Result<()> {
     // Install rustls crypto provider before any TLS connections (Slack Socket Mode)
     #[cfg(feature = "slack")]
     let _ = rustls::crypto::ring::default_provider().install_default();

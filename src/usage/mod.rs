@@ -7,4 +7,5 @@ pub mod cards;
 pub mod categorizer;
 pub mod dashboard;
 pub mod data;
+pub mod layout;
 pub mod pricing;

@@ -32,6 +32,10 @@ pub enum DialogScope {
     Help,
     Settings,
     UsageDashboard,
+    /// The usage dashboard's cache price breakdown, open over the grid
+    /// (#2027). Esc backs out to the dashboard, and that is the only key
+    /// it has.
+    UsageCacheBreakdown,
     SkillsDialog,
     ProfilesDialog,
     MissionControl,
@@ -47,6 +51,9 @@ pub enum DialogScope {
     /// The SSH password prompt. No inline footer (it renders inside the
     /// input area); the scope exists so Ctrl+C can show its keys.
     SshPassword,
+    /// The `/sessions` list. A full-screen surface, so it belongs in the
+    /// census that `#1775` left it out of (#2162).
+    Sessions,
 }
 
 impl DialogScope {
@@ -62,6 +69,7 @@ impl DialogScope {
             DialogScope::Help => "Help",
             DialogScope::Settings => "Settings",
             DialogScope::UsageDashboard => "Usage",
+            DialogScope::UsageCacheBreakdown => "Cache prices",
             DialogScope::SkillsDialog => "Skills",
             DialogScope::ProfilesDialog => "Profiles",
             DialogScope::MissionControl => "Mission Control",
@@ -71,11 +79,16 @@ impl DialogScope {
             DialogScope::ToolApproval => "Tool approval",
             DialogScope::ApprovePolicyMenu => "Approval policy",
             DialogScope::SshPassword => "SSH password",
+            DialogScope::Sessions => "Sessions",
         }
     }
 }
 
 /// One key binding: the events that fire it, plus how it is displayed.
+///
+/// `Copy` so a surface that shows a state-filtered subset of its table can
+/// hand the footer the entries directly (#2027).
+#[derive(Debug, Clone, Copy)]
 pub struct DialogKey {
     /// Key events the surface's input handler recognizes for this
     /// binding. The drift tests replay each of these into the handler.
@@ -581,6 +594,79 @@ const TABLE_17: &[DialogKey] = &[
     },
 ];
 
+/// The cache price breakdown on the usage dashboard (#2027). The table is a
+/// detail view over the grid: the dashboard's own keys are inert while it is
+/// open, so Esc is the whole keymap.
+const TABLE_18: &[DialogKey] = &[DialogKey {
+    events: &[k(KeyCode::Esc)],
+    label: "Esc",
+    verb: "close",
+}];
+
+/// The `/sessions` list (#2162). Display order is the footer's order AND
+/// its priority order: the footer drops bindings from the tail when the
+/// terminal is narrow, so the keys that matter most (navigate, open, get
+/// out) come first. Every event here is replayed into
+/// `handle_sessions_key` by the drift test, so a binding that stops being
+/// handled fails the build rather than sitting in the footer as a lie.
+const TABLE_19: &[DialogKey] = &[
+    DialogKey {
+        events: &[k(KeyCode::Up), k(KeyCode::Down)],
+        label: "↑↓",
+        verb: "navigate",
+    },
+    DialogKey {
+        events: &[k(KeyCode::Enter)],
+        label: "Enter",
+        verb: "select",
+    },
+    DialogKey {
+        events: &[k(KeyCode::Esc)],
+        label: "Esc",
+        verb: "back",
+    },
+    DialogKey {
+        events: &[k(KeyCode::Char('n'))],
+        label: "n",
+        verb: "new",
+    },
+    DialogKey {
+        events: &[k(KeyCode::Char('r'))],
+        label: "r",
+        verb: "rename",
+    },
+    DialogKey {
+        events: &[k(KeyCode::Char('d'))],
+        label: "d",
+        verb: "delete",
+    },
+    DialogKey {
+        events: &[k(KeyCode::Char('f'))],
+        label: "f",
+        verb: "files",
+    },
+    DialogKey {
+        events: &[k(KeyCode::Char('p'))],
+        label: "p",
+        verb: "projects",
+    },
+    DialogKey {
+        events: &[k(KeyCode::Char('|'))],
+        label: "|",
+        verb: "split h",
+    },
+    DialogKey {
+        events: &[k(KeyCode::Char('_'))],
+        label: "_",
+        verb: "split v",
+    },
+    DialogKey {
+        events: &[k(KeyCode::Char('/'))],
+        label: "/",
+        verb: "search",
+    },
+];
+
 pub fn dialog_keys(scope: DialogScope) -> &'static [DialogKey] {
     match scope {
         DialogScope::FilePicker => TABLE_1,
@@ -594,6 +680,7 @@ pub fn dialog_keys(scope: DialogScope) -> &'static [DialogKey] {
         DialogScope::Help => TABLE_6,
         DialogScope::Settings => TABLE_7,
         DialogScope::UsageDashboard => TABLE_8,
+        DialogScope::UsageCacheBreakdown => TABLE_18,
         DialogScope::SkillsDialog => TABLE_9,
         DialogScope::ProfilesDialog => TABLE_10,
         DialogScope::MissionControl => TABLE_11,
@@ -603,6 +690,7 @@ pub fn dialog_keys(scope: DialogScope) -> &'static [DialogKey] {
         DialogScope::ToolApproval => TABLE_15,
         DialogScope::ApprovePolicyMenu => TABLE_16,
         DialogScope::SshPassword => TABLE_17,
+        DialogScope::Sessions => TABLE_19,
     }
 }
 
@@ -645,6 +733,7 @@ mod tests {
             DialogScope::Help,
             DialogScope::Settings,
             DialogScope::UsageDashboard,
+            DialogScope::UsageCacheBreakdown,
             DialogScope::SkillsDialog,
             DialogScope::ProfilesDialog,
             DialogScope::MissionControl,
@@ -654,6 +743,7 @@ mod tests {
             DialogScope::ToolApproval,
             DialogScope::ApprovePolicyMenu,
             DialogScope::SshPassword,
+            DialogScope::Sessions,
         ]
     }
 
@@ -777,5 +867,33 @@ mod tests {
         // NoPlan: only Esc.
         let from_esc = keys.iter().position(|k| k.label == "Esc").unwrap();
         assert!(from_d < from_esc);
+    }
+
+    /// DRIFT TEST for the cache price breakdown scope (#2027): the single key
+    /// it advertises must actually close the breakdown.
+    #[test]
+    fn cache_breakdown_footer_key_closes_the_breakdown() {
+        use crate::usage::dashboard::{CACHE_CARD, DashboardState, UsageKeyOutcome, decide};
+
+        for key in dialog_keys(DialogScope::UsageCacheBreakdown) {
+            for (code, mods) in key.events {
+                let mut state = DashboardState {
+                    focused_card: CACHE_CARD,
+                    cache_detail_open: true,
+                    ..DashboardState::default()
+                };
+                let event = crossterm::event::KeyEvent::new(*code, *mods);
+                assert_eq!(
+                    decide(&mut state, event),
+                    UsageKeyOutcome::Consumed,
+                    "cache breakdown advertises {code:?} ({}) but decide() does not consume it",
+                    key.label
+                );
+                assert!(
+                    !state.cache_detail_open,
+                    "{code:?} is advertised as close but leaves the breakdown open"
+                );
+            }
+        }
     }
 }

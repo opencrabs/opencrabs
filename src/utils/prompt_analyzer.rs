@@ -12,13 +12,18 @@
 //! ## Multilanguage support
 //!
 //! Keywords are loaded from per-language TOML files at compile time via
-//! `include_str!`. Language detection uses character-set heuristics
-//! (Cyrillic → ru, ã/õ/ç → pt, ñ/¿/¡ → es, accented Latin → fr, else en).
+//! `include_str!`. Which languages exist, and the character-set heuristic
+//! that picks one, are owned by `phantom_lang`
+//! ([`crate::brain::agent::service::phantom_lang::Lang`]); this module
+//! resolves that language to its analyzer pack through an exhaustive match,
+//! so a language added there does not compile until its TOML is registered
+//! here too (#2226).
 //!
 //! Multi-word phrases are scanned across all languages to catch code-switched
 //! input (e.g. "Voy a usar write_file" with no ñ/¿). Single-word keywords
 //! are gated to the detected language to avoid false positives.
 
+use crate::brain::agent::service::phantom_lang::{self, Lang};
 use regex::Regex;
 use serde::Deserialize;
 use std::sync::LazyLock;
@@ -43,7 +48,7 @@ pub struct AnalyzerLang {
     /// Phrases that mean "stop what you are doing right now" (#965).
     ///
     /// Read by [`crate::utils::stop_intent`], which scans every language via
-    /// [`all_langs`] rather than guessing one. Single-word entries only match
+    /// [`all_packs`] rather than guessing one. Single-word entries only match
     /// a whole message; multi-word entries may also match a leading clause.
     /// See that module for why the two behave differently.
     #[serde(default)]
@@ -59,6 +64,8 @@ pub struct AnalyzerLang {
 /// Embedded TOML content (compile-time validated).
 const EN_TOML: &str = include_str!("prompt_analyzer_lang/en.toml");
 const RU_TOML: &str = include_str!("prompt_analyzer_lang/ru.toml");
+const AR_TOML: &str = include_str!("prompt_analyzer_lang/ar.toml");
+const ZH_TOML: &str = include_str!("prompt_analyzer_lang/zh.toml");
 const ES_TOML: &str = include_str!("prompt_analyzer_lang/es.toml");
 const PT_TOML: &str = include_str!("prompt_analyzer_lang/pt.toml");
 const FR_TOML: &str = include_str!("prompt_analyzer_lang/fr.toml");
@@ -68,6 +75,10 @@ pub(crate) static LANG_EN: LazyLock<AnalyzerLang> =
     LazyLock::new(|| toml::from_str(EN_TOML).expect("BUG: en.toml failed to parse at runtime"));
 pub(crate) static LANG_RU: LazyLock<AnalyzerLang> =
     LazyLock::new(|| toml::from_str(RU_TOML).expect("BUG: ru.toml failed to parse at runtime"));
+pub(crate) static LANG_AR: LazyLock<AnalyzerLang> =
+    LazyLock::new(|| toml::from_str(AR_TOML).expect("BUG: ar.toml failed to parse at runtime"));
+pub(crate) static LANG_ZH: LazyLock<AnalyzerLang> =
+    LazyLock::new(|| toml::from_str(ZH_TOML).expect("BUG: zh.toml failed to parse at runtime"));
 pub(crate) static LANG_ES: LazyLock<AnalyzerLang> =
     LazyLock::new(|| toml::from_str(ES_TOML).expect("BUG: es.toml failed to parse at runtime"));
 pub(crate) static LANG_PT: LazyLock<AnalyzerLang> =
@@ -77,83 +88,38 @@ pub(crate) static LANG_FR: LazyLock<AnalyzerLang> =
 pub(crate) static LANG_ID: LazyLock<AnalyzerLang> =
     LazyLock::new(|| toml::from_str(ID_TOML).expect("BUG: id.toml failed to parse at runtime"));
 
-/// Detect language from text content using character-set heuristics.
-/// Returns a static reference to the appropriate language config.
-pub fn detect_language(text: &str) -> &'static AnalyzerLang {
-    let mut cyrillic = 0u32;
-    let mut latin_accent = 0u32;
-    let mut total_alpha = 0u32;
-
-    for ch in text.chars().take(500) {
-        if ch.is_alphabetic() {
-            total_alpha += 1;
-            if ('\u{0400}'..='\u{04FF}').contains(&ch) {
-                cyrillic += 1;
-            } else if ('\u{00C0}'..='\u{024F}').contains(&ch) {
-                latin_accent += 1;
-            }
-        }
+/// The prompt-analyzer pack for one language.
+///
+/// The language set is owned by
+/// [`phantom_lang`](crate::brain::agent::service::phantom_lang): this match is
+/// exhaustive on its [`Lang`], so a language registered there does not
+/// compile until its analyzer TOML is wired here too (#2226).
+pub(crate) fn analyzer_pack(lang: Lang) -> &'static AnalyzerLang {
+    match lang {
+        Lang::En => &LANG_EN,
+        Lang::Ru => &LANG_RU,
+        Lang::Ar => &LANG_AR,
+        Lang::Zh => &LANG_ZH,
+        Lang::Es => &LANG_ES,
+        Lang::Pt => &LANG_PT,
+        Lang::Fr => &LANG_FR,
+        Lang::Id => &LANG_ID,
     }
-
-    if total_alpha == 0 {
-        return &LANG_EN;
-    }
-
-    // Cyrillic > 20% of alpha chars → Russian
-    if cyrillic * 5 > total_alpha {
-        return &LANG_RU;
-    }
-
-    // For Latin-accent text, distinguish Spanish/Portuguese/French
-    // by looking for language-specific characters
-    if latin_accent > 0 {
-        // Portuguese-specific: ã, õ, ç
-        if text.contains('ã')
-            || text.contains('õ')
-            || text.contains('ç')
-            || text.contains('Ã')
-            || text.contains('Õ')
-            || text.contains('Ç')
-        {
-            return &LANG_PT;
-        }
-        // Spanish-specific: ñ, ¿, ¡
-        if text.contains('ñ') || text.contains('Ñ') || text.contains('¿') || text.contains('¡')
-        {
-            return &LANG_ES;
-        }
-        // If we have significant accented Latin but no PT/ES markers,
-        // check for French patterns (à, â, ç, é, è, ê, ë, î, ï, ô, ù, û, ü, ÿ)
-        // French is the fallback for accented Latin since it's the most
-        // common accented-Latin language after Spanish/Portuguese
-        if text.contains('à')
-            || text.contains('â')
-            || text.contains('é')
-            || text.contains('è')
-            || text.contains('ê')
-            || text.contains('ë')
-            || text.contains('î')
-            || text.contains('ï')
-            || text.contains('ô')
-            || text.contains('û')
-            || text.contains('ù')
-            || text.contains('ü')
-            || text.contains('ÿ')
-        {
-            return &LANG_FR;
-        }
-    }
-
-    &LANG_EN
 }
 
-/// Every loaded language config, in detection-priority order.
+/// Every analyzer pack, in the registry's detection-priority order.
 ///
 /// Multi-word phrases are scanned across all languages to catch code-switched
 /// input. Single-word keywords stay gated to the detected language to avoid
 /// false positives.
-pub fn all_langs() -> [&'static AnalyzerLang; 6] {
-    [&LANG_EN, &LANG_RU, &LANG_ES, &LANG_PT, &LANG_FR, &LANG_ID]
+pub(crate) fn all_packs() -> [&'static AnalyzerLang; 8] {
+    Lang::ALL.map(analyzer_pack)
+}
+
+/// Detect language from text content using the shared character-set
+/// heuristics, and return its analyzer pack.
+pub fn detect_language(text: &str) -> &'static AnalyzerLang {
+    analyzer_pack(phantom_lang::detect_lang(text))
 }
 
 static SHARED: LazyLock<PromptAnalyzer> = LazyLock::new(PromptAnalyzer::new);
@@ -181,7 +147,7 @@ impl PromptAnalyzer {
     /// Create a new prompt analyzer
     pub fn new() -> Self {
         // Collect all multi-word phrases across all languages
-        let plan_phrases: Vec<&str> = all_langs()
+        let plan_phrases: Vec<&str> = all_packs()
             .iter()
             .flat_map(|lang| {
                 lang.plan
@@ -190,7 +156,7 @@ impl PromptAnalyzer {
                     .map(|s| s.as_str())
             })
             .collect();
-        let read_file_phrases: Vec<&str> = all_langs()
+        let read_file_phrases: Vec<&str> = all_packs()
             .iter()
             .flat_map(|lang| {
                 lang.read_file
@@ -199,7 +165,7 @@ impl PromptAnalyzer {
                     .map(|s| s.as_str())
             })
             .collect();
-        let search_phrases: Vec<&str> = all_langs()
+        let search_phrases: Vec<&str> = all_packs()
             .iter()
             .flat_map(|lang| {
                 lang.search
@@ -208,7 +174,7 @@ impl PromptAnalyzer {
                     .map(|s| s.as_str())
             })
             .collect();
-        let write_file_phrases: Vec<&str> = all_langs()
+        let write_file_phrases: Vec<&str> = all_packs()
             .iter()
             .flat_map(|lang| {
                 lang.write_file
@@ -217,7 +183,7 @@ impl PromptAnalyzer {
                     .map(|s| s.as_str())
             })
             .collect();
-        let edit_file_phrases: Vec<&str> = all_langs()
+        let edit_file_phrases: Vec<&str> = all_packs()
             .iter()
             .flat_map(|lang| {
                 lang.edit_file
@@ -226,7 +192,7 @@ impl PromptAnalyzer {
                     .map(|s| s.as_str())
             })
             .collect();
-        let bash_phrases: Vec<&str> = all_langs()
+        let bash_phrases: Vec<&str> = all_packs()
             .iter()
             .flat_map(|lang| {
                 lang.bash
@@ -235,7 +201,7 @@ impl PromptAnalyzer {
                     .map(|s| s.as_str())
             })
             .collect();
-        let web_search_phrases: Vec<&str> = all_langs()
+        let web_search_phrases: Vec<&str> = all_packs()
             .iter()
             .flat_map(|lang| {
                 lang.web_search
@@ -293,20 +259,9 @@ impl PromptAnalyzer {
         let lower_prompt = prompt.to_lowercase();
 
         // Detect language for single-word keyword gating
-        let lang = detect_language(prompt);
-        let lang_name = if std::ptr::eq(lang, &*LANG_RU) {
-            "ru"
-        } else if std::ptr::eq(lang, &*LANG_ES) {
-            "es"
-        } else if std::ptr::eq(lang, &*LANG_PT) {
-            "pt"
-        } else if std::ptr::eq(lang, &*LANG_FR) {
-            "fr"
-        } else if std::ptr::eq(lang, &*LANG_ID) {
-            "id"
-        } else {
-            "en"
-        };
+        let detected = phantom_lang::detect_lang(prompt);
+        let lang = analyzer_pack(detected);
+        let lang_name = detected.code();
 
         // Build language-specific word regexes on the fly (cheap, only when needed)
         let plan_word_lang = Self::build_word_regex_for_lang(&lang.plan);

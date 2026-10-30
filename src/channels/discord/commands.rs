@@ -390,6 +390,45 @@ pub(crate) async fn sync_commands(
 /// (#2014). `open_here` never overrides `unconfigured`.
 ///
 /// Extracted pure so the branch can be pinned without a gateway.
+/// Whether a message or interaction is the owner's `/cowork` or `/respond_to`.
+/// Those pass the channel scope and the `dm_only` policy: they are how the owner
+/// opens or fixes a channel, so the gate must not block them (#2060 cowork gate).
+pub(crate) fn owner_scope_text(text: &str, is_owner: bool) -> bool {
+    is_owner
+        && (crate::channels::respond_to_scope::is_respond_to_command(text)
+            || super::cowork::is_cowork_command(text))
+}
+
+/// The reply to an interaction the gate refused. It names the check that
+/// failed and the config key or owner command that fixes it.
+pub(crate) fn refusal_reason(
+    admitted: bool,
+    channel_ok: bool,
+    policy_ok: bool,
+    channel_id: &str,
+) -> String {
+    if !admitted {
+        "You are not allowed to use this bot here. Your user id is not in \
+         channels.discord.allowed_users or allowed_roles, and this channel is not \
+         open. Ask the bot owner to add you, or to run /cowork in this channel."
+            .to_string()
+    } else if !channel_ok {
+        format!(
+            "This channel is not in channels.discord.allowed_channels. The bot owner \
+             can run /cowork here to enable it, or add a \
+             [channels.discord.channels.{channel_id}] block to config.toml."
+        )
+    } else if !policy_ok {
+        format!(
+            "This channel is set to dm_only, so the bot does not answer commands here. \
+             The bot owner can run /respond_to all here, or set \
+             channels.discord.channels.{channel_id}.respond_to to \"all\"."
+        )
+    } else {
+        "This bot is not enabled for you or this channel.".to_string()
+    }
+}
+
 pub(crate) fn identity_admitted(
     unconfigured: bool,
     is_owner: bool,

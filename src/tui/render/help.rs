@@ -48,7 +48,6 @@ pub(super) fn render_help(f: &mut Frame, app: &mut App, area: Rect) {
     let model_name = app.provider_model_for_current_session();
 
     let mut left = vec![
-        Line::from(""),
         section_header("ABOUT"),
         kv("Version", &version_line, cyan),
         kv("Provider", &provider_name, cyan),
@@ -123,7 +122,6 @@ pub(super) fn render_help(f: &mut Frame, app: &mut App, area: Rect) {
 
     left.extend([
         Line::from(""),
-        Line::from(""),
         Line::from(vec![
             Span::styled(" 📖 ", Style::default().fg(theme::role(Role::Accent))),
             Span::styled(
@@ -137,12 +135,10 @@ pub(super) fn render_help(f: &mut Frame, app: &mut App, area: Rect) {
                 Style::default().fg(theme::role(Role::GrayDim)),
             ),
         ]),
-        Line::from(""),
     ]);
 
     // ── RIGHT COLUMN ──
     let right = vec![
-        Line::from(""),
         section_header("SESSIONS"),
         kv("↑ / ↓", "Navigate", cyan),
         kv("Enter", "Load session", cyan),
@@ -243,84 +239,103 @@ pub(super) fn render_help(f: &mut Frame, app: &mut App, area: Rect) {
         Line::from(""),
     ];
 
-    // Pad left column to match right column length for even rendering
-    while left.len() < right.len() {
-        left.push(Line::from(""));
-    }
+    // Full-bleed (#2162): content fills everything above the last two rows.
+    // The second to last is a dim rule and the last is the shared command
+    // footer, so the commands read as a footer instead of as two more
+    // entries in the catalog. No border, no title row.
+    let [content_area, separator_area, footer_area] = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(area);
 
-    // Footer row at the bottom of the screen + columns above it (#1775):
-    // the shared footer replaces the in-content bracket strip.
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(1)])
-        .split(area);
-
-    // Responsive (#1775): two 50/50 columns when there is room, a single
-    // full-width column under 100 cols — the old fixed split squeezed
-    // both panes into unreadability on narrow terminals.
-    let wide = area.width >= 100;
-    let (left_area, right_area) = if wide {
-        let columns = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(rows[0]);
-        (columns[0], columns[1])
-    } else {
-        (rows[0], rows[0])
-    };
-    let (content, extra) = if wide {
-        (left, right)
-    } else {
-        let mut combined = left;
-        combined.extend(right);
-        (combined, Vec::new())
-    };
-    // Record what was rendered so the key handler can clamp scroll to it.
-    // `render_chat` does the same with `chat_area_height`; without it the
-    // offset has no ceiling and winds off the end of the content (#1527).
-    // (Plain field writes, not `&mut app`: `content` may still borrow
-    // `app.help_catalog` through the section rows.)
-    app.help_content_rows = content.len();
-    app.help_viewport_rows = left_area.height.saturating_sub(2) as usize; // minus borders
-    let scroll = app.help_scroll_offset.min(help_catalog::max_scroll(
-        app.help_content_rows,
-        app.help_viewport_rows,
-    )) as u16;
-
-    let title = if app.help_search_active || !needle.is_empty() {
-        format!(" 🔍 {needle}▏ — {match_count} match(es) ")
-    } else {
-        " 📚 Help & Commands ".to_string()
-    };
-
-    let left_para = Paragraph::new(content)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(Span::styled(
-                    title,
+    // The search row exists only while a filter is being typed or applied.
+    // Idle Help has no header at all, which is the row that was eating space.
+    let show_search = app.help_search_active || !needle.is_empty();
+    let mut body = content_area;
+    if show_search {
+        let [search_area, rest] =
+            Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(content_area);
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("  🔍 ", Style::default().fg(theme::role(Role::AccentTeal))),
+                Span::styled(
+                    format!("{needle}▏"),
                     Style::default()
                         .fg(theme::role(Role::Accent))
                         .add_modifier(Modifier::BOLD),
-                ))
-                .border_style(Style::default().fg(theme::role(Role::Gray))),
-        )
-        .scroll((scroll, 0));
-
-    f.render_widget(left_para, left_area);
-
-    if !extra.is_empty() {
-        let right_para = Paragraph::new(extra)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(theme::role(Role::Gray))),
-            )
-            .scroll((scroll, 0));
-        f.render_widget(right_para, right_area);
+                ),
+                Span::styled(
+                    format!("   {match_count} matches"),
+                    Style::default().fg(theme::role(Role::GrayDim)),
+                ),
+            ])),
+            search_area,
+        );
+        body = rest;
     }
 
-    hints::render_footer(f, rows[1], dialog_keys(DialogScope::Help));
+    // Responsive: two columns with a one-column rule when there is room, a
+    // single full-width column under 110 cols. The border used to do the
+    // separating; now the rule does, and it costs exactly one column. The
+    // threshold sits above 100 so a 100-col terminal keeps a full-width
+    // column instead of squeezing both halves into 49 cells.
+    let wide = body.width >= 110;
+    let [left_area, rule_area, right_area] = Layout::horizontal([
+        Constraint::Fill(1),
+        Constraint::Length(1),
+        Constraint::Fill(1),
+    ])
+    .areas(body);
+
+    // Record what was rendered so the key handler can clamp scroll to it.
+    // `render_chat` does the same with `chat_area_height`; without it the
+    // offset has no ceiling and winds off the end of the content (#1527).
+    // (Plain field writes, not `&mut app`: `left` may still borrow
+    // `app.help_catalog` through the section rows.)
+    let viewport = body.height as usize;
+    let content_rows = if wide {
+        left.len()
+    } else {
+        left.len() + right.len()
+    };
+    app.help_content_rows = content_rows;
+    // No border any more, so the viewport is the whole content height.
+    // `render_settings` keeps its `- 2` because Settings keeps its border.
+    app.help_viewport_rows = viewport;
+
+    // One offset, but each column is clamped to its OWN length: the shorter
+    // column stops at its end instead of scrolling past it into blank space.
+    let left_scroll = app
+        .help_scroll_offset
+        .min(help_catalog::max_scroll(content_rows, viewport)) as u16;
+    let right_scroll = app
+        .help_scroll_offset
+        .min(help_catalog::max_scroll(right.len(), viewport)) as u16;
+
+    if wide {
+        f.render_widget(Paragraph::new(left).scroll((left_scroll, 0)), left_area);
+        f.render_widget(
+            Block::default()
+                .borders(Borders::LEFT)
+                .border_style(Style::default().fg(theme::role(Role::GrayDim))),
+            rule_area,
+        );
+        f.render_widget(Paragraph::new(right).scroll((right_scroll, 0)), right_area);
+    } else {
+        let mut combined = left;
+        combined.extend(right);
+        f.render_widget(Paragraph::new(combined).scroll((left_scroll, 0)), body);
+    }
+
+    hints::render_separator(f, separator_area);
+    hints::render_footer_with_context(
+        f,
+        footer_area,
+        dialog_keys(DialogScope::Help),
+        &format!("{match_count} commands"),
+    );
 }
 
 /// Render the settings screen

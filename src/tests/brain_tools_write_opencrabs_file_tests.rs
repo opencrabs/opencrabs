@@ -499,3 +499,222 @@ async fn test_execute_rejects_profiles_prefix_and_writes_nothing() {
         );
     }
 }
+
+// ── config parse guard (#2099) ───────────────────────────────────────────────
+//
+// The capability stays exactly as it is: a config the user asks for still
+// writes. Only content that would not LOAD is refused, and the previous bytes
+// stay on disk. These drive the real `execute()` boundary under a temp home, so
+// the guard is proven wired into each write path rather than merely available.
+
+/// Run one `execute()` under a temp home that already holds `file_name` with
+/// `initial` content. Returns the tool result and the bytes on disk afterwards.
+async fn write_under_home(
+    home: std::path::PathBuf,
+    file_name: &str,
+    initial: &str,
+    input: serde_json::Value,
+) -> (crate::brain::tools::ToolResult, String) {
+    use crate::config::profile::with_home_override_async;
+
+    std::fs::create_dir_all(&home).unwrap();
+    let target = home.join(file_name);
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    std::fs::write(&target, initial).unwrap();
+
+    let ctx = ctx();
+    let t = tool();
+    let result = with_home_override_async(home.clone(), async { t.execute(input, &ctx).await })
+        .await
+        .unwrap();
+
+    let on_disk = std::fs::read_to_string(&target).unwrap_or_default();
+    (result, on_disk)
+}
+
+#[tokio::test]
+async fn test_overwrite_rejects_unparseable_config_and_keeps_old_bytes() {
+    let dir = TempDir::new().unwrap();
+    let original = "[agent]\napproval_policy = \"auto-always\"\n";
+
+    let (result, on_disk) = write_under_home(
+        default_home(&dir),
+        "config.toml",
+        original,
+        serde_json::json!({
+            "path": "config.toml",
+            "operation": "overwrite",
+            "content": "allowed = [\n",
+        }),
+    )
+    .await;
+
+    assert!(!result.success, "unparseable config must be refused");
+    let err = result.error.unwrap_or_default();
+    assert!(
+        err.contains("Refused to write config.toml"),
+        "error must name the file it refused: {err}"
+    );
+    assert_eq!(
+        on_disk, original,
+        "the previous bytes must survive a refused write"
+    );
+}
+
+#[tokio::test]
+async fn test_overwrite_accepts_valid_config_including_approval_policy() {
+    let dir = TempDir::new().unwrap();
+    let asked_for = "[agent]\napproval_policy = \"auto-always\"\n";
+
+    let (result, on_disk) = write_under_home(
+        default_home(&dir),
+        "config.toml",
+        "[agent]\n",
+        serde_json::json!({
+            "path": "config.toml",
+            "operation": "overwrite",
+            "content": asked_for,
+        }),
+    )
+    .await;
+
+    assert!(
+        result.success,
+        "a config the user asked for must still write: {:?}",
+        result.error
+    );
+    assert_eq!(
+        on_disk, asked_for,
+        "the requested policy change must land, not be gated"
+    );
+}
+
+#[tokio::test]
+async fn test_overwrite_rejects_unparseable_keys_and_keeps_old_bytes() {
+    let dir = TempDir::new().unwrap();
+    let original = "[providers]\n";
+
+    let (result, on_disk) = write_under_home(
+        default_home(&dir),
+        "keys.toml",
+        original,
+        serde_json::json!({
+            "path": "keys.toml",
+            "operation": "overwrite",
+            "content": "[providers\n",
+        }),
+    )
+    .await;
+
+    assert!(!result.success, "unparseable keys must be refused");
+    let err = result.error.unwrap_or_default();
+    assert!(
+        err.contains("Refused to write keys.toml"),
+        "error must name the file it refused: {err}"
+    );
+    assert_eq!(on_disk, original, "the previous keys must survive");
+}
+
+#[tokio::test]
+async fn test_overwrite_accepts_valid_keys() {
+    let dir = TempDir::new().unwrap();
+    let asked_for = "[providers]\n";
+
+    let (result, on_disk) = write_under_home(
+        default_home(&dir),
+        "keys.toml",
+        "",
+        serde_json::json!({
+            "path": "keys.toml",
+            "operation": "overwrite",
+            "content": asked_for,
+        }),
+    )
+    .await;
+
+    assert!(
+        result.success,
+        "valid keys must still write: {:?}",
+        result.error
+    );
+    assert_eq!(on_disk, asked_for);
+}
+
+#[tokio::test]
+async fn test_replace_that_would_break_config_is_refused() {
+    let dir = TempDir::new().unwrap();
+    let original = "[agent]\napproval_policy = \"auto-always\"\n";
+
+    let (result, on_disk) = write_under_home(
+        default_home(&dir),
+        "config.toml",
+        original,
+        serde_json::json!({
+            "path": "config.toml",
+            "operation": "replace",
+            "old_text": "auto-always",
+            "new_text": "auto-always\" [\nbroken",
+        }),
+    )
+    .await;
+
+    assert!(
+        !result.success,
+        "a replace that breaks parsing must be refused"
+    );
+    assert_eq!(on_disk, original, "the previous bytes must survive");
+}
+
+#[tokio::test]
+async fn test_append_that_would_break_config_is_refused() {
+    let dir = TempDir::new().unwrap();
+    let original = "[agent]\napproval_policy = \"auto-always\"\n";
+
+    let (result, on_disk) = write_under_home(
+        default_home(&dir),
+        "config.toml",
+        original,
+        serde_json::json!({
+            "path": "config.toml",
+            "operation": "append",
+            "content": "allowed = [\n",
+        }),
+    )
+    .await;
+
+    assert!(
+        !result.success,
+        "an append that breaks parsing must be refused"
+    );
+    assert_eq!(on_disk, original, "the previous bytes must survive");
+}
+
+/// Only the profile's own `config.toml` is guarded. A `config.toml` in a
+/// subdirectory of the home is a different file with a different purpose, so
+/// the guard must not reach it. Pinned here because a blanket file-name check
+/// would widen the gate past what #2099 asked for.
+#[tokio::test]
+async fn test_non_profile_config_name_is_not_guarded() {
+    let dir = TempDir::new().unwrap();
+    let home = default_home(&dir);
+
+    let (result, _) = write_under_home(
+        home,
+        "notes/config.toml",
+        "",
+        serde_json::json!({
+            "path": "notes/config.toml",
+            "operation": "overwrite",
+            "content": "not [ valid",
+        }),
+    )
+    .await;
+
+    assert!(
+        result.success,
+        "only the profile's real config.toml is protected: {:?}",
+        result.error
+    );
+}

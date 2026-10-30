@@ -1,20 +1,23 @@
 //! The Discord session turn slot and the mid-turn follow-up queue (#1990).
 //!
 //! Telegram's `active_turns` / `pending_reactions` twin (#501, #1213, #1837).
-//! Two facts made this necessary: `store_cancel_token` CANCELS the token it
-//! finds (`cancel.rs`), so a second inbound message on a busy session killed
-//! the live or recovered turn; and the follow-up had nowhere to queue, so it
-//! forked a second concurrent tool loop on the same session, whose answer
-//! read the first turn's prompt as "another task in flight" and said so
-//! (#1990). The slot makes the claim atomic; the queue gives the loser
-//! somewhere to wait: injected between tool rounds by the queue callback,
-//! flushed into a fresh tracked turn by whoever held the slot last.
+//! Two facts made this necessary: `store_cancel_token` used to CANCEL the
+//! token it found (`cancel.rs`), so a second inbound message on a busy
+//! session killed the live or recovered turn; and the follow-up had nowhere
+//! to queue, so it forked a second concurrent tool loop on the same session,
+//! whose answer read the first turn's prompt as "another task in flight" and
+//! said so (#1990). The store no longer cancels (it only overwrites, #652's
+//! Discord twin), but the slot is still what makes the claim atomic: without
+//! it two turns run at once and only the last token stored is reachable by
+//! /stop. The queue gives the loser somewhere to wait: injected between tool
+//! rounds by the queue callback, flushed into a fresh tracked turn by whoever
+//! held the slot last.
 
 use std::sync::Arc;
 use uuid::Uuid;
 
 use super::DiscordState;
-use crate::brain::agent::{MessageQueueCallback, QueuedUserMessage};
+use crate::brain::agent::{MessageQueueCallback, PushOrigin, QueuedUserMessage};
 
 /// Keeps a session marked "turn active" for its lifetime (#1990). Held for
 /// the whole turn, ingress-born, background-born or boot-born, and released
@@ -51,6 +54,45 @@ impl DiscordState {
             state: self.clone(),
             session_id,
         })
+    }
+
+    /// Claim the session's turn slot for an interaction-originated turn
+    /// (#2191). The select menu, the modal submit and the reaction handler
+    /// used to run their turn without ever touching the slot, so a component
+    /// interaction arriving while a turn was live forked a SECOND concurrent
+    /// tool loop onto the same session: history rows interleaved and the new
+    /// loop read a transcript the live one was still appending to.
+    ///
+    /// Losing the claim queues the interaction for the live turn instead, the
+    /// same contract `route_followup_turn` follows, so what the user did is
+    /// never dropped: it is injected between tool rounds or flushed at turn
+    /// end. Returns `None` when the message was queued.
+    ///
+    /// `display_text` is what history keeps, so a caller that hides its
+    /// scaffolding (the reaction prompt, a select-menu fill) passes its
+    /// compact tag here and the full prompt only as `context_text`.
+    pub(crate) fn claim_interaction_turn(
+        self: &Arc<Self>,
+        session_id: Uuid,
+        context_text: String,
+        display_text: String,
+    ) -> Option<ActiveTurnGuard> {
+        let Some(guard) = self.try_begin_turn(session_id) else {
+            tracing::info!(
+                "Discord: interaction queued for session {session_id}, a turn is in flight (#2191)"
+            );
+            self.enqueue_followup(
+                session_id,
+                QueuedUserMessage {
+                    context_text,
+                    display_text,
+                    origin: PushOrigin::Ingress,
+                    bg_meta: None,
+                },
+            );
+            return None;
+        };
+        Some(guard)
     }
 
     /// Queue a follow-up for a session whose slot is held: an inbound

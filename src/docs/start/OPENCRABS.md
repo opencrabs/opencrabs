@@ -26,7 +26,7 @@ Start conservative:
 
 ## Prerequisites
 
-- OpenCrabs installed and onboarded — see [Getting Started](/start/getting-started) if you haven't done this yet
+- OpenCrabs installed and onboarded, see [Getting Started](https://docs.opencrabs.com/getting-started/installation.html) if you haven't done this yet
 - A second phone number (SIM/eSIM/prepaid) for the assistant, if you're doing the WhatsApp setup
 
 ## The two-phone setup (recommended for WhatsApp)
@@ -143,6 +143,6 @@ Logs live under `~/.opencrabs/logs/` (one file per day: `opencrabs.YYYY-MM-DD`).
 
 ## Next steps
 
-- First-run details: [Getting Started](/start/getting-started), [Onboarding overview](/start/onboarding-overview)
+- First-run details: [Getting Started](https://docs.opencrabs.com/getting-started/installation.html), [Onboarding overview](https://docs.opencrabs.com/getting-started/onboarding.html)
 - Reference docs (providers, plans, templates): `src/docs/reference/`
 - Cron jobs and scheduled work: README → "Cron Jobs"

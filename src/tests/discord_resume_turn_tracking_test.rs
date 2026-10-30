@@ -11,10 +11,11 @@ const UI_SRC: &str = include_str!("../cli/ui.rs");
 
 #[test]
 fn runner_claims_the_slot_before_any_token_can_cancel() {
-    // `store_cancel_token` CANCELS the token it finds (cancel.rs). A resume
-    // turn that ran it before losing the claim would kill the live turn it
-    // meant to join, so the claim MUST precede it in the runner body. The
-    // needle is the code form, `.store_cancel_token(`: the module docs
+    // The store no longer cancels (it only overwrites, #652's Discord twin),
+    // but the ordering is still load-bearing: a resume turn that stored
+    // before losing the claim would take over the live turn's cancel slot, so
+    // /stop would reach the newcomer and the running turn would keep going.
+    // The needle is the code form, `.store_cancel_token(`: the module docs
     // name the call in prose at the top of the file, and a bare-word find
     // would rank the sentence above the claim instead of the statement.
     let claim = TRACKED_TURN_SRC

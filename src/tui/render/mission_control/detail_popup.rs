@@ -260,7 +260,10 @@ fn render_schedule(item: &McScheduleItem) -> Vec<Line<'static>> {
         lines.push(blank());
         lines.push(section_heading("Prompt"));
         let preview = if item.prompt.len() > 300 {
-            format!("{}...", &item.prompt[..300])
+            format!(
+                "{}...",
+                crate::utils::string::truncate_str(&item.prompt, 300)
+            )
         } else {
             item.prompt.clone()
         };

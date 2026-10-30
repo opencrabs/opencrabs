@@ -816,7 +816,7 @@ mod vision_fallback_chain {
 
         let cands = vision_candidates(&config);
         assert_eq!(cands.len(), 1, "chain only: {cands:?}");
-        assert_eq!(cands[0].0, "minimax-key", "the configured entry wins");
+        assert_eq!(cands[0].api_key, "minimax-key", "the configured entry wins");
     }
 
     #[test]
@@ -832,8 +832,11 @@ mod vision_fallback_chain {
 
         let cands = vision_candidates_for(&config, Some("openai"));
         assert_eq!(cands.len(), 2, "current provider + chain: {cands:?}");
-        assert_eq!(cands[0].0, "openai-key", "the session's provider is first");
-        assert_eq!(cands[1].0, "minimax-key");
+        assert_eq!(
+            cands[0].api_key, "openai-key",
+            "the session's provider is first"
+        );
+        assert_eq!(cands[1].api_key, "minimax-key");
     }
 
     #[test]
@@ -849,7 +852,7 @@ mod vision_fallback_chain {
         let cands = vision_candidates_for(&config, Some("openai"));
         assert_eq!(cands.len(), 2, "deduped: {cands:?}");
         assert_eq!(
-            cands[0].0, "openai-key",
+            cands[0].api_key, "openai-key",
             "and it keeps the CURRENT-provider position, not its chain one"
         );
     }
@@ -867,7 +870,7 @@ mod vision_fallback_chain {
 
         let cands = vision_candidates_for(&config, Some("openai"));
         assert_eq!(cands.len(), 1);
-        assert_eq!(cands[0].0, "minimax-key");
+        assert_eq!(cands[0].api_key, "minimax-key");
     }
 
     #[test]
@@ -928,7 +931,7 @@ mod vision_fallback_chain {
         assert!(
             cands
                 .iter()
-                .any(|c| c.0 == "minimax-key" && c.2 == "MiniMax-Text-01"),
+                .any(|c| c.api_key == "minimax-key" && c.model == "MiniMax-Text-01"),
             "disabled provider with vision_model stays a candidate: {cands:?}"
         );
     }
@@ -1077,7 +1080,9 @@ mod vision_fallback_chain {
 
         let cands = vision_candidates(&config);
         assert!(
-            cands.iter().any(|c| c.0.is_empty() && c.2 == "llava"),
+            cands
+                .iter()
+                .any(|c| c.api_key.is_empty() && c.model == "llava"),
             "keyless local custom is a candidate: {cands:?}"
         );
     }
@@ -1110,7 +1115,7 @@ mod vision_fallback_chain {
         assert!(
             cands
                 .iter()
-                .any(|c| c.0 == "custom-key" && c.2 == "my-model"),
+                .any(|c| c.api_key == "custom-key" && c.model == "my-model"),
             "custom: prefixed chain entry resolves: {cands:?}"
         );
     }

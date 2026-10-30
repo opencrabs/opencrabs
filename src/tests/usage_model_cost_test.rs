@@ -20,10 +20,10 @@ async fn model_rows_and_header_sum_the_ledger_cost() {
 
         // Two calls of one model. Their recorded costs sum to the figure the
         // provider path produced for the whole run.
-        repo.record("s1", "zai", "glm-5.3-flash", 10_000_000, 0.30)
+        repo.record("s1", "zai", "glm-5.3-flash", 10_000_000, 0.30, None, None)
             .await
             .unwrap();
-        repo.record("s1", "zai", "glm-5.3-flash", 4_540_704, 0.2246)
+        repo.record("s1", "zai", "glm-5.3-flash", 4_540_704, 0.2246, None, None)
             .await
             .unwrap();
 

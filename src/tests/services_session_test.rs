@@ -83,11 +83,11 @@ async fn test_update_session_usage() {
         .unwrap();
 
     service
-        .update_session_usage(session.id, 100, 0.05, "xiaomi", "mimo-v2.5-pro")
+        .update_session_usage(session.id, 100, 0.05, "xiaomi", "mimo-v2.5-pro", None, None)
         .await
         .unwrap();
     service
-        .update_session_usage(session.id, 50, 0.025, "xiaomi", "mimo-v2.5-pro")
+        .update_session_usage(session.id, 50, 0.025, "xiaomi", "mimo-v2.5-pro", None, None)
         .await
         .unwrap();
 

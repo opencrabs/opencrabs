@@ -9,6 +9,7 @@ use std::time::Instant;
 
 fn turn_start_shell() -> GroupState {
     GroupState {
+        page: 0,
         entries: Vec::new(),
         notes: Vec::new(),
         expanded: false,

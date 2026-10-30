@@ -333,6 +333,19 @@ impl OnboardingWizard {
                         String::new(),
                         String::new(),
                     )
+                } else if config
+                    .providers
+                    .opencrabs
+                    .as_ref()
+                    .is_some_and(|p| p.enabled)
+                {
+                    // The built-in provider is enabled: open on it (#2060).
+                    (
+                        crate::tui::provider_selector::index_of_provider("opencrabs").unwrap_or(0),
+                        EXISTING_KEY_SENTINEL.to_string(),
+                        String::new(),
+                        String::new(),
+                    )
                 } else if config.providers.qwen.as_ref().is_some_and(|p| p.enabled) {
                     (
                         crate::tui::provider_selector::index_of_provider("qwen").unwrap_or(0),
@@ -340,14 +353,9 @@ impl OnboardingWizard {
                         String::new(),
                         String::new(),
                     )
-                } else if let Some((name, c)) = config.providers.active_custom().or_else(|| {
-                    config
-                        .providers
-                        .custom
-                        .as_ref()
-                        .and_then(|m| m.iter().next())
-                        .map(|(n, c)| (n.as_str(), c))
-                }) {
+                } else if let Some((name, c)) = config.providers.active_custom() {
+                    // Only an enabled custom provider is selected. A disabled
+                    // one used to win here as the first entry in the map (#2060).
                     let base = c.base_url.clone().unwrap_or_default();
                     let model = c.default_model.clone().unwrap_or_default();
                     custom_provider_name_init = Some(name.to_string());
@@ -602,9 +610,80 @@ impl OnboardingWizard {
         wizard
     }
 
+    /// Put the provider and model a session is using into the dialog (#2060).
+    ///
+    /// Returns false, leaving the dialog as it was, when the provider cannot be
+    /// found: a session can outlive the provider entry it was created with.
+    pub fn select_session_pair(
+        &mut self,
+        provider_name: &str,
+        model: &str,
+        config: &crate::config::Config,
+    ) -> bool {
+        use crate::tui::provider_selector::{CUSTOM_INSTANCES_START, index_of_provider};
+
+        let custom_name = provider_name.strip_prefix("custom:");
+        let idx = if let Some(name) = custom_name {
+            let customs = config.providers.custom.as_ref();
+            let Some(pos) = customs.and_then(|m| m.keys().position(|k| k == name)) else {
+                return false;
+            };
+            CUSTOM_INSTANCES_START + pos
+        } else {
+            match index_of_provider(provider_name) {
+                Some(i) => i,
+                None => return false,
+            }
+        };
+
+        // The custom names the index above points into come from this config,
+        // and the key/fields probe runs first: it overwrites the custom fields
+        // from the live config, so the session's own values are set after it.
+        self.ps.custom_names = config
+            .providers
+            .custom
+            .as_ref()
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default();
+        self.ps.selected_provider = idx;
+        self.ps.detect_existing_key();
+        if let Some(name) = custom_name {
+            self.ps.custom_name = name.to_string();
+            self.ps.base_url = config
+                .providers
+                .custom
+                .as_ref()
+                .and_then(|m| m.get(name))
+                .and_then(|c| c.base_url.clone())
+                .unwrap_or_default();
+        }
+        self.ps.reload_config_models();
+
+        // A model the provider does not list is still the session's model, so it
+        // is added to the list rather than silently replaced by the first entry.
+        let listed = self.ps.all_model_names().contains(&model);
+        if !listed {
+            self.ps.config_models.push(model.to_string());
+        }
+        self.ps.custom_model = model.to_string();
+        self.ps.resolve_selected_model_index();
+        true
+    }
+
     /// Create a wizard with existing config.toml values as defaults
     pub fn from_config(config: &crate::config::Config) -> Self {
         let mut wizard = Self::new();
+
+        // The selection below is derived from `config` alone. `new()` pre-fills
+        // it from the live config on disk, and inheriting that made the answer
+        // depend on the machine running it: on a CI runner with an enabled
+        // `claude-cli` in its own config.toml, that pre-fill survived every arm
+        // here, so `/models` opened on provider 8 while the fixture asked for
+        // the built-in one at 17 (#2077). Reset to the no-config default first,
+        // so the arms are the only thing that can set the selection.
+        wizard.ps.selected_provider = 0;
+        wizard.ps.api_key_input.clear();
+        wizard.ps.custom_model.clear();
 
         // Determine which provider is configured and set selected_provider.
         // Routes by id via `index_of_provider` so reordering PROVIDERS never
@@ -805,10 +884,31 @@ impl OnboardingWizard {
             {
                 wizard.ps.custom_model = model.clone();
             }
+        } else if config
+            .providers
+            .opencrabs
+            .as_ref()
+            .is_some_and(|p| p.enabled)
+        {
+            // The built-in provider, same as `new()` handles it. This arm was
+            // the one missing from the chain, so an enabled OpenCrabs section
+            // fell through to the custom-provider fallback and `/models`
+            // opened on the wrong entry (#2079).
+            wizard.ps.selected_provider = resolve("opencrabs");
+            wizard.ps.api_key_input = EXISTING_KEY_SENTINEL.to_string();
+            if let Some(model) = &config
+                .providers
+                .opencrabs
+                .as_ref()
+                .and_then(|p| p.default_model.clone())
+            {
+                wizard.ps.custom_model = model.clone();
+            }
         }
 
-        // Detect if we have an existing API key for the selected provider
-        wizard.ps.detect_existing_key();
+        // Key presence comes from the config we were handed, never from the
+        // live config.toml on this machine (#2077).
+        wizard.ps.detect_existing_key_from(config);
         wizard.ps.reload_config_models();
         wizard.ps.resolve_selected_model_index();
 

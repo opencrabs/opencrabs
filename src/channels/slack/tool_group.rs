@@ -35,6 +35,10 @@ pub(crate) enum GroupEntry {
         context: String,
         /// None = running, Some(success) = finished.
         status: Option<bool>,
+        /// Set for a detached background task row (#2145, #2149): the id the
+        /// finish event matches on, so a finish settles its own row even when
+        /// two tasks share a label. `None` for an ordinary tool row.
+        task_id: Option<String>,
     },
     /// Inter-iteration narration: what the agent said between tool calls.
     Note(String),
@@ -59,6 +63,97 @@ impl GroupEntry {
 
     fn is_tool(&self) -> bool {
         matches!(self, Self::Tool { .. })
+    }
+
+    /// How this row names itself in the rendered list (#2149).
+    ///
+    /// A detached background task row says what it is and where it stands;
+    /// an ordinary tool row keeps its tool name untouched, so every existing
+    /// render is unchanged.
+    pub(crate) fn display_name(&self) -> String {
+        match self {
+            Self::Tool {
+                name,
+                status,
+                task_id,
+                ..
+            } => crate::channels::background_work::detached_row_label(
+                name,
+                task_id.as_deref(),
+                *status,
+            ),
+            Self::Note(text) => text.clone(),
+        }
+    }
+}
+
+/// What a detached-task event must do to the group message (#2149).
+///
+/// Returned instead of performed, because the contract that matters is "the
+/// start and the finish share one message", and that is provable without a
+/// bot only if the decision lives outside the spawned HTTP call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DetachedRender {
+    /// No group message exists yet: post one and keep its ts.
+    Post,
+    /// Rewrite the existing group message with this ts.
+    Edit(String),
+    /// Nothing to show: a finish whose start never landed in this group.
+    Skip,
+}
+
+/// A detached-task lifecycle event, free of transport.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum DetachedEvent<'a> {
+    Started { task_id: &'a str, label: &'a str },
+    Finished { task_id: &'a str, success: bool },
+}
+
+/// Fold a detached-task event into the group entries and say what the caller
+/// must do with the message (#2149).
+///
+/// A finish never posts. If the row is missing the event is `Skip`, so a
+/// late finish cannot open a second bubble carrying the outcome the group
+/// already shows.
+pub(crate) fn detached_render(
+    entries: &mut Vec<GroupEntry>,
+    group_ts: Option<&str>,
+    event: DetachedEvent<'_>,
+) -> DetachedRender {
+    match event {
+        DetachedEvent::Started { task_id, label } => {
+            entries.push(GroupEntry::Tool {
+                name: label.to_string(),
+                context: String::new(),
+                status: None,
+                task_id: Some(task_id.to_string()),
+            });
+            match group_ts {
+                Some(ts) => DetachedRender::Edit(ts.to_string()),
+                None => DetachedRender::Post,
+            }
+        }
+        DetachedEvent::Finished { task_id, success } => {
+            // Match by task id, never by label: two detached tasks can both
+            // be `cargo test`, and a label match would settle whichever row
+            // it hit first, leaving a finished task showing as running.
+            let row = entries.iter_mut().rev().find(|e| {
+                matches!(
+                    e,
+                    GroupEntry::Tool { task_id: Some(id), .. } if id == task_id
+                )
+            });
+            let Some(GroupEntry::Tool { status, .. }) = row else {
+                return DetachedRender::Skip;
+            };
+            *status = Some(success);
+            // A finish only ever rewrites. With no block to rewrite the
+            // outcome is dropped rather than posted as a second bubble.
+            match group_ts {
+                Some(ts) => DetachedRender::Edit(ts.to_string()),
+                None => DetachedRender::Skip,
+            }
+        }
     }
 }
 
@@ -209,10 +304,13 @@ pub(crate) fn consume_notes(entries: &[GroupEntry]) -> Vec<GroupEntry> {
 fn entry_line(entry: &GroupEntry) -> String {
     match entry {
         GroupEntry::Tool {
-            name,
-            context,
-            status,
-        } => format!("{} *{}*{}", entry_icon(*status), name, context),
+            context, status, ..
+        } => format!(
+            "{} *{}*{}",
+            entry_icon(*status),
+            entry.display_name(),
+            context
+        ),
         GroupEntry::Note(text) => format!("💭 _{}_", text.trim()),
     }
 }

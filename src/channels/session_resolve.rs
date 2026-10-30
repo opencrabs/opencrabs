@@ -43,11 +43,14 @@ pub fn session_idle_expired(
 /// suffix-stable lookup so auto-renamed rows stay findable.
 ///
 /// Resolution order:
-/// 1. `find_session_by_title_suffix(suffix)` — stable across renames.
-/// 2. `find_session_by_title(legacy_title)` — pre-suffix rows; on hit, the
+/// 1. `find_session_by_channel_chat_key(suffix)` — the unique identity, and
+///    the only lookup that survives auto-renaming (#2183).
+/// 2. `find_session_by_title_suffix(suffix)` — rows that predate
+///    `channel_chat_key`.
+/// 3. `find_session_by_title(legacy_title)` — pre-suffix rows; on hit, the
 ///    row is forward-migrated to include the suffix so future lookups take
 ///    path 1.
-/// 3. Idle archive + new session, or fresh new session.
+/// 4. Idle archive + new session, or fresh new session.
 ///
 /// `log_prefix` is the channel name used in `tracing` output ("Discord",
 /// "Slack", "WhatsApp"). `current_title` is the freshly built template with
@@ -73,10 +76,21 @@ pub async fn resolve_or_create_channel_session(
     // silently forks the chat onto a fresh session and orphans its history
     // (an i32-unreadable row did exactly that). Propagate; the caller tells
     // the user and skips the message.
+    // `suffix` IS the chat key (`[chat:<id>]`), so the keyed lookup answers
+    // the question directly. Auto-renaming rewrites the title and takes the
+    // suffix with it, which is why the title lookups below miss on
+    // long-lived chats (#2183).
     let mut existing = session_svc
-        .find_session_by_title_suffix(suffix)
+        .find_session_by_channel_chat_key(suffix)
         .await
         .map_err(|e| e.context(format!("{log_prefix}: session lookup failed for {suffix}")))?;
+
+    if existing.is_none() {
+        existing = session_svc
+            .find_session_by_title_suffix(suffix)
+            .await
+            .map_err(|e| e.context(format!("{log_prefix}: session lookup failed for {suffix}")))?;
+    }
 
     let legacy_hit = if existing.is_none() {
         session_svc
@@ -125,35 +139,55 @@ pub async fn resolve_or_create_channel_session(
                     e,
                 );
             }
-            let new_session = crate::channels::session_init::create_channel_session(
-                session_svc,
-                Some(current_title.to_string()),
-                Some(&session),
-            )
-            .await?;
-            tracing::info!(
-                "{}: idle-timeout reset — new session {} for \"{}\"",
-                log_prefix,
-                new_session.id,
-                current_title,
-            );
+            let (new_session, created) =
+                crate::channels::session_init::create_channel_session_reported(
+                    session_svc,
+                    Some(current_title.to_string()),
+                    Some(&session),
+                )
+                .await?;
+            if created {
+                tracing::info!(
+                    "{}: idle-timeout reset — new session {} for \"{}\"",
+                    log_prefix,
+                    new_session.id,
+                    current_title,
+                );
+            } else {
+                tracing::info!(
+                    "{}: idle-timeout reset — resolved existing session {} for \"{}\"",
+                    log_prefix,
+                    new_session.id,
+                    current_title,
+                );
+            }
             Ok(new_session.id)
         } else {
             Ok(session.id)
         }
     } else {
-        let new_session = crate::channels::session_init::create_channel_session(
-            session_svc,
-            Some(current_title.to_string()),
-            None,
-        )
-        .await?;
-        tracing::info!(
-            "{}: created new channel session {} for \"{}\"",
-            log_prefix,
-            new_session.id,
-            current_title,
-        );
+        let (new_session, created) =
+            crate::channels::session_init::create_channel_session_reported(
+                session_svc,
+                Some(current_title.to_string()),
+                None,
+            )
+            .await?;
+        if created {
+            tracing::info!(
+                "{}: created new channel session {} for \"{}\"",
+                log_prefix,
+                new_session.id,
+                current_title,
+            );
+        } else {
+            tracing::info!(
+                "{}: resolved existing channel session {} for \"{}\"",
+                log_prefix,
+                new_session.id,
+                current_title,
+            );
+        }
         Ok(new_session.id)
     }
 }
