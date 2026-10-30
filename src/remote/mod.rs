@@ -7,4 +7,5 @@
 //! without a broker in the middle. Design reference:
 //! `research/remote-phase1-plan.md` in the OpenCrabs home.
 
+pub mod pairing;
 pub mod scopes;

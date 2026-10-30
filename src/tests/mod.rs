@@ -490,6 +490,7 @@ pub mod reasoning_split_test;
 pub mod release_gate_test;
 pub mod reload_phantom_blocked_test;
 pub mod reload_quoted_markers_test;
+pub mod remote_pairing_test;
 pub mod repetition_fenced_code_test;
 pub mod repetition_test;
 pub mod rsi_disposition_test;
