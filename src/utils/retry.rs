@@ -15,15 +15,6 @@ pub trait RetryableError: std::fmt::Display {
     fn retry_after(&self) -> Option<Duration> {
         None
     }
-
-    /// True when the error is a handshake timeout: a wall elapsed because the
-    /// endpoint never answered at all, as opposed to an answer that refused the
-    /// request (a 5xx, a 429, a dropped connection). Only this kind can trip
-    /// [`RetryConfig::abort_on_consecutive_timeouts`], because repeating a
-    /// send to an endpoint that has not answered once is just more waiting.
-    fn is_handshake_timeout(&self) -> bool {
-        false
-    }
 }
 
 /// Universal retry configuration
@@ -39,15 +30,6 @@ pub struct RetryConfig {
     pub backoff_multiplier: f64,
     /// Add random jitter to delays (0.0 = none, 0.1+ = recommended for distributed systems)
     pub jitter: f64,
-    /// Stop the ladder after this many CONSECUTIVE handshake timeouts, even
-    /// with attempts left. `None` (the default) always burns the full attempt
-    /// budget.
-    ///
-    /// Only timeouts count, and only consecutive ones: a timeout followed by a
-    /// 5xx resets the streak, because the endpoint did answer. This exists for
-    /// endpoints where a timeout means "no answer at all", so the remaining
-    /// attempts would repeat the same silence (#2232).
-    pub abort_on_consecutive_timeouts: Option<u32>,
 }
 
 impl Default for RetryConfig {
@@ -64,7 +46,6 @@ impl Default for RetryConfig {
             max_delay: Duration::from_secs(30),
             backoff_multiplier: 2.0,
             jitter: 0.1,
-            abort_on_consecutive_timeouts: None,
         }
     }
 }
@@ -89,7 +70,6 @@ impl RetryConfig {
             max_delay: Duration::from_secs(5),
             backoff_multiplier: 2.0,
             jitter: 0.0, // Deterministic for database locks
-            abort_on_consecutive_timeouts: None,
         }
     }
 
@@ -101,7 +81,6 @@ impl RetryConfig {
             max_delay: Duration::from_secs(10),
             backoff_multiplier: 1.5,
             jitter: 0.0,
-            abort_on_consecutive_timeouts: None,
         }
     }
 
@@ -118,23 +97,6 @@ impl RetryConfig {
             max_delay: Duration::from_secs(60),
             backoff_multiplier: 2.0,
             jitter: 0.2,
-            abort_on_consecutive_timeouts: None,
-        }
-    }
-
-    /// The built-in OpenCrabs endpoint (#2232).
-    ///
-    /// Same patient budget as the default, with one exception: the ladder
-    /// stops after two consecutive handshake timeouts. The endpoint is a proxy
-    /// in front of upstream models, so a timeout there means it never answered
-    /// at all. Five sends of the 120s endpoint budget would hold the user for
-    /// ten minutes before the fallback chain even starts, and the remaining
-    /// attempts would only repeat the same silence. A 5xx, a 429 or a dropped
-    /// connection still gets every attempt, because those are answers.
-    pub fn opencrabs_endpoint() -> Self {
-        Self {
-            abort_on_consecutive_timeouts: Some(2),
-            ..Default::default()
         }
     }
 
@@ -157,7 +119,6 @@ impl RetryConfig {
             max_delay: Duration::from_secs(30),
             backoff_multiplier: 2.0,
             jitter: 0.2,
-            abort_on_consecutive_timeouts: None,
         }
     }
 
@@ -198,7 +159,6 @@ where
 {
     let mut attempt = 0;
     let mut last_error: Option<E> = None;
-    let mut consecutive_timeouts: u32 = 0;
 
     loop {
         match operation().await {
@@ -224,27 +184,6 @@ where
                 if attempt >= config.max_attempts {
                     tracing::warn!("Max retry attempts ({}) exceeded", config.max_attempts);
                     return Err(last_error.unwrap_or(err));
-                }
-
-                // A handshake timeout means the endpoint never answered at
-                // all, so the attempts left would repeat the same silence.
-                // Stop once the configured streak is reached (#2232).
-                if err.is_handshake_timeout() {
-                    consecutive_timeouts += 1;
-                } else {
-                    consecutive_timeouts = 0;
-                }
-                if let Some(limit) = config.abort_on_consecutive_timeouts
-                    && consecutive_timeouts >= limit
-                {
-                    tracing::warn!(
-                        "Stopping after {} consecutive handshake timeouts, {} of {} requests used: {}",
-                        consecutive_timeouts,
-                        attempt + 1,
-                        config.max_attempts + 1,
-                        err
-                    );
-                    return Err(err);
                 }
 
                 // Check for Retry-After hint from the error
@@ -296,7 +235,6 @@ where
 {
     let mut attempt = 0;
     let mut last_error: Option<E> = None;
-    let mut consecutive_timeouts: u32 = 0;
 
     loop {
         match operation().await {
@@ -321,27 +259,6 @@ where
                 if attempt >= config.max_attempts {
                     tracing::warn!("Max retry attempts ({}) exceeded", config.max_attempts);
                     return Err(last_error.unwrap_or(err));
-                }
-
-                // A handshake timeout means the endpoint never answered at
-                // all, so the attempts left would repeat the same silence.
-                // Stop once the configured streak is reached (#2232).
-                if err.is_handshake_timeout() {
-                    consecutive_timeouts += 1;
-                } else {
-                    consecutive_timeouts = 0;
-                }
-                if let Some(limit) = config.abort_on_consecutive_timeouts
-                    && consecutive_timeouts >= limit
-                {
-                    tracing::warn!(
-                        "Stopping after {} consecutive handshake timeouts, {} of {} requests used: {}",
-                        consecutive_timeouts,
-                        attempt + 1,
-                        config.max_attempts + 1,
-                        err
-                    );
-                    return Err(err);
                 }
 
                 let delay = err

@@ -678,13 +678,6 @@ impl crate::utils::retry::RetryableError for ProviderError {
         self.declared_cooldown()
             .map(|d| d.min(std::time::Duration::from_secs(30)))
     }
-
-    /// A `Timeout` is a wall elapsing, never an answer: the endpoint did not
-    /// produce response headers inside the handshake budget. That is the only
-    /// kind that may trip `RetryConfig::abort_on_consecutive_timeouts` (#2232).
-    fn is_handshake_timeout(&self) -> bool {
-        matches!(self, ProviderError::Timeout(_))
-    }
 }
 
 /// Free wrapper so the `RetryableError` impl can call the inherent

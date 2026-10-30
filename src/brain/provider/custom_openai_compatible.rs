@@ -2278,25 +2278,16 @@ pub struct OpenAIProvider {
 ///
 /// Split out of the provider's `retry_config` method so the selection rules
 /// can be pinned without widening that method's visibility: the decision is a
-/// pure function of the override, the resolved send URL, the provider name,
-/// whether the host is OpenRouter, and the model id.
+/// pure function of the override, the provider name, whether the host is
+/// OpenRouter, and the model id.
 pub(crate) fn select_retry_config(
     override_cfg: Option<&crate::utils::retry::RetryConfig>,
-    send_url: &str,
     provider_name: &str,
     is_openrouter: bool,
     model: &str,
 ) -> crate::utils::retry::RetryConfig {
     if let Some(ovr) = override_cfg {
         return ovr.clone();
-    }
-    // The built-in endpoint (#2232). A handshake timeout there means the proxy
-    // never answered at all, so the ladder stops after two consecutive
-    // timeouts instead of holding the user for five sends of the 120s endpoint
-    // budget. A 5xx, a 429 or a dropped connection keeps every attempt,
-    // because those are answers.
-    if crate::brain::provider::opencrabs_install::is_opencrabs_endpoint(Some(send_url)) {
-        return crate::utils::retry::RetryConfig::opencrabs_endpoint();
     }
     // Qwen, OpenRouter, and :free models: retry on 429 with backoff.
     // OpenRouter upstream providers often have tight per-minute windows that
@@ -2329,15 +2320,10 @@ impl OpenAIProvider {
     ///   flip rather than a true quota exhaustion. Retrying in-place keeps
     ///   the user on the free tier instead of silently burning paid credits
     ///   on the fallback chain.
-    /// - The built-in endpoint (`inference.opencrabs.com`) stops the ladder
-    ///   after two consecutive handshake timeouts, because a timeout there
-    ///   means the proxy never answered and more sends only repeat the
-    ///   silence (#2232).
     /// - All other providers keep the default (bail-to-fallback on 429).
     fn retry_config(&self, model: &str) -> crate::utils::retry::RetryConfig {
         select_retry_config(
             self.retry_config_override.as_ref(),
-            &self.send_url(),
             &self.name,
             self.is_openrouter(),
             model,

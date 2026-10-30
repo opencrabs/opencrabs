@@ -61,7 +61,6 @@ async fn test_retryable_error_retries() {
         max_delay: Duration::from_millis(10),
         backoff_multiplier: 2.0,
         jitter: 0.0,
-        ..Default::default()
     };
 
     let call_count = Arc::new(AtomicU32::new(0));
@@ -98,7 +97,6 @@ async fn test_max_attempts_exceeded() {
         max_delay: Duration::from_millis(10),
         backoff_multiplier: 2.0,
         jitter: 0.0,
-        ..Default::default()
     };
 
     let call_count = Arc::new(AtomicU32::new(0));
@@ -205,10 +203,4 @@ fn in_place_retry_attempts_track_the_retry_config() {
     let cfg = RetryConfig::default();
     assert_eq!(in_place_attempt_budget(), cfg.max_attempts + 1);
     assert_eq!(in_place_attempt_budget(), 5);
-    // The built-in endpoint keeps the same budget (it only adds the handshake
-    // timeout cutoff), so the count stays honest for the opencrabs provider.
-    assert_eq!(
-        RetryConfig::opencrabs_endpoint().max_attempts + 1,
-        in_place_attempt_budget()
-    );
 }
