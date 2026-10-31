@@ -4,6 +4,7 @@
 
 pub(crate) mod database;
 pub(crate) mod migration_heal;
+pub(crate) mod migration_lock;
 pub(crate) mod migration_snapshot;
 pub mod models;
 pub mod repository;

@@ -397,6 +397,31 @@ impl Database {
 
     /// Run database migrations
     pub async fn run_migrations(&self) -> Result<()> {
+        // #2297: one migrator at a time, across processes.
+        //
+        // Two OpenCrabs processes (the TUI or daemon and a gui window, or two
+        // gui windows) opening one ledger at the same moment both call
+        // `to_latest`. `rusqlite_migration` reads `user_version` BEFORE it
+        // opens its transaction, so the loser keeps a stale version, replays
+        // the list against a schema the winner already advanced, and startup
+        // dies with "db migrations: Failed to run database migrations". The
+        // reproduction lives in
+        // `src/tests/gui_two_agents_migrations_2297_test.rs`.
+        //
+        // The lock is taken before the snapshot probe reads the file, and
+        // held to the end of this function, so the loser reads the finished
+        // version instead of replaying into it. Called inline rather than on
+        // `spawn_blocking` so it works under any executor (several callers
+        // and tests poll this without a Tokio reactor installed).
+        let _migration_lock = match self.db_path.as_deref() {
+            Some(path) => Some(
+                crate::db::migration_lock::MigrationLock::acquire(Path::new(path))
+                    .context("failed to take the migration lock")?,
+            ),
+            // In-memory databases have no file to share.
+            None => None,
+        };
+
         let migrations = build_migrations();
 
         // #1779: snapshot the image BEFORE any migration can write to it.
