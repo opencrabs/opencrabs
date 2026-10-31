@@ -156,6 +156,12 @@ pub(crate) const MIGRATION_SQL: &[&str] = &[
     include_str!("../migrations/20261015000001_add_usage_ledger_cache_read_tokens.sql"),
     include_str!("../migrations/20261016000001_add_discord_tool_cards.sql"),
     include_str!("../migrations/20261019000001_add_usage_ledger_prompt_tokens.sql"),
+    // Sessions dialog: the pins behind "favorite a session and keep it at the
+    // top". An idempotent CREATE in a sidecar table rather than a `sessions`
+    // column, so nothing has to backfill and the pin write never nudges
+    // `updated_at` (unpinning returns the session to its real recency slot).
+    // Appended last per the list invariant above.
+    include_str!("../migrations/20261031000001_add_session_favorites.sql"),
 ];
 
 pub(crate) fn build_migrations() -> Migrations<'static> {

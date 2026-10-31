@@ -108,6 +108,11 @@ const fn k(code: KeyCode) -> (KeyCode, KeyModifiers) {
     (code, KeyModifiers::NONE)
 }
 
+/// Like [`k`], but carrying modifiers, for bindings such as Ctrl+F.
+const fn kc(code: KeyCode, modifiers: KeyModifiers) -> (KeyCode, KeyModifiers) {
+    (code, modifiers)
+}
+
 /// The scoped keymap for `scope`, in footer display order.
 ///
 /// Order is part of the contract: the footer renders exactly this order,
@@ -649,6 +654,11 @@ const TABLE_19: &[DialogKey] = &[
         events: &[k(KeyCode::Char('p'))],
         label: "p",
         verb: "projects",
+    },
+    DialogKey {
+        events: &[kc(KeyCode::Char('f'), KeyModifiers::CONTROL)],
+        label: "^F",
+        verb: "pin",
     },
     DialogKey {
         events: &[k(KeyCode::Char('|'))],

@@ -599,6 +599,12 @@ pub struct App {
     /// background-task resume) and whenever a session is (re)loaded.
     pub(crate) turn_start_len: usize,
     pub sessions: Vec<Session>,
+    /// Pinned session ids behind the sessions dialog's favorite feature
+    /// (migration `20261031000001_add_session_favorites.sql`). Hydrated at
+    /// `load_sessions` and mutated by the `Ctrl+F`/`Cmd+F` handler in the
+    /// sessions dialog; ordering applies favorite-first WITHOUT reordering
+    /// the recency order the favorites keep between themselves.
+    pub(crate) session_favorites: HashSet<Uuid>,
     /// All-time usage stats from the ledger (survives session deletes)
     pub usage_ledger_stats: Vec<crate::db::repository::usage_ledger::ModelUsageStats>,
     /// Usage dashboard state (populated when /usage is opened)
@@ -1085,6 +1091,7 @@ impl App {
             messages: Vec::new(),
             turn_start_len: 0,
             sessions: Vec::new(),
+            session_favorites: HashSet::new(),
             usage_ledger_stats: Vec::new(),
             dashboard_state: None,
             mode: AppMode::Chat,

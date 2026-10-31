@@ -848,6 +848,26 @@ impl App {
             })
             .await?;
 
+        // Hydrate the pin set, then float pinned sessions to the top of the
+        // dialog WITHOUT disturbing the recency order inside each group:
+        // `sort_by_key` is stable, so favorites keep their updated_at order
+        // and unpinned sessions keep theirs. The sort lives in this TUI
+        // loader only, so the CLI and channel session lists stay pure
+        // recency.
+        self.session_favorites = self
+            .session_service
+            .session_favorites()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            // The table stores TEXT ids; parse to `Uuid` so every consumer
+            // compares native session ids with zero per-row allocation. A
+            // malformed row simply never matches and is skipped.
+            .filter_map(|id| Uuid::parse_str(&id).ok())
+            .collect();
+        let pins = &self.session_favorites;
+        self.sessions.sort_by_key(|s| !pins.contains(&s.id));
+
         // Populate project name cache for session list display
         if let Ok(projects) = self.project_service.list_projects().await {
             for p in projects {

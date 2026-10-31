@@ -590,10 +590,15 @@ fn session_row(
 
     // Left gutter, then the name padded to its column, then each column
     // right-aligned inside its fixed width, then the right gutter.
-    let name = truncate_to_width(
-        session.title.as_deref().unwrap_or("New Chat"),
-        plan.name_width,
-    );
+    // A pinned session carries a star inside the name cell, so the columns
+    // to its right stay put: the row plan is identical for every row and a
+    // star only costs the name two cells of its own width.
+    let title = session.title.as_deref().unwrap_or("New Chat");
+    let name = if app.session_favorites.contains(&session.id) {
+        truncate_to_width(&format!("★ {title}"), plan.name_width)
+    } else {
+        truncate_to_width(title, plan.name_width)
+    };
     let mut spans = vec![
         Span::raw(" ".repeat(GUTTER)),
         Span::styled(name.clone(), name_style),

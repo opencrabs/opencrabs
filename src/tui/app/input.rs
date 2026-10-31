@@ -2571,7 +2571,7 @@ impl App {
         event: crossterm::event::KeyEvent,
     ) -> Result<()> {
         use super::events::keys;
-        use crossterm::event::KeyCode;
+        use crossterm::event::{KeyCode, KeyModifiers};
 
         // Rename mode: typing the new name
         if self.session_renaming {
@@ -2822,8 +2822,50 @@ impl App {
                     self.selected_session_index = self.sessions.len().saturating_sub(1);
                 }
             }
-        } else if event.code == KeyCode::Char('f') || event.code == KeyCode::Char('F') {
-            // Open session files browser
+        } else if (event.code == KeyCode::Char('f') || event.code == KeyCode::Char('F'))
+            && (event.modifiers == KeyModifiers::CONTROL || event.modifiers == KeyModifiers::SUPER)
+        {
+            // Pin/unpin the selected session. A pin is a view property: it
+            // lives in the sidecar table, never touches `updated_at`, and
+            // floats the session to the top of this list without disturbing
+            // the recency order under it.
+            if let Some(session) = self.sessions.get(self.selected_session_index) {
+                let session_id = session.id;
+                // Pulled out before `load_sessions` below: `session` borrows
+                // `self.sessions`, and the reload needs `&mut self`.
+                let title = session
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| "Untitled".to_string());
+                let pinned = self.session_favorites.contains(&session_id);
+                if pinned {
+                    self.session_service
+                        .unfavorite_session(&session_id.to_string())
+                        .await?;
+                } else {
+                    self.session_service
+                        .favorite_session(&session_id.to_string())
+                        .await?;
+                }
+                self.load_sessions().await?;
+                // The reload re-sorted the list, so follow the toggled
+                // session to its new row instead of leaving the cursor
+                // pointing at whatever moved into the old index.
+                if let Some(pos) = self.sessions.iter().position(|s| s.id == session_id) {
+                    self.selected_session_index = pos;
+                }
+                self.notification = Some(if pinned {
+                    format!("Unpinned: {title}")
+                } else {
+                    format!("Pinned to top: {title}")
+                });
+                self.notification_shown_at = Some(std::time::Instant::now());
+            }
+        } else if (event.code == KeyCode::Char('f') || event.code == KeyCode::Char('F'))
+            && event.modifiers.is_empty()
+        {
+            // Open session files browser (modifiers excluded so the
+            // Ctrl/Cmd+F pin binding above cannot also land here)
             if let Some(session) = self.sessions.get(self.selected_session_index) {
                 let session_id = session.id;
                 match self.file_service.list_files_for_session(session_id).await {

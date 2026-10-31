@@ -4,7 +4,9 @@
 
 use crate::db::{
     models::Session,
-    repository::{SessionListOptions, SessionRepository, UsageLedgerRepository},
+    repository::{
+        SessionFavoritesRepository, SessionListOptions, SessionRepository, UsageLedgerRepository,
+    },
 };
 use crate::services::ServiceContext;
 use anyhow::{Context, Result};
@@ -157,6 +159,31 @@ impl SessionService {
     pub async fn list_sessions(&self, options: SessionListOptions) -> Result<Vec<Session>> {
         let repo = SessionRepository::new(self.context.pool());
         repo.list(options).await.context("Failed to list sessions")
+    }
+
+    /// Pin `session_id` to the top of the sessions dialog (idempotent). The
+    /// pin lives in a sidecar table, so the session's `updated_at` is never
+    /// nudged: unpinning returns it to its real recency slot.
+    pub async fn favorite_session(&self, session_id: &str) -> Result<()> {
+        SessionFavoritesRepository::new(self.context.pool())
+            .add(session_id)
+            .await
+            .context("Failed to favorite session")
+    }
+
+    /// Unpin `session_id` (idempotent).
+    pub async fn unfavorite_session(&self, session_id: &str) -> Result<()> {
+        SessionFavoritesRepository::new(self.context.pool())
+            .remove(session_id)
+            .await
+            .context("Failed to unfavorite session")
+    }
+
+    /// The full pin set, as session ids.
+    pub async fn session_favorites(&self) -> Result<Vec<String>> {
+        SessionFavoritesRepository::new(self.context.pool())
+            .all()
+            .await
     }
 
     /// Update a session
