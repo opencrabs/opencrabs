@@ -352,6 +352,7 @@ pub mod goal_driver_line_test;
 pub mod goal_judge_test;
 pub mod goal_manage_test;
 pub mod group_history_test;
+pub mod gui_esc_screens_test;
 pub mod gui_two_agents_migrations_2297_test;
 pub mod headless_tool_surface_test;
 pub mod help_catalog_test;
