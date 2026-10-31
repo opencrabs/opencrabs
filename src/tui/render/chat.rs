@@ -110,7 +110,7 @@ pub(crate) fn should_compensate_for_growth(
 /// "is thinking..." made it read that way (#741). The ctx budget is
 /// deliberately NOT shown here: it already lives in the footer under the input,
 /// so repeating it on the spinner was redundant (#744).
-pub(crate) fn format_turn_spinner_meta(elapsed_secs: u64, turn_tokens: u32) -> Option<String> {
+pub fn format_turn_spinner_meta(elapsed_secs: u64, turn_tokens: u32) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
     if elapsed_secs > 0 {
         parts.push(format!("{elapsed_secs}s"));
@@ -232,7 +232,7 @@ pub(crate) fn turn_of(messages: &[DisplayMessage], msg_idx: usize) -> Option<Tur
 
 /// What a turn actually did, for its header line (#759).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) struct TurnSummary {
+pub struct TurnSummary {
     /// Total tool calls across every group in the turn.
     pub tool_calls: usize,
     /// How many of them failed.
@@ -276,7 +276,7 @@ pub(crate) fn turn_summary(messages: &[DisplayMessage], turn: TurnRange) -> Turn
 /// noise — only turns that actually did work get one. Mirrors the shape of the
 /// Telegram flow header (status • N tool calls • duration); ctx is deliberately
 /// absent because it already lives in the footer under the input (#744).
-pub(crate) fn format_turn_header(summary: TurnSummary, steps: usize) -> Option<String> {
+pub fn format_turn_header(summary: TurnSummary, steps: usize) -> Option<String> {
     if steps == 0 && summary.tool_calls == 0 {
         return None;
     }
@@ -507,7 +507,7 @@ pub(crate) fn visible_when_folded(
 /// reconstruct from a one-line summary. Length alone is not enough — a long
 /// narration is still narration — so both a separator row and real bulk are
 /// required.
-pub(crate) fn is_deliverable_report(content: &str) -> bool {
+pub fn is_deliverable_report(content: &str) -> bool {
     const MIN_REPORT_CHARS: usize = 200;
     if content.chars().count() < MIN_REPORT_CHARS {
         return false;
@@ -584,7 +584,7 @@ pub(crate) fn turn_hideable_count(
 }
 
 /// `1 step` / `4 steps`, for a turn with no tool calls to summarise.
-pub(crate) fn format_step_count(hidden: usize) -> String {
+pub fn format_step_count(hidden: usize) -> String {
     if hidden == 1 {
         "1 step".to_string()
     } else {

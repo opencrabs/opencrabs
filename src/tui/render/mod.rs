@@ -54,6 +54,17 @@ pub(crate) use tools::detached_state_suffix;
 pub(crate) use tools::unescape_display_string;
 
 pub use frame::render;
+
+// The turn-header grammar (#759) and the token label are pure formatting the
+// desktop client renders too. Served from here so the gui cannot fork them
+// into a second dialect that drifts the moment one side changes.
+// `format_turn_spinner_meta` is the live head's suffix builder: the gui
+// status line spells its clock and counter exactly as the TUI does.
+pub use chat::{
+    TurnSummary, format_step_count, format_turn_header, format_turn_spinner_meta,
+    is_deliverable_report,
+};
+pub use utils::format_token_count_raw;
 // #2237: the wording and width maths for the mid-turn queue row live in
 // `input`, which stays a private module. Re-export just what the tests pin.
 // `#[cfg(test)]` because nothing in the library reads them through this path:

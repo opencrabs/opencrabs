@@ -21,7 +21,7 @@
 
 /// One chronological piece of a persisted assistant message.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Segment {
+pub enum Segment {
     /// A `<!-- reasoning -->` block's contents.
     Reasoning(String),
     /// Visible text between blocks.
@@ -42,7 +42,7 @@ const BLOCKED_CLOSE: &str = "<!-- /phantom_blocked=1 -->";
 
 /// Heading a collapsed blocked section carries, so an expanded row says what
 /// it is instead of reading like an answer that was hidden by mistake.
-pub(crate) const BLOCKED_LABEL: &str = "Blocked narration (phantom tool calls, never delivered):";
+pub const BLOCKED_LABEL: &str = "Blocked narration (phantom tool calls, never delivered):";
 
 /// Split `content` into text, reasoning and blocked segments, in order.
 ///
@@ -59,7 +59,7 @@ pub(crate) const BLOCKED_LABEL: &str = "Blocked narration (phantom tool calls, n
 /// self-heal had drained from the live view then rendered in full on the next
 /// reload, closing marker and all. An unclosed opener folds to the end of the
 /// row for the same reason an unclosed reasoning block does.
-pub(crate) fn split_segments(content: &str) -> Vec<Segment> {
+pub fn split_segments(content: &str) -> Vec<Segment> {
     let mut out = Vec::new();
     let mut rest = content;
 
@@ -173,7 +173,7 @@ fn push_text(out: &mut Vec<Segment>, text: &str) {
 ///
 /// A blocked section counts for nothing here: it is never the answer itself,
 /// and the reasoning it folded in must not demote the real answer before it.
-pub(crate) fn is_intermediate(segments: &[Segment], i: usize) -> bool {
+pub fn is_intermediate(segments: &[Segment], i: usize) -> bool {
     let Some(after_reasoning) = segments[i + 1..]
         .iter()
         .position(|s| matches!(s, Segment::Reasoning(_)))

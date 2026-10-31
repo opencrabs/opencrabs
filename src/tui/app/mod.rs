@@ -10,12 +10,16 @@ pub(crate) mod dropped_path;
 pub(crate) mod duplicate_submit;
 pub(crate) mod help_catalog;
 pub(crate) mod input;
-pub(crate) mod ledger_scan;
+/// Reused by the gui transcript: the ledger scanner is the TUI message
+/// grammar, and the gui mirrors the TUI instead of forking it.
+pub mod ledger_scan;
 pub(crate) mod messaging;
 pub mod mission_control;
 pub(crate) mod mouse_frag;
 pub mod profiles_dialog;
-pub(crate) mod reasoning_split;
+/// Reused by the gui transcript for thinking/narration parsing, same reason
+/// as `ledger_scan` above.
+pub mod reasoning_split;
 pub mod skills_dialog;
 pub(crate) mod state;
 
