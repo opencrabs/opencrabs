@@ -175,6 +175,12 @@ pub(crate) fn reinit_terminal_for_editor(terminal: &mut TuiTerminal) -> Result<(
 
 /// Run the TUI application
 pub async fn run(mut app: App) -> Result<()> {
+    // Give the process a Dock tile holding the crab (#2280). A TUI run as
+    // a bare binary has no bundle for macOS to read an icon from, so the
+    // icon was missing from the Dock entirely. No-op off macOS, and
+    // skippable with OPENCRABS_NO_DOCK_ICON=1.
+    crate::utils::dock_icon::install();
+
     // Boot-time theme apply (#1364 commit D): read the active config and
     // activate the named preset before the first render. `None` / empty /
     // unknown name falls through to CRAB_DARK (byte-identical default).

@@ -7,6 +7,7 @@ pub(crate) mod config_reload_reason;
 pub mod config_watcher;
 pub mod cwd;
 pub mod directives;
+pub mod dock_icon;
 pub mod drop_agent;
 pub mod drop_landing;
 pub mod drop_transfer;
