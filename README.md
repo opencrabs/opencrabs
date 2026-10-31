@@ -3997,7 +3997,7 @@ Any tool on your `$PATH` works. If it runs in your terminal, OpenCrabs can use i
 |----------|--------|
 | `Ctrl+C` | First press: snaps to bottom if scrolled up, else clears input. Second press (within 3s) quits |
 | `Ctrl+N` | New session |
-| `Ctrl+L` | List/switch sessions |
+| `Ctrl+S` | List/switch sessions (the TUI maps both `Ctrl+S`, which matches the desktop sidebar, and `Ctrl+L`) |
 | `Ctrl+K` | Clear current session |
 | `Page Up/Down` | Scroll chat history |
 | `Mouse Scroll` | Scroll chat history |

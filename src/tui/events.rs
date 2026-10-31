@@ -609,9 +609,12 @@ pub mod keys {
         key_matches(event, KeyCode::Char('n'), KeyModifiers::CONTROL)
     }
 
-    /// Ctrl+L - List sessions
+    /// Ctrl+S - List sessions. The window calls the same pane the sidebar and
+    /// answers ctrl+s, so the terminal accepts it too; ctrl+l stays as the
+    /// alias anyone already has in their fingers.
     pub fn is_list_sessions(event: &KeyEvent) -> bool {
-        key_matches(event, KeyCode::Char('l'), KeyModifiers::CONTROL)
+        key_matches(event, KeyCode::Char('s'), KeyModifiers::CONTROL)
+            || key_matches(event, KeyCode::Char('l'), KeyModifiers::CONTROL)
     }
 
     /// Ctrl+K - Clear current session
