@@ -27,28 +27,31 @@ fn readme_ctrl_c_row_documents_snap_to_bottom() {
     );
 }
 
-const HELP_SRC: &str = include_str!("../tui/render/help.rs");
-
 #[test]
 fn help_dialog_ctrl_c_row_documents_snap_and_fits_the_column() {
-    let line = HELP_SRC
-        .lines()
-        .find(|l| l.contains("kv(\"Ctrl+C\""))
-        .expect("help.rs must keep a Ctrl+C kv row in the GLOBAL section");
+    // The chord rows moved out of `help.rs` into the shared table in
+    // `ui_core::help_keys` (#2320), so the pin follows the data instead of
+    // scanning the renderer's source text.
+    let row = crate::ui_core::help_keys::find("ctrl+c")
+        .expect("the help table must keep a ctrl-c row in the GLOBAL section");
+    assert_eq!(row.tui, "Ctrl+C");
     assert!(
-        line.contains("Snap bottom"),
+        row.description.contains("Snap bottom"),
         "#1771: the /help dialog must document that the first Ctrl+C press \
-         snaps the scrolled-up transcript to bottom. Offending line: {line}"
+         snaps the scrolled-up transcript to bottom. Offending row: {row:?}"
     );
     // The dialog renders two 50% columns with no wrap, so a long description
     // silently clips at the column edge (#1771's proposed 50-char string
-    // would have). The description lives in the second string literal.
-    let literals: Vec<&str> = line.split('"').skip(1).step_by(2).collect();
-    let desc = literals.get(1).copied().unwrap_or_default();
-    assert!(
-        !desc.is_empty() && desc.len() <= 34,
-        "#1771: Ctrl+C help description is {} chars; keep it within the \
-         no-wrap column budget (<= 34). Offending line: {line}",
-        desc.len()
-    );
+    // would have). Every row shares that budget now that they live in one
+    // table, so check them all rather than only Ctrl+C.
+    for row in crate::ui_core::help_keys::rows() {
+        assert!(
+            row.description.len() <= 34,
+            "#1771: {} help description is {} chars; keep it within the \
+             no-wrap column budget (<= 34). Offending description: {}",
+            row.tui,
+            row.description.len(),
+            row.description
+        );
+    }
 }

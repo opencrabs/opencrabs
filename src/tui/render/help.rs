@@ -52,34 +52,21 @@ pub(super) fn render_help(f: &mut Frame, app: &mut App, area: Rect) {
         kv("Version", &version_line, cyan),
         kv("Provider", &provider_name, cyan),
         kv("Model", &model_name, cyan),
-        Line::from(""),
-        section_header("GLOBAL"),
-        kv("Ctrl+C", "Snap bottom / clear, quit (2x)", cyan),
-        kv("Ctrl+N", "New session", cyan),
-        kv("Ctrl+L", "List sessions", cyan),
-        kv("Ctrl+K", "Clear session", cyan),
-        kv("Mouse click", "Open URL/path under click", cyan),
-        Line::from(""),
-        section_header("CHAT"),
-        kv("Enter", "Send message", cyan),
-        kv("Shift+Enter", "New line", cyan),
-        kv("Ctrl+J", "New line (alt)", cyan),
-        kv("Escape (x2)", "Cancel / abort immediately", cyan),
-        kv("Page Up/Down", "Scroll history", cyan),
-        kv("@", "File picker", cyan),
-        Line::from(""),
-        section_header("INPUT EDITING"),
-        kv("↑ / ↓", "Line nav / start-end / history", cyan),
-        kv("← / →", "Move cursor", cyan),
-        kv("Ctrl/Alt+←→", "Jump word", cyan),
-        kv("Home / End", "Start / end of line", cyan),
-        kv("Alt+Backspace", "Delete word", cyan),
-        kv("Ctrl+Backspace", "Delete word (alias)", cyan),
-        kv("Ctrl+W", "Delete word (vim)", cyan),
-        kv("Ctrl+U", "Delete to line start (vim)", cyan),
-        Line::from(""),
-        section_header("SLASH COMMANDS"),
     ];
+
+    // The chord blocks come from the shared table in `ui_core::help_keys`, the
+    // same one the desktop window renders (#2320). Two hand-written lists would
+    // drift, and then the two surfaces would disagree about the same key.
+    for section in crate::ui_core::help_keys::HelpSection::ALL {
+        left.push(Line::from(""));
+        left.push(section_header(section.title()));
+        for row in crate::ui_core::help_keys::section_rows(section) {
+            left.push(kv(row.tui, row.description, cyan));
+        }
+    }
+
+    left.push(Line::from(""));
+    left.push(section_header("SLASH COMMANDS"));
 
     // Commands come from the catalogue collected on entry (#1530) rather than
     // from a directory walk and a TOML parse per frame. The SLASH COMMANDS
