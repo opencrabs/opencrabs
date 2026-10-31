@@ -18,8 +18,10 @@
 use uuid::Uuid;
 
 use super::builder::AgentService;
+use super::clear_snapshot::{EnvironmentSnapshot, PlanState, reply_instructions, snapshot_block};
 use crate::brain::agent::error::{AgentError, Result};
 use crate::services::{MessageService, SessionService};
+use crate::utils::plan_files;
 
 /// Prefix the context loader and the TUI reload both key on. Must start
 /// with the compaction marker text, which is the only thing either checks.
@@ -112,6 +114,18 @@ pub(crate) fn clear_marker(session_title: Option<&str>, recent: &[(String, Strin
     }
 }
 
+/// Everything a `/clear` needs before its reply turn starts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedClear {
+    pub receipt: ClearReceipt,
+    /// Persisted as the user row the loader cuts at. The TUI hides it on
+    /// reload, and the history of the session stays intact.
+    pub marker: String,
+    /// What the model reads for the reply turn: the marker plus instructions
+    /// that are never written to history.
+    pub reply_context: String,
+}
+
 /// What happened, for the surface that asked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClearReceipt {
@@ -150,8 +164,9 @@ impl AgentService {
     /// Aborts an in-flight background summariser first, exactly as
     /// `compact_context` does: its result is applied on a later visit and
     /// would otherwise overwrite the cleared context with a summary of the
-    /// old one. Then appends the marker row the loader cuts at.
-    pub async fn clear_context(&self, session_id: Uuid) -> Result<ClearReceipt> {
+    /// old one. Writes nothing: the caller starts the reply turn, and that
+    /// turn persists `marker` as the row the loader cuts at.
+    pub async fn prepare_clear(&self, session_id: Uuid) -> Result<PreparedClear> {
         let aborted_background_compaction = match self.take_pending_compaction(session_id) {
             Some(pending) => {
                 tracing::info!("/clear: aborting the background compaction in flight");
@@ -161,17 +176,18 @@ impl AgentService {
             None => false,
         };
 
-        let session_title = SessionService::new(self.context.clone())
+        let session = SessionService::new(self.context.clone())
             .get_session(session_id)
             .await
-            .map_err(AgentError::db)?
-            .and_then(|s| s.title);
+            .map_err(AgentError::db)?;
+        let session_title = session.as_ref().and_then(|s| s.title.clone());
+        let working_directory = session.and_then(|s| s.working_directory);
 
         let messages = MessageService::new(self.context.clone());
 
-        // Read before the marker row exists, so the quote is exactly what
-        // the user saw vanish. `clear_marker` filters out old marker and
-        // summary rows and caps the quote at the last six pairs itself.
+        // Read before the reply turn persists the marker, so the quote is
+        // exactly what the user saw vanish. `clear_marker` filters out old
+        // marker and summary rows and caps the quote at the last six pairs.
         let recent: Vec<(String, String)> = messages
             .list_messages_for_session(session_id)
             .await
@@ -180,23 +196,68 @@ impl AgentService {
             .map(|m| (m.role.clone(), m.content.clone()))
             .collect();
 
-        messages
-            .create_message(
-                session_id,
-                "user".to_string(),
-                clear_marker(session_title.as_deref(), &recent),
-            )
-            .await
-            .map_err(AgentError::db)?;
+        let snapshot = environment_snapshot(session_id, working_directory).await;
+        let marker = format!(
+            "{}\n\n{}",
+            clear_marker(session_title.as_deref(), &recent),
+            snapshot_block(&snapshot)
+        );
+        let title = session_title
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .unwrap_or("untitled");
+        let reply_context = format!("{marker}\n\n{}", reply_instructions(title, &snapshot));
 
         tracing::info!(
-            "/clear: context cut for session {session_id} (title={:?}, aborted_background={})",
+            "/clear: context cut for session {session_id} (title={:?}, plan={:?}, aborted_background={})",
             session_title,
+            snapshot.plan_state,
             aborted_background_compaction
         );
-        Ok(ClearReceipt {
-            session_title,
-            aborted_background_compaction,
+        Ok(PreparedClear {
+            receipt: ClearReceipt {
+                session_title,
+                aborted_background_compaction,
+            },
+            marker,
+            reply_context,
         })
+    }
+
+    /// Cut the context and persist the marker, without starting a reply turn.
+    /// For surfaces that do not stream a turn of their own (channels).
+    pub async fn clear_context(&self, session_id: Uuid) -> Result<ClearReceipt> {
+        let prepared = self.prepare_clear(session_id).await?;
+        MessageService::new(self.context.clone())
+            .create_message(session_id, "user".to_string(), prepared.marker)
+            .await
+            .map_err(AgentError::db)?;
+        Ok(prepared.receipt)
+    }
+}
+
+/// Reads where the session's state lives. Paths are reported only when the
+/// file exists, so the agent is never pointed at a file that is not there.
+async fn environment_snapshot(
+    session_id: Uuid,
+    working_directory: Option<String>,
+) -> EnvironmentSnapshot {
+    let plan_state = PlanState::from(plan_files::plan_mode_state(session_id).await);
+    let (plan_md, plan_json) = if plan_state == PlanState::None {
+        (None, None)
+    } else {
+        let md = plan_files::plan_md_path(session_id).await;
+        let json = plan_files::plan_json_read_path(session_id).await;
+        (
+            md.exists().then(|| md.display().to_string()),
+            json.exists().then(|| json.display().to_string()),
+        )
+    };
+    EnvironmentSnapshot {
+        working_directory,
+        plan_state,
+        plan_md,
+        plan_json,
     }
 }

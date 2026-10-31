@@ -1096,12 +1096,23 @@ impl App {
                     self.push_system_message(crate::tui::clear_notice::no_session());
                     return true;
                 };
-                match self.agent_service.clear_context(session_id).await {
-                    Ok(receipt) => {
+                match self.agent_service.prepare_clear(session_id).await {
+                    Ok(prepared) => {
                         let base = self.agent_service.base_context_tokens();
                         self.session_input_tokens.insert(session_id, base);
                         self.last_input_tokens = Some(base);
-                        self.push_system_message(crate::tui::clear_notice::cleared(&receipt));
+                        self.push_system_message(crate::tui::clear_notice::cleared(
+                            &prepared.receipt,
+                        ));
+                        // The reply turn persists the marker as its user row
+                        // and tells the agent its context was wiped, so it
+                        // acknowledges the clear and resumes without a prompt.
+                        self.resume_background_turn(
+                            session_id,
+                            prepared.reply_context,
+                            prepared.marker,
+                        )
+                        .await;
                     }
                     Err(e) => {
                         tracing::error!("/clear failed: {e}");

@@ -201,12 +201,16 @@ fn every_surface_handles_clear_without_an_agent_turn() {
         );
     }
     let tui = TUI.find("\"/clear\" => {").expect("TUI command");
-    let window = &TUI[tui..tui + 1200];
+    let window = &TUI[tui..tui + 2000];
     assert!(
         window.contains("is_processing"),
         "refused while a turn runs"
     );
-    assert!(window.contains("clear_context(session_id)"));
+    assert!(window.contains("prepare_clear(session_id)"));
+    assert!(
+        window.contains("resume_background_turn("),
+        "the reply turn starts right after the clear"
+    );
     assert!(
         window.contains("base_context_tokens()"),
         "footer reset to baseline"

@@ -8,6 +8,7 @@ pub(crate) mod background_tasks;
 pub(crate) mod boot_report;
 pub(crate) mod builder;
 pub(crate) mod clear;
+pub(crate) mod clear_snapshot;
 pub(crate) mod compaction;
 pub(crate) mod compaction_notice;
 pub(crate) mod compaction_prompts;
