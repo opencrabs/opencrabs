@@ -2228,7 +2228,7 @@ cargo install opencrabs --no-default-features --features "telegram,whatsapp,disc
 | `code-graph` | tree-sitter | Symbol/call-graph index for structural code queries (see [Structural code search](#-benchmarks)) |
 | `rtk` | — | Bash output filtering via RTK, cutting tokens on supported commands |
 | `pdfium` | pdfium-render | PDF page rendering, the primary renderer; falls back to `pdftoppm` when the system Pdfium library is absent |
-| `notification-sound` | rodio | Plan-finished chime: plays the embedded dripping-tap WAV when a plan reaches 100% at turn settle. Opt-in via `[agent] completion_notification_enabled` (default false), TUI only, no desktop toast |
+| `notification-sound` | rodio | Plan-finished chime: plays the embedded notification WAV when a plan reaches 100% at turn settle. Opt-in via `[agent] completion_notification_enabled` (default false), TUI only, no desktop toast |
 
 ### Option 4: Build from Source (full control)
 
@@ -2942,7 +2942,7 @@ plan_auto_start = false          # default false: completing a plan task NEVER s
 plan_worker_allow_nested = false # default false: isolated plan workers are pure - they cannot spawn further sub-agents
 plan_worker_allow_write = false  # default false: isolated plan workers run READ-ONLY (#1173 grant) - they verify/report; mutations stay with the parent
                                  # or background tasks (their long bash runs attached). true lets them nest.
-completion_notification_enabled = false # default false (#2255): play src/assets/sound/water_drip_ui-04.wav when a
+completion_notification_enabled = false # default false (#2255): play src/assets/sound/notification.wav when a
                                  # plan reaches 100% at turn settle. TUI only, no desktop toast. Opt-in, because
                                  # an agent that chirps unasked is noise.
 subagent_session_ttl_days = 7    # days a spawned sub-agent's session is kept before pruning. Nothing revisits
@@ -5171,7 +5171,7 @@ cargo clippy -- -D warnings
 | `rtk` | Bash output filtering via RTK (default: enabled) |
 | `code-graph` | tree-sitter symbol/call-graph index behind `memory_search`'s structural lane (default: enabled) |
 | `pdfium` | PDF page rendering via the system Pdfium library, ahead of the `pdftoppm` fallback (default: enabled) |
-| `notification-sound` | Plan-finished chime from the embedded dripping-tap WAV, behind `[agent] completion_notification_enabled` (default: enabled feature, sound itself off by default) |
+| `notification-sound` | Plan-finished chime from the embedded notification WAV, behind `[agent] completion_notification_enabled` (default: enabled feature, sound itself off by default) |
 | `profiling` | Enable pprof flamegraph profiling (Unix only) |
 | `eval` | Offline + live evaluation harness. Compiled automatically under `cfg(test)`, and present in release binaries, which are built with `--all-features` |
 

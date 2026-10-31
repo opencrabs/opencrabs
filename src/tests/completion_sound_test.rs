@@ -216,3 +216,34 @@ fn telegram_progress_handler_renders_nothing_for_plan_completed() {
         "a plan completion must add no line and settle no flow on a channel surface"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Embedded asset.
+//
+// A bad swap is silent at runtime: `play_blocking` only logs a warning when
+// the decoder refuses the bytes, so the operator hears nothing and nothing
+// fails. Pin the shape of the file the feature ships instead.
+const COMPLETION_WAV_ASSET: &[u8] = include_bytes!("../assets/sound/notification.wav");
+
+#[test]
+fn the_embedded_completion_asset_is_a_real_wav() {
+    assert!(
+        COMPLETION_WAV_ASSET.len() > 10_000,
+        "the chime must be a real recording, not a stub (got {} bytes)",
+        COMPLETION_WAV_ASSET.len()
+    );
+    assert_eq!(
+        &COMPLETION_WAV_ASSET[0..4],
+        b"RIFF",
+        "the chime must be a RIFF container"
+    );
+    assert_eq!(
+        &COMPLETION_WAV_ASSET[8..12],
+        b"WAVE",
+        "the chime must be a WAVE file for rodio's wav decoder"
+    );
+    assert!(
+        COMPLETION_WAV_ASSET.windows(4).any(|w| w == b"fmt "),
+        "a WAV with no fmt chunk cannot be decoded"
+    );
+}

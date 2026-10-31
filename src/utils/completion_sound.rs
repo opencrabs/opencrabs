@@ -5,17 +5,16 @@
 //! - [`announcement_pending`] decides whether a plan just finished. It is a
 //!   pure function over the plan document, so the never-fire cases (Editing,
 //!   partly done, failed, discarded) are unit-testable with no audio device.
-//! - [`play_completion_sound`] plays the embedded dripping tap once, on its
-//!   own thread. Sound is a TUI surface concern: the settle hook emits
+//! - [`play_completion_sound`] plays the embedded notification chime once, on
+//!   its own thread. Sound is a TUI surface concern: the settle hook emits
 //!   `ProgressEvent::PlanCompleted` for every surface, and only the TUI turns
 //!   that fact into audio.
 
 use crate::tui::plan::{PlanDocument, PlanStatus};
 
-/// The only asset this module plays. `ding.mp3` was never used on purpose:
-/// the dripping tap is the sound the owner picked.
+/// The only asset this module plays: the notification chime the owner picked.
 #[cfg(feature = "notification-sound")]
-const COMPLETION_WAV: &[u8] = include_bytes!("../assets/sound/water_drip_ui-04.wav");
+const COMPLETION_WAV: &[u8] = include_bytes!("../assets/sound/notification.wav");
 
 /// Report the resolved-task count when `plan` just finished, else None.
 ///

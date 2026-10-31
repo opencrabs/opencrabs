@@ -274,7 +274,7 @@ slack = ["slack-morphism", "tokio-tungstenite", "rustls"]
 local-stt = ["rwhisper", "rodio", "hound", "rubato", "symphonia", "symphonia-adapter-libopus"]
 local-tts = ["opusic-sys", "rubato"]
 # Plan-finished chime (#2255). `rodio` is already pulled in by `local-stt`,
-# so this feature only adds the WAV decoder for the one embedded drip.
+# so this feature only adds the WAV decoder for the one embedded chime.
 notification-sound = ["rodio", "rodio/wav"]
 browser = ["chromey"]
 pdfium = ["dep:pdfium-render"]
