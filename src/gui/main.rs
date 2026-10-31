@@ -37,10 +37,10 @@ use crate::theme::{
 use futures::channel::oneshot;
 
 use gpui::{
-    AnyElement, App, Application, Bounds, Context, Div, DragMoveEvent, Entity, ExternalPaths,
-    FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ScrollHandle, SharedString, TitlebarOptions, Window, WindowBounds, WindowOptions, div,
-    prelude::*, px, rems, rgb, rgba, size,
+    AnyElement, App, Application, Bounds, ClickEvent, Context, Div, DragMoveEvent, Entity,
+    ExternalPaths, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ScrollHandle, SharedString, TitlebarOptions, Window, WindowBounds, WindowOptions,
+    div, prelude::*, px, rems, rgb, rgba, size,
 };
 use opencrabs::brain::agent::ProgressEvent;
 use opencrabs::utils::drop_landing::human_size;
@@ -232,6 +232,21 @@ struct Dashboard {
     /// counting: the poll tick retires the flag a few frames after the moves
     /// stop, and the drop clears it outright.
     drag_seen: Option<std::time::Instant>,
+    /// The row whose pin/delete strip is showing. One at a time: opening a
+    /// row's actions closes the one before it.
+    rail_actions: Option<Uuid>,
+    /// A leftward slide in flight on a rail row: the session and the pointer
+    /// x where the drag began. Past the threshold the row's strip opens.
+    rail_swipe: Option<(Uuid, f32)>,
+    /// The row whose strip a slide just opened. gpui fires a click on mouse-up
+    /// whenever the pointer is still over the element, movement or not, so
+    /// without this the release that ends a slide also opens the chat the
+    /// slide was meant to act on.
+    rail_slide_opened: Option<Uuid>,
+    /// The conversation a delete is waiting on. Every delete path arms this
+    /// and only the dialog's own button erases, so no gesture can cost a
+    /// conversation.
+    confirm_delete: Option<Uuid>,
     /// The plan checklist strip above the editor, re-read when its file moves.
     plan: plan_strip::PlanStripState,
     /// Which session the strip's path was resolved for, so the DB lookup runs
@@ -652,6 +667,7 @@ impl Dashboard {
                     }
                 }
                 agent_bridge::TurnEvent::BootstrapFailed(e) => {
+                    logging::error(&format!("agent offline: {e}"));
                     self.agent_error = Some(e.clone());
                     self.live.notices.push(format!("agent offline: {e}"));
                 }
@@ -852,15 +868,70 @@ impl Dashboard {
         cx.notify();
     }
 
+    /// Pin or unpin one conversation, then re-read the pinned set from the
+    /// ledger. The star flips on the click so the rail never lags a slow
+    /// write, and the refetch replaces the guess with what was stored.
+    fn toggle_favorite(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        let pinned = self.sessions.is_favorite(id);
+        let db_path = self.db_path.clone();
+        cx.spawn(async move |this, cx| {
+            if let Err(e) = sessions::set_favorite(db_path, id, !pinned).await {
+                logging::error(&format!("favorite {id}: {e}"));
+                this.update(cx, |this, cx| {
+                    this.live.notices.push(format!("favorite: {e}"));
+                    cx.notify();
+                })
+                .ok();
+                return;
+            }
+            this.update(cx, |this, cx| this.refresh_favorites(cx)).ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Re-read the pinned ids. A separate fetch from the rows because the
+    /// sidecar can change on its own (the TUI pins too).
+    fn refresh_favorites(&mut self, cx: &mut Context<Self>) {
+        let db_path = self.db_path.clone();
+        cx.spawn(async move |this, cx| {
+            let result = sessions::load_favorites(db_path).await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(ids) => this.sessions.favorites = ids.into_iter().collect(),
+                    Err(e) => logging::error(&format!("favorites refresh: {e}")),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Arm the delete dialog. Every delete path (Cmd+Backspace, a row's
+    /// strip) lands here instead of erasing, so the erase is always the
+    /// second, deliberate click.
+    fn request_delete(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        self.confirm_delete = Some(id);
+        cx.notify();
+    }
+
     /// Delete a session, then let the rail fetch the truth back from the
     /// ledger. The row disappears because the row is gone, not because a
     /// local list was filtered.
     fn delete_session(&mut self, id: Uuid, cx: &mut Context<Self>) {
         agent_bridge::spawn_delete_session(self.db_path.clone(), id, self.sink.clone());
+        // The pin is part of the row: it leaves with the row.
+        self.sessions.favorites.retain(|f| *f != id);
+        if self.rail_actions == Some(id) {
+            self.rail_actions = None;
+        }
         cx.notify();
     }
 
-    /// Refetch the rail from the ledger.
+    /// Refetch the rail from the ledger. The pinned set rides along: pins come
+    /// from a sidecar the TUI also writes, so a list refresh that skipped it
+    /// would draw a row in the wrong slot until the next pin click.
     fn refresh_rail(&mut self, cx: &mut Context<Self>) {
         let db_path = self.db_path.clone();
         cx.spawn(async move |this, cx| {
@@ -873,6 +944,7 @@ impl Dashboard {
                     }
                     Err(e) => this.sessions.error = Some(e.into()),
                 }
+                this.refresh_favorites(cx);
                 cx.notify();
             })
             .ok();
@@ -975,6 +1047,17 @@ impl Dashboard {
         // chats whose title (or id prefix) matches, live, with the match
         // count on the bar. Any exit clears it, so the rail never hides a
         // filter behind a closed field.
+        // Cmd+Shift+F pins the open conversation. It comes before the plain
+        // find key because both carry `f`; shift decides which one it was.
+        if ev.keystroke.modifiers.platform
+            && ev.keystroke.modifiers.shift
+            && ev.keystroke.key == "f"
+        {
+            if let Some(id) = self.transcript.session {
+                self.toggle_favorite(id, cx);
+            }
+            return;
+        }
         if ev.keystroke.modifiers.platform && ev.keystroke.key == "f" {
             if self.sessions.filter_active {
                 self.close_rail_filter(cx);
@@ -1020,7 +1103,7 @@ impl Dashboard {
         // the rail re-fetches, so the row leaves because it is gone.
         if ev.keystroke.modifiers.platform && ev.keystroke.key == "backspace" {
             if let Some(id) = self.transcript.session {
-                self.delete_session(id, cx);
+                self.request_delete(id, cx);
             }
             return;
         }
@@ -1028,6 +1111,18 @@ impl Dashboard {
         // before the editor gate because the editor owns the keyboard while
         // typing and would swallow it.
         if ev.keystroke.key == "escape" {
+            // The confirm dialog sits above everything, so Esc answers it
+            // first: cancelling leaves the conversation untouched.
+            if self.confirm_delete.take().is_some() {
+                cx.notify();
+                return;
+            }
+            // An open row strip closes next: Esc dismisses the nearest
+            // affordance, never the far one.
+            if self.rail_actions.take().is_some() {
+                cx.notify();
+                return;
+            }
             if !self.busy {
                 self.esc_at = None;
                 return;
@@ -1159,23 +1254,61 @@ impl Render for Dashboard {
         // The rail's rows: each carries its own click listener, built in its
         // own loop turn so the `&mut cx` borrow stays legal.
         let mut rail_rows = Vec::with_capacity(self.sessions.items.len());
-        for s in self.sessions.visible() {
+        // Pinned rows first, the rest untouched: the TUI's own order.
+        for s in self.sessions.ordered() {
             let id = s.id;
             let selected = self.sessions.selected == Some(id);
-            // The ✕ carries its own listener and stops the click before the
-            // row's, so deleting a session never also opens it.
-            let del = cx.listener(move |this, _ev, _window, cx| {
-                cx.stop_propagation();
-                this.delete_session(id, cx);
+            let favorite = self.sessions.is_favorite(id);
+            // A row's actions stay out of sight until asked for. There is no
+            // always-visible delete: an ✕ on every row reads as "close" and
+            // costs conversations. Slide the row left, or press the pin key,
+            // and the strip appears on that row alone.
+            let action = if self.rail_actions == Some(id) {
+                let pin = cx.listener(move |this, _ev, _window, cx| {
+                    cx.stop_propagation();
+                    this.toggle_favorite(id, cx);
+                });
+                let del = cx.listener(move |this, _ev, _window, cx| {
+                    cx.stop_propagation();
+                    this.request_delete(id, cx);
+                });
+                Some(
+                    div()
+                        .id(SharedString::from(format!("session-actions-{id}")))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_1()
+                        .child(sessions::pin_button(favorite).on_click(pin))
+                        .child(sessions::delete_button().on_click(del)),
+                )
+            } else {
+                None
+            };
+            let r = sessions::row(s, selected, favorite, action);
+            // The press starts the slide and closes any other row's strip.
+            let press = cx.listener(move |this, _ev: &MouseDownEvent, window, cx| {
+                this.rail_slide_opened = None;
+                this.rail_swipe = Some((id, f32::from(window.mouse_position().x)));
+                if this.rail_actions.is_some_and(|open| open != id) {
+                    this.rail_actions = None;
+                }
+                cx.notify();
             });
-            let action = sessions::delete_marker().on_click(del);
-            let r = sessions::row(s, selected, Some(action));
             let handler = cx.listener(move |this, _ev, _window, cx| {
+                // The release that ended a slide is the tail of that gesture,
+                // not a pick: it leaves the strip it just opened alone.
+                if this.rail_slide_opened.take() == Some(id) {
+                    cx.notify();
+                    return;
+                }
                 // The find field is a jump aid: picking a row is its exit,
                 // and the keyboard goes back to the conversation.
                 this.close_rail_filter(cx);
+                this.rail_actions = None;
                 this.open_session(id, cx);
             });
+            let r = r.on_mouse_down(MouseButton::Left, press);
             rail_rows.push(sessions::on_click(r, handler));
         }
         let rail = sessions::rail(&self.sessions, rail_rows, self.rail_width);
@@ -1273,6 +1406,7 @@ impl Render for Dashboard {
                                     .child("cmd-n · new chat")
                                     .child("cmd-o · fold turn")
                                     .child("cmd-b · sidebar")
+                                    .child("cmd-shift-f · pin")
                                     .child("cmd-⌫ · delete chat"),
                             )
                             .child(
@@ -1447,6 +1581,16 @@ impl Render for Dashboard {
                     }
                     cx.notify();
                 }
+                // A rail row slid left far enough: open its actions. The
+                // threshold keeps a wobbling click from revealing anything.
+                if let Some((id, from_x)) = this.rail_swipe
+                    && sessions::slide_reveals(from_x, f32::from(ev.position.x))
+                    && this.rail_actions != Some(id)
+                {
+                    this.rail_actions = Some(id);
+                    this.rail_slide_opened = Some(id);
+                    cx.notify();
+                }
             }))
             // Light the target while a Finder drag is over the window. The
             // moves are what carry the flag; the drop consumes it.
@@ -1481,6 +1625,7 @@ impl Render for Dashboard {
                 cx.listener(|this, _ev: &MouseUpEvent, _window, _cx| {
                     this.dragging_rail = false;
                     this.drag_from = None;
+                    this.rail_swipe = None;
                 }),
             );
         if self.rail_open {
@@ -1490,6 +1635,28 @@ impl Render for Dashboard {
                 this.drag_from = Some((f32::from(window.mouse_position().x), width * this.rem));
             });
             root = root.child(rail).child(splitter(grab));
+        }
+        // One dialog for every delete path, painted above both panes. The
+        // conversation is only named so the user knows what they are about
+        // to lose; nothing is erased until the confirm button is clicked.
+        if let Some(id) = self.confirm_delete {
+            let title = self
+                .sessions
+                .items
+                .iter()
+                .find(|s| s.id == id)
+                .and_then(|s| s.title.clone())
+                .unwrap_or_else(|| "(untitled)".to_string());
+            let confirm = cx.listener(move |this, _ev, _window, cx| {
+                this.confirm_delete = None;
+                this.rail_actions = None;
+                this.delete_session(id, cx);
+            });
+            let cancel = cx.listener(|this, _ev, _window, cx| {
+                this.confirm_delete = None;
+                cx.notify();
+            });
+            root = root.child(confirm_delete_overlay(title, confirm, cancel));
         }
         // The drop target: a Finder drag tints the whole window so the target
         // is never guessed. It paints above both panes and vanishes the
@@ -1562,9 +1729,20 @@ fn main() {
     }
     let state = futures::executor::block_on(load_view(db_path.clone(), Period::AllTime));
     let session_list = futures::executor::block_on(sessions::load_sessions(db_path.clone()));
+    // The pinned set is a sidecar table, so it is its own read. A failure
+    // leaves the rail unpinned rather than hiding the conversations.
+    let favorites: std::collections::HashSet<uuid::Uuid> =
+        futures::executor::block_on(sessions::load_favorites(db_path.clone()))
+            .unwrap_or_else(|e| {
+                logging::error(&format!("favorites load: {e}"));
+                Vec::new()
+            })
+            .into_iter()
+            .collect();
     let sessions_state = match session_list {
         Ok(items) => sessions::SessionsState {
             items,
+            favorites: favorites.clone(),
             selected: None,
             error: None,
             filter: String::new(),
@@ -1572,6 +1750,7 @@ fn main() {
         },
         Err(e) => sessions::SessionsState {
             items: Vec::new(),
+            favorites,
             selected: None,
             error: Some(e.into()),
             filter: String::new(),
@@ -1643,6 +1822,10 @@ fn main() {
                         dragging_rail: false,
                         drag_from: None,
                         drag_seen: None,
+                        rail_actions: None,
+                        rail_swipe: None,
+                        rail_slide_opened: None,
+                        confirm_delete: None,
                         plan: plan_strip::PlanStripState::default(),
                         plan_for: None,
                         transcript: transcript::TranscriptState {
@@ -1789,8 +1972,158 @@ fn ctx_footer(used: Option<u32>, max: u32) -> (String, u32) {
     )
 }
 
+/// The delete confirmation: a dim card over both panes naming the
+/// conversation, with the erase on its own button and nothing else. Every
+/// delete path routes here, so the conversation is never one mis-click or one
+/// mis-swipe away from gone.
+fn confirm_delete_overlay(
+    title: String,
+    confirm: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    cancel: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id("confirm-delete-scrim")
+        // Modal: the dim scrim takes the pointer so a click meant for the
+        // rail behind it cannot open or delete anything else.
+        .occlude()
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .bg(rgba(0x0a0a0acc))
+        .child(
+            div()
+                .id("confirm-delete")
+                .flex()
+                .flex_col()
+                .gap_3()
+                .w(rems(24.0))
+                .p_4()
+                .rounded(px(10.0))
+                .border_1()
+                .border_color(rgb(theme::PANEL_HI))
+                .bg(rgb(theme::PANEL))
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(TEXT))
+                        .child(SharedString::from("Delete this conversation?")),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(TEXT_MUTED))
+                        .truncate()
+                        .child(SharedString::from(title)),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(TEXT_MUTED))
+                        .child(SharedString::from(
+                            "Its messages leave the ledger. This cannot be undone.",
+                        )),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .justify_end()
+                        .gap_2()
+                        .child(
+                            div()
+                                .id("confirm-delete-cancel")
+                                .px_3()
+                                .py_1()
+                                .rounded_sm()
+                                .text_xs()
+                                .text_color(rgb(TEXT_NORMAL))
+                                .cursor_pointer()
+                                .hover(|d| d.bg(rgb(theme::PANEL_HI)))
+                                .child(SharedString::from("cancel"))
+                                .on_click(cancel),
+                        )
+                        .child(
+                            div()
+                                .id("confirm-delete-yes")
+                                .px_3()
+                                .py_1()
+                                .rounded_sm()
+                                .text_xs()
+                                .text_color(rgb(RED))
+                                .cursor_pointer()
+                                .border_1()
+                                .border_color(rgb(RED))
+                                .hover(|d| d.bg(rgb(theme::SELECTION)))
+                                .child(SharedString::from("delete"))
+                                .on_click(confirm),
+                        ),
+                ),
+        )
+}
+
 #[cfg(test)]
 mod tests {
+    /// One dialog, one delete path. The bridge that erases the row has exactly
+    /// one call site, and that site is the dialog's own confirm handler. A
+    /// second call site would mean a gesture can delete a conversation
+    /// without ever asking, which is the footgun this dialog exists to close.
+    ///
+    /// A source scan, because the rule is about wiring: the paths themselves
+    /// need a window and a click to exercise.
+    #[test]
+    fn only_the_confirm_dialog_reaches_the_delete_bridge() {
+        let src = include_str!("main.rs");
+        // Built in halves so this test's own source does not contain the
+        // needle it is counting: the file it reads includes this module.
+        let needle = ["spawn_delete", "_session"].concat();
+
+        let sites: Vec<usize> = src
+            .match_indices(needle.as_str())
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(
+            sites.len(),
+            1,
+            "one delete path only, found {}",
+            sites.len()
+        );
+
+        let call = sites[0];
+        let head = src.get(..call).expect("a call site is a char boundary");
+        let owner = head
+            .rfind("fn delete_session")
+            .expect("the call sits inside delete_session");
+        let between = src
+            .get(owner..call)
+            .expect("a fn header is a char boundary");
+        assert!(
+            !between.contains("\n    fn "),
+            "the bridge must be reached from delete_session itself, not a neighbour"
+        );
+
+        // Both arming paths exist and go through the dialog: Cmd+Backspace
+        // for the open conversation, and the row's slide-out strip.
+        assert!(
+            src.contains("self.request_delete(id, cx);"),
+            "Cmd+Backspace must arm the dialog"
+        );
+        assert!(
+            src.contains("this.request_delete(id, cx);"),
+            "the row strip must arm the dialog"
+        );
+        // Esc is the dialog's cancel, and it must answer the dialog before
+        // the row strip or the turn it would otherwise abort.
+        assert!(
+            src.contains("if self.confirm_delete.take().is_some()"),
+            "Esc must cancel the dialog first"
+        );
+    }
+
     use super::*;
 
     #[test]

@@ -11,6 +11,8 @@
 //! builds each row's handler in its own loop turn, then hands the finished
 //! rows to `rail`.
 
+use std::collections::HashSet;
+
 use gpui::{
     App, ClickEvent, Div, InteractiveElement, SharedString, Stateful, Styled, Window, div,
     prelude::*, rems, rgb,
@@ -19,9 +21,11 @@ use gpui::{
 use opencrabs::db::Database;
 use opencrabs::db::models::Session;
 use opencrabs::db::repository::session::{SessionListOptions, SessionRepository};
+use opencrabs::db::repository::session_favorites::SessionFavoritesRepository;
 
 use crate::theme::{
-    BG, FOCUS, PANEL, PANEL_HI, SELECTION, TEXT, TEXT_FAINT, TEXT_HINT, TEXT_MUTED, TEXT_TITLE,
+    ACCENT, BG, FOCUS, PANEL, PANEL_HI, RED, SELECTION, TEXT, TEXT_FAINT, TEXT_HINT, TEXT_MUTED,
+    TEXT_TITLE,
 };
 
 /// The rail's live state, owned by the window's view.
@@ -40,12 +44,34 @@ pub struct SessionsState {
     /// Whether the field is taking keystrokes. The bar is only drawn while it
     /// is, so an unsearched rail looks the way it always did.
     pub filter_active: bool,
+    /// Pinned sessions, straight from the `session_favorites` sidecar the TUI
+    /// writes (`SessionService::favorite_session`). Same table, same ids, so
+    /// pinning in one surface shows up in the other on its next fetch. A set,
+    /// because every rail row asks "is this one pinned?" once per frame and
+    /// the sidecar is keyed by session id: the same shape it is stored in.
+    pub favorites: HashSet<uuid::Uuid>,
 }
 
 impl SessionsState {
     /// The rows the rail shows right now, in ledger order.
     pub fn visible(&self) -> impl Iterator<Item = &Session> {
         self.items.iter().filter(|s| matches(s, &self.filter))
+    }
+
+    /// Pinned first, then everything else, each group keeping the ledger's
+    /// order. TUI parity: `SessionService::session_favorites` feeds a stable
+    /// `sort_by_key(|s| !pins.contains(&s.id))`, so a pin moves a chat to the
+    /// top without disturbing the order inside either group.
+    pub fn ordered(&self) -> impl Iterator<Item = &Session> {
+        let (mut pinned, rest): (Vec<&Session>, Vec<&Session>) =
+            self.visible().partition(|s| self.is_favorite(s.id));
+        pinned.extend(rest);
+        pinned.into_iter()
+    }
+
+    /// Whether this session is pinned right now.
+    pub fn is_favorite(&self, id: uuid::Uuid) -> bool {
+        self.favorites.contains(&id)
     }
 
     /// How many of the ledger's sessions match the query.
@@ -68,6 +94,19 @@ pub fn matches(s: &Session, query: &str) -> bool {
         return true;
     }
     s.id.to_string().starts_with(&q)
+}
+
+/// How far left a rail row must be slid before its action strip opens, in
+/// px. Below this a click with an unsteady hand stays a click, and a slide
+/// that comes up short snaps back to where the row was.
+pub const SLIDE_REVEAL_PX: f32 = 36.0;
+
+/// The slide's whole rule, as arithmetic, so it can be tested without a
+/// window: a drag that started at `from_x` and is now at `to_x` has travelled
+/// far enough left when the travel is at least `SLIDE_REVEAL_PX`. Only
+/// leftward travel counts; a drag to the right never opens anything.
+pub fn slide_reveals(from_x: f32, to_x: f32) -> bool {
+    to_x - from_x <= -SLIDE_REVEAL_PX
 }
 
 /// Cmd+F's field, drawn under the rail's header while it holds the keyboard.
@@ -156,6 +195,95 @@ pub async fn load_sessions(db_path: std::path::PathBuf) -> Result<Vec<Session>, 
     }
 }
 
+/// The pinned set, read through the same 4 MB no-migration door as
+/// [`load_sessions`]. Returns ids: the rail already holds the rows, this only
+/// says which of them go on top.
+pub async fn load_favorites(db_path: std::path::PathBuf) -> Result<Vec<uuid::Uuid>, String> {
+    let (tx, rx) = futures::channel::oneshot::channel::<Result<Vec<uuid::Uuid>, String>>();
+    let spawned = std::thread::Builder::new()
+        .name("favorites-fetch".into())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let result = match runtime {
+                Ok(rt) => rt.block_on(async {
+                    let db = Database::connect(&db_path)
+                        .await
+                        .map_err(|e| format!("db connect: {e}"))?;
+                    let repo = SessionFavoritesRepository::new(db.pool().clone());
+                    let ids = repo
+                        .all()
+                        .await
+                        .map_err(|e| format!("favorites read: {e}"))?;
+                    // The sidecar stores ids as text; a malformed one is a
+                    // foreign key that got past SQLite, so it is skipped
+                    // rather than failing the whole rail.
+                    // Both arms are `String`-errored, so the block's own
+                    // error type is stated rather than inferred: a
+                    // generic `?` target leaves it ambiguous.
+                    Ok::<Vec<uuid::Uuid>, String>(
+                        ids.iter()
+                            .filter_map(|s| uuid::Uuid::parse_str(s).ok())
+                            .collect(),
+                    )
+                }),
+                Err(e) => Err(format!("tokio runtime failed: {e}")),
+            };
+            let _ = tx.send(result);
+        });
+    match spawned {
+        Ok(_) => match rx.await {
+            Ok(result) => result,
+            Err(_) => Err("favorites fetch thread dropped its result".into()),
+        },
+        Err(e) => Err(format!("favorites fetch thread failed to spawn: {e}")),
+    }
+}
+
+/// Pin or unpin one session in the shared sidecar table. The caller refetches
+/// afterwards instead of patching its own list, so the rail can never show a
+/// pin the ledger does not have.
+pub async fn set_favorite(
+    db_path: std::path::PathBuf,
+    id: uuid::Uuid,
+    pinned: bool,
+) -> Result<(), String> {
+    let (tx, rx) = futures::channel::oneshot::channel::<Result<(), String>>();
+    let spawned = std::thread::Builder::new()
+        .name("favorite-write".into())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let result = match runtime {
+                Ok(rt) => rt
+                    .block_on(async {
+                        let db = Database::connect(&db_path).await?;
+                        let repo = SessionFavoritesRepository::new(db.pool().clone());
+                        let sid = id.to_string();
+                        if pinned {
+                            repo.add(&sid).await
+                        } else {
+                            repo.remove(&sid).await
+                        }
+                    })
+                    .map_err(|e| format!("{e:#}")),
+                Err(e) => Err(format!("tokio runtime failed: {e}")),
+            };
+            let _ = tx.send(result);
+        });
+    match spawned {
+        Ok(_) => match rx.await {
+            Ok(result) => result,
+            Err(_) => Err("favorite write thread dropped its result".into()),
+        },
+        Err(e) => Err(format!("favorite write thread failed to spawn: {e}")),
+    }
+}
+
 /// Char-safe truncation: walk chars, never slice bytes (#2271's whole class).
 fn fit(s: &str, max_chars: usize) -> String {
     if s.chars().count() <= max_chars {
@@ -166,23 +294,48 @@ fn fit(s: &str, max_chars: usize) -> String {
     out
 }
 
-/// One session row: title and cost on the left, the caller's action on the
-/// right. Pure data plus one slot for behaviour, so the view owns every
-/// listener it puts on screen.
-pub fn row(s: &Session, selected: bool, action: Option<Stateful<Div>>) -> Stateful<Div> {
-    let body = div()
+/// One session row: title and cost on the left, the caller's action strip on
+/// the right. Pure data plus one slot for behaviour, so the view owns every
+/// listener it puts on screen. A pinned row carries the star the owner asked
+/// for, in the accent colour, so "why is this one on top" is answered by the
+/// row itself.
+pub fn row(
+    s: &Session,
+    selected: bool,
+    favorited: bool,
+    action: Option<Stateful<Div>>,
+) -> Stateful<Div> {
+    let title = div()
         .flex()
-        .flex_col()
-        .gap_0p5()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .min_w_0()
+        .when(favorited, |d| {
+            d.child(
+                div()
+                    .flex_none()
+                    .text_xs()
+                    .text_color(rgb(ACCENT))
+                    .child(SharedString::from("\u{2605}")),
+            )
+        })
         .child(
             div()
                 .text_sm()
                 .text_color(rgb(TEXT))
+                .truncate()
                 .child(SharedString::from(fit(
                     s.title.as_deref().unwrap_or("(untitled)"),
                     42,
                 ))),
-        )
+        );
+    let body = div()
+        .flex()
+        .flex_col()
+        .gap_0p5()
+        .min_w_0()
+        .child(title)
         .child(
             div()
                 .text_xs()
@@ -222,17 +375,51 @@ pub fn on_click(
     row.on_click(handler)
 }
 
-/// The per-row delete affordance. A small ✕ that the view wires to
-/// `SessionService::delete_session` (soft delete: the row is archived, so
-/// usage history survives). Dim until the row is hovered in the caller's
-/// layout, so a rail of sessions does not read as a rail of delete buttons.
-pub fn delete_marker() -> Stateful<Div> {
+/// The pin button of a row's slide-out strip. The glyph states the action it
+/// performs: a hollow star pins, a filled one unpins.
+pub fn pin_button(favorited: bool) -> Stateful<Div> {
+    let (id, glyph, label, color) = if favorited {
+        ("session-unpin", "\u{2605}", "unpin", ACCENT)
+    } else {
+        ("session-pin", "\u{2606}", "pin", TEXT_MUTED)
+    };
+    div()
+        .id(id)
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .px_2()
+        .py_1()
+        .rounded_sm()
+        .bg(rgb(PANEL_HI))
+        .text_xs()
+        .text_color(rgb(color))
+        .cursor_pointer()
+        .hover(|d| d.bg(rgb(FOCUS)))
+        .child(SharedString::from(glyph))
+        .child(SharedString::from(label))
+}
+
+/// The delete button of a row's slide-out strip. It never deletes on its own:
+/// the view routes every delete path through one confirmation dialog, so a
+/// mis-swipe cannot cost a conversation.
+pub fn delete_button() -> Stateful<Div> {
     div()
         .id("session-delete")
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .px_2()
+        .py_1()
+        .rounded_sm()
+        .bg(rgb(PANEL_HI))
         .text_xs()
-        .text_color(rgb(TEXT_FAINT))
+        .text_color(rgb(RED))
         .cursor_pointer()
-        .child(SharedString::from("\u{2715}"))
+        .hover(|d| d.bg(rgb(FOCUS)))
+        .child(SharedString::from("delete"))
 }
 
 /// The rail column: header and error slot from the state, then the caller's
@@ -293,7 +480,8 @@ pub fn rail(state: &SessionsState, rows: Vec<Stateful<Div>>, width_rem: f32) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::{Database, fit, load_sessions};
+    use super::{Database, SessionsState, fit, load_sessions};
+    use opencrabs::db::models::Session;
 
     /// #2271's whole class, seated: truncation walks chars, never bytes. Any
     /// return to byte-index slicing panics here on a multibyte boundary, and
@@ -376,5 +564,110 @@ mod tests {
         let result = handle.join().expect("tiny caller must survive");
         let sessions = result.unwrap_or_else(|e| panic!("fetch against a fresh db failed: {e}"));
         assert!(sessions.is_empty(), "fresh db must list zero sessions");
+    }
+
+    /// One row of the ledger, built in memory: the ordering rule is about
+    /// what the rail does with rows, never about how they were fetched.
+    fn session(id: u128, title: &str) -> Session {
+        let stamp = chrono::DateTime::from_timestamp(1_700_000_000 + id as i64, 0)
+            .expect("a fixed stamp is valid");
+        Session {
+            id: uuid::Uuid::from_u128(id),
+            title: Some(title.to_string()),
+            model: None,
+            provider_name: None,
+            created_at: stamp,
+            updated_at: stamp,
+            archived_at: None,
+            token_count: 0,
+            total_cost: 0.0,
+            working_directory: None,
+            auto_title_attempted: false,
+            project_id: None,
+            channel_chat_key: None,
+        }
+    }
+
+    /// TUI parity: pins go on top through a stable partition, so a pin moves
+    /// that one chat and leaves every other row where the ledger put it.
+    /// Sorting by title or id instead would reshuffle the rail under the
+    /// cursor, which is why the rule is "pinned first, ledger order inside
+    /// each group" and not "sort".
+    #[test]
+    fn favorites_pin_to_the_top_and_leave_the_rest_in_ledger_order() {
+        let mut state = SessionsState {
+            items: vec![
+                session(3, "newest"),
+                session(2, "pinned one"),
+                session(1, "oldest"),
+            ],
+            ..Default::default()
+        };
+        state.favorites.insert(uuid::Uuid::from_u128(2));
+
+        let order: Vec<&str> = state
+            .ordered()
+            .map(|s| s.title.as_deref().unwrap_or(""))
+            .collect();
+        assert_eq!(order, ["pinned one", "newest", "oldest"]);
+    }
+
+    /// A pin never resurrects a row the find field hid: the query narrows
+    /// first, the pins only sort what survives it.
+    #[test]
+    fn a_pin_does_not_escape_the_rail_filter() {
+        let mut state = SessionsState {
+            items: vec![session(3, "newest"), session(2, "pinned one")],
+            ..Default::default()
+        };
+        state.favorites.insert(uuid::Uuid::from_u128(2));
+        state.filter = "newest".to_string();
+
+        let order: Vec<&str> = state
+            .ordered()
+            .map(|s| s.title.as_deref().unwrap_or(""))
+            .collect();
+        assert_eq!(order, ["newest"]);
+        assert_eq!(state.matched(), 1);
+    }
+
+    /// A slide that comes up short is a click with an unsteady hand: the
+    /// row snaps back and its strip stays shut.
+    #[test]
+    fn a_short_slide_snaps_back() {
+        assert!(!super::slide_reveals(500.0, 500.0));
+        assert!(!super::slide_reveals(
+            500.0,
+            500.0 - super::SLIDE_REVEAL_PX + 1.0
+        ));
+    }
+
+    /// Past the threshold the strip is earned, and the threshold itself
+    /// counts: the rule is "at least this far", not "further than".
+    #[test]
+    fn a_slide_past_the_threshold_opens_the_strip() {
+        assert!(super::slide_reveals(500.0, 500.0 - super::SLIDE_REVEAL_PX));
+        assert!(super::slide_reveals(
+            500.0,
+            500.0 - super::SLIDE_REVEAL_PX - 40.0
+        ));
+    }
+
+    /// Rightward travel is not a slide, however far it goes.
+    #[test]
+    fn a_rightward_slide_never_opens_the_strip() {
+        assert!(!super::slide_reveals(500.0, 520.0));
+        assert!(!super::slide_reveals(500.0, 900.0));
+    }
+
+    /// The pin set is the sidecar's set: membership answers per row, and a
+    /// session that was never pinned is not in it.
+    #[test]
+    fn the_pinned_set_answers_membership_by_id() {
+        let mut state = SessionsState::default();
+        state.favorites.insert(uuid::Uuid::from_u128(7));
+
+        assert!(state.is_favorite(uuid::Uuid::from_u128(7)));
+        assert!(!state.is_favorite(uuid::Uuid::from_u128(8)));
     }
 }
