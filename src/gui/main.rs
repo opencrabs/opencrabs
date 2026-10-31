@@ -5,8 +5,8 @@
 //!
 //! The window has two panes: the session rail (every real session, most
 //! recent first) and the right pane, which is the chat by default, with the
-//! newest conversation already open. Cmd+U swaps the right pane to the real
-//! usage ledger and Esc (or Cmd+U again) returns to the conversation; the two
+//! newest conversation already open. ctrl+u swaps the right pane to the real
+//! usage ledger and Esc (or ctrl+u again) returns to the conversation; the two
 //! screens are never mixed. There is no sample data anywhere: when a read
 //! cannot happen, the pane says why.
 //!
@@ -61,8 +61,8 @@ enum LoadState {
 }
 
 /// Which pane the right side draws. Chat is the default screen, the usage
-/// ledger is opened with Cmd+U, and the conversation's tracked files with
-/// Cmd+F, because the owner asked for exactly that split: an open
+/// ledger is opened with ctrl+u, and the conversation's tracked files with
+/// ctrl+g, because the owner asked for exactly that split: an open
 /// conversation must never be labelled or treated as usage.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Screen {
@@ -189,7 +189,7 @@ const RAIL_MAX_REM: f32 = 32.0;
 
 /// The phase 1 window. Every string on screen is real data or the real error.
 struct Dashboard {
-    /// Which pane the right side draws: chat by default, usage on Cmd+U.
+    /// Which pane the right side draws: chat by default, usage on ctrl+u.
     screen: Screen,
     state: LoadState,
     /// Which card is focused, whether the breakdown is open: the shared
@@ -199,7 +199,7 @@ struct Dashboard {
     /// Monotonic tag on the latest period fetch; only its result is applied,
     /// so a slow fetch landing after a newer one cannot paint stale data.
     pending: u64,
-    /// The session-files browser (Cmd+F): rows for the open conversation and
+    /// The session-files browser (ctrl+g): rows for the open conversation and
     /// the session they were fetched for, so a slow fetch landing after a
     /// rail click paints nothing.
     files: Vec<agent_bridge::SessionFile>,
@@ -215,7 +215,7 @@ struct Dashboard {
     /// The session rail's live state.
     sessions: sessions::SessionsState,
     /// Rail width in rem, moved by the splitter's drag. Never below
-    /// `RAIL_MIN_REM`: dragging past it closes the rail instead, and Cmd+B
+    /// `RAIL_MIN_REM`: dragging past it closes the rail instead, and ctrl+s
     /// brings it back at the last width.
     rail_width: f32,
     /// Whether the rail is drawn at all.
@@ -317,7 +317,7 @@ impl Dashboard {
 
     /// Open one conversation: select it in the rail, switch the right pane to
     /// chat, and load its newest window off the UI thread. Every door (rail
-    /// click, launch, Cmd+U return) goes through here, so the screen and the
+    /// click, launch, ctrl+u return) goes through here, so the screen and the
     /// session can never disagree.
     fn open_session(&mut self, id: Uuid, cx: &mut Context<Self>) {
         self.sessions.selected = Some(id);
@@ -370,7 +370,7 @@ impl Dashboard {
         cx.notify();
     }
 
-    /// Cmd+O: toggle the newest turn, the way ctrl+o does in the TUI.
+    /// ctrl+o: toggle the newest turn, the same chord the TUI answers.
     fn toggle_newest_turn(&mut self, cx: &mut Context<Self>) {
         let Some(anchor) = self.transcript.newest_anchor().map(str::to_string) else {
             return;
@@ -378,7 +378,7 @@ impl Dashboard {
         self.toggle_turn(&anchor, cx);
     }
 
-    /// Cmd+U: open the usage ledger, or return to the conversation. The panes
+    /// ctrl+u: open the usage ledger, or return to the conversation. The panes
     /// never mix and the chat stays exactly where it was.
     fn toggle_usage(&mut self, cx: &mut Context<Self>) {
         match self.screen {
@@ -410,7 +410,7 @@ impl Dashboard {
             return;
         }
         let Some(sid) = self.transcript.session else {
-            logging::info("cmd-g ignored: no open conversation");
+            logging::info("ctrl-g ignored: no open conversation");
             return;
         };
         self.screen = Screen::Files;
@@ -908,9 +908,9 @@ impl Dashboard {
         .detach();
     }
 
-    /// Arm the delete dialog. Every delete path (Cmd+Backspace, a row's
-    /// strip) lands here instead of erasing, so the erase is always the
-    /// second, deliberate click.
+    /// Arm the delete dialog. Every delete path (a row's strip, and nothing
+    /// else) lands here instead of erasing, so the erase is always the second,
+    /// deliberate click.
     fn request_delete(&mut self, id: Uuid, cx: &mut Context<Self>) {
         self.confirm_delete = Some(id);
         cx.notify();
@@ -1011,31 +1011,35 @@ impl Dashboard {
 
     fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         logging::debug(&format!("key {:?}", ev.keystroke.key));
-        // Cmd+U is the screen switch and it must work while typing, so it
+        // ctrl+u is the screen switch and it must work while typing, so it
         // sits before the editor focus gate: the editor only claims IME
-        // escapes, and this key belongs to the window.
-        if ev.keystroke.modifiers.platform && ev.keystroke.key == "u" {
+        // escapes, and this key belongs to the window. The chord stays on the
+        // control key so no command is a macOS-only habit.
+        if ev.keystroke.modifiers.control && ev.keystroke.key == "u" {
             self.toggle_usage(cx);
             return;
         }
-        // Cmd+O folds or unfolds the newest turn, the desktop half of the
-        // TUI's ctrl+o. It sits with the screen keys so it works while typing.
-        if ev.keystroke.modifiers.platform && ev.keystroke.key == "o" && self.screen == Screen::Chat
+        // ctrl+o folds or unfolds the newest turn, the terminal's own chord.
+        // It sits with the screen keys so it works while typing.
+        if ev.keystroke.modifiers.control && ev.keystroke.key == "o" && self.screen == Screen::Chat
         {
             self.toggle_newest_turn(cx);
             return;
         }
-        // Cmd+N opens a new conversation, the desktop half of the TUI's
-        // ctrl+n. The row is created in the ledger first, so the rail and the
-        // transcript agree on which session the next turn is written to.
-        if ev.keystroke.modifiers.platform && ev.keystroke.key == "n" {
+        // ctrl+n opens a new conversation, the terminal's own chord. The row
+        // is created in the ledger first, so the rail and the transcript agree
+        // on which session the next turn is written to.
+        if ev.keystroke.modifiers.control && ev.keystroke.key == "n" {
             self.new_session(cx);
             return;
         }
-        // Cmd+B shows or hides the rail, the desktop half of a TUI pane
-        // toggle. Like the screen keys it sits before the editor gate. A
-        // hidden rail has no field to keep listening, so the filter exits.
-        if ev.keystroke.modifiers.platform && ev.keystroke.key == "b" {
+        // ctrl+s shows or hides the rail: the sidebar is the window's own
+        // pane, and the chord rides the control key so it is the same on every
+        // platform. ctrl+l stays as the alias the terminal's session list has
+        // always answered. Like the screen keys it sits before the editor
+        // gate. A hidden rail has no field to keep listening, so the filter
+        // exits.
+        if ev.keystroke.modifiers.control && (ev.keystroke.key == "s" || ev.keystroke.key == "l") {
             if self.rail_open {
                 self.close_rail_filter(cx);
             }
@@ -1043,22 +1047,20 @@ impl Dashboard {
             cx.notify();
             return;
         }
-        // Cmd+F is the rail's find field: it narrows the session list to
+        // ctrl+f is the rail's find field: it narrows the session list to
         // chats whose title (or id prefix) matches, live, with the match
         // count on the bar. Any exit clears it, so the rail never hides a
         // filter behind a closed field.
-        // Cmd+Shift+F pins the open conversation. It comes before the plain
+        // ctrl+shift+f pins the open conversation. It comes before the plain
         // find key because both carry `f`; shift decides which one it was.
-        if ev.keystroke.modifiers.platform
-            && ev.keystroke.modifiers.shift
-            && ev.keystroke.key == "f"
+        if ev.keystroke.modifiers.control && ev.keystroke.modifiers.shift && ev.keystroke.key == "f"
         {
             if let Some(id) = self.transcript.session {
                 self.toggle_favorite(id, cx);
             }
             return;
         }
-        if ev.keystroke.modifiers.platform && ev.keystroke.key == "f" {
+        if ev.keystroke.modifiers.control && ev.keystroke.key == "f" {
             if self.sessions.filter_active {
                 self.close_rail_filter(cx);
             } else {
@@ -1067,10 +1069,10 @@ impl Dashboard {
             }
             return;
         }
-        // Cmd+G lists the open conversation's tracked files, the desktop half
+        // ctrl+g lists the open conversation's tracked files, the desktop half
         // of the TUI sessions-browser `f` (`AppMode::SessionFiles`). A screen
         // key, so it works while typing like the rest of these.
-        if ev.keystroke.modifiers.platform && ev.keystroke.key == "g" {
+        if ev.keystroke.modifiers.control && ev.keystroke.key == "g" {
             self.toggle_files(cx);
             return;
         }
@@ -1098,15 +1100,10 @@ impl Dashboard {
             }
             return;
         }
-        // Cmd+Backspace deletes the open conversation, the desktop half of
-        // the TUI's session delete. The row is soft-deleted in the ledger and
-        // the rail re-fetches, so the row leaves because it is gone.
-        if ev.keystroke.modifiers.platform && ev.keystroke.key == "backspace" {
-            if let Some(id) = self.transcript.session {
-                self.request_delete(id, cx);
-            }
-            return;
-        }
+        // Deleting a conversation has no chord. ctrl+backspace is the editor's
+        // word delete (#2313), so a window binding on it would break typing,
+        // and the command key is macOS-only. The row strip's delete, behind
+        // the confirm dialog, is the one path: the slide reveals it.
         // Esc twice stops the running turn, the TUI's own gesture. It sits
         // before the editor gate because the editor owns the keyboard while
         // typing and would swallow it.
@@ -1174,7 +1171,7 @@ impl Dashboard {
             return;
         }
         // The files browser is a list, not the ledger's grid: Esc (or the
-        // Cmd+G toggle again) is the only key it owns, and it goes back to
+        // ctrl+g toggle again) is the only key it owns, and it goes back to
         // the conversation.
         if self.screen == Screen::Files {
             if translate_key(ev) == UiKey::Esc {
@@ -1758,7 +1755,7 @@ fn main() {
         },
     };
     // Chat is the default screen: the newest conversation opens on launch.
-    // The usage ledger is something the user asks for (Cmd+U). They never
+    // The usage ledger is something the user asks for (ctrl+u). They never
     // share the pane, so a conversation can never render as "usage".
     let initial_session = sessions_state.items.first().map(|s| s.id);
     Application::new().run(move |cx: &mut App| {
@@ -2106,15 +2103,19 @@ mod tests {
             "the bridge must be reached from delete_session itself, not a neighbour"
         );
 
-        // Both arming paths exist and go through the dialog: Cmd+Backspace
-        // for the open conversation, and the row's slide-out strip.
+        // The row's slide-out strip is the one arming path. There is no
+        // chord: ctrl+backspace is the editor's word delete and the command
+        // key is macOS-only. The needles are split so the scan cannot count
+        // its own source text.
+        let strip_arm = ["this.request", "_delete(id, cx);"].concat();
+        let chord_arm = ["self.request", "_delete(id, cx);"].concat();
         assert!(
-            src.contains("self.request_delete(id, cx);"),
-            "Cmd+Backspace must arm the dialog"
+            src.contains(&strip_arm),
+            "the row strip must arm the dialog"
         );
         assert!(
-            src.contains("this.request_delete(id, cx);"),
-            "the row strip must arm the dialog"
+            !src.contains(&chord_arm),
+            "no chord may arm delete: the strip is the one path"
         );
         // Esc is the dialog's cancel, and it must answer the dialog before
         // the row strip or the turn it would otherwise abort.

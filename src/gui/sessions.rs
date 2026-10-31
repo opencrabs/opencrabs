@@ -37,7 +37,7 @@ pub struct SessionsState {
     pub selected: Option<uuid::Uuid>,
     /// Set when the fetch failed; the rail says why instead of lying empty.
     pub error: Option<SharedString>,
-    /// Cmd+F's query. A non-empty query narrows the rail to the chats whose
+    /// ctrl+f's query. A non-empty query narrows the rail to the chats whose
     /// title (or id prefix) matches; the ledger is untouched, so clearing the
     /// query shows everything back exactly as it was.
     pub filter: String,
@@ -109,7 +109,7 @@ pub fn slide_reveals(from_x: f32, to_x: f32) -> bool {
     to_x - from_x <= -SLIDE_REVEAL_PX
 }
 
-/// Cmd+F's field, drawn under the rail's header while it holds the keyboard.
+/// ctrl+f's field, drawn under the rail's header while it holds the keyboard.
 /// The match count rides on the right so a query that found nothing says so
 /// before Enter is pressed on it.
 pub fn filter_bar(state: &SessionsState) -> Stateful<Div> {

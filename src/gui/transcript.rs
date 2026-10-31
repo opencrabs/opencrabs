@@ -325,7 +325,7 @@ pub struct TranscriptState {
 }
 
 impl TranscriptState {
-    /// Newest turn's anchor: the one cmd-o acts on, as in the TUI where
+    /// Newest turn's anchor: the one ctrl-o acts on, as in the TUI where
     /// ctrl+o toggles the newest turn only.
     pub fn newest_anchor(&self) -> Option<&str> {
         self.turns.last().map(|t| t.anchor.as_str())
@@ -932,9 +932,9 @@ fn tools_block(calls: &[ToolCall]) -> Div {
 fn fold_header(turn: &Turn, folded: bool, newest: bool) -> Option<Stateful<Div>> {
     let base = turn.header.as_ref()?;
     let hint = match (folded, newest) {
-        (true, true) => " (click / cmd-o to expand)",
+        (true, true) => " (click / ctrl-o to expand)",
         (true, false) => " (click to expand)",
-        (false, true) => " (click / cmd-o to fold)",
+        (false, true) => " (click / ctrl-o to fold)",
         (false, false) => " (click to fold)",
     };
     let mut col = div()

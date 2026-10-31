@@ -355,7 +355,7 @@ pub fn spawn_track_files(db_path: PathBuf, session_id: Uuid, paths: Vec<PathBuf>
     }
 }
 
-/// One row of the Cmd+G files browser: the tracked path plus its size. A
+/// One row of the ctrl+g files browser: the tracked path plus its size. A
 /// projection of `db::models::File` so the window never reaches into the
 /// DB model crate-wide.
 pub struct SessionFile {
@@ -363,7 +363,7 @@ pub struct SessionFile {
     pub size: Option<i64>,
 }
 
-/// The open conversation's tracked files, the fetch behind Cmd+G. Same shape
+/// The open conversation's tracked files, the fetch behind ctrl+g. Same shape
 /// as the window's `load_view`: an own 4 MB thread with an own current-thread
 /// runtime, because gpui's workers are dispatch-queue threads with tiny
 /// stacks and sqlx needs a Tokio reactor.
