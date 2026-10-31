@@ -852,6 +852,11 @@ impl Dashboard {
                             },
                         ));
                     }
+                    // Freeze the turn's rate on the same measure every other
+                    // surface uses: the service's own tokens_per_second when
+                    // it reported one, else the local active-streaming
+                    // estimate. The footer and the settled card then agree.
+                    self.live.finalize(tokens_per_second);
                     // The answer stays on screen: the stream when chunks
                     // arrived, otherwise the response the turn returned. Live
                     // state clears only once the reload proves the DB has it.

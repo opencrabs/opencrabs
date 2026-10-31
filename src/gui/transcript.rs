@@ -235,6 +235,19 @@ pub struct LiveTurn {
     /// TUI runs over every chunk (`brain::tokenizer`), so the live counter and
     /// the TUI's agree instead of being two estimates.
     pub tokens: u32,
+    /// Seconds the provider spent ACTUALLY streaming this turn (#2325), the
+    /// denominator every other surface divides by. Tool execution, approval
+    /// waits and between-response round-trips are excluded: a 30s tool run
+    /// used to turn a 200 tok/s burst into "8 tok/s".
+    active_secs: f64,
+    /// When the currently open streaming window started.
+    window_start: Option<std::time::Instant>,
+    /// When the newest chunk landed, which is where the open window ends.
+    last_token_at: Option<std::time::Instant>,
+    /// The last finalized rate, kept across idle so the footer shows the
+    /// previous turn's number until the next turn produces its first token,
+    /// exactly like the terminal's streaming tracker.
+    last_tps: Option<f64>,
     /// When the turn opened. The status line's clock reads from here, which is
     /// the only reason a silent provider no longer looks like a frozen window.
     pub started: Option<std::time::Instant>,
@@ -289,6 +302,61 @@ impl LiveTurn {
         self.first_chunk = None;
         self.sent_at = None;
         self.answer_at = None;
+        // The accumulator belongs to the turn that just ended; the finalized
+        // rate deliberately survives, so an idle footer keeps the number
+        // instead of blanking until the next turn streams.
+        self.active_secs = 0.0;
+        self.window_start = None;
+        self.last_token_at = None;
+    }
+
+    /// A gap longer than this between chunks closes the active window: tool
+    /// runs, approval prompts and between-response round-trips all exceed it,
+    /// so they are excluded from the rate's denominator.
+    const IDLE_GAP_SECS: f64 = 1.0;
+
+    /// Feed the active-window accumulator one token event (#2325), the same
+    /// rule `tui::app::state::StreamingTpsTracker::advance` applies. The clock
+    /// is a parameter so a seat can drive it deterministically.
+    fn advance_streaming(&mut self, now: std::time::Instant) {
+        match (self.window_start, self.last_token_at) {
+            (None, _) => self.window_start = Some(now),
+            (Some(start), Some(last)) => {
+                if (now - last).as_secs_f64() > Self::IDLE_GAP_SECS {
+                    // Idle gap: close the old window, open a new one.
+                    self.active_secs += (last - start).as_secs_f64();
+                    self.window_start = Some(now);
+                }
+            }
+            (Some(_), None) => self.window_start = Some(now),
+        }
+        self.last_token_at = Some(now);
+    }
+
+    /// Active streaming seconds so far, including the open window. Measured
+    /// to the LAST chunk, never to now, so idle ticks cannot inflate it.
+    pub fn streaming_active_secs(&self) -> f64 {
+        match (self.window_start, self.last_token_at) {
+            (Some(start), Some(last)) => self.active_secs + (last - start).as_secs_f64().max(0.0),
+            _ => self.active_secs,
+        }
+    }
+
+    /// Finish the turn's rate (#2325): prefer the service's own
+    /// `tokens_per_second` (provider-reported tokens over summed active
+    /// streaming time, the number the Telegram card prints), else the local
+    /// active-window estimate, and reset the accumulator. A turn that produced
+    /// nothing keeps the previous number rather than reporting a fake zero.
+    pub fn finalize(&mut self, authoritative: Option<f64>) {
+        let active = self.streaming_active_secs();
+        if let Some(tps) = authoritative.filter(|t| t.is_finite() && *t > 0.0) {
+            self.last_tps = Some(tps);
+        } else if self.tokens > 0 && active > 0.0 {
+            self.last_tps = Some(self.tokens as f64 / active);
+        }
+        self.active_secs = 0.0;
+        self.window_start = None;
+        self.last_token_at = None;
     }
 
     /// Seconds since the turn opened; zero before one has.
@@ -296,20 +364,27 @@ impl LiveTurn {
         self.started.map(|t| t.elapsed().as_secs()).unwrap_or(0)
     }
 
-    /// Output tokens per second for this turn: what the TUI's footer shows,
-    /// computed the same way (this turn's tokens over its own clock). Zero
-    /// before a turn opens, which keeps "0.0 tok/s" off an idle footer.
+    /// Output tokens per second, measured the way every other surface measures
+    /// it (#2325): this turn's tokens over its ACTIVE streaming seconds, never
+    /// over wall clock, so a tool run cannot drag the number down. When no
+    /// window is open the last finalized rate is returned, which is what keeps
+    /// an idle footer from blanking the moment a turn settles.
     pub fn tokens_per_sec(&self) -> f32 {
-        if self.started.is_none() {
-            return 0.0;
-        }
-        self.tokens as f32 / self.elapsed_secs().max(1) as f32
+        let active = self.streaming_active_secs();
+        let live = (active > 0.0).then(|| self.tokens as f64 / active);
+        live.or(self.last_tps).map_or(0.0, |t| t as f32)
     }
 
     /// Count one answer chunk: text plus its tokens. Counting here keeps the
     /// live counter honest for every caller (a chunk that never renders still
     /// cost the tokens).
     pub fn note_chunk(&mut self, text: &str) {
+        self.note_chunk_at(text, std::time::Instant::now());
+    }
+
+    /// [`note_chunk`](Self::note_chunk) with the clock injected, so tests can
+    /// rehearse a stream with a tool wait in the middle.
+    fn note_chunk_at(&mut self, text: &str, now: std::time::Instant) {
         let tokens = opencrabs::brain::tokenizer::count_tokens(text) as u32;
         self.tokens = self.tokens.saturating_add(tokens);
         self.chunks += 1;
@@ -319,6 +394,9 @@ impl LiveTurn {
         }
         if self.answer_at.is_none() {
             self.answer_at = Some(chrono::Local::now());
+        }
+        if tokens > 0 {
+            self.advance_streaming(now);
         }
         self.stream.push_str(text);
     }
@@ -363,12 +441,26 @@ impl LiveTurn {
     /// it toward the turn's total (2026-05-29 receipt: a 38s reasoning turn
     /// read "65 tok"), so excluding it here would understate the turn.
     pub fn note_reasoning(&mut self, text: &str) {
+        self.note_reasoning_at(text, std::time::Instant::now());
+    }
+
+    /// [`note_reasoning`](Self::note_reasoning) with the clock injected.
+    ///
+    /// Reasoning advances the streaming window the same way the answer does:
+    /// the channel bridge feeds `StreamingOutputTokens` for reasoning chunks
+    /// too (`cli/ui.rs`, "reasoning chunks ARE model output"), so the terminal
+    /// tracker counts that time, and counting the tokens here without the
+    /// time would inflate the rate (#2325).
+    fn note_reasoning_at(&mut self, text: &str, now: std::time::Instant) {
         let tokens = opencrabs::brain::tokenizer::count_tokens(text) as u32;
         self.tokens = self.tokens.saturating_add(tokens);
         if self.first_chunk.is_none() {
             self.first_chunk = self.started.map(|t| t.elapsed());
         }
         self.thinking = false;
+        if tokens > 0 {
+            self.advance_streaming(now);
+        }
         self.reasoning.push_str(text);
     }
 
@@ -1766,5 +1858,128 @@ mod tests {
         assert!(!settle_detached(&mut rows, "", true, 1.0));
         assert!(!rows[0].done);
         assert!(rows[0].task_id.is_none());
+    }
+    /// #2325: reasoning is output, so its time belongs in the denominator the
+    /// same way the channel bridge counts its tokens in the numerator.
+    /// Excluding it would report a reasoning-heavy turn at its final answer's
+    /// speed alone, which is the mirror image of the tool-wait bug.
+    #[test]
+    fn reasoning_time_counts_toward_the_streaming_window() {
+        let base = std::time::Instant::now();
+        let at = |secs: u64| base + std::time::Duration::from_secs(secs);
+
+        let mut live = LiveTurn::default();
+        live.begin("think about it".into());
+
+        // 0s..3s: reasoning streams.
+        for secs in 0..=3 {
+            live.note_reasoning_at("hmm ", at(secs));
+        }
+        // 3s..5s: the answer follows without a pause.
+        for secs in 4..=5 {
+            live.note_chunk_at("answer ", at(secs));
+        }
+
+        let active = live.streaming_active_secs();
+        assert!(
+            (active - 5.0).abs() < 1e-6,
+            "reasoning and answer share one window of five seconds, got {active}"
+        );
+        assert!(live.tokens > 0, "reasoning tokens count toward the turn");
+    }
+
+    /// #2325: the live rate divides by ACTIVE streaming time only. Four
+    /// seconds of stream, a forty second tool run, four more seconds of
+    /// stream is eight seconds of streaming, not forty eight, so a fast turn
+    /// stops reporting itself as a crawl the moment a tool runs.
+    #[test]
+    fn a_tool_wait_is_not_billed_to_the_streaming_rate() {
+        let base = std::time::Instant::now();
+        let at = |secs: u64| base + std::time::Duration::from_secs(secs);
+
+        let mut live = LiveTurn::default();
+        live.begin("fix it".into());
+
+        // 0s..4s: the first response streams, one chunk per second.
+        for secs in 0..=4 {
+            live.note_chunk_at("word ", at(secs));
+        }
+        let after_first = live.streaming_active_secs();
+        assert!(
+            (after_first - 4.0).abs() < 1e-6,
+            "the first window is four seconds, got {after_first}"
+        );
+
+        // 40s tool run, then the second response streams 44s..48s.
+        for secs in 44..=48 {
+            live.note_chunk_at("word ", at(secs));
+        }
+        let active = live.streaming_active_secs();
+        assert!(
+            (active - 8.0).abs() < 1e-6,
+            "two four second windows are eight seconds of streaming, not wall clock: got {active}"
+        );
+
+        // The finalized rate is the turn's tokens over those eight seconds.
+        let tokens = live.tokens as f64;
+        live.finalize(None);
+        let rate = live.tokens_per_sec();
+        let expected = (tokens / 8.0) as f32;
+        assert!(
+            (rate - expected).abs() < 0.01,
+            "rate must be {tokens} tokens over 8s, got {rate}"
+        );
+        assert!(
+            rate > (tokens / 48.0) as f32 * 2.0,
+            "wall clock would have split the rate roughly six ways"
+        );
+    }
+
+    /// A settled turn keeps showing its rate: the footer must not blank the
+    /// number the instant the response finishes.
+    #[test]
+    fn a_finalized_rate_survives_the_idle_turn() {
+        let base = std::time::Instant::now();
+        let mut live = LiveTurn::default();
+        live.begin("fix it".into());
+        live.note_chunk_at("word ", base);
+        live.note_chunk_at("word ", base + std::time::Duration::from_secs(2));
+
+        live.finalize(Some(58.0));
+        assert_eq!(live.tokens_per_sec(), 58.0, "the service rate wins");
+        assert_eq!(
+            live.streaming_active_secs(),
+            0.0,
+            "the accumulator resets with the turn"
+        );
+
+        live.clear();
+        assert_eq!(
+            live.tokens_per_sec(),
+            58.0,
+            "an idle footer keeps the last rate instead of blanking"
+        );
+        assert_eq!(live.streaming_active_secs(), 0.0);
+    }
+
+    /// A turn that produced no tokens must not overwrite the last good rate
+    /// with a fake zero, and a rate of zero from the provider is not a
+    /// measurement either.
+    #[test]
+    fn a_tokenless_turn_keeps_the_previous_rate() {
+        let mut live = LiveTurn::default();
+        live.begin("fix it".into());
+        live.finalize(Some(0.0));
+        assert_eq!(live.tokens_per_sec(), 0.0, "nothing measured yet");
+
+        live.begin("again".into());
+        live.finalize(Some(41.5));
+        live.begin("and again".into());
+        live.finalize(None);
+        assert_eq!(
+            live.tokens_per_sec(),
+            41.5,
+            "an empty turn must not erase the last real rate"
+        );
     }
 }
