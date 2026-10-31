@@ -201,7 +201,10 @@ fn every_surface_handles_clear_without_an_agent_turn() {
         );
     }
     let tui = TUI.find("\"/clear\" => {").expect("TUI command");
-    let window = &TUI[tui..tui + 2000];
+    // `get` returns None instead of panicking on a non-boundary index, so the
+    // window never needs a byte-index slice (the ratchet counts those).
+    let rest = TUI.get(tui..).expect("TUI command starts at a boundary");
+    let window = rest.get(..2000).unwrap_or(rest);
     assert!(
         window.contains("is_processing"),
         "refused while a turn runs"
