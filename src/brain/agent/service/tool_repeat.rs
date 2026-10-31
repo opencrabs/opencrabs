@@ -42,14 +42,40 @@ pub(crate) enum RepeatVerdict {
 
 /// Identity of a tool call for repeat comparison.
 ///
-/// `input` is a [`Value`], and this crate's `serde_json` has no
-/// `preserve_order` feature, so its `Map` is a `BTreeMap` and object keys
-/// always serialize sorted. Field order in what the model emitted therefore
-/// cannot change this string, and no separate canonicalization pass is needed
-/// (a test pins that, since enabling `preserve_order` later would silently
-/// break it).
+/// Canonicalizes `input` before serializing: every object's keys are sorted,
+/// recursively. The order-independence this needs used to come for free from
+/// `serde_json`'s default `BTreeMap`-backed map, but feature unification
+/// broke that assumption: with the `gui` feature enabled, gpui's dependency
+/// tree turns on `serde_json/preserve_order`, the map becomes
+/// insertion-ordered, and `Display` would serialize in the order the model
+/// emitted. A reordered re-send of the same call would then look like a
+/// different call, which is exactly the guard evasion this detector exists
+/// to close. Sorting here makes identity stable under both map backends,
+/// so no future dependency can silently reopen the hole. (A test pins it.)
 pub(crate) fn signature(name: &str, input: &Value) -> String {
-    format!("{name}|{input}")
+    format!("{name}|{}", canonical(input))
+}
+
+/// Rebuild `value` with every object's keys in sorted order, recursively.
+///
+/// Under the default map this is an identity transformation (its iteration is
+/// already sorted); under `preserve_order` it is what restores sorted order.
+/// Array order is preserved: a list of arguments is positional, so reordering
+/// one is a genuinely different call.
+fn canonical(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            let mut out = serde_json::Map::new();
+            for key in keys {
+                out.insert(key.clone(), canonical(&map[key]));
+            }
+            Value::Object(out)
+        }
+        Value::Array(items) => Value::Array(items.iter().map(canonical).collect()),
+        other => other.clone(),
+    }
 }
 
 /// Tracks how many times running the same call has been requested in a row.
