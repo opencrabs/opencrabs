@@ -247,6 +247,9 @@ struct Dashboard {
     /// and only the dialog's own button erases, so no gesture can cost a
     /// conversation.
     confirm_delete: Option<Uuid>,
+    /// Whether the key reference is open (#2320). The overlay reads the same
+    /// table the terminal's `/help` prints, so the two cannot disagree.
+    help_open: bool,
     /// The plan checklist strip above the editor, re-read when its file moves.
     plan: plan_strip::PlanStripState,
     /// Which session the strip's path was resolved for, so the DB lookup runs
@@ -399,7 +402,20 @@ impl Dashboard {
         cx.notify();
     }
 
-    /// Cmd+G: the open conversation's tracked files, or back to the chat. A
+    /// ctrl+h, or Cmd+? on a Mac: the key reference, the window's door to the
+    /// rows the terminal prints via `/help` (#2320). It is read-only, so it
+    /// can sit above every other affordance: closing it leaves the screen
+    /// exactly as it was, and opening it disarms the rail's row strip so a
+    /// click meant for the panel cannot delete anything behind it.
+    fn toggle_help(&mut self, cx: &mut Context<Self>) {
+        self.help_open = !self.help_open;
+        if self.help_open {
+            self.rail_actions = None;
+        }
+        cx.notify();
+    }
+
+    /// ctrl+g: the open conversation's tracked files, or back to the chat. A
     /// no-op without an open conversation, because a files browser for no
     /// session is a lie. The TUI reaches the same list with `f` on the
     /// sessions browser (`AppMode::SessionFiles`).
@@ -1076,6 +1092,20 @@ impl Dashboard {
             self.toggle_files(cx);
             return;
         }
+        // ctrl+h opens the key reference, the window's door to the rows the
+        // terminal prints via `/help` (#2320). It sits with the screen keys,
+        // ahead of the rail filter: help is a window concern, and a filter
+        // that owns the keyboard must not be the one chord it hides.
+        // Cmd+? is the same door for a hand already on the command key: the
+        // platform reports it as `/` with shift, and a layout that reports the
+        // glyph itself is answered too.
+        let cmd_question = ev.keystroke.modifiers.platform
+            && (ev.keystroke.key == "?"
+                || (ev.keystroke.key == "/" && ev.keystroke.modifiers.shift));
+        if (ev.keystroke.modifiers.control && ev.keystroke.key == "h") || cmd_question {
+            self.toggle_help(cx);
+            return;
+        }
         // While the rail filter is open it owns the keyboard, editor focus
         // included: printable characters extend the query, backspace (plain
         // or with the command key) shortens it, Enter and Esc clear it and
@@ -1108,6 +1138,13 @@ impl Dashboard {
         // before the editor gate because the editor owns the keyboard while
         // typing and would swallow it.
         if ev.keystroke.key == "escape" {
+            // The key reference paints above everything and costs nothing to
+            // close, so it goes first: the nearest thing to the user answers.
+            if self.help_open {
+                self.help_open = false;
+                cx.notify();
+                return;
+            }
             // The confirm dialog sits above everything, so Esc answers it
             // first: cancelling leaves the conversation untouched.
             if self.confirm_delete.take().is_some() {
@@ -1655,6 +1692,15 @@ impl Render for Dashboard {
             });
             root = root.child(confirm_delete_overlay(title, confirm, cancel));
         }
+        // The key reference, above the panes and above the delete dialog: it
+        // is read-only, so nothing behind it can be armed while it is up.
+        if self.help_open {
+            let close = cx.listener(|this, _ev, _window, cx| {
+                this.help_open = false;
+                cx.notify();
+            });
+            root = root.child(help_overlay(close));
+        }
         // The drop target: a Finder drag tints the whole window so the target
         // is never guessed. It paints above both panes and vanishes the
         // moment the drag ends.
@@ -1823,6 +1869,7 @@ fn main() {
                         rail_swipe: None,
                         rail_slide_opened: None,
                         confirm_delete: None,
+                        help_open: false,
                         plan: plan_strip::PlanStripState::default(),
                         plan_for: None,
                         transcript: transcript::TranscriptState {
@@ -1967,6 +2014,124 @@ fn ctx_footer(used: Option<u32>, max: u32) -> (String, u32) {
         ),
         color,
     )
+}
+
+/// The key reference, painted over everything else (#2320).
+///
+/// Rows come from `ui_core::help_keys`, the table the terminal's `/help`
+/// prints, and only the rows this window actually answers are listed: `gui`
+/// is `None` for a chord whose port has not landed yet, and a help screen
+/// that advertises a dead chord is worse than one that stays quiet.
+/// The rows the overlay paints, in display order: every row whose `gui`
+/// spelling exists, section by section (#2320).
+///
+/// A function rather than a loop inside the renderer, so a test can compare
+/// the painted list with the shared table without building a window. The
+/// window answers a chord or it does not, and a row the window ignores is a
+/// row it must not advertise.
+fn help_rows() -> Vec<(
+    opencrabs::ui_core::help_keys::HelpSection,
+    &'static opencrabs::ui_core::help_keys::HelpRow,
+)> {
+    use opencrabs::ui_core::help_keys::{self, HelpSection};
+
+    let mut out = Vec::new();
+    for section in HelpSection::ALL {
+        out.extend(
+            help_keys::section_rows(section)
+                .filter(|row| row.gui.is_some())
+                .map(|row| (section, row)),
+        );
+    }
+    out
+}
+
+fn help_overlay(close: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> impl IntoElement {
+    let mut panel = div()
+        .id("help-panel")
+        .occlude()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .w(rems(30.0))
+        .max_h(rems(32.0))
+        .p_4()
+        .rounded(px(10.0))
+        .border_1()
+        .border_color(rgb(theme::PANEL_HI))
+        .bg(rgb(theme::PANEL));
+
+    panel = panel.child(
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(TEXT))
+                    .child(SharedString::from("keys")),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(TEXT_MUTED))
+                    .child(SharedString::from("esc")),
+            ),
+    );
+
+    let mut printed: Option<opencrabs::ui_core::help_keys::HelpSection> = None;
+    for (section, row) in help_rows() {
+        if printed != Some(section) {
+            panel = panel.child(
+                div()
+                    .mt_1()
+                    .text_xs()
+                    .text_color(rgb(theme::ACCENT))
+                    .child(SharedString::from(section.title())),
+            );
+            printed = Some(section);
+        }
+        let chord = row.gui.unwrap_or_default();
+        panel = panel.child(
+            div()
+                .flex()
+                .flex_row()
+                .gap_3()
+                .child(
+                    div()
+                        .w(rems(9.0))
+                        .flex_shrink_0()
+                        .text_xs()
+                        .text_color(rgb(TEXT_NORMAL))
+                        .child(SharedString::from(chord)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_xs()
+                        .text_color(rgb(TEXT_MUTED))
+                        .child(SharedString::from(row.description)),
+                ),
+        );
+    }
+
+    div()
+        .id("help-scrim")
+        .occlude()
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .bg(rgba(0x0a0a0acc))
+        .on_click(close)
+        .child(panel)
 }
 
 /// The delete confirmation: a dim card over both panes naming the
@@ -2154,5 +2319,145 @@ mod tests {
             ("ctx: -".to_string(), TEXT_FAINT)
         );
         assert_eq!(ctx_footer(Some(900), 0), ("ctx: -".to_string(), TEXT_FAINT));
+    }
+
+    #[test]
+    fn help_overlay_paints_one_row_per_entry_in_the_shared_table() {
+        use opencrabs::ui_core::help_keys::{self, HelpSection};
+
+        // One painted row per entry of the collection the window reads, and
+        // no row the window cannot answer. A blank chord or a blank
+        // description is a row that costs space and says nothing.
+        let painted = help_rows();
+        let shared: Vec<_> = help_keys::gui_rows().collect();
+        assert_eq!(
+            painted.len(),
+            shared.len(),
+            "the overlay must paint every shared row with a window chord"
+        );
+        assert!(
+            painted.len() >= 8,
+            "the window answers more chords than the {} listed",
+            painted.len()
+        );
+        for (section, row) in &painted {
+            let chord = row.gui.expect("every painted row has a chord");
+            assert!(!chord.is_empty(), "{} has no chord", row.description);
+            assert!(!row.description.is_empty(), "{chord} explains nothing");
+            assert_eq!(*section, row.section, "{chord} is under the wrong heading");
+        }
+        // Sections print in the order the shared table declares them, and a
+        // heading never repeats mid-list.
+        let mut seen: Vec<HelpSection> = Vec::new();
+        for (section, _) in &painted {
+            if seen.last() != Some(section) {
+                seen.push(*section);
+            }
+        }
+        let declared: Vec<HelpSection> = HelpSection::ALL
+            .into_iter()
+            .filter(|s| seen.contains(s))
+            .collect();
+        assert_eq!(seen, declared, "a section printed twice or out of order");
+        // The door the panel hangs off is itself one of the rows (#2320).
+        assert_eq!(help_keys::find("help").and_then(|r| r.gui), Some("ctrl-h"));
+    }
+
+    #[test]
+    fn help_overlay_opens_on_ctrl_h_and_cmd_question() {
+        // A source scan, because the handler needs a window and a key event
+        // to exercise. The rule here is wiring: both doors land on the same
+        // toggle, Esc closes the panel before it reaches anything behind it,
+        // and the panel reads the shared table instead of its own copy of the
+        // chords.
+        let src = include_str!("main.rs");
+        assert!(
+            src.contains("&& ev.keystroke.key == \"h\") || cmd_question"),
+            "ctrl+h and Cmd+? must share the help door"
+        );
+        assert!(src.contains("fn toggle_help"));
+        assert!(
+            src.contains("self.help_open = false;"),
+            "Esc must close the panel"
+        );
+        assert!(src.contains("help_keys::section_rows"));
+        assert!(src.contains("filter(|row| row.gui.is_some())"));
+        assert!(
+            src.contains("for (section, row) in help_rows()"),
+            "the renderer must paint the list the test checks"
+        );
+    }
+
+    #[test]
+    fn tui_chords_bind_the_window_like_the_terminal() {
+        // The three commands the window spelled differently: new session,
+        // sessions, fold newest turn. The terminal's chord is the one chord,
+        // because the window has to answer on every platform and the command
+        // key only exists on a Mac (#2319). ctrl+l stays as the alias the
+        // session list has always answered.
+        let src = include_str!("main.rs");
+        for needle in [
+            ["ev.keystroke.key == ", "\"n\""].concat(),
+            ["modifiers.control && (ev.keystroke.key == ", "\"s\""].concat(),
+            ["ev.keystroke.key == ", "\"o\""].concat(),
+        ] {
+            assert!(
+                src.contains(&needle),
+                "the window must answer {needle} as the terminal does"
+            );
+        }
+        // And the command key answers none of the three, so no habit rides a
+        // chord that only exists on one platform.
+        for key in ["n", "o", "s"] {
+            let banned = format!("modifiers.platform && ev.keystroke.key == \"{key}\"");
+            assert!(
+                !src.contains(&banned),
+                "the command key must not be the chord for {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn chat_footer_points_at_the_key_reference() {
+        // The footer stopped being a hand-maintained keymap (#2321). It carries
+        // live state (provider, model, directory, branch, tokens per second,
+        // ctx budget) and exactly one hint: the door to the key reference. A
+        // strip of chords taught keys the window no longer binds and went
+        // stale the moment a binding moved, so every screen answers with the
+        // same three words instead.
+        let src = include_str!("main.rs");
+        let door = ["\"ctrl+h · ", "help\""].concat();
+        assert_eq!(
+            src.matches(&door).count(),
+            3,
+            "chat, usage and files each carry the one door, and nothing else"
+        );
+        assert!(
+            !src.contains(&["back to ", "chat"].concat()),
+            "no footer advertises a chord the window does not bind"
+        );
+        // None of the eight entries of the retired strip survives. The needles
+        // are split so the scan cannot count this test's own source text.
+        let retired = [
+            ["cmd-u · ", "usage"],
+            ["cmd-f · ", "find chat"],
+            ["cmd-g · ", "files"],
+            ["cmd-n · ", "new chat"],
+            ["cmd-o · ", "fold turn"],
+            ["cmd-b · ", "sidebar"],
+            ["cmd-shift-f · ", "pin"],
+            ["cmd-⌫ · ", "delete chat"],
+        ];
+        for parts in retired {
+            let needle = parts.concat();
+            let quoted = format!("\"{needle}\"");
+            assert!(
+                !src.contains(&quoted),
+                "the footer must not advertise {needle} any more"
+            );
+        }
+        // The identity line survives: it is live state, which the strip was not.
+        assert!(src.contains("fn status_identity"));
+        assert!(src.contains("fn ctx_footer"));
     }
 }
