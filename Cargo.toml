@@ -29,6 +29,24 @@ clap_complete = "4.6"
 ratatui = { version = "0.30", features = ["all-widgets"] }
 crossterm = { version = "0.29", features = ["event-stream"] }
 
+# Native desktop client (experimental, phase 0). Zed's GPU-accelerated UI
+# framework. Optional on purpose: the TUI binary, the release build, and CI
+# never pull this tree.
+#
+# `runtime_shaders` instead of the default build-time shader compile: this
+# machine has Command Line Tools but no full Xcode, so `xcrun metal` does not
+# exist and gpui's build script would fail. With runtime shaders the Metal
+# source is embedded and compiled when the app starts.
+#
+# `font-kit` must stay enabled: without it mac platform.rs swaps in
+# NoopTextSystem, which fakes font metrics so layout and colors still work
+# but rasterize_glyph returns zero bytes and every string paints as blank
+# space (found 2026-10-30, first GUI run had no text at all).
+gpui = { version = "0.2.2", default-features = false, features = [
+    "runtime_shaders",
+    "font-kit",
+], optional = true }
+
 # Database (deadpool-sqlite uses rusqlite 0.40, single libsqlite3-sys build).
 # rusqlite 0.40 bundles SQLite 3.53.2: 3.51.1's unix VFS took the inode lock
 # then the global VFS lock in unixLock (unixIsSharingShmNode) while unixClose
@@ -246,6 +264,13 @@ reqwest_teloxide = { package = "reqwest", version = "0.12", default-features = f
 # macOS: Metal GPU acceleration for local STT (rwhisper/candle)
 [target.'cfg(target_os = "macos")'.dependencies]
 rwhisper = { version = "0.4", optional = true, features = ["metal", "accelerate"] }
+# GPUI client only: runtime Dock icon. A bare `cargo run` binary has no .app
+# bundle, so macOS shows its generic executable icon; we hand the running
+# NSApplication the embedded logo instead. Optional so the TUI-only build
+# never compiles AppKit bindings.
+objc2 = { version = "0.6", optional = true }
+objc2-foundation = { version = "0.3", optional = true, features = ["NSData"] }
+objc2-app-kit = { version = "0.3", optional = true, features = ["NSApplication", "NSImage"] }
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
 winresource = "0.1"
@@ -279,6 +304,9 @@ notification-sound = ["rodio", "rodio/wav"]
 browser = ["chromey"]
 pdfium = ["dep:pdfium-render"]
 code-graph = ["tree-sitter", "tree-sitter-rust"]
+# Native desktop client (experimental). Off by default so the TUI-only build
+# and the CI gate stay free of the gpui dependency tree.
+gui = ["dep:gpui", "dep:objc2", "dep:objc2-foundation", "dep:objc2-app-kit"]
 [profile.dev]
 opt-level = 0
 debug = true
@@ -317,6 +345,13 @@ codegen-units = 16
 [[bin]]
 name = "opencrabs"
 path = "src/main.rs"
+
+# Native desktop client (experimental). Only built when the `gui` feature is
+# enabled, so a normal `cargo build` produces the TUI exactly as before.
+[[bin]]
+name = "opencrabs-gui"
+path = "src/gui/main.rs"
+required-features = ["gui"]
 
 # Benchmarks
 [[bench]]
