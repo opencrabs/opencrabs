@@ -154,12 +154,43 @@ pub enum Block {
     Marker { hidden: usize },
 }
 
+/// The parts of a settled turn the Telegram card carries and the shared
+/// turn header deliberately does not (#744 keeps ctx out of the terminal
+/// header): the context the turn ran with, and its output rate.
+///
+/// In memory only (#2324 D3): after a restart there is no record for the
+/// turn, so the card shows no metrics instead of borrowing the session's
+/// current number, which would be a lie about what that turn cost.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TurnMetrics {
+    /// Prompt tokens the model saw on the turn's final call.
+    pub ctx_used: u32,
+    /// The conversation's context window at the time.
+    pub ctx_max: u32,
+    /// Provider-reported output rate; `None` when it could not be measured.
+    pub tps: Option<f64>,
+}
+
+impl TurnMetrics {
+    /// The card's ctx segment, built by the same formatter the Telegram
+    /// footer uses (`format_ctx_footer`), so the two surfaces cannot drift
+    /// into different spellings of the same number (#2324 D2).
+    pub fn segment(&self) -> Option<String> {
+        (self.ctx_max > 0).then(|| {
+            opencrabs::utils::string::format_ctx_footer(self.ctx_used, self.ctx_max, self.tps)
+        })
+    }
+}
+
 /// One conversation turn, folded the way the TUI folds it (#758/#759): the
 /// question and the answer stay, the working-out hides behind a header line.
 pub struct Turn {
     /// `\u{2713} 4 steps \u{b7} 9 tool calls \u{b7} 1m 20s`, or `None` for a turn
     /// that did no work (a plain question and answer earns no header).
     pub header: Option<String>,
+    /// The turn's own ctx and rate, when this process settled it and still
+    /// remembers. Drawn after the header, in the Telegram card's wording.
+    pub metrics: Option<TurnMetrics>,
     /// Last call description and whether it succeeded, shown under a folded
     /// header so a collapsed turn still says what it did.
     pub preview: Option<(String, bool)>,
@@ -508,7 +539,15 @@ fn row_blocks(m: &Message) -> Vec<Block> {
 /// one, so the question, the working-out and the answer belong together.
 ///
 /// Returns the count of rows the window hid, and the turns in order.
-pub fn turns(rows: &[Message], total: i64) -> (usize, Vec<Turn>) {
+///
+/// `metrics` carries the per-turn ctx and rate this process still remembers,
+/// keyed by turn anchor (#2324): a turn keeps them across reloads of the same
+/// session and forgets them only when the process does.
+pub fn turns_with_metrics(
+    rows: &[Message],
+    total: i64,
+    metrics: &HashMap<String, TurnMetrics>,
+) -> (usize, Vec<Turn>) {
     let hidden = total.saturating_sub(rows.len() as i64).max(0) as usize;
     if rows.is_empty() {
         return (hidden, Vec::new());
@@ -574,10 +613,13 @@ pub fn turns(rows: &[Message], total: i64) -> (usize, Vec<Turn>) {
             Block::Tools { calls } => calls.last().map(|c| (c.description.clone(), c.success)),
             _ => None,
         });
+        let anchor = format!("{}@{}", rows[s].role, rows[s].created_at.timestamp());
+        let metrics = metrics.get(&anchor).copied();
         out.push(Turn {
             header,
+            metrics,
             preview,
-            anchor: format!("{}@{}", rows[s].role, rows[s].created_at.timestamp()),
+            anchor,
             blocks,
             final_idx,
         });
@@ -987,6 +1029,28 @@ fn fold_header(turn: &Turn, folded: bool, newest: bool) -> Option<Stateful<Div>>
         (false, true) => " (click / ctrl-o to fold)",
         (false, false) => " (click to fold)",
     };
+    let mut row = div()
+        .flex()
+        .flex_row()
+        .gap_1()
+        .child(
+            div()
+                .text_xs()
+                .font_weight(gpui::FontWeight::BOLD)
+                .text_color(rgb(TEAL))
+                .child(SharedString::from(base.clone())),
+        );
+    // The card's ctx and rate, in the Telegram footer's own wording. It
+    // rides HERE rather than in the shared header string, which the terminal
+    // deliberately keeps ctx-free (#744, #2324 D1).
+    if let Some(segment) = turn.metrics.as_ref().and_then(|m| m.segment()) {
+        row = row.child(
+            div()
+                .text_xs()
+                .text_color(rgb(TEXT_MUTED))
+                .child(SharedString::from(segment)),
+        );
+    }
     let mut col = div()
         .id(SharedString::from(format!("fold-{}", turn.anchor)))
         .flex()
@@ -997,25 +1061,12 @@ fn fold_header(turn: &Turn, folded: bool, newest: bool) -> Option<Stateful<Div>>
         .rounded_sm()
         .cursor_pointer()
         .hover(|d| d.bg(rgb(PANEL)))
-        .child(
+        .child(row.child(
             div()
-                .flex()
-                .flex_row()
-                .gap_1()
-                .child(
-                    div()
-                        .text_xs()
-                        .font_weight(gpui::FontWeight::BOLD)
-                        .text_color(rgb(TEAL))
-                        .child(SharedString::from(base.clone())),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(TEXT_TITLE))
-                        .child(SharedString::from(hint)),
-                ),
-        );
+                .text_xs()
+                .text_color(rgb(TEXT_TITLE))
+                .child(SharedString::from(hint)),
+        ));
     if folded && let Some((description, success)) = &turn.preview {
         let color = if *success { TEXT_MUTED } else { RED };
         col = col.child(
@@ -1280,6 +1331,12 @@ pub fn view(
 mod tests {
     use super::*;
 
+    /// The stored-rows split with nothing remembered, which is what most
+    /// seats here exercise. Metrics have their own seats.
+    fn turns(rows: &[Message], total: i64) -> (usize, Vec<Turn>) {
+        turns_with_metrics(rows, total, &HashMap::new())
+    }
+
     fn row(role: &str, content: &str, sequence: i32) -> Message {
         Message::new(
             uuid::Uuid::nil(),
@@ -1501,6 +1558,63 @@ mod tests {
             header, "\u{2713} 1 step \u{b7} 1 tool call",
             "an equal stamp must drop the duration segment, not print 0s"
         );
+    }
+
+    /// #2324: the settled card carries the turn's OWN ctx and rate, in the
+    /// Telegram footer's wording, because the shared turn header keeps ctx
+    /// out (#744).
+    #[test]
+    fn a_settled_turn_prints_its_own_ctx_and_rate() {
+        let ledger = "\n<!-- tools-v2: [{\"d\":\"bash: cargo test\",\"s\":true}] -->\n";
+        let content = format!("{ledger}Done.");
+        let rows = [row("user", "fix it", 1), row("assistant", &content, 2)];
+        let (_, plain) = turns(&rows, 2);
+        let anchor = plain[0].anchor.clone();
+
+        let mut known: HashMap<String, TurnMetrics> = HashMap::new();
+        known.insert(
+            anchor,
+            TurnMetrics {
+                ctx_used: 68_000,
+                ctx_max: 200_000,
+                tps: Some(58.0),
+            },
+        );
+        let (_, mut turns) = turns_with_metrics(&rows, 2, &known);
+        let turn = turns.pop().expect("one turn");
+        let segment = turn
+            .metrics
+            .and_then(|m| m.segment())
+            .expect("a remembered turn prints its metrics");
+        assert_eq!(
+            segment, "ctx: 68K/200K 34% | 58 tok/s",
+            "the card must read exactly as the Telegram footer does"
+        );
+    }
+
+    /// A provider that reports no rate still gets the honest half: ctx only,
+    /// never a fabricated tok/s.
+    #[test]
+    fn a_turn_without_a_rate_prints_ctx_only() {
+        let metrics = TurnMetrics {
+            ctx_used: 12_000,
+            ctx_max: 200_000,
+            tps: None,
+        };
+        assert_eq!(metrics.segment().as_deref(), Some("ctx: 12K/200K 6%"));
+    }
+
+    /// No record means no segment: borrowing the session's current number
+    /// would be a lie about what an older turn cost (#2324 D3).
+    #[test]
+    fn a_turn_with_no_record_prints_no_metrics() {
+        let ledger = "\n<!-- tools-v2: [{\"d\":\"bash: cargo test\",\"s\":true}] -->\n";
+        let content = format!("{ledger}Done.");
+        let rows = [row("user", "fix it", 1), row("assistant", &content, 2)];
+        let (_, mut turns) = turns(&rows, 2);
+        let turn = turns.pop().expect("one turn");
+        assert!(turn.metrics.is_none());
+        assert_eq!(turn.metrics.and_then(|m| m.segment()), None);
     }
 
     /// The owner's "the session I sent the request to was empty afterwards",

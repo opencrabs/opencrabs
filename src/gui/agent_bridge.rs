@@ -41,6 +41,11 @@ pub enum TurnEvent {
         /// Prompt tokens the model saw on the final call. Same number the
         /// TUI reads from `response.context_tokens`.
         context_tokens: u32,
+        /// The service's own output rate for this turn: provider-reported
+        /// tokens over summed active streaming windows, which is the number
+        /// the Telegram card prints. `None` when the provider or the CLI
+        /// path could not measure it.
+        tokens_per_second: Option<f64>,
     },
     /// The turn failed; carries the user-facing message the channels use.
     Failed(String),
@@ -580,6 +585,7 @@ pub fn spawn_turn(
                         let _ = sink.send(TurnEvent::Done {
                             content: response.content,
                             context_tokens: response.context_tokens,
+                            tokens_per_second: response.tokens_per_second,
                         });
                     }
                     Err(e) => {

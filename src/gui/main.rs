@@ -51,6 +51,7 @@ use gpui::{
 };
 use opencrabs::brain::agent::ProgressEvent;
 use opencrabs::utils::drop_landing::human_size;
+use std::collections::HashMap;
 use uuid::Uuid;
 
 use opencrabs::config::Config;
@@ -307,6 +308,15 @@ struct Dashboard {
     /// The open conversation's context window: the compaction budget the
     /// service actually enforces for it, not a hardcoded 200K.
     ctx_max: u32,
+    /// Per-turn card metrics keyed by turn anchor (#2324): what a settled
+    /// turn cost and how fast it answered. In memory only, so a restarted
+    /// window forgets instead of showing the session's current number as if
+    /// it belonged to an old turn.
+    turn_metrics: HashMap<String, transcript::TurnMetrics>,
+    /// Metrics for the turn that just settled, waiting for its rows to land
+    /// so the anchor they get keyed by exists. Session-tagged: a reload for
+    /// another conversation must not claim them.
+    pending_metrics: Option<(Uuid, transcript::TurnMetrics)>,
     /// The checkout's branch, read once at startup: the footer's own field in
     /// the TUI. `None` outside a git tree, which the footer shows as a dash
     /// rather than a made-up name.
@@ -336,6 +346,9 @@ impl Dashboard {
             // prompt size; carrying the previous one over would show a
             // counter for a session the user is not reading.
             self.ctx_tokens = None;
+            // Metrics belong to the turn they settled, never to the session
+            // the user just switched to.
+            self.pending_metrics = None;
             if let Some(b) = agent_bridge::bridge() {
                 self.ctx_max = b.service.context_limit_for_session(id);
             }
@@ -354,7 +367,8 @@ impl Dashboard {
                 if this.transcript.session == Some(id) {
                     match result {
                         Ok((rows, total)) => {
-                            let (hidden, turns) = transcript::turns(&rows, total);
+                            let (hidden, turns) =
+                                transcript::turns_with_metrics(&rows, total, &this.turn_metrics);
                             this.transcript.hidden = hidden;
                             this.transcript.turns = turns;
                         }
@@ -819,11 +833,25 @@ impl Dashboard {
                 agent_bridge::TurnEvent::Done {
                     content,
                     context_tokens,
+                    tokens_per_second,
                 } => {
                     // The provider's own prompt size for the call that just
                     // answered: the honest number for the ctx footer, not an
                     // estimate of what we think we sent.
                     self.ctx_tokens = Some(context_tokens);
+                    // The same numbers, frozen for THIS turn, so the settled
+                    // card can print what the turn cost instead of whatever
+                    // the session's budget reads later (#2324).
+                    if let Some(sid) = self.transcript.session {
+                        self.pending_metrics = Some((
+                            sid,
+                            transcript::TurnMetrics {
+                                ctx_used: context_tokens,
+                                ctx_max: self.ctx_max,
+                                tps: tokens_per_second,
+                            },
+                        ));
+                    }
                     // The answer stays on screen: the stream when chunks
                     // arrived, otherwise the response the turn returned. Live
                     // state clears only once the reload proves the DB has it.
@@ -849,6 +877,9 @@ impl Dashboard {
                 }
                 agent_bridge::TurnEvent::Failed(msg) => {
                     self.live.notices.push(msg);
+                    // A failed turn has no ctx or rate to report; a stale
+                    // record would land on whatever turn shows up next.
+                    self.pending_metrics = None;
                     self.busy = false;
                     self.live.thinking = false;
                     reload = self.transcript.session;
@@ -1129,11 +1160,16 @@ impl Dashboard {
                 }
                 match result {
                     Ok((rows, total)) => {
-                        let (hidden, turns) = transcript::turns(&rows, total);
+                        let (hidden, turns) =
+                            transcript::turns_with_metrics(&rows, total, &this.turn_metrics);
                         let landed = expect.is_none_or(|want| turns.len() >= want);
                         this.transcript.hidden = hidden;
                         this.transcript.turns = turns;
                         if landed {
+                            // The rows are in: the newest turn is the one
+                            // that just answered, so it can claim the metrics
+                            // recorded at `Done` (#2324).
+                            this.attach_pending_metrics(sid);
                             this.live.clear();
                             this.settle_expect = None;
                             this.settle_retries = 0;
@@ -1162,6 +1198,26 @@ impl Dashboard {
             .ok();
         })
         .detach();
+    }
+
+    /// Key the just-settled turn's metrics by the anchor its persisted rows
+    /// produced, now that they exist. Only called once a reload proves the
+    /// turn landed, so the newest turn on screen IS the one that answered;
+    /// the map is what carries the numbers onto a later reload of the same
+    /// conversation.
+    fn attach_pending_metrics(&mut self, sid: Uuid) {
+        let Some((session, metrics)) = self.pending_metrics else {
+            return;
+        };
+        if session != sid {
+            return;
+        }
+        self.pending_metrics = None;
+        let Some(turn) = self.transcript.turns.last_mut() else {
+            return;
+        };
+        turn.metrics = Some(metrics);
+        self.turn_metrics.insert(turn.anchor.clone(), metrics);
     }
 
     fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -2054,6 +2110,8 @@ fn main() {
                         agent_error: None,
                         ctx_tokens: None,
                         ctx_max: 0,
+                        turn_metrics: HashMap::new(),
+                        pending_metrics: None,
                         branch: git_branch(&opencrabs::utils::cwd::launch_cwd()),
                     }
                 });
