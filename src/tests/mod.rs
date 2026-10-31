@@ -823,7 +823,6 @@ pub mod fullscreen_dialogs_test;
 pub mod help_responsive_test;
 pub mod tool_approval_hotkeys_test;
 pub mod tool_loop_rotation_rows_test;
-pub mod tui_display_budget_test;
 #[cfg(unix)]
 pub mod tui_editor_handoff_test;
 pub mod tui_escape_scrub_burst_test;

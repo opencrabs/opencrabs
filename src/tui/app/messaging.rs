@@ -329,14 +329,13 @@ impl App {
             .await?
             .ok_or_else(|| anyhow::anyhow!("Session not found"))?;
 
-        let messages = self
-            .message_service
-            .list_messages_for_session(session_id)
-            .await?;
+        // Only the newest display window is read from SQL. Reading the full
+        // history to show its tail cost a 57 MB allocation on a large session
+        // (#2281); PageUp pages older rows in on demand.
+        let (display, hidden) = self.load_display_window(session_id).await?;
 
-        // TUI scrollback shows the FULL session history. The agent applies
-        // its own compaction window when building the LLM prompt — that's
-        // independent of what the human sees. Trimming here was wiping the
+        // The agent applies its own compaction window when building the LLM
+        // prompt — that's independent of what the human sees. Trimming here was wiping the
         // visible chat after every auto-compaction.
 
         // Stash old session's cancel token before switching so background
@@ -419,8 +418,6 @@ impl App {
         // Sync is_processing flag with per-session state
         self.is_processing = self.processing_sessions.contains(&session.id);
 
-        let (display, hidden) =
-            Self::trim_messages_to_display_window(&messages, Self::DISPLAY_MESSAGE_WINDOW);
         self.hidden_older_messages = hidden;
         self.oldest_displayed_sequence = display.first().map(|m| m.sequence).unwrap_or(0);
         self.display_token_count = display
@@ -680,16 +677,37 @@ impl App {
 
     /// Pre-load a session's messages into the pane cache (for restored split panes).
     pub(crate) async fn preload_pane_session(&mut self, session_id: Uuid) {
-        let messages = self
-            .message_service
-            .list_messages_for_session(session_id)
-            .await
-            .unwrap_or_default();
-        let (display, _) =
-            Self::trim_messages_to_display_window(&messages, Self::DISPLAY_MESSAGE_WINDOW);
+        let display = match self.load_display_window(session_id).await {
+            Ok((display, _)) => display,
+            Err(e) => {
+                tracing::warn!(error = %e, %session_id, "failed to preload pane session");
+                Vec::new()
+            }
+        };
         let expanded: Vec<DisplayMessage> =
             display.into_iter().flat_map(Self::expand_message).collect();
         self.pane_message_cache.insert(session_id, expanded);
+    }
+
+    /// The newest `DISPLAY_MESSAGE_WINDOW` rows of a session plus how many
+    /// older rows sit behind them. Reads a count and a LIMIT-bounded tail, so
+    /// the cost is independent of how long the session has grown (#2281).
+    async fn load_display_window(
+        &self,
+        session_id: Uuid,
+    ) -> Result<(Vec<crate::db::models::Message>, usize)> {
+        let total = self
+            .message_service
+            .count_messages_in_session(session_id)
+            .await?;
+        let rows = self
+            .message_service
+            .list_recent_messages_for_session(session_id, Self::DISPLAY_MESSAGE_WINDOW)
+            .await?;
+        let hidden = usize::try_from(total)
+            .unwrap_or(0)
+            .saturating_sub(rows.len());
+        Ok((rows, hidden))
     }
 
     /// How many of the newest database rows a reloaded pane displays.
@@ -712,24 +730,6 @@ impl App {
     /// (#2155). This bound still keeps a very long session from loading itself
     /// entirely into memory.
     pub(crate) const MAX_DISPLAYED_MESSAGES: usize = 2_000;
-
-    /// Keep the newest `window` rows of a session, dropping the rest.
-    /// Returns (kept_messages, hidden_count).
-    ///
-    /// The newest row is always kept when the history is non-empty: a window
-    /// of zero would otherwise blank a pane that has messages, and the row the
-    /// user most recently received is the last thing to hide (#1944).
-    pub(crate) fn trim_messages_to_display_window(
-        msgs: &[crate::db::models::Message],
-        window: usize,
-    ) -> (Vec<crate::db::models::Message>, usize) {
-        if msgs.is_empty() {
-            return (Vec::new(), 0);
-        }
-        let keep = window.clamp(1, msgs.len());
-        let hidden = msgs.len() - keep;
-        (msgs[hidden..].to_vec(), hidden)
-    }
 
     /// Build the dim italic history marker shown at the top of the message list.
     fn make_history_marker(count: usize) -> DisplayMessage {
@@ -768,23 +768,22 @@ impl App {
             None => return Ok(()),
         };
         let msgs_before = self.messages.len();
-        let all = self
+        // One more window of rows strictly older than the oldest displayed
+        // one, read from SQL with LIMIT (#2281). Rows still hidden after this
+        // page come from the running count, not from a full reload.
+        let to_add = self
             .message_service
-            .list_messages_for_session(session_id)
+            .list_messages_before_sequence(
+                session_id,
+                self.oldest_displayed_sequence,
+                Self::DISPLAY_MESSAGE_WINDOW,
+            )
             .await?;
-        // Messages older than the current oldest displayed
-        let older: Vec<_> = all
-            .into_iter()
-            .filter(|m| m.sequence < self.oldest_displayed_sequence)
-            .collect(); // already ordered ASC by sequence
-
-        let keep = older.len().min(Self::DISPLAY_MESSAGE_WINDOW);
-        let tokens: usize = older[older.len() - keep..]
+        let tokens: usize = to_add
             .iter()
             .map(|m| crate::brain::tokenizer::count_tokens(&m.content))
             .sum();
-        let hidden_still = older.len().saturating_sub(keep);
-        let to_add = &older[older.len() - keep..];
+        let hidden_still = self.hidden_older_messages.saturating_sub(to_add.len());
 
         // Remove existing history_marker at front
         let removed_marker = if self

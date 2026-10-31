@@ -99,6 +99,33 @@ impl MessageService {
             .context("Failed to list messages for session")
     }
 
+    /// The newest `limit` messages of a session, oldest-first. Reads only the
+    /// tail, so a session switch costs `limit` rows whatever the history size.
+    pub async fn list_recent_messages_for_session(
+        &self,
+        session_id: Uuid,
+        limit: usize,
+    ) -> Result<Vec<Message>> {
+        let repo = MessageRepository::new(self.context.pool());
+        repo.find_recent_by_session(session_id, limit)
+            .await
+            .context("Failed to list recent messages for session")
+    }
+
+    /// Up to `limit` messages strictly older than `before_sequence`,
+    /// oldest-first. Backs PageUp paging.
+    pub async fn list_messages_before_sequence(
+        &self,
+        session_id: Uuid,
+        before_sequence: i32,
+        limit: usize,
+    ) -> Result<Vec<Message>> {
+        let repo = MessageRepository::new(self.context.pool());
+        repo.find_recent_before_sequence(session_id, before_sequence, limit)
+            .await
+            .context("Failed to list messages before sequence")
+    }
+
     /// Update a message
     pub async fn update_message(&self, message: &Message) -> Result<()> {
         let repo = MessageRepository::new(self.context.pool());

@@ -233,3 +233,51 @@ async fn find_recent_by_session_returns_chronological_tail() {
         .unwrap();
     assert!(none.is_empty());
 }
+
+/// #2281: find_recent_before_sequence pages strictly older rows, newest of
+/// those first, returned oldest-first, so PageUp never re-reads the tail.
+#[tokio::test]
+async fn find_recent_before_sequence_pages_older_rows() {
+    let db = Database::connect_in_memory().await.unwrap();
+    db.run_migrations().await.unwrap();
+    let session_repo = SessionRepository::new(db.pool().clone());
+    let repo = MessageRepository::new(db.pool().clone());
+
+    let session = Session::new(Some("t".to_string()), Some("m".to_string()), None);
+    session_repo.create(&session).await.unwrap();
+
+    for i in 1..=5 {
+        repo.create(&Message::new(
+            session.id,
+            "user".into(),
+            format!("msg{}", i),
+            i,
+        ))
+        .await
+        .unwrap();
+    }
+
+    // Older than sequence 4, up to 2 rows: [msg2, msg3].
+    let page = repo
+        .find_recent_before_sequence(session.id, 4, 2)
+        .await
+        .unwrap();
+    assert_eq!(page.len(), 2);
+    assert_eq!(page[0].content, "msg2");
+    assert_eq!(page[1].content, "msg3");
+
+    // Fewer rows exist than the limit: returns just what is left.
+    let rest = repo
+        .find_recent_before_sequence(session.id, 2, 10)
+        .await
+        .unwrap();
+    assert_eq!(rest.len(), 1);
+    assert_eq!(rest[0].content, "msg1");
+
+    // Nothing older than the first row.
+    let none = repo
+        .find_recent_before_sequence(session.id, 1, 10)
+        .await
+        .unwrap();
+    assert!(none.is_empty());
+}
