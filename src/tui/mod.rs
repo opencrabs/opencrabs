@@ -14,6 +14,11 @@ pub(crate) mod compact_notice;
 pub mod editor;
 pub mod error;
 pub mod events;
+/// One source of truth for the input box geometry: visual rows, the byte
+/// under a screen cell, and the text between two cells. Click to place the
+/// caret, drag to copy and the selection highlight all read it, so they
+/// cannot disagree.
+pub mod input_layout;
 /// Detached process launcher (#2170, #2172): spawns with nulled stdio, reaps
 /// on a background thread and reports a non-zero exit, so the draw loop never
 /// blocks and a failed open is not reported as a success.

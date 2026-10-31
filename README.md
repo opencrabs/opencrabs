@@ -4001,7 +4001,7 @@ Any tool on your `$PATH` works. If it runs in your terminal, OpenCrabs can use i
 | `Ctrl+K` | Clear current session |
 | `Page Up/Down` | Scroll chat history |
 | `Mouse Scroll` | Scroll chat history |
-| `Mouse click` | On a URL or an existing file path: open it in the default app (browser, Finder/Explorer, `xdg-open`). Elsewhere: expand/collapse blocks and select messages; click-drag still selects text to copy |
+| `Mouse click` | Inside the input box: move the cursor to the click, on any line, including wrapped lines and a box that has scrolled. On a URL or an existing file path: open it in the default app (browser, Finder/Explorer, `xdg-open`). Elsewhere: expand/collapse blocks and select messages; click-drag still selects text to copy |
 | `F12` | Toggle mouse capture: off gives native terminal drag-select and copy (browser-style), on restores in-app click, right-click, and scroll. Works even inside dialogs |
 | `Escape` | Clear input / close overlay |
 

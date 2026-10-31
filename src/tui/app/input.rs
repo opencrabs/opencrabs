@@ -3,6 +3,7 @@
 use super::events::{AppMode, ToolApprovalResponse, TuiEvent};
 use super::mission_control::McPanel;
 use super::*;
+use crate::tui::input_layout;
 use anyhow::Result;
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -125,15 +126,20 @@ impl App {
         (line_start, col)
     }
 
-    /// Get the effective text width per visual line in the input box.
-    /// Accounts for borders (2) and prefix/padding (2).
-    fn input_visual_line_width() -> usize {
-        let term_width = crossterm::terminal::size()
-            .map(|(w, _)| w as usize)
-            .unwrap_or(80);
-        // input_content_width = term_width - 2 (borders)
-        // text area = input_content_width - 2 (prefix "❯ " or padding "  ")
-        term_width.saturating_sub(4).max(10)
+    /// Text width of one input visual line, in display columns.
+    ///
+    /// This has to be the width the renderer wraps at, or Alt+Up/Down lands on
+    /// a different column than the row it moved to. The box has no side
+    /// borders, but every row spends two columns on its prefix (`❯ ` or two
+    /// spaces), so the text wraps at `input_area_width - 2`. That is the same
+    /// number `input_layout::content_width` hands to click and drag.
+    fn input_visual_line_width(&self) -> usize {
+        let area_width = if self.input_area_width > 0 {
+            self.input_area_width
+        } else {
+            crossterm::terminal::size().map(|(w, _)| w).unwrap_or(80)
+        };
+        input_layout::content_width(area_width).max(1)
     }
 
     /// Read-only predicate: is there anywhere for the cursor to move up to?
@@ -158,7 +164,7 @@ impl App {
         let (line_start, _col_bytes) = self.cursor_line_position();
         let text_before = &self.input_buffer[line_start..self.cursor_position];
         let display_col = text_before.width();
-        let vw = Self::input_visual_line_width();
+        let vw = self.input_visual_line_width();
 
         let visual_row = display_col / vw;
         if visual_row == 0 {
@@ -185,7 +191,7 @@ impl App {
         let (line_start, _col_bytes) = self.cursor_line_position();
         let text_before = &self.input_buffer[line_start..self.cursor_position];
         let display_col = text_before.width();
-        let vw = Self::input_visual_line_width();
+        let vw = self.input_visual_line_width();
 
         // Get full logical line
         let line_text = &self.input_buffer[line_start..];
@@ -578,6 +584,60 @@ impl App {
         }
     }
 
+    /// Is `row` a content row of the input box, i.e. not one of its borders?
+    fn row_is_input_content(&self, row: u16) -> bool {
+        if self.input_area_height < 3 {
+            return false;
+        }
+        let first = self.input_area_y + 1;
+        let last = self.input_area_y + self.input_area_height - 2;
+        row >= first && row <= last
+    }
+
+    /// Handle a left click inside the input box: put the caret under the
+    /// pointer. Returns true when the click landed in the box, so the caller
+    /// knows the chat gesture handling must not run for it.
+    ///
+    /// The same press also seeds the drag anchor, so a selection starts at the
+    /// exact cell the user pressed instead of a cell or two later at the first
+    /// motion event. A press with no drag before the release stays a plain
+    /// caret placement; `handle_input_mouse_up` drops the anchor.
+    pub(crate) fn handle_input_mouse_click(&mut self, col: u16, row: u16) -> bool {
+        if !self.row_is_input_content(row) {
+            return false;
+        }
+        self.input_drag_selecting = false;
+        self.input_drag_current = None;
+        self.input_drag_anchor = Some((col, row));
+        // A press in the input box never starts a chat gesture, and a chat
+        // anchor left over from an earlier gesture must not survive it.
+        self.drag_anchor = None;
+        self.drag_current = None;
+
+        if self.input_buffer.is_empty() {
+            // The caret is already at 0. Consume the click anyway so it does
+            // not fall through to the chat block handling underneath.
+            return true;
+        }
+        let Some((visual_row, disp_col)) = input_layout::screen_to_visual(
+            row,
+            col,
+            self.input_area_x,
+            self.input_area_y,
+            self.input_scroll_y,
+        ) else {
+            // Border column or prefix padding: the caret stays where it is.
+            return true;
+        };
+        let rows = input_layout::visual_rows(
+            &self.input_buffer,
+            input_layout::content_width(self.input_area_width),
+        );
+        self.cursor_position =
+            input_layout::byte_at_visual_pos(&rows, &self.input_buffer, visual_row, disp_col);
+        true
+    }
+
     /// Handle mouse drag in the input area — track text selection.
     pub(crate) fn handle_input_mouse_drag(&mut self, col: u16, row: u16) {
         if self.input_area_height == 0 {
@@ -589,7 +649,12 @@ impl App {
         }
         if !self.input_drag_selecting {
             self.input_drag_selecting = true;
-            self.input_drag_anchor = Some((col, row));
+            // The press already recorded the anchor. Only a drag that began
+            // without a press (mouse capture turned on mid-gesture) falls back
+            // to the first motion event.
+            if self.input_drag_anchor.is_none() {
+                self.input_drag_anchor = Some((col, row));
+            }
             // Clear any chat drag selection
             self.drag_anchor = None;
             self.drag_current = None;
@@ -601,6 +666,10 @@ impl App {
     /// Returns true if text was copied.
     pub(crate) fn handle_input_mouse_up(&mut self, col: u16, row: u16) -> bool {
         if !self.input_drag_selecting {
+            // A plain click: the caret was already placed on press, so drop
+            // the press anchor instead of letting it leak into the next drag.
+            self.input_drag_anchor = None;
+            self.input_drag_current = None;
             return false;
         }
         self.input_drag_selecting = false;
@@ -618,88 +687,16 @@ impl App {
     }
 
     /// Extract text from input buffer based on drag selection coordinates.
-    fn extract_input_drag_selection(&self, a: (u16, u16), b: (u16, u16)) -> String {
-        let (start, end) = if (a.1, a.0) <= (b.1, b.0) {
-            (a, b)
-        } else {
-            (b, a)
-        };
-
-        let input_top = self.input_area_y;
-        let input_left = self.input_area_x;
-        let content_left = input_left + 2;
-        let input_width = self.input_area_width.saturating_sub(2) as usize;
-
-        if input_width == 0 || self.input_buffer.is_empty() {
-            return String::new();
-        }
-
-        // Build visual rows: each is (global_byte_start, global_byte_end)
-        let buf = &self.input_buffer;
-        let blen = buf.len();
-        let mut visual_rows: Vec<(usize, usize)> = Vec::new();
-        let mut ls = 0usize;
-        while ls <= blen {
-            let le = buf[ls..].find('\n').map(|i| ls + i).unwrap_or(blen);
-            let line = &buf[ls..le];
-            let lw = unicode_width::UnicodeWidthStr::width(line);
-            let rows = if lw == 0 { 1 } else { lw.div_ceil(input_width) };
-            for vr in 0..rows {
-                let chunk_start_display = vr * input_width;
-                let chunk_end_display = chunk_start_display + input_width;
-                let mut disp_w = 0;
-                let mut char_start = 0;
-                let mut char_end = line.len();
-                for (idx, ch) in line.char_indices() {
-                    let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-                    if vr == 0 && disp_w + cw > chunk_end_display {
-                        char_end = idx;
-                        break;
-                    }
-                    if vr > 0 {
-                        if disp_w < chunk_start_display {
-                            char_start = idx;
-                        }
-                        if disp_w + cw > chunk_end_display {
-                            char_end = idx;
-                            break;
-                        }
-                    }
-                    disp_w += cw;
-                }
-                visual_rows.push((ls + char_start, ls + char_end));
-            }
-            if le == blen {
-                break;
-            }
-            ls = le + 1;
-        }
-
-        // Map visual row + column to byte offset
-        let map_to_byte = |vr: usize, col: u16| -> usize {
-            if vr >= visual_rows.len() {
-                return blen;
-            }
-            let (rs, re) = visual_rows[vr];
-            let chunk = &buf[rs..re];
-            let target_disp = col.saturating_sub(content_left) as usize;
-            let mut w = 0;
-            for (idx, ch) in chunk.char_indices() {
-                if w >= target_disp {
-                    return rs + idx;
-                }
-                w += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-            }
-            re
-        };
-
-        let start_visual = start.1.saturating_sub(input_top + 1) as usize;
-        let end_visual = end.1.saturating_sub(input_top + 1) as usize;
-
-        let from = map_to_byte(start_visual, start.0);
-        let to = map_to_byte(end_visual, end.0);
-
-        buf[from.min(to)..from.max(to)].to_string()
+    pub(crate) fn extract_input_drag_selection(&self, a: (u16, u16), b: (u16, u16)) -> String {
+        input_layout::selection_text(
+            &self.input_buffer,
+            input_layout::content_width(self.input_area_width),
+            self.input_area_x,
+            self.input_area_y,
+            self.input_scroll_y,
+            a,
+            b,
+        )
     }
 
     /// Copy text to system clipboard
@@ -2331,7 +2328,7 @@ impl App {
                         .unwrap_or(0);
                     let prev_line = &self.input_buffer[prev_line_start..prev_line_end];
                     let prev_total_width = prev_line.width();
-                    let vw = Self::input_visual_line_width();
+                    let vw = self.input_visual_line_width();
                     let last_row = if prev_total_width == 0 {
                         0
                     } else {
@@ -2373,7 +2370,7 @@ impl App {
                         .unwrap_or(self.input_buffer.len());
                     let next_line = &self.input_buffer[next_line_start..next_line_end];
                     let current_col = self.input_buffer[line_start..self.cursor_position].width();
-                    let vw = Self::input_visual_line_width();
+                    let vw = self.input_visual_line_width();
                     let target_col = (current_col % vw).min(next_line.width());
                     self.cursor_position =
                         next_line_start + byte_offset_at_display_col(next_line, target_col);

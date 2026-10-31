@@ -984,6 +984,10 @@ pub struct App {
     pub input_area_y: u16,
     pub input_area_width: u16,
     pub input_area_height: u16,
+    /// Vertical scroll the input paragraph applied on the last frame. The box
+    /// scrolls once the buffer is taller than the visible rows, so click to
+    /// place the caret and drag to copy have to add it to the screen row.
+    pub input_scroll_y: u16,
     /// Input drag selection state
     pub input_drag_anchor: Option<(u16, u16)>,
     pub input_drag_current: Option<(u16, u16)>,
@@ -1212,6 +1216,7 @@ impl App {
             input_area_y: 0,
             input_area_width: 0,
             input_area_height: 0,
+            input_scroll_y: 0,
             input_drag_anchor: None,
             input_drag_current: None,
             input_drag_selecting: false,
@@ -2056,25 +2061,32 @@ impl App {
                     }
                 }
             }
-            TuiEvent::MouseClick(_col, row) => {
+            TuiEvent::MouseClick(col, row) => {
                 if self.mode == AppMode::Chat {
-                    // Clear input drag selection if clicking outside input
-                    if row < self.input_area_y || row >= self.input_area_y + self.input_area_height
-                    {
-                        self.input_drag_selecting = false;
-                        self.input_drag_anchor = None;
-                        self.input_drag_current = None;
+                    // A click inside the input box puts the caret under the
+                    // pointer. It owns the whole press, including the drag
+                    // anchor, and returns false when the click landed outside
+                    // the box so the chat gesture handling still runs.
+                    if !self.handle_input_mouse_click(col, row) {
+                        // Clear input drag selection if clicking outside input
+                        if row < self.input_area_y
+                            || row >= self.input_area_y + self.input_area_height
+                        {
+                            self.input_drag_selecting = false;
+                            self.input_drag_anchor = None;
+                            self.input_drag_current = None;
+                        }
+                        // Mouse-DOWN only STARTS a gesture (#726). Do NOT toggle
+                        // expand/select here: that fired the expand before a drag
+                        // could begin, so a click-drag over a collapsible block
+                        // expanded it instead of selecting text to copy. The
+                        // click-vs-drag decision happens on mouse-up: handle_mouse_up
+                        // click-selects (expand) when no drag occurred and
+                        // extracts+copies when a drag did. Reset the drag anchor so
+                        // this gesture starts clean.
+                        self.drag_anchor = None;
+                        self.drag_current = None;
                     }
-                    // Mouse-DOWN only STARTS a gesture (#726). Do NOT toggle
-                    // expand/select here — that fired the expand before a drag
-                    // could begin, so a click-drag over a collapsible block
-                    // expanded it instead of selecting text to copy. The
-                    // click-vs-drag decision happens on mouse-up: handle_mouse_up
-                    // click-selects (expand) when no drag occurred and
-                    // extracts+copies when a drag did. Reset the drag anchor so
-                    // this gesture starts clean.
-                    self.drag_anchor = None;
-                    self.drag_current = None;
                 }
             }
             TuiEvent::MouseRightClick(_col, row) => {

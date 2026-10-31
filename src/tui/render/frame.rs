@@ -219,7 +219,11 @@ pub fn render(f: &mut Frame, app: &mut App) {
             app.input_area_y = chunks[3].y;
             app.input_area_width = chunks[3].width;
             app.input_area_height = chunks[3].height;
-            render_input(f, app, chunks[3]);
+            // The paragraph scrolls once the buffer outgrows the box; store
+            // it so click and drag map the row the user sees, not the row the
+            // buffer starts at.
+            let input_scroll_y = render_input(f, app, chunks[3]);
+            app.input_scroll_y = input_scroll_y;
             render_status_bar(f, app, chunks[4]);
             if app.slash_suggestions_active {
                 render_slash_autocomplete(f, app, chunks[3]);
@@ -316,7 +320,11 @@ pub fn render(f: &mut Frame, app: &mut App) {
             app.input_area_y = chunks[3].y;
             app.input_area_width = chunks[3].width;
             app.input_area_height = chunks[3].height;
-            render_input(f, app, chunks[3]);
+            // The paragraph scrolls once the buffer outgrows the box; store
+            // it so click and drag map the row the user sees, not the row the
+            // buffer starts at.
+            let input_scroll_y = render_input(f, app, chunks[3]);
+            app.input_scroll_y = input_scroll_y;
             render_status_bar(f, app, chunks[4]);
             render_restart_dialog(f, f.area());
         }
@@ -337,7 +345,11 @@ pub fn render(f: &mut Frame, app: &mut App) {
             app.input_area_y = chunks[3].y;
             app.input_area_width = chunks[3].width;
             app.input_area_height = chunks[3].height;
-            render_input(f, app, chunks[3]);
+            // The paragraph scrolls once the buffer outgrows the box; store
+            // it so click and drag map the row the user sees, not the row the
+            // buffer starts at.
+            let input_scroll_y = render_input(f, app, chunks[3]);
+            app.input_scroll_y = input_scroll_y;
             render_status_bar(f, app, chunks[4]);
             render_update_dialog(f, app, f.area());
         }

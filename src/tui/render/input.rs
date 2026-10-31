@@ -5,6 +5,7 @@
 use super::super::app::App;
 use super::theme::{self, Role};
 use super::utils::format_token_count_raw;
+use crate::tui::input_layout;
 use ratatui::{
     Frame,
     layout::{Alignment, Rect},
@@ -229,9 +230,14 @@ pub(super) fn render_queue(f: &mut Frame, app: &App, area: Rect) -> u16 {
     queue_height
 }
 
-/// Render the input box
-pub(super) fn render_input(f: &mut Frame, app: &App, area: Rect) {
-    let input_content_width = area.width.saturating_sub(2) as usize; // borders
+/// Render the input box.
+///
+/// Returns the vertical scroll it applied to the paragraph, which the caller
+/// stores on `App` so click to place the caret and drag to copy can map a
+/// screen row to the visual row the user is actually looking at.
+pub(super) fn render_input(f: &mut Frame, app: &App, area: Rect) -> u16 {
+    // No side borders, but each row spends two columns on its prefix.
+    let input_content_width = input_layout::content_width(area.width);
     let mut input_lines: Vec<Line> = Vec::new();
     let mut cursor_row: usize = 0;
 
@@ -254,87 +260,22 @@ pub(super) fn render_input(f: &mut Frame, app: &App, area: Rect) {
         .bg(theme::role(Role::SelectionBg))
         .fg(theme::role(Role::AccentSoft));
 
-    // Compute selection byte range from drag coordinates
+    // Selection byte range from the drag coordinates, computed by the same
+    // helper the drag-to-copy path and click-to-caret use. Adding the stored
+    // scroll offset here is what keeps the highlight on the text the user
+    // actually sees once the box scrolls past its visible rows.
     let sel_from_to: Option<(usize, usize)> = if app.input_drag_selecting {
         let a = app.input_drag_anchor.unwrap_or((0, 0));
         let b = app.input_drag_current.unwrap_or(a);
-        let (start, end) = if (a.1, a.0) <= (b.1, b.0) {
-            (a, b)
-        } else {
-            (b, a)
-        };
-
-        let input_top = app.input_area_y;
-        let input_content_width = area.width.saturating_sub(2) as usize;
-        let content_left = app.input_area_x + 2;
-
-        if input_content_width == 0 || app.input_buffer.is_empty() {
-            None
-        } else {
-            let start_visual = start.1.saturating_sub(input_top + 1) as usize;
-            let end_visual = end.1.saturating_sub(input_top + 1) as usize;
-
-            // Build a list of visual rows: each entry is (global_byte_start, global_byte_end)
-            let mut visual_rows: Vec<(usize, usize)> = Vec::new();
-            let buf = &app.input_buffer;
-            let blen = buf.len();
-            let mut ls = 0usize;
-            while ls <= blen {
-                let le = buf[ls..].find('\n').map(|i| ls + i).unwrap_or(blen);
-                let line = &buf[ls..le];
-                let lw = unicode_width::UnicodeWidthStr::width(line);
-                let rows = if lw == 0 {
-                    1
-                } else {
-                    lw.div_ceil(input_content_width)
-                };
-                for r in 0..rows {
-                    let chunk_start = r * input_content_width;
-                    let mut display_w = 0;
-                    let mut char_start = 0;
-                    let mut char_end = line.len();
-                    let mut found_start = false;
-                    for (idx, ch) in line.char_indices() {
-                        let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-                        if r > 0 && !found_start && display_w >= chunk_start {
-                            char_start = idx;
-                            found_start = true;
-                        }
-                        if display_w + ch_w > chunk_start + input_content_width {
-                            char_end = idx;
-                            break;
-                        }
-                        display_w += ch_w;
-                    }
-                    visual_rows.push((ls + char_start, ls + char_end));
-                }
-                if le == blen {
-                    break;
-                }
-                ls = le + 1;
-            }
-
-            let map_vr_to_byte = |vr: usize, col: u16| -> usize {
-                if vr >= visual_rows.len() {
-                    return blen;
-                }
-                let (rs, re) = visual_rows[vr];
-                let line_text = &buf[rs..re];
-                let target_disp = col.saturating_sub(content_left) as usize;
-                let mut w = 0;
-                for (idx, ch) in line_text.char_indices() {
-                    if w >= target_disp {
-                        return rs + idx;
-                    }
-                    w += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-                }
-                re
-            };
-
-            let from = map_vr_to_byte(start_visual, start.0);
-            let to = map_vr_to_byte(end_visual, end.0);
-            Some((from.min(to), from.max(to)))
-        }
+        input_layout::selection_range(
+            &app.input_buffer,
+            input_layout::content_width(area.width),
+            app.input_area_x,
+            app.input_area_y,
+            app.input_scroll_y,
+            a,
+            b,
+        )
     } else {
         None
     };
@@ -399,42 +340,17 @@ pub(super) fn render_input(f: &mut Frame, app: &App, area: Rect) {
                 Span::raw("  ")
             };
 
-            // Build wrapped visual rows for this logical line
-            let lw = unicode_width::UnicodeWidthStr::width(line);
-            let num_visual_rows = if lw == 0 {
-                1
-            } else {
-                lw.div_ceil(input_content_width)
-            };
+            // Where each visual row of this logical line starts and ends is
+            // decided by the shared helper, the same one click to place the
+            // caret and drag to copy use. The inline copy this replaced began
+            // every soft wrapped row one character early, so the character on
+            // the wrap boundary was drawn twice.
+            let line_rows = input_layout::visual_rows(line, input_content_width);
+            let num_visual_rows = line_rows.len();
 
             let (sel_from, sel_to) = sel_from_to.unwrap_or((usize::MAX, usize::MAX));
 
-            for vr in 0..num_visual_rows {
-                let chunk_start_display = vr * input_content_width;
-                let chunk_end_display = chunk_start_display + input_content_width;
-
-                // Find the byte range within `line` that fits this visual row
-                let mut disp_w = 0;
-                let mut char_start = 0;
-                let mut char_end = line.len();
-                for (idx, ch) in line.char_indices() {
-                    let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-                    if vr == 0 && disp_w + cw > chunk_end_display {
-                        char_end = idx;
-                        break;
-                    }
-                    if vr > 0 {
-                        if disp_w < chunk_start_display {
-                            char_start = idx;
-                        }
-                        if disp_w + cw > chunk_end_display {
-                            char_end = idx;
-                            break;
-                        }
-                    }
-                    disp_w += cw;
-                }
-
+            for (vr, &(char_start, char_end)) in line_rows.iter().enumerate() {
                 let chunk_text = &line[char_start..char_end];
                 let global_chunk_start = line_start + char_start;
                 let global_chunk_end = line_start + char_end;
@@ -675,6 +591,8 @@ pub(super) fn render_input(f: &mut Frame, app: &App, area: Rect) {
         .block(block);
 
     f.render_widget(input, area);
+
+    scroll_y
 }
 
 /// Sizing math for the slash-autocomplete dropdown.
