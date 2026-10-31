@@ -1029,17 +1029,13 @@ fn fold_header(turn: &Turn, folded: bool, newest: bool) -> Option<Stateful<Div>>
         (false, true) => " (click / ctrl-o to fold)",
         (false, false) => " (click to fold)",
     };
-    let mut row = div()
-        .flex()
-        .flex_row()
-        .gap_1()
-        .child(
-            div()
-                .text_xs()
-                .font_weight(gpui::FontWeight::BOLD)
-                .text_color(rgb(TEAL))
-                .child(SharedString::from(base.clone())),
-        );
+    let mut row = div().flex().flex_row().gap_1().child(
+        div()
+            .text_xs()
+            .font_weight(gpui::FontWeight::BOLD)
+            .text_color(rgb(TEAL))
+            .child(SharedString::from(base.clone())),
+    );
     // The card's ctx and rate, in the Telegram footer's own wording. It
     // rides HERE rather than in the shared header string, which the terminal
     // deliberately keeps ctx-free (#744, #2324 D1).
@@ -1061,12 +1057,14 @@ fn fold_header(turn: &Turn, folded: bool, newest: bool) -> Option<Stateful<Div>>
         .rounded_sm()
         .cursor_pointer()
         .hover(|d| d.bg(rgb(PANEL)))
-        .child(row.child(
-            div()
-                .text_xs()
-                .text_color(rgb(TEXT_TITLE))
-                .child(SharedString::from(hint)),
-        ));
+        .child(
+            row.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(TEXT_TITLE))
+                    .child(SharedString::from(hint)),
+            ),
+        );
     if folded && let Some((description, success)) = &turn.preview {
         let color = if *success { TEXT_MUTED } else { RED };
         col = col.child(
@@ -1545,10 +1543,7 @@ mod tests {
     fn a_zero_duration_is_omitted_from_the_header() {
         let ledger = "\n<!-- tools-v2: [{\"d\":\"bash: cargo test\",\"s\":true}] -->\n";
         let content = format!("{ledger}Done.");
-        let rows = [
-            row("user", "fix it", 1),
-            row("assistant", &content, 2),
-        ];
+        let rows = [row("user", "fix it", 1), row("assistant", &content, 2)];
         let (_, mut turns) = turns(&rows, 2);
         let header = turns
             .pop()
