@@ -94,6 +94,9 @@ pub type EventSink = std::sync::mpsc::Sender<TurnEvent>;
 /// `config` is read once on the main thread before the window opens; the
 /// tiny-stack rule forbids re-running `Config::load` on workers.
 pub fn spawn_bootstrap(config: Config, sink: EventSink) {
+    // #2299: pair this with the "agent ready" line so one run shows whether
+    // bootstrap started at all, and what it did next.
+    crate::logging::info("bootstrap start");
     let thread_sink = sink.clone();
     let spawned = std::thread::Builder::new()
         .stack_size(4 * 1024 * 1024)
@@ -106,6 +109,7 @@ pub fn spawn_bootstrap(config: Config, sink: EventSink) {
             {
                 Ok(rt) => rt,
                 Err(e) => {
+                    crate::logging::error(&format!("bootstrap tokio runtime failed: {e}"));
                     let _ = sink.send(TurnEvent::BootstrapFailed(format!("tokio runtime: {e}")));
                     return;
                 }
@@ -119,6 +123,9 @@ pub fn spawn_bootstrap(config: Config, sink: EventSink) {
                         SERVICE_VEHICLE.set(bridge);
                     }
                     Err(e) => {
+                        // #2299: the window used to show this and record nothing,
+                        // so a failed start left no trail on disk at all.
+                        crate::logging::error(&format!("bootstrap failed: {e}"));
                         let _ = sink.send(TurnEvent::BootstrapFailed(e));
                     }
                 }
@@ -126,6 +133,7 @@ pub fn spawn_bootstrap(config: Config, sink: EventSink) {
         });
 
     if let Err(e) = spawned {
+        crate::logging::error(&format!("bootstrap thread spawn failed: {e}"));
         let _ = sink.send(TurnEvent::BootstrapFailed(format!(
             "bootstrap thread spawn: {e}"
         )));
@@ -159,15 +167,25 @@ pub fn bridge() -> Option<&'static AgentBridge> {
 async fn build(config: Config, sink: EventSink) -> Result<AgentBridge, String> {
     let db = Database::connect(&config.database.path)
         .await
-        .map_err(|e| format!("db connect: {e}"))?;
-    db.run_migrations()
-        .await
-        .map_err(|e| format!("db migrations: {e}"))?;
+        .map_err(|e| {
+            crate::logging::error(&format!("bootstrap db connect failed: {e:#}"));
+            format!("db connect: {e}")
+        })?;
+    // The on-screen line stays short; the log gets the whole chain. Before
+    // #2299 "Failed to run database migrations" reached the user with its
+    // cause already discarded, which is exactly why #2297 had no trail.
+    db.run_migrations().await.map_err(|e| {
+        crate::logging::error(&format!("bootstrap db migrations failed: {e:#}"));
+        format!("db migrations: {e}")
+    })?;
     let context = ServiceContext::new(db.pool().clone());
 
     let provider = opencrabs::brain::provider::create_provider(&config)
         .await
-        .map_err(|e| format!("provider: {e}"))?;
+        .map_err(|e| {
+            crate::logging::error(&format!("bootstrap provider failed: {e:#}"));
+            format!("provider: {e}")
+        })?;
 
     // Same core tool set the TUI registers, via the lib's public wrapper.
     let tool_registry = Arc::new(ToolRegistry::new());
