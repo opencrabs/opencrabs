@@ -11,11 +11,11 @@ pub mod usage;
 #[cfg(test)]
 mod purity_tests {
     //! The whole point of this module is that a non-terminal frontend can
-    //! link it. A `use crossterm` or a `ratatui::` type slipping in would
+    //! link it. An import from either terminal crate slipping in would
     //! break that silently at compile time for the GUI, never for us.
 
     /// Every source file in `ui_core`, with its contents.
-    fn sources() -> [(&'static str, &'static str); 8] {
+    fn sources() -> [(&'static str, &'static str); 9] {
         [
             ("ui_core/mod.rs", include_str!("mod.rs")),
             ("ui_core/keys.rs", include_str!("keys.rs")),
@@ -31,12 +31,14 @@ mod purity_tests {
                 include_str!("usage/view_model.rs"),
             ),
             ("ui_core/usage/input.rs", include_str!("usage/input.rs")),
+            ("ui_core/usage/loader.rs", include_str!("usage/loader.rs")),
         ]
     }
 
-    /// Built from single words rather than written as `crossterm::`, so this
-    /// file does not match the needles it scans for. A scanner that spells
-    /// the forbidden string in its own source flags itself.
+    /// Built from single words rather than written as a crate path with
+    /// the path separator, so this file does not match the needles it
+    /// scans for. A scanner that spells the forbidden string in its own
+    /// source flags itself.
     fn terminal_crates() -> [String; 2] {
         ["crossterm", "ratatui"].map(String::from)
     }

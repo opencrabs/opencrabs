@@ -6,5 +6,6 @@
 pub mod categorizer;
 pub mod data;
 pub mod input;
+pub mod loader;
 pub mod pricing;
 pub mod view_model;
