@@ -1157,6 +1157,20 @@ impl Dashboard {
                 cx.notify();
                 return;
             }
+            // The usage ledger and the files list are full screens, so Esc
+            // leaves them the same way their own chords do. It sits before
+            // the turn gate: a running turn must not hold a screen open.
+            match self.screen {
+                Screen::Usage => {
+                    self.toggle_usage(cx);
+                    return;
+                }
+                Screen::Files => {
+                    self.toggle_files(cx);
+                    return;
+                }
+                Screen::Chat => {}
+            }
             if !self.busy {
                 self.esc_at = None;
                 return;
