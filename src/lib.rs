@@ -88,6 +88,7 @@ pub mod a2a;
 pub mod acp;
 pub mod channels;
 pub mod cron;
+pub mod remote;
 pub mod rtk;
 pub mod ui_core;
 pub mod usage;

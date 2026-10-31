@@ -47,6 +47,7 @@
 - [🖼️ Image Generation & Vision](#-image-generation--vision)
 - [📄 Document Generation](#-document-generation)
 - [🤝 Agent-to-Agent (A2A) Protocol](#-agent-to-agent-a2a-protocol)
+- [🔭 Remote Access (connect · pairing · routes)](#-remote-access-connect--pairing--routes)
 - [🚀 Quick Start](#-quick-start)
 - [🧙 Onboarding Wizard](#-onboarding-wizard)
 - [🔑 API Keys (keys.toml)](#-api-keys-keystoml)
@@ -2079,7 +2080,56 @@ OpenCrabs supports multi-agent structured debate via the **Bee Colony** protocol
 - **Bearer token auth** — set `api_key` to require `Authorization: Bearer <key>` on all JSON-RPC requests
 - **CORS locked down** — no cross-origin requests unless `allowed_origins` is explicitly set
 - **Task persistence** — active tasks survive restarts via SQLite
-- For public exposure, use a reverse proxy (nginx/Caddy) with TLS + the `api_key` auth
+- For public exposure, use `opencrabs connect` below (managed tunnel + pairing), or a reverse proxy (nginx/Caddy) with TLS + the `api_key` auth
+
+---
+
+## 🔭 Remote Access (connect · pairing · routes)
+
+Reach this machine's agent from anywhere without an open gate. Three pieces, inspired by [t3code](https://t3.codes)'s T3 Connect and adapted for a single-owner, relay-free deployment.
+
+### `opencrabs connect` — one command to expose the gateway
+
+```bash
+opencrabs connect                     # tunnel + one-time pairing code
+opencrabs connect --status            # the current tunnel
+opencrabs connect --stop
+opencrabs connect --list-sessions     # paired clients (no secrets)
+opencrabs connect --revoke <id|label>
+```
+
+`connect` manages a pinned `cloudflared` quick tunnel (an existing binary on PATH wins; otherwise the pinned release is downloaded into `state/remote/bin/` and version-smoke-checked) in front of the A2A gateway, prints the public HTTPS URL plus a single-use 8-char pairing code (5-minute TTL), and refuses to run against a keyless gateway.
+
+### Pairing & scopes
+
+The remote client exchanges the code for a session token:
+
+```bash
+curl -s https://<tunnel>.trycloudflare.com/a2a/pair \
+  -H 'content-type: application/json' \
+  -d '{"code":"ABCD1234","label":"my-phone"}'
+# → {"token":"ocpair_…","scopes":["a2a:read","a2a:send"],"expires_at":…}
+```
+
+- `a2a:read` — `tasks/get`, `session/notify-status`
+- `a2a:send` — `message/send`, `message/stream`, `tasks/cancel`, `session/notify`
+- The config `api_key` keeps full access; pairing codes carry a subset and can only narrow, never widen.
+- Codes and tokens are stored as SHA-256 only (`state/remote/pairing.json`, mode 0600). Codes are single-use; 10 consecutive misses lock pairing for 15 minutes; `/a2a/pair` is additionally rate-limited to 10 attempts/min per client IP.
+- Insufficient scope → JSON-RPC `-32004`.
+
+### Routes — race, learn, fail over
+
+A gateway announces how it can be reached (`lan` / `tailnet` / `tunnel`) on `GET /a2a/routes` — auth-gated, because the public `/a2a/health` would otherwise leak LAN topology to the open internet (it shows `routes` only to a valid read-scoped bearer). Clients keep a route table in `state/remote/routes.json`:
+
+```bash
+opencrabs routes list
+opencrabs routes add <host-id> <url> [--kind lan|tailnet|tunnel]
+opencrabs routes race <host-id>                  # probe all routes, record EWMA
+opencrabs routes learn <url> --api-key <key>     # harvest an announcement
+opencrabs routes clear [<host-id>]
+```
+
+`a2a_send` resolves its target through this table: with 2+ routes to a host it races them (health probes only — a mutation is sent exactly once, to the winner), orders by EWMA latency, gives recently-failed routes a 1-second leash instead of 3, and `discover` harvests fresh announcements. With an empty table everything behaves exactly as before.
 
 ---
 
