@@ -355,6 +355,7 @@ pub mod gui_two_agents_migrations_2297_test;
 pub mod headless_tool_surface_test;
 pub mod help_catalog_test;
 pub mod help_mode_entry_test;
+pub mod help_table_test;
 pub mod init_command_test;
 pub mod install_homebrew_test;
 pub mod install_ps1_test;
