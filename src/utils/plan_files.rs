@@ -51,8 +51,10 @@ pub async fn session_dir(session_id: Uuid) -> PathBuf {
 /// `<project>/session/` when the session is bound to a project. Mirrors
 /// [`crate::services::FileService::project_files_dir`] but resolves the
 /// session subdir instead of `files/`, so a project's plan and attachments
-/// live under one roof.
-async fn project_session_dir(session_id: Uuid, pool: &crate::db::Pool) -> Option<PathBuf> {
+/// live under one roof. `pub`: the GUI bin is its own crate and its bridge
+/// thread resolves the same path on its own runtime (the global pool needs a
+/// Tokio reactor the gpui executor does not have).
+pub async fn project_session_dir(session_id: Uuid, pool: &crate::db::Pool) -> Option<PathBuf> {
     use crate::db::repository::{ProjectRepository, SessionRepository};
     let session = SessionRepository::new(pool.clone())
         .find_by_id(session_id)

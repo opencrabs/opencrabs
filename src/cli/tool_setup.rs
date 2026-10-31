@@ -34,6 +34,16 @@ use crate::db::Database;
 /// (`ToolExecutionContext.headless` → hard `ToolError`) is the
 /// belt-and-braces backstop, so a registration leak fails loudly instead
 /// of silently parking a verdict. Interactive callers pass `false`.
+/// Public entry for surfaces outside the lib tree (the gpui gui bin) that
+/// need the exact core tool set the TUI ships. Same body, same wiring.
+pub fn register_core_agent_tools_embedded(
+    tool_registry: &Arc<ToolRegistry>,
+    db: &Database,
+    config: &Config,
+) -> Arc<crate::brain::tools::subagent::SubAgentManager> {
+    register_core_agent_tools(tool_registry, db, config, false)
+}
+
 pub(crate) fn register_core_agent_tools(
     tool_registry: &Arc<ToolRegistry>,
     db: &Database,

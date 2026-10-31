@@ -14,7 +14,7 @@ pub(crate) mod resume_delivery;
 pub(crate) mod session_notify;
 pub(crate) mod session_resolve;
 pub(crate) mod session_set_model;
-pub(crate) mod tool_setup;
+pub mod tool_setup;
 pub(crate) mod ui;
 
 pub use args::*;
