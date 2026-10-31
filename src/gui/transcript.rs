@@ -554,9 +554,14 @@ pub fn turns(rows: &[Message], total: i64) -> (usize, Vec<Turn>) {
                 _ => {}
             }
         }
-        // Same duration fallback the TUI keeps for turns with no stamped
-        // duration: last row minus first row, floored at zero.
-        if let (Some(first), Some(last)) = (rows.get(s), rows.get(e - 1)) {
+        // Prefer the duration stamped at turn end (#964, #2323), the same
+        // order `tui::render::chat::turn_summary` uses. The assistant row is
+        // created at turn START and updated in place, so subtracting stored
+        // timestamps collapses to zero for almost every turn: that subtraction
+        // was the whole reason a settled turn lost its timer.
+        if let Some(secs) = rows[s..e].iter().rev().find_map(|m| m.duration_secs) {
+            summary.duration_secs = secs.max(0);
+        } else if let (Some(first), Some(last)) = (rows.get(s), rows.get(e - 1)) {
             summary.duration_secs = (last.created_at - first.created_at).num_seconds().max(0);
         }
         // Steps are the rows the fold actually hides, never the turn's row
@@ -1434,6 +1439,68 @@ mod tests {
         let rows = [row("user", "hi", 1), row("assistant", "hello", 2)];
         let (_, turns) = turns(&rows, 2);
         assert!(turns[0].header.is_none());
+    }
+
+    /// #2323: the timer used to vanish on every settled turn because the
+    /// header subtracted two timestamps that are equal by construction. The
+    /// duration stamped at turn end wins.
+    #[test]
+    fn the_turn_timer_reads_the_stamped_duration() {
+        let ledger = "\n<!-- tools-v2: [{\"d\":\"bash: cargo test\",\"s\":true}] -->\n";
+        let content = format!("{ledger}Done, the suite is green.");
+        let mut answer = row("assistant", &content, 2);
+        answer.duration_secs = Some(165);
+        let rows = [row("user", "fix it", 1), answer];
+        let (_, mut turns) = turns(&rows, 2);
+        let header = turns
+            .pop()
+            .and_then(|t| t.header)
+            .expect("a turn that ran tools carries a header");
+        assert!(
+            header.contains("2m 45s"),
+            "the stamped 165s must reach the header, got {header:?}"
+        );
+    }
+
+    /// A turn written before the stamp existed still gets a timer: the row
+    /// span is the fallback, exactly as in the TUI.
+    #[test]
+    fn an_unstamped_turn_falls_back_to_the_row_span() {
+        let ledger = "\n<!-- tools-v2: [{\"d\":\"bash: cargo test\",\"s\":true}] -->\n";
+        let content = format!("{ledger}Done.");
+        let mut question = row("user", "fix it", 1);
+        question.created_at -= chrono::TimeDelta::seconds(90);
+        let rows = [question, row("assistant", &content, 2)];
+        let (_, mut turns) = turns(&rows, 2);
+        let header = turns
+            .pop()
+            .and_then(|t| t.header)
+            .expect("a turn that ran tools carries a header");
+        assert!(
+            header.contains("1m 30s"),
+            "the span between the rows is 90s, got {header:?}"
+        );
+    }
+
+    /// Zero is not a duration worth printing: the segment is omitted rather
+    /// than reading "0s".
+    #[test]
+    fn a_zero_duration_is_omitted_from_the_header() {
+        let ledger = "\n<!-- tools-v2: [{\"d\":\"bash: cargo test\",\"s\":true}] -->\n";
+        let content = format!("{ledger}Done.");
+        let rows = [
+            row("user", "fix it", 1),
+            row("assistant", &content, 2),
+        ];
+        let (_, mut turns) = turns(&rows, 2);
+        let header = turns
+            .pop()
+            .and_then(|t| t.header)
+            .expect("a turn that ran tools carries a header");
+        assert_eq!(
+            header, "\u{2713} 1 step \u{b7} 1 tool call",
+            "an equal stamp must drop the duration segment, not print 0s"
+        );
     }
 
     /// The owner's "the session I sent the request to was empty afterwards",
