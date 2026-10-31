@@ -39,7 +39,7 @@ use crate::editor::{Attachment, marker_paths, strip_markers};
 use crate::markdown;
 use crate::theme::{
     ACCENT, AMBER, BG, BLUE, GREEN, PANEL, PANEL_HI, RED, TEAL, TEXT, TEXT_MUTED, TEXT_NORMAL,
-    TEXT_TITLE, WARN,
+    TEXT_STRONG, TEXT_TITLE, TRACK, WARN,
 };
 
 /// Newest rows shown per load, matching the TUI display window. Older
@@ -660,35 +660,110 @@ fn md_line(l: &markdown::MdLine) -> Div {
     div().pl(rems(f32::from(l.indent) * 0.9)).child(text)
 }
 
+/// One table cell. Every cell is `flex_1` with `min_w_0`, so the grid takes
+/// the width the window actually has and the columns share it: a wide window
+/// gets wide columns, a narrow one wraps the text instead of clipping it.
+fn table_cell(cell: &markdown::MdCell, header: bool) -> Div {
+    let style = TextStyle {
+        color: rgb(if header { TEXT_STRONG } else { TEXT_NORMAL }).into(),
+        font_size: AbsoluteLength::Pixels(px(13.0)),
+        ..Default::default()
+    };
+    let text =
+        StyledText::new(cell.text.clone()).with_default_highlights(&style, cell.highlights.clone());
+    div().flex_1().min_w_0().px_2().py_1().child(text)
+}
+
+/// A rule between two rows, drawn as its own element so no table depends on
+/// border-side helpers the way the TUI's box drawing does not either.
+fn table_rule() -> Div {
+    div().h(px(1.0)).w_full().flex_none().bg(rgb(TRACK))
+}
+
+/// A markdown table as a real grid: header band, a rule under it, then one
+/// flex row per record with the same column count. This is the shape the TUI
+/// draws in box characters; the GUI draws it in panels.
+fn md_table(t: &markdown::MdTable) -> Div {
+    let cols = t.columns().max(1);
+    let empty = markdown::MdCell {
+        text: String::new(),
+        highlights: Vec::new(),
+    };
+    let mut grid = div()
+        .flex()
+        .flex_col()
+        .w_full()
+        .border_1()
+        .border_color(rgb(TRACK))
+        .rounded_sm()
+        .overflow_hidden();
+
+    let mut head = div()
+        .flex()
+        .flex_row()
+        .items_start()
+        .w_full()
+        .bg(rgb(PANEL_HI));
+    for i in 0..cols {
+        head = head.child(table_cell(t.header.get(i).unwrap_or(&empty), true));
+    }
+    grid = grid.child(head).child(table_rule());
+
+    for (n, row) in t.rows.iter().enumerate() {
+        if n > 0 {
+            grid = grid.child(table_rule());
+        }
+        let mut line = div().flex().flex_row().items_start().w_full();
+        for i in 0..cols {
+            line = line.child(table_cell(row.get(i).unwrap_or(&empty), false));
+        }
+        grid = grid.child(line);
+    }
+    grid
+}
+
 /// Assistant content as markdown. Consecutive fence lines group under one
-/// padded mono container so a code block reads as one shape.
+/// padded mono container so a code block reads as one shape, while a table
+/// block keeps its grid instead of being flattened into text rows.
 fn md_block(src: &str) -> Div {
-    let lines = markdown::lines(src);
+    let blocks = markdown::blocks(src);
     let mut out = div().flex().flex_col().gap_1();
     let mut i = 0;
-    while i < lines.len() {
-        if lines[i].mono {
-            let mut code = div()
-                .flex()
-                .flex_col()
-                .bg(rgb(PANEL_HI))
-                .rounded_sm()
-                .p_2()
-                .gap_0p5();
-            while i < lines.len() && lines[i].mono {
-                let style = mono_style();
-                code = code.child(
-                    div().child(
-                        StyledText::new(lines[i].text.clone())
-                            .with_default_highlights(&style, lines[i].highlights.clone()),
-                    ),
-                );
+    while i < blocks.len() {
+        match &blocks[i] {
+            markdown::MdBlock::Table(table) => {
+                out = out.child(md_table(table));
                 i += 1;
             }
-            out = out.child(code);
-        } else {
-            out = out.child(md_line(&lines[i]));
-            i += 1;
+            markdown::MdBlock::Line(line) if line.mono => {
+                let mut code = div()
+                    .flex()
+                    .flex_col()
+                    .bg(rgb(PANEL_HI))
+                    .rounded_sm()
+                    .p_2()
+                    .gap_0p5();
+                while i < blocks.len() {
+                    match &blocks[i] {
+                        markdown::MdBlock::Line(l) if l.mono => {
+                            let style = mono_style();
+                            code = code.child(
+                                div().child(
+                                    StyledText::new(l.text.clone())
+                                        .with_default_highlights(&style, l.highlights.clone()),
+                                ),
+                            );
+                            i += 1;
+                        }
+                        _ => break,
+                    }
+                }
+                out = out.child(code);
+            }
+            markdown::MdBlock::Line(line) => {
+                out = out.child(md_line(line));
+                i += 1;
+            }
         }
     }
     out
@@ -1376,9 +1451,16 @@ mod tests {
 
     #[test]
     fn markdown_structure_survives_parsing() {
-        let lines = crate::markdown::lines(
+        let blocks = crate::markdown::blocks(
             "## Heading\n\n- one\n- two\n\nuse `speed` here\n\n```\ncode line\n```",
         );
+        let lines: Vec<_> = blocks
+            .into_iter()
+            .filter_map(|b| match b {
+                crate::markdown::MdBlock::Line(l) => Some(l),
+                crate::markdown::MdBlock::Table(_) => None,
+            })
+            .collect();
         assert!(
             lines
                 .iter()
@@ -1393,5 +1475,27 @@ mod tests {
             lines.iter().any(|l| !l.highlights.is_empty()),
             "inline emphasis must carry highlight runs"
         );
+    }
+
+    /// The regression this module was rebuilt for: a table used to arrive as
+    /// one line per cell, so the window drew a column of words where the TUI
+    /// drew a grid. It must parse as a table block with real columns.
+    #[test]
+    fn table_parses_as_a_grid_not_as_loose_lines() {
+        let blocks = crate::markdown::blocks(
+            "| model | cost | note |\n|---|---|---|\n| a | $1 | fast |\n| b | $2 | slow |\n",
+        );
+        let table = blocks
+            .iter()
+            .find_map(|b| match b {
+                crate::markdown::MdBlock::Table(t) => Some(t),
+                crate::markdown::MdBlock::Line(_) => None,
+            })
+            .expect("a markdown table must parse as a table block, not as lines");
+        assert_eq!(table.columns(), 3, "three columns, never three lines");
+        assert_eq!(table.header.len(), 3);
+        assert_eq!(table.rows.len(), 2);
+        assert_eq!(table.header[1].text, "cost");
+        assert_eq!(table.rows[1][2].text, "slow");
     }
 }
