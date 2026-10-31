@@ -1434,14 +1434,7 @@ impl Render for Dashboard {
                                     .gap_3()
                                     .text_xs()
                                     .text_color(rgb(TEXT_MUTED))
-                                    .child("cmd-u · usage")
-                                    .child("cmd-f · find chat")
-                                    .child("cmd-g · files")
-                                    .child("cmd-n · new chat")
-                                    .child("cmd-o · fold turn")
-                                    .child("cmd-b · sidebar")
-                                    .child("cmd-shift-f · pin")
-                                    .child("cmd-⌫ · delete chat"),
+                                    .child("ctrl+h · help"),
                             )
                             .child(
                                 div()
@@ -1517,7 +1510,7 @@ impl Render for Dashboard {
                         div()
                             .text_xs()
                             .text_color(rgb(TEXT_MUTED))
-                            .child("cmd-u · back to chat"),
+                            .child("ctrl+h · help"),
                     );
                 (scroller.into_any_element(), footer.into_any_element())
             }
@@ -1549,7 +1542,7 @@ impl Render for Dashboard {
                             div()
                                 .text_xs()
                                 .text_color(rgb(TEXT_MUTED))
-                                .child("cmd-g · back to chat"),
+                                .child("ctrl+h · help"),
                         );
                 (scroller.into_any_element(), footer.into_any_element())
             }
