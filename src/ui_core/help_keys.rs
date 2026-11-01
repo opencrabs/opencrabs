@@ -314,7 +314,7 @@ pub const ROWS: &[HelpRow] = &[
         "t",
         "T",
         None,
-        "New topic under the selected session",
+        "New topic under this session",
     ),
     row(
         HelpSection::Sessions,
