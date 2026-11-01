@@ -110,8 +110,8 @@ pub const ROWS: &[HelpRow] = &[
     ),
     row(
         HelpSection::Global,
-        "ctrl+shift+t",
-        "/theme",
+        "alt+t",
+        "Alt+T",
         Some("ctrl-shift-t"),
         "Themes: preview and keep a theme",
     ),

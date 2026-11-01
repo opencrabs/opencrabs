@@ -617,6 +617,13 @@ pub mod keys {
             || key_matches(event, KeyCode::Char('l'), KeyModifiers::CONTROL)
     }
 
+    /// Alt+T - open the theme picker, the same one `/theme` opens. Alt rather
+    /// than Ctrl+Shift+T: a terminal sends Ctrl+Shift+T as plain Ctrl+T, and
+    /// Ctrl+T is reserved for topics.
+    pub fn is_themes(event: &KeyEvent) -> bool {
+        key_matches(event, KeyCode::Char('t'), KeyModifiers::ALT)
+    }
+
     /// Ctrl+K - Clear current session
     pub fn is_clear_session(event: &KeyEvent) -> bool {
         key_matches(event, KeyCode::Char('k'), KeyModifiers::CONTROL)
