@@ -7,13 +7,22 @@
 //! decision, every ledger fetch with its duration, and any panic with a full
 //! backtrace.
 //!
-//! `OPENCRABS_GUI_DEBUG=1` additionally mirrors the trail to stderr and turns
-//! on the per-keystroke detail.
+//! `[debug] gui_debug_logs = true` in config.toml, or `OPENCRABS_GUI_DEBUG=1`,
+//! mirrors the trail to stderr and turns on the per-keystroke detail.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
+
+/// Set from `[debug] gui_debug_logs` once the config has loaded.
+static CONFIG_DEBUG: AtomicBool = AtomicBool::new(false);
+
+/// Apply the config switch. Called once at startup, before the first event.
+pub fn set_debug_from_config(enabled: bool) {
+    CONFIG_DEBUG.store(enabled, Ordering::Relaxed);
+}
 
 /// The append-only sink. `None` when the log file could not be opened, which
 /// must never stop the window from running: logging is a witness, not a
@@ -103,6 +112,7 @@ fn stamp() -> String {
 }
 
 fn verbose() -> bool {
-    static V: OnceLock<bool> = OnceLock::new();
-    *V.get_or_init(|| std::env::var("OPENCRABS_GUI_DEBUG").is_ok())
+    static ENV: OnceLock<bool> = OnceLock::new();
+    CONFIG_DEBUG.load(Ordering::Relaxed)
+        || *ENV.get_or_init(|| std::env::var("OPENCRABS_GUI_DEBUG").is_ok())
 }
