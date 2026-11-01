@@ -1751,12 +1751,14 @@ mod tests {
         let calls = [
             ToolCall {
                 name: "bash".to_string(),
+                task_id: None,
                 description: "bash: cargo test".to_string(),
                 success: true,
                 done: true,
             },
             ToolCall {
                 name: "read_file".to_string(),
+                task_id: None,
                 description: "read_file: src/gui/main.rs".to_string(),
                 success: false,
                 done: true,
@@ -1938,53 +1940,6 @@ mod tests {
         assert_eq!(table.rows[1][2].text, "slow");
     }
 
-    /// A detached row keeps the id its finish will name, and says so in the
-    /// description: a row that outlives the turn must not read like a call
-    /// that is blocking it.
-    #[test]
-    fn a_detached_row_carries_its_task_id_and_label() {
-        let call = ToolCall::detached("task-7".into(), "cargo test".into());
-        assert_eq!(call.task_id.as_deref(), Some("task-7"));
-        assert!(!call.done, "a detached command starts unresolved");
-        assert!(
-            call.description.contains("cargo test") && call.description.contains("detached"),
-            "description names the label and the detachment: {}",
-            call.description
-        );
-    }
-
-    /// The finish settles the row it opened, with the elapsed time the event
-    /// reported.
-    #[test]
-    fn settle_detached_marks_the_matching_row_done() {
-        let mut rows = vec![ToolCall::detached("task-7".into(), "cargo test".into())];
-        assert!(settle_detached(&mut rows, "task-7", true, 12.34));
-        assert!(rows[0].done && rows[0].success);
-        assert!(
-            rows[0].description.contains("12.3s"),
-            "the elapsed time lands in the row: {}",
-            rows[0].description
-        );
-    }
-
-    /// A finish for a task this turn never drew settles nothing and says so,
-    /// instead of closing some other row.
-    #[test]
-    fn settle_detached_ignores_an_unknown_task_id() {
-        let mut rows = vec![ToolCall::detached("task-7".into(), "cargo test".into())];
-        assert!(!settle_detached(&mut rows, "task-9", true, 3.0));
-        assert!(!rows[0].done, "an unrelated finish leaves the row running");
-    }
-
-    /// Provider calls carry no task id, so a detached finish can never settle
-    /// one: which command finished is answered by identity, not by position.
-    #[test]
-    fn settle_detached_never_touches_a_provider_row() {
-        let mut rows = vec![ToolCall::running("bash".into(), "bash: ls".into())];
-        assert!(!settle_detached(&mut rows, "", true, 1.0));
-        assert!(!rows[0].done);
-        assert!(rows[0].task_id.is_none());
-    }
     /// #2325: reasoning is output, so its time belongs in the denominator the
     /// same way the channel bridge counts its tokens in the numerator.
     /// Excluding it would report a reasoning-heavy turn at its final answer's
@@ -2134,6 +2089,7 @@ mod tests {
         for n in 0..9 {
             live.tools.push(ToolCall {
                 name: "read_file".into(),
+                task_id: None,
                 description: format!("Read file{n}.rs"),
                 success: true,
                 done: true,
@@ -2160,12 +2116,14 @@ mod tests {
             .push(ToolCall::running("bash".into(), "bash: cargo test".into()));
         live.tools.push(ToolCall {
             name: "read_file".into(),
+            task_id: None,
             description: "Read Cargo.toml".into(),
             success: true,
             done: true,
         });
         live.tools.push(ToolCall {
             name: "bash".into(),
+            task_id: None,
             description: "bash: cargo clippy".into(),
             success: true,
             done: true,
@@ -2196,5 +2154,53 @@ mod tests {
         let text = live_status_text(&live);
         assert!(!text.contains("thinking"), "got {text}");
         assert!(text.contains("tok this turn"), "got {text}");
+    }
+
+    /// A detached row keeps the id its finish will name, and says so in the
+    /// description: a row that outlives the turn must not read like a call
+    /// that is blocking it.
+    #[test]
+    fn a_detached_row_carries_its_task_id_and_label() {
+        let call = ToolCall::detached("task-7".into(), "cargo test".into());
+        assert_eq!(call.task_id.as_deref(), Some("task-7"));
+        assert!(!call.done, "a detached command starts unresolved");
+        assert!(
+            call.description.contains("cargo test") && call.description.contains("detached"),
+            "description names the label and the detachment: {}",
+            call.description
+        );
+    }
+
+    /// The finish settles the row it opened, with the elapsed time the event
+    /// reported.
+    #[test]
+    fn settle_detached_marks_the_matching_row_done() {
+        let mut rows = vec![ToolCall::detached("task-7".into(), "cargo test".into())];
+        assert!(settle_detached(&mut rows, "task-7", true, 12.34));
+        assert!(rows[0].done && rows[0].success);
+        assert!(
+            rows[0].description.contains("12.3s"),
+            "the elapsed time lands in the row: {}",
+            rows[0].description
+        );
+    }
+
+    /// A finish for a task this turn never drew settles nothing and says so,
+    /// instead of closing some other row.
+    #[test]
+    fn settle_detached_ignores_an_unknown_task_id() {
+        let mut rows = vec![ToolCall::detached("task-7".into(), "cargo test".into())];
+        assert!(!settle_detached(&mut rows, "task-9", true, 3.0));
+        assert!(!rows[0].done, "an unrelated finish leaves the row running");
+    }
+
+    /// Provider calls carry no task id, so a detached finish can never settle
+    /// one: which command finished is answered by identity, not by position.
+    #[test]
+    fn settle_detached_never_touches_a_provider_row() {
+        let mut rows = vec![ToolCall::running("bash".into(), "bash: ls".into())];
+        assert!(!settle_detached(&mut rows, "", true, 1.0));
+        assert!(!rows[0].done);
+        assert!(rows[0].task_id.is_none());
     }
 }
