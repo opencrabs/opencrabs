@@ -17,6 +17,7 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::Duration;
 
 use opencrabs::brain::agent::AgentService;
+use opencrabs::brain::agent::service::MessageEnqueueCallback;
 use opencrabs::brain::agent::{ProgressCallback, ProgressEvent, QueuedUserMessage};
 use opencrabs::brain::prompt_builder::{BrainLoader, RuntimeInfo};
 use opencrabs::brain::tools::ToolRegistry;
@@ -43,6 +44,17 @@ pub enum TurnEvent {
     },
     /// The turn failed; carries the user-facing message the channels use.
     Failed(String),
+    /// A detached background task finished: the resumed-turn payload, not a UI
+    /// notice. The row it settles is drawn and closed by the progress events;
+    /// this is what tells the agent the command it backgrounded is done.
+    ///
+    /// `context_text` is what the model reads (the command, its status and its
+    /// output); `display_text` is the one-line receipt the user sees.
+    BackgroundTaskDone {
+        session_id: Uuid,
+        context_text: String,
+        display_text: String,
+    },
     /// Bootstrap finished: the service is live. It owns no session: every
     /// turn runs on the conversation the window has open, so the agent and
     /// the pane can never disagree about which session is being written.
@@ -210,6 +222,13 @@ async fn build(config: Config, sink: EventSink) -> Result<AgentBridge, String> {
 
     let auto_approve = config.agent.approval_policy.as_str() == "auto-always";
     let forwarder: ProgressCallback = install_progress_forwarder(&sink);
+
+    // Background-task resume producer (#2322): this setter is the ONE place a
+    // `BackgroundTaskManager` is created, and the window never called it. With
+    // no manager a long command cannot detach at all, `tasks_list` is blind,
+    // and no detached row can be drawn or settled.
+    let enqueue: MessageEnqueueCallback = install_enqueue_forwarder(&sink);
+
     let service = AgentService::new(provider, context.clone(), &config)
         .await
         .with_system_brain(system_brain)
@@ -217,7 +236,14 @@ async fn build(config: Config, sink: EventSink) -> Result<AgentBridge, String> {
         .with_auto_approve_tools(auto_approve)
         .with_tool_registry(tool_registry)
         .with_subagent_manager(subagent_manager)
-        .with_progress_callback(Some(forwarder));
+        .with_progress_callback(Some(forwarder))
+        .with_message_enqueue_callback(Some(enqueue.clone()));
+
+    // Delivery route for a completion on a session no channel owns: a
+    // sub-agent reached from a tool carries no callback of its own and
+    // resolves this instead (#1036). The window is its own process, so this
+    // static does not collide with a running TUI.
+    opencrabs::brain::agent::service::register_local_route(enqueue);
 
     Ok(AgentBridge {
         service: Arc::new(service),
@@ -575,6 +601,28 @@ fn install_progress_forwarder(sink: &EventSink) -> ProgressCallback {
     let sink = sink.clone();
     Arc::new(move |session, event| {
         let _ = sink.send(TurnEvent::ProgressFor(session, event));
+    })
+}
+
+/// The window's completion sink: a finished background task becomes a
+/// [`TurnEvent::BackgroundTaskDone`], so the open conversation resumes with the
+/// result instead of going quiet while the work it started still runs.
+///
+/// A failed send is logged, never dropped: a silently discarded completion is
+/// exactly what made this class of loss invisible on the TUI (#1206).
+fn install_enqueue_forwarder(sink: &EventSink) -> MessageEnqueueCallback {
+    let sink = sink.clone();
+    Arc::new(move |session_id, msg| {
+        if let Err(e) = sink.send(TurnEvent::BackgroundTaskDone {
+            session_id,
+            context_text: msg.context_text,
+            display_text: msg.display_text,
+        }) {
+            tracing::error!(
+                target: "background_task",
+                "Could not hand session {session_id}'s completion to the GUI: {e}"
+            );
+        }
     })
 }
 

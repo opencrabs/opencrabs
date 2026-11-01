@@ -16,6 +16,13 @@
 //! runs. The footer's hint labels come from the same `advertises` rule set.
 //! GUI-only concerns live outside that vocabulary: the zoom keys, the scroll
 //! containers, and rail clicks.
+//!
+//! Long shell commands detach instead of blocking the pane. A running one gets
+//! its own row in the live turn and a `⏳` strip above the input, both drawn
+//! from the same formatter the TUI uses. When it finishes, the row settles by
+//! task id and the conversation resumes with the output (#2322). A completion
+//! for a session other than the open one is logged, not resumed: the window
+//! runs one conversation at a time.
 
 mod agent_bridge;
 mod breakdown;
@@ -742,12 +749,16 @@ impl Dashboard {
                     // Close the newest open row this call opened; with no open
                     // row (an event lost across a mode switch) draw it closed
                     // rather than dropping the call from the turn.
+                    //
+                    // Rows carrying a `task_id` are detached commands: their own
+                    // finish settles them, so a synchronous call must never close
+                    // one that happens to share its tool name.
                     let open = self
                         .live
                         .tools
                         .iter_mut()
                         .rev()
-                        .find(|c| !c.done && c.name == tool_name);
+                        .find(|c| !c.done && c.name == tool_name && c.task_id.is_none());
                     match open {
                         Some(call) => {
                             call.done = true;
@@ -758,6 +769,7 @@ impl Dashboard {
                             description: tool_name,
                             success,
                             done: true,
+                            task_id: None,
                         }),
                     }
                 }
@@ -767,9 +779,42 @@ impl Dashboard {
                 agent_bridge::TurnEvent::ProgressFor(_, ProgressEvent::TokenCount(count)) => {
                     self.ctx_tokens = Some(count.min(u32::MAX as usize) as u32);
                 }
-                // Detached-task rows, compaction notices, queue echoes: the
-                // phase-2 transcript mirror. They persist to the DB and show
-                // on the reload; nothing to draw live yet.
+                // A detached command's row lands synchronously, while the
+                // turn that spawned it is still live, and its finish finds it
+                // again by `task_id` (#2146). Keyed by id, never by position:
+                // two parallel calls would otherwise settle each other's rows.
+                agent_bridge::TurnEvent::ProgressFor(
+                    sid,
+                    ProgressEvent::DetachedTaskStarted { task_id, label },
+                ) => {
+                    if Some(sid) == self.transcript.session {
+                        self.live.thinking = false;
+                        self.live
+                            .tools
+                            .push(transcript::ToolCall::detached(task_id, label));
+                    }
+                }
+                agent_bridge::TurnEvent::ProgressFor(
+                    _,
+                    ProgressEvent::DetachedTaskFinished {
+                        task_id,
+                        label,
+                        success,
+                        elapsed_secs,
+                    },
+                ) => {
+                    // A finish with no row is not an error: the turn may have
+                    // been settled, or the task outlived a restart. The receipt
+                    // still arrives as `BackgroundTaskDone`.
+                    if !self.settle_detached_row(&task_id, success, elapsed_secs) {
+                        logging::debug(&format!(
+                            "detached task {task_id} ({label}) finished with no row to settle"
+                        ));
+                    }
+                }
+                // Compaction notices and queue echoes: the phase-2 transcript
+                // mirror. They persist to the DB and show on the reload;
+                // nothing to draw live yet.
                 agent_bridge::TurnEvent::ProgressFor(_, _) => {}
                 agent_bridge::TurnEvent::Done {
                     content,
@@ -808,6 +853,37 @@ impl Dashboard {
                     self.live.thinking = false;
                     reload = self.transcript.session;
                 }
+                agent_bridge::TurnEvent::BackgroundTaskDone {
+                    session_id,
+                    context_text,
+                    display_text,
+                } => {
+                    // The whole point of backgrounding: the command ends and
+                    // the agent is told, so the work is reported instead of the
+                    // window going quiet with the turn already finished.
+                    //
+                    // The window runs one turn, on the conversation it has
+                    // open (`agent_bridge` module doc). A completion for any
+                    // other session is logged, not silently dropped: resuming a
+                    // session nobody is looking at needs its own queue and turn
+                    // runner, which is #2322's documented gap.
+                    if Some(session_id) != self.transcript.session {
+                        logging::warn(&format!(
+                            "background task finished on session {session_id} while session {:?} is open: not resumed",
+                            self.transcript.session
+                        ));
+                    } else if self.busy {
+                        // Queue it behind the running turn rather than
+                        // interrupting it: `QueuedUserMessage::join` keeps the
+                        // system half out of what the user "said" (#765).
+                        self.queued.push(agent_bridge::PendingMessage::system(
+                            context_text,
+                            display_text,
+                        ));
+                    } else {
+                        self.resume_finished_task(session_id, context_text, display_text, cx);
+                    }
+                }
             }
         }
         if let Some(sid) = reload {
@@ -820,6 +896,69 @@ impl Dashboard {
             self.drain_pending(cx);
         }
         self.transcript_scroll.scroll_to_bottom();
+        cx.notify();
+    }
+
+    /// The running detached command, formatted exactly as the TUI formats it.
+    ///
+    /// `None` when nothing runs, so the strip is omitted rather than drawn
+    /// empty. Elapsed time is read from each task's own `Instant` at paint
+    /// time, which is why the label ticks off the existing 50 ms poll with no
+    /// extra timer.
+    fn running_tasks_label(&self) -> Option<String> {
+        let session = self.transcript.session?;
+        let bridge = agent_bridge::bridge()?;
+        let mgr = bridge.service.background_manager()?;
+        let tasks: Vec<(String, u64)> = mgr
+            .running_tasks(session)
+            .into_iter()
+            .map(|t| (t.label, t.started.elapsed().as_secs()))
+            .collect();
+        opencrabs::tui::render::format_background_tasks(&tasks, opencrabs::tui::render::LABEL_CHARS)
+    }
+
+    /// Settle one detached row in the live turn, if it still holds it.
+    fn settle_detached_row(&mut self, task_id: &str, success: bool, elapsed_secs: f32) -> bool {
+        transcript::settle_detached(&mut self.live.tools, task_id, success, elapsed_secs)
+    }
+
+    /// Run a turn on the open conversation for a finished background task.
+    ///
+    /// Same bookkeeping as `drain_pending`: the resumed turn must look like any
+    /// other turn, so `live.begin` seeds the panel and `settle_expect` counts the
+    /// row the answer will land in. Without a service there is nowhere to send
+    /// it, so it queues and drains on `Ready` instead of vanishing.
+    fn resume_finished_task(
+        &mut self,
+        session_id: Uuid,
+        context_text: String,
+        display_text: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(bridge) = agent_bridge::bridge() else {
+            self.queued.push(agent_bridge::PendingMessage::system(
+                context_text,
+                display_text,
+            ));
+            return;
+        };
+        self.live.begin(display_text);
+        self.settle_retries = 0;
+        self.settle_expect = Some(self.transcript.turns.len() + 1);
+        self.busy = true;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        self.cancel = Some(cancel.clone());
+        let attached = editor::marker_paths(&context_text);
+        agent_bridge::spawn_turn(
+            bridge.service.clone(),
+            session_id,
+            context_text,
+            self.sink.clone(),
+            cancel,
+        );
+        if !attached.is_empty() {
+            agent_bridge::spawn_track_files(self.db_path.clone(), session_id, attached);
+        }
         cx.notify();
     }
 
@@ -1594,6 +1733,12 @@ impl Render for Dashboard {
                 if !self.queued.is_empty() {
                     col = col.child(queue_strip(&self.queued));
                 }
+                // A detached command sits directly above the editor: the same
+                // place the TUI puts it (on the input box's top border), which
+                // is where the eye goes while waiting.
+                if let Some(label) = self.running_tasks_label() {
+                    col = col.child(task_strip(label));
+                }
                 col = col.child(self.editor.clone());
                 col.child(footer)
             }
@@ -1968,6 +2113,22 @@ fn queue_strip(queued: &[agent_bridge::PendingMessage]) -> Div {
         );
     }
     col
+}
+
+/// The running detached command, above the input.
+///
+/// Same formatter as the TUI (`tui::render::background`), so the two surfaces
+/// cannot disagree about what a running task looks like. No border and no
+/// percentage width: it sits in the column flow and disappears when idle.
+fn task_strip(text: String) -> Div {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .text_xs()
+        .text_color(rgb(AMBER))
+        .child(SharedString::from(format!("⏳ {text}")))
 }
 
 /// The footer's identity line: who is answering, from where, on what branch,
@@ -2477,5 +2638,55 @@ mod tests {
         // The identity line survives: it is live state, which the strip was not.
         assert!(src.contains("fn status_identity"));
         assert!(src.contains("fn ctx_footer"));
+    }
+
+    /// The manager is born in ONE setter, and the bridge calls it. A second
+    /// call site would mean two construction paths, which is how the two
+    /// surfaces drifted before (#2322). The needle is built in halves so this
+    /// test's own source does not count itself.
+    #[test]
+    fn the_bridge_creates_the_background_manager() {
+        let src = include_str!("agent_bridge.rs");
+        let needle = [".with_message_enqueue", "_callback(Some("].concat();
+        let sites = src.match_indices(needle.as_str()).count();
+        assert_eq!(
+            sites, 1,
+            "exactly one manager setter, found {sites}: the GUI had none"
+        );
+        let head = src
+            .get(..src.find(needle.as_str()).expect("the call site exists"))
+            .expect("a call site is a char boundary");
+        assert!(
+            head.contains("fn build"),
+            "the setter belongs to the bridge's build fn"
+        );
+    }
+
+    /// A completion on a session no channel owns has to have somewhere to
+    /// report, which is what the local route is for (#1036). One call only.
+    #[test]
+    fn the_bridge_registers_the_local_route() {
+        let src = include_str!("agent_bridge.rs");
+        let needle = ["register_local", "_route("].concat();
+        let sites = src.match_indices(needle.as_str()).count();
+        assert_eq!(sites, 1, "one local route registration, found {sites}");
+    }
+
+    /// The completion event is handled, and the cross-session branch says so
+    /// out loud instead of dropping the receipt. Halves again: the file this
+    /// reads includes this test.
+    #[test]
+    fn the_completion_event_is_handled() {
+        let src = include_str!("main.rs");
+        let event = ["TurnEvent::", "BackgroundTaskDone"].concat();
+        let warn = ["logging::", "warn("].concat();
+        assert!(
+            src.contains(&event),
+            "the poll loop must handle the completion event"
+        );
+        assert!(
+            src.contains(&warn),
+            "a completion for another session is logged, never dropped"
+        );
     }
 }

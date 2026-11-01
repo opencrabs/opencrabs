@@ -65,6 +65,10 @@ pub use chat::{
     is_deliverable_report,
 };
 pub use utils::format_token_count_raw;
+// The GUI's running-task strip is drawn with the TUI's own formatter and label
+// width, so the two surfaces cannot disagree about what a running task looks
+// like (#2322).
+pub use background::{LABEL_CHARS, format_background_tasks};
 // #2237: the wording and width maths for the mid-turn queue row live in
 // `input`, which stays a private module. Re-export just what the tests pin.
 // `#[cfg(test)]` because nothing in the library reads them through this path:

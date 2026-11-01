@@ -60,6 +60,7 @@ pub use phantom::{
     has_phantom_tool_intent_no_tools, is_analysis_intent, is_bare_completion_only,
     is_delivery_intent, is_stuck_in_intent_loop, looks_truncated_mid_sentence,
 };
+pub use session_routes::register_local_route;
 pub use types::{
     AgentResponse, AgentStreamResponse, ApprovalCallback, BgTaskMeta, ChannelSessionEvent,
     MessageEnqueueCallback, MessageQueueCallback, PendingOrigin, ProgressCallback, ProgressEvent,

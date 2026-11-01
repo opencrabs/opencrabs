@@ -713,6 +713,10 @@ Prefer windows and buttons over the TUI? [MonoCode](https://github.com/hardbeat9
 2. **Get a MonoCode build carrying the OpenCrabs provider**: the provider adapter is upstream PR [hardbeat920/monocode#343](https://github.com/hardbeat920/monocode/pull/343) (draft, pending merge); builds with it expose OpenCrabs directly in the provider picker
 3. **Pick OpenCrabs and go**: sessions, resume, slash commands, approval gates, plan mode, compaction and model switching all speak native ACP. Sessions born in MonoCode appear in `opencrabs session list` and resume in the TUI as first-class sessions
 
+### Built-in GUI
+
+`cargo build --features gui --bin opencrabs-gui` builds the native desktop client over the same sessions, providers and SQLite store as the TUI. Long `bash` commands run as detached tasks instead of blocking the turn: each running task shows as a `⏳` strip above the input with its elapsed seconds, its tool row carries the task id, and the row settles with the total elapsed time when the task ends. A finished task resumes the session with its output, queued as a system message when a turn is still running, so a 20 minute command neither holds the editor hostage nor collapses into a 600s timeout.
+
 ### Debug Logging
 
 OpenCrabs writes structured debug logs to files when debug logging is active. Two ways to turn it on:

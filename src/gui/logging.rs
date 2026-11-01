@@ -53,6 +53,17 @@ pub fn debug(msg: &str) {
     }
 }
 
+/// A decision the code made that the user might have wanted differently:
+/// written to the trail and mirrored, so "why did nothing happen" has an
+/// answer in the log instead of only in the source.
+pub fn warn(msg: &str) {
+    let line = format!("{} WARN {msg}", stamp());
+    write_raw(&line);
+    if verbose() {
+        eprintln!("{line}");
+    }
+}
+
 /// An error the user can also see on screen: always mirrored to stderr, so a
 /// terminal run and the log file agree.
 pub fn error(msg: &str) {

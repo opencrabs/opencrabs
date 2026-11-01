@@ -8,6 +8,10 @@
 //!
 //! Pure formatting, so the shape is testable without a terminal or a live
 //! task. Elapsed seconds are passed in rather than read from a clock here.
+//!
+//! The GUI reuses [`format_background_tasks`] for its own running strip: one
+//! implementation means the two surfaces cannot drift on what a running task
+//! looks like.
 
 /// How much of a command label the indicator shows.
 ///
@@ -15,7 +19,7 @@
 /// too long for a border title: a full `cargo test --locked --profile ci --lib
 /// 2>&1 | tail -40` crowded out everything beside it. The leading words are
 /// what identify the command, so the tail is what gets dropped.
-pub(crate) const LABEL_CHARS: usize = 28;
+pub const LABEL_CHARS: usize = 28;
 
 /// `cargo test 32s`, or `cargo test 32s +2` when other tasks are also running.
 ///
@@ -26,7 +30,7 @@ pub(crate) const LABEL_CHARS: usize = 28;
 ///
 /// `max_label` truncates the command, never the elapsed time or the overflow
 /// count: those are short, fixed-width, and the whole point of the indicator.
-pub(crate) fn format_background_tasks(tasks: &[(String, u64)], max_label: usize) -> Option<String> {
+pub fn format_background_tasks(tasks: &[(String, u64)], max_label: usize) -> Option<String> {
     let (label, secs) = tasks.first()?;
     let mut out = truncate_label(label, max_label);
     out.push(' ');

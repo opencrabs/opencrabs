@@ -71,6 +71,11 @@ pub struct ToolCall {
     pub description: String,
     pub success: bool,
     pub done: bool,
+    /// Set only on a detached background command's row. The TUI's finish event
+    /// names the task it settles (`app::state`), so the row carries the same
+    /// id and a finish finds its own row instead of the newest open one. Every
+    /// other row is `None`: a provider call or a ledger entry has no task.
+    pub task_id: Option<String>,
 }
 
 impl ToolCall {
@@ -81,8 +86,46 @@ impl ToolCall {
             description,
             success: false,
             done: false,
+            task_id: None,
         }
     }
+
+    /// A detached background command's row: still running, keyed by the id its
+    /// finish will name. The description says `detached` so a row that outlives
+    /// the turn cannot be mistaken for a call that is blocking it.
+    pub fn detached(task_id: String, label: String) -> Self {
+        Self {
+            name: "bash".to_string(),
+            description: format!("detached · {label}"),
+            success: false,
+            done: false,
+            task_id: Some(task_id),
+        }
+    }
+}
+
+/// Settle the row the start of `task_id` drew: `true` when a row was found.
+///
+/// Matching by id, never by name or position: parallel calls in one turn mean
+/// "the newest open bash row" can belong to a different command. A finish with
+/// no row is not an error (the turn may have been reloaded), so the caller only
+/// logs it.
+pub fn settle_detached(
+    tools: &mut [ToolCall],
+    task_id: &str,
+    success: bool,
+    elapsed_secs: f32,
+) -> bool {
+    let Some(call) = tools
+        .iter_mut()
+        .find(|c| c.task_id.as_deref() == Some(task_id))
+    else {
+        return false;
+    };
+    call.done = true;
+    call.success = success;
+    call.description.push_str(&format!(" · {elapsed_secs:.1}s"));
+    true
 }
 
 /// A click listener the view attaches to one fold header. The view cannot
@@ -603,6 +646,7 @@ fn parse_calls(body: &str, is_v2: bool) -> Vec<ToolCall> {
                 description: entry["d"].as_str().unwrap_or("?").to_string(),
                 success: entry["s"].as_bool().unwrap_or(true),
                 done: true,
+                task_id: None,
             })
             .collect()
     } else {
@@ -612,6 +656,7 @@ fn parse_calls(body: &str, is_v2: bool) -> Vec<ToolCall> {
                 description: d.to_string(),
                 success: true,
                 done: true,
+                task_id: None,
             })
             .collect()
     }
@@ -1497,5 +1542,53 @@ mod tests {
         assert_eq!(table.rows.len(), 2);
         assert_eq!(table.header[1].text, "cost");
         assert_eq!(table.rows[1][2].text, "slow");
+    }
+
+    /// A detached row keeps the id its finish will name, and says so in the
+    /// description: a row that outlives the turn must not read like a call
+    /// that is blocking it.
+    #[test]
+    fn a_detached_row_carries_its_task_id_and_label() {
+        let call = ToolCall::detached("task-7".into(), "cargo test".into());
+        assert_eq!(call.task_id.as_deref(), Some("task-7"));
+        assert!(!call.done, "a detached command starts unresolved");
+        assert!(
+            call.description.contains("cargo test") && call.description.contains("detached"),
+            "description names the label and the detachment: {}",
+            call.description
+        );
+    }
+
+    /// The finish settles the row it opened, with the elapsed time the event
+    /// reported.
+    #[test]
+    fn settle_detached_marks_the_matching_row_done() {
+        let mut rows = vec![ToolCall::detached("task-7".into(), "cargo test".into())];
+        assert!(settle_detached(&mut rows, "task-7", true, 12.34));
+        assert!(rows[0].done && rows[0].success);
+        assert!(
+            rows[0].description.contains("12.3s"),
+            "the elapsed time lands in the row: {}",
+            rows[0].description
+        );
+    }
+
+    /// A finish for a task this turn never drew settles nothing and says so,
+    /// instead of closing some other row.
+    #[test]
+    fn settle_detached_ignores_an_unknown_task_id() {
+        let mut rows = vec![ToolCall::detached("task-7".into(), "cargo test".into())];
+        assert!(!settle_detached(&mut rows, "task-9", true, 3.0));
+        assert!(!rows[0].done, "an unrelated finish leaves the row running");
+    }
+
+    /// Provider calls carry no task id, so a detached finish can never settle
+    /// one: which command finished is answered by identity, not by position.
+    #[test]
+    fn settle_detached_never_touches_a_provider_row() {
+        let mut rows = vec![ToolCall::running("bash".into(), "bash: ls".into())];
+        assert!(!settle_detached(&mut rows, "", true, 1.0));
+        assert!(!rows[0].done);
+        assert!(rows[0].task_id.is_none());
     }
 }
