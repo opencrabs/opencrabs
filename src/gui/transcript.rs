@@ -39,7 +39,7 @@ use crate::editor::{Attachment, marker_paths, strip_markers};
 use crate::markdown;
 use crate::theme::{
     ACCENT, AMBER, BG, BLUE, GREEN, PANEL, PANEL_HI, RED, TEAL, TEXT, TEXT_MUTED, TEXT_NORMAL,
-    TEXT_STRONG, TEXT_TITLE, TRACK, WARN,
+    TEXT_STRONG, TRACK, WARN,
 };
 
 /// Newest rows shown per load, matching the TUI display window. Older
@@ -1121,24 +1121,35 @@ fn tool_ledger_text(calls: &[ToolCall]) -> String {
         .join("\n")
 }
 
-/// One turn's fold header: the TUI's own summary line, the affordance that
-/// says how to open it, and, while folded, the last call as a preview so a
-/// collapsed turn still says what it did.
-fn fold_header(turn: &Turn, folded: bool, newest: bool) -> Option<Stateful<Div>> {
+/// The chevron a fold header leads with: right when the turn is collapsed,
+/// down when it is open. The glyph carries the affordance, so the header no
+/// longer spells out which input folds it.
+fn fold_chevron(folded: bool) -> &'static str {
+    if folded { "\u{25B8}" } else { "\u{25BE}" }
+}
+
+/// One turn's fold header: the TUI's own summary line, a chevron that says
+/// whether the body is open, and, while folded, the last call as a preview so
+/// a collapsed turn still says what it did.
+fn fold_header(turn: &Turn, folded: bool) -> Option<Stateful<Div>> {
     let base = turn.header.as_ref()?;
-    let hint = match (folded, newest) {
-        (true, true) => " (click / ctrl-o to expand)",
-        (true, false) => " (click to expand)",
-        (false, true) => " (click / ctrl-o to fold)",
-        (false, false) => " (click to fold)",
-    };
-    let mut row = div().flex().flex_row().gap_1().child(
-        div()
-            .text_xs()
-            .font_weight(gpui::FontWeight::BOLD)
-            .text_color(rgb(TEAL))
-            .child(SharedString::from(base.clone())),
-    );
+    let mut row = div()
+        .flex()
+        .flex_row()
+        .gap_1()
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(TEXT_MUTED))
+                .child(SharedString::from(fold_chevron(folded))),
+        )
+        .child(
+            div()
+                .text_xs()
+                .font_weight(gpui::FontWeight::BOLD)
+                .text_color(rgb(TEAL))
+                .child(SharedString::from(base.clone())),
+        );
     // The card's ctx and rate, in the Telegram footer's own wording. It
     // rides HERE rather than in the shared header string, which the terminal
     // deliberately keeps ctx-free (#744, #2324 D1).
@@ -1160,14 +1171,7 @@ fn fold_header(turn: &Turn, folded: bool, newest: bool) -> Option<Stateful<Div>>
         .rounded_sm()
         .cursor_pointer()
         .hover(|d| d.bg(rgb(PANEL)))
-        .child(
-            row.child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(TEXT_TITLE))
-                    .child(SharedString::from(hint)),
-            ),
-        );
+        .child(row);
     if folded && let Some((description, success)) = &turn.preview {
         let color = if *success { TEXT_MUTED } else { RED };
         col = col.child(
@@ -1457,7 +1461,7 @@ pub fn view(
         let mut drew_header = false;
         for (i, block) in turn.blocks.iter().enumerate() {
             if i == header_at
-                && let Some(header) = fold_header(turn, folded, newest)
+                && let Some(header) = fold_header(turn, folded)
             {
                 // The listener is per turn and used exactly here, so it is
                 // taken out of the map instead of cloned.
@@ -1485,7 +1489,7 @@ pub fn view(
             }
             col = col.child(block_view(block));
         }
-        if !drew_header && let Some(header) = fold_header(turn, folded, newest) {
+        if !drew_header && let Some(header) = fold_header(turn, folded) {
             col = col.child(match handlers.remove(&turn.anchor) {
                 Some(click) => header.on_click(click),
                 None => header,
@@ -1671,6 +1675,14 @@ mod tests {
         let rows = [row("user", "hi", 1), row("assistant", "hello", 2)];
         let (_, turns) = turns(&rows, 2);
         assert!(turns[0].header.is_none());
+    }
+
+    /// #2328: the chevron carries the affordance, so the header says whether
+    /// the body is open instead of spelling out which input folds it.
+    #[test]
+    fn the_fold_chevron_points_at_the_body_while_collapsed() {
+        assert_eq!(fold_chevron(true), "\u{25B8}");
+        assert_eq!(fold_chevron(false), "\u{25BE}");
     }
 
     /// #2323: the timer used to vanish on every settled turn because the
