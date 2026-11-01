@@ -108,6 +108,48 @@ fn period_word(p: Period) -> &'static str {
     }
 }
 
+/// The config the window boots with, provisioned on a home that has none
+/// (#2375).
+///
+/// A window shipped without this step: it loaded whatever config happened to
+/// exist, so a fresh install opened with no provider at all and the first
+/// message died on "No provider configured", with no terminal to run the
+/// wizard from. The order mirrors the CLI's own startup, and each line is
+/// load-bearing:
+///
+/// 1. Write the documented `config.toml` and `keys.toml` when absent. The
+///    built-in provider gets its section from that file, so provisioning
+///    before this would have nowhere to write.
+/// 2. Re-read the config. The file loaded before seeding carries no provider
+///    sections, and `provision_builtin_provider` decides from `enabled`, so
+///    the old value would have skipped the token request (#2151).
+/// 3. Seed the brain templates, offline-safe and idempotent, so a first-run
+///    window has a personality instead of an empty prompt (#1382).
+/// 4. Ask the proxy for this install's token. The request needs a reactor,
+///    and the main thread has the stack for the current-thread runtime
+///    `Config::load` must not run on a gpui worker (see `load_view`).
+///
+/// Every step is idempotent and only fills a blank home, so a configured
+/// install boots exactly as before.
+fn boot_config() -> Result<Config, String> {
+    if opencrabs::config::seed::ensure_config_seeded() {
+        opencrabs::config::seed::ensure_keys_seeded();
+        logging::info("first run: documented config and keys written");
+    }
+    let mut config = Config::load().map_err(|e| format!("config load: {e}"))?;
+    opencrabs::config::profile::ensure_brain_seeded();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("first run: no runtime for provisioning: {e}"))?;
+    if runtime.block_on(
+        opencrabs::brain::provider::opencrabs_acquire::provision_builtin_provider(&mut config),
+    ) {
+        logging::info("first run: built-in provider token acquired");
+    }
+    Ok(config)
+}
+
 /// Fetch the real view on a thread with a real stack. The GUI is a separate
 /// process with no pool of its own, so it uses the loader's by-path door,
 /// which opens the ledger read-only and runs no migrations: the daemon and
@@ -2899,7 +2941,7 @@ fn main() {
     // registry, brain files and a fresh session build on a 4 MB thread and
     // report through the channel the Dashboard drains on its poll tick.
     let (agent_sink, agent_rx) = std::sync::mpsc::channel::<agent_bridge::TurnEvent>();
-    match Config::load() {
+    match boot_config() {
         Ok(config) => {
             // Before the bootstrap takes the config: the keystroke trail is
             // switched on from config.toml, not only from the environment.
@@ -2907,9 +2949,7 @@ fn main() {
             agent_bridge::spawn_bootstrap(config, agent_sink.clone());
         }
         Err(e) => {
-            let _ = agent_sink.send(agent_bridge::TurnEvent::BootstrapFailed(format!(
-                "config load: {e}"
-            )));
+            let _ = agent_sink.send(agent_bridge::TurnEvent::BootstrapFailed(e));
         }
     }
     let state = futures::executor::block_on(load_view(db_path.clone(), Period::AllTime));
@@ -4083,7 +4123,7 @@ mod gui {
     //! reach through a real window.
 
     mod tests {
-        use super::super::popup_window;
+        use super::super::{Config, popup_window};
 
         /// Eight names is the most a popup may cover: beyond that it would
         /// hide the conversation it belongs to.
@@ -4140,6 +4180,114 @@ mod gui {
                 parse < offline,
                 "the command parse must precede the agent gates"
             );
+        }
+
+        /// A blank home reaches all four capabilities the built-in provider
+        /// serves, with no wizard and no key. This is what `boot_config` has
+        /// to leave behind, and it is testable without a window or a network
+        /// call: the shipped example carries the vision, generation and
+        /// transcription models, and seeding is what puts that section on
+        /// disk. Under a temp home, never the live `~/.opencrabs`.
+        #[test]
+        fn provisioning_a_fresh_home_reaches_all_four_capabilities() {
+            let home = tempfile::tempdir().expect("a temp home");
+            opencrabs::config::profile::with_home_override(home.path().to_path_buf(), || {
+                assert!(
+                    opencrabs::config::seed::ensure_config_seeded(),
+                    "a blank home gets the shipped example"
+                );
+                let config = Config::load().expect("the shipped example parses");
+                let section = config
+                    .providers
+                    .opencrabs
+                    .as_ref()
+                    .expect("the built-in section survives seeding");
+                assert_eq!(
+                    section.default_model.as_deref(),
+                    Some("deepseek-v4.1-flash"),
+                    "text"
+                );
+                assert!(
+                    section
+                        .vision_model
+                        .as_deref()
+                        .is_some_and(|m| !m.is_empty()),
+                    "vision"
+                );
+                assert!(
+                    section
+                        .generation_model
+                        .as_deref()
+                        .is_some_and(|m| !m.is_empty()),
+                    "image generation"
+                );
+                assert!(
+                    section.stt_model.as_deref().is_some_and(|m| !m.is_empty()),
+                    "transcription"
+                );
+                // And the one call the window makes here is warranted: no
+                // token on disk and no other usable provider.
+                assert!(
+                    opencrabs::brain::provider::opencrabs_acquire::needs_builtin_provision(&config),
+                    "a blank home must ask the proxy for its token"
+                );
+            });
+        }
+
+        /// Provisioning is a one-time act: it writes the token and enables the
+        /// section, and the same check that said "yes, provision this" must
+        /// then say no. Without that, every start would ask the proxy again.
+        ///
+        /// The two writes are the ones `provision_builtin_provider` makes
+        /// before it goes to the network, so this covers its effect on the
+        /// config without a token request.
+        #[test]
+        fn provisioning_stops_asking_once_the_token_is_written() {
+            let home = tempfile::tempdir().expect("a temp home");
+            opencrabs::config::profile::with_home_override(home.path().to_path_buf(), || {
+                assert!(opencrabs::config::seed::ensure_config_seeded());
+                assert!(opencrabs::config::seed::ensure_keys_seeded());
+                let before = Config::load().expect("the seeded config parses");
+                assert!(
+                    opencrabs::brain::provider::opencrabs_acquire::needs_builtin_provision(&before),
+                    "a blank home is the case the fix exists for"
+                );
+
+                Config::write_key("providers.opencrabs", "enabled", "true")
+                    .expect("the section is enabled");
+                Config::write_key("providers.opencrabs", "api_key", "test-token")
+                    .expect("the token is written");
+
+                let after = Config::load().expect("the provisioned config parses");
+                assert!(
+                    !opencrabs::brain::provider::opencrabs_acquire::needs_builtin_provision(&after),
+                    "a provisioned home must not be touched again"
+                );
+            });
+        }
+
+        /// And the provisioned config is one the provider factory walks to the
+        /// built-in provider: the same registry answer `create_provider`
+        /// consumes, checked without a reactor or a request.
+        #[test]
+        fn a_provisioned_home_resolves_the_builtin_provider() {
+            let home = tempfile::tempdir().expect("a temp home");
+            opencrabs::config::profile::with_home_override(home.path().to_path_buf(), || {
+                assert!(opencrabs::config::seed::ensure_config_seeded());
+                assert!(opencrabs::config::seed::ensure_keys_seeded());
+                Config::write_key("providers.opencrabs", "enabled", "true")
+                    .expect("the section is enabled");
+                Config::write_key("providers.opencrabs", "api_key", "test-token")
+                    .expect("the token is written");
+
+                let config = Config::load().expect("the provisioned config parses");
+                let (provider, model) = config.providers.active_provider_and_model();
+                assert_eq!(provider, "opencrabs", "the built-in provider is the one");
+                assert_eq!(
+                    model, "deepseek-v4.1-flash",
+                    "with the model the shipped section declares"
+                );
+            });
         }
     }
 }
