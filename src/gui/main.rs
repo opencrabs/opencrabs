@@ -1408,11 +1408,13 @@ impl Dashboard {
         // chats whose title (or id prefix) matches, live, with the match
         // count on the bar. Any exit clears it, so the rail never hides a
         // filter behind a closed field.
-        // ctrl+shift+f pins the open conversation. It comes before the plain
-        // find key because both carry `f`; shift decides which one it was.
+        // ctrl+shift+f pins the row the keyboard is on, or the open
+        // conversation when the rail has not armed one. It comes before the
+        // plain find key because both carry `f`; shift decides which one it
+        // was.
         if ev.keystroke.modifiers.control && ev.keystroke.modifiers.shift && ev.keystroke.key == "f"
         {
-            if let Some(id) = self.transcript.session {
+            if let Some(id) = self.sessions.pin_target() {
                 self.toggle_favorite(id, cx);
             }
             return;

@@ -108,7 +108,20 @@ impl SessionsState {
     /// all this does. Nothing erases here: the caller asks the dialog, and
     /// only its confirm button reaches the delete bridge (#2352).
     pub fn delete_target(&self) -> Option<uuid::Uuid> {
+        self.rail_target()
+    }
+
+    /// The row a rail chord acts on: the cursor row while the keyboard is
+    /// on one, else the chat that is open. Chords share this resolution
+    /// instead of each spelling it out (#2352, #2353).
+    pub fn rail_target(&self) -> Option<uuid::Uuid> {
         self.cursor.or(self.selected)
+    }
+
+    /// What the pin chord acts on, resolved the same way the delete chord
+    /// resolves its target (#2353).
+    pub fn pin_target(&self) -> Option<uuid::Uuid> {
+        self.rail_target()
     }
 
     /// How many of the ledger's sessions match the query.
@@ -340,6 +353,19 @@ fn fit(s: &str, max_chars: usize) -> String {
 /// listener it puts on screen. A pinned row carries the star the owner asked
 /// for, in the accent colour, so "why is this one on top" is answered by the
 /// row itself.
+/// The pin mark a row carries: the filled star once pinned, an outline
+/// before first use. Without the outline a first-time user saw no star, no
+/// button and no hint, so pinning looked like it did not exist (#2353).
+/// The colour rides along: accent when the pin is on, muted while the
+/// outline is only an invitation.
+pub fn pin_mark(favorited: bool) -> (&'static str, u32) {
+    if favorited {
+        ("\u{2605}", palette::current().accent)
+    } else {
+        ("\u{2606}", palette::current().text_muted)
+    }
+}
+
 pub fn row(
     s: &Session,
     selected: bool,
@@ -353,14 +379,13 @@ pub fn row(
         .items_center()
         .gap_1()
         .min_w_0()
-        .when(favorited, |d| {
-            d.child(
-                div()
-                    .flex_none()
-                    .text_xs()
-                    .text_color(rgb(palette::current().accent))
-                    .child(SharedString::from("\u{2605}")),
-            )
+        .child({
+            let (mark, colour) = pin_mark(favorited);
+            div()
+                .flex_none()
+                .text_xs()
+                .text_color(rgb(colour))
+                .child(SharedString::from(mark))
         })
         .child(
             div()
@@ -546,7 +571,7 @@ pub fn rail(
 
 #[cfg(test)]
 mod tests {
-    use super::{Database, SessionsState, fit, load_sessions};
+    use super::{Database, SessionsState, fit, load_sessions, palette, pin_mark};
     use opencrabs::db::models::Session;
 
     /// #2271's whole class, seated: truncation walks chars, never bytes. Any
@@ -805,6 +830,57 @@ mod tests {
         assert!(
             state.cursor_visible(),
             "a refetch that keeps the row keeps the cursor"
+        );
+    }
+
+    #[test]
+    fn pin_mark_is_filled_only_when_favorited() {
+        let (mark, colour) = pin_mark(true);
+        assert_eq!(mark, "\u{2605}", "a pinned row carries the filled star");
+        assert_eq!(
+            colour,
+            palette::current().accent,
+            "the pin borrows the accent so the row says why it is on top"
+        );
+        assert_ne!(
+            pin_mark(false).0,
+            mark,
+            "an unpinned row must never look pinned"
+        );
+    }
+
+    #[test]
+    fn hover_mark_is_the_outline() {
+        // Before the first pin there was no star, no button and no hint, so
+        // the row itself has to carry the invitation: the outline star in
+        // the quiet colour, which turns filled the moment it is used.
+        let (mark, colour) = pin_mark(false);
+        assert_eq!(mark, "\u{2606}", "an unpinned row shows the outline star");
+        assert_eq!(
+            colour,
+            palette::current().text_muted,
+            "the invitation stays quieter than the pin"
+        );
+    }
+
+    #[test]
+    fn the_pin_chord_follows_the_cursor_row() {
+        let mut state = SessionsState::default();
+        let open_chat = uuid::Uuid::from_u128(7);
+        let cursored = uuid::Uuid::from_u128(8);
+
+        state.selected = Some(open_chat);
+        assert_eq!(
+            state.pin_target(),
+            Some(open_chat),
+            "with nothing armed the chord pins the open chat"
+        );
+
+        state.cursor = Some(cursored);
+        assert_eq!(
+            state.pin_target(),
+            Some(cursored),
+            "the row the keyboard is on wins over the open chat"
         );
     }
 }
