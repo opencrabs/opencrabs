@@ -1663,11 +1663,18 @@ impl Render for Dashboard {
             ),
         };
         window.set_window_title(&label);
+        // The header is its own surface: a panel one step above the chat and a
+        // divider under it, so the title does not read as part of the history.
         let chrome = div()
             .flex()
             .flex_row()
             .items_center()
             .gap_2()
+            .px_4()
+            .py_2()
+            .bg(rgb(palette::current().panel))
+            .border_b_1()
+            .border_color(rgb(palette::current().panel_hi))
             .child(icon::banner_logo())
             .child(div().text_lg().child(SharedString::from(label)));
 

@@ -967,7 +967,10 @@ impl Render for Editor {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .bg(rgb(palette::current().bg))
+            // One step above the chat, with a shadow, so the input reads as a
+            // surface of its own in both themes.
+            .bg(rgb(palette::current().panel))
+            .shadow_sm()
             .border_1()
             .border_color(rgb(palette::current().panel_hi))
             .rounded_sm()
