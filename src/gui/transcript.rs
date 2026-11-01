@@ -1085,11 +1085,7 @@ fn tools_block(calls: &[ToolCall]) -> Div {
             div()
                 .text_xs()
                 .text_color(rgb(AMBER))
-                .child(SharedString::from(format!(
-                    "{} tool call{}",
-                    calls.len(),
-                    if calls.len() == 1 { "" } else { "s" }
-                ))),
+                .child(SharedString::from(tool_count_label(calls.len()))),
         );
     for call in calls {
         let (mark, color) = match (call.done, call.success) {
@@ -1210,39 +1206,113 @@ fn live_time(at: Option<chrono::DateTime<chrono::Local>>) -> String {
         .unwrap_or_default()
 }
 
-/// One live status line: a spinner frame, "OpenCrabs is thinking...", and the
-/// turn's clock and token count. The frame comes off the wall clock rather
-/// than a stored frame counter, so a repaint alone advances it and the line is
-/// never stale when the window wakes for another reason.
+/// One live status line: a spinner frame, what the turn is doing right now,
+/// and how much it has done. The frame comes off the wall clock rather than a
+/// stored frame counter, so a repaint alone advances it and the line is never
+/// stale when the window wakes for another reason.
 fn status_line(live: &LiveTurn) -> Div {
     let frame = match live.started {
         Some(t) => SPINNER_FRAMES[(t.elapsed().as_millis() / 80) as usize % SPINNER_FRAMES.len()],
         None => SPINNER_FRAMES[0],
     };
-    let meta = format_turn_spinner_meta(live.elapsed_secs(), live.tokens).unwrap_or_default();
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap_1()
-        .child(
-            div()
-                .text_xs()
-                .text_color(rgb(TEXT_MUTED))
-                .child(SharedString::from(frame.to_string())),
-        )
-        .child(
+    let (lead, rest) = live_status_line(live);
+    let mut row = div().flex().flex_row().items_center().gap_1().child(
+        div()
+            .text_xs()
+            .text_color(rgb(TEXT_MUTED))
+            .child(SharedString::from(frame.to_string())),
+    );
+    if !lead.is_empty() {
+        row = row.child(
             div()
                 .text_xs()
                 .text_color(rgb(ACCENT))
-                .child(SharedString::from("OpenCrabs is thinking...".to_string())),
-        )
-        .child(
+                .child(SharedString::from(lead)),
+        );
+    }
+    if !rest.is_empty() {
+        row = row.child(
             div()
                 .text_xs()
                 .text_color(rgb(TEXT_MUTED))
-                .child(SharedString::from(meta)),
-        )
+                .child(SharedString::from(rest)),
+        );
+    }
+    row
+}
+
+/// The status glyph for a live call, the trio the Telegram flow uses
+/// (`channels/telegram/flow.rs::tool_status_icon`): running, succeeded,
+/// failed. It cannot be imported here because that helper is `pub(crate)` in
+/// the library crate and this file builds the `opencrabs-gui` binary.
+fn activity_glyph(call: &ToolCall) -> &'static str {
+    match (call.done, call.success) {
+        (false, _) => "\u{2699}\u{fe0f}",
+        (true, true) => "\u{2705}",
+        (true, false) => "\u{274c}",
+    }
+}
+
+/// The turn's latest activity, worded like the card's leading segment
+/// (#2326): the call running now, else the last one that ran. `None` until a
+/// tool has started.
+fn live_activity(live: &LiveTurn) -> Option<String> {
+    let call = live
+        .tools
+        .iter()
+        .rev()
+        .find(|c| !c.done)
+        .or_else(|| live.tools.last())?;
+    let text = if call.description.trim().is_empty() {
+        call.name.trim()
+    } else {
+        call.description.trim()
+    };
+    (!text.is_empty()).then(|| format!("{} {}", activity_glyph(call), fit(text, 160)))
+}
+
+/// `1 tool call`, `9 tool calls`: one spelling for the live line and for the
+/// expanded turn's own count.
+fn tool_count_label(count: usize) -> String {
+    format!("{count} tool call{}", if count == 1 { "" } else { "s" })
+}
+
+/// The live line split into its accented lead and its muted tail (#2326).
+///
+/// The lead is what the turn is doing: the running call, else the last one
+/// that ran, else "OpenCrabs is thinking..." while nothing has arrived at all.
+/// The tail is how much it did (the call count) and the clock the terminal
+/// builds with `format_turn_spinner_meta`.
+fn live_status_line(live: &LiveTurn) -> (String, String) {
+    let mut lead = live_activity(live);
+    if lead.is_none()
+        && live.tools.is_empty()
+        && live.chunks == 0
+        && live.stream.is_empty()
+        && live.reasoning.is_empty()
+    {
+        lead = Some("OpenCrabs is thinking...".to_string());
+    }
+    let mut tail: Vec<String> = Vec::new();
+    if !live.tools.is_empty() {
+        tail.push(tool_count_label(live.tools.len()));
+    }
+    if let Some(meta) = format_turn_spinner_meta(live.elapsed_secs(), live.tokens) {
+        tail.push(meta.trim().to_string());
+    }
+    (lead.unwrap_or_default(), tail.join(" \u{b7} "))
+}
+
+/// The line's whole text, as drawn (#2326), so a test reads exactly what the
+/// user sees instead of inferring it from two halves. Test-only: the pane
+/// draws the two halves separately so the lead can carry the accent colour.
+#[cfg(test)]
+fn live_status_text(live: &LiveTurn) -> String {
+    match live_status_line(live) {
+        (lead, rest) if lead.is_empty() => rest,
+        (lead, rest) if rest.is_empty() => lead,
+        (lead, rest) => format!("{lead} \u{b7} {rest}"),
+    }
 }
 
 /// The running turn, drawn with the transcript's own block grammar: the
@@ -1981,5 +2051,94 @@ mod tests {
             41.5,
             "an empty turn must not erase the last real rate"
         );
+    }
+
+    /// #2326: while a call runs, the live line names that call instead of
+    /// claiming the crab is still thinking, and it counts the call it is
+    /// running.
+    #[test]
+    fn a_running_tool_leads_the_live_line() {
+        let mut live = LiveTurn::default();
+        live.begin("run it".into());
+        live.tools
+            .push(ToolCall::running("bash".into(), "bash: cargo test".into()));
+
+        let text = live_status_text(&live);
+        assert!(text.contains("bash: cargo test"), "got {text}");
+        assert!(text.contains("1 tool call"), "got {text}");
+        assert!(!text.contains("thinking"), "got {text}");
+    }
+
+    /// #2326: with nothing running, the line holds the last call that ran
+    /// and the total count, so a long turn still says what it last did.
+    #[test]
+    fn the_last_finished_call_holds_the_line_when_nothing_runs() {
+        let mut live = LiveTurn::default();
+        live.begin("read them".into());
+        for n in 0..9 {
+            live.tools.push(ToolCall {
+                name: "read_file".into(),
+                description: format!("Read file{n}.rs"),
+                success: true,
+                done: true,
+            });
+        }
+
+        let text = live_status_text(&live);
+        assert!(text.contains("Read file8.rs"), "got {text}");
+        assert!(text.contains("9 tool calls"), "got {text}");
+        assert!(
+            !text.contains("Read file0.rs"),
+            "the newest call leads: {text}"
+        );
+        assert!(!text.contains("thinking"), "got {text}");
+    }
+
+    /// #2326: the running call outranks every finished one, even when the
+    /// finished one is newer in the vector.
+    #[test]
+    fn a_running_call_outranks_the_last_finished_one() {
+        let mut live = LiveTurn::default();
+        live.begin("run it".into());
+        live.tools
+            .push(ToolCall::running("bash".into(), "bash: cargo test".into()));
+        live.tools.push(ToolCall {
+            name: "read_file".into(),
+            description: "Read Cargo.toml".into(),
+            success: true,
+            done: true,
+        });
+        live.tools.push(ToolCall {
+            name: "bash".into(),
+            description: "bash: cargo clippy".into(),
+            success: true,
+            done: true,
+        });
+
+        let text = live_status_text(&live);
+        assert!(text.contains("bash: cargo test"), "got {text}");
+        assert!(text.contains("3 tool calls"), "got {text}");
+    }
+
+    /// #2326: a turn that has produced nothing yet keeps the crab's own name
+    /// on the line, so a cold provider still looks alive.
+    #[test]
+    fn an_idle_live_turn_still_says_it_is_thinking() {
+        let mut live = LiveTurn::default();
+        live.begin("hello".into());
+        assert_eq!(live_status_text(&live), "OpenCrabs is thinking...");
+    }
+
+    /// #2326: once answer text arrives the line stops saying "thinking" even
+    /// though no tool has started: the stream itself is the activity.
+    #[test]
+    fn a_streaming_turn_without_tools_stops_saying_thinking() {
+        let mut live = LiveTurn::default();
+        live.begin("hello".into());
+        live.note_chunk("hello there, streaming now ");
+
+        let text = live_status_text(&live);
+        assert!(!text.contains("thinking"), "got {text}");
+        assert!(text.contains("tok this turn"), "got {text}");
     }
 }
