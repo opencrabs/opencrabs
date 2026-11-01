@@ -851,8 +851,10 @@ mod tests {
     /// a real row.
     #[test]
     fn cursor_moves_through_the_ordered_rows() {
-        let mut state = SessionsState::default();
-        state.items = vec![session(1, "a"), session(2, "b"), session(3, "c")];
+        let mut state = SessionsState {
+            items: vec![session(1, "a"), session(2, "b"), session(3, "c")],
+            ..Default::default()
+        };
         // Pinning the last ledger row must not confuse the walk: the rail
         // paints it first, so the first Down lands on it.
         state.favorites.insert(uuid::Uuid::from_u128(3));
@@ -884,8 +886,10 @@ mod tests {
     /// as a jump to a row the user cannot see.
     #[test]
     fn cursor_clamps_at_both_ends() {
-        let mut state = SessionsState::default();
-        state.items = vec![session(1, "a"), session(2, "b")];
+        let state = SessionsState {
+            items: vec![session(1, "a"), session(2, "b")],
+            ..Default::default()
+        };
         let first = uuid::Uuid::from_u128(1);
         let last = uuid::Uuid::from_u128(2);
 
@@ -897,8 +901,10 @@ mod tests {
     /// instead of arming a ghost; a cursor on a surviving row stays put.
     #[test]
     fn cursor_survives_a_row_disappearing() {
-        let mut state = SessionsState::default();
-        state.items = vec![session(1, "a"), session(2, "b")];
+        let mut state = SessionsState {
+            items: vec![session(1, "a"), session(2, "b")],
+            ..Default::default()
+        };
         let first = uuid::Uuid::from_u128(1);
         let second = uuid::Uuid::from_u128(2);
 

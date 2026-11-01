@@ -2903,8 +2903,10 @@ mod tests {
         let cursor_row = Uuid::from_u128(11);
         let open_chat = Uuid::from_u128(22);
 
-        let mut state = sessions::SessionsState::default();
-        state.selected = Some(open_chat);
+        let mut state = sessions::SessionsState {
+            selected: Some(open_chat),
+            ..Default::default()
+        };
         assert_eq!(
             state.delete_target(),
             Some(open_chat),
