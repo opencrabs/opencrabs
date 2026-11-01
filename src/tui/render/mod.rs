@@ -84,3 +84,14 @@ pub use theme::Theme;
 pub fn find_theme(name: &str) -> Option<&'static Theme> {
     presets::by_name(name).or_else(|| user_themes::find(name))
 }
+
+/// Every theme name the desktop window can pick: the built-in presets, then
+/// the user presets. Read on each open of the themes screen, so a new file in
+/// `~/.opencrabs/themes` shows up without a restart.
+pub fn theme_names() -> Vec<&'static str> {
+    presets::built_ins()
+        .iter()
+        .map(|t| t.name)
+        .chain(user_themes::all().into_iter().map(|t| t.name))
+        .collect()
+}

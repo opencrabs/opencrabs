@@ -8,6 +8,7 @@
 //! `DARK` value, since a terminal colour has no fixed RGB to read.
 
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use gpui::WindowAppearance;
 use opencrabs::config::Config;
@@ -79,6 +80,9 @@ pub const DARK: Palette = Palette {
 /// The live palette. Read on every frame, written only when the appearance or
 /// the config changes.
 static CURRENT: RwLock<Palette> = RwLock::new(DARK);
+
+/// The system appearance last seen. Starts dark, the window's own default.
+static SYSTEM_DARK: AtomicBool = AtomicBool::new(true);
 
 /// The palette to draw with right now.
 pub fn current() -> Palette {
@@ -163,11 +167,28 @@ pub fn follow_appearance(appearance: WindowAppearance) {
         appearance,
         WindowAppearance::Dark | WindowAppearance::VibrantDark
     );
+    SYSTEM_DARK.store(dark, Ordering::Relaxed);
     let palette = for_appearance(dark);
     logging::info(&format!(
         "palette: system {} -> bg 0x{:06x}",
         if dark { "dark" } else { "light" },
         palette.bg
     ));
+    set(palette);
+}
+
+/// Whether the system is currently dark, as last reported by the window.
+pub fn system_is_dark() -> bool {
+    SYSTEM_DARK.load(Ordering::Relaxed)
+}
+
+/// Show a theme on the window without saving it. The themes screen previews
+/// each row this way and restores the saved palette when it closes.
+pub fn preview(name: &str) {
+    set(resolve(name));
+}
+
+/// Put back a palette captured before a preview.
+pub fn restore(palette: Palette) {
     set(palette);
 }
