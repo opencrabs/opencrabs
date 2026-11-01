@@ -280,9 +280,10 @@ mod tests {
     /// The 22 TUI labels, written out so a row cannot vanish during a
     /// refactor without a test going red. Kept as data rather than derived
     /// from [`ROWS`], which would make the assertion true by construction.
-    const TUI_LABELS: [&str; 22] = [
+    const TUI_LABELS: [&str; 23] = [
         "Ctrl+C",
         "Ctrl+N",
+        "Alt+T",
         "Ctrl+S",
         "Ctrl+O",
         "Ctrl+K",
