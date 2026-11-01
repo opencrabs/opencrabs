@@ -359,7 +359,9 @@ pub fn row(
         .rounded_sm()
         .cursor_pointer()
         .when(selected, |d| d.bg(rgb(palette::current().selection)))
-        .hover(|d| d.bg(rgb(palette::current().bg)))
+        // The hover tint is for rows that are not selected. On the selected row
+        // it would paint over the selection and hide which conversation is open.
+        .when(!selected, |d| d.hover(|d| d.bg(rgb(palette::current().bg))))
         .child(body);
     if let Some(action) = action {
         row = row.child(action);
