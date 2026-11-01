@@ -277,10 +277,12 @@ pub fn find(neutral: &str) -> Option<&'static HelpRow> {
 mod tests {
     use super::*;
 
-    /// The 22 TUI labels, written out so a row cannot vanish during a
+    /// The TUI labels, written out so a row cannot vanish during a
     /// refactor without a test going red. Kept as data rather than derived
     /// from [`ROWS`], which would make the assertion true by construction.
-    const TUI_LABELS: [&str; 23] = [
+    /// A slice, not a sized array: the row set grows, the length must follow
+    /// it instead of being a second hand-maintained count.
+    const TUI_LABELS: &[&str] = &[
         "Ctrl+C",
         "Ctrl+N",
         "Alt+T",
