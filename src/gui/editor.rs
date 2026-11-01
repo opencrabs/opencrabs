@@ -18,9 +18,9 @@ use gpui::{
     AnyElement, App, Bounds, ClipboardItem, Context, CursorStyle, Div, Element, ElementId,
     ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
     GlobalElementId, KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ObjectFit, PathPromptOptions, Pixels, Point, ShapedLine, SharedString, Style,
-    TextRun, UTF16Selection, Window, actions, div, fill, img, point, prelude::*, px, relative, rgb,
-    rgba, size,
+    MouseUpEvent, ObjectFit, PathPromptOptions, Pixels, Point, SharedString, Style, TextAlign,
+    TextRun, UTF16Selection, Window, WrappedLine, actions, div, fill, img, point, prelude::*, px,
+    relative, rgb, rgba, size,
 };
 
 use unicode_segmentation::UnicodeSegmentation;
@@ -34,6 +34,9 @@ actions!(
         Right,
         Up,
         Down,
+        WordLeft,
+        WordRight,
+        DeleteWordBack,
         SelectLeft,
         SelectRight,
         SelectAll,
@@ -218,9 +221,16 @@ pub struct Editor {
     selected_range: Range<usize>,
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
-    last_layout: Vec<ShapedLine>,
+    last_layout: Vec<WrappedLine>,
+    /// (top, height) of every logical line once wrapped, in field-local
+    /// pixels. Mouse mapping needs the row's own origin, not the field's.
+    last_tops: Vec<(Pixels, Pixels)>,
     last_bounds: Option<Bounds<Pixels>>,
     last_line_height: Pixels,
+    /// Width the field was last laid out at. `request_layout` has to answer a
+    /// height before it is told its own bounds, so it measures with the width
+    /// the previous frame recorded.
+    wrap_width: Pixels,
     is_selecting: bool,
 }
 
@@ -235,8 +245,10 @@ impl Editor {
             selection_reversed: false,
             marked_range: None,
             last_layout: Vec::new(),
+            last_tops: Vec::new(),
             last_bounds: None,
             last_line_height: px(20.0),
+            wrap_width: Pixels::ZERO,
             is_selecting: false,
         }
     }
@@ -317,24 +329,63 @@ impl Editor {
         }
     }
 
-    /// Vertical movement in a multiline field: same column, row above or
-    /// below, clamped to that row's length.
-    fn up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
-        let (line, col) = self.line_col(self.cursor_offset());
-        if line == 0 {
-            return;
+    /// Every visual row of the field in paint order, as `(byte offset where
+    /// the row starts, its length in bytes)`. A row is a wrapped piece of one
+    /// logical line; before the field has ever been shaped the layout is
+    /// empty and each logical line stands in for its own single row.
+    fn visual_rows(&self) -> Vec<(usize, usize)> {
+        let mut rows = Vec::new();
+        for line in 0..self.line_count() {
+            let start = self.line_start(line);
+            let len = self.line_len(line);
+            match self.last_layout.get(line) {
+                Some(shaped) => {
+                    for (from, to) in visual_segments(shaped, len) {
+                        rows.push((start + from, to - from));
+                    }
+                }
+                None => rows.push((start, len)),
+            }
         }
-        let target = self.line_start(line - 1) + col.min(self.line_len(line - 1));
+        if rows.is_empty() {
+            rows.push((0, 0));
+        }
+        rows
+    }
+
+    /// Vertical movement runs over visual rows, so a wrapped paragraph behaves
+    /// like the lines the reader sees. At the top row Up goes to the very
+    /// start, and at the bottom row Down goes to the very end.
+    fn up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
+        let rows = self.visual_rows();
+        let target = vertical_row_target(&rows, self.cursor_offset(), -1);
         self.move_to(target, cx);
     }
 
     fn down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
-        let (line, col) = self.line_col(self.cursor_offset());
-        if line + 1 >= self.line_count() {
-            return;
-        }
-        let target = self.line_start(line + 1) + col.min(self.line_len(line + 1));
+        let rows = self.visual_rows();
+        let target = vertical_row_target(&rows, self.cursor_offset(), 1);
         self.move_to(target, cx);
+    }
+
+    fn word_left(&mut self, _: &WordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(self.previous_boundary(self.cursor_offset()), cx);
+    }
+
+    fn word_right(&mut self, _: &WordRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(self.next_boundary(self.cursor_offset()), cx);
+    }
+
+    fn delete_word_back(
+        &mut self,
+        _: &DeleteWordBack,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_range.is_empty() {
+            self.select_to(self.previous_boundary(self.cursor_offset()), cx)
+        }
+        self.replace_text_in_range(None, "", window, cx)
     }
 
     fn select_left(&mut self, _: &SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
@@ -511,12 +562,31 @@ impl Editor {
         };
         let line_height = self.last_line_height;
         let rel_y = position.y - bounds.top();
-        let line = (rel_y / line_height) as usize;
-        let line = line.min(self.line_count() - 1);
+        // Once a line wraps, rows no longer share one height, so the click is
+        // resolved against the row that actually covers it instead of by
+        // dividing by a single line height.
+        let mut line = self.last_tops.len().saturating_sub(1);
+        let mut row_top = Pixels::ZERO;
+        for (index, (top, height)) in self.last_tops.iter().enumerate() {
+            if rel_y >= *top && rel_y < *top + *height {
+                line = index;
+                row_top = *top;
+                break;
+            }
+        }
+        line = line.min(self.line_count() - 1);
         let Some(shaped) = self.last_layout.get(line) else {
             return 0;
         };
-        self.line_start(line) + shaped.closest_index_for_x(position.x - bounds.left())
+        let rel = point(
+            position.x - bounds.left(),
+            (rel_y - row_top).max(Pixels::ZERO),
+        );
+        self.line_start(line)
+            + shaped
+                .closest_index_for_position(rel, line_height)
+                .unwrap_or(0)
+                .min(self.line_len(line))
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
@@ -699,13 +769,20 @@ impl EntityInputHandler for Editor {
         } else {
             self.line_col(range.end).1
         };
+        let line_height = self.last_line_height;
         let shaped = self.last_layout.get(line)?;
-        let y = bounds.top() + self.last_line_height * line as f32;
+        let line_top = self
+            .last_tops
+            .get(line)
+            .map(|(top, _)| *top)
+            .unwrap_or_default();
+        let start = shaped.position_for_index(col_start, line_height)?;
+        let end = shaped.position_for_index(col_end, line_height)?;
         Some(Bounds::from_corners(
-            point(bounds.left() + shaped.x_for_index(col_start), y),
+            point(bounds.left() + start.x, bounds.top() + line_top + start.y),
             point(
-                bounds.left() + shaped.x_for_index(col_end),
-                y + self.last_line_height,
+                bounds.left() + end.x,
+                bounds.top() + line_top + end.y + line_height,
             ),
         ))
     }
@@ -716,12 +793,7 @@ impl EntityInputHandler for Editor {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<usize> {
-        let bounds = self.last_bounds?;
-        let rel_y = point.y - bounds.top();
-        let line = ((rel_y / self.last_line_height) as usize).min(self.line_count() - 1);
-        let shaped = self.last_layout.get(line)?;
-        let utf8 = shaped.index_for_x(point.x - bounds.left())?;
-        Some(self.offset_to_utf16(self.line_start(line) + utf8))
+        Some(self.offset_to_utf16(self.index_for_mouse_position(point)))
     }
 }
 
@@ -733,13 +805,18 @@ impl Focusable for Editor {
 
 impl EventEmitter<EditorEvent> for Editor {}
 
-/// One painted text row: the shaped line plus, optionally, that row's
-/// selection rect and cursor quad.
+/// One logical line, already shaped and wrapped to the field width, plus the
+/// y offset it paints at and the quads that belong to it.
 struct RowPaint {
-    line: ShapedLine,
-    selection: Option<Pixels>,
-    selection_end: Option<Pixels>,
-    cursor_x: Option<Pixels>,
+    line: WrappedLine,
+    /// Distance from the top of the field to this line's first visual row.
+    top: Pixels,
+    /// Total height of this line, every wrapped row counted.
+    height: Pixels,
+    /// One rect per visual row the selection spans, line-local pixels.
+    selection: Vec<(Point<Pixels>, Point<Pixels>)>,
+    /// Caret origin within the line, when the caret sits on it.
+    cursor: Option<Point<Pixels>>,
 }
 
 /// The custom element: shapes every row during prepaint, paints rows and
@@ -779,10 +856,14 @@ impl Element for EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let line_count = self.input.read(cx).content.split('\n').count().max(1);
+        let (content, wrap_width) = {
+            let input = self.input.read(cx);
+            (input.content.clone(), input.wrap_width)
+        };
+        let rows = wrapped_row_count(&content, wrap_width, window);
         let mut style = Style::default();
         style.size.width = relative(1.).into();
-        style.size.height = (window.line_height() * line_count as f32).into();
+        style.size.height = (window.line_height() * rows as f32).into();
         (window.request_layout(style, [], cx), ())
     }
 
@@ -790,73 +871,119 @@ impl Element for EditorElement {
         &mut self,
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&gpui::InspectorElementId>,
-        _bounds: Bounds<Pixels>,
+        bounds: Bounds<Pixels>,
         _request_layout: &mut Self::RequestLayoutState,
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        let input = self.input.read(cx);
-        let content = input.content.clone();
-        let selected = input.selected_range.clone();
-        let cursor = input.cursor_offset();
+        let (content, selected, cursor, placeholder, empty) = {
+            let input = self.input.read(cx);
+            (
+                input.content.clone(),
+                input.selected_range.clone(),
+                input.cursor_offset(),
+                input.placeholder.to_string(),
+                input.content.is_empty(),
+            )
+        };
         let style = window.text_style();
         let font_size = style.font_size.to_pixels(window.rem_size());
+        let line_height = window.line_height();
+        // The field never widens past its own bounds: wrap to exactly the
+        // width the parent handed us, which is what makes a resize reflow.
+        let wrap_width = bounds.size.width;
 
-        let empty = content.is_empty();
-        let display = if empty {
-            input.placeholder.to_string()
+        let display = if empty { placeholder } else { content.clone() };
+        let run_color = if empty {
+            hsla_from(palette::current().text_faint)
         } else {
-            content.clone()
+            style.color
         };
+        let run = TextRun {
+            len: display.len(),
+            font: style.font(),
+            color: run_color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let shaped = window
+            .text_system()
+            .shape_text(
+                SharedString::from(display.clone()),
+                font_size,
+                &[run],
+                Some(wrap_width),
+                None,
+            )
+            .ok();
 
         let mut rows = Vec::new();
         let mut line_start = 0usize;
-        for text in display.split('\n') {
+        let mut top = Pixels::ZERO;
+        for (index, text) in display.split('\n').enumerate() {
             let line_end = line_start + text.len();
-            let run_color = if empty {
-                hsla_from(palette::current().text_faint)
-            } else {
-                style.color
-            };
-            let run = TextRun {
-                len: text.len(),
-                font: style.font(),
-                color: run_color,
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            };
-            let shaped = window.text_system().shape_line(
-                SharedString::from(text.to_string()),
-                font_size,
-                &[run],
-                None,
-            );
-            // Selection and cursor map onto display rows only when the field
-            // has real content; the placeholder paints bare.
-            let (sel, sel_end, cursor_x) = if empty {
-                (None, None, None)
-            } else {
-                let sel_start_in_line = selected.start.clamp(line_start, line_end) - line_start;
-                let sel_end_in_line = selected.end.clamp(line_start, line_end) - line_start;
-                let has_selection_here =
-                    !selected.is_empty() && selected.start < line_end && selected.end > line_start;
-                let cursor_here = cursor >= line_start && cursor <= line_end;
-                (
-                    has_selection_here.then(|| shaped.x_for_index(sel_start_in_line)),
-                    has_selection_here.then(|| shaped.x_for_index(sel_end_in_line)),
-                    (cursor_here && selected.is_empty())
-                        .then(|| shaped.x_for_index(cursor - line_start)),
-                )
-            };
+            let line = shaped
+                .as_ref()
+                .and_then(|lines| lines.get(index))
+                .cloned()
+                .unwrap_or_default();
+            let height = line_height * (line.wrap_boundaries().len() + 1) as f32;
+
+            // Selection and cursor map onto a real line only when the field
+            // has content; the placeholder paints bare.
+            let mut selection = Vec::new();
+            let mut caret = None;
+            if !empty {
+                if !selected.is_empty() && selected.start < line_end && selected.end > line_start {
+                    let sel_start = selected.start.clamp(line_start, line_end) - line_start;
+                    let sel_end = selected.end.clamp(line_start, line_end) - line_start;
+                    for (seg_start, seg_end) in visual_segments(&line, text.len()) {
+                        let lo = sel_start.max(seg_start);
+                        let hi = sel_end.min(seg_end);
+                        if lo >= hi {
+                            continue;
+                        }
+                        if let (Some(from), Some(to)) = (
+                            line.position_for_index(lo, line_height),
+                            line.position_for_index(hi, line_height),
+                        ) {
+                            selection.push((from, to));
+                        }
+                    }
+                }
+                if selected.is_empty() && cursor >= line_start && cursor <= line_end {
+                    caret = line.position_for_index(cursor - line_start, line_height);
+                }
+            }
+
             rows.push(RowPaint {
-                line: shaped,
-                selection: sel,
-                selection_end: sel_end,
-                cursor_x,
+                line,
+                top,
+                height,
+                selection,
+                cursor: caret,
             });
+            top += height;
             line_start = line_end + 1; // past the '\n'
         }
+
+        let layout: Vec<WrappedLine> = rows.iter().map(|row| row.line.clone()).collect();
+        let tops: Vec<(Pixels, Pixels)> = rows.iter().map(|row| (row.top, row.height)).collect();
+        self.input.update(cx, |input, cx| {
+            let resized = input.wrap_width != wrap_width;
+            input.wrap_width = wrap_width;
+            input.last_layout = layout;
+            input.last_tops = tops;
+            input.last_bounds = Some(bounds);
+            input.last_line_height = line_height;
+            // Height is measured before bounds are known, so the width that
+            // just became real only takes effect on the next frame. Re-render
+            // once when it changes; two frames later the width is stable.
+            if resized {
+                cx.notify();
+            }
+        });
 
         EditorPrepaint { rows }
     }
@@ -880,40 +1007,40 @@ impl Element for EditorElement {
         let line_height = window.line_height();
         let focused = focus_handle.is_focused(window);
         let rows = std::mem::take(&mut prepaint.rows);
-        for (row_idx, row) in rows.iter().enumerate() {
-            let y = bounds.top() + line_height * row_idx as f32;
-            if let (Some(sel), Some(sel_end)) = (row.selection, row.selection_end) {
+        for row in rows.iter() {
+            let y = bounds.top() + row.top;
+            for (from, to) in &row.selection {
                 window.paint_quad(fill(
                     Bounds::from_corners(
-                        point(bounds.left() + sel.min(sel_end), y),
-                        point(bounds.left() + sel.max(sel_end), y + line_height),
+                        point(bounds.left() + from.x.min(to.x), y + from.y),
+                        point(
+                            bounds.left() + from.x.max(to.x),
+                            y + from.y.max(to.y) + line_height,
+                        ),
                     ),
                     rgba(0x3311ff30),
                 ));
             }
             row.line
                 .paint(
-                    bounds.origin + point(px(0.), line_height * row_idx as f32),
+                    bounds.origin + point(px(0.), row.top),
                     line_height,
+                    TextAlign::Left,
+                    Some(bounds),
                     window,
                     cx,
                 )
                 .unwrap();
-            if focused && let Some(cursor_x) = row.cursor_x {
+            if focused && let Some(caret) = row.cursor {
                 window.paint_quad(fill(
                     Bounds::new(
-                        point(bounds.left() + cursor_x, y),
+                        point(bounds.left() + caret.x, y + caret.y),
                         size(px(2.), line_height),
                     ),
                     gpui::blue(),
                 ));
             }
         }
-        self.input.update(cx, |input, _cx| {
-            input.last_layout = rows.iter().map(|r| r.line.clone()).collect();
-            input.last_bounds = Some(bounds);
-            input.last_line_height = line_height;
-        });
     }
 }
 
@@ -953,6 +1080,9 @@ impl Render for Editor {
             .on_action(cx.listener(Self::right))
             .on_action(cx.listener(Self::up))
             .on_action(cx.listener(Self::down))
+            .on_action(cx.listener(Self::word_left))
+            .on_action(cx.listener(Self::word_right))
+            .on_action(cx.listener(Self::delete_word_back))
             .on_action(cx.listener(Self::select_left))
             .on_action(cx.listener(Self::select_right))
             .on_action(cx.listener(Self::select_all))
@@ -1082,6 +1212,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("right", Right, None),
         KeyBinding::new("up", Up, None),
         KeyBinding::new("down", Down, None),
+        KeyBinding::new("alt-left", WordLeft, None),
+        KeyBinding::new("alt-right", WordRight, None),
+        KeyBinding::new("alt-backspace", DeleteWordBack, None),
         KeyBinding::new("shift-left", SelectLeft, None),
         KeyBinding::new("shift-right", SelectRight, None),
         KeyBinding::new("cmd-a", SelectAll, None),
@@ -1104,6 +1237,106 @@ pub fn bind_keys(cx: &mut App) {
 
 fn line_count(content: &str) -> usize {
     content.split('\n').count()
+}
+
+/// Visual rows the text occupies at `wrap_width`.
+///
+/// `request_layout` has to answer a height before it is handed its own
+/// bounds, so it measures with the width the previous frame recorded. Zero
+/// means nothing has been laid out yet, and the logical line count is the
+/// honest fallback; the first prepaint stores the real width and asks for
+/// one more frame.
+fn wrapped_row_count(content: &str, wrap_width: Pixels, window: &Window) -> usize {
+    let logical = content.split('\n').count().max(1);
+    if wrap_width <= Pixels::ZERO {
+        return logical;
+    }
+    let style = window.text_style();
+    let font_size = style.font_size.to_pixels(window.rem_size());
+    let run = TextRun {
+        len: content.len(),
+        font: style.font(),
+        color: style.color,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    window
+        .text_system()
+        .shape_text(
+            SharedString::from(content.to_string()),
+            font_size,
+            &[run],
+            Some(wrap_width),
+            None,
+        )
+        .map(|lines| {
+            lines
+                .iter()
+                .map(|line| line.wrap_boundaries().len() + 1)
+                .sum::<usize>()
+        })
+        .unwrap_or(logical)
+        .max(1)
+}
+
+/// Byte ranges, relative to the logical line, that each visual row covers
+/// once the line wraps. A line that fits is one range; a wrapped line is one
+/// range per wrap boundary, contiguous and covering the whole line.
+fn visual_segments(line: &WrappedLine, line_len: usize) -> Vec<(usize, usize)> {
+    let mut starts = vec![0usize];
+    for boundary in line.wrap_boundaries() {
+        if let Some(run) = line.runs().get(boundary.run_ix)
+            && let Some(glyph) = run.glyphs.get(boundary.glyph_ix)
+            && glyph.index > *starts.last().unwrap_or(&0)
+            && glyph.index < line_len
+        {
+            starts.push(glyph.index);
+        }
+    }
+    let mut segments = Vec::with_capacity(starts.len());
+    for (index, start) in starts.iter().enumerate() {
+        let end = starts.get(index + 1).copied().unwrap_or(line_len);
+        segments.push((*start, end));
+    }
+    segments
+}
+
+/// Where the caret lands when it travels `delta` visual rows from `offset`.
+///
+/// Row ends are exclusive: a caret parked exactly at a wrap point stays on the
+/// row it just finished, so pressing Up there climbs from that row instead of
+/// skipping it. Off the top the caret goes to the very start of the content;
+/// off the bottom, to its very end. The column is carried across, clamped to
+/// whatever the destination row can hold.
+fn vertical_row_target(rows: &[(usize, usize)], offset: usize, delta: isize) -> usize {
+    let Some(last) = rows.last() else {
+        return 0;
+    };
+    let mut current = rows.len() - 1;
+    for (index, (start, len)) in rows.iter().enumerate() {
+        // Inclusive at the end: a caret parked at a wrap point (or at the end of a
+        // line, just before its `\n`) belongs to the row it just finished, so
+        // Up and Down climb from there instead of skipping that row.
+        if offset >= *start && offset <= start + len {
+            current = index;
+            break;
+        }
+    }
+    let column = offset.saturating_sub(rows[current].0);
+    if delta < 0 {
+        if current == 0 {
+            return 0;
+        }
+        let (start, len) = rows[current - 1];
+        start + column.min(len)
+    } else {
+        if current + 1 >= rows.len() {
+            return last.0 + last.1;
+        }
+        let (start, len) = rows[current + 1];
+        start + column.min(len)
+    }
 }
 
 /// Utf8 offset where line `line` starts (line 0 starts at 0; every later
@@ -1136,7 +1369,7 @@ fn line_col(content: &str, offset: usize) -> (usize, usize) {
 mod tests {
     use super::{
         Attachment, line_col, line_count, line_len, line_start, marker_paths, message_with_markers,
-        strip_markers,
+        strip_markers, vertical_row_target,
     };
     use std::path::PathBuf;
 
@@ -1313,5 +1546,47 @@ mod tests {
         // Multibyte content counts utf8 bytes: é is 2, each CJK char is 3.
         assert_eq!(line_start("é\n日", 1), 3);
         assert_eq!(line_len("é\n日", 1), 3);
+    }
+
+    /// "one two three four" wrapped at 8 bytes, then a hard newline line.
+    fn wrapped_rows() -> Vec<(usize, usize)> {
+        vec![(0, 8), (8, 9), (17, 4), (22, 5)]
+    }
+
+    #[test]
+    fn up_moves_one_visual_row_and_keeps_the_column() {
+        let rows = wrapped_rows();
+        // From column 3 of row 2 up to column 3 of row 1.
+        assert_eq!(vertical_row_target(&rows, 11, -1), 3);
+        // Column beyond the destination row clamps to its end.
+        assert_eq!(vertical_row_target(&rows, 25, -1), 20);
+    }
+
+    #[test]
+    fn up_off_the_first_row_goes_to_the_start() {
+        let rows = wrapped_rows();
+        assert_eq!(vertical_row_target(&rows, 0, -1), 0);
+        assert_eq!(vertical_row_target(&rows, 5, -1), 0);
+    }
+
+    #[test]
+    fn down_moves_one_visual_row_and_keeps_the_column() {
+        let rows = wrapped_rows();
+        assert_eq!(vertical_row_target(&rows, 3, 1), 11);
+        // A caret parked at the end of a row belongs to that row, so Down from
+        // the wrap point advances a row instead of re-entering the same one.
+        assert_eq!(vertical_row_target(&rows, 8, 1), 16);
+    }
+
+    #[test]
+    fn down_off_the_last_row_goes_to_the_end() {
+        let rows = wrapped_rows();
+        let end = rows.last().map(|(start, len)| start + len).unwrap_or(0);
+        assert_eq!(end, 27);
+        assert_eq!(vertical_row_target(&rows, 27, 1), 27);
+        assert_eq!(vertical_row_target(&rows, 24, 1), 27);
+        // No layout yet is not a crash: the caret stays home.
+        assert_eq!(vertical_row_target(&[], 4, 1), 0);
+        assert_eq!(vertical_row_target(&[], 4, -1), 0);
     }
 }

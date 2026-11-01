@@ -203,7 +203,7 @@ pub const ROWS: &[HelpRow] = &[
         HelpSection::InputEditing,
         "up/down",
         "↑ / ↓",
-        None,
+        Some("up/down"),
         "Line nav / start-end / history",
     ),
     row(
@@ -217,7 +217,7 @@ pub const ROWS: &[HelpRow] = &[
         HelpSection::InputEditing,
         "ctrl+alt+left/right",
         "Ctrl/Alt+←→",
-        None,
+        Some("alt-left/right"),
         "Jump word",
     ),
     row(
@@ -231,7 +231,7 @@ pub const ROWS: &[HelpRow] = &[
         HelpSection::InputEditing,
         "alt+backspace",
         "Alt+Backspace",
-        None,
+        Some("alt-backspace"),
         "Delete word",
     ),
     row(
