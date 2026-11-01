@@ -1889,6 +1889,10 @@ impl Render for Dashboard {
             });
             root = root.child(rail).child(splitter(grab));
         }
+        // The panes go in before every overlay. gpui paints children in the
+        // order they are added, so a pane added after an overlay covers it:
+        // the key reference then drew under the chat and under the rail.
+        root = root.child(right);
         // One dialog for every delete path, painted above both panes. The
         // conversation is only named so the user knows what they are about
         // to lose; nothing is erased until the confirm button is clicked.
@@ -1949,7 +1953,7 @@ impl Render for Dashboard {
                     ),
             );
         }
-        root.child(right)
+        root
     }
 }
 
@@ -2305,8 +2309,13 @@ fn help_overlay(close: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) ->
         .flex()
         .flex_col()
         .gap_2()
-        .w(rems(30.0))
-        .max_h(rems(32.0))
+        // Fills the window and stops at a readable size, so a narrow window
+        // (or one with the rail open) gets the whole space and a wide one
+        // keeps the panel from stretching across the screen.
+        .w_full()
+        .h_full()
+        .max_w(rems(40.0))
+        .max_h(rems(44.0))
         .p_4()
         .rounded(px(10.0))
         .border_1()
