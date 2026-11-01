@@ -1718,12 +1718,17 @@ impl Render for Dashboard {
                             Some(b) => (b.service.provider_name(), b.service.provider_model()),
                             None => ("-".to_string(), "-".to_string()),
                         };
-                        let identity = status_identity(
-                            &provider,
-                            &model,
-                            &tilde_path(&opencrabs::utils::cwd::launch_cwd()),
-                            self.branch.as_deref().unwrap_or("-"),
-                            self.live.tokens_per_sec(),
+                        // The session name leads, as in the TUI footer.
+                        let identity = format!(
+                            "{} · {}",
+                            self.session_title().unwrap_or("chat"),
+                            status_identity(
+                                &provider,
+                                &model,
+                                &tilde_path(&opencrabs::utils::cwd::launch_cwd()),
+                                self.branch.as_deref().unwrap_or("-"),
+                                self.live.tokens_per_sec(),
+                            )
                         );
                         div()
                             .flex()
@@ -1928,9 +1933,13 @@ impl Render for Dashboard {
             // floating in empty space above the window edge.
             .px_6()
             .pt_3()
-            .pb_4()
-            .child(chrome)
-            .child(middle);
+            .pb_4();
+        // The chat screen has no header: the session name leads the footer
+        // instead. The other screens keep their title above the body.
+        if self.screen != Screen::Chat {
+            right = right.child(chrome);
+        }
+        right = right.child(middle);
         right = match self.screen {
             Screen::Chat => {
                 // The running checklist sits between the conversation and the
