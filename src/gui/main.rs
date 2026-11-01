@@ -2907,10 +2907,13 @@ mod tests {
         // toggle, Esc closes the panel before it reaches anything behind it,
         // and the panel reads the shared table instead of its own copy of the
         // chords.
+        // The two doors (ctrl+h and Cmd+?) are pinned where the chords
+        // live, in `screen_keys`; this pins the wiring from that table to
+        // the panel, the half that lives in this file (#2356).
         let src = include_str!("main.rs");
         assert!(
-            src.contains("&& ev.keystroke.key == \"h\") || cmd_question"),
-            "ctrl+h and Cmd+? must share the help door"
+            src.contains("ScreenAction::ToggleHelp => self.toggle_help(cx)"),
+            "the chord table's help action must land on toggle_help"
         );
         assert!(src.contains("fn toggle_help"));
         assert!(
