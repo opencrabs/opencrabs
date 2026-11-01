@@ -356,6 +356,7 @@ pub mod gui_debug_config_test;
 pub mod gui_esc_screens_test;
 pub mod gui_overlay_layer_test;
 pub mod gui_theme_config_test;
+pub mod gui_themes_screen_test;
 pub mod gui_two_agents_migrations_2297_test;
 pub mod headless_tool_surface_test;
 pub mod help_catalog_test;

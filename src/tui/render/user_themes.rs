@@ -457,3 +457,9 @@ pub(crate) fn contrast(a: Color, b: Color) -> f64 {
     let (hi, lo) = if la >= lb { (la, lb) } else { (lb, la) };
     (hi + 0.05) / (lo + 0.05)
 }
+
+/// Every loaded user preset, in the order the registry holds them.
+pub fn all() -> Vec<&'static Theme> {
+    ensure_loaded();
+    REGISTRY.read().map(|reg| reg.clone()).unwrap_or_default()
+}

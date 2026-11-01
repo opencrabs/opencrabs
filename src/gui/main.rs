@@ -34,6 +34,7 @@ mod palette;
 mod plan_strip;
 mod sessions;
 mod theme;
+mod themes_view;
 mod transcript;
 mod usage_view;
 
@@ -75,6 +76,8 @@ enum Screen {
     Chat,
     Usage,
     Files,
+    /// The themes screen (ctrl+shift+t): preview a theme, keep it or restore.
+    Themes,
 }
 
 /// The ledger path, unchanged: `config.database.path`, with the same
@@ -256,6 +259,11 @@ struct Dashboard {
     /// Whether the key reference is open (#2320). The overlay reads the same
     /// table the terminal's `/help` prints, so the two cannot disagree.
     help_open: bool,
+    /// The palette the window had when the themes screen opened. Esc puts it
+    /// back, so a preview is never kept by accident.
+    themes_origin: Option<palette::Palette>,
+    /// The theme the themes screen is previewing, if the user has clicked one.
+    themes_pick: Option<String>,
     /// The plan checklist strip above the editor, re-read when its file moves.
     plan: plan_strip::PlanStripState,
     /// Which session the strip's path was resolved for, so the DB lookup runs
@@ -417,7 +425,65 @@ impl Dashboard {
                 }
             }
             Screen::Files => self.screen = Screen::Usage,
+            Screen::Themes => self.close_themes(true, cx),
         }
+        cx.notify();
+    }
+
+    /// ctrl+shift+t: the themes screen. Opening it remembers the palette the
+    /// window shows now; closing it without keeping restores that palette.
+    fn toggle_themes(&mut self, cx: &mut Context<Self>) {
+        if self.screen == Screen::Themes {
+            self.close_themes(true, cx);
+            return;
+        }
+        self.themes_origin = Some(palette::current());
+        self.themes_pick = None;
+        self.rail_actions = None;
+        self.screen = Screen::Themes;
+        cx.notify();
+    }
+
+    /// Leave the themes screen. `restore` puts back the palette from before
+    /// the screen opened: Esc and the toggle use it, Keep does not.
+    fn close_themes(&mut self, restore: bool, cx: &mut Context<Self>) {
+        if let Some(origin) = self.themes_origin.take()
+            && restore
+        {
+            palette::restore(origin);
+        }
+        self.themes_pick = None;
+        self.screen = Screen::Chat;
+        cx.notify();
+    }
+
+    /// A row click: show the theme on the window, without saving it.
+    fn preview_theme(&mut self, name: String, cx: &mut Context<Self>) {
+        palette::preview(&name);
+        self.themes_pick = Some(name);
+        cx.notify();
+    }
+
+    /// Keep: save the previewed theme under the key for the system appearance
+    /// the window is showing right now. Writes `[gui] dark_theme` or
+    /// `[gui] light_theme`, so the other appearance keeps its own choice.
+    fn keep_theme(&mut self, cx: &mut Context<Self>) {
+        let Some(name) = self.themes_pick.clone() else {
+            self.close_themes(true, cx);
+            return;
+        };
+        let key = if palette::system_is_dark() {
+            "dark_theme"
+        } else {
+            "light_theme"
+        };
+        match Config::write_key_string("gui", key, &name) {
+            Ok(()) => logging::info(&format!("themes: kept '{name}' as [gui] {key}")),
+            Err(e) => logging::error(&format!("themes: could not save '{name}': {e}")),
+        }
+        self.themes_origin = None;
+        self.themes_pick = None;
+        self.screen = Screen::Chat;
         cx.notify();
     }
 
@@ -1296,6 +1362,13 @@ impl Dashboard {
             self.toggle_files(cx);
             return;
         }
+        // ctrl+shift+t opens the themes screen, where a theme is previewed and
+        // kept. It sits with the screen keys so it works while typing.
+        if ev.keystroke.modifiers.control && ev.keystroke.modifiers.shift && ev.keystroke.key == "t"
+        {
+            self.toggle_themes(cx);
+            return;
+        }
         // ctrl+h opens the key reference, the window's door to the rows the
         // terminal prints via `/help` (#2320). It sits with the screen keys,
         // ahead of the rail filter: help is a window concern, and a filter
@@ -1371,6 +1444,12 @@ impl Dashboard {
                 }
                 Screen::Files => {
                     self.toggle_files(cx);
+                    return;
+                }
+                // Esc on the themes screen is a cancel: the palette from before
+                // the screen opened comes back, and nothing is saved.
+                Screen::Themes => {
+                    self.close_themes(true, cx);
                     return;
                 }
                 Screen::Chat => {}
@@ -1577,6 +1656,7 @@ impl Render for Dashboard {
                 env!("CARGO_PKG_VERSION")
             ),
             Screen::Files => "OpenCrabs \u{b7} files".to_string(),
+            Screen::Themes => "OpenCrabs \u{b7} themes".to_string(),
             Screen::Chat => format!(
                 "OpenCrabs \u{b7} {}",
                 self.session_title().unwrap_or("chat")
@@ -1766,6 +1846,64 @@ impl Render for Dashboard {
                     );
                 (scroller.into_any_element(), footer.into_any_element())
             }
+            Screen::Themes => {
+                // One row per theme, each drawn with its own swatches. A click
+                // previews it on the window; Keep saves it; Esc restores.
+                let picked = self.themes_pick.clone();
+                let mut list = div().flex().flex_col().gap_2();
+                for name in themes_view::names() {
+                    let selected = picked.as_deref() == Some(name);
+                    let pick = name.to_string();
+                    list = list.child(themes_view::row(name, selected).on_click(cx.listener(
+                        move |this, _ev, _window, cx| {
+                            this.preview_theme(pick.clone(), cx);
+                        },
+                    )));
+                }
+                let scroller = div()
+                    .id("themes-body")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(list);
+                let hint = match &picked {
+                    Some(name) => format!(
+                        "previewing {name} · keep saves it for the {} system appearance · esc restores",
+                        if palette::system_is_dark() {
+                            "dark"
+                        } else {
+                            "light"
+                        }
+                    ),
+                    None => "click a theme to preview it · esc restores".to_string(),
+                };
+                let keep = cx.listener(|this, _ev, _window, cx| this.keep_theme(cx));
+                let footer = div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .w_full()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(palette::current().text_muted))
+                            .child(SharedString::from(hint)),
+                    )
+                    .child(
+                        div()
+                            .id("themes-keep")
+                            .px_3()
+                            .py_1()
+                            .rounded(px(6.0))
+                            .bg(rgb(palette::current().panel_hi))
+                            .text_color(rgb(palette::current().text))
+                            .cursor_pointer()
+                            .on_click(keep)
+                            .child("keep"),
+                    );
+                (scroller.into_any_element(), footer.into_any_element())
+            }
         };
 
         // The input box and the live turn panel belong to the chat screen.
@@ -1805,6 +1943,7 @@ impl Render for Dashboard {
             }
             Screen::Usage => right.child(footer),
             Screen::Files => right.child(footer),
+            Screen::Themes => right.child(footer),
         };
 
         let mut root = div()
@@ -2098,6 +2237,8 @@ fn main() {
                         rail_slide_opened: None,
                         confirm_delete: None,
                         help_open: false,
+                        themes_origin: None,
+                        themes_pick: None,
                         plan: plan_strip::PlanStripState::default(),
                         plan_for: None,
                         transcript: transcript::TranscriptState {
