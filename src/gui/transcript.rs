@@ -16,6 +16,7 @@
 //! Phase-0 lessons still bind: 4 MB fetch thread, no migrations, char-safe
 //! truncation everywhere (#2271).
 
+use crate::palette;
 use std::collections::{HashMap, HashSet};
 
 use gpui::{
@@ -37,10 +38,7 @@ use opencrabs::tui::render::{
 
 use crate::editor::{Attachment, marker_paths, strip_markers};
 use crate::markdown;
-use crate::theme::{
-    ACCENT, AMBER, BG, BLUE, GREEN, PANEL, PANEL_HI, RED, TEAL, TEXT, TEXT_MUTED, TEXT_NORMAL,
-    TEXT_STRONG, TRACK, WARN,
-};
+
 
 /// Newest rows shown per load, matching the TUI display window. Older
 /// history stays behind the `Marker` block.
@@ -811,16 +809,16 @@ fn stamp(m: &Message) -> String {
 /// Role accent: the same three-colour grammar the dashboard bars use.
 fn role_color(role: &str) -> u32 {
     match role {
-        "user" => BLUE,
-        "assistant" => GREEN,
-        "system" | "tool" => WARN,
-        _ => TEXT_MUTED,
+        "user" => palette::current().blue,
+        "assistant" => palette::current().green,
+        "system" | "tool" => palette::current().warn,
+        _ => palette::current().text_muted,
     }
 }
 
 fn body_style(size: f32) -> TextStyle {
     TextStyle {
-        color: rgb(TEXT).into(),
+        color: rgb(palette::current().text).into(),
         font_size: AbsoluteLength::Pixels(px(size)),
         ..Default::default()
     }
@@ -829,7 +827,7 @@ fn body_style(size: f32) -> TextStyle {
 fn mono_style() -> TextStyle {
     TextStyle {
         font_family: "Menlo".into(),
-        color: rgb(TEXT_NORMAL).into(),
+        color: rgb(palette::current().text_normal).into(),
         font_size: AbsoluteLength::Pixels(px(12.0)),
         ..Default::default()
     }
@@ -849,7 +847,7 @@ fn md_line(l: &markdown::MdLine) -> Div {
 /// gets wide columns, a narrow one wraps the text instead of clipping it.
 fn table_cell(cell: &markdown::MdCell, header: bool) -> Div {
     let style = TextStyle {
-        color: rgb(if header { TEXT_STRONG } else { TEXT_NORMAL }).into(),
+        color: rgb(if header { palette::current().text_strong } else { palette::current().text_normal }).into(),
         font_size: AbsoluteLength::Pixels(px(13.0)),
         ..Default::default()
     };
@@ -861,7 +859,7 @@ fn table_cell(cell: &markdown::MdCell, header: bool) -> Div {
 /// A rule between two rows, drawn as its own element so no table depends on
 /// border-side helpers the way the TUI's box drawing does not either.
 fn table_rule() -> Div {
-    div().h(px(1.0)).w_full().flex_none().bg(rgb(TRACK))
+    div().h(px(1.0)).w_full().flex_none().bg(rgb(palette::current().track))
 }
 
 /// A markdown table as a real grid: header band, a rule under it, then one
@@ -878,7 +876,7 @@ fn md_table(t: &markdown::MdTable) -> Div {
         .flex_col()
         .w_full()
         .border_1()
-        .border_color(rgb(TRACK))
+        .border_color(rgb(palette::current().track))
         .rounded_sm()
         .overflow_hidden();
 
@@ -887,7 +885,7 @@ fn md_table(t: &markdown::MdTable) -> Div {
         .flex_row()
         .items_start()
         .w_full()
-        .bg(rgb(PANEL_HI));
+        .bg(rgb(palette::current().panel_hi));
     for i in 0..cols {
         head = head.child(table_cell(t.header.get(i).unwrap_or(&empty), true));
     }
@@ -923,7 +921,7 @@ fn md_block(src: &str) -> Div {
                 let mut code = div()
                     .flex()
                     .flex_col()
-                    .bg(rgb(PANEL_HI))
+                    .bg(rgb(palette::current().panel_hi))
                     .rounded_sm()
                     .p_2()
                     .gap_0p5();
@@ -961,7 +959,7 @@ fn plain_block(content: &str) -> Div {
         lines = lines.child(
             div()
                 .text_sm()
-                .text_color(rgb(TEXT))
+                .text_color(rgb(palette::current().text))
                 .child(SharedString::from(line.to_string())),
         );
     }
@@ -1023,7 +1021,7 @@ fn history_attachments(paths: &[std::path::PathBuf]) -> Div {
                 .w(px(TILE))
                 .h(px(TILE))
                 .rounded(px(6.0))
-                .bg(rgb(PANEL_HI))
+                .bg(rgb(palette::current().panel_hi))
                 .child(if attachment.is_video { "🎬" } else { "📄" })
                 .into_any_element()
         };
@@ -1038,7 +1036,7 @@ fn history_attachments(paths: &[std::path::PathBuf]) -> Div {
                     div()
                         .truncate()
                         .text_xs()
-                        .text_color(rgb(TEXT_MUTED))
+                        .text_color(rgb(palette::current().text_muted))
                         .child(SharedString::from(attachment.name)),
                 ),
         );
@@ -1056,18 +1054,18 @@ fn thinking_block(content: &str) -> Div {
         .p_2()
         .rounded_sm()
         .border_1()
-        .border_color(rgb(PANEL_HI))
+        .border_color(rgb(palette::current().panel_hi))
         .child(
             div()
                 .text_xs()
-                .text_color(rgb(TEXT_MUTED))
+                .text_color(rgb(palette::current().text_muted))
                 .child("· thinking ·"),
         )
         .child(
             div()
                 .text_xs()
                 .italic()
-                .text_color(rgb(TEXT_MUTED))
+                .text_color(rgb(palette::current().text_muted))
                 .child(SharedString::from(fit(content.trim(), 600))),
         )
 }
@@ -1081,7 +1079,7 @@ fn tools_block(calls: &[ToolCall]) -> Div {
         .gap_0p5()
         .p_2()
         .rounded_sm()
-        .bg(rgb(PANEL_HI));
+        .bg(rgb(palette::current().panel_hi));
     for call in calls {
         let (mark, color) = tool_mark(call);
         col = col.child(
@@ -1101,9 +1099,9 @@ fn tools_block(calls: &[ToolCall]) -> Div {
 /// ledger's text so a test cannot read a mark the pane never draws.
 fn tool_mark(call: &ToolCall) -> (&'static str, u32) {
     match (call.done, call.success) {
-        (false, _) => ("\u{b7}\u{b7}\u{b7}", TEXT_MUTED),
-        (true, true) => ("\u{2713}", GREEN),
-        (true, false) => ("\u{2717}", RED),
+        (false, _) => ("\u{b7}\u{b7}\u{b7}", palette::current().text_muted),
+        (true, true) => ("\u{2713}", palette::current().green),
+        (true, false) => ("\u{2717}", palette::current().red),
     }
 }
 
@@ -1140,14 +1138,14 @@ fn fold_header(turn: &Turn, folded: bool) -> Option<Stateful<Div>> {
         .child(
             div()
                 .text_xs()
-                .text_color(rgb(TEXT_MUTED))
+                .text_color(rgb(palette::current().text_muted))
                 .child(SharedString::from(fold_chevron(folded))),
         )
         .child(
             div()
                 .text_xs()
                 .font_weight(gpui::FontWeight::BOLD)
-                .text_color(rgb(TEAL))
+                .text_color(rgb(palette::current().teal))
                 .child(SharedString::from(base.clone())),
         );
     // The card's ctx and rate, in the Telegram footer's own wording. It
@@ -1157,7 +1155,7 @@ fn fold_header(turn: &Turn, folded: bool) -> Option<Stateful<Div>> {
         row = row.child(
             div()
                 .text_xs()
-                .text_color(rgb(TEXT_MUTED))
+                .text_color(rgb(palette::current().text_muted))
                 .child(SharedString::from(segment)),
         );
     }
@@ -1170,10 +1168,10 @@ fn fold_header(turn: &Turn, folded: bool) -> Option<Stateful<Div>> {
         .py_1()
         .rounded_sm()
         .cursor_pointer()
-        .hover(|d| d.bg(rgb(PANEL)))
+        .hover(|d| d.bg(rgb(palette::current().panel)))
         .child(row);
     if folded && let Some((description, success)) = &turn.preview {
-        let color = if *success { TEXT_MUTED } else { RED };
+        let color = if *success { palette::current().text_muted } else { palette::current().red };
         col = col.child(
             div()
                 .text_xs()
@@ -1203,7 +1201,7 @@ fn block_view(block: &Block) -> Div {
         Block::Marker { hidden } => {
             div()
                 .text_xs()
-                .text_color(rgb(TEXT_MUTED))
+                .text_color(rgb(palette::current().text_muted))
                 .child(SharedString::from(format!(
                     "\u{2191} {hidden} older messages hidden",
                 )))
@@ -1238,14 +1236,14 @@ fn status_line(live: &LiveTurn) -> Div {
     let mut row = div().flex().flex_row().items_center().gap_1().child(
         div()
             .text_xs()
-            .text_color(rgb(TEXT_MUTED))
+            .text_color(rgb(palette::current().text_muted))
             .child(SharedString::from(frame.to_string())),
     );
     if !lead.is_empty() {
         row = row.child(
             div()
                 .text_xs()
-                .text_color(rgb(ACCENT))
+                .text_color(rgb(palette::current().accent))
                 .child(SharedString::from(lead)),
         );
     }
@@ -1253,7 +1251,7 @@ fn status_line(live: &LiveTurn) -> Div {
         row = row.child(
             div()
                 .text_xs()
-                .text_color(rgb(TEXT_MUTED))
+                .text_color(rgb(palette::current().text_muted))
                 .child(SharedString::from(rest)),
         );
     }
@@ -1353,7 +1351,7 @@ fn live_view(live: &LiveTurn) -> Div {
         col = col.child(
             div()
                 .text_xs()
-                .text_color(rgb(AMBER))
+                .text_color(rgb(palette::current().amber))
                 .child(SharedString::from(notice.clone())),
         );
     }
@@ -1377,7 +1375,7 @@ fn live_view(live: &LiveTurn) -> Div {
             div()
                 .text_xs()
                 .italic()
-                .text_color(rgb(TEXT_MUTED))
+                .text_color(rgb(palette::current().text_muted))
                 .child(SharedString::from(fit(live.reasoning.trim(), 600))),
         );
     }
@@ -1414,13 +1412,13 @@ pub fn view(
         .track_scroll(scroll)
         .gap_2()
         .p_2()
-        .bg(rgb(BG));
+        .bg(rgb(palette::current().bg));
 
     if state.session.is_none() {
         col = col.child(
             div()
                 .text_sm()
-                .text_color(rgb(TEXT_MUTED))
+                .text_color(rgb(palette::current().text_muted))
                 .child("Select a session to read its transcript"),
         );
         return col;
@@ -1429,7 +1427,7 @@ pub fn view(
         col = col.child(
             div()
                 .text_sm()
-                .text_color(rgb(TEXT_MUTED))
+                .text_color(rgb(palette::current().text_muted))
                 .child(err.clone()),
         );
         return col;
@@ -1438,7 +1436,7 @@ pub fn view(
         col = col.child(
             div()
                 .text_sm()
-                .text_color(rgb(TEXT_MUTED))
+                .text_color(rgb(palette::current().text_muted))
                 .child("No messages in this session"),
         );
         return col;

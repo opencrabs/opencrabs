@@ -30,16 +30,14 @@ mod editor;
 mod icon;
 mod logging;
 mod markdown;
+mod palette;
 mod plan_strip;
 mod sessions;
 mod theme;
 mod transcript;
 mod usage_view;
 
-use crate::theme::{
-    AMBER, BASE_REM, BG, RED, TEAL, TEXT, TEXT_FAINT, TEXT_MUTED, TEXT_NORMAL, ZOOM_MAX, ZOOM_MIN,
-    ZOOM_STEP,
-};
+use crate::theme::{BASE_REM, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP};
 
 use futures::channel::oneshot;
 
@@ -497,7 +495,7 @@ impl Dashboard {
             return body.child(
                 div()
                     .text_sm()
-                    .text_color(rgb(TEXT_MUTED))
+                    .text_color(rgb(palette::current().text_muted))
                     .child(err.clone()),
             );
         }
@@ -505,7 +503,7 @@ impl Dashboard {
             return body.child(
                 div()
                     .text_sm()
-                    .text_color(rgb(TEXT_FAINT))
+                    .text_color(rgb(palette::current().text_faint))
                     .child("no files tracked yet"),
             );
         }
@@ -531,7 +529,7 @@ impl Dashboard {
                         div()
                             .truncate()
                             .text_sm()
-                            .text_color(rgb(TEXT_NORMAL))
+                            .text_color(rgb(palette::current().text_normal))
                             .child(name),
                     )
                     .child(
@@ -539,7 +537,7 @@ impl Dashboard {
                             .flex_shrink_0()
                             .truncate()
                             .text_xs()
-                            .text_color(rgb(TEXT_MUTED))
+                            .text_color(rgb(palette::current().text_muted))
                             .child(SharedString::from(meta)),
                     ),
             );
@@ -1653,7 +1651,7 @@ impl Render for Dashboard {
                                     .flex_row()
                                     .gap_3()
                                     .text_xs()
-                                    .text_color(rgb(TEXT_MUTED))
+                                    .text_color(rgb(palette::current().text_muted))
                                     .child("ctrl+h · help"),
                             )
                             .child(
@@ -1662,7 +1660,7 @@ impl Render for Dashboard {
                                     .min_w_0()
                                     .truncate()
                                     .text_xs()
-                                    .text_color(rgb(TEXT_FAINT))
+                                    .text_color(rgb(palette::current().text_faint))
                                     .child(SharedString::from(identity)),
                             )
                             .child(
@@ -1693,13 +1691,13 @@ impl Render for Dashboard {
                             .child(
                                 div()
                                     .text_lg()
-                                    .text_color(rgb(RED))
+                                    .text_color(rgb(palette::current().red))
                                     .child("Usage data failed to load"),
                             )
                             .child(
                                 div()
                                     .text_sm()
-                                    .text_color(rgb(TEXT_MUTED))
+                                    .text_color(rgb(palette::current().text_muted))
                                     .child(err.clone()),
                             ),
                     }
@@ -1723,13 +1721,13 @@ impl Render for Dashboard {
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(TEXT_MUTED))
+                            .text_color(rgb(palette::current().text_muted))
                             .child("t · today · w · weekly · m · monthly · a · all time"),
                     )
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(TEXT_MUTED))
+                            .text_color(rgb(palette::current().text_muted))
                             .child("ctrl+h · help"),
                     );
                 (scroller.into_any_element(), footer.into_any_element())
@@ -1745,25 +1743,27 @@ impl Render for Dashboard {
                     .overflow_y_scroll()
                     .child(self.files_view());
                 let count = self.files.len();
-                let footer =
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .justify_between()
-                        .w_full()
-                        .child(div().text_xs().text_color(rgb(TEXT_MUTED)).child(
-                            SharedString::from(format!(
+                let footer = div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .w_full()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(palette::current().text_muted))
+                            .child(SharedString::from(format!(
                                 "{count} file{} tracked",
                                 if count == 1 { "" } else { "s" }
-                            )),
-                        ))
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(TEXT_MUTED))
-                                .child("ctrl+h · help"),
-                        );
+                            ))),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(palette::current().text_muted))
+                            .child("ctrl+h · help"),
+                    );
                 (scroller.into_any_element(), footer.into_any_element())
             }
         };
@@ -1811,8 +1811,8 @@ impl Render for Dashboard {
             .flex()
             .flex_row()
             .size_full()
-            .bg(rgb(BG))
-            .text_color(rgb(TEXT))
+            .bg(rgb(palette::current().bg))
+            .text_color(rgb(palette::current().text))
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
             // The drag lives on the root so it survives the pointer leaving
@@ -1937,14 +1937,14 @@ impl Render for Dashboard {
                     .gap_2()
                     .rounded(px(10.0))
                     .border_2()
-                    .border_color(rgb(theme::ACCENT))
+                    .border_color(rgb(palette::current().accent))
                     .bg(rgba(0x101010dd))
                     .child(div().text_xl().child("📎"))
                     .child(div().text_lg().child("Drop to attach"))
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(TEXT_MUTED))
+                            .text_color(rgb(palette::current().text_muted))
                             .child("files and images ride with your next message"),
                     ),
             );
@@ -1965,8 +1965,8 @@ fn splitter(
         .h_full()
         .flex_none()
         .cursor_col_resize()
-        .bg(rgb(theme::PANEL_HI))
-        .hover(|d| d.bg(rgb(theme::ACCENT)))
+        .bg(rgb(palette::current().panel_hi))
+        .hover(|d| d.bg(rgb(palette::current().accent)))
         .on_mouse_down(MouseButton::Left, grab)
 }
 
@@ -2120,6 +2120,16 @@ fn main() {
                         branch: git_branch(&opencrabs::utils::cwd::launch_cwd()),
                     }
                 });
+                // The palette follows the system appearance from the first
+                // frame, and again whenever the system switches (#2341).
+                palette::follow_appearance(window.appearance());
+                view.update(cx, |_this, cx| {
+                    cx.observe_window_appearance(window, |_this, window, cx| {
+                        palette::follow_appearance(window.appearance());
+                        cx.notify();
+                    })
+                    .detach();
+                });
                 // The editor starts focused, like the TUI's input box: the
                 // user opens the window and types straight into it.
                 window.focus(&view.read(cx).editor.read(cx).focus_handle);
@@ -2153,11 +2163,11 @@ fn queue_strip(queued: &[agent_bridge::PendingMessage]) -> Div {
         .gap_1()
         .p_2()
         .rounded_sm()
-        .bg(rgb(theme::PANEL))
+        .bg(rgb(palette::current().panel))
         .child(
             div()
                 .text_xs()
-                .text_color(rgb(AMBER))
+                .text_color(rgb(palette::current().amber))
                 .child(SharedString::from(format!(
                     "queued {} · sends when this turn ends",
                     queued.len()
@@ -2171,7 +2181,7 @@ fn queue_strip(queued: &[agent_bridge::PendingMessage]) -> Div {
         col = col.child(
             div()
                 .text_xs()
-                .text_color(rgb(TEXT_MUTED))
+                .text_color(rgb(palette::current().text_muted))
                 .child(SharedString::from(format!("{}. {short}{suffix}", i + 1))),
         );
     }
@@ -2190,7 +2200,7 @@ fn task_strip(text: String) -> Div {
         .items_center()
         .gap_2()
         .text_xs()
-        .text_color(rgb(AMBER))
+        .text_color(rgb(palette::current().amber))
         .child(SharedString::from(format!("⏳ {text}")))
 }
 
@@ -2237,15 +2247,15 @@ fn git_branch(dir: &std::path::Path) -> Option<String> {
 
 fn ctx_footer(used: Option<u32>, max: u32) -> (String, u32) {
     let Some(used) = used.filter(|_| max > 0) else {
-        return ("ctx: -".to_string(), TEXT_FAINT);
+        return ("ctx: -".to_string(), palette::current().text_faint);
     };
     let pct = (used as f64 / max as f64) * 100.0;
     let color = if pct > 80.0 {
-        RED
+        palette::current().red
     } else if pct > 60.0 {
-        AMBER
+        palette::current().amber
     } else {
-        TEAL
+        palette::current().teal
     };
     (
         format!(
@@ -2300,8 +2310,8 @@ fn help_overlay(close: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) ->
         .p_4()
         .rounded(px(10.0))
         .border_1()
-        .border_color(rgb(theme::PANEL_HI))
-        .bg(rgb(theme::PANEL));
+        .border_color(rgb(palette::current().panel_hi))
+        .bg(rgb(palette::current().panel));
 
     panel = panel.child(
         div()
@@ -2312,13 +2322,13 @@ fn help_overlay(close: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) ->
             .child(
                 div()
                     .text_sm()
-                    .text_color(rgb(TEXT))
+                    .text_color(rgb(palette::current().text))
                     .child(SharedString::from("keys")),
             )
             .child(
                 div()
                     .text_xs()
-                    .text_color(rgb(TEXT_MUTED))
+                    .text_color(rgb(palette::current().text_muted))
                     .child(SharedString::from("esc")),
             ),
     );
@@ -2330,7 +2340,7 @@ fn help_overlay(close: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) ->
                 div()
                     .mt_1()
                     .text_xs()
-                    .text_color(rgb(theme::ACCENT))
+                    .text_color(rgb(palette::current().accent))
                     .child(SharedString::from(section.title())),
             );
             printed = Some(section);
@@ -2346,7 +2356,7 @@ fn help_overlay(close: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) ->
                         .w(rems(9.0))
                         .flex_shrink_0()
                         .text_xs()
-                        .text_color(rgb(TEXT_NORMAL))
+                        .text_color(rgb(palette::current().text_normal))
                         .child(SharedString::from(chord)),
                 )
                 .child(
@@ -2354,7 +2364,7 @@ fn help_overlay(close: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) ->
                         .flex_1()
                         .min_w_0()
                         .text_xs()
-                        .text_color(rgb(TEXT_MUTED))
+                        .text_color(rgb(palette::current().text_muted))
                         .child(SharedString::from(row.description)),
                 ),
         );
@@ -2409,25 +2419,25 @@ fn confirm_delete_overlay(
                 .p_4()
                 .rounded(px(10.0))
                 .border_1()
-                .border_color(rgb(theme::PANEL_HI))
-                .bg(rgb(theme::PANEL))
+                .border_color(rgb(palette::current().panel_hi))
+                .bg(rgb(palette::current().panel))
                 .child(
                     div()
                         .text_sm()
-                        .text_color(rgb(TEXT))
+                        .text_color(rgb(palette::current().text))
                         .child(SharedString::from("Delete this conversation?")),
                 )
                 .child(
                     div()
                         .text_xs()
-                        .text_color(rgb(TEXT_MUTED))
+                        .text_color(rgb(palette::current().text_muted))
                         .truncate()
                         .child(SharedString::from(title)),
                 )
                 .child(
                     div()
                         .text_xs()
-                        .text_color(rgb(TEXT_MUTED))
+                        .text_color(rgb(palette::current().text_muted))
                         .child(SharedString::from(
                             "Its messages leave the ledger. This cannot be undone.",
                         )),
@@ -2445,9 +2455,9 @@ fn confirm_delete_overlay(
                                 .py_1()
                                 .rounded_sm()
                                 .text_xs()
-                                .text_color(rgb(TEXT_NORMAL))
+                                .text_color(rgb(palette::current().text_normal))
                                 .cursor_pointer()
-                                .hover(|d| d.bg(rgb(theme::PANEL_HI)))
+                                .hover(|d| d.bg(rgb(palette::current().panel_hi)))
                                 .child(SharedString::from("cancel"))
                                 .on_click(cancel),
                         )
@@ -2458,11 +2468,11 @@ fn confirm_delete_overlay(
                                 .py_1()
                                 .rounded_sm()
                                 .text_xs()
-                                .text_color(rgb(RED))
+                                .text_color(rgb(palette::current().red))
                                 .cursor_pointer()
                                 .border_1()
-                                .border_color(rgb(RED))
-                                .hover(|d| d.bg(rgb(theme::SELECTION)))
+                                .border_color(rgb(palette::current().red))
+                                .hover(|d| d.bg(rgb(palette::current().selection)))
                                 .child(SharedString::from("delete"))
                                 .on_click(confirm),
                         ),
@@ -2547,9 +2557,12 @@ mod tests {
     fn the_ctx_counter_colours_at_the_tui_thresholds() {
         // Same boundaries as `tui::render::input`: >80 red, >60 amber, else
         // teal. Below 60 stays calm so a healthy turn does not shout.
-        assert_eq!(ctx_footer(Some(10_000), 200_000).1, TEAL);
-        assert_eq!(ctx_footer(Some(130_000), 200_000).1, AMBER);
-        assert_eq!(ctx_footer(Some(170_000), 200_000).1, RED);
+        assert_eq!(ctx_footer(Some(10_000), 200_000).1, palette::current().teal);
+        assert_eq!(
+            ctx_footer(Some(130_000), 200_000).1,
+            palette::current().amber
+        );
+        assert_eq!(ctx_footer(Some(170_000), 200_000).1, palette::current().red);
     }
 
     #[test]
@@ -2558,9 +2571,12 @@ mod tests {
         // counter for a conversation that has not run a turn yet.
         assert_eq!(
             ctx_footer(None, 200_000),
-            ("ctx: -".to_string(), TEXT_FAINT)
+            ("ctx: -".to_string(), palette::current().text_faint)
         );
-        assert_eq!(ctx_footer(Some(900), 0), ("ctx: -".to_string(), TEXT_FAINT));
+        assert_eq!(
+            ctx_footer(Some(900), 0),
+            ("ctx: -".to_string(), palette::current().text_faint)
+        );
     }
 
     #[test]

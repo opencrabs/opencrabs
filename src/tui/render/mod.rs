@@ -76,3 +76,11 @@ pub use background::{LABEL_CHARS, format_background_tasks};
 // import for every non-test build and trips `-D warnings`.
 #[cfg(test)]
 pub(crate) use input::queue_line_parts;
+
+pub use theme::Theme;
+
+/// Look up a theme by name for the desktop window: built-in presets first,
+/// then user themes in `~/.opencrabs/themes`. Case-insensitive, like `/theme`.
+pub fn find_theme(name: &str) -> Option<&'static Theme> {
+    presets::by_name(name).or_else(|| user_themes::find(name))
+}

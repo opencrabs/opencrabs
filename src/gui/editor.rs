@@ -10,6 +10,7 @@
 //! movement respects grapheme boundaries (`unicode-segmentation`, already a
 //! direct dependency).
 
+use crate::palette;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
@@ -23,8 +24,6 @@ use gpui::{
 };
 
 use unicode_segmentation::UnicodeSegmentation;
-
-use crate::theme::{ACCENT, BG, PANEL_HI, TEXT, TEXT_FAINT};
 
 actions!(
     editor,
@@ -815,7 +814,7 @@ impl Element for EditorElement {
         for text in display.split('\n') {
             let line_end = line_start + text.len();
             let run_color = if empty {
-                hsla_from(TEXT_FAINT)
+                hsla_from(palette::current().text_faint)
             } else {
                 style.color
             };
@@ -937,7 +936,7 @@ impl Render for Editor {
                 .child(
                     div()
                         .text_xs()
-                        .text_color(rgb(TEXT_FAINT))
+                        .text_color(rgb(palette::current().text_faint))
                         .child("drop files to attach"),
                 ),
         );
@@ -968,14 +967,14 @@ impl Render for Editor {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .bg(rgb(BG))
+            .bg(rgb(palette::current().bg))
             .border_1()
-            .border_color(rgb(PANEL_HI))
+            .border_color(rgb(palette::current().panel_hi))
             .rounded_sm()
             .p_2()
             .line_height(px(22.))
             .text_size(px(14.))
-            .text_color(rgb(TEXT))
+            .text_color(rgb(palette::current().text))
             .min_h(px(44.))
             .child(body)
     }
@@ -1008,7 +1007,7 @@ fn attachment_strip(attachments: &[Attachment], cx: &mut Context<Editor>) -> Div
                 .w(px(34.0))
                 .h(px(34.0))
                 .rounded(px(4.0))
-                .bg(rgb(BG))
+                .bg(rgb(palette::current().bg))
                 .child(if attachment.is_video { "🎬" } else { "📄" })
                 .into_any_element()
         };
@@ -1020,14 +1019,14 @@ fn attachment_strip(attachments: &[Attachment], cx: &mut Context<Editor>) -> Div
                 .gap_2()
                 .p_1()
                 .rounded(px(6.0))
-                .bg(rgb(PANEL_HI))
+                .bg(rgb(palette::current().panel_hi))
                 .child(tile)
                 .child(
                     div()
                         .max_w(px(160.0))
                         .truncate()
                         .text_xs()
-                        .text_color(rgb(TEXT))
+                        .text_color(rgb(palette::current().text))
                         .child(SharedString::from(attachment.name.clone())),
                 )
                 .child(
@@ -1035,8 +1034,8 @@ fn attachment_strip(attachments: &[Attachment], cx: &mut Context<Editor>) -> Div
                         .id(ElementId::Name(format!("attachment-remove-{index}").into()))
                         .cursor_pointer()
                         .text_xs()
-                        .text_color(rgb(TEXT_FAINT))
-                        .hover(|d| d.text_color(rgb(ACCENT)))
+                        .text_color(rgb(palette::current().text_faint))
+                        .hover(|d| d.text_color(rgb(palette::current().accent)))
                         .child("✕")
                         .on_mouse_down(MouseButton::Left, remove),
                 ),
@@ -1056,8 +1055,8 @@ fn paperclip(cx: &mut Context<Editor>) -> impl IntoElement {
         .gap_1()
         .cursor_pointer()
         .text_xs()
-        .text_color(rgb(TEXT_FAINT))
-        .hover(|d| d.text_color(rgb(ACCENT)))
+        .text_color(rgb(palette::current().text_faint))
+        .hover(|d| d.text_color(rgb(palette::current().accent)))
         .child("📎")
         .child("attach")
         .on_mouse_down(
