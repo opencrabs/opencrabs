@@ -39,7 +39,6 @@ use opencrabs::tui::render::{
 use crate::editor::{Attachment, marker_paths, strip_markers};
 use crate::markdown;
 
-
 /// Newest rows shown per load, matching the TUI display window. Older
 /// history stays behind the `Marker` block.
 const WINDOW: usize = 200;
@@ -847,7 +846,12 @@ fn md_line(l: &markdown::MdLine) -> Div {
 /// gets wide columns, a narrow one wraps the text instead of clipping it.
 fn table_cell(cell: &markdown::MdCell, header: bool) -> Div {
     let style = TextStyle {
-        color: rgb(if header { palette::current().text_strong } else { palette::current().text_normal }).into(),
+        color: rgb(if header {
+            palette::current().text_strong
+        } else {
+            palette::current().text_normal
+        })
+        .into(),
         font_size: AbsoluteLength::Pixels(px(13.0)),
         ..Default::default()
     };
@@ -859,7 +863,11 @@ fn table_cell(cell: &markdown::MdCell, header: bool) -> Div {
 /// A rule between two rows, drawn as its own element so no table depends on
 /// border-side helpers the way the TUI's box drawing does not either.
 fn table_rule() -> Div {
-    div().h(px(1.0)).w_full().flex_none().bg(rgb(palette::current().track))
+    div()
+        .h(px(1.0))
+        .w_full()
+        .flex_none()
+        .bg(rgb(palette::current().track))
 }
 
 /// A markdown table as a real grid: header band, a rule under it, then one
@@ -1171,7 +1179,11 @@ fn fold_header(turn: &Turn, folded: bool) -> Option<Stateful<Div>> {
         .hover(|d| d.bg(rgb(palette::current().panel)))
         .child(row);
     if folded && let Some((description, success)) = &turn.preview {
-        let color = if *success { palette::current().text_muted } else { palette::current().red };
+        let color = if *success {
+            palette::current().text_muted
+        } else {
+            palette::current().red
+        };
         col = col.child(
             div()
                 .text_xs()
@@ -1198,14 +1210,12 @@ fn block_view(block: &Block) -> Div {
         } => bubble(role, content, time),
         Block::Thinking { content } => thinking_block(content),
         Block::Tools { calls } => tools_block(calls),
-        Block::Marker { hidden } => {
-            div()
-                .text_xs()
-                .text_color(rgb(palette::current().text_muted))
-                .child(SharedString::from(format!(
-                    "\u{2191} {hidden} older messages hidden",
-                )))
-        }
+        Block::Marker { hidden } => div()
+            .text_xs()
+            .text_color(rgb(palette::current().text_muted))
+            .child(SharedString::from(format!(
+                "\u{2191} {hidden} older messages hidden",
+            ))),
     }
 }
 
