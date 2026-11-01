@@ -26,6 +26,7 @@
 
 mod agent_bridge;
 mod breakdown;
+mod commands;
 mod editor;
 mod icon;
 mod logging;
@@ -43,6 +44,8 @@ use crate::screen_keys::{
     ChordMods, FocusTarget, ScreenAction, action_label, focus_target, screen_chord,
 };
 use crate::theme::{BASE_REM, Size, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP, text};
+// The terminal's own command table, shared rather than copied.
+use opencrabs::ui_core::commands as slash;
 
 use futures::channel::oneshot;
 
@@ -55,6 +58,7 @@ use gpui::{
 use opencrabs::brain::agent::ProgressEvent;
 use opencrabs::utils::drop_landing::human_size;
 use std::collections::HashMap;
+use std::ops::Range;
 use uuid::Uuid;
 
 use opencrabs::config::Config;
@@ -470,6 +474,70 @@ impl Dashboard {
         }
     }
 
+    /// Run a submitted command, or say why it does not run here.
+    ///
+    /// The reading is `commands::parse_command`, which is pure and unit
+    /// tested; this only applies what it decided. Nothing in here may fall
+    /// through to the agent: a command the window cannot run gets one line,
+    /// because a model asked to answer `/usage` writes a paragraph about
+    /// usage instead of opening the ledger (#2374).
+    fn run_command(&mut self, outcome: commands::Outcome, cx: &mut Context<Self>) {
+        let commands::Outcome::Run(action) = outcome else {
+            if let Some(line) = commands::message(&outcome) {
+                self.live.notices.push(line);
+                cx.notify();
+            }
+            return;
+        };
+        match action {
+            commands::GuiAction::OpenThemes => {
+                // The toggle closes it, so ask first: `/theme` on the themes
+                // screen must not throw the preview away.
+                if self.screen != Screen::Themes {
+                    self.toggle_themes(cx);
+                }
+            }
+            commands::GuiAction::OpenUsage => {
+                if self.screen != Screen::Usage {
+                    self.toggle_usage(cx);
+                }
+            }
+            commands::GuiAction::ToggleHelp => self.toggle_help(cx),
+            commands::GuiAction::NewSession => self.new_session(cx),
+            commands::GuiAction::StopTurn => self.stop_turn(cx),
+            commands::GuiAction::OpenSessions => self.toggle_rail(cx),
+            commands::GuiAction::Quit => cx.quit(),
+        }
+    }
+
+    /// The sessions rail: `/sessions` and ctrl+s share one toggle, so the
+    /// command and the chord can never disagree about what showing it means.
+    /// A hidden rail has no field to keep listening, so the filter exits.
+    fn toggle_rail(&mut self, cx: &mut Context<Self>) {
+        if self.rail_open {
+            self.close_rail_filter(cx);
+        }
+        self.rail_open = !self.rail_open;
+        cx.notify();
+    }
+
+    /// `/stop`: abort the turn in flight, the same effect as Esc Esc and the
+    /// same wording. The pane stops claiming a turn is running the moment the
+    /// user asks, and the service's own failure event lands afterwards.
+    fn stop_turn(&mut self, cx: &mut Context<Self>) {
+        let Some(cancel) = self.cancel.take() else {
+            self.live.notices.push("Nothing is running.".to_string());
+            cx.notify();
+            return;
+        };
+        cancel.cancel();
+        self.busy = false;
+        self.live.thinking = false;
+        self.live.notices.push("Operation cancelled.".to_string());
+        logging::info("turn cancelled by /stop");
+        cx.notify();
+    }
+
     /// ctrl+u: open the usage ledger, or return to the conversation. The panes
     /// never mix and the chat stays exactly where it was.
     fn toggle_usage(&mut self, cx: &mut Context<Self>) {
@@ -720,8 +788,19 @@ impl Dashboard {
         if text.is_empty() {
             return;
         }
+        // Commands are read before every other gate, because the two that
+        // matter most are needed exactly when the window is busy or broken:
+        // `/stop` has nothing to stop on an idle window, and `/help` is what a
+        // user reaches for when the agent is offline. A line that starts with
+        // a slash never becomes a turn (#2374).
+        if let Some(outcome) = commands::parse_command(&text) {
+            self.run_command(outcome, cx);
+            return;
+        }
         // A closed topic refuses new turns. The notice says why, so the send is
-        // never dropped without a word (#2305).
+        // never dropped without a word (#2305). It sits after the parse above
+        // because a command is not a turn: `/new` and `/sessions` still work
+        // from a closed topic.
         if self
             .transcript
             .session
@@ -1670,11 +1749,7 @@ impl Dashboard {
         // gate. A hidden rail has no field to keep listening, so the filter
         // exits.
         if ev.keystroke.modifiers.control && (ev.keystroke.key == "s" || ev.keystroke.key == "l") {
-            if self.rail_open {
-                self.close_rail_filter(cx);
-            }
-            self.rail_open = !self.rail_open;
-            cx.notify();
+            self.toggle_rail(cx);
             return;
         }
         // ctrl+f is the rail's find field: it narrows the session list to
@@ -1806,6 +1881,17 @@ impl Dashboard {
             // The context menu is the strip's neighbour: same nearness
             // rule, and a dismissal writes nothing (#2354).
             if self.sessions.rail_menu.take().is_some() {
+                cx.notify();
+                return;
+            }
+            // The command list lives inside the composer, so with it open Esc
+            // closes the list and keeps the draft: the terminal's behaviour,
+            // and the nearest thing answers first.
+            let spelling = self.editor.read(cx).command_popup().is_some();
+            if spelling {
+                self.editor.update(cx, |editor, cx| {
+                    editor.dismiss_command_popup(cx);
+                });
                 cx.notify();
                 return;
             }
@@ -2598,6 +2684,13 @@ impl Render for Dashboard {
                         "New topic"
                     };
                     col = col.child(topic_prompt(label, draft));
+                } else {
+                    // The slash-command list sits over the input while a name
+                    // is being spelled, the terminal's own placement.
+                    let popup = self.editor.read(cx).command_popup();
+                    if let Some((names, selected)) = popup {
+                        col = col.child(command_popup_view(&names, selected));
+                    }
                 }
                 col = col.child(self.editor.clone());
                 col.child(footer)
@@ -3058,6 +3151,88 @@ fn queue_strip(queued: &[agent_bridge::PendingMessage]) -> Div {
         );
     }
     col
+}
+
+/// Which slice of the list the popup paints.
+///
+/// The window never moves until the selection walks past its last row, so the
+/// eye keeps a stable block of names instead of a list that scrolls on every
+/// arrow. A selection outside the range is clamped, because the list shrinks
+/// as the draft grows.
+fn popup_window(total: usize, selected: usize, visible: usize) -> Range<usize> {
+    let visible = visible.max(1);
+    let shown = total.min(visible);
+    let selected = selected.min(total.saturating_sub(1));
+    let start = selected.saturating_sub(visible - 1).min(total - shown);
+    start..start + shown
+}
+
+/// The slash-command list above the input: the one table the terminal reads
+/// too, narrowed to what the draft is spelling.
+///
+/// Only the visible window is built, eight rows at most, and it slides once
+/// the selection walks past the last of them. Descriptions are clipped here
+/// rather than in the table, because the same strings are printed in full by
+/// the terminal's `/help`.
+fn command_popup_view(names: &[&'static str], selected: usize) -> Div {
+    const VISIBLE: usize = 8;
+    let window = popup_window(names.len(), selected, VISIBLE);
+    let mut col = div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .p_2()
+        .rounded_sm()
+        .border_1()
+        .border_color(rgb(palette::current().panel_hi))
+        .bg(rgb(palette::current().panel));
+    for (offset, name) in names[window.clone()].iter().enumerate() {
+        let picked = window.start + offset == selected;
+        let description = match slash::lookup(name) {
+            Some(cmd) => slash::clipped(cmd.description, 52).to_string(),
+            None => String::new(),
+        };
+        let mut row = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .px_1()
+            .rounded_sm();
+        if picked {
+            row = row.bg(rgb(palette::current().panel_hi));
+        }
+        let name_color = if picked {
+            palette::current().amber
+        } else {
+            palette::current().text
+        };
+        col = col.child(
+            row.child(
+                div()
+                    .w(px(112.))
+                    .text_xs()
+                    .text_color(rgb(name_color))
+                    .child(SharedString::from(*name)),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(palette::current().text_muted))
+                    .child(SharedString::from(description)),
+            ),
+        );
+    }
+    col.child(
+        div()
+            .text_xs()
+            .text_color(rgb(palette::current().text_muted))
+            .child(SharedString::from(format!(
+                "{}/{} · ↑↓ select · tab complete · enter run",
+                selected + 1,
+                names.len()
+            ))),
+    )
 }
 
 /// The running detached command, above the input.
@@ -3897,5 +4072,74 @@ mod tests {
             src.contains(&warn),
             "a completion for another session is logged, never dropped"
         );
+    }
+}
+
+#[cfg(test)]
+mod gui {
+    //! The window's own tests, under one module name so a selection can be
+    //! made with `cargo test -- gui::tests`: the panel and the popup are the
+    //! two places the GUI has behaviour of its own that no headless test can
+    //! reach through a real window.
+
+    mod tests {
+        use super::super::popup_window;
+
+        /// Eight names is the most a popup may cover: beyond that it would
+        /// hide the conversation it belongs to.
+        #[test]
+        fn the_list_paints_at_most_eight_rows() {
+            let window = popup_window(33, 0, 8);
+            assert_eq!(window, 0..8);
+        }
+
+        /// The window stays put while the selection walks its rows: the eye
+        /// keeps a stable block of names instead of a list that scrolls on
+        /// every arrow.
+        #[test]
+        fn the_window_slides_only_past_its_last_row() {
+            assert_eq!(popup_window(33, 7, 8), 0..8, "last row, no slide yet");
+            assert_eq!(popup_window(33, 8, 8), 1..9, "one step past: slide by one");
+        }
+
+        /// A short list does not scroll at all.
+        #[test]
+        fn a_short_list_never_scrolls() {
+            assert_eq!(popup_window(3, 0, 8), 0..3);
+            assert_eq!(popup_window(3, 2, 8), 0..3);
+        }
+
+        /// The selection is clamped rather than trusted: the list shrinks as
+        /// the draft grows, and a stale index must never slice past the end.
+        #[test]
+        fn a_stale_selection_is_clamped() {
+            assert_eq!(popup_window(4, 99, 8), 0..4);
+            assert_eq!(popup_window(1, 99, 8), 0..1);
+        }
+
+        /// A one-row budget still yields one row instead of an empty range,
+        /// which would paint nothing and panic on an empty slice elsewhere.
+        #[test]
+        fn a_zero_budget_still_shows_one_row() {
+            assert_eq!(popup_window(5, 2, 0), 2..3);
+        }
+
+        /// A line starting with a slash is read before the agent gates, or
+        /// `/stop` and `/help` would be dead in exactly the states that need
+        /// them. Source scan, because `send_message` needs a live window.
+        #[test]
+        fn a_command_is_read_before_the_agent_gates() {
+            let src = include_str!("main.rs");
+            let parse = src
+                .find("commands::parse_command(&text)")
+                .expect("send_message parses the line");
+            let offline = src
+                .find("agent offline: {}")
+                .expect("the offline gate exists");
+            assert!(
+                parse < offline,
+                "the command parse must precede the agent gates"
+            );
+        }
     }
 }

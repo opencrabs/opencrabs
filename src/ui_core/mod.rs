@@ -5,6 +5,7 @@
 //! ratatui, crossterm, or any other terminal-specific crate, so a GUI
 //! binary can link it as-is.
 
+pub mod commands;
 pub mod help_keys;
 pub mod keys;
 pub mod usage;
@@ -16,9 +17,10 @@ mod purity_tests {
     //! break that silently at compile time for the GUI, never for us.
 
     /// Every source file in `ui_core`, with its contents.
-    fn sources() -> [(&'static str, &'static str); 10] {
+    fn sources() -> [(&'static str, &'static str); 11] {
         [
             ("ui_core/mod.rs", include_str!("mod.rs")),
+            ("ui_core/commands.rs", include_str!("commands.rs")),
             ("ui_core/help_keys.rs", include_str!("help_keys.rs")),
             ("ui_core/keys.rs", include_str!("keys.rs")),
             ("ui_core/usage/mod.rs", include_str!("usage/mod.rs")),

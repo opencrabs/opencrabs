@@ -11,6 +11,7 @@
 //! direct dependency).
 
 use crate::palette;
+use opencrabs::ui_core::commands::completions;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
@@ -47,6 +48,8 @@ actions!(
         Copy,
         Send,
         Newline,
+        /// Tab on a half-typed slash command: fill the name, do not run it.
+        AcceptCommand,
     ]
 );
 
@@ -232,6 +235,14 @@ pub struct Editor {
     /// the previous frame recorded.
     wrap_width: Pixels,
     is_selecting: bool,
+    /// Where the arrows stand in the slash-command list. The list itself is
+    /// derived from the field's own text, so only the position is remembered;
+    /// `command_popup` clamps it when the list shrank.
+    command_index: usize,
+    /// Set by Escape. The list stays closed while the draft is unchanged and
+    /// the first edit opens it again: without this, dismissing a popup whose
+    /// content is still a bare command word would be impossible.
+    command_dismissed: bool,
 }
 
 impl Editor {
@@ -250,6 +261,8 @@ impl Editor {
             last_line_height: px(20.0),
             wrap_width: Pixels::ZERO,
             is_selecting: false,
+            command_index: 0,
+            command_dismissed: false,
         }
     }
 
@@ -311,6 +324,67 @@ impl Editor {
         .detach();
     }
 
+    /// The slash-command list to draw above the field, or `None` when the field
+    /// is not spelling a command. Carries the selection so the view does not
+    /// have to know how the list is computed or where the arrows stand.
+    ///
+    /// Derived from the content, not cached: the field is the only thing that
+    /// edits text, so a cache would need a refresh call at every one of those
+    /// sites and one missed site means a stale popup over the wrong draft.
+    pub fn command_popup(&self) -> Option<(Vec<&'static str>, usize)> {
+        if self.command_dismissed {
+            return None;
+        }
+        let names = completions(&self.content);
+        if names.is_empty() {
+            return None;
+        }
+        Some((names.clone(), self.command_index.min(names.len() - 1)))
+    }
+
+    /// Escape: close the list and keep the draft. The next edit reopens it,
+    /// which is the terminal's behaviour too.
+    pub fn dismiss_command_popup(&mut self, cx: &mut Context<Self>) {
+        if self.command_popup().is_some() {
+            self.command_dismissed = true;
+            cx.notify();
+        }
+    }
+
+    /// Step the slash-command selection. Answers whether there was a list to
+    /// step in, so the arrow handlers know whether to fall through to moving
+    /// the caret: with a popup open, Up and Down walk names, not lines.
+    fn step_command_popup(&mut self, delta: i64, cx: &mut Context<Self>) -> bool {
+        let Some((names, index)) = self.command_popup() else {
+            return false;
+        };
+        let last = names.len() as i64 - 1;
+        let next = (index as i64 + delta).clamp(0, last) as usize;
+        if next != self.command_index {
+            self.command_index = next;
+            cx.notify();
+        }
+        true
+    }
+
+    /// Tab on a half-typed command fills the name and stops there: the argument
+    /// is the user's to type, and running on Tab would take that choice away.
+    fn accept_command(&mut self, _: &AcceptCommand, _: &mut Window, cx: &mut Context<Self>) {
+        let Some((names, index)) = self.command_popup() else {
+            return;
+        };
+        let Some(name) = names.get(index).copied() else {
+            return;
+        };
+        // The trailing space closes the list: the word is finished.
+        self.content = format!("{name} ");
+        self.selected_range = self.content.len()..self.content.len();
+        self.selection_reversed = false;
+        self.marked_range = None;
+        self.command_index = 0;
+        cx.notify();
+    }
+
     // Movement and editing -------------------------------------------------
 
     fn left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
@@ -357,12 +431,18 @@ impl Editor {
     /// like the lines the reader sees. At the top row Up goes to the very
     /// start, and at the bottom row Down goes to the very end.
     fn up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
+        if self.step_command_popup(-1, cx) {
+            return;
+        }
         let rows = self.visual_rows();
         let target = vertical_row_target(&rows, self.cursor_offset(), -1);
         self.move_to(target, cx);
     }
 
     fn down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
+        if self.step_command_popup(1, cx) {
+            return;
+        }
         let rows = self.visual_rows();
         let target = vertical_row_target(&rows, self.cursor_offset(), 1);
         self.move_to(target, cx);
@@ -433,18 +513,39 @@ impl Editor {
 
     /// Enter sends: non-empty content goes out as an event, the field clears.
     fn send(&mut self, _: &Send, _window: &mut Window, cx: &mut Context<Self>) {
+        // A command it is still spelling runs the highlighted name, which is
+        // what Enter on the terminal's suggestion list does. Attachments are
+        // not part of a command, so a draft carrying them goes out as text.
+        let picked = if self.attachments.is_empty() {
+            self.command_popup()
+                .and_then(|(names, index)| names.get(index).copied())
+        } else {
+            None
+        };
+        if let Some(name) = picked {
+            self.clear_after_send(cx);
+            cx.emit(EditorEvent::Sent(name.to_string()));
+            return;
+        }
         let text = self.content.trim().to_string();
         let attachments = self.take_attachments();
         if text.is_empty() && attachments.is_empty() {
             return;
         }
         let payload = message_with_markers(&text, &attachments);
+        self.clear_after_send(cx);
+        cx.emit(EditorEvent::Sent(payload));
+    }
+
+    /// Empty the field and put the command list back to its resting state.
+    fn clear_after_send(&mut self, cx: &mut Context<Self>) {
         self.content.clear();
         self.selected_range = 0..0;
         self.selection_reversed = false;
         self.marked_range = None;
+        self.command_index = 0;
+        self.command_dismissed = false;
         cx.notify();
-        cx.emit(EditorEvent::Sent(payload));
     }
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
@@ -719,6 +820,8 @@ impl EntityInputHandler for Editor {
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
         self.selection_reversed = false;
         self.marked_range.take();
+        // The draft changed, so a dismissed list is offered again.
+        self.command_dismissed = false;
         cx.notify();
     }
 
@@ -753,6 +856,7 @@ impl EntityInputHandler for Editor {
             .map(|range_utf16| self.range_from_utf16(range_utf16))
             .map(|new_range| new_range.start + range.start..new_range.end + range.end)
             .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
+        self.command_dismissed = false;
         cx.notify();
     }
 
@@ -1096,6 +1200,7 @@ impl Render for Editor {
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::send))
             .on_action(cx.listener(Self::newline))
+            .on_action(cx.listener(Self::accept_command))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -1228,6 +1333,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("end", End, None),
         KeyBinding::new("enter", Send, None),
         KeyBinding::new("shift-enter", Newline, None),
+        KeyBinding::new("tab", AcceptCommand, None),
     ]);
 }
 
