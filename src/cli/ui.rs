@@ -173,7 +173,7 @@ pub(crate) async fn cmd_daemon(config: &crate::config::Config) -> Result<()> {
             }
         }
     }
-    cmd_chat_inner(config, None, false, true, active_lock).await
+    cmd_chat_inner(config, None, false, true, active_lock, false).await
 }
 
 /// #1723: adoption candidates from a profile listing, in listing order.
@@ -312,8 +312,9 @@ pub(crate) async fn cmd_chat(
     config: &crate::config::Config,
     session_id: Option<String>,
     force_onboard: bool,
+    start_fresh: bool,
 ) -> Result<()> {
-    cmd_chat_inner(config, session_id, force_onboard, false, None).await
+    cmd_chat_inner(config, session_id, force_onboard, false, None, start_fresh).await
 }
 
 /// Claim this profile, or refuse to boot (#1072).
@@ -449,6 +450,7 @@ async fn cmd_chat_inner(
     force_onboard: bool,
     headless: bool,
     scheduler_lock: Option<crate::config::profile::SchedulerLock>,
+    start_fresh: bool,
 ) -> Result<()> {
     // Single-instance guard (#1072), before the database, the provider, the
     // tool registry or the memory reindex. A second instance of the same
@@ -2108,6 +2110,15 @@ async fn cmd_chat_inner(
     // Set force onboard flag if requested
     if force_onboard {
         app.force_onboard = true;
+    }
+
+    // `chat --new`: drop the saved pane layout and open a brand-new session.
+    // Saving the single-pane layout also removes layout.json, so the next
+    // start does not bring the old panes back.
+    if start_fresh {
+        app.pane_manager = crate::tui::pane::PaneManager::new();
+        app.pane_manager.save_layout();
+        app.start_fresh = true;
     }
 
     // Resume a specific session (e.g. after a restart). Accepts a full

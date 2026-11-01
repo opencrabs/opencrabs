@@ -917,6 +917,8 @@ pub struct App {
 
     /// Session to resume after restart (set via --session CLI arg)
     pub resume_session_id: Option<Uuid>,
+    /// Start in a brand-new session instead of the last one (`chat --new`)
+    pub start_fresh: bool,
 
     /// Cache of rendered lines per message to avoid re-parsing markdown every frame.
     /// Key: (message_id, content_width). Invalidated on terminal resize, and on
@@ -1203,6 +1205,7 @@ impl App {
             active_tool_group: None,
             update_available_version: None,
             resume_session_id: None,
+            start_fresh: false,
             render_cache: HashMap::new(),
             render_cache_theme_gen: crate::tui::render::theme::generation(),
             chat_line_to_msg: Vec::new(),
@@ -1589,6 +1592,9 @@ impl App {
                     }
                 }
             });
+        } else if self.start_fresh {
+            // `chat --new`: a brand-new session, never the last one.
+            self.create_new_session().await?;
         } else if let Some(last_id) = Self::read_last_session_id()
             && self.session_service.get_session(last_id).await?.is_some()
         {
@@ -3904,7 +3910,12 @@ impl App {
             if let Some(pane) = self.pane_manager.focused_pane()
                 && let Some(session_id) = pane.session_id
             {
-                self.load_session(session_id).await?;
+                // A pane whose session fails to load is logged and left as it
+                // is. Returning the error here stopped the key handler, so a
+                // bad pane could leave the rest of the layout unclosable.
+                if let Err(e) = self.load_session(session_id).await {
+                    tracing::error!(error = %e, %session_id, "failed to load the focused pane's session");
+                }
                 // Ensure the session's provider entry exists in the HashMap
                 // after load. load_session skips swap if saved == current,
                 // but current may be from global fallback (closed pane's

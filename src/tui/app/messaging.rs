@@ -1121,6 +1121,24 @@ impl App {
                 }
                 true
             }
+            "/panes" => {
+                // `/panes close` empties the layout down to one pane in one go.
+                // Before, each pane needed its own Ctrl+X press.
+                if input.split_whitespace().nth(1) != Some("close") {
+                    self.push_system_message("usage: /panes close".to_string());
+                    return true;
+                }
+                let closed = self.pane_manager.close_all_but_focused();
+                self.pane_manager.save_layout();
+                if let Some(sid) = self.pane_manager.focused_pane().and_then(|p| p.session_id)
+                    && self.current_session.as_ref().map(|s| s.id) != Some(sid)
+                    && let Err(e) = self.load_session(sid).await
+                {
+                    tracing::error!(error = %e, %sid, "failed to load the remaining pane's session");
+                }
+                self.push_system_message(format!("Closed {closed} pane(s)."));
+                true
+            }
             "/theme" => {
                 use crate::tui::render::presets;
                 use crate::tui::render::theme;

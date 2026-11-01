@@ -182,6 +182,17 @@ impl PaneManager {
         true
     }
 
+    /// Close panes until one is left. Returns how many were closed. The pane
+    /// that remains is the one the closing leaves focused, and the caller
+    /// loads its session.
+    pub fn close_all_but_focused(&mut self) -> usize {
+        let mut closed = 0;
+        while self.close_focused() {
+            closed += 1;
+        }
+        closed
+    }
+
     /// Cycle focus to the next pane in the given direction.
     pub fn focus_next(&mut self) {
         if self.panes.len() <= 1 {
