@@ -26,7 +26,9 @@ fn screen_action_arm() -> &'static str {
     let start = GUI_MAIN
         .find("fn apply_screen_action")
         .expect("the window applies screen actions through one arm");
-    &GUI_MAIN[start..]
+    GUI_MAIN
+        .get(start..)
+        .expect("the action arm starts on a char boundary")
 }
 
 #[test]
