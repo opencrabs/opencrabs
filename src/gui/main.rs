@@ -3741,7 +3741,11 @@ mod tests {
                 "{chord} must carry the window's spelling"
             );
         }
-        assert_eq!(sessions.len(), wanted.len(), "SESSIONS lists nothing else");
+        // Rows with a window chord are the rail's commands, and those are what
+        // must match the list above. Terminal-only rows (the topic keys in
+        // /sessions) carry no window chord and are checked by their own tests.
+        let rail: Vec<_> = sessions.iter().filter(|row| row.gui.is_some()).collect();
+        assert_eq!(rail.len(), wanted.len(), "SESSIONS lists nothing else");
     }
 
     #[test]
