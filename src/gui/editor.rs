@@ -368,12 +368,15 @@ impl Editor {
         self.move_to(target, cx);
     }
 
+    // Word motion walks whole words, not graphemes. Sharing the arrow helpers
+    // here would have made alt+left move one character, which is what the
+    // composer shipped with before the owner asked for the TUI's word keys.
     fn word_left(&mut self, _: &WordLeft, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_to(self.previous_boundary(self.cursor_offset()), cx);
+        self.move_to(previous_word_start(&self.content, self.cursor_offset()), cx);
     }
 
     fn word_right(&mut self, _: &WordRight, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_to(self.next_boundary(self.cursor_offset()), cx);
+        self.move_to(next_word_end(&self.content, self.cursor_offset()), cx);
     }
 
     fn delete_word_back(
@@ -383,7 +386,7 @@ impl Editor {
         cx: &mut Context<Self>,
     ) {
         if self.selected_range.is_empty() {
-            self.select_to(self.previous_boundary(self.cursor_offset()), cx)
+            self.select_to(previous_word_start(&self.content, self.cursor_offset()), cx)
         }
         self.replace_text_in_range(None, "", window, cx)
     }
@@ -1349,6 +1352,55 @@ fn line_len(content: &str, line: usize) -> usize {
     content.split('\n').nth(line).map(str::len).unwrap_or(0)
 }
 
+/// Byte offset where the word before `offset` begins.
+///
+/// The TUI composer walks back over the separators and then over the word, so
+/// the same walk happens here and the window's alt+left lands where the
+/// terminal's ctrl+left does. Graphemes keep the walk from splitting a
+/// character that spans several bytes.
+fn previous_word_start(content: &str, offset: usize) -> usize {
+    let clamped = offset.min(content.len());
+    let graphemes: Vec<(usize, &str)> = content.grapheme_indices(true).collect();
+    let mut index = graphemes
+        .iter()
+        .position(|(start, _)| *start >= clamped)
+        .unwrap_or(graphemes.len());
+    while index > 0 && !is_word_grapheme(graphemes[index - 1].1) {
+        index -= 1;
+    }
+    while index > 0 && is_word_grapheme(graphemes[index - 1].1) {
+        index -= 1;
+    }
+    graphemes.get(index).map(|(start, _)| *start).unwrap_or(0)
+}
+
+/// Byte offset the word after `offset` ends on, past the word and the
+/// separators that follow it, matching the terminal composer.
+fn next_word_end(content: &str, offset: usize) -> usize {
+    let clamped = offset.min(content.len());
+    let graphemes: Vec<(usize, &str)> = content.grapheme_indices(true).collect();
+    let mut index = graphemes
+        .iter()
+        .position(|(start, _)| *start >= clamped)
+        .unwrap_or(graphemes.len());
+    while index < graphemes.len() && is_word_grapheme(graphemes[index].1) {
+        index += 1;
+    }
+    while index < graphemes.len() && !is_word_grapheme(graphemes[index].1) {
+        index += 1;
+    }
+    graphemes
+        .get(index)
+        .map(|(start, _)| *start)
+        .unwrap_or(content.len())
+}
+
+/// Letters and digits are word content; whitespace and punctuation separate
+/// words. A grapheme counts as a word when any of its characters is a letter.
+fn is_word_grapheme(grapheme: &str) -> bool {
+    grapheme.chars().any(|ch| ch.is_alphanumeric())
+}
+
 /// (line, utf8 column) for a utf8 offset. Past-the-end offsets clamp to the
 /// last line's end rather than panicking: a stale offset must never take the
 /// window down.
@@ -1369,7 +1421,7 @@ fn line_col(content: &str, offset: usize) -> (usize, usize) {
 mod tests {
     use super::{
         Attachment, line_col, line_count, line_len, line_start, marker_paths, message_with_markers,
-        strip_markers, vertical_row_target,
+        next_word_end, previous_word_start, strip_markers, vertical_row_target,
     };
     use std::path::PathBuf;
 
@@ -1588,5 +1640,47 @@ mod tests {
         // No layout yet is not a crash: the caret stays home.
         assert_eq!(vertical_row_target(&[], 4, 1), 0);
         assert_eq!(vertical_row_target(&[], 4, -1), 0);
+    }
+
+    /// Alt+backspace selects back to the word start and replaces the
+    /// selection, so what it removes is exactly the range below. The halves
+    /// come from `get` so a boundary that ever came out mid character would
+    /// fail the assertion instead of panicking the runner.
+    fn delete_word_back_once(text: &str, cursor: usize) -> String {
+        let start = previous_word_start(text, cursor);
+        let mut kept = String::with_capacity(text.len());
+        kept.push_str(text.get(..start).unwrap_or(""));
+        kept.push_str(text.get(cursor..).unwrap_or(""));
+        kept
+    }
+
+    #[test]
+    fn alt_left_stops_at_a_word_boundary() {
+        let text = "alpha beta gamma";
+        assert_eq!(previous_word_start(text, text.len()), 11);
+        assert_eq!(previous_word_start(text, 11), 6);
+        assert_eq!(previous_word_start(text, 0), 0);
+        // Separators before the word are skipped, not counted as the word.
+        assert_eq!(previous_word_start("alpha   ", 8), 0);
+        // Multibyte text is counted in utf8 bytes, never split mid character.
+        assert_eq!(previous_word_start("olá mundo", "olá mundo".len()), 5);
+    }
+
+    #[test]
+    fn alt_right_lands_on_the_next_word() {
+        let text = "alpha beta gamma";
+        assert_eq!(next_word_end(text, 0), 6);
+        assert_eq!(next_word_end(text, 6), 11);
+        assert_eq!(next_word_end(text, text.len()), text.len());
+        assert_eq!(next_word_end("olá mundo", 0), 5);
+    }
+
+    #[test]
+    fn alt_backspace_removes_a_whole_word() {
+        assert_eq!(delete_word_back_once("alpha beta gamma", 16), "alpha beta ");
+        assert_eq!(delete_word_back_once("alpha beta gamma", 6), "beta gamma");
+        assert_eq!(delete_word_back_once("olá mundo", 10), "olá ");
+        // A caret at the very start has nothing to remove and must not panic.
+        assert_eq!(delete_word_back_once("alpha", 0), "alpha");
     }
 }
