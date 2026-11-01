@@ -1196,6 +1196,34 @@ impl Dashboard {
         cx.notify();
     }
 
+    /// Turn topics on for a session from the rail menu (#2302). The write is
+    /// durable: the flag is read back from the database, never kept only here.
+    fn enable_topics(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        let db_path = self.db_path.clone();
+        cx.spawn(async move |this, cx| {
+            if let Err(e) = sessions::set_topics(db_path.clone(), id, true).await {
+                logging::error(&format!("enable topics {id}: {e}"));
+                this.update(cx, |this, cx| {
+                    this.live.notices.push(format!("enable topics: {e}"));
+                    cx.notify();
+                })
+                .ok();
+                return;
+            }
+            let result = sessions::load_topics(db_path).await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(ids) => this.sessions.topics = ids.into_iter().collect(),
+                    Err(e) => logging::error(&format!("topics refresh: {e}")),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
     /// Re-read the pinned ids. A separate fetch from the rows because the
     /// sidecar can change on its own (the TUI pins too).
     fn refresh_favorites(&mut self, cx: &mut Context<Self>) {
@@ -1742,7 +1770,8 @@ impl Render for Dashboard {
             // The menu overlays its row, so a pick must not fall through to
             // the row's click (which opens the chat) or read as a dismissal.
             let menu = if self.sessions.rail_menu == Some(id) {
-                let items = sessions::rail_menu_entries(favorite)
+                let topics_on = self.sessions.is_topic_enabled(id);
+                let items = sessions::rail_menu_entries(favorite, topics_on)
                     .into_iter()
                     .map(|entry| {
                         let kind = entry.kind;
@@ -1751,6 +1780,7 @@ impl Render for Dashboard {
                             this.sessions.rail_menu = None;
                             match kind {
                                 sessions::MenuKind::Pin => this.toggle_favorite(id, cx),
+                                sessions::MenuKind::EnableTopics => this.enable_topics(id, cx),
                                 sessions::MenuKind::Delete => this.request_delete(id, cx),
                             }
                         });
@@ -2337,10 +2367,20 @@ fn main() {
             })
             .into_iter()
             .collect();
+    // Topics are opt-in per session, read as their own set (#2302).
+    let topics: std::collections::HashSet<uuid::Uuid> =
+        futures::executor::block_on(sessions::load_topics(db_path.clone()))
+            .unwrap_or_else(|e| {
+                logging::error(&format!("topics load: {e}"));
+                Vec::new()
+            })
+            .into_iter()
+            .collect();
     let sessions_state = match session_list {
         Ok(items) => sessions::SessionsState {
             items,
             favorites: favorites.clone(),
+            topics: topics.clone(),
             selected: None,
             cursor: None,
             rail_menu: None,
@@ -2351,6 +2391,7 @@ fn main() {
         Err(e) => sessions::SessionsState {
             items: Vec::new(),
             favorites,
+            topics,
             selected: None,
             cursor: None,
             rail_menu: None,

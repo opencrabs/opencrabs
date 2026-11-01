@@ -46,6 +46,48 @@ impl SessionRepository {
         Self { pool }
     }
 
+    /// Turn topics on or off for one session. `updated_at` is left alone, so
+    /// turning topics on never moves the session in the recency order.
+    pub async fn set_topics_enabled(&self, id: Uuid, enabled: bool) -> Result<()> {
+        let id_str = id.to_string();
+        self.pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                conn.execute(
+                    "UPDATE sessions SET topics_enabled = ?2 WHERE id = ?1",
+                    params![id_str, enabled as i64],
+                )
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to set topics_enabled")?;
+        Ok(())
+    }
+
+    /// Every session with topics turned on, as ids.
+    pub async fn topic_enabled_ids(&self) -> Result<Vec<Uuid>> {
+        self.pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                let mut stmt =
+                    conn.prepare_cached("SELECT id FROM sessions WHERE topics_enabled = 1")?;
+                let ids = stmt
+                    .query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<String>>>()?;
+                Ok::<_, rusqlite::Error>(ids)
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to read topics_enabled")?
+            .into_iter()
+            .map(|s| Uuid::parse_str(&s).context("malformed session id"))
+            .collect()
+    }
+
     /// Find session by ID
     pub async fn find_by_id(&self, id: Uuid) -> Result<Option<Session>> {
         let id_str = id.to_string();

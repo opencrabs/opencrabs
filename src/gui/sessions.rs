@@ -56,6 +56,9 @@ pub struct SessionsState {
     /// because every rail row asks "is this one pinned?" once per frame and
     /// the sidecar is keyed by session id: the same shape it is stored in.
     pub favorites: HashSet<uuid::Uuid>,
+    /// Sessions with topics turned on (#2302). Kept beside the rows for the
+    /// same reason as favorites: the row model stays as it is.
+    pub topics: HashSet<uuid::Uuid>,
 }
 
 impl SessionsState {
@@ -78,6 +81,10 @@ impl SessionsState {
     /// Whether this session is pinned right now.
     pub fn is_favorite(&self, id: uuid::Uuid) -> bool {
         self.favorites.contains(&id)
+    }
+
+    pub fn is_topic_enabled(&self, id: uuid::Uuid) -> bool {
+        self.topics.contains(&id)
     }
 
     /// Move the cursor one row down (positive delta) or up (negative),
@@ -308,6 +315,73 @@ pub async fn load_favorites(db_path: std::path::PathBuf) -> Result<Vec<uuid::Uui
     }
 }
 
+/// Every session with topics turned on. Read separately from the rows, the
+/// same way favorites are, so the row model does not carry the flag.
+pub async fn load_topics(db_path: std::path::PathBuf) -> Result<Vec<uuid::Uuid>, String> {
+    let (tx, rx) = futures::channel::oneshot::channel::<Result<Vec<uuid::Uuid>, String>>();
+    let spawned = std::thread::Builder::new()
+        .name("topics-fetch".into())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let result = match runtime {
+                Ok(rt) => rt
+                    .block_on(async {
+                        let db = Database::connect(&db_path).await?;
+                        let repo = SessionRepository::new(db.pool().clone());
+                        repo.topic_enabled_ids().await
+                    })
+                    .map_err(|e| format!("{e:#}")),
+                Err(e) => Err(format!("tokio runtime failed: {e}")),
+            };
+            let _ = tx.send(result);
+        });
+    match spawned {
+        Ok(_) => match rx.await {
+            Ok(result) => result,
+            Err(_) => Err("topics fetch thread dropped its result".into()),
+        },
+        Err(e) => Err(format!("topics fetch thread failed to spawn: {e}")),
+    }
+}
+
+/// Turn topics on or off for one session. The caller re-reads afterwards.
+pub async fn set_topics(
+    db_path: std::path::PathBuf,
+    id: uuid::Uuid,
+    enabled: bool,
+) -> Result<(), String> {
+    let (tx, rx) = futures::channel::oneshot::channel::<Result<(), String>>();
+    let spawned = std::thread::Builder::new()
+        .name("topics-write".into())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let result = match runtime {
+                Ok(rt) => rt
+                    .block_on(async {
+                        let db = Database::connect(&db_path).await?;
+                        let repo = SessionRepository::new(db.pool().clone());
+                        repo.set_topics_enabled(id, enabled).await
+                    })
+                    .map_err(|e| format!("{e:#}")),
+                Err(e) => Err(format!("tokio runtime failed: {e}")),
+            };
+            let _ = tx.send(result);
+        });
+    match spawned {
+        Ok(_) => match rx.await {
+            Ok(result) => result,
+            Err(_) => Err("topics write thread dropped its result".into()),
+        },
+        Err(e) => Err(format!("topics write thread failed to spawn: {e}")),
+    }
+}
+
 /// Pin or unpin one session in the shared sidecar table. The caller refetches
 /// afterwards instead of patching its own list, so the rail can never show a
 /// pin the ledger does not have.
@@ -382,6 +456,7 @@ pub fn pin_mark(favorited: bool) -> (&'static str, u32) {
 pub enum MenuKind {
     Pin,
     Delete,
+    EnableTopics,
 }
 
 /// One item of the rail's context menu. The labels are the interface:
@@ -394,17 +469,24 @@ pub struct MenuEntry {
 /// The menu's contents, resolved from the row's pin state. Pure, so the
 /// labels are pinned by test and the render only draws what this returns
 /// (#2354).
-pub fn rail_menu_entries(favorited: bool) -> Vec<MenuEntry> {
-    vec![
-        MenuEntry {
-            kind: MenuKind::Pin,
-            label: if favorited { "Unpin" } else { "Pin" },
-        },
-        MenuEntry {
-            kind: MenuKind::Delete,
-            label: "Delete",
-        },
-    ]
+pub fn rail_menu_entries(favorited: bool, topics_enabled: bool) -> Vec<MenuEntry> {
+    let mut entries = vec![MenuEntry {
+        kind: MenuKind::Pin,
+        label: if favorited { "Unpin" } else { "Pin" },
+    }];
+    // Topics are opt-in per session (#2302): the item is offered only while
+    // they are off, so it cannot be flipped twice by accident.
+    if !topics_enabled {
+        entries.push(MenuEntry {
+            kind: MenuKind::EnableTopics,
+            label: "Enable topics",
+        });
+    }
+    entries.push(MenuEntry {
+        kind: MenuKind::Delete,
+        label: "Delete",
+    });
+    entries
 }
 
 /// One row of the context menu: a label and a full-height hit target.
@@ -978,17 +1060,33 @@ mod tests {
     /// a pinned row) and delete, delete never renamed.
     #[test]
     fn rail_menu_offers_pin_and_delete() {
-        let plain = rail_menu_entries(false);
+        let plain = rail_menu_entries(false, true);
         assert_eq!(plain.len(), 2, "pin and delete, no more");
         assert_eq!(plain[0].label, "Pin");
         assert!(matches!(plain[0].kind, MenuKind::Pin));
         assert_eq!(plain[1].label, "Delete");
         assert!(matches!(plain[1].kind, MenuKind::Delete));
 
-        let pinned = rail_menu_entries(true);
+        let pinned = rail_menu_entries(true, true);
         assert_eq!(pinned[0].label, "Unpin", "a pinned row offers the way out");
         assert!(matches!(pinned[0].kind, MenuKind::Pin));
         assert_eq!(pinned[1].label, "Delete");
+    }
+
+    /// Enable topics is offered only on a session with topics off, between
+    /// pin and delete (#2302).
+    #[test]
+    fn rail_menu_offers_enable_topics_only_while_topics_are_off() {
+        let off = rail_menu_entries(false, false);
+        assert_eq!(off.len(), 3);
+        assert_eq!(off[1].label, "Enable topics");
+        assert!(matches!(off[1].kind, MenuKind::EnableTopics));
+
+        let on = rail_menu_entries(false, true);
+        assert!(
+            on.iter().all(|e| e.label != "Enable topics"),
+            "a session with topics on cannot be flipped twice"
+        );
     }
 
     /// Dismissing the menu writes nothing: no favorite flips, no delete
