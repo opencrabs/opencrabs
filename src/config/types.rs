@@ -2551,6 +2551,12 @@ pub struct DebugConfig {
     /// Enable profiling
     #[serde(default)]
     pub profiling: bool,
+
+    /// Write per-keystroke detail to the desktop window's log
+    /// (`~/.opencrabs/logs/opencrabs-gui.log`). The `OPENCRABS_GUI_DEBUG`
+    /// environment variable forces it on regardless of this value.
+    #[serde(default)]
+    pub gui_debug_logs: bool,
 }
 
 /// LLM Provider configurations

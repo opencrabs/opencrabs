@@ -1026,7 +1026,13 @@ impl Dashboard {
     }
 
     fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        logging::debug(&format!("key {:?}", ev.keystroke.key));
+        // Modifiers go in the line too: a bare key name cannot tell ctrl+h
+        // from a typed h, which is exactly what a help-door report needs.
+        let m = &ev.keystroke.modifiers;
+        logging::debug(&format!(
+            "key {:?} ctrl={} cmd={} shift={} alt={}",
+            ev.keystroke.key, m.control, m.platform, m.shift, m.alt
+        ));
         // ctrl+u is the screen switch and it must work while typing, so it
         // sits before the editor focus gate: the editor only claims IME
         // escapes, and this key belongs to the window. The chord stays on the
@@ -1770,7 +1776,12 @@ fn main() {
     // report through the channel the Dashboard drains on its poll tick.
     let (agent_sink, agent_rx) = std::sync::mpsc::channel::<agent_bridge::TurnEvent>();
     match Config::load() {
-        Ok(config) => agent_bridge::spawn_bootstrap(config, agent_sink.clone()),
+        Ok(config) => {
+            // Before the bootstrap takes the config: the keystroke trail is
+            // switched on from config.toml, not only from the environment.
+            logging::set_debug_from_config(config.debug.gui_debug_logs);
+            agent_bridge::spawn_bootstrap(config, agent_sink.clone());
+        }
         Err(e) => {
             let _ = agent_sink.send(agent_bridge::TurnEvent::BootstrapFailed(format!(
                 "config load: {e}"
