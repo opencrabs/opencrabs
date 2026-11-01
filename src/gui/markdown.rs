@@ -14,12 +14,11 @@
 //! highlighting inside fences is not attempted (the TUI's syntect pass
 //! stays terminal-side for now).
 
+use crate::palette;
 use std::ops::Range;
 
 use gpui::{FontStyle, FontWeight, HighlightStyle, StrikethroughStyle, UnderlineStyle, rgb};
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
-
-use crate::theme::{BLUE, PANEL_HI, TEXT_FAINT, TEXT_MUTED, TEXT_STRONG};
 
 /// One renderable line: the text plus byte-range highlight runs into it,
 /// whether it belongs to a code fence (mono, grouped by the renderer), the
@@ -87,18 +86,18 @@ impl Inline {
         }
         if self.heading {
             s.font_weight = Some(FontWeight::BOLD);
-            s.color = Some(rgb(TEXT_STRONG).into());
+            s.color = Some(rgb(palette::current().text_strong).into());
         }
         if self.link {
-            s.color = Some(rgb(BLUE).into());
+            s.color = Some(rgb(palette::current().blue).into());
             s.underline = Some(UnderlineStyle::default());
         }
         if self.strike {
             s.strikethrough = Some(StrikethroughStyle::default());
         }
         if code_bg {
-            s.color = Some(rgb(BLUE).into());
-            s.background_color = Some(rgb(PANEL_HI).into());
+            s.color = Some(rgb(palette::current().blue).into());
+            s.background_color = Some(rgb(palette::current().panel_hi).into());
         }
         s
     }
@@ -271,7 +270,7 @@ pub fn blocks(src: &str) -> Vec<MdBlock> {
                 // Stored answers rarely carry HTML; when they do, show the
                 // raw text dim rather than silently dropping content.
                 let dim = HighlightStyle {
-                    color: Some(rgb(TEXT_FAINT).into()),
+                    color: Some(rgb(palette::current().text_faint).into()),
                     ..Default::default()
                 };
                 let start = b.buf.len();
@@ -313,7 +312,7 @@ fn start_tag(b: &mut Builder, tag: Tag) {
                     b.hl.push((
                         start..b.buf.len(),
                         HighlightStyle {
-                            color: Some(rgb(TEXT_MUTED).into()),
+                            color: Some(rgb(palette::current().text_muted).into()),
                             ..Default::default()
                         },
                     ));
@@ -324,7 +323,7 @@ fn start_tag(b: &mut Builder, tag: Tag) {
                     b.hl.push((
                         start..b.buf.len(),
                         HighlightStyle {
-                            color: Some(rgb(TEXT_MUTED).into()),
+                            color: Some(rgb(palette::current().text_muted).into()),
                             ..Default::default()
                         },
                     ));

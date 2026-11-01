@@ -12,13 +12,12 @@
 //! cached behind a fake model: the file's mtime is the cache key, and a
 //! rewitten plan redraws on the next frame.
 
+use crate::palette;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
 use gpui::{Div, SharedString, div, prelude::*, rgb};
 use opencrabs::tui::plan::{PlanDocument, PlanStatus, TaskStatus};
-
-use crate::theme::{ACCENT, PANEL, TEAL, TEXT, TEXT_FAINT, TEXT_MUTED, WARN};
 
 /// The strip's state: the plan file it is showing, the mtime it last read,
 /// and the parsed document.
@@ -82,11 +81,11 @@ impl PlanStripState {
                 .gap_2()
                 .p_2()
                 .rounded_sm()
-                .bg(rgb(PANEL))
+                .bg(rgb(palette::current().panel))
                 .child(
                     div()
                         .text_xs()
-                        .text_color(rgb(WARN))
+                        .text_color(rgb(palette::current().warn))
                         .child(SharedString::from(format!(
                             "📋 {} · checklist not seeded yet",
                             fit(&plan.title, 60)
@@ -123,7 +122,7 @@ fn checklist(plan: &PlanDocument) -> Div {
         .gap_1()
         .p_2()
         .rounded_sm()
-        .bg(rgb(PANEL))
+        .bg(rgb(palette::current().panel))
         .child(
             div()
                 .flex()
@@ -133,7 +132,7 @@ fn checklist(plan: &PlanDocument) -> Div {
                 .child(
                     div()
                         .text_xs()
-                        .text_color(rgb(TEXT_MUTED))
+                        .text_color(rgb(palette::current().text_muted))
                         .child(SharedString::from(format!(
                             "📋 {} · {}/{}",
                             fit(&plan.title, 60),
@@ -141,11 +140,16 @@ fn checklist(plan: &PlanDocument) -> Div {
                             total
                         ))),
                 )
-                .child(div().text_xs().text_color(rgb(TEAL)).child(bar))
                 .child(
                     div()
                         .text_xs()
-                        .text_color(rgb(TEXT_FAINT))
+                        .text_color(rgb(palette::current().teal))
+                        .child(bar),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(palette::current().text_faint))
                         .child(SharedString::from(format!("{percent}%"))),
                 ),
         );
@@ -154,11 +158,11 @@ fn checklist(plan: &PlanDocument) -> Div {
     let (start, len) = window;
     for task in plan.tasks.iter().skip(start).take(len) {
         let (mark, color) = match &task.status {
-            TaskStatus::Completed | TaskStatus::Skipped => ("☑", TEAL),
-            TaskStatus::InProgress => ("▶", ACCENT),
-            TaskStatus::Failed => ("✗", WARN),
-            TaskStatus::Blocked(_) => ("⊘", WARN),
-            TaskStatus::Pending => ("☐", TEXT_FAINT),
+            TaskStatus::Completed | TaskStatus::Skipped => ("☑", palette::current().teal),
+            TaskStatus::InProgress => ("▶", palette::current().accent),
+            TaskStatus::Failed => ("✗", palette::current().warn),
+            TaskStatus::Blocked(_) => ("⊘", palette::current().warn),
+            TaskStatus::Pending => ("☐", palette::current().text_faint),
         };
         col = col.child(
             div()
@@ -170,9 +174,9 @@ fn checklist(plan: &PlanDocument) -> Div {
                     div()
                         .text_xs()
                         .text_color(rgb(if matches!(task.status, TaskStatus::InProgress) {
-                            TEXT
+                            palette::current().text
                         } else {
-                            TEXT_MUTED
+                            palette::current().text_muted
                         }))
                         .child(SharedString::from(format!(
                             "{}. {}",

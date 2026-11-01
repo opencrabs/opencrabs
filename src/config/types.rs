@@ -47,6 +47,10 @@ pub struct Config {
     #[serde(default)]
     pub debug: DebugConfig,
 
+    /// Desktop window settings (`[gui]`), separate from the TUI's own theme
+    #[serde(default)]
+    pub gui: GuiConfig,
+
     /// LLM provider configurations
     #[serde(default)]
     pub providers: ProviderConfigs,
@@ -2541,6 +2545,20 @@ impl MemoryConfig {
     }
 }
 
+/// Desktop window options (`[gui]`). Each key names a theme, built-in or user.
+/// Unset keys use the window's own defaults: the built-in dark palette and
+/// Alucard for light.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct GuiConfig {
+    /// Theme while the system is dark. Unset means the built-in dark palette.
+    #[serde(default)]
+    pub dark_theme: Option<String>,
+
+    /// Theme while the system is light. Unset means Alucard.
+    #[serde(default)]
+    pub light_theme: Option<String>,
+}
+
 /// Debug configuration options
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DebugConfig {
@@ -3450,6 +3468,7 @@ impl Default for Config {
                 file: None,
             },
             debug: DebugConfig::default(),
+            gui: GuiConfig::default(),
             tui: TuiConfig::default(),
             providers: ProviderConfigs::default(),
             channels: ChannelsConfig::default(),

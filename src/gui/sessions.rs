@@ -11,6 +11,7 @@
 //! builds each row's handler in its own loop turn, then hands the finished
 //! rows to `rail`.
 
+use crate::palette;
 use std::collections::HashSet;
 
 use gpui::{
@@ -22,11 +23,6 @@ use opencrabs::db::Database;
 use opencrabs::db::models::Session;
 use opencrabs::db::repository::session::{SessionListOptions, SessionRepository};
 use opencrabs::db::repository::session_favorites::SessionFavoritesRepository;
-
-use crate::theme::{
-    ACCENT, BG, FOCUS, PANEL, PANEL_HI, RED, SELECTION, TEXT, TEXT_FAINT, TEXT_HINT, TEXT_MUTED,
-    TEXT_TITLE,
-};
 
 /// The rail's live state, owned by the window's view.
 #[derive(Default)]
@@ -134,22 +130,26 @@ pub fn filter_bar(state: &SessionsState) -> Stateful<Div> {
         .px_2()
         .py_1()
         .rounded_sm()
-        .bg(rgb(PANEL_HI))
+        .bg(rgb(palette::current().panel_hi))
         .border_1()
-        .border_color(rgb(FOCUS))
+        .border_color(rgb(palette::current().focus))
         .child(
             div()
                 .flex_1()
                 .min_w_0()
                 .truncate()
                 .text_xs()
-                .text_color(rgb(if empty { TEXT_FAINT } else { TEXT }))
+                .text_color(rgb(if empty {
+                    palette::current().text_faint
+                } else {
+                    palette::current().text
+                }))
                 .child(SharedString::from(body)),
         )
         .child(
             div()
                 .text_xs()
-                .text_color(rgb(TEXT_HINT))
+                .text_color(rgb(palette::current().text_hint))
                 .child(SharedString::from(count)),
         )
 }
@@ -316,14 +316,14 @@ pub fn row(
                 div()
                     .flex_none()
                     .text_xs()
-                    .text_color(rgb(ACCENT))
+                    .text_color(rgb(palette::current().accent))
                     .child(SharedString::from("\u{2605}")),
             )
         })
         .child(
             div()
                 .text_sm()
-                .text_color(rgb(TEXT))
+                .text_color(rgb(palette::current().text))
                 .truncate()
                 .child(SharedString::from(fit(
                     s.title.as_deref().unwrap_or("(untitled)"),
@@ -339,7 +339,7 @@ pub fn row(
         .child(
             div()
                 .text_xs()
-                .text_color(rgb(TEXT_MUTED))
+                .text_color(rgb(palette::current().text_muted))
                 .child(SharedString::from(format!(
                     "{} · ${:.2}",
                     s.updated_at
@@ -358,8 +358,8 @@ pub fn row(
         .p_2()
         .rounded_sm()
         .cursor_pointer()
-        .when(selected, |d| d.bg(rgb(SELECTION)))
-        .hover(|d| d.bg(rgb(BG)))
+        .when(selected, |d| d.bg(rgb(palette::current().selection)))
+        .hover(|d| d.bg(rgb(palette::current().bg)))
         .child(body);
     if let Some(action) = action {
         row = row.child(action);
@@ -379,9 +379,19 @@ pub fn on_click(
 /// performs: a hollow star pins, a filled one unpins.
 pub fn pin_button(favorited: bool) -> Stateful<Div> {
     let (id, glyph, label, color) = if favorited {
-        ("session-unpin", "\u{2605}", "unpin", ACCENT)
+        (
+            "session-unpin",
+            "\u{2605}",
+            "unpin",
+            palette::current().accent,
+        )
     } else {
-        ("session-pin", "\u{2606}", "pin", TEXT_MUTED)
+        (
+            "session-pin",
+            "\u{2606}",
+            "pin",
+            palette::current().text_muted,
+        )
     };
     div()
         .id(id)
@@ -392,11 +402,11 @@ pub fn pin_button(favorited: bool) -> Stateful<Div> {
         .px_2()
         .py_1()
         .rounded_sm()
-        .bg(rgb(PANEL_HI))
+        .bg(rgb(palette::current().panel_hi))
         .text_xs()
         .text_color(rgb(color))
         .cursor_pointer()
-        .hover(|d| d.bg(rgb(FOCUS)))
+        .hover(|d| d.bg(rgb(palette::current().focus)))
         .child(SharedString::from(glyph))
         .child(SharedString::from(label))
 }
@@ -414,11 +424,11 @@ pub fn delete_button() -> Stateful<Div> {
         .px_2()
         .py_1()
         .rounded_sm()
-        .bg(rgb(PANEL_HI))
+        .bg(rgb(palette::current().panel_hi))
         .text_xs()
-        .text_color(rgb(RED))
+        .text_color(rgb(palette::current().red))
         .cursor_pointer()
-        .hover(|d| d.bg(rgb(FOCUS)))
+        .hover(|d| d.bg(rgb(palette::current().focus)))
         .child(SharedString::from("delete"))
 }
 
@@ -434,14 +444,14 @@ pub fn rail(state: &SessionsState, rows: Vec<Stateful<Div>>, width_rem: f32) -> 
         .flex_none()
         .w(rems(width_rem))
         .h_full()
-        .bg(rgb(PANEL))
+        .bg(rgb(palette::current().panel))
         .p_2()
         .gap_1();
 
     col = col.child(
         div()
             .text_xs()
-            .text_color(rgb(TEXT_TITLE))
+            .text_color(rgb(palette::current().text_title))
             .child(SharedString::from(format!(
                 "SESSIONS · {}",
                 state.items.len()
@@ -456,7 +466,7 @@ pub fn rail(state: &SessionsState, rows: Vec<Stateful<Div>>, width_rem: f32) -> 
         col = col.child(
             div()
                 .text_xs()
-                .text_color(rgb(TEXT_MUTED))
+                .text_color(rgb(palette::current().text_muted))
                 .child(err.clone()),
         );
         return col;
@@ -466,7 +476,7 @@ pub fn rail(state: &SessionsState, rows: Vec<Stateful<Div>>, width_rem: f32) -> 
         col = col.child(
             div()
                 .text_xs()
-                .text_color(rgb(TEXT_MUTED))
+                .text_color(rgb(palette::current().text_muted))
                 .child("no chat matches"),
         );
         return col;
