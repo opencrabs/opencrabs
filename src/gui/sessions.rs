@@ -36,6 +36,11 @@ pub struct SessionsState {
     /// at, the same split the TUI keeps between its list index and the open
     /// chat (#2351).
     pub cursor: Option<uuid::Uuid>,
+    /// The row whose context menu is open. Right-click asked for it; a
+    /// left click anywhere, an esc, or a pick closes it. The menu anchors
+    /// to the row, not the pointer: the row is the stable thing inside a
+    /// scrolling rail, and the slide strip already behaves this way.
+    pub rail_menu: Option<uuid::Uuid>,
     /// Set when the fetch failed; the rail says why instead of lying empty.
     pub error: Option<SharedString>,
     /// ctrl+f's query. A non-empty query narrows the rail to the chats whose
@@ -122,6 +127,13 @@ impl SessionsState {
     /// resolves its target (#2353).
     pub fn pin_target(&self) -> Option<uuid::Uuid> {
         self.rail_target()
+    }
+
+    /// Dismiss the context menu. Deliberately the only thing it touches:
+    /// a dismissal is an eraser, never an action, so no favorite flips
+    /// and no delete arms on the way out (#2354).
+    pub fn close_rail_menu(&mut self) {
+        self.rail_menu = None;
     }
 
     /// How many of the ledger's sessions match the query.
@@ -366,12 +378,77 @@ pub fn pin_mark(favorited: bool) -> (&'static str, u32) {
     }
 }
 
+/// Which row action a context-menu item performs.
+pub enum MenuKind {
+    Pin,
+    Delete,
+}
+
+/// One item of the rail's context menu. The labels are the interface:
+/// Pin flips to Unpin on a pinned row, Delete never changes.
+pub struct MenuEntry {
+    pub kind: MenuKind,
+    pub label: &'static str,
+}
+
+/// The menu's contents, resolved from the row's pin state. Pure, so the
+/// labels are pinned by test and the render only draws what this returns
+/// (#2354).
+pub fn rail_menu_entries(favorited: bool) -> Vec<MenuEntry> {
+    vec![
+        MenuEntry {
+            kind: MenuKind::Pin,
+            label: if favorited { "Unpin" } else { "Pin" },
+        },
+        MenuEntry {
+            kind: MenuKind::Delete,
+            label: "Delete",
+        },
+    ]
+}
+
+/// One row of the context menu: a label and a full-height hit target.
+pub fn menu_item(label: &'static str) -> Stateful<Div> {
+    div()
+        .id(SharedString::from(format!("rail-menu-{label}")))
+        .px_2()
+        .py_1()
+        .rounded_sm()
+        .cursor_pointer()
+        .text_sm()
+        .text_color(rgb(palette::current().text))
+        .hover(|d| d.bg(rgb(palette::current().selection)))
+        .child(SharedString::from(label))
+}
+
+/// The context menu's card: a small column overlaying its row's right
+/// edge. Absolute inside the row (which is relative), so it tracks the
+/// row through rail scrolls without window-coordinate math.
+pub fn menu_popover(items: Vec<Stateful<Div>>) -> Stateful<Div> {
+    let mut menu = div()
+        .id("rail-context-menu")
+        .absolute()
+        .right_1()
+        .top_1()
+        .flex()
+        .flex_col()
+        .gap_0p5()
+        .p_1()
+        .rounded_sm()
+        .bg(rgb(palette::current().panel_hi));
+    for item in items {
+        menu = menu.child(item);
+    }
+    menu
+}
+
 pub fn row(
     s: &Session,
     selected: bool,
     cursored: bool,
     favorited: bool,
     action: Option<Stateful<Div>>,
+    menu: Option<Stateful<Div>>,
 ) -> Stateful<Div> {
     let title = div()
         .flex()
@@ -417,6 +494,7 @@ pub fn row(
         );
     let mut row = div()
         .id(SharedString::from(s.id.to_string()))
+        .relative()
         .flex()
         .flex_row()
         .items_center()
@@ -438,6 +516,10 @@ pub fn row(
         .child(body);
     if let Some(action) = action {
         row = row.child(action);
+    }
+    // The menu paints last so it sits above the row it overlays.
+    if let Some(menu) = menu {
+        row = row.child(menu);
     }
     row
 }
@@ -571,7 +653,9 @@ pub fn rail(
 
 #[cfg(test)]
 mod tests {
-    use super::{Database, SessionsState, fit, load_sessions, palette, pin_mark};
+    use super::{
+        Database, MenuKind, SessionsState, fit, load_sessions, palette, pin_mark, rail_menu_entries,
+    };
     use opencrabs::db::models::Session;
 
     /// #2271's whole class, seated: truncation walks chars, never bytes. Any
@@ -881,6 +965,54 @@ mod tests {
             state.pin_target(),
             Some(cursored),
             "the row the keyboard is on wins over the open chat"
+        );
+    }
+
+    /// The menu offers exactly the two row actions (#2354): pin (unpin on
+    /// a pinned row) and delete, delete never renamed.
+    #[test]
+    fn rail_menu_offers_pin_and_delete() {
+        let plain = rail_menu_entries(false);
+        assert_eq!(plain.len(), 2, "pin and delete, no more");
+        assert_eq!(plain[0].label, "Pin");
+        assert!(matches!(plain[0].kind, MenuKind::Pin));
+        assert_eq!(plain[1].label, "Delete");
+        assert!(matches!(plain[1].kind, MenuKind::Delete));
+
+        let pinned = rail_menu_entries(true);
+        assert_eq!(pinned[0].label, "Unpin", "a pinned row offers the way out");
+        assert!(matches!(pinned[0].kind, MenuKind::Pin));
+        assert_eq!(pinned[1].label, "Delete");
+    }
+
+    /// Dismissing the menu writes nothing: no favorite flips, no delete
+    /// arms, no cursor or selection moves. A close is an eraser (#2354).
+    #[test]
+    fn rail_menu_closes_without_writing() {
+        let mut state = SessionsState::default();
+        let pinned = uuid::Uuid::from_u128(2);
+        state.items = vec![session(1, "a"), session(2, "pinned")];
+        state.favorites.insert(pinned);
+        state.cursor = Some(uuid::Uuid::from_u128(1));
+        state.selected = Some(uuid::Uuid::from_u128(1));
+        state.rail_menu = Some(pinned);
+
+        state.close_rail_menu();
+
+        assert!(state.rail_menu.is_none(), "the menu closed");
+        assert!(
+            state.is_favorite(pinned),
+            "a dismissal must not unpin the row"
+        );
+        assert_eq!(
+            state.cursor,
+            Some(uuid::Uuid::from_u128(1)),
+            "a dismissal must not move the cursor"
+        );
+        assert_eq!(
+            state.selected,
+            Some(uuid::Uuid::from_u128(1)),
+            "a dismissal must not change the open chat"
         );
     }
 }

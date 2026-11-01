@@ -1488,6 +1488,12 @@ impl Dashboard {
                 cx.notify();
                 return;
             }
+            // The context menu is the strip's neighbour: same nearness
+            // rule, and a dismissal writes nothing (#2354).
+            if self.sessions.rail_menu.take().is_some() {
+                cx.notify();
+                return;
+            }
             // The usage ledger and the files list are full screens, so Esc
             // leaves them the same way their own chords do. It sits before
             // the turn gate: a running turn must not hold a screen open.
@@ -1725,7 +1731,37 @@ impl Render for Dashboard {
             } else {
                 None
             };
-            let r = sessions::row(s, selected, cursored, favorite, action);
+            // Right-click asks for the row's menu: pin and delete without
+            // the slide gesture or a chord (#2354). It closes any open
+            // strip first: one affordance at a time, the rail's own rule.
+            let ask_menu = cx.listener(move |this, _ev: &MouseDownEvent, _window, cx| {
+                this.sessions.rail_menu = Some(id);
+                this.rail_actions = None;
+                cx.notify();
+            });
+            // The menu overlays its row, so a pick must not fall through to
+            // the row's click (which opens the chat) or read as a dismissal.
+            let menu = if self.sessions.rail_menu == Some(id) {
+                let items = sessions::rail_menu_entries(favorite)
+                    .into_iter()
+                    .map(|entry| {
+                        let kind = entry.kind;
+                        let pick = cx.listener(move |this, _ev, _window, cx| {
+                            cx.stop_propagation();
+                            this.sessions.rail_menu = None;
+                            match kind {
+                                sessions::MenuKind::Pin => this.toggle_favorite(id, cx),
+                                sessions::MenuKind::Delete => this.request_delete(id, cx),
+                            }
+                        });
+                        sessions::menu_item(entry.label).on_click(pick)
+                    })
+                    .collect::<Vec<_>>();
+                Some(sessions::menu_popover(items))
+            } else {
+                None
+            };
+            let r = sessions::row(s, selected, cursored, favorite, action, menu);
             // The press starts the slide and closes any other row's strip.
             let press = cx.listener(move |this, _ev: &MouseDownEvent, window, cx| {
                 this.rail_slide_opened = None;
@@ -1733,6 +1769,9 @@ impl Render for Dashboard {
                 if this.rail_actions.is_some_and(|open| open != id) {
                     this.rail_actions = None;
                 }
+                // A left press on the rail dismisses a context menu: the
+                // press is elsewhere, so the menu goes with it (#2354).
+                this.sessions.close_rail_menu();
                 cx.notify();
             });
             let handler = cx.listener(move |this, _ev, _window, cx| {
@@ -1748,6 +1787,7 @@ impl Render for Dashboard {
                 this.rail_actions = None;
                 this.open_session(id, cx);
             });
+            let r = r.on_mouse_down(MouseButton::Right, ask_menu);
             let r = r.on_mouse_down(MouseButton::Left, press);
             rail_rows.push(sessions::on_click(r, handler));
         }
@@ -2089,6 +2129,17 @@ impl Render for Dashboard {
             .text_color(rgb(palette::current().text))
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
+            // A context menu closes when its row is left alone: any left
+            // press in the window dismisses it, the rail rows do the same
+            // in their own press listener first (#2354).
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _ev, _window, cx| {
+                    if this.sessions.rail_menu.take().is_some() {
+                        cx.notify();
+                    }
+                }),
+            )
             // The drag lives on the root so it survives the pointer leaving
             // the handle: a 4px column cannot track a fast drag on its own.
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _window, cx| {
@@ -2292,6 +2343,7 @@ fn main() {
             favorites: favorites.clone(),
             selected: None,
             cursor: None,
+            rail_menu: None,
             error: None,
             filter: String::new(),
             filter_active: false,
@@ -2301,6 +2353,7 @@ fn main() {
             favorites,
             selected: None,
             cursor: None,
+            rail_menu: None,
             error: Some(e.into()),
             filter: String::new(),
             filter_active: false,
