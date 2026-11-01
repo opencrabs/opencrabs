@@ -1072,7 +1072,8 @@ fn thinking_block(content: &str) -> Div {
         )
 }
 
-/// A tool ledger: count line plus each call with its status mark.
+/// A tool ledger: each call with its status mark. The turn header already
+/// counts the calls, so the expanded body does not repeat the count.
 fn tools_block(calls: &[ToolCall]) -> Div {
     let mut col = div()
         .flex()
@@ -1080,19 +1081,9 @@ fn tools_block(calls: &[ToolCall]) -> Div {
         .gap_0p5()
         .p_2()
         .rounded_sm()
-        .bg(rgb(PANEL_HI))
-        .child(
-            div()
-                .text_xs()
-                .text_color(rgb(AMBER))
-                .child(SharedString::from(tool_count_label(calls.len()))),
-        );
+        .bg(rgb(PANEL_HI));
     for call in calls {
-        let (mark, color) = match (call.done, call.success) {
-            (false, _) => ("\u{b7}\u{b7}\u{b7}", TEXT_MUTED),
-            (true, true) => ("\u{2713}", GREEN),
-            (true, false) => ("\u{2717}", RED),
-        };
+        let (mark, color) = tool_mark(call);
         col = col.child(
             div()
                 .text_xs()
@@ -1104,6 +1095,30 @@ fn tools_block(calls: &[ToolCall]) -> Div {
         );
     }
     col
+}
+
+/// One call's status mark and the colour that carries it. Shared with the
+/// ledger's text so a test cannot read a mark the pane never draws.
+fn tool_mark(call: &ToolCall) -> (&'static str, u32) {
+    match (call.done, call.success) {
+        (false, _) => ("\u{b7}\u{b7}\u{b7}", TEXT_MUTED),
+        (true, true) => ("\u{2713}", GREEN),
+        (true, false) => ("\u{2717}", RED),
+    }
+}
+
+/// The expanded ledger as text. The count lives in the turn header, so this
+/// must never mention it again (#2327).
+#[cfg(test)]
+fn tool_ledger_text(calls: &[ToolCall]) -> String {
+    calls
+        .iter()
+        .map(|call| {
+            let (mark, _) = tool_mark(call);
+            format!("{mark} {}", fit(call.description.trim(), 160))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// One turn's fold header: the TUI's own summary line, the affordance that
@@ -1714,6 +1729,35 @@ mod tests {
         assert_eq!(
             header, "\u{2713} 1 step \u{b7} 1 tool call",
             "an equal stamp must drop the duration segment, not print 0s"
+        );
+    }
+
+    /// #2327: the fold header counts the calls, so the expanded ledger must
+    /// list them without repeating the count it already shows.
+    #[test]
+    fn the_expanded_ledger_does_not_repeat_the_header_count() {
+        let calls = [
+            ToolCall {
+                name: "bash".to_string(),
+                description: "bash: cargo test".to_string(),
+                success: true,
+                done: true,
+            },
+            ToolCall {
+                name: "read_file".to_string(),
+                description: "read_file: src/gui/main.rs".to_string(),
+                success: false,
+                done: true,
+            },
+        ];
+        let ledger = tool_ledger_text(&calls);
+        assert!(
+            !ledger.contains("tool call"),
+            "the count belongs to the header, not the body, got {ledger:?}"
+        );
+        assert_eq!(
+            ledger, "\u{2713} bash: cargo test\n\u{2717} read_file: src/gui/main.rs",
+            "each call keeps its own status mark"
         );
     }
 
