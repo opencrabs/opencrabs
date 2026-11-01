@@ -32,12 +32,16 @@ mod logging;
 mod markdown;
 mod palette;
 mod plan_strip;
+mod screen_keys;
 mod sessions;
 mod theme;
 mod themes_view;
 mod transcript;
 mod usage_view;
 
+use crate::screen_keys::{
+    action_label, focus_target, screen_chord, ChordMods, FocusTarget, ScreenAction,
+};
 use crate::theme::{BASE_REM, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP};
 
 use futures::channel::oneshot;
@@ -71,21 +75,13 @@ enum LoadState {
 /// ledger is opened with ctrl+u, and the conversation's tracked files with
 /// ctrl+g, because the owner asked for exactly that split: an open
 /// conversation must never be labelled or treated as usage.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Screen {
     Chat,
     Usage,
     Files,
     /// The themes screen (ctrl+shift+t): preview a theme, keep it or restore.
     Themes,
-}
-
-/// Where the next frame puts focus. The composer owns Chat, every other
-/// screen is driven from the root, so a key always has a named receiver.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum FocusTarget {
-    Composer,
-    Root,
 }
 
 /// The ledger path, unchanged: `config.database.path`, with the same
@@ -425,12 +421,19 @@ impl Dashboard {
     ///
     /// A transition calls this instead of touching focus itself: only the
     /// render holds a window to focus through, and this is the one place that
-    /// decides which element a screen owns (#2350).
+    /// decides which element a screen owns (#2350, #2356).
     fn refocus_screen(&mut self) {
-        self.refocus = Some(match self.screen {
-            Screen::Chat => FocusTarget::Composer,
-            _ => FocusTarget::Root,
-        });
+        self.refocus = Some(focus_target(self.screen));
+    }
+
+    /// Run what the screen table named. The table decides and this applies, so
+    /// the routing is unit tested and the effect stays in one place.
+    fn apply_screen_action(&mut self, action: ScreenAction, cx: &mut Context<Self>) {
+        match action {
+            ScreenAction::EnterUsage | ScreenAction::LeaveUsage => self.toggle_usage(cx),
+            ScreenAction::EnterFiles | ScreenAction::LeaveFiles => self.toggle_files(cx),
+            ScreenAction::ToggleHelp => self.toggle_help(cx),
+        }
     }
 
     /// ctrl+u: open the usage ledger, or return to the conversation. The panes
@@ -1329,16 +1332,31 @@ impl Dashboard {
         // Modifiers go in the line too: a bare key name cannot tell ctrl+h
         // from a typed h, which is exactly what a help-door report needs.
         let m = &ev.keystroke.modifiers;
+        let mods = ChordMods {
+            control: m.control,
+            shift: m.shift,
+            platform: m.platform,
+        };
+        // The line carries the screen and the table's answer, because a report
+        // that only says which key arrived cannot tell a keystroke that never
+        // reached this handler from one that reached it and matched nothing
+        // (#2356).
+        let screen_action = screen_chord(&ev.keystroke.key, mods, self.screen);
         logging::debug(&format!(
-            "key {:?} ctrl={} cmd={} shift={} alt={}",
-            ev.keystroke.key, m.control, m.platform, m.shift, m.alt
+            "key {:?} screen={:?} action={} ctrl={} cmd={} shift={} alt={}",
+            ev.keystroke.key,
+            self.screen,
+            action_label(screen_action),
+            m.control,
+            m.platform,
+            m.shift,
+            m.alt
         ));
-        // ctrl+u is the screen switch and it must work while typing, so it
-        // sits before the editor focus gate: the editor only claims IME
-        // escapes, and this key belongs to the window. The chord stays on the
-        // control key so no command is a macOS-only habit.
-        if ev.keystroke.modifiers.control && ev.keystroke.key == "u" {
-            self.toggle_usage(cx);
+        // The screen chords are answered by one pure table and they must work
+        // while typing, so they sit before the editor focus gate: the editor
+        // only claims IME escapes, and these keys belong to the window.
+        if let Some(action) = screen_action {
+            self.apply_screen_action(action, cx);
             return;
         }
         // ctrl+o folds or unfolds the newest turn, the terminal's own chord.
@@ -1391,32 +1409,11 @@ impl Dashboard {
             }
             return;
         }
-        // ctrl+g lists the open conversation's tracked files, the desktop half
-        // of the TUI sessions-browser `f` (`AppMode::SessionFiles`). A screen
-        // key, so it works while typing like the rest of these.
-        if ev.keystroke.modifiers.control && ev.keystroke.key == "g" {
-            self.toggle_files(cx);
-            return;
-        }
         // ctrl+shift+t opens the themes screen, where a theme is previewed and
         // kept. It sits with the screen keys so it works while typing.
         if ev.keystroke.modifiers.control && ev.keystroke.modifiers.shift && ev.keystroke.key == "t"
         {
             self.toggle_themes(cx);
-            return;
-        }
-        // ctrl+h opens the key reference, the window's door to the rows the
-        // terminal prints via `/help` (#2320). It sits with the screen keys,
-        // ahead of the rail filter: help is a window concern, and a filter
-        // that owns the keyboard must not be the one chord it hides.
-        // Cmd+? is the same door for a hand already on the command key: the
-        // platform reports it as `/` with shift, and a layout that reports the
-        // glyph itself is answered too.
-        let cmd_question = ev.keystroke.modifiers.platform
-            && (ev.keystroke.key == "?"
-                || (ev.keystroke.key == "/" && ev.keystroke.modifiers.shift));
-        if (ev.keystroke.modifiers.control && ev.keystroke.key == "h") || cmd_question {
-            self.toggle_help(cx);
             return;
         }
         // While the rail filter is open it owns the keyboard, editor focus
@@ -1473,22 +1470,16 @@ impl Dashboard {
             // The usage ledger and the files list are full screens, so Esc
             // leaves them the same way their own chords do. It sits before
             // the turn gate: a running turn must not hold a screen open.
-            match self.screen {
-                Screen::Usage => {
-                    self.toggle_usage(cx);
-                    return;
-                }
-                Screen::Files => {
-                    self.toggle_files(cx);
-                    return;
-                }
-                // Esc on the themes screen is a cancel: the palette from before
-                // the screen opened comes back, and nothing is saved.
-                Screen::Themes => {
-                    self.close_themes(true, cx);
-                    return;
-                }
-                Screen::Chat => {}
+            if let Some(action) = screen_chord("escape", mods, self.screen) {
+                self.apply_screen_action(action, cx);
+                return;
+            }
+            // Esc on the themes screen is a cancel: the palette from before
+            // the screen opened comes back, and nothing is saved. It stays out
+            // of the table because the themes screen belongs to another lane.
+            if self.screen == Screen::Themes {
+                self.close_themes(true, cx);
+                return;
             }
             if !self.busy {
                 self.esc_at = None;
