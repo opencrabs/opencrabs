@@ -206,10 +206,7 @@ mod tests {
     #[test]
     fn the_action_label_prints_none_for_an_unclaimed_key() {
         assert_eq!(action_label(None), "none");
-        assert_eq!(
-            action_label(Some(ScreenAction::LeaveUsage)),
-            "LeaveUsage"
-        );
+        assert_eq!(action_label(Some(ScreenAction::LeaveUsage)), "LeaveUsage");
     }
 
     #[test]
