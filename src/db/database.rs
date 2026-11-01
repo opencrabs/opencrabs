@@ -162,6 +162,7 @@ pub(crate) const MIGRATION_SQL: &[&str] = &[
     // `updated_at` (unpinning returns the session to its real recency slot).
     // Appended last per the list invariant above.
     include_str!("../migrations/20261031000001_add_session_favorites.sql"),
+    include_str!("../migrations/20261101000001_add_session_topics.sql"),
 ];
 
 pub(crate) fn build_migrations() -> Migrations<'static> {

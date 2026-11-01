@@ -310,6 +310,7 @@ pub mod db_repository_message_test;
 pub mod db_repository_project_test;
 pub mod db_repository_session_test;
 pub mod db_retry_test;
+pub mod db_session_topics_test;
 pub mod db_thread_id_stamp_heal_test;
 pub mod decide_cached_test;
 pub mod decision_cache_test;
