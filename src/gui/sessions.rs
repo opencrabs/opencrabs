@@ -103,6 +103,14 @@ impl SessionsState {
             .is_some_and(|c| self.visible().any(|s| s.id == c))
     }
 
+    /// What a delete chord acts on: the row the keyboard is pointed at, or
+    /// the chat that is open when nothing is armed. Resolving the target is
+    /// all this does. Nothing erases here: the caller asks the dialog, and
+    /// only its confirm button reaches the delete bridge (#2352).
+    pub fn delete_target(&self) -> Option<uuid::Uuid> {
+        self.cursor.or(self.selected)
+    }
+
     /// How many of the ledger's sessions match the query.
     pub fn matched(&self) -> usize {
         self.visible().count()

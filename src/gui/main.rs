@@ -1581,6 +1581,16 @@ impl Dashboard {
                     cx.notify();
                     return;
                 }
+                "d" if ev.keystroke.modifiers.control => {
+                    // ctrl+d asks the dialog, it never erases (#2352). The
+                    // cursor row wins; with nothing armed the open chat is
+                    // the target, which is the row the transcript shows.
+                    if let Some(target) = self.sessions.delete_target() {
+                        self.request_delete(target, cx);
+                    }
+                    cx.notify();
+                    return;
+                }
                 _ => {}
             }
         }
@@ -2799,19 +2809,26 @@ mod tests {
             "the bridge must be reached from delete_session itself, not a neighbour"
         );
 
-        // The row's slide-out strip is the one arming path. There is no
-        // chord: ctrl+backspace is the editor's word delete and the command
-        // key is macOS-only. The needles are split so the scan cannot count
-        // its own source text.
+        // Two arming paths: the row's slide-out strip, and ctrl+d on the
+        // cursor row (#2352). Both ask the dialog; arming is not deleting.
+        // The needles are split so the scan cannot count its own source text.
         let strip_arm = ["this.request", "_delete(id, cx);"].concat();
-        let chord_arm = ["self.request", "_delete(id, cx);"].concat();
+        let chord_arm = ["self.request", "_delete(target, cx);"].concat();
         assert!(
             src.contains(&strip_arm),
             "the row strip must arm the dialog"
         );
         assert!(
-            !src.contains(&chord_arm),
-            "no chord may arm delete: the strip is the one path"
+            src.contains(&chord_arm),
+            "ctrl+d must arm the dialog through the resolved target"
+        );
+        // A chord that erased on its own would be a second path to the
+        // bridge. The dialog's confirm stays the only caller.
+        let key_erase = ["this.", "delete_session(id, cx)"].concat();
+        assert_eq!(
+            src.matches(key_erase.as_str()).count(),
+            1,
+            "only the dialog's confirm may call delete_session"
         );
         // Esc is the dialog's cancel, and it must answer the dialog before
         // the row strip or the turn it would otherwise abort.
@@ -2822,6 +2839,45 @@ mod tests {
     }
 
     use super::*;
+
+    /// ctrl+d carries a delete, so the chord must never BE the delete: it
+    /// resolves one row, then asks the same dialog the row's strip asks
+    /// (#2352). The bridge stays behind the dialog's confirm button.
+    #[test]
+    fn ctrl_d_arms_the_confirm_dialog_not_the_delete() {
+        let cursor_row = Uuid::from_u128(11);
+        let open_chat = Uuid::from_u128(22);
+
+        let mut state = sessions::SessionsState::default();
+        state.selected = Some(open_chat);
+        assert_eq!(
+            state.delete_target(),
+            Some(open_chat),
+            "with nothing armed the chord targets the open chat"
+        );
+
+        state.cursor = Some(cursor_row);
+        assert_eq!(
+            state.delete_target(),
+            Some(cursor_row),
+            "the row the keyboard is on wins over the open chat"
+        );
+
+        state.cursor = None;
+        state.selected = None;
+        assert_eq!(
+            state.delete_target(),
+            None,
+            "no row and no open chat means nothing to ask about"
+        );
+
+        // The chord is bound on the rail, where arrows already land. A bare
+        // `d` would need a rail focus mode the window does not have, so the
+        // chord is the only key that may carry a delete.
+        let src = include_str!("main.rs");
+        let chord = ["\"d\" if ev.keystroke.modifiers", ".control"].concat();
+        assert!(src.contains(&chord), "ctrl+d must be bound on the rail");
+    }
 
     #[test]
     fn the_ctx_counter_speaks_the_tui_grammar() {
