@@ -12,11 +12,12 @@ fn escape_branch() -> &'static str {
     let start = GUI_MAIN
         .find("if ev.keystroke.key == \"escape\" {")
         .expect("on_key has an escape branch");
-    let end = GUI_MAIN[start..]
-        .find("if !self.busy {")
-        .map(|offset| start + offset)
-        .expect("the escape branch ends at the turn gate");
-    &GUI_MAIN[start..end]
+    GUI_MAIN
+        .get(start..)
+        .expect("the escape branch starts on a char boundary")
+        .split("if !self.busy {")
+        .next()
+        .expect("the escape branch ends at the turn gate")
 }
 
 #[test]
