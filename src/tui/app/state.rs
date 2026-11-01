@@ -605,6 +605,14 @@ pub struct App {
     /// sessions dialog; ordering applies favorite-first WITHOUT reordering
     /// the recency order the favorites keep between themselves.
     pub(crate) session_favorites: HashSet<Uuid>,
+    /// Topic id to parent session id (#2306). The sessions dialog lists a
+    /// topic directly under its parent and indents it.
+    pub(crate) topic_parents: std::collections::HashMap<Uuid, Uuid>,
+    /// Closed sessions (#2305): dimmed in the dialog, refuse new turns.
+    pub(crate) closed_sessions: HashSet<Uuid>,
+    /// The name prompt for a new topic in the sessions dialog (#2306).
+    pub(crate) topic_naming: bool,
+    pub(crate) topic_name_buffer: String,
     /// All-time usage stats from the ledger (survives session deletes)
     pub usage_ledger_stats: Vec<crate::db::repository::usage_ledger::ModelUsageStats>,
     /// Usage dashboard state (populated when /usage is opened)
@@ -1094,6 +1102,10 @@ impl App {
             turn_start_len: 0,
             sessions: Vec::new(),
             session_favorites: HashSet::new(),
+            topic_parents: std::collections::HashMap::new(),
+            closed_sessions: HashSet::new(),
+            topic_naming: false,
+            topic_name_buffer: String::new(),
             usage_ledger_stats: Vec::new(),
             dashboard_state: None,
             mode: AppMode::Chat,

@@ -309,6 +309,20 @@ pub const ROWS: &[HelpRow] = &[
         Some("esc"),
         "Cancel or step back",
     ),
+    row(
+        HelpSection::Sessions,
+        "t",
+        "T",
+        None,
+        "New topic under the selected session",
+    ),
+    row(
+        HelpSection::Sessions,
+        "c",
+        "C",
+        None,
+        "Close or reopen the selected topic",
+    ),
 ];
 
 /// Every row in display order.
@@ -371,6 +385,8 @@ mod tests {
         "D",
         "F",
         "Esc",
+        "T",
+        "C",
     ];
 
     #[test]

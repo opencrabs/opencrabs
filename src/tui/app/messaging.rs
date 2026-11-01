@@ -867,6 +867,46 @@ impl App {
         let pins = &self.session_favorites;
         self.sessions.sort_by_key(|s| !pins.contains(&s.id));
 
+        // Topics follow their parent in the dialog (#2306), and closed topics
+        // are remembered for the dim and the send guard (#2305). A pinned topic
+        // stays at the top level, as in the window. A topic whose parent is not
+        // in the list shows as a top-level row.
+        let topic_repo = crate::db::repository::SessionRepository::new(self.session_service.pool());
+        self.topic_parents = topic_repo
+            .topic_parents()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        self.closed_sessions = topic_repo
+            .closed_ids()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        let in_list: std::collections::HashSet<Uuid> = self.sessions.iter().map(|s| s.id).collect();
+        let parents = &self.topic_parents;
+        let mut by_parent: std::collections::HashMap<Uuid, Vec<crate::db::models::Session>> =
+            std::collections::HashMap::new();
+        let mut tops = Vec::new();
+        for s in std::mem::take(&mut self.sessions) {
+            match parents.get(&s.id) {
+                Some(p) if in_list.contains(p) && !pins.contains(&s.id) => {
+                    by_parent.entry(*p).or_default().push(s)
+                }
+                _ => tops.push(s),
+            }
+        }
+        let mut ordered = Vec::with_capacity(in_list.len());
+        for top in tops {
+            let id = top.id;
+            ordered.push(top);
+            if let Some(kids) = by_parent.remove(&id) {
+                ordered.extend(kids);
+            }
+        }
+        self.sessions = ordered;
+
         // Populate project name cache for session list display
         if let Ok(projects) = self.project_service.list_projects().await {
             for p in projects {
@@ -879,6 +919,48 @@ impl App {
         self.usage_ledger_stats = ledger.stats_by_model().await.unwrap_or_default();
 
         Ok(())
+    }
+
+    /// Create the topic named in the prompt under the selected session, then
+    /// reload the list so it appears under its parent (#2306).
+    pub(crate) async fn submit_topic_name(&mut self) -> Result<()> {
+        let name = self.topic_name_buffer.trim().to_string();
+        self.topic_naming = false;
+        self.topic_name_buffer.clear();
+        if name.is_empty() {
+            self.push_system_message("A topic needs a name.".to_string());
+            return Ok(());
+        }
+        let Some(parent) = self.sessions.get(self.selected_session_index).map(|s| s.id) else {
+            return Ok(());
+        };
+        let repo = crate::db::repository::SessionRepository::new(self.session_service.pool());
+        match repo.create_topic(parent, &name).await {
+            Ok(_) => self.load_sessions().await?,
+            Err(e) => self.push_system_message(format!("Could not create the topic: {e}")),
+        }
+        Ok(())
+    }
+
+    /// Close the selected topic, or reopen it if it is closed (#2305). Only a
+    /// topic can be closed; a plain session gets a notice instead.
+    pub(crate) async fn toggle_closed_selected(&mut self) -> Result<()> {
+        let Some(id) = self.sessions.get(self.selected_session_index).map(|s| s.id) else {
+            return Ok(());
+        };
+        if !self.topic_parents.contains_key(&id) {
+            self.push_system_message("Only a topic can be closed.".to_string());
+            return Ok(());
+        }
+        let closed = self.closed_sessions.contains(&id);
+        let repo = crate::db::repository::SessionRepository::new(self.session_service.pool());
+        repo.set_closed(id, !closed).await?;
+        self.push_system_message(if closed {
+            "Topic reopened.".to_string()
+        } else {
+            "Topic closed. It keeps its history and refuses new turns until reopened.".to_string()
+        });
+        self.load_sessions().await
     }
 
     /// Clear all messages from the current session
@@ -3014,6 +3096,16 @@ impl App {
     }
 
     async fn send_message_inner(&mut self, content: String, command_sourced: bool) -> Result<()> {
+        // A closed topic refuses new turns, with a notice that says why, so the
+        // message is never dropped without a word (#2305).
+        if self
+            .current_session
+            .as_ref()
+            .is_some_and(|s| self.closed_sessions.contains(&s.id))
+        {
+            self.push_system_message("This topic is closed. Reopen it to continue.".to_string());
+            return Ok(());
+        }
         // A new turn is starting — drop any follow-up suggestions from the
         // previous turn so they can't reappear on the next empty input (#596).
         self.followup_suggestions.clear();

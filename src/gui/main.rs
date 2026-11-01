@@ -49,8 +49,8 @@ use futures::channel::oneshot;
 use gpui::{
     AnyElement, App, Application, Bounds, ClickEvent, Context, Div, DragMoveEvent, Entity,
     ExternalPaths, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ScrollHandle, SharedString, TitlebarOptions, Window, WindowBounds, WindowOptions,
-    div, prelude::*, px, rems, rgb, rgba, size,
+    MouseUpEvent, ScrollHandle, SharedString, Stateful, TitlebarOptions, Window, WindowBounds,
+    WindowOptions, div, prelude::*, px, rems, rgb, rgba, size,
 };
 use opencrabs::brain::agent::ProgressEvent;
 use opencrabs::utils::drop_landing::human_size;
@@ -267,6 +267,15 @@ struct Dashboard {
     /// Whether the key reference is open (#2320). The overlay reads the same
     /// table the terminal's `/help` prints, so the two cannot disagree.
     help_open: bool,
+    /// The `...` menu over the chat is open (#2303). Its only item is New topic.
+    topic_menu: bool,
+    /// The topic name being typed, while the name prompt is open (#2303).
+    topic_draft: Option<String>,
+    /// The topic being renamed, while the prompt is open for a rename (#2304).
+    /// None means the prompt names a new topic.
+    topic_rename: Option<uuid::Uuid>,
+    /// The read-only info panel for a topic, while it is open (#2304).
+    topic_info: Option<sessions::TopicInfo>,
     /// The palette the window had when the themes screen opened. Esc puts it
     /// back, so a preview is never kept by accident.
     themes_origin: Option<palette::Palette>,
@@ -709,6 +718,19 @@ impl Dashboard {
     fn send_message(&mut self, text: String, cx: &mut Context<Self>) {
         let text = text.trim().to_string();
         if text.is_empty() {
+            return;
+        }
+        // A closed topic refuses new turns. The notice says why, so the send is
+        // never dropped without a word (#2305).
+        if self
+            .transcript
+            .session
+            .is_some_and(|id| self.sessions.is_closed(id))
+        {
+            self.live
+                .notices
+                .push("This topic is closed. Reopen it to continue.".to_string());
+            cx.notify();
             return;
         }
         if self.agent_error.is_some() {
@@ -1298,6 +1320,194 @@ impl Dashboard {
         cx.notify();
     }
 
+    /// Open the rename prompt for the open topic, pre-filled with its title
+    /// (#2304). Enter saves the new name; Esc leaves the title as it was.
+    fn start_rename(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.transcript.session else {
+            return;
+        };
+        let current = self
+            .sessions
+            .items
+            .iter()
+            .find(|s| s.id == id)
+            .and_then(|s| s.title.clone())
+            .unwrap_or_default();
+        self.topic_menu = false;
+        self.topic_rename = Some(id);
+        self.topic_draft = Some(current);
+        cx.notify();
+    }
+
+    /// Load the info panel for the open session. The panel is read-only: it
+    /// shows the id, the parent, the created time, and the message count.
+    fn open_topic_info(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.transcript.session else {
+            return;
+        };
+        let db_path = self.db_path.clone();
+        cx.spawn(
+            async move |this, cx| match sessions::load_topic_info(db_path, id).await {
+                Ok(Some(info)) => {
+                    this.update(cx, |this, cx| {
+                        this.topic_info = Some(info);
+                        cx.notify();
+                    })
+                    .ok();
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    logging::error(&format!("topic info {id}: {e}"));
+                    this.update(cx, |this, cx| {
+                        this.live.notices.push(format!("topic info: {e}"));
+                        cx.notify();
+                    })
+                    .ok();
+                }
+            },
+        )
+        .detach();
+        cx.notify();
+    }
+
+    /// Close the open topic, or reopen it if it is closed (#2305). The state
+    /// is re-read from the database, so the dimming and the send guard follow
+    /// what was actually written.
+    fn toggle_closed_topic(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.transcript.session else {
+            return;
+        };
+        let closed = self.sessions.is_closed(id);
+        let db_path = self.db_path.clone();
+        cx.spawn(async move |this, cx| {
+            if let Err(e) = sessions::set_closed(db_path, id, !closed).await {
+                logging::error(&format!("close topic {id}: {e}"));
+                this.update(cx, |this, cx| {
+                    this.live.notices.push(format!("close topic: {e}"));
+                    cx.notify();
+                })
+                .ok();
+                return;
+            }
+            this.update(cx, |this, cx| this.refresh_topic_state(cx))
+                .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Whether the open chat is a session with topics turned on.
+    fn open_chat_topics_on(&self) -> bool {
+        self.transcript
+            .session
+            .is_some_and(|id| self.sessions.is_topic_enabled(id))
+    }
+
+    /// Open the name prompt for a new topic under the open session (#2303).
+    fn start_topic_draft(&mut self, cx: &mut Context<Self>) {
+        if !self.open_chat_topics_on() {
+            return;
+        }
+        self.topic_menu = false;
+        self.topic_draft = Some(String::new());
+        cx.notify();
+    }
+
+    /// Create the named topic under the open session, then open it. An empty
+    /// name is refused and the prompt stays open.
+    fn submit_topic(&mut self, cx: &mut Context<Self>) {
+        let Some(name) = self.topic_draft.as_ref().map(|d| d.trim().to_string()) else {
+            return;
+        };
+        if name.is_empty() {
+            self.live.notices.push("a topic needs a name".to_string());
+            cx.notify();
+            return;
+        }
+        // A rename prompt renames the topic in place and changes nothing else.
+        if let Some(target) = self.topic_rename {
+            let db_path = self.db_path.clone();
+            cx.spawn(async move |this, cx| {
+                match sessions::rename_session(db_path, target, name).await {
+                    Ok(()) => {
+                        this.update(cx, |this, cx| {
+                            this.topic_draft = None;
+                            this.topic_rename = None;
+                            this.refresh_rail(cx);
+                            cx.notify();
+                        })
+                        .ok();
+                    }
+                    Err(e) => {
+                        logging::error(&format!("rename topic {target}: {e}"));
+                        this.update(cx, |this, cx| {
+                            this.live.notices.push(format!("rename: {e}"));
+                            cx.notify();
+                        })
+                        .ok();
+                    }
+                }
+            })
+            .detach();
+            cx.notify();
+            return;
+        }
+        let Some(parent) = self.transcript.session else {
+            return;
+        };
+        let db_path = self.db_path.clone();
+        cx.spawn(
+            async move |this, cx| match sessions::create_topic(db_path, parent, name).await {
+                Ok(topic) => {
+                    this.update(cx, |this, cx| {
+                        this.topic_draft = None;
+                        this.refresh_rail(cx);
+                        this.refresh_topic_state(cx);
+                        this.open_session(topic, cx);
+                    })
+                    .ok();
+                }
+                Err(e) => {
+                    logging::error(&format!("create topic under {parent}: {e}"));
+                    this.update(cx, |this, cx| {
+                        this.live.notices.push(format!("topic: {e}"));
+                        cx.notify();
+                    })
+                    .ok();
+                }
+            },
+        )
+        .detach();
+        cx.notify();
+    }
+
+    /// Re-read which sessions are topics and what each topic's parent is.
+    fn refresh_topic_state(&mut self, cx: &mut Context<Self>) {
+        let db_path = self.db_path.clone();
+        cx.spawn(async move |this, cx| {
+            let parents = sessions::load_topic_parents(db_path.clone()).await;
+            let closed = sessions::load_closed(db_path.clone()).await;
+            let topics = sessions::load_topics(db_path).await;
+            this.update(cx, |this, cx| {
+                match closed {
+                    Ok(ids) => this.sessions.closed = ids.into_iter().collect(),
+                    Err(e) => logging::error(&format!("closed refresh: {e}")),
+                }
+                match parents {
+                    Ok(pairs) => this.sessions.parents = pairs.into_iter().collect(),
+                    Err(e) => logging::error(&format!("topic parents refresh: {e}")),
+                }
+                match topics {
+                    Ok(ids) => this.sessions.topics = ids.into_iter().collect(),
+                    Err(e) => logging::error(&format!("topics refresh: {e}")),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Refetch the rail from the ledger. The pinned set rides along: pins come
     /// from a sidecar the TUI also writes, so a list refresh that skipped it
     /// would draw a row in the wrong slot until the next pin click.
@@ -1491,6 +1701,12 @@ impl Dashboard {
             }
             return;
         }
+        // cmd+t starts a new topic under the open session (#2303). It does
+        // nothing unless that session has topics turned on.
+        if ev.keystroke.modifiers.platform && ev.keystroke.key == "t" {
+            self.start_topic_draft(cx);
+            return;
+        }
         // ctrl+shift+t opens the themes screen, where a theme is previewed and
         // kept. It sits with the screen keys so it works while typing.
         if ev.keystroke.modifiers.control && ev.keystroke.modifiers.shift && ev.keystroke.key == "t"
@@ -1503,6 +1719,42 @@ impl Dashboard {
         // or with the command key) shortens it, Enter and Esc clear it and
         // close. Anything else is swallowed so typing can never leak into
         // the chat editor while the field says it is listening.
+        // The topic info panel is read only; Esc closes it and nothing else.
+        if self.topic_info.is_some() && ev.keystroke.key == "escape" {
+            self.topic_info = None;
+            cx.notify();
+            return;
+        }
+        // The topic name prompt owns the keyboard while it is open (#2303):
+        // typed characters extend the name, Enter creates the topic, Esc
+        // cancels. Nothing leaks into the chat editor behind it.
+        if self.topic_draft.is_some() {
+            let ks = &ev.keystroke;
+            match ks.key.as_str() {
+                "enter" => self.submit_topic(cx),
+                "escape" => {
+                    self.topic_draft = None;
+                    self.topic_rename = None;
+                    cx.notify();
+                }
+                "backspace" => {
+                    if let Some(draft) = self.topic_draft.as_mut() {
+                        draft.pop();
+                    }
+                    cx.notify();
+                }
+                _ => {
+                    if let Some(ch) = ks.key_char.as_ref().and_then(|s| s.chars().next())
+                        && !ch.is_control()
+                        && let Some(draft) = self.topic_draft.as_mut()
+                    {
+                        draft.push(ch);
+                        cx.notify();
+                    }
+                }
+            }
+            return;
+        }
         if self.sessions.filter_active {
             let ks = &ev.keystroke;
             match ks.key.as_str() {
@@ -1847,7 +2099,16 @@ impl Render for Dashboard {
             } else {
                 None
             };
-            let r = sessions::row(s, selected, cursored, favorite, action, menu);
+            let indented = self.sessions.is_indented(id);
+            let closed = self.sessions.is_closed(id);
+            let flags = sessions::RowFlags {
+                selected,
+                cursored,
+                favorited: favorite,
+                indented,
+                closed,
+            };
+            let r = sessions::row(s, flags, action, menu);
             // The press starts the slide and closes any other row's strip.
             let press = cx.listener(move |this, _ev: &MouseDownEvent, window, cx| {
                 this.rail_slide_opened = None;
@@ -2266,6 +2527,58 @@ impl Render for Dashboard {
                 // hints go back UNDER the input where they were: the owner
                 // called the move above the plan card out.
                 let mut col = right;
+                // Topics live in the chat: the `...` button sits above the
+                // conversation for a session that has them on (#2303).
+                let is_topic = self
+                    .transcript
+                    .session
+                    .is_some_and(|id| self.sessions.parents.contains_key(&id));
+                if self.open_chat_topics_on() || is_topic {
+                    let toggle = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                        this.topic_menu = !this.topic_menu;
+                        cx.notify();
+                    });
+                    let mut items: Vec<Stateful<Div>> = Vec::new();
+                    if self.open_chat_topics_on() {
+                        let new_topic = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                            this.start_topic_draft(cx);
+                        });
+                        items.push(sessions::menu_item("New topic").on_click(new_topic));
+                    }
+                    let view = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                        this.topic_menu = false;
+                        this.open_topic_info(cx);
+                    });
+                    items.push(sessions::menu_item("View topic info").on_click(view));
+                    if is_topic {
+                        let edit = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                            this.start_rename(cx);
+                        });
+                        items.push(sessions::menu_item("Edit topic").on_click(edit));
+                        let closed_now = self
+                            .transcript
+                            .session
+                            .is_some_and(|id| self.sessions.is_closed(id));
+                        let close_label = if closed_now {
+                            "Reopen topic"
+                        } else {
+                            "Close topic"
+                        };
+                        let close = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                            this.topic_menu = false;
+                            this.toggle_closed_topic(cx);
+                        });
+                        items.push(sessions::menu_item(close_label).on_click(close));
+                        let delete = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                            this.topic_menu = false;
+                            if let Some(id) = this.transcript.session {
+                                this.request_delete(id, cx);
+                            }
+                        });
+                        items.push(sessions::menu_item("Delete topic").on_click(delete));
+                    }
+                    col = col.child(topic_bar(self.topic_menu, toggle, items));
+                }
                 if let Some(plan_view) = self.plan.view() {
                     col = col.child(plan_view);
                 }
@@ -2277,6 +2590,14 @@ impl Render for Dashboard {
                 // is where the eye goes while waiting.
                 if let Some(label) = self.running_tasks_label() {
                     col = col.child(task_strip(label));
+                }
+                if let Some(draft) = self.topic_draft.as_deref() {
+                    let label = if self.topic_rename.is_some() {
+                        "Rename topic"
+                    } else {
+                        "New topic"
+                    };
+                    col = col.child(topic_prompt(label, draft));
                 }
                 col = col.child(self.editor.clone());
                 col.child(footer)
@@ -2416,6 +2737,14 @@ impl Render for Dashboard {
             });
             root = root.child(help_overlay(close));
         }
+        // The topic info panel sits above the panes, like the key reference (#2304).
+        if let Some(info) = self.topic_info.clone() {
+            let close = cx.listener(|this, _ev, _window, cx| {
+                this.topic_info = None;
+                cx.notify();
+            });
+            root = root.child(topic_info_overlay(&info, close));
+        }
         // The drop target: a Finder drag tints the whole window so the target
         // is never guessed. It paints above both panes and vanishes the
         // moment the drag ends.
@@ -2511,11 +2840,31 @@ fn main() {
             })
             .into_iter()
             .collect();
+    // Closed topics are dimmed and refuse turns, so their set is read up front (#2305).
+    let closed: std::collections::HashSet<uuid::Uuid> =
+        futures::executor::block_on(sessions::load_closed(db_path.clone()))
+            .unwrap_or_else(|e| {
+                logging::error(&format!("closed load: {e}"));
+                Vec::new()
+            })
+            .into_iter()
+            .collect();
+    // Which topic sits under which session, so the rail can group them (#2303).
+    let parents: std::collections::HashMap<uuid::Uuid, uuid::Uuid> =
+        futures::executor::block_on(sessions::load_topic_parents(db_path.clone()))
+            .unwrap_or_else(|e| {
+                logging::error(&format!("topic parents load: {e}"));
+                Vec::new()
+            })
+            .into_iter()
+            .collect();
     let sessions_state = match session_list {
         Ok(items) => sessions::SessionsState {
             items,
             favorites: favorites.clone(),
             topics: topics.clone(),
+            parents: parents.clone(),
+            closed: closed.clone(),
             selected: None,
             cursor: None,
             rail_menu: None,
@@ -2527,6 +2876,8 @@ fn main() {
             items: Vec::new(),
             favorites,
             topics,
+            parents,
+            closed,
             selected: None,
             cursor: None,
             rail_menu: None,
@@ -2606,6 +2957,10 @@ fn main() {
                         rail_slide_opened: None,
                         confirm_delete: None,
                         help_open: false,
+                        topic_menu: false,
+                        topic_draft: None,
+                        topic_rename: None,
+                        topic_info: None,
                         themes_origin: None,
                         themes_pick: None,
                         themes_index: 0,
@@ -2813,6 +3168,125 @@ fn help_rows() -> Vec<(
         );
     }
     out
+}
+
+/// The chat's `...` button, right aligned, with its items below it while the
+/// menu is open (#2303, #2304). Only drawn for a topic or a session with topics on.
+fn topic_bar(
+    open: bool,
+    toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    items: Vec<Stateful<Div>>,
+) -> impl IntoElement {
+    let button = div()
+        .id("topic-menu-button")
+        .px_2()
+        .py_0p5()
+        .rounded_sm()
+        .cursor_pointer()
+        .text_color(rgb(palette::current().text_muted))
+        .hover(|d| d.bg(rgb(palette::current().panel_hi)))
+        .on_click(toggle)
+        .child("...");
+    let mut bar = div().flex().flex_col().items_end().w_full().child(button);
+    if open {
+        for item in items {
+            bar = bar.child(item);
+        }
+    }
+    bar
+}
+
+/// The name prompt above the input, while a topic is being named (#2303).
+fn topic_prompt(label: &str, draft: &str) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .p_3()
+        .rounded_md()
+        .border_1()
+        .border_color(rgb(palette::current().panel_hi))
+        .bg(rgb(palette::current().panel))
+        .child(
+            div()
+                .text_sm()
+                .text_color(rgb(palette::current().text))
+                .child(SharedString::from(format!("{label}: {draft}|"))),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(palette::current().text_faint))
+                .child("enter creates · esc cancels"),
+        )
+}
+
+/// The topic info panel (#2304): read only, over the window. A click on the
+/// scrim or Esc closes it. It holds no editable field.
+fn topic_info_overlay(
+    info: &sessions::TopicInfo,
+    close: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let created = chrono::DateTime::<chrono::Utc>::from_timestamp(info.created_at, 0)
+        .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let parent = info
+        .parent_title
+        .clone()
+        .unwrap_or_else(|| "none".to_string());
+    let line = |label: &'static str, value: String| {
+        div()
+            .flex()
+            .flex_row()
+            .gap_3()
+            .text_sm()
+            .child(
+                div()
+                    .w(rems(8.0))
+                    .text_color(rgb(palette::current().text_muted))
+                    .child(label),
+            )
+            .child(
+                div()
+                    .text_color(rgb(palette::current().text))
+                    .child(SharedString::from(value)),
+            )
+    };
+    let panel = div()
+        .id("topic-info-panel")
+        .occlude()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .w(rems(30.0))
+        .p_4()
+        .rounded(px(10.0))
+        .border_1()
+        .border_color(rgb(palette::current().panel_hi))
+        .bg(rgb(palette::current().panel))
+        .child(
+            div()
+                .text_sm()
+                .text_color(rgb(palette::current().text))
+                .child("topic info"),
+        )
+        .child(line("id", info.id.to_string()))
+        .child(line("parent", parent))
+        .child(line("created", created))
+        .child(line("messages", info.messages.to_string()));
+    div()
+        .id("topic-info-scrim")
+        .occlude()
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(rgba(0x0a0a0acc))
+        .on_click(close)
+        .child(panel)
 }
 
 fn help_overlay(close: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> impl IntoElement {

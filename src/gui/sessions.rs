@@ -12,7 +12,7 @@
 //! rows to `rail`.
 
 use crate::palette;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use gpui::{
     App, ClickEvent, Div, InteractiveElement, ScrollHandle, SharedString, Stateful, Styled, Window,
@@ -59,6 +59,11 @@ pub struct SessionsState {
     /// Sessions with topics turned on (#2302). Kept beside the rows for the
     /// same reason as favorites: the row model stays as it is.
     pub topics: HashSet<uuid::Uuid>,
+    /// Topic id to its parent session id (#2303). A topic is grouped under
+    /// its parent in the rail; the row model itself is unchanged.
+    pub parents: HashMap<uuid::Uuid, uuid::Uuid>,
+    /// Closed sessions (#2305): drawn dimmed and refuse new turns.
+    pub closed: HashSet<uuid::Uuid>,
 }
 
 impl SessionsState {
@@ -71,11 +76,45 @@ impl SessionsState {
     /// order. TUI parity: `SessionService::session_favorites` feeds a stable
     /// `sort_by_key(|s| !pins.contains(&s.id))`, so a pin moves a chat to the
     /// top without disturbing the order inside either group.
+    ///
+    /// A topic sits directly under its parent when that parent is in view
+    /// (#2303). A pinned topic is a top-level row, so pins stay above groups.
     pub fn ordered(&self) -> impl Iterator<Item = &Session> {
-        let (mut pinned, rest): (Vec<&Session>, Vec<&Session>) =
-            self.visible().partition(|s| self.is_favorite(s.id));
+        let visible: Vec<&Session> = self.visible().collect();
+        let in_view = |id: uuid::Uuid| visible.iter().any(|s| s.id == id);
+        let grouped = |s: &Session| {
+            !self.is_favorite(s.id) && self.parents.get(&s.id).is_some_and(|p| in_view(*p))
+        };
+        let (mut pinned, rest): (Vec<&Session>, Vec<&Session>) = visible
+            .iter()
+            .copied()
+            .filter(|s| !grouped(s))
+            .partition(|s| self.is_favorite(s.id));
         pinned.extend(rest);
-        pinned.into_iter()
+        let mut out: Vec<&Session> = Vec::with_capacity(visible.len());
+        for top in pinned {
+            out.push(top);
+            out.extend(
+                visible
+                    .iter()
+                    .copied()
+                    .filter(|s| self.parents.get(&s.id) == Some(&top.id) && grouped(s)),
+            );
+        }
+        out.into_iter()
+    }
+
+    /// Whether a row is a topic shown under its parent, so it is indented.
+    pub fn is_closed(&self, id: uuid::Uuid) -> bool {
+        self.closed.contains(&id)
+    }
+
+    pub fn is_indented(&self, id: uuid::Uuid) -> bool {
+        !self.is_favorite(id)
+            && self
+                .parents
+                .get(&id)
+                .is_some_and(|p| self.visible().any(|s| s.id == *p))
     }
 
     /// Whether this session is pinned right now.
@@ -315,6 +354,235 @@ pub async fn load_favorites(db_path: std::path::PathBuf) -> Result<Vec<uuid::Uui
     }
 }
 
+/// What the topic info panel shows (#2304). Read once per open, never edited.
+#[derive(Clone)]
+pub struct TopicInfo {
+    pub id: uuid::Uuid,
+    pub parent_title: Option<String>,
+    pub created_at: i64,
+    pub messages: i64,
+}
+
+/// Read one session's info for the panel. A session that is not a topic
+/// reports no parent.
+pub async fn load_topic_info(
+    db_path: std::path::PathBuf,
+    id: uuid::Uuid,
+) -> Result<Option<TopicInfo>, String> {
+    let (tx, rx) = futures::channel::oneshot::channel::<Result<Option<TopicInfo>, String>>();
+    let spawned = std::thread::Builder::new()
+        .name("topic-info-fetch".into())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let result = match runtime {
+                Ok(rt) => rt
+                    .block_on(async {
+                        let db = Database::connect(&db_path).await?;
+                        let repo = SessionRepository::new(db.pool().clone());
+                        let Some((parent, created_at, messages)) = repo.topic_info(id).await?
+                        else {
+                            return Ok(None);
+                        };
+                        let parent_title = match parent {
+                            Some(p) => repo.find_by_id(p).await?.and_then(|s| s.title),
+                            None => None,
+                        };
+                        Ok::<_, anyhow::Error>(Some(TopicInfo {
+                            id,
+                            parent_title,
+                            created_at,
+                            messages,
+                        }))
+                    })
+                    .map_err(|e| format!("{e:#}")),
+                Err(e) => Err(format!("tokio runtime failed: {e}")),
+            };
+            let _ = tx.send(result);
+        });
+    match spawned {
+        Ok(_) => match rx.await {
+            Ok(result) => result,
+            Err(_) => Err("topic info thread dropped its result".into()),
+        },
+        Err(e) => Err(format!("topic info thread failed to spawn: {e}")),
+    }
+}
+
+/// Rename a session or topic. The caller re-reads the rail afterwards.
+pub async fn rename_session(
+    db_path: std::path::PathBuf,
+    id: uuid::Uuid,
+    title: String,
+) -> Result<(), String> {
+    let (tx, rx) = futures::channel::oneshot::channel::<Result<(), String>>();
+    let spawned = std::thread::Builder::new()
+        .name("rename-write".into())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let result = match runtime {
+                Ok(rt) => rt
+                    .block_on(async {
+                        let db = Database::connect(&db_path).await?;
+                        let repo = SessionRepository::new(db.pool().clone());
+                        repo.rename(id, &title).await
+                    })
+                    .map_err(|e| format!("{e:#}")),
+                Err(e) => Err(format!("tokio runtime failed: {e}")),
+            };
+            let _ = tx.send(result);
+        });
+    match spawned {
+        Ok(_) => match rx.await {
+            Ok(result) => result,
+            Err(_) => Err("rename thread dropped its result".into()),
+        },
+        Err(e) => Err(format!("rename thread failed to spawn: {e}")),
+    }
+}
+
+/// Every closed session. A closed topic is dimmed and refuses new turns (#2305).
+pub async fn load_closed(db_path: std::path::PathBuf) -> Result<Vec<uuid::Uuid>, String> {
+    let (tx, rx) = futures::channel::oneshot::channel::<Result<Vec<uuid::Uuid>, String>>();
+    let spawned = std::thread::Builder::new()
+        .name("closed-fetch".into())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let result = match runtime {
+                Ok(rt) => rt
+                    .block_on(async {
+                        let db = Database::connect(&db_path).await?;
+                        let repo = SessionRepository::new(db.pool().clone());
+                        repo.closed_ids().await
+                    })
+                    .map_err(|e| format!("{e:#}")),
+                Err(e) => Err(format!("tokio runtime failed: {e}")),
+            };
+            let _ = tx.send(result);
+        });
+    match spawned {
+        Ok(_) => match rx.await {
+            Ok(result) => result,
+            Err(_) => Err("closed fetch thread dropped its result".into()),
+        },
+        Err(e) => Err(format!("closed fetch thread failed to spawn: {e}")),
+    }
+}
+
+/// Close or reopen one topic. The caller re-reads the closed set afterwards.
+pub async fn set_closed(
+    db_path: std::path::PathBuf,
+    id: uuid::Uuid,
+    closed: bool,
+) -> Result<(), String> {
+    let (tx, rx) = futures::channel::oneshot::channel::<Result<(), String>>();
+    let spawned = std::thread::Builder::new()
+        .name("closed-write".into())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let result = match runtime {
+                Ok(rt) => rt
+                    .block_on(async {
+                        let db = Database::connect(&db_path).await?;
+                        let repo = SessionRepository::new(db.pool().clone());
+                        repo.set_closed(id, closed).await
+                    })
+                    .map_err(|e| format!("{e:#}")),
+                Err(e) => Err(format!("tokio runtime failed: {e}")),
+            };
+            let _ = tx.send(result);
+        });
+    match spawned {
+        Ok(_) => match rx.await {
+            Ok(result) => result,
+            Err(_) => Err("closed write thread dropped its result".into()),
+        },
+        Err(e) => Err(format!("closed write thread failed to spawn: {e}")),
+    }
+}
+
+/// Every (topic, parent) pair. Read separately from the rows, like favorites,
+/// so the grouping does not change the row model (#2303).
+pub async fn load_topic_parents(
+    db_path: std::path::PathBuf,
+) -> Result<Vec<(uuid::Uuid, uuid::Uuid)>, String> {
+    let (tx, rx) =
+        futures::channel::oneshot::channel::<Result<Vec<(uuid::Uuid, uuid::Uuid)>, String>>();
+    let spawned = std::thread::Builder::new()
+        .name("topic-parents-fetch".into())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let result = match runtime {
+                Ok(rt) => rt
+                    .block_on(async {
+                        let db = Database::connect(&db_path).await?;
+                        let repo = SessionRepository::new(db.pool().clone());
+                        repo.topic_parents().await
+                    })
+                    .map_err(|e| format!("{e:#}")),
+                Err(e) => Err(format!("tokio runtime failed: {e}")),
+            };
+            let _ = tx.send(result);
+        });
+    match spawned {
+        Ok(_) => match rx.await {
+            Ok(result) => result,
+            Err(_) => Err("topic parents fetch thread dropped its result".into()),
+        },
+        Err(e) => Err(format!("topic parents fetch thread failed to spawn: {e}")),
+    }
+}
+
+/// Create a topic under a session and return its id. The database refuses a
+/// parent that is already a topic; that refusal comes back as the error.
+pub async fn create_topic(
+    db_path: std::path::PathBuf,
+    parent: uuid::Uuid,
+    title: String,
+) -> Result<uuid::Uuid, String> {
+    let (tx, rx) = futures::channel::oneshot::channel::<Result<uuid::Uuid, String>>();
+    let spawned = std::thread::Builder::new()
+        .name("topic-create".into())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let result = match runtime {
+                Ok(rt) => rt
+                    .block_on(async {
+                        let db = Database::connect(&db_path).await?;
+                        let repo = SessionRepository::new(db.pool().clone());
+                        repo.create_topic(parent, &title).await
+                    })
+                    .map_err(|e| format!("{e:#}")),
+                Err(e) => Err(format!("tokio runtime failed: {e}")),
+            };
+            let _ = tx.send(result);
+        });
+    match spawned {
+        Ok(_) => match rx.await {
+            Ok(result) => result,
+            Err(_) => Err("topic create thread dropped its result".into()),
+        },
+        Err(e) => Err(format!("topic create thread failed to spawn: {e}")),
+    }
+}
+
 /// Every session with topics turned on. Read separately from the rows, the
 /// same way favorites are, so the row model does not carry the flag.
 pub async fn load_topics(db_path: std::path::PathBuf) -> Result<Vec<uuid::Uuid>, String> {
@@ -524,14 +792,30 @@ pub fn menu_popover(items: Vec<Stateful<Div>>) -> Stateful<Div> {
     menu
 }
 
+/// What a rail row shows about its session right now. Grouped so the row
+/// keeps a short argument list as the rail gains states.
+#[derive(Clone, Copy, Default)]
+pub struct RowFlags {
+    pub selected: bool,
+    pub cursored: bool,
+    pub favorited: bool,
+    pub indented: bool,
+    pub closed: bool,
+}
+
 pub fn row(
     s: &Session,
-    selected: bool,
-    cursored: bool,
-    favorited: bool,
+    flags: RowFlags,
     action: Option<Stateful<Div>>,
     menu: Option<Stateful<Div>>,
 ) -> Stateful<Div> {
+    let RowFlags {
+        selected,
+        cursored,
+        favorited,
+        indented,
+        closed,
+    } = flags;
     let title = div()
         .flex()
         .flex_row()
@@ -549,18 +833,25 @@ pub fn row(
         .child(
             div()
                 .text_sm()
-                .text_color(rgb(palette::current().text))
+                // A closed topic reads dimmed: still there, no longer taking work.
+                .text_color(rgb(if closed {
+                    palette::current().text_faint
+                } else {
+                    palette::current().text
+                }))
                 .truncate()
                 .child(SharedString::from(fit(
                     s.title.as_deref().unwrap_or("(untitled)"),
                     42,
                 ))),
         );
+    // A topic is indented under its session, so the grouping reads at a glance.
     let body = div()
         .flex()
         .flex_col()
         .gap_0p5()
         .min_w_0()
+        .when(indented, |d| d.pl_4())
         .child(title)
         .child(
             div()
@@ -739,6 +1030,36 @@ mod tests {
         Database, MenuKind, SessionsState, fit, load_sessions, palette, pin_mark, rail_menu_entries,
     };
     use opencrabs::db::models::Session;
+
+    /// #2303: a topic sits directly under its parent, a favorited topic stays
+    /// pinned at the top level, and an indent is only drawn for a grouped row.
+    #[test]
+    fn topics_group_under_their_parent_and_favorites_stay_pinned() {
+        let a = Session::new(Some("A".into()), None, None);
+        let b = Session::new(Some("B".into()), None, None);
+        let a1 = Session::new(Some("A topic".into()), None, None);
+        let c = Session::new(Some("C".into()), None, None);
+        let (a_id, b_id, a1_id, c_id) = (a.id, b.id, a1.id, c.id);
+        let mut state = SessionsState {
+            items: vec![a, b, a1, c],
+            ..Default::default()
+        };
+        state.parents.insert(a1_id, a_id);
+
+        let order: Vec<_> = state.ordered().map(|s| s.id).collect();
+        assert_eq!(
+            order,
+            vec![a_id, a1_id, b_id, c_id],
+            "the topic follows its parent"
+        );
+        assert!(state.is_indented(a1_id));
+        assert!(!state.is_indented(a_id));
+
+        state.favorites.insert(a1_id);
+        let order: Vec<_> = state.ordered().map(|s| s.id).collect();
+        assert_eq!(order[0], a1_id, "a pinned topic stays above the groups");
+        assert!(!state.is_indented(a1_id));
+    }
 
     /// #2271's whole class, seated: truncation walks chars, never bytes. Any
     /// return to byte-index slicing panics here on a multibyte boundary, and

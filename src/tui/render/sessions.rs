@@ -172,6 +172,10 @@ pub(super) fn render_sessions(f: &mut Frame, app: &App, area: Rect) {
             lines.push(rename_row(app, &plan));
             continue;
         }
+        if is_selected && app.topic_naming {
+            lines.push(topic_name_row(app, &plan));
+            continue;
+        }
 
         lines.push(session_row(app, session, is_selected, is_current, &plan));
     }
@@ -582,6 +586,9 @@ fn session_row(
         Style::default()
             .fg(theme::role(Role::Success))
             .add_modifier(Modifier::BOLD)
+    } else if app.closed_sessions.contains(&session.id) {
+        // A closed topic reads dimmed: still there, no longer taking work (#2305).
+        Style::default().fg(theme::role(Role::TextDim))
     } else if is_current {
         Style::default().fg(theme::role(Role::Gray))
     } else {
@@ -593,7 +600,19 @@ fn session_row(
     // A pinned session carries a star inside the name cell, so the columns
     // to its right stay put: the row plan is identical for every row and a
     // star only costs the name two cells of its own width.
-    let title = session.title.as_deref().unwrap_or("New Chat");
+    // A topic shown under its parent carries a tree mark, so the grouping reads
+    // in the dialog (#2306).
+    let is_topic = app
+        .topic_parents
+        .get(&session.id)
+        .is_some_and(|p| app.sessions.iter().any(|s| s.id == *p));
+    let raw_title = session.title.as_deref().unwrap_or("New Chat");
+    let title_owned = if is_topic {
+        format!("  └ {raw_title}")
+    } else {
+        raw_title.to_string()
+    };
+    let title = title_owned.as_str();
     let name = if app.session_favorites.contains(&session.id) {
         truncate_to_width(&format!("★ {title}"), plan.name_width)
     } else {
@@ -627,6 +646,24 @@ fn session_row(
 ///
 /// Padded to the plan's name width so the editor sits exactly where the names
 /// it replaces sit.
+/// The prompt row for a new topic under the selected session (#2306).
+fn topic_name_row(app: &App, plan: &RowPlan) -> Line<'static> {
+    let text = truncate_to_width(
+        &format!("  └ new topic: {}▏", app.topic_name_buffer),
+        plan.name_width,
+    );
+    let spans = vec![
+        Span::raw(" ".repeat(GUTTER)),
+        Span::styled(
+            text,
+            Style::default()
+                .fg(theme::role(Role::TextPrimary))
+                .add_modifier(Modifier::BOLD),
+        ),
+    ];
+    finish_row(spans, plan.width, true)
+}
+
 fn rename_row(app: &App, plan: &RowPlan) -> Line<'static> {
     let text = truncate_to_width(&format!("{}▏", app.session_rename_buffer), plan.name_width);
     let spans = vec![

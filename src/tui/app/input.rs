@@ -2618,6 +2618,24 @@ impl App {
             return Ok(());
         }
 
+        // Topic name prompt: typing the name of a topic under the selected
+        // session (#2306). Enter creates it, Esc cancels.
+        if self.topic_naming {
+            match event.code {
+                KeyCode::Enter => self.submit_topic_name().await?,
+                KeyCode::Esc => {
+                    self.topic_naming = false;
+                    self.topic_name_buffer.clear();
+                }
+                KeyCode::Backspace => {
+                    self.topic_name_buffer.pop();
+                }
+                KeyCode::Char(c) => self.topic_name_buffer.push(c),
+                _ => {}
+            }
+            return Ok(());
+        }
+
         // Search mode: typing to filter sessions
         if self.session_search_active {
             match event.code {
@@ -2751,6 +2769,16 @@ impl App {
                     self.switch_mode(AppMode::Chat).await?;
                 }
             }
+        } else if event.code == KeyCode::Char('t') || event.code == KeyCode::Char('T') {
+            // New topic under the selected session (#2306). The name is asked for
+            // in the prompt above the list.
+            if self.sessions.get(self.selected_session_index).is_some() {
+                self.topic_naming = true;
+                self.topic_name_buffer.clear();
+            }
+        } else if event.code == KeyCode::Char('c') || event.code == KeyCode::Char('C') {
+            // Close or reopen the selected topic (#2305).
+            self.toggle_closed_selected().await?;
         } else if event.code == KeyCode::Char('r') || event.code == KeyCode::Char('R') {
             // Start renaming the selected session
             if let Some(session) = self.sessions.get(self.selected_session_index) {

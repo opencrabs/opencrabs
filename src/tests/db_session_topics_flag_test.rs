@@ -61,3 +61,77 @@ async fn topics_flag_round_trips_and_keeps_recency() {
             .all(|id| *id != session.id)
     );
 }
+
+#[tokio::test]
+async fn a_topic_is_created_under_a_session_and_listed_with_its_parent() {
+    let db = Database::connect_in_memory()
+        .await
+        .expect("in-memory DB should connect");
+    db.run_migrations().await.expect("migrations should apply");
+    let repo = SessionRepository::new(db.pool().clone());
+
+    let parent = Session::new(Some("p".to_string()), None, None);
+    repo.create(&parent).await.expect("create parent");
+    let topic = repo
+        .create_topic(parent.id, "Design")
+        .await
+        .expect("a topic under a plain session");
+
+    let pairs = repo.topic_parents().await.expect("list parents");
+    assert!(pairs.contains(&(topic, parent.id)));
+
+    assert!(
+        repo.create_topic(topic, "Nested").await.is_err(),
+        "depth is one: a topic cannot take a topic"
+    );
+}
+
+#[tokio::test]
+async fn a_topic_can_be_renamed_and_its_info_is_read() {
+    let db = Database::connect_in_memory()
+        .await
+        .expect("in-memory DB should connect");
+    db.run_migrations().await.expect("migrations should apply");
+    let repo = SessionRepository::new(db.pool().clone());
+
+    let parent = Session::new(Some("p".to_string()), None, None);
+    repo.create(&parent).await.expect("create parent");
+    let topic = repo
+        .create_topic(parent.id, "Draft")
+        .await
+        .expect("create topic");
+
+    repo.rename(topic, "Final").await.expect("rename");
+    let renamed = repo.find_by_id(topic).await.expect("read").expect("exists");
+    assert_eq!(renamed.title.as_deref(), Some("Final"));
+
+    let (parent_id, _created, messages) = repo
+        .topic_info(topic)
+        .await
+        .expect("info")
+        .expect("topic exists");
+    assert_eq!(parent_id, Some(parent.id));
+    assert_eq!(messages, 0, "a new topic holds no messages");
+}
+
+#[tokio::test]
+async fn a_topic_closes_and_reopens() {
+    let db = Database::connect_in_memory()
+        .await
+        .expect("in-memory DB should connect");
+    db.run_migrations().await.expect("migrations should apply");
+    let repo = SessionRepository::new(db.pool().clone());
+
+    let parent = Session::new(Some("p".to_string()), None, None);
+    repo.create(&parent).await.expect("create parent");
+    let topic = repo
+        .create_topic(parent.id, "Archive me")
+        .await
+        .expect("create topic");
+
+    repo.set_closed(topic, true).await.expect("close");
+    assert!(repo.closed_ids().await.expect("list").contains(&topic));
+
+    repo.set_closed(topic, false).await.expect("reopen");
+    assert!(!repo.closed_ids().await.expect("list").contains(&topic));
+}

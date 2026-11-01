@@ -66,6 +66,159 @@ impl SessionRepository {
         Ok(())
     }
 
+    /// Create a topic under a session: a new session row with `parent_id` set.
+    /// The depth trigger (migration 20261101000001) refuses a parent that is
+    /// itself a topic, so the refusal comes back as an error here.
+    pub async fn create_topic(&self, parent: Uuid, title: &str) -> Result<Uuid> {
+        let topic = Session::new(Some(title.to_string()), None, None);
+        self.create(&topic).await?;
+        let (topic_id, parent_str) = (topic.id.to_string(), parent.to_string());
+        self.pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                conn.execute(
+                    "UPDATE sessions SET parent_id = ?2 WHERE id = ?1",
+                    params![topic_id, parent_str],
+                )
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to attach topic to its session")?;
+        Ok(topic.id)
+    }
+
+    /// Every (topic, parent) pair, as ids. A topic is a session with a parent.
+    pub async fn topic_parents(&self) -> Result<Vec<(Uuid, Uuid)>> {
+        self.pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                let mut stmt = conn.prepare_cached(
+                    "SELECT id, parent_id FROM sessions WHERE parent_id IS NOT NULL",
+                )?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })?
+                    .collect::<rusqlite::Result<Vec<(String, String)>>>()?;
+                Ok::<_, rusqlite::Error>(rows)
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to read topic parents")?
+            .into_iter()
+            .map(|(child, parent)| {
+                Ok((
+                    Uuid::parse_str(&child).context("malformed topic id")?,
+                    Uuid::parse_str(&parent).context("malformed parent id")?,
+                ))
+            })
+            .collect()
+    }
+
+    /// Rename a session or topic in place. `updated_at` is left alone, so a
+    /// rename does not move the row in the recency order.
+    pub async fn rename(&self, id: Uuid, title: &str) -> Result<()> {
+        let (id_str, title) = (id.to_string(), title.to_string());
+        self.pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                conn.execute(
+                    "UPDATE sessions SET title = ?2 WHERE id = ?1",
+                    params![id_str, title],
+                )
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to rename session")?;
+        Ok(())
+    }
+
+    /// What the topic info panel shows for one session: its parent (if it is
+    /// a topic), when it was created, and how many messages it holds.
+    pub async fn topic_info(&self, id: Uuid) -> Result<Option<(Option<Uuid>, i64, i64)>> {
+        let id_str = id.to_string();
+        self.pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                conn.query_row(
+                    "SELECT parent_id, created_at,
+                        (SELECT COUNT(*) FROM messages WHERE session_id = sessions.id)
+                     FROM sessions WHERE id = ?1",
+                    params![id_str],
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<String>>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, i64>(2)?,
+                        ))
+                    },
+                )
+                .optional()
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to read topic info")?
+            .map(|(parent, created, count)| {
+                let parent = match parent {
+                    Some(p) => Some(Uuid::parse_str(&p).context("malformed parent id")?),
+                    None => None,
+                };
+                Ok((parent, created, count))
+            })
+            .transpose()
+    }
+
+    /// Close a topic (`closed_at` set) or reopen it (`closed_at` cleared). A
+    /// closed topic stays readable; it refuses new turns until reopened.
+    pub async fn set_closed(&self, id: Uuid, closed: bool) -> Result<()> {
+        let id_str = id.to_string();
+        let now = Utc::now().timestamp();
+        self.pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                conn.execute(
+                    "UPDATE sessions SET closed_at = ?2 WHERE id = ?1",
+                    params![id_str, if closed { Some(now) } else { None }],
+                )
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to set closed_at")?;
+        Ok(())
+    }
+
+    /// Every session that is closed, as ids.
+    pub async fn closed_ids(&self) -> Result<Vec<Uuid>> {
+        self.pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                let mut stmt =
+                    conn.prepare_cached("SELECT id FROM sessions WHERE closed_at IS NOT NULL")?;
+                let ids = stmt
+                    .query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<String>>>()?;
+                Ok::<_, rusqlite::Error>(ids)
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to read closed topics")?
+            .into_iter()
+            .map(|s| Uuid::parse_str(&s).context("malformed session id"))
+            .collect()
+    }
+
     /// Every session with topics turned on, as ids.
     pub async fn topic_enabled_ids(&self) -> Result<Vec<Uuid>> {
         self.pool
