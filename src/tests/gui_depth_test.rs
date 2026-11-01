@@ -11,7 +11,9 @@ fn the_header_has_a_panel_background_and_a_divider() {
     let start = GUI_MAIN
         .find("let chrome = div()")
         .expect("the chat header is built in render");
-    let header = &GUI_MAIN[start..start + 400];
+    let header = GUI_MAIN
+        .get(start..start + 400)
+        .expect("the header block is in range");
     assert!(header.contains(".bg(rgb(palette::current().panel))"));
     assert!(header.contains(".border_b_1()"));
 }
@@ -21,7 +23,9 @@ fn the_input_has_a_panel_background_and_a_shadow() {
     let start = EDITOR
         .find(".on_mouse_move(cx.listener(Self::on_mouse_move))")
         .expect("the editor root is built in render");
-    let root = &EDITOR[start..start + 400];
+    let root = EDITOR
+        .get(start..start + 400)
+        .expect("the editor root is in range");
     assert!(root.contains(".bg(rgb(palette::current().panel))"));
     assert!(root.contains(".shadow_sm()"));
 }

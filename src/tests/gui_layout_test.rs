@@ -18,7 +18,9 @@ fn the_chat_pane_has_less_top_and_bottom_padding_than_24px_on_every_side() {
     let start = GUI_MAIN
         .find("let mut right = div()")
         .expect("the chat pane is built in render");
-    let pane = &GUI_MAIN[start..start + 900];
+    let pane = GUI_MAIN
+        .get(start..start + 900)
+        .expect("the chat pane is in range");
     assert!(pane.contains(".pt_3()"));
     assert!(pane.contains(".pb_4()"));
     assert!(!pane.contains(".p_6()"));

@@ -58,7 +58,9 @@ fn ctrl_x_logs_a_failed_pane_load_instead_of_stopping_the_handler() {
     let start = APP_STATE
         .find("if keys::is_close_pane(&event) && self.pane_manager.is_split() {")
         .expect("the Ctrl+X handler exists");
-    let handler = &APP_STATE[start..start + 900];
+    let handler = APP_STATE
+        .get(start..start + 900)
+        .expect("the handler is in range");
     assert!(handler.contains("if let Err(e) = self.load_session(session_id).await {"));
     assert!(!handler.contains("self.load_session(session_id).await?;"));
 }
