@@ -42,7 +42,7 @@ mod usage_view;
 use crate::screen_keys::{
     ChordMods, FocusTarget, ScreenAction, action_label, focus_target, screen_chord,
 };
-use crate::theme::{BASE_REM, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP};
+use crate::theme::{BASE_REM, Size, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP, text};
 
 use futures::channel::oneshot;
 
@@ -272,6 +272,11 @@ struct Dashboard {
     themes_origin: Option<palette::Palette>,
     /// The theme the themes screen is previewing, if the user has clicked one.
     themes_pick: Option<String>,
+    /// The row the keyboard is standing on in the themes sidebar, and every
+    /// theme this visit has already previewed, oldest first. The history is
+    /// how a good preview is found again without hunting the list.
+    themes_index: usize,
+    themes_history: Vec<String>,
     /// The plan checklist strip above the editor, re-read when its file moves.
     plan: plan_strip::PlanStripState,
     /// Which session the strip's path was resolved for, so the DB lookup runs
@@ -338,6 +343,23 @@ struct Dashboard {
     /// the TUI. `None` outside a git tree, which the footer shows as a dash
     /// rather than a made-up name.
     branch: Option<String>,
+}
+
+/// How many previews the themes sidebar's history strip keeps. A trail, not a
+/// second list: enough to step back a few times, short enough to stay quiet.
+const THEMES_HISTORY_LEN: usize = 6;
+
+/// Record a preview in the history strip.
+///
+/// Newest goes last so the strip reads oldest to newest, the same theme never
+/// appears twice (previewing it again moves it forward), and the trailing end
+/// is dropped once the trail is full.
+fn remember_preview(history: &mut Vec<String>, name: &str) {
+    history.retain(|seen| seen != name);
+    history.push(name.to_string());
+    while history.len() > THEMES_HISTORY_LEN {
+        history.remove(0);
+    }
 }
 
 impl Dashboard {
@@ -471,8 +493,16 @@ impl Dashboard {
         }
         self.themes_origin = Some(palette::current());
         self.themes_pick = None;
+        // The keyboard starts at the top of the list; the row that is already
+        // in force is marked as selected, so the eye finds it either way.
+        self.themes_index = 0;
+        self.themes_history.clear();
         self.rail_actions = None;
         self.screen = Screen::Themes;
+        // The window's root takes the keyboard, not the composer: on this
+        // screen the arrows walk the list and Enter previews, so a stale
+        // editor focus would send a message instead.
+        self.refocus_screen();
         cx.notify();
     }
 
@@ -485,14 +515,18 @@ impl Dashboard {
             palette::restore(origin);
         }
         self.themes_pick = None;
+        self.themes_history.clear();
         self.screen = Screen::Chat;
         self.refocus_screen();
         cx.notify();
     }
 
-    /// A row click: show the theme on the window, without saving it.
+    /// A row click or Enter on the highlighted row: show the theme on the window,
+    /// without saving it. The preview is remembered in the history list so the
+    /// same theme can be walked back to.
     fn preview_theme(&mut self, name: String, cx: &mut Context<Self>) {
         palette::preview(&name);
+        remember_preview(&mut self.themes_history, &name);
         self.themes_pick = Some(name);
         cx.notify();
     }
@@ -516,6 +550,7 @@ impl Dashboard {
         }
         self.themes_origin = None;
         self.themes_pick = None;
+        self.themes_history.clear();
         self.screen = Screen::Chat;
         self.refocus_screen();
         cx.notify();
@@ -1646,6 +1681,27 @@ impl Dashboard {
             }
             return;
         }
+        // The themes screen is a narrow sidebar over the conversation, so its
+        // keys belong to the list: up and down walk the highlight, Enter
+        // previews the highlighted row, and a click does the same thing with
+        // the mouse. Esc restores the palette from before, handled above with
+        // the overlays it belongs to.
+        if self.screen == Screen::Themes {
+            let names = themes_view::names();
+            let last = names.len().saturating_sub(1);
+            match ev.keystroke.key.as_str() {
+                "up" => self.themes_index = self.themes_index.saturating_sub(1),
+                "down" => self.themes_index = (self.themes_index + 1).min(last),
+                "enter" => {
+                    if let Some(name) = names.get(self.themes_index.min(last)).copied() {
+                        self.preview_theme(name.to_string(), cx);
+                    }
+                }
+                _ => {}
+            }
+            cx.notify();
+            return;
+        }
         match input::decide(&mut self.dash, translate_key(ev)) {
             UsageKeyOutcome::Consumed => cx.notify(),
             UsageKeyOutcome::Period(period) => {
@@ -2043,18 +2099,25 @@ impl Render for Dashboard {
                 (scroller.into_any_element(), footer.into_any_element())
             }
             Screen::Themes => {
-                // One row per theme, each drawn with its own swatches. A click
-                // previews it on the window; Keep saves it; Esc restores.
+                // The list is a sidebar, not a takeover: the conversation stays
+                // on screen and the preview repaints the whole window around
+                // it, so a theme is judged against real content. The rows are
+                // compact, the one the arrows stand on is marked, and only a
+                // click or Enter previews, so walking the list never flashes.
+                let shown = palette::current();
                 let picked = self.themes_pick.clone();
-                let mut list = div().flex().flex_col().gap_2();
-                for name in themes_view::names() {
-                    let selected = picked.as_deref() == Some(name);
+                let names = themes_view::names();
+                let current = self.themes_index.min(names.len().saturating_sub(1));
+                let mut list = div().flex().flex_col().gap_1();
+                for (index, name) in names.iter().enumerate() {
+                    let selected = picked.as_deref() == Some(*name);
                     let pick = name.to_string();
-                    list = list.child(themes_view::row(name, selected).on_click(cx.listener(
-                        move |this, _ev, _window, cx| {
+                    list = list.child(themes_view::row(name, selected, index == current).on_click(
+                        cx.listener(move |this, _ev, _window, cx| {
+                            this.themes_index = index;
                             this.preview_theme(pick.clone(), cx);
-                        },
-                    )));
+                        }),
+                    ));
                 }
                 let scroller = div()
                     .id("themes-body")
@@ -2062,6 +2125,75 @@ impl Render for Dashboard {
                     .min_h_0()
                     .overflow_y_scroll()
                     .child(list);
+                let header = div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .child(text("themes", Size::Sm, shown.text))
+                    .child(div().text_xs().text_color(rgb(shown.text_muted)).child(
+                        SharedString::from(format!("{}/{}", current + 1, names.len())),
+                    ));
+                let mut panel = div()
+                    .id("themes-sidebar")
+                    .w(px(248.0))
+                    .flex_shrink_0()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .p_3()
+                    .rounded(px(8.0))
+                    .border_1()
+                    .border_color(rgb(shown.panel_hi))
+                    .bg(rgb(shown.panel))
+                    .child(header)
+                    .child(scroller);
+                // The trail of previews this visit, newest first and never
+                // the one on screen: the row above is the step back.
+                let earlier: Vec<String> = self
+                    .themes_history
+                    .iter()
+                    .rev()
+                    .filter(|name| Some(name.as_str()) != picked.as_deref())
+                    .take(4)
+                    .cloned()
+                    .collect();
+                if !earlier.is_empty() {
+                    let mut history = div().flex().flex_col().gap_1();
+                    for name in earlier {
+                        let pick = name.clone();
+                        history = history.child(themes_view::history_row(&name).on_click(
+                            cx.listener(move |this, _ev, _window, cx| {
+                                this.preview_theme(pick.clone(), cx);
+                            }),
+                        ));
+                    }
+                    panel = panel
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(shown.text_faint))
+                                .child("preview history"),
+                        )
+                        .child(history);
+                }
+                let keep = cx.listener(|this, _ev: &ClickEvent, _window, cx| this.keep_theme(cx));
+                panel = panel.child(
+                    div()
+                        .id("themes-keep")
+                        .flex()
+                        .justify_center()
+                        .px_3()
+                        .py_1()
+                        .rounded(px(6.0))
+                        .bg(rgb(shown.panel_hi))
+                        .border_1()
+                        .border_color(rgb(shown.accent))
+                        .text_color(rgb(shown.text))
+                        .cursor_pointer()
+                        .on_click(keep)
+                        .child("keep"),
+                );
                 let hint = match &picked {
                     Some(name) => format!(
                         "previewing {name} · keep saves it for the {} system appearance · esc restores",
@@ -2071,9 +2203,8 @@ impl Render for Dashboard {
                             "light"
                         }
                     ),
-                    None => "click a theme to preview it · esc restores".to_string(),
+                    None => "arrows walk the list · enter previews · esc restores".to_string(),
                 };
-                let keep = cx.listener(|this, _ev, _window, cx| this.keep_theme(cx));
                 let footer = div()
                     .flex()
                     .flex_row()
@@ -2083,22 +2214,26 @@ impl Render for Dashboard {
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(palette::current().text_muted))
+                            .text_color(rgb(shown.text_muted))
                             .child(SharedString::from(hint)),
-                    )
-                    .child(
-                        div()
-                            .id("themes-keep")
-                            .px_3()
-                            .py_1()
-                            .rounded(px(6.0))
-                            .bg(rgb(palette::current().panel_hi))
-                            .text_color(rgb(palette::current().text))
-                            .cursor_pointer()
-                            .on_click(keep)
-                            .child("keep"),
                     );
-                (scroller.into_any_element(), footer.into_any_element())
+                let middle = div()
+                    .flex()
+                    .flex_row()
+                    .flex_1()
+                    .min_h_0()
+                    .gap_3()
+                    .child(div().flex().flex_col().flex_1().min_w_0().min_h_0().child(
+                        transcript::view(
+                            &self.transcript,
+                            &self.transcript_scroll,
+                            &self.live,
+                            self.busy,
+                            fold_handlers,
+                        ),
+                    ))
+                    .child(panel);
+                (middle.into_any_element(), footer.into_any_element())
             }
         };
 
@@ -2473,6 +2608,8 @@ fn main() {
                         help_open: false,
                         themes_origin: None,
                         themes_pick: None,
+                        themes_index: 0,
+                        themes_history: Vec::new(),
                         plan: plan_strip::PlanStripState::default(),
                         plan_for: None,
                         transcript: transcript::TranscriptState {
@@ -2867,6 +3004,44 @@ fn confirm_delete_overlay(
 
 #[cfg(test)]
 mod tests {
+    use super::{THEMES_HISTORY_LEN, remember_preview};
+
+    /// The themes sidebar keeps a short trail of what was previewed: newest
+    /// last, no duplicates, and never longer than the strip is meant to be.
+    /// Re-previewing an earlier theme moves it forward instead of listing it
+    /// twice, which is what makes the trail walkable.
+    #[test]
+    fn themes_preview_history_is_newest_last_unique_and_capped() {
+        let mut history: Vec<String> = Vec::new();
+        remember_preview(&mut history, "dark");
+        remember_preview(&mut history, "light");
+        assert_eq!(history, vec!["dark".to_string(), "light".to_string()]);
+
+        // The same theme again moves to the end, no second row.
+        remember_preview(&mut history, "dark");
+        assert_eq!(history, vec!["light".to_string(), "dark".to_string()]);
+
+        for name in ["a", "b", "c", "d", "e", "f"] {
+            remember_preview(&mut history, name);
+        }
+        assert_eq!(history.len(), THEMES_HISTORY_LEN);
+        assert_eq!(history.last().map(String::as_str), Some("f"));
+        assert!(!history.iter().any(|seen| seen == "dark"));
+    }
+
+    /// The themes screen paints the conversation next to a sidebar, so a
+    /// preview is judged against real content and no row is reachable only by
+    /// mouse: arrows and Enter run through the same handler as a click.
+    #[test]
+    fn themes_screen_draws_a_sidebar_beside_the_conversation() {
+        let src = include_str!("main.rs");
+        assert!(src.contains(".id(\"themes-sidebar\")"));
+        assert!(src.contains("themes_view::row(name, selected, index == current)"));
+        assert!(src.contains("themes_view::history_row"));
+        assert!(src.contains("\"enter\" => {"));
+        assert!(src.contains(".id(\"themes-keep\")"));
+    }
+
     /// One dialog, one delete path. The bridge that erases the row has exactly
     /// one call site, and that site is the dialog's own confirm handler. A
     /// second call site would mean a gesture can delete a conversation

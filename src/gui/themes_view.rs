@@ -36,14 +36,22 @@ fn swatches(shown: Palette) -> Div {
         .child(square(shown.accent))
 }
 
-/// One selectable row. `selected` marks the theme the window is showing, so
-/// the row reads as the current choice while the others are previews.
-pub fn row(name: &str, selected: bool) -> Stateful<Div> {
+/// One selectable row in the sidebar list. `selected` marks the theme the
+/// window is previewing, `current` the row the keyboard is standing on: they
+/// are different facts, so the border and the fill carry them apart.
+pub fn row(name: &str, selected: bool, current: bool) -> Stateful<Div> {
     let shown = palette::resolve(name);
     let border = if selected {
         shown.accent
+    } else if current {
+        shown.text_muted
     } else {
         shown.panel_hi
+    };
+    let fill = if selected || current {
+        shown.panel_hi
+    } else {
+        shown.panel
     };
     div()
         .id(SharedString::from(format!("theme-row-{name}")))
@@ -51,14 +59,33 @@ pub fn row(name: &str, selected: bool) -> Stateful<Div> {
         .flex_row()
         .items_center()
         .justify_between()
-        .px_3()
-        .py_2()
-        .rounded(px(6.0))
+        .gap_2()
+        .px_2()
+        .py_1()
+        .rounded(px(4.0))
         .border_1()
         .border_color(rgb(border))
-        .bg(rgb(shown.panel))
+        .bg(rgb(fill))
         .hover(|d| d.bg(rgb(shown.panel_hi)))
         .cursor_pointer()
-        .child(text(name.to_string(), Size::Sm, shown.text))
+        .child(text(name.to_string(), Size::Xs, shown.text))
         .child(swatches(shown))
+}
+
+/// A row in the preview history: the themes this visit has already shown, so
+/// a good one can be found again without hunting the list. Deliberately
+/// quieter than [`row`]: no border, no swatches, just the name.
+pub fn history_row(name: &str) -> Stateful<Div> {
+    let shown = palette::resolve(name);
+    div()
+        .id(SharedString::from(format!("theme-history-{name}")))
+        .flex()
+        .flex_row()
+        .items_center()
+        .px_2()
+        .py_1()
+        .rounded(px(4.0))
+        .cursor_pointer()
+        .hover(|d| d.bg(rgb(shown.panel_hi)))
+        .child(text(name.to_string(), Size::Xs, shown.text_muted))
 }
