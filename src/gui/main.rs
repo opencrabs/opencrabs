@@ -40,7 +40,7 @@ mod transcript;
 mod usage_view;
 
 use crate::screen_keys::{
-    action_label, focus_target, screen_chord, ChordMods, FocusTarget, ScreenAction,
+    ChordMods, FocusTarget, ScreenAction, action_label, focus_target, screen_chord,
 };
 use crate::theme::{BASE_REM, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP};
 
@@ -281,6 +281,9 @@ struct Dashboard {
     /// load can open at the bottom where the conversation ends.
     transcript: transcript::TranscriptState,
     transcript_scroll: ScrollHandle,
+    /// The rail's own scroll handle, so a cursor moved by the arrows can
+    /// ask the next frame to bring its row into view (#2351).
+    rail_scroll: ScrollHandle,
     /// The message editor (task 4). Typing goes to it while it holds focus;
     /// its Sent events arrive through the subscription made in `main`.
     editor: Entity<editor::Editor>,
@@ -588,6 +591,15 @@ impl Dashboard {
         self.sessions.filter_active = false;
         self.refocus_screen();
         cx.notify();
+    }
+
+    /// Drop the rail cursor when the row it points at is no longer shown,
+    /// so the keyboard never arms a ghost (#2351). Clearing the filter only
+    /// ever adds rows back, so it needs no call here.
+    fn normalize_cursor(&mut self) {
+        if !self.sessions.cursor_visible() {
+            self.sessions.cursor = None;
+        }
     }
 
     /// The session-files browser body: one row per tracked file, name on the
@@ -1235,6 +1247,11 @@ impl Dashboard {
                     Ok(items) => {
                         this.sessions.items = items;
                         this.sessions.error = None;
+                        // A refetch can drop the row the cursor is on; a
+                        // cursor pointing at a ghost would arm nothing.
+                        if !this.sessions.cursor_visible() {
+                            this.sessions.cursor = None;
+                        }
                     }
                     Err(e) => this.sessions.error = Some(e.into()),
                 }
@@ -1427,6 +1444,7 @@ impl Dashboard {
                 "escape" | "enter" => self.close_rail_filter(cx),
                 "backspace" => {
                     self.sessions.filter.pop();
+                    self.normalize_cursor();
                     cx.notify();
                 }
                 _ => {
@@ -1434,6 +1452,7 @@ impl Dashboard {
                         && !ch.is_control()
                     {
                         self.sessions.filter.push(ch);
+                        self.normalize_cursor();
                         cx.notify();
                     }
                 }
@@ -1483,6 +1502,16 @@ impl Dashboard {
             }
             if !self.busy {
                 self.esc_at = None;
+                // Idle Esc hands the keyboard between the composer and the
+                // rail: the one keyboard bridge that makes arrow navigation
+                // reachable without a mouse click first (#2351). Second Esc
+                // hands it back.
+                if self.editor.read(cx).focus_handle.is_focused(window) {
+                    window.blur();
+                } else {
+                    self.refocus_screen();
+                }
+                cx.notify();
                 return;
             }
             let now = std::time::Instant::now();
@@ -1524,6 +1553,36 @@ impl Dashboard {
             logging::debug(&format!("zoom -> {:.2}x", self.rem / BASE_REM));
             cx.notify();
             return;
+        }
+        // Rail arrows and enter. This sits after the editor gate, so the
+        // composer keeps its up, down and enter actions while it holds
+        // focus, and before the chat-screen return, which is the dead end
+        // arrows used to die in (#2351).
+        if self.screen == Screen::Chat && self.rail_open {
+            match ev.keystroke.key.as_str() {
+                "up" | "down" => {
+                    let delta = if ev.keystroke.key == "down" { 1 } else { -1 };
+                    if let Some(id) = self.sessions.cursor_step(self.sessions.cursor, delta) {
+                        self.sessions.cursor = Some(id);
+                        if let Some(ix) = self.sessions.cursor_index(id) {
+                            self.rail_scroll.scroll_to_item(ix);
+                        }
+                    }
+                    cx.notify();
+                    return;
+                }
+                "enter" => {
+                    if let Some(id) = self.sessions.cursor {
+                        self.open_session(id, cx);
+                        // Back to the composer, the place a newly opened
+                        // conversation is about to be typed into.
+                        self.refocus_screen();
+                    }
+                    cx.notify();
+                    return;
+                }
+                _ => {}
+            }
         }
         // Chat owns no usage keys. Esc included: backing out of the
         // conversation into the ledger was the mixing the owner called out,
@@ -1626,6 +1685,7 @@ impl Render for Dashboard {
         for s in self.sessions.ordered() {
             let id = s.id;
             let selected = self.sessions.selected == Some(id);
+            let cursored = self.sessions.cursor == Some(id);
             let favorite = self.sessions.is_favorite(id);
             // A row's actions stay out of sight until asked for. There is no
             // always-visible delete: an ✕ on every row reads as "close" and
@@ -1653,7 +1713,7 @@ impl Render for Dashboard {
             } else {
                 None
             };
-            let r = sessions::row(s, selected, favorite, action);
+            let r = sessions::row(s, selected, cursored, favorite, action);
             // The press starts the slide and closes any other row's strip.
             let press = cx.listener(move |this, _ev: &MouseDownEvent, window, cx| {
                 this.rail_slide_opened = None;
@@ -1679,7 +1739,12 @@ impl Render for Dashboard {
             let r = r.on_mouse_down(MouseButton::Left, press);
             rail_rows.push(sessions::on_click(r, handler));
         }
-        let rail = sessions::rail(&self.sessions, rail_rows, self.rail_width);
+        let rail = sessions::rail(
+            &self.sessions,
+            rail_rows,
+            self.rail_width,
+            &self.rail_scroll,
+        );
 
         // One label drives the in-window chrome and the OS titlebar: the old
         // static "usage" title sat over an open conversation. The owner
@@ -2214,6 +2279,7 @@ fn main() {
             items,
             favorites: favorites.clone(),
             selected: None,
+            cursor: None,
             error: None,
             filter: String::new(),
             filter_active: false,
@@ -2222,6 +2288,7 @@ fn main() {
             items: Vec::new(),
             favorites,
             selected: None,
+            cursor: None,
             error: Some(e.into()),
             filter: String::new(),
             filter_active: false,
@@ -2307,6 +2374,7 @@ fn main() {
                             ..Default::default()
                         },
                         transcript_scroll: ScrollHandle::new(),
+                        rail_scroll: ScrollHandle::new(),
                         editor,
                         agent_rx,
                         sink: agent_sink,

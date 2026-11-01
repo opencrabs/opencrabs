@@ -15,8 +15,8 @@ use crate::palette;
 use std::collections::HashSet;
 
 use gpui::{
-    App, ClickEvent, Div, InteractiveElement, SharedString, Stateful, Styled, Window, div,
-    prelude::*, rems, rgb,
+    App, ClickEvent, Div, InteractiveElement, ScrollHandle, SharedString, Stateful, Styled, Window,
+    div, prelude::*, rems, rgb,
 };
 
 use opencrabs::db::Database;
@@ -31,6 +31,11 @@ pub struct SessionsState {
     pub items: Vec<Session>,
     /// The session a click chose; the transcript (task 3) reads it.
     pub selected: Option<uuid::Uuid>,
+    /// The row the keyboard is on. Distinct from `selected`: that is the
+    /// chat whose transcript is open, this is the row an arrow is pointing
+    /// at, the same split the TUI keeps between its list index and the open
+    /// chat (#2351).
+    pub cursor: Option<uuid::Uuid>,
     /// Set when the fetch failed; the rail says why instead of lying empty.
     pub error: Option<SharedString>,
     /// ctrl+f's query. A non-empty query narrows the rail to the chats whose
@@ -68,6 +73,34 @@ impl SessionsState {
     /// Whether this session is pinned right now.
     pub fn is_favorite(&self, id: uuid::Uuid) -> bool {
         self.favorites.contains(&id)
+    }
+
+    /// Move the cursor one row down (positive delta) or up (negative),
+    /// walking the same pinned-first order the rail paints and clamping at
+    /// both ends. An unarmed cursor starts at the first row either way, so
+    /// the first press always lands on a real row.
+    pub fn cursor_step(&self, current: Option<uuid::Uuid>, delta: isize) -> Option<uuid::Uuid> {
+        let ids: Vec<uuid::Uuid> = self.ordered().map(|s| s.id).collect();
+        let last = ids.len().checked_sub(1)?;
+        let at = current
+            .and_then(|c| ids.iter().position(|&id| id == c))
+            .map(|p| p as isize)
+            .unwrap_or(if delta >= 0 { -1 } else { 0 });
+        let next = (at + delta).clamp(0, last as isize) as usize;
+        Some(ids[next])
+    }
+
+    /// The row's index in the painted order, for the scroll handle's
+    /// scroll_to_item. None when the row is not shown right now.
+    pub fn cursor_index(&self, id: uuid::Uuid) -> Option<usize> {
+        self.ordered().position(|s| s.id == id)
+    }
+
+    /// Whether the cursor points at a row the rail still shows. A deleted,
+    /// filtered-out or refetched-away row must never stay armed.
+    pub fn cursor_visible(&self) -> bool {
+        self.cursor
+            .is_some_and(|c| self.visible().any(|s| s.id == c))
     }
 
     /// How many of the ledger's sessions match the query.
@@ -302,6 +335,7 @@ fn fit(s: &str, max_chars: usize) -> String {
 pub fn row(
     s: &Session,
     selected: bool,
+    cursored: bool,
     favorited: bool,
     action: Option<Stateful<Div>>,
 ) -> Stateful<Div> {
@@ -359,6 +393,12 @@ pub fn row(
         .rounded_sm()
         .cursor_pointer()
         .when(selected, |d| d.bg(rgb(palette::current().selection)))
+        // The keyboard's row reads as an accent bar on the left edge,
+        // distinct from the filled block that marks the open conversation:
+        // two different states, two different paints (#2351).
+        .when(cursored, |d| {
+            d.border_l_2().border_color(rgb(palette::current().accent))
+        })
         // The hover tint is for rows that are not selected. On the selected row
         // it would paint over the selection and hide which conversation is open.
         .when(!selected, |d| d.hover(|d| d.bg(rgb(palette::current().bg))))
@@ -437,12 +477,18 @@ pub fn delete_button() -> Stateful<Div> {
 /// The rail column: header and error slot from the state, then the caller's
 /// prebuilt rows (each already carrying its click handler). Stateful, because
 /// the scroll container needs an element id.
-pub fn rail(state: &SessionsState, rows: Vec<Stateful<Div>>, width_rem: f32) -> Stateful<Div> {
+pub fn rail(
+    state: &SessionsState,
+    rows: Vec<Stateful<Div>>,
+    width_rem: f32,
+    scroll: &ScrollHandle,
+) -> Stateful<Div> {
     let mut col = div()
         .id("session-rail")
         .flex()
         .flex_col()
         .overflow_y_scroll()
+        .track_scroll(scroll)
         .flex_none()
         .w(rems(width_rem))
         .h_full()
@@ -681,5 +727,76 @@ mod tests {
 
         assert!(state.is_favorite(uuid::Uuid::from_u128(7)));
         assert!(!state.is_favorite(uuid::Uuid::from_u128(8)));
+    }
+
+    /// #2351's main path: Down walks the painted order, pinned rows first,
+    /// and an unarmed cursor starts at the top so the first press lands on
+    /// a real row.
+    #[test]
+    fn cursor_moves_through_the_ordered_rows() {
+        let mut state = SessionsState::default();
+        state.items = vec![session(1, "a"), session(2, "b"), session(3, "c")];
+        // Pinning the last ledger row must not confuse the walk: the rail
+        // paints it first, so the first Down lands on it.
+        state.favorites.insert(uuid::Uuid::from_u128(3));
+
+        let first = state.cursor_step(None, 1).expect("rows exist");
+        assert_eq!(
+            first,
+            uuid::Uuid::from_u128(3),
+            "pinned row is painted first"
+        );
+
+        let second = state.cursor_step(Some(first), 1).expect("rows exist");
+        assert_eq!(second, uuid::Uuid::from_u128(1));
+
+        let third = state.cursor_step(Some(second), 1).expect("rows exist");
+        assert_eq!(third, uuid::Uuid::from_u128(2));
+
+        // Up walks the same order backwards from an unarmed start.
+        let up_first = state.cursor_step(None, -1).expect("rows exist");
+        assert_eq!(up_first, uuid::Uuid::from_u128(3));
+        assert_eq!(
+            state.cursor_step(Some(up_first), -1),
+            Some(uuid::Uuid::from_u128(3)),
+            "up from the top row clamps, it does not wrap"
+        );
+    }
+
+    /// Both ends stop, they never wrap into the opposite end: a wrap reads
+    /// as a jump to a row the user cannot see.
+    #[test]
+    fn cursor_clamps_at_both_ends() {
+        let mut state = SessionsState::default();
+        state.items = vec![session(1, "a"), session(2, "b")];
+        let first = uuid::Uuid::from_u128(1);
+        let last = uuid::Uuid::from_u128(2);
+
+        assert_eq!(state.cursor_step(Some(first), -1), Some(first));
+        assert_eq!(state.cursor_step(Some(last), 1), Some(last));
+    }
+
+    /// A cursor on a row that is gone (deleted, filtered out) disarms
+    /// instead of arming a ghost; a cursor on a surviving row stays put.
+    #[test]
+    fn cursor_survives_a_row_disappearing() {
+        let mut state = SessionsState::default();
+        state.items = vec![session(1, "a"), session(2, "b")];
+        let first = uuid::Uuid::from_u128(1);
+        let second = uuid::Uuid::from_u128(2);
+
+        state.cursor = Some(second);
+        state.items = vec![session(1, "a")];
+        assert!(
+            !state.cursor_visible(),
+            "the cursor points at a removed row"
+        );
+
+        state.cursor = Some(first);
+        state.items = vec![session(1, "a"), session(3, "c")];
+        assert!(
+            state.cursor_visible(),
+            "a refetch that keeps the row keeps the cursor"
+        );
     }
 }
