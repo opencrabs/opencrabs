@@ -39,6 +39,10 @@ pub enum Commands {
         /// Force onboarding wizard before chat
         #[arg(long)]
         onboard: bool,
+
+        /// Start clean: drop the saved pane layout and open a new session
+        #[arg(long)]
+        new: bool,
     },
 
     /// Run the onboarding setup wizard
@@ -685,15 +689,19 @@ pub async fn run() -> Result<()> {
     match cli.command {
         None | Some(Commands::Chat { .. }) => {
             // Default: Interactive TUI mode
-            let (session, force_onboard) = match &cli.command {
-                Some(Commands::Chat { session, onboard }) => (session.clone(), *onboard),
-                _ => (None, false),
+            let (session, force_onboard, start_fresh) = match &cli.command {
+                Some(Commands::Chat {
+                    session,
+                    onboard,
+                    new,
+                }) => (session.clone(), *onboard, *new),
+                _ => (None, false, false),
             };
-            ui::cmd_chat(&config, session, force_onboard).await
+            ui::cmd_chat(&config, session, force_onboard, start_fresh).await
         }
         Some(Commands::Onboard) => {
             // Launch TUI with onboarding wizard (skip splash)
-            ui::cmd_chat(&config, None, true).await
+            ui::cmd_chat(&config, None, true, false).await
         }
         Some(Commands::Status) => commands::cmd_status(&config).await,
         Some(Commands::Doctor { fix }) => commands::cmd_doctor(&config, fix).await,
