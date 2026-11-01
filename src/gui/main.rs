@@ -80,6 +80,14 @@ enum Screen {
     Themes,
 }
 
+/// Where the next frame puts focus. The composer owns Chat, every other
+/// screen is driven from the root, so a key always has a named receiver.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FocusTarget {
+    Composer,
+    Root,
+}
+
 /// The ledger path, unchanged: `config.database.path`, with the same
 /// default (`~/.opencrabs/opencrabs.db`) when config cannot be read at all.
 fn ledger_path() -> std::path::PathBuf {
@@ -205,6 +213,10 @@ struct Dashboard {
     /// state the TUI's own handler mutates, driven by the same `decide`.
     dash: DashboardState,
     focus: FocusHandle,
+    /// Where the next frame should put focus. Every screen transition sets it,
+    /// so the caret is never left on an element that stopped drawing and a
+    /// screen key always has a named receiver.
+    refocus: Option<FocusTarget>,
     /// Monotonic tag on the latest period fetch; only its result is applied,
     /// so a slow fetch landing after a newer one cannot paint stale data.
     pending: u64,
@@ -387,6 +399,7 @@ impl Dashboard {
             .ok();
         })
         .detach();
+        self.refocus_screen();
         cx.notify();
     }
 
@@ -408,6 +421,18 @@ impl Dashboard {
         self.toggle_turn(&anchor, cx);
     }
 
+    /// Ask the next frame to put focus where the new screen expects it.
+    ///
+    /// A transition calls this instead of touching focus itself: only the
+    /// render holds a window to focus through, and this is the one place that
+    /// decides which element a screen owns (#2350).
+    fn refocus_screen(&mut self) {
+        self.refocus = Some(match self.screen {
+            Screen::Chat => FocusTarget::Composer,
+            _ => FocusTarget::Root,
+        });
+    }
+
     /// ctrl+u: open the usage ledger, or return to the conversation. The panes
     /// never mix and the chat stays exactly where it was.
     fn toggle_usage(&mut self, cx: &mut Context<Self>) {
@@ -427,6 +452,7 @@ impl Dashboard {
             Screen::Files => self.screen = Screen::Usage,
             Screen::Themes => self.close_themes(true, cx),
         }
+        self.refocus_screen();
         cx.notify();
     }
 
@@ -454,6 +480,7 @@ impl Dashboard {
         }
         self.themes_pick = None;
         self.screen = Screen::Chat;
+        self.refocus_screen();
         cx.notify();
     }
 
@@ -484,6 +511,7 @@ impl Dashboard {
         self.themes_origin = None;
         self.themes_pick = None;
         self.screen = Screen::Chat;
+        self.refocus_screen();
         cx.notify();
     }
 
@@ -496,6 +524,10 @@ impl Dashboard {
         self.help_open = !self.help_open;
         if self.help_open {
             self.rail_actions = None;
+        } else {
+            // Closing the reference is a return to the conversation, so the
+            // caret goes back where typing is expected.
+            self.refocus_screen();
         }
         cx.notify();
     }
@@ -507,6 +539,7 @@ impl Dashboard {
     fn toggle_files(&mut self, cx: &mut Context<Self>) {
         if self.screen != Screen::Chat {
             self.screen = Screen::Chat;
+            self.refocus_screen();
             cx.notify();
             return;
         }
@@ -519,6 +552,7 @@ impl Dashboard {
         self.files_err = None;
         self.files_for = Some(sid);
         self.fetch_files(sid, cx);
+        self.refocus_screen();
         cx.notify();
     }
 
@@ -549,6 +583,7 @@ impl Dashboard {
     fn close_rail_filter(&mut self, cx: &mut Context<Self>) {
         self.sessions.filter.clear();
         self.sessions.filter_active = false;
+        self.refocus_screen();
         cx.notify();
     }
 
@@ -1120,6 +1155,7 @@ impl Dashboard {
             provider,
             model,
         );
+        self.refocus_screen();
         cx.notify();
     }
 
@@ -1562,6 +1598,16 @@ impl Dashboard {
 
 impl Render for Dashboard {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The pending focus from the last transition is applied here because
+        // this is the only place holding a window to focus through. Applying
+        // it before the tree is built means the frame that shows the new
+        // screen is the frame that can be typed into.
+        if let Some(target) = self.refocus.take() {
+            match target {
+                FocusTarget::Composer => window.focus(&self.editor.read(cx).focus_handle),
+                FocusTarget::Root => window.focus(&self.focus),
+            }
+        }
         // The plan strip follows the open conversation. Where a plan lives
         // depends on what the session is bound to, so the lookup is a DB read
         // and runs once per selection, off the paint path; the strip itself
@@ -2067,10 +2113,12 @@ impl Render for Dashboard {
             let confirm = cx.listener(move |this, _ev, _window, cx| {
                 this.confirm_delete = None;
                 this.rail_actions = None;
+                this.refocus_screen();
                 this.delete_session(id, cx);
             });
             let cancel = cx.listener(|this, _ev, _window, cx| {
                 this.confirm_delete = None;
+                this.refocus_screen();
                 cx.notify();
             });
             root = root.child(confirm_delete_overlay(title, confirm, cancel));
@@ -2241,6 +2289,7 @@ fn main() {
                         state,
                         dash: DashboardState::default(),
                         focus: focus.clone(),
+                        refocus: None,
                         pending: 0,
                         files: Vec::new(),
                         files_for: None,
