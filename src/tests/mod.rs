@@ -355,6 +355,7 @@ pub mod group_history_test;
 pub mod gui_debug_config_test;
 pub mod gui_depth_test;
 pub mod gui_esc_screens_test;
+pub mod gui_footer_title_test;
 pub mod gui_layout_test;
 pub mod gui_overlay_layer_test;
 pub mod gui_theme_config_test;
