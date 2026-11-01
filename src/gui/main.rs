@@ -3012,6 +3012,47 @@ mod tests {
     }
 
     #[test]
+    fn help_lists_every_rail_chord() {
+        use opencrabs::ui_core::help_keys::{self, HelpSection};
+
+        // The rail's commands are only discoverable if the table lists
+        // them: each one appears exactly once, under SESSIONS, with a
+        // window chord (#2355). ctrl+u is absent on purpose: the usage
+        // ledger already documents it once, in GLOBAL. ctrl+s likewise:
+        // GLOBAL's "List sessions" row is that command.
+        let wanted = [
+            ("up/down", "Move the highlight in the list"),
+            ("enter", "Open the highlighted session"),
+            ("ctrl+f", "Find a session"),
+            ("ctrl+shift+f", "Pin the selected session"),
+            ("ctrl+d", "Delete the selected session"),
+            ("ctrl+g", "Session files"),
+            ("esc", "Cancel or step back"),
+        ];
+        let sessions: Vec<_> = help_keys::section_rows(HelpSection::Sessions).collect();
+        for (chord, description) in wanted {
+            let hits: Vec<_> = sessions.iter().filter(|row| row.neutral == chord).collect();
+            assert_eq!(hits.len(), 1, "{chord} must be listed exactly once");
+            let row = hits[0];
+            assert_eq!(row.description, description, "{chord} changed its words");
+            assert_eq!(
+                row.gui,
+                Some(match chord {
+                    "up/down" => "up/down",
+                    "ctrl+f" => "ctrl-f",
+                    "ctrl+shift+f" => "ctrl-shift-f",
+                    "ctrl+d" => "ctrl-d",
+                    "ctrl+s" => "ctrl-s",
+                    "ctrl+g" => "ctrl-g",
+                    _ => chord,
+                }),
+                "{chord} must carry the window's spelling"
+            );
+        }
+        assert_eq!(sessions.len(), wanted.len(), "SESSIONS lists nothing else");
+    }
+
+    #[test]
     fn help_overlay_opens_on_ctrl_h_and_cmd_question() {
         // A source scan, because the handler needs a window and a key event
         // to exercise. The rule here is wiring: both doors land on the same

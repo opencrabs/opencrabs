@@ -25,7 +25,7 @@
 //! chord to render.
 
 /// Which block of the help screen a row belongs to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HelpSection {
     /// Keys that work everywhere, including outside the editor.
     Global,
@@ -33,6 +33,9 @@ pub enum HelpSection {
     Chat,
     /// Keys that edit the input line.
     InputEditing,
+    /// Keys that act on the session list: the terminal's sessions screen
+    /// and the window's rail (#2355).
+    Sessions,
 }
 
 impl HelpSection {
@@ -42,11 +45,12 @@ impl HelpSection {
             Self::Global => "GLOBAL",
             Self::Chat => "CHAT",
             Self::InputEditing => "INPUT EDITING",
+            Self::Sessions => "SESSIONS",
         }
     }
 
     /// Every section, in the order the help screen shows them.
-    pub const ALL: [Self; 3] = [Self::Global, Self::Chat, Self::InputEditing];
+    pub const ALL: [Self; 4] = [Self::Global, Self::Chat, Self::InputEditing, Self::Sessions];
 }
 
 /// One documented chord and what it does.
@@ -251,6 +255,60 @@ pub const ROWS: &[HelpRow] = &[
         None,
         "Delete to line start (vim)",
     ),
+    // ── SESSIONS ──
+    // Every chord here is answered on both surfaces, each with its own
+    // spelling. The window's rail answers arrows only while it owns the
+    // keyboard (idle esc hands it over); the terminal answers them on its
+    // sessions screen.
+    row(
+        HelpSection::Sessions,
+        "up/down",
+        "↑ / ↓",
+        Some("up/down"),
+        "Move the highlight in the list",
+    ),
+    row(
+        HelpSection::Sessions,
+        "enter",
+        "Enter",
+        Some("enter"),
+        "Open the highlighted session",
+    ),
+    row(
+        HelpSection::Sessions,
+        "ctrl+f",
+        "/",
+        Some("ctrl-f"),
+        "Find a session",
+    ),
+    row(
+        HelpSection::Sessions,
+        "ctrl+shift+f",
+        "Ctrl+F",
+        Some("ctrl-shift-f"),
+        "Pin the selected session",
+    ),
+    row(
+        HelpSection::Sessions,
+        "ctrl+d",
+        "D",
+        Some("ctrl-d"),
+        "Delete the selected session",
+    ),
+    row(
+        HelpSection::Sessions,
+        "ctrl+g",
+        "F",
+        Some("ctrl-g"),
+        "Session files",
+    ),
+    row(
+        HelpSection::Sessions,
+        "esc",
+        "Esc",
+        Some("esc"),
+        "Cancel or step back",
+    ),
 ];
 
 /// Every row in display order.
@@ -306,6 +364,13 @@ mod tests {
         "Ctrl+Backspace",
         "Ctrl+W",
         "Ctrl+U",
+        "↑ / ↓",
+        "Enter",
+        "/",
+        "Ctrl+F",
+        "D",
+        "F",
+        "Esc",
     ];
 
     #[test]
@@ -342,7 +407,17 @@ mod tests {
                 "{} is not a machine spelling",
                 r.neutral
             );
-            assert!(seen.insert(r.neutral), "{} appears twice", r.neutral);
+            // Uniqueness is per section: the same physical key answers two
+            // commands depending on where the keyboard is (enter sends in
+            // the chat and opens in the list), and both meanings deserve
+            // their row. `find` resolves the first, so globally unique
+            // chords stay the lookup keys.
+            assert!(
+                seen.insert((r.section, r.neutral)),
+                "{} appears twice under {}",
+                r.neutral,
+                r.section.title()
+            );
         }
     }
 
