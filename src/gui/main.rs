@@ -1923,7 +1923,12 @@ impl Render for Dashboard {
             .min_w_0()
             .min_h_0()
             .gap_3()
-            .p_6()
+            // Less top and bottom room than the old 24px on every side: the
+            // header lines up with the sessions title, and the input is not
+            // floating in empty space above the window edge.
+            .px_6()
+            .pt_3()
+            .pb_4()
             .child(chrome)
             .child(middle);
         right = match self.screen {
