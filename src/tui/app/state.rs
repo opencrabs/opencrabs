@@ -3880,6 +3880,13 @@ impl App {
             return Ok(());
         }
 
+        // Alt+T opens the theme picker from anywhere, the way `/theme` does.
+        // An open picker keeps its own keys, so a second press is ignored.
+        if keys::is_themes(&event) && self.theme_picker.is_none() {
+            self.theme_picker = Some(crate::tui::render::theme_picker::ThemePickerState::open());
+            return Ok(());
+        }
+
         if keys::is_list_sessions(&event) {
             self.switch_mode(AppMode::Sessions).await?;
             return Ok(());
