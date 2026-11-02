@@ -3453,7 +3453,7 @@ impl App {
         Ok(())
     }
 
-    /// Open the deep find card, or close it when it is already up, so the
+    /// Open the Seeker card, or close it when it is already up, so the
     /// chord is a toggle like every other one in the terminal (#2458).
     fn open_command_palette(&mut self) {
         if self.command_palette.is_some() {
@@ -3596,7 +3596,7 @@ impl App {
             return Ok(());
         }
 
-        // Deep find (#2458): the chord opens one card that finds a
+        // Seeker (#2458): the chord opens one card that finds a
         // conversation, a command or a surface, and while it is up it owns
         // every key. It is checked before every dialog so no field underneath
         // can eat a character meant for the card.

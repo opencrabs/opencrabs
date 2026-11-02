@@ -718,7 +718,7 @@ impl Dashboard {
         self.refocus_screen();
     }
 
-    /// Open the deep find card (`ctrl-shift-f`, `cmd-k`): one field over the
+    /// Open the Seeker card (`ctrl-shift-f`, `cmd-k`): one field over the
     /// window that finds a conversation, a command or a surface with the same
     /// scoring the terminal uses (#2458).
     ///
@@ -3020,7 +3020,7 @@ impl Dashboard {
     }
 
     fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        // The deep find card owns every key while it is up, and the chord that
+        // The Seeker card owns every key while it is up, and the chord that
         // opens it sits ahead of every other reader: one field that finds a
         // conversation, a command or a surface is only useful if the composer
         // underneath cannot eat the characters (#2458). ctrl-shift-f is the
@@ -3130,7 +3130,7 @@ impl Dashboard {
         // ctrl+shift+p pins the row the keyboard is on, or the open
         // conversation when the rail has not armed one. It rides `p` on both
         // clients, so the terminal and the window pin with the same keys
-        // (#2457); ctrl+shift+f is the deep find card.
+        // (#2457); ctrl+shift+f is the Seeker card.
         if ev.keystroke.modifiers.control && ev.keystroke.modifiers.shift && ev.keystroke.key == "p"
         {
             if let Some(id) = self.sessions.pin_target() {
@@ -6071,7 +6071,7 @@ impl Render for Dashboard {
                     ),
             );
         }
-        // The deep find card paints above every other surface, because it is
+        // The Seeker card paints above every other surface, because it is
         // the one thing that takes every key while it is up (#2458). One
         // handler per printed row, built here where the context lives.
         if let Some(state) = self.finder.as_ref() {

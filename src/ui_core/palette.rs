@@ -1,4 +1,4 @@
-//! Deep find: one ranker for the terminal and the window.
+//! Seeker: one ranker for the terminal and the window.
 //!
 //! The owner asked for Spotlight scoped to the app: one chord, a card in the
 //! middle, the caret in the field, and everything in this app findable by the

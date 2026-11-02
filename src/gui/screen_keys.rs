@@ -126,7 +126,7 @@ pub enum OverlayId {
     RailMenu,
     /// Waiting for a second session while a split is set up.
     SplitPick,
-    /// Deep find.
+    /// Seeker.
     CommandPalette,
 }
 
@@ -327,7 +327,7 @@ mod tests {
             keyboard_owner(&overlays, Screen::Chat),
             KeyboardOwner::Overlay(OverlayId::Preview)
         );
-        // A screen does not outrank an overlay either: deep find opens over
+        // A screen does not outrank an overlay either: Seeker opens over
         // the models screen and keeps the keys.
         assert_eq!(
             keyboard_owner(&[OverlayId::CommandPalette], Screen::Models),

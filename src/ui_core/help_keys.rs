@@ -328,7 +328,7 @@ pub const ROWS: &[HelpRow] = &[
         "ctrl+shift+f",
         "Ctrl+Shift+F",
         Some("ctrl-shift-f"),
-        "Deep find anything",
+        "Seeker: find anything",
     ),
     row(
         HelpSection::Sessions,

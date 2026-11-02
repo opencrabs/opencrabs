@@ -1016,7 +1016,7 @@ impl App {
     /// Open the session-files browser for the conversation in view (#2458).
     ///
     /// The view is reached from a bare `f` in the sessions list and from the
-    /// deep find card; both call this, so the two cannot drift into loading
+    /// Seeker card; both call this, so the two cannot drift into loading
     /// different lists for the same session.
     pub(crate) async fn open_session_files_view(&mut self) -> Result<()> {
         let Some(session_id) = self

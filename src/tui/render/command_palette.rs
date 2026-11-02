@@ -1,4 +1,4 @@
-//! The deep find card in the terminal.
+//! The Seeker card in the terminal.
 //!
 //! Same engine as the window (`ui_core::palette`), so the rows, their order and
 //! the no-match line are decided once for both surfaces (#2458). This file is

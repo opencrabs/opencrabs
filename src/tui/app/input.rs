@@ -2860,7 +2860,7 @@ impl App {
             && event.modifiers.contains(KeyModifiers::SHIFT)
         {
             // Pin/unpin the selected session (#2457): the pin moved off
-            // `ctrl-f` so `ctrl-shift-f` could open the deep find card on
+            // `ctrl-f` so `ctrl-shift-f` could open the Seeker card on
             // both clients, and it now rides `p` on both. A pin is a view
             // property: it lives in the sidecar table, never touches
             // `updated_at`, and floats the session to the top of this list
@@ -2901,7 +2901,7 @@ impl App {
             && event.modifiers.is_empty()
         {
             // Open session files browser. Modifiers are excluded so no chord
-            // can also land here; the deep find card opens the same view
+            // can also land here; the Seeker card opens the same view
             // through the same method (#2458).
             self.open_session_files_view().await?;
         } else if (event.code == KeyCode::Char('p') || event.code == KeyCode::Char('P'))
@@ -3339,7 +3339,7 @@ mod clipboard_backend_tests {
 
 #[cfg(test)]
 mod palette_wiring_tests {
-    /// The pin chord moved to `ctrl-shift-p` when the deep find card took
+    /// The pin chord moved to `ctrl-shift-p` when the Seeker card took
     /// `ctrl-shift-f` (#2457), and the bare `p` that opens the projects
     /// browser gained a modifier guard in the same move. A source scan,
     /// because the handler needs a full app to exercise; the behaviour it

@@ -1,4 +1,4 @@
-//! The deep find card: a centered panel over a dimmed window.
+//! The Seeker card: a centered panel over a dimmed window.
 //!
 //! The ranking, the keyword table and the state live in `ui_core::palette`, so
 //! the terminal and the window print the same rows in the same order (#2458).
