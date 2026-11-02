@@ -26,6 +26,7 @@
 
 mod agent_bridge;
 mod attachment_view;
+mod bang;
 mod breakdown;
 mod commands;
 mod editor;
@@ -1209,6 +1210,13 @@ impl Dashboard {
             self.run_command(outcome, cx);
             return;
         }
+        // `!cmd` runs a shell command here, not a turn, as the terminal does (#2437).
+        if let Some(cmd) = opencrabs::ui_core::bang::bang_command(&text) {
+            bang::spawn(cmd.to_string(), self.sink.clone());
+            self.live.notices.push(format!("! {cmd}"));
+            cx.notify();
+            return;
+        }
         // A closed topic refuses new turns. The notice says why, so the send is
         // never dropped without a word (#2305). It sits after the parse above
         // because a command is not a turn: `/new` and `/sessions` still work
@@ -1350,6 +1358,10 @@ impl Dashboard {
                     cx.notify();
                 }
                 agent_bridge::TurnEvent::ClearFailed(text) => {
+                    self.live.notices.push(text);
+                    cx.notify();
+                }
+                agent_bridge::TurnEvent::BangOutput(text) => {
                     self.live.notices.push(text);
                     cx.notify();
                 }

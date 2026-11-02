@@ -5,6 +5,7 @@
 //! ratatui, crossterm, or any other terminal-specific crate, so a GUI
 //! binary can link it as-is.
 
+pub mod bang;
 pub mod commands;
 pub mod help_keys;
 pub mod keys;

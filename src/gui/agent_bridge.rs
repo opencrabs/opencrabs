@@ -29,6 +29,8 @@ use uuid::Uuid;
 
 /// A turn outcome the worker thread hands back to the UI thread.
 pub enum TurnEvent {
+    /// Output of a `!cmd` the user ran in the window (#2437).
+    BangOutput(String),
     /// ctrl+k cleared this session's messages; the transcript empties (#2430).
     MessagesCleared(Uuid),
     /// ctrl+k could not clear the session: the reason, for the notices.
