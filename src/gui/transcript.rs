@@ -490,6 +490,10 @@ pub struct TranscriptState {
     /// Anchors the user has opened. Folding is the default, so absence means
     /// folded, exactly like `turn_is_folded` in the TUI.
     pub expanded: HashSet<String>,
+    /// Turns whose details are shown in full, past the first expansion: the
+    /// reasoning is no longer cut short. The second ctrl+o sets it, as the TUI's
+    /// second press does (#2440).
+    pub details: HashSet<String>,
     /// Set when the fetch failed; the pane says why instead of lying empty.
     pub error: Option<SharedString>,
 }
@@ -1203,7 +1207,7 @@ fn fold_cell(folded: usize, side: f32) -> AnyElement {
 
 /// A thinking block: dim, italic, collapsed to a bounded preview so a long
 /// reasoning run cannot take over the pane.
-fn thinking_block(content: &str) -> Div {
+fn thinking_block(content: &str, full: bool) -> Div {
     div()
         .flex()
         .flex_col()
@@ -1223,7 +1227,11 @@ fn thinking_block(content: &str) -> Div {
                 .text_xs()
                 .italic()
                 .text_color(rgb(palette::current().text_muted))
-                .child(SharedString::from(fit(content.trim(), 600))),
+                .child(SharedString::from(if full {
+                    content.trim().to_string()
+                } else {
+                    fit(content.trim(), 600)
+                })),
         )
 }
 
@@ -1357,7 +1365,7 @@ fn block_view(block: &Block, content_width: f32, handlers: &HashMap<String, Clic
             time,
             ..
         } => bubble(role, content, time, content_width, handlers),
-        Block::Thinking { content } => thinking_block(content),
+        Block::Thinking { content } => thinking_block(content, false),
         Block::Tools { calls } => tools_block(calls),
         Block::Marker { hidden } => div()
             .text_xs()
@@ -1628,6 +1636,7 @@ pub fn view(
     for (ti, turn) in state.turns.iter().enumerate() {
         let newest = ti == last;
         let folded = !state.expanded.contains(&turn.anchor);
+        let full = state.details.contains(&turn.anchor);
         // The header sits above the turn's first non-user row, as in the TUI.
         let header_at = match turn.blocks.first() {
             Some(Block::Msg { role, .. }) if role == "user" => 1,
@@ -1664,7 +1673,10 @@ pub fn view(
             {
                 continue;
             }
-            col = col.child(block_view(block, content_width, &attachment_handlers));
+            col = match block {
+                Block::Thinking { content } => col.child(thinking_block(content, full)),
+                _ => col.child(block_view(block, content_width, &attachment_handlers)),
+            };
         }
         if !drew_header && let Some(header) = fold_header(turn, folded) {
             col = col.child(match handlers.remove(&turn.anchor) {

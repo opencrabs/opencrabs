@@ -538,16 +538,29 @@ impl Dashboard {
     fn toggle_turn(&mut self, anchor: &str, cx: &mut Context<Self>) {
         if !self.transcript.expanded.remove(anchor) {
             self.transcript.expanded.insert(anchor.to_string());
+        } else {
+            // A folded turn forgets its full details, so reopening starts at the top (#2440).
+            self.transcript.details.remove(anchor);
         }
         cx.notify();
     }
 
     /// ctrl+o: toggle the newest turn, the same chord the TUI answers.
+    /// The TUI's three presses: folded, then expanded, then details in full,
+    /// then folded again (#2440). The first press opens the turn; the second
+    /// shows its reasoning whole.
     fn toggle_newest_turn(&mut self, cx: &mut Context<Self>) {
         let Some(anchor) = self.transcript.newest_anchor().map(str::to_string) else {
             return;
         };
-        self.toggle_turn(&anchor, cx);
+        if !self.transcript.expanded.contains(&anchor) {
+            self.transcript.expanded.insert(anchor);
+        } else if self.transcript.details.remove(&anchor) {
+            self.transcript.expanded.remove(&anchor);
+        } else {
+            self.transcript.details.insert(anchor);
+        }
+        cx.notify();
     }
 
     /// Ask the next frame to put focus where the new screen expects it.
