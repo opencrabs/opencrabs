@@ -725,6 +725,7 @@ pub enum MenuKind {
     Pin,
     Delete,
     EnableTopics,
+    NewTopic,
 }
 
 /// One item of the rail's context menu. The labels are the interface:
@@ -743,8 +744,14 @@ pub fn rail_menu_entries(favorited: bool, topics_enabled: bool) -> Vec<MenuEntry
         label: if favorited { "Unpin" } else { "Pin" },
     }];
     // Topics are opt-in per session (#2302): the item is offered only while
-    // they are off, so it cannot be flipped twice by accident.
-    if !topics_enabled {
+    // they are off, so it cannot be flipped twice by accident. Once they are
+    // on, the same slot offers a new topic under the row (#2397).
+    if topics_enabled {
+        entries.push(MenuEntry {
+            kind: MenuKind::NewTopic,
+            label: "New topic",
+        });
+    } else {
         entries.push(MenuEntry {
             kind: MenuKind::EnableTopics,
             label: "Enable topics",
@@ -1417,21 +1424,28 @@ mod tests {
         );
     }
 
-    /// The menu offers exactly the two row actions (#2354): pin (unpin on
-    /// a pinned row) and delete, delete never renamed.
+    /// The menu offers the row actions (#2354): pin (unpin on a pinned row)
+    /// and delete, delete never renamed. Topics off adds Enable topics; topics
+    /// on adds New topic in the same slot (#2397).
     #[test]
     fn rail_menu_offers_pin_and_delete() {
-        let plain = rail_menu_entries(false, true);
-        assert_eq!(plain.len(), 2, "pin and delete, no more");
-        assert_eq!(plain[0].label, "Pin");
-        assert!(matches!(plain[0].kind, MenuKind::Pin));
-        assert_eq!(plain[1].label, "Delete");
-        assert!(matches!(plain[1].kind, MenuKind::Delete));
+        let off = rail_menu_entries(false, false);
+        assert_eq!(off.len(), 3, "pin, enable topics and delete");
+        assert_eq!(off[0].label, "Pin");
+        assert!(matches!(off[0].kind, MenuKind::Pin));
+        assert_eq!(off[2].label, "Delete");
+        assert!(matches!(off[2].kind, MenuKind::Delete));
+
+        let on = rail_menu_entries(false, true);
+        assert_eq!(on.len(), 3, "pin, new topic and delete");
+        assert_eq!(on[1].label, "New topic");
+        assert!(matches!(on[1].kind, MenuKind::NewTopic));
+        assert_eq!(on[2].label, "Delete");
 
         let pinned = rail_menu_entries(true, true);
         assert_eq!(pinned[0].label, "Unpin", "a pinned row offers the way out");
         assert!(matches!(pinned[0].kind, MenuKind::Pin));
-        assert_eq!(pinned[1].label, "Delete");
+        assert_eq!(pinned[2].label, "Delete");
     }
 
     /// Enable topics is offered only on a session with topics off, between

@@ -2230,6 +2230,11 @@ impl Render for Dashboard {
                             match kind {
                                 sessions::MenuKind::Pin => this.toggle_favorite(id, cx),
                                 sessions::MenuKind::EnableTopics => this.enable_topics(id, cx),
+                                sessions::MenuKind::NewTopic => {
+                                    // The prompt works on the open chat, so open the row first (#2397).
+                                    this.open_session(id, cx);
+                                    this.start_topic_draft(cx);
+                                }
                                 sessions::MenuKind::Delete => this.request_delete(id, cx),
                             }
                         });
@@ -2737,16 +2742,10 @@ impl Render for Dashboard {
                 if let Some(label) = self.running_tasks_label() {
                     col = col.child(task_strip(label));
                 }
-                if let Some(draft) = self.topic_draft.as_deref() {
-                    let label = if self.topic_rename.is_some() {
-                        "Rename topic"
-                    } else {
-                        "New topic"
-                    };
-                    col = col.child(topic_prompt(label, draft));
-                } else {
-                    // The slash-command list sits over the input while a name
-                    // is being spelled, the terminal's own placement.
+                // The slash-command list sits over the input while a name is
+                // not being spelled, the terminal's own placement. The name
+                // prompt itself is the overlay below (#2398).
+                if self.topic_draft.is_none() {
                     let popup = self.editor.read(cx).command_popup();
                     if let Some((names, selected)) = popup {
                         col = col.child(command_popup_view(&names, selected));
@@ -2897,6 +2896,21 @@ impl Render for Dashboard {
                 cx.notify();
             });
             root = root.child(topic_info_overlay(&info, close));
+        }
+        // The name prompt takes the whole window: the scrim darkens everything
+        // else, and a click outside the panel cancels, as Esc does (#2398).
+        if let Some(draft) = self.topic_draft.clone() {
+            let label = if self.topic_rename.is_some() {
+                "Rename topic"
+            } else {
+                "New topic"
+            };
+            let cancel = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                this.topic_draft = None;
+                this.topic_rename = None;
+                cx.notify();
+            });
+            root = root.child(topic_prompt_overlay(label, &draft, cancel));
         }
         // The drop target: a Finder drag tints the whole window so the target
         // is never guessed. It paints above both panes and vanishes the
@@ -3430,13 +3444,33 @@ fn topic_bar(
 }
 
 /// The name prompt above the input, while a topic is being named (#2303).
-fn topic_prompt(label: &str, draft: &str) -> impl IntoElement {
-    div()
+/// The name prompt for a topic (#2398): a centred card over a dark scrim, so
+/// the one thing that takes the keyboard is also the one thing on screen. The
+/// field shows a caret; Enter creates, Esc or a click outside cancels.
+fn topic_prompt_overlay(
+    label: &str,
+    draft: &str,
+    cancel: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let field = div()
+        .w_full()
+        .px_3()
+        .py_2()
+        .rounded_md()
+        .border_1()
+        .border_color(rgb(palette::current().accent))
+        .bg(rgb(palette::current().bg))
+        .text_color(rgb(palette::current().text))
+        .child(SharedString::from(format!("{draft}|")));
+    let panel = div()
+        .id("topic-prompt-panel")
+        .occlude()
         .flex()
         .flex_col()
-        .gap_1()
-        .p_3()
-        .rounded_md()
+        .gap_3()
+        .w(rems(28.0))
+        .p_4()
+        .rounded(px(10.0))
         .border_1()
         .border_color(rgb(palette::current().panel_hi))
         .bg(rgb(palette::current().panel))
@@ -3444,14 +3478,28 @@ fn topic_prompt(label: &str, draft: &str) -> impl IntoElement {
             div()
                 .text_sm()
                 .text_color(rgb(palette::current().text))
-                .child(SharedString::from(format!("{label}: {draft}|"))),
+                .child(SharedString::from(label.to_string())),
         )
+        .child(field)
         .child(
             div()
                 .text_xs()
                 .text_color(rgb(palette::current().text_faint))
                 .child("enter creates · esc cancels"),
-        )
+        );
+    div()
+        .id("topic-prompt-scrim")
+        .occlude()
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(rgba(0x0a0a0acc))
+        .on_click(cancel)
+        .child(panel)
 }
 
 /// The topic info panel (#2304): read only, over the window. A click on the
