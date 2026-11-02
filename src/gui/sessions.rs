@@ -15,8 +15,8 @@ use crate::palette;
 use std::collections::{HashMap, HashSet};
 
 use gpui::{
-    App, ClickEvent, Div, InteractiveElement, ScrollHandle, SharedString, Stateful, Styled, Window,
-    deferred, div, prelude::*, rems, rgb,
+    AnyView, App, ClickEvent, Context, Div, InteractiveElement, Render, ScrollHandle, SharedString,
+    Stateful, Styled, Window, deferred, div, prelude::*, rems, rgb,
 };
 
 use opencrabs::db::Database;
@@ -917,9 +917,35 @@ pub fn on_click(
 /// One icon in a row's slide-out strip. Icons only, so the strip stays small
 /// next to the title: the title keeps its room, and the glyph carries the
 /// action (#2384).
-fn action_icon(id: &'static str, glyph: &'static str, color: u32) -> Stateful<Div> {
+/// The hover label of a slide icon: a small card naming the action (#2392).
+struct IconTip(SharedString);
+
+impl Render for IconTip {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .border_1()
+            .border_color(rgb(palette::current().panel_hi))
+            .bg(rgb(palette::current().panel))
+            .text_xs()
+            .text_color(rgb(palette::current().text))
+            .child(self.0.clone())
+    }
+}
+
+fn action_icon(
+    id: &'static str,
+    glyph: &'static str,
+    color: u32,
+    label: &'static str,
+) -> Stateful<Div> {
     div()
         .id(id)
+        .tooltip(move |_window, cx| -> AnyView {
+            cx.new(|_| IconTip(SharedString::from(label))).into()
+        })
         .flex()
         .flex_none()
         .items_center()
@@ -937,9 +963,19 @@ fn action_icon(id: &'static str, glyph: &'static str, color: u32) -> Stateful<Di
 /// unpins.
 pub fn pin_button(favorited: bool) -> Stateful<Div> {
     if favorited {
-        action_icon("session-unpin", "\u{26B2}", palette::current().accent)
+        action_icon(
+            "session-unpin",
+            "\u{26B2}",
+            palette::current().accent,
+            "Favorite",
+        )
     } else {
-        action_icon("session-pin", "\u{26B2}", palette::current().text_muted)
+        action_icon(
+            "session-pin",
+            "\u{26B2}",
+            palette::current().text_muted,
+            "Favorite",
+        )
     }
 }
 
@@ -951,14 +987,19 @@ pub fn topic_button(topics_on: bool) -> Stateful<Div> {
     } else {
         palette::current().text_muted
     };
-    action_icon("session-topic", "\u{2442}", color)
+    action_icon("session-topic", "\u{2442}", color, "Topic")
 }
 
 /// The delete icon of a row's slide-out strip. It never deletes on its own:
 /// the view routes every delete path through one confirmation dialog, so a
 /// mis-swipe cannot cost a conversation.
 pub fn delete_button() -> Stateful<Div> {
-    action_icon("session-delete", "\u{2715}", palette::current().red)
+    action_icon(
+        "session-delete",
+        "\u{2715}",
+        palette::current().red,
+        "Delete",
+    )
 }
 
 /// The rail column: header and error slot from the state, then the caller's
