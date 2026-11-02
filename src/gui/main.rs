@@ -73,6 +73,7 @@ use std::rc::Rc;
 use uuid::Uuid;
 
 use opencrabs::config::Config;
+use opencrabs::tui::app::mission_control::log_viewer::LogViewerState;
 use opencrabs::tui::render::format_token_count_raw;
 use opencrabs::ui_core::keys::UiKey;
 use opencrabs::ui_core::usage::data::Period;
@@ -318,6 +319,10 @@ struct Dashboard {
     /// open. The rules live in `mission_control::Nav` so they are tested
     /// without a window.
     mc_nav: mission_control::Nav,
+    /// The log viewer while `L` has it open. It is the terminal's own state
+    /// type, so the window reads a log with the same parser and the same
+    /// filters (#1528).
+    mc_logs: Option<LogViewerState>,
     /// The window's rem size in px. The zoom keys move it and every
     /// rem-based length in the theme follows.
     rem: f32,
@@ -1219,6 +1224,33 @@ impl Dashboard {
         // Chords belong to the window (zoom, the screen doors), never to a
         // panel: swallowing them would break the keys that leave the screen.
         if ks.modifiers.control || ks.modifiers.platform || ks.modifiers.alt {
+            return;
+        }
+        // The log viewer takes every key while it is open, the terminal's own
+        // rule: a stray keystroke must not move a selection nobody can see.
+        if self.mc_logs.is_some() {
+            let key = ks.key.clone();
+            let shift = ks.modifiers.shift;
+            let close = self
+                .mc_logs
+                .as_mut()
+                .is_some_and(|viewer| mission_control::log_key(viewer, &key, shift));
+            if close {
+                self.mc_logs = None;
+            }
+            cx.notify();
+            return;
+        }
+        // Uppercase L opens the log viewer, because lowercase `l` cycles the
+        // panels, exactly as the terminal binds it (#1528).
+        if ks.modifiers.shift && ks.key == "l" {
+            let mut viewer = LogViewerState::open();
+            // Land on the newest entries: the thing just reproduced is at the
+            // end of the file, not the start of the window.
+            viewer.scroll_to_end();
+            self.mc_logs = Some(viewer);
+            self.mc_nav.detail = false;
+            cx.notify();
             return;
         }
         // The window filter the footer advertises: D/W/M/A, the terminal's
@@ -2955,6 +2987,12 @@ impl Dashboard {
                     editor.dismiss_emoji_popup(cx);
                 });
                 cx.notify();
+                return;
+            }
+            // The log viewer covers the screen while it is open, so every key
+            // including Esc belongs to it, exactly as the terminal binds it.
+            if self.screen == Screen::MissionControl && self.mc_logs.is_some() {
+                self.mission_control_key(ev, cx);
                 return;
             }
             // An open Mission Control record is the nearest thing Esc can answer:
@@ -5577,6 +5615,17 @@ impl Render for Dashboard {
                 close,
             ));
         }
+        // The log reader covers the screen while it is open, like the
+        // terminal's, so no key lands on a panel nobody can see.
+        if self.screen == Screen::MissionControl && self.mc_logs.is_some() {
+            let close = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                this.mc_logs = None;
+                cx.notify();
+            });
+            if let Some(viewer) = self.mc_logs.as_mut() {
+                root = root.child(mission_control_logs(viewer, close));
+            }
+        }
         // The drop target: a Finder drag tints the whole window so the target
         // is never guessed. It paints above both panes and vanishes the
         // moment the drag ends.
@@ -5818,6 +5867,7 @@ fn main() {
                         mc_loading: false,
                         mc_window: mission_control::TimeWindow::Month,
                         mc_nav: mission_control::Nav::default(),
+                        mc_logs: None,
                         rem: BASE_REM,
                         db_path: db_path.clone(),
                         sessions: sessions_state,
@@ -6367,6 +6417,161 @@ fn mission_control_detail(
         .justify_center()
         .bg(rgba(0x0a0a0add))
         .on_click(move |ev, window, cx| scrim_close(ev, window, cx))
+        .child(card)
+}
+
+/// How many log lines the window draws at once: a page key moves by a screen,
+/// and a 512 KB tail never becomes thousands of elements in one frame.
+const MC_LOG_ROWS: usize = 44;
+
+/// The log reader, drawn over the screen it was opened from. The state, its
+/// filters and its file paging are the terminal's own type, so the two
+/// clients read the same lines with the same parser and the same levels.
+fn mission_control_logs(
+    viewer: &mut LogViewerState,
+    close: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    use opencrabs::logging::reader::LogLevel;
+    let shown = palette::current();
+    // The state clamps scrolling to what fits; the renderer is the part that
+    // knows how many rows fit, exactly as in the terminal.
+    viewer.viewport_rows = MC_LOG_ROWS;
+    let scroll = viewer.scroll.min(viewer.max_scroll());
+    let file = viewer.file_name();
+    let level = viewer.min_level.label();
+    let total = viewer.entries.len();
+    let filtered = viewer.visible().len();
+    let search = viewer.search.clone();
+    let searching = viewer.search_active;
+    let error = viewer.error.clone();
+
+    // The rows on screen: each entry's header, then its continuation lines,
+    // starting at the scroll offset and stopping at the bottom.
+    let mut rows: Vec<(String, u32)> = Vec::new();
+    let mut row = 0usize;
+    'outer: for entry in viewer.visible() {
+        let color = match entry.level {
+            LogLevel::Error => shown.red,
+            LogLevel::Warn => shown.warn,
+            LogLevel::Info => shown.text_normal,
+            LogLevel::Debug => shown.text_muted,
+            LogLevel::Trace => shown.text_faint,
+        };
+        let lines = std::iter::once((
+            format!(
+                "{} {:<5} {} \u{b7} {}",
+                entry.timestamp,
+                entry.level.label(),
+                entry.target,
+                entry.message
+            ),
+            color,
+        ))
+        .chain(
+            entry
+                .continuation
+                .iter()
+                .map(|line| (format!("  {line}"), shown.text_faint)),
+        );
+        for (line, color) in lines {
+            if row >= scroll {
+                rows.push((line, color));
+            }
+            row += 1;
+            if rows.len() >= MC_LOG_ROWS {
+                break 'outer;
+            }
+        }
+    }
+
+    let close = std::rc::Rc::new(close);
+    let scrim_close = close.clone();
+    let mut card = div()
+        .id("mission-control-logs")
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h_0()
+        .gap_1()
+        .p_3()
+        .w_full()
+        .overflow_hidden()
+        .rounded(px(10.0))
+        .border_1()
+        .border_color(rgb(shown.panel_hi))
+        .bg(rgb(shown.panel))
+        // Inert: a click inside the reader never closes it by accident.
+        .on_click(|_ev, _window, cx| cx.stop_propagation())
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_1()
+                        .text_sm()
+                        .text_color(rgb(shown.focus))
+                        .truncate()
+                        .child(format!(
+                            "{file} \u{b7} level {level} \u{b7} {filtered}/{total} entries"
+                        )),
+                )
+                .child(
+                    div()
+                        .id("mission-control-logs-close")
+                        .text_xs()
+                        .text_color(rgb(shown.text_muted))
+                        .cursor_pointer()
+                        .child("esc")
+                        .on_click(move |ev, window, cx| scrim_close(ev, window, cx)),
+                ),
+        );
+    if !search.is_empty() || searching {
+        // The search box, with a caret while the keys are going into it.
+        card = card.child(text(
+            format!("/{search}{}", if searching { "\u{258f}" } else { "" }),
+            Size::Xs,
+            if searching {
+                shown.focus
+            } else {
+                shown.text_muted
+            },
+        ));
+    }
+    if let Some(err) = error {
+        card = card.child(text(err, Size::Xs, shown.red));
+    } else if rows.is_empty() {
+        card = card.child(text("No entries match.", Size::Xs, shown.text_faint));
+    }
+    let mut body = div().flex().flex_col().flex_1().min_h_0();
+    for (line, color) in rows {
+        body = body.child(
+            div()
+                .text_xs()
+                .truncate()
+                .text_color(rgb(color))
+                .child(line),
+        );
+    }
+    card = card.child(body).child(text(
+        "j/k scroll \u{b7} PgUp/PgDn page \u{b7} g/G ends \u{b7} / search \u{b7} [ ] file \u{b7} 1-5 level \u{b7} Esc close",
+        Size::Xs,
+        shown.text_muted,
+    ));
+    div()
+        .id("mission-control-logs-scrim")
+        .occlude()
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .flex()
+        .flex_col()
+        .p_4()
+        .bg(rgba(0x0a0a0add))
+        .on_click(move |ev, window, cx| close(ev, window, cx))
         .child(card)
 }
 

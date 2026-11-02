@@ -19,6 +19,7 @@ use opencrabs::brain::mission_control::{
     inbox_service, schedule_service,
 };
 use opencrabs::db::{Database, Pool};
+use opencrabs::tui::app::mission_control::log_viewer::{self, LogViewerState};
 use std::path::PathBuf;
 
 /// How many activity rows the panel asks for. The terminal shows the newest
@@ -175,6 +176,74 @@ pub fn visible_window(total: usize, selected: Option<usize>, cap: usize) -> (usi
     (start, cap.min(total - start))
 }
 
+/// Apply one keystroke to the log viewer, in the terminal's own mapping
+/// (#1528). The state, its scrolling, its filters and its file paging are the
+/// terminal's type, so there is no second parser and nothing to disagree.
+///
+/// Returns true when the viewer should close. Esc clears a filter first and
+/// closes second, so a search that matched nothing costs one key rather than
+/// the whole screen. `shift` is passed in because a window hands us `G` as
+/// `g` with the modifier set.
+pub fn log_key(viewer: &mut LogViewerState, key: &str, shift: bool) -> bool {
+    // While the search box is open printable keys are search text rather than
+    // commands, or typing "debug" would trip the `d` level filter on the way.
+    if viewer.search_active {
+        match key {
+            "escape" => viewer.clear_search(),
+            "enter" => viewer.search_active = false,
+            "backspace" => viewer.pop_search(),
+            _ => {
+                if let Some(c) = single_char(key) {
+                    viewer.push_search(c);
+                }
+            }
+        }
+        return false;
+    }
+    match key {
+        "escape" => {
+            if viewer.search.is_empty() {
+                return true;
+            }
+            viewer.clear_search();
+        }
+        "/" => viewer.search_active = true,
+        "up" | "k" => viewer.scroll_up(1),
+        "down" | "j" => viewer.scroll_down(1),
+        "pageup" => viewer.page_up(),
+        "pagedown" => viewer.page_down(),
+        "home" => viewer.scroll = 0,
+        "end" => viewer.scroll_to_end(),
+        "[" => viewer.step_file(-1),
+        "]" => viewer.step_file(1),
+        _ => {
+            let Some(c) = single_char(key) else {
+                return false;
+            };
+            if c == 'g' {
+                if shift {
+                    viewer.scroll_to_end();
+                } else {
+                    viewer.scroll = 0;
+                }
+            } else if let Some(level) = log_viewer::level_for_key(c) {
+                // Digits and initials both, the terminal's own table.
+                viewer.set_level(level);
+            }
+        }
+    }
+    false
+}
+
+/// The printable character a keystroke names, if it names exactly one.
+fn single_char(key: &str) -> Option<char> {
+    let mut chars = key.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) if !c.is_control() => Some(c),
+        _ => None,
+    }
+}
+
 /// Read the snapshot for `window` on a thread that owns its reactor.
 ///
 /// The thread is 4 MB and named, exactly like [`super::agent_bridge::load_files`],
@@ -306,19 +375,86 @@ mod tests {
 
     /// An inbox holding `items` proposals, for the keyboard tests.
     fn inbox_snapshot(items: usize) -> Snapshot {
-        let mut snapshot = Snapshot::default();
-        snapshot.inbox = (0..items)
-            .map(|i| McInboxItem {
-                id: format!("prop_tool_{i}"),
-                label: format!("tool_{i}"),
-                summary: "why it was proposed".into(),
-                kind: opencrabs::brain::mission_control::McInboxKind::ProposedTool,
-                source: "rsi-autonomous".into(),
-                created_at: chrono::Utc::now(),
-                detail: None,
-            })
-            .collect();
-        snapshot
+        Snapshot {
+            inbox: (0..items)
+                .map(|i| McInboxItem {
+                    id: format!("prop_tool_{i}"),
+                    label: format!("tool_{i}"),
+                    summary: "why it was proposed".into(),
+                    kind: opencrabs::brain::mission_control::McInboxKind::ProposedTool,
+                    source: "rsi-autonomous".into(),
+                    created_at: chrono::Utc::now(),
+                    detail: None,
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn mission_log_keys_scroll_filter_and_close_like_the_terminal() {
+        use opencrabs::logging::reader::{LogEntry, LogLevel};
+
+        let entry = |level: LogLevel, message: &str| LogEntry {
+            timestamp: "2026-11-02T10:00:00Z".into(),
+            level,
+            target: "opencrabs::test".into(),
+            message: message.into(),
+            continuation: Vec::new(),
+        };
+        let mut state = LogViewerState {
+            entries: vec![entry(LogLevel::Info, "one"), entry(LogLevel::Error, "two")],
+            // One row fits, so two entries leave exactly one row of scroll.
+            viewport_rows: 1,
+            ..Default::default()
+        };
+
+        // j walks down and stops at the last row rather than past it.
+        assert!(!log_key(&mut state, "j", false));
+        assert_eq!(state.scroll, 1);
+        log_key(&mut state, "j", false);
+        assert_eq!(state.scroll, 1, "two entries in a one-row view stop at one");
+        log_key(&mut state, "k", false);
+        assert_eq!(state.scroll, 0);
+        log_key(&mut state, "g", true);
+        assert_eq!(state.scroll, 1, "G lands on the newest line");
+        log_key(&mut state, "g", false);
+        assert_eq!(state.scroll, 0, "g returns to the oldest");
+
+        // The level table is the terminal's: a digit and an initial both work.
+        log_key(&mut state, "3", false);
+        assert_eq!(state.min_level, LogLevel::Info);
+        log_key(&mut state, "e", false);
+        assert_eq!(state.min_level, LogLevel::Error);
+
+        // Esc closes on an empty filter, but a filter costs one key first.
+        assert!(log_key(&mut state, "escape", false));
+        state.search = "payload".into();
+        assert!(!log_key(&mut state, "escape", false));
+        assert!(state.search.is_empty());
+        assert!(log_key(&mut state, "escape", false));
+
+        // Inside the search box every printable key is text, Esc empties it,
+        // and Enter leaves it without losing what was typed.
+        log_key(&mut state, "/", false);
+        assert!(state.search_active);
+        log_key(&mut state, "t", false);
+        log_key(&mut state, "e", false);
+        log_key(&mut state, "s", false);
+        log_key(&mut state, "t", false);
+        assert_eq!(state.search, "test");
+        assert_eq!(
+            state.min_level,
+            LogLevel::Error,
+            "typing must not trip the level filter"
+        );
+        log_key(&mut state, "enter", false);
+        assert!(!state.search_active);
+        assert_eq!(state.search, "test");
+        log_key(&mut state, "/", false);
+        log_key(&mut state, "escape", false);
+        assert!(!state.search_active);
+        assert!(state.search.is_empty());
     }
 
     #[test]
