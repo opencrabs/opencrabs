@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 
 use gpui::{
     App, ClickEvent, Div, InteractiveElement, ScrollHandle, SharedString, Stateful, Styled, Window,
-    div, prelude::*, rems, rgb,
+    deferred, div, prelude::*, rems, rgb,
 };
 
 use opencrabs::db::Database;
@@ -898,9 +898,10 @@ pub fn row(
     if let Some(action) = action {
         row = row.child(action);
     }
-    // The menu paints last so it sits above the row it overlays.
+    // Deferred, so the menu paints above the rows below it: a plain child is
+    // covered by the later rows' text (#2386).
     if let Some(menu) = menu {
-        row = row.child(menu);
+        row = row.child(deferred(menu).with_priority(1));
     }
     row
 }
@@ -936,9 +937,9 @@ fn action_icon(id: &'static str, glyph: &'static str, color: u32) -> Stateful<Di
 /// unpins.
 pub fn pin_button(favorited: bool) -> Stateful<Div> {
     if favorited {
-        action_icon("session-unpin", "\u{2605}", palette::current().accent)
+        action_icon("session-unpin", "\u{26B2}", palette::current().accent)
     } else {
-        action_icon("session-pin", "\u{2606}", palette::current().text_muted)
+        action_icon("session-pin", "\u{26B2}", palette::current().text_muted)
     }
 }
 
