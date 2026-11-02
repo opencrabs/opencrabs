@@ -40,17 +40,6 @@ pub struct Snapshot {
     pub window: TimeWindow,
 }
 
-impl Snapshot {
-    /// Tool calls and failures in one line, the pair the analytics panel leads
-    /// with.
-    pub fn tool_line(&self) -> String {
-        format!(
-            "{} calls · {} failed",
-            self.analytics.tool_total_calls, self.analytics.tool_total_fails
-        )
-    }
-}
-
 /// Which panel the keyboard is on, in the terminal's own order
 /// (`tui::app::mission_control::McPanel`): Tab and `l` walk it forward, `h`
 /// and Shift-Tab walk it back.
@@ -169,6 +158,21 @@ impl Nav {
         }
         self.selected = self.selected.min(rows - 1);
     }
+}
+
+/// The slice of rows to draw for a panel that can show fewer than it holds:
+/// `start` and `len` describe a window that keeps the selected row on screen,
+/// so `j` never walks past the bottom of the panel.
+pub fn visible_window(total: usize, selected: Option<usize>, cap: usize) -> (usize, usize) {
+    if total == 0 || cap == 0 {
+        return (0, 0);
+    }
+    let Some(selected) = selected else {
+        return (0, total.min(cap));
+    };
+    let selected = selected.min(total - 1);
+    let start = selected.saturating_sub(cap - 1);
+    (start, cap.min(total - start))
 }
 
 /// Read the snapshot for `window` on a thread that owns its reactor.
@@ -294,7 +298,10 @@ mod tests {
         assert_eq!(snapshot.inbox.len(), 1);
         // The schedule panel marks a paused job; the fixture holds exactly one.
         assert_eq!(snapshot.schedule.iter().filter(|j| !j.enabled).count(), 1);
-        assert_eq!(snapshot.tool_line(), "41 calls · 3 failed");
+        // The analytics panel prints these two counts, so they are pinned
+        // here rather than against a mock.
+        assert_eq!(snapshot.analytics.tool_total_calls, 41);
+        assert_eq!(snapshot.analytics.tool_total_fails, 3);
     }
 
     /// An inbox holding `items` proposals, for the keyboard tests.
@@ -312,6 +319,21 @@ mod tests {
             })
             .collect();
         snapshot
+    }
+
+    #[test]
+    fn mission_visible_window_keeps_the_selection_on_screen() {
+        // A short list is drawn whole, selection or not.
+        assert_eq!(visible_window(3, None, 6), (0, 3));
+        assert_eq!(visible_window(3, Some(2), 6), (0, 3));
+        // A long one slides so the selection is the last row of the window...
+        assert_eq!(visible_window(20, Some(0), 6), (0, 6));
+        assert_eq!(visible_window(20, Some(6), 6), (1, 6));
+        // ...and the end of the list lands flush with the bottom.
+        assert_eq!(visible_window(20, Some(19), 6), (14, 6));
+        // A selection left past the end by a shorter read still lands inside.
+        assert_eq!(visible_window(20, Some(99), 6), (14, 6));
+        assert_eq!(visible_window(0, Some(3), 6), (0, 0));
     }
 
     #[test]

@@ -1190,6 +1190,11 @@ impl Dashboard {
                     // A fresh read can be shorter than the last one; the
                     // selection follows it instead of pointing past the end.
                     this.mc_nav.clamp(this.mc.as_ref());
+                } else {
+                    // The window moved while this read was in flight, so this
+                    // answer is for a window nobody is looking at: read the
+                    // one that is showing now.
+                    this.fetch_mission_control(cx);
                 }
                 cx.notify();
             })
@@ -1215,6 +1220,26 @@ impl Dashboard {
         // panel: swallowing them would break the keys that leave the screen.
         if ks.modifiers.control || ks.modifiers.platform || ks.modifiers.alt {
             return;
+        }
+        // The window filter the footer advertises: D/W/M/A, the terminal's
+        // capitals, so the bare letters stay free for apply and reject.
+        if ks.modifiers.shift {
+            let window = match ks.key.as_str() {
+                "d" => Some(mission_control::TimeWindow::Day),
+                "w" => Some(mission_control::TimeWindow::Week),
+                "m" => Some(mission_control::TimeWindow::Month),
+                "a" => Some(mission_control::TimeWindow::All),
+                _ => None,
+            };
+            if let Some(window) = window {
+                if self.mc_window != window {
+                    self.mc_window = window;
+                    // A new window is a new read: the numbers are the services'
+                    // to produce, never arithmetic done in the frame.
+                    self.fetch_mission_control(cx);
+                }
+                return;
+            }
         }
         match ks.key.as_str() {
             "tab" | "l" => self.mc_nav.focus_next(self.mc.as_ref()),
@@ -3693,7 +3718,6 @@ impl Render for Dashboard {
                 let body = mission_control_body(
                     self.mc.as_ref(),
                     &self.mc_nav,
-                    self.mc_window,
                     self.mc_err.as_ref(),
                     self.mc_loading,
                     shown,
@@ -5899,7 +5923,6 @@ fn main() {
 fn mission_control_body(
     snapshot: Option<&mission_control::Snapshot>,
     nav: &mission_control::Nav,
-    window: mission_control::TimeWindow,
     err: Option<&SharedString>,
     loading: bool,
     shown: palette::Palette,
@@ -5931,16 +5954,11 @@ fn mission_control_body(
     let on = |panel: mission_control::Panel| nav.panel == panel;
     col.child(row(
         mc_inbox_panel(snapshot, nav, shown),
-        mc_analytics_panel(
-            snapshot,
-            window,
-            on(mission_control::Panel::Analytics),
-            shown,
-        ),
+        mc_analytics_panel(snapshot, on(mission_control::Panel::Analytics), shown),
     ))
     .child(row(
-        mc_activity_panel(snapshot, on(mission_control::Panel::Activity), shown),
-        mc_schedule_panel(snapshot, on(mission_control::Panel::Schedule), shown),
+        mc_activity_panel(snapshot, nav, shown),
+        mc_schedule_panel(snapshot, nav, shown),
     ))
 }
 
@@ -6007,9 +6025,9 @@ fn mc_inbox_panel(
     // Six rows fit the panel. The window slides with the selection instead of
     // hiding whatever fell past the sixth, so `j` never walks off the screen.
     let selected = nav.selected.min(items.len().saturating_sub(1));
-    let start = selected.saturating_sub(5);
+    let (start, len) = mission_control::visible_window(items.len(), Some(selected), 6);
     let mut rows = Vec::new();
-    for item in items.iter().skip(start).take(6) {
+    for item in items.iter().skip(start).take(len) {
         rows.push((
             format!("{} \u{b7} {}", item.kind.label(), item.label),
             shown.text_normal,
@@ -6053,41 +6071,94 @@ fn mc_window_tabs(window: mission_control::TimeWindow) -> String {
 /// liveness line the terminal leads with (#469), then the busiest tools.
 fn mc_analytics_panel(
     snapshot: Option<&mission_control::Snapshot>,
-    window: mission_control::TimeWindow,
     focused: bool,
     shown: palette::Palette,
 ) -> Div {
-    let mut rows = Vec::new();
-    if let Some(a) = snapshot.map(|s| &s.analytics) {
-        let now = chrono::Utc::now().timestamp();
+    let mut rows: Vec<(String, u32)> = Vec::new();
+    if let Some(snap) = snapshot {
+        let a = &snap.analytics;
+        // The terminal's totals card, line for line, so two clients never
+        // disagree about the same instance.
+        let fail_pct = if a.tool_total_calls > 0 {
+            (a.tool_total_fails as f64 / a.tool_total_calls as f64) * 100.0
+        } else {
+            0.0
+        };
         // The snapshot carries the window it was read for; the tabs show that
         // one, so a slow read can never label November numbers as September's.
-        let read_for = snapshot.map(|s| s.window).unwrap_or(window);
-        rows.push((mc_window_tabs(read_for), shown.teal));
+        rows.push((mc_window_tabs(snap.window), shown.teal));
         rows.push((
-            snapshot.map(|s| s.tool_line()).unwrap_or_default(),
+            format!("Tools {} calls", a.tool_total_calls),
             shown.text_normal,
         ));
         rows.push((
-            format!("{} improvements applied", a.rsi_applied_total),
+            format!("Fails {} ({fail_pct:.1}%)", a.tool_total_fails),
+            if a.tool_total_fails > 0 {
+                shown.warn
+            } else {
+                shown.text_muted
+            },
+        ));
+        rows.push((
+            format!("Recov {} recovered", a.streaming.total),
+            shown.text_muted,
+        ));
+        rows.push((
+            format!(
+                "Verify {} ok / {} rollbk",
+                a.brain_verify.passes, a.brain_verify.rollbacks
+            ),
+            shown.text_muted,
+        ));
+        rows.push((
+            format!("RSI {} applied", a.rsi_applied_total),
             shown.text_muted,
         ));
         rows.push((
             opencrabs::brain::mission_control::staleness::rsi_staleness_line(
-                now,
+                chrono::Utc::now().timestamp(),
                 a.rsi_last_call_ts,
                 a.tool_events_since_rsi,
             ),
             shown.text_faint,
         ));
-        for stat in a.top_tools.iter().take(3) {
+        rows.push((
+            format!(
+                "Brain {:.1} KB / {} files",
+                a.brain_total_kb,
+                a.brain_files.len()
+            ),
+            shown.text_muted,
+        ));
+        if !a.flakiest_tools.is_empty() {
+            rows.push(("Flakiest".to_string(), shown.text_title));
+            for stat in a.flakiest_tools.iter().take(2) {
+                rows.push((
+                    format!("  {} \u{b7} {:.1}%", stat.name, stat.fail_rate),
+                    shown.warn,
+                ));
+            }
+        }
+        if a.phantom.total > 0 {
             rows.push((
                 format!(
-                    "{} \u{b7} {} calls \u{b7} {} failed",
-                    stat.name, stat.total, stat.failures
+                    "Phantoms {} detected, {} resolved",
+                    a.phantom.total, a.phantom.resolved
                 ),
                 shown.text_muted,
             ));
+        }
+        if !a.top_tools.is_empty() {
+            rows.push(("Top tools".to_string(), shown.text_title));
+            for stat in a.top_tools.iter().take(3) {
+                rows.push((
+                    format!(
+                        "  {} \u{b7} {} calls \u{b7} {} failed",
+                        stat.name, stat.total, stat.failures
+                    ),
+                    shown.text_muted,
+                ));
+            }
         }
     }
     mc_panel(
@@ -6100,50 +6171,62 @@ fn mc_analytics_panel(
     )
 }
 
-/// The RSI journal, newest first, coloured by the level the service assigned.
+/// The RSI journal, newest first, each row carrying the level glyph the
+/// terminal paints, and the selection that follows the keyboard.
 fn mc_activity_panel(
     snapshot: Option<&mission_control::Snapshot>,
-    focused: bool,
+    nav: &mission_control::Nav,
     shown: palette::Palette,
 ) -> Div {
     use opencrabs::brain::mission_control::McActivityLevel;
     let entries = snapshot.map(|s| s.activity.as_slice()).unwrap_or_default();
+    let focused = nav.panel == mission_control::Panel::Activity;
     let mut rows = Vec::new();
-    for entry in entries.iter().take(8) {
-        let color = match entry.level {
-            McActivityLevel::Error => shown.red,
-            McActivityLevel::Warn => shown.warn,
-            McActivityLevel::Success => shown.green,
-            McActivityLevel::Info => shown.text_muted,
+    for entry in entries {
+        let (glyph, color) = match entry.level {
+            McActivityLevel::Error => ("\u{2717}", shown.red),
+            McActivityLevel::Warn => ("\u{26a0}", shown.warn),
+            McActivityLevel::Success => ("\u{2713}", shown.green),
+            McActivityLevel::Info => ("\u{b7}", shown.text_muted),
         };
         rows.push((
             format!(
-                "{} \u{b7} {}",
+                "{glyph} {} \u{b7} {}",
                 mc_relative_time(entry.timestamp),
                 entry.detail
             ),
             color,
         ));
     }
+    let (start, len) = mission_control::visible_window(
+        rows.len(),
+        focused.then_some(nav.selected),
+        mission_control::ACTIVITY_ROWS,
+    );
+    let selected = focused.then(|| nav.selected.saturating_sub(start));
+    let rows: Vec<(String, u32)> = rows.into_iter().skip(start).take(len).collect();
+    let selected = selected.filter(|_| !rows.is_empty());
     mc_panel(
         format!("Activity ({})", entries.len()),
         rows,
         "No activity yet.",
         focused,
-        None,
+        selected,
         shown,
     )
 }
 
-/// Cron jobs and pending approvals, with a paused job marked as paused.
+/// Cron jobs and pending approvals: label, expression, and the state the
+/// terminal marks (awaiting you, or paused), with the focused row selected.
 fn mc_schedule_panel(
     snapshot: Option<&mission_control::Snapshot>,
-    focused: bool,
+    nav: &mission_control::Nav,
     shown: palette::Palette,
 ) -> Div {
     let jobs = snapshot.map(|s| s.schedule.as_slice()).unwrap_or_default();
+    let focused = nav.panel == mission_control::Panel::Schedule;
     let mut rows = Vec::new();
-    for job in jobs.iter().take(8) {
+    for job in jobs {
         let color = if job.awaiting_user {
             shown.amber
         } else if job.enabled {
@@ -6151,18 +6234,32 @@ fn mc_schedule_panel(
         } else {
             shown.text_faint
         };
-        let state = if job.enabled { "" } else { " \u{b7} paused" };
+        let state = if job.awaiting_user {
+            " \u{b7} awaiting you"
+        } else if !job.enabled {
+            " \u{b7} paused"
+        } else {
+            ""
+        };
         rows.push((
             format!("{} \u{b7} {}{}", job.label, job.schedule, state),
             color,
         ));
     }
+    let (start, len) = mission_control::visible_window(
+        rows.len(),
+        focused.then_some(nav.selected),
+        mission_control::ACTIVITY_ROWS,
+    );
+    let selected = focused.then(|| nav.selected.saturating_sub(start));
+    let rows: Vec<(String, u32)> = rows.into_iter().skip(start).take(len).collect();
+    let selected = selected.filter(|_| !rows.is_empty());
     mc_panel(
         format!("Schedule ({})", jobs.len()),
         rows,
         "No scheduled jobs.",
         focused,
-        None,
+        selected,
         shown,
     )
 }
@@ -6194,6 +6291,7 @@ fn mission_control_detail(
         .p_3()
         .max_w(px(720.0))
         .max_h(px(560.0))
+        // A long summary is clipped to the card instead of painting past it.
         .overflow_hidden()
         .rounded(px(10.0))
         .border_1()
