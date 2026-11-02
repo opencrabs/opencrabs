@@ -715,7 +715,9 @@ Prefer windows and buttons over the TUI? [MonoCode](https://github.com/hardbeat9
 
 ### Built-in GUI
 
-`cargo build --features gui --bin opencrabs-gui` builds the native desktop client over the same sessions, providers and SQLite store as the TUI. Long `bash` commands run as detached tasks instead of blocking the turn: each running task shows as a `⏳` strip above the input with its elapsed seconds, its tool row carries the task id, and the row settles with the total elapsed time when the task ends. A finished task resumes the session with its output, queued as a system message when a turn is still running, so a 20 minute command neither holds the editor hostage nor collapses into a 600s timeout.
+`cargo build --features gui --bin opencrabs-gui` builds the native desktop client over the same sessions, providers and SQLite store as the TUI. A turn in flight draws the same shape Telegram does: one card with a collapsed header, the tool rows interleaved with the narration as it arrives, and a footer that carries the metrics, the context budget included, once the turn settles. `ctrl+o` or a click on the card folds it, and it folds the live card rather than a settled turn while one is running. Long `bash` commands run as detached tasks instead of blocking the turn: each running task shows as a `⏳` strip above the input with its elapsed seconds, its tool row carries the task id, and the row settles with the total elapsed time when the task ends. A finished task resumes the session with its output, queued as a system message when a turn is still running, so a 20 minute command neither holds the editor hostage nor collapses into a 600s timeout.
+
+A launch opens the conversation you were last in, on both surfaces, because the GUI and the terminal read and write the same `last_session` pointer. A first run, or a pointer at a conversation that has since been deleted, falls back to the newest session on the rail.
 
 ### Debug Logging
 
