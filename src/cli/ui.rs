@@ -936,7 +936,11 @@ async fn cmd_chat_inner(
                     reason,
                 } => progress_sender.send(TuiEvent::SystemMessage {
                     session_id,
-                    text: format!("⏳ Retry {}/{} — {}", attempt, max, reason),
+                    text: format!(
+                        "⏳ {} — {}",
+                        crate::utils::retry::send_label(attempt, max),
+                        reason
+                    ),
                 }),
                 ProgressEvent::SuggestedOptions(options) => {
                     progress_sender.send(TuiEvent::SuggestedOptions {

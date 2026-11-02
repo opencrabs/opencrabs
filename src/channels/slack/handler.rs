@@ -2093,7 +2093,11 @@ async fn handle_message(
                     let thread_ts_retry = thread_ts_inner.clone();
                     tokio::spawn(async move {
                         let session = client.open_session(&token);
-                        let text = format!("⏳ Retry {}/{} — {}", attempt, max, reason);
+                        let text = format!(
+                            "⏳ {} — {}",
+                            crate::utils::retry::send_label(attempt, max),
+                            reason
+                        );
                         let mut req = SlackApiChatPostMessageRequest::new(
                             channel,
                             SlackMessageContent::new().with_text(text),

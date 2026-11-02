@@ -1837,8 +1837,10 @@ pub(crate) async fn handle_message(
                 let client = client_cb.clone();
                 let jid = jid_cb.clone();
                 let text = format!(
-                    "{}\n\n⏳ Retry {}/{} — {}",
-                    MSG_HEADER, attempt, max, reason
+                    "{}\n\n⏳ {} — {}",
+                    MSG_HEADER,
+                    crate::utils::retry::send_label(attempt, max),
+                    reason
                 );
                 tokio::spawn(async move {
                     let msg = waproto::whatsapp::Message {

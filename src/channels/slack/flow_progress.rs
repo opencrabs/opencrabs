@@ -224,7 +224,10 @@ pub(crate) fn build_flow_progress(
                 } => {
                     tokio::spawn(async move {
                         let session = client.open_session(&token);
-                        let text = format!("⏳ Retry {attempt}/{max}: {reason}");
+                        let text = format!(
+                            "⏳ {}: {reason}",
+                            crate::utils::retry::send_label(attempt, max)
+                        );
                         let req = SlackApiChatPostMessageRequest::new(
                             channel,
                             SlackMessageContent::new().with_text(text),
