@@ -50,6 +50,8 @@ use crate::screen_keys::{
     ChordMods, FocusTarget, ScreenAction, action_label, focus_target, screen_chord,
 };
 use crate::theme::{BASE_REM, Size, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP, text};
+use opencrabs::ui_core::split::{self, Layout};
+use transcript::{LiveTurn, TranscriptState};
 // The terminal's own command table, shared rather than copied.
 use opencrabs::ui_core::commands as slash;
 
@@ -97,6 +99,16 @@ enum Screen {
     Models,
     /// The onboarding wizard, full screen: the same steps, the same writes.
     Onboard,
+}
+
+/// The second pane of a split: its session, transcript, scroll and layout (#2438).
+struct SplitPane {
+    session: uuid::Uuid,
+    /// The session's title as the rail shows it, for the pane header.
+    title: String,
+    transcript: TranscriptState,
+    scroll: ScrollHandle,
+    layout: Layout,
 }
 
 /// The ledger path, unchanged: `config.database.path`, with the same
@@ -309,6 +321,12 @@ struct Dashboard {
     update_prompt: Option<bool>,
     /// The Help Center filter typed after `/`; None while it is not open (#2407).
     help_filter: Option<String>,
+    /// The second pane of a split, when one is open (#2438).
+    split: Option<SplitPane>,
+    /// The layout a split is waiting on a session for; the sidebar picks it (#2438).
+    split_pick: Option<Layout>,
+    /// A split's new session is being created, so the created row fills the pane.
+    split_creating: bool,
     /// The icon picked for the topic being named; None means the default (#2414).
     topic_draft_icon: Option<String>,
     /// The Help Center body's scroll position, so the arrows can move it (#2407).
@@ -637,6 +655,97 @@ impl Dashboard {
     /// The sessions rail: `/sessions` and ctrl+s share one toggle, so the
     /// command and the chord can never disagree about what showing it means.
     /// A hidden rail has no field to keep listening, so the filter exits.
+    /// Start a split: open the sidebar, focus it, and ask for the second
+    /// session. The chat's own session stays on the left or top (#2438).
+    fn begin_split(&mut self, layout: Layout, cx: &mut Context<Self>) {
+        if self.transcript.session.is_none() {
+            self.live
+                .notices
+                .push("Open a session before splitting it.".to_string());
+            cx.notify();
+            return;
+        }
+        if !self.rail_open {
+            self.toggle_rail(cx);
+        }
+        self.split_pick = Some(layout);
+        self.rail_focused = true;
+        self.sessions.cursor = self.transcript.session;
+        // Focus goes to the window, not the composer, so the sidebar keys and the
+        // dialog's N and Esc reach it while the split waits.
+        self.refocus = Some(FocusTarget::Root);
+        cx.notify();
+    }
+
+    /// Esc during the pick: the split is dropped and the chat keeps focus.
+    fn cancel_split_pick(&mut self, cx: &mut Context<Self>) {
+        self.split_pick = None;
+        self.rail_focused = false;
+        self.refocus_screen();
+        cx.notify();
+    }
+
+    /// Fill the second pane with `id` and load its newest messages (#2438).
+    fn choose_split(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        let Some(layout) = self.split_pick else {
+            return;
+        };
+        if self.transcript.session == Some(id) {
+            self.live
+                .notices
+                .push("That session is already in the chat. Pick another.".to_string());
+            cx.notify();
+            return;
+        }
+        self.split_pick = None;
+        self.rail_focused = false;
+        self.refocus_screen();
+        let title = self
+            .sessions
+            .items
+            .iter()
+            .find(|s| s.id == id)
+            .and_then(|s| s.title.clone())
+            .unwrap_or_else(|| "(untitled)".to_string());
+        self.split = Some(SplitPane {
+            session: id,
+            title,
+            transcript: TranscriptState {
+                session: Some(id),
+                ..Default::default()
+            },
+            scroll: ScrollHandle::new(),
+            layout,
+        });
+        let db_path = self.db_path.clone();
+        cx.spawn(async move |this, cx| {
+            let result = transcript::load_recent(db_path, id).await;
+            this.update(cx, |this, cx| {
+                if let Some(pane) = this.split.as_mut().filter(|p| p.session == id) {
+                    match result {
+                        Ok((rows, total)) => {
+                            let (hidden, turns) =
+                                transcript::turns_with_metrics(&rows, total, &this.turn_metrics);
+                            pane.transcript.hidden = hidden;
+                            pane.transcript.turns = turns;
+                        }
+                        Err(e) => pane.transcript.error = Some(e.into()),
+                    }
+                    pane.scroll.scroll_to_bottom();
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// N in the pick: a new session that fills the second pane (#2438).
+    fn split_new(&mut self, cx: &mut Context<Self>) {
+        self.split_creating = true;
+        self.new_session(cx);
+    }
+
     fn toggle_rail(&mut self, cx: &mut Context<Self>) {
         if self.rail_open {
             self.close_rail_filter(cx);
@@ -1352,7 +1461,12 @@ impl Dashboard {
                 agent_bridge::TurnEvent::SessionCreated(id) => {
                     logging::info(&format!("session created {id}"));
                     self.refresh_rail(cx);
-                    self.open_session(id, cx);
+                    let for_split = std::mem::take(&mut self.split_creating);
+                    if for_split && self.split_pick.is_some() {
+                        self.choose_split(id, cx);
+                    } else {
+                        self.open_session(id, cx);
+                    }
                 }
                 agent_bridge::TurnEvent::SessionCreateFailed(e) => {
                     self.live.notices.push(format!("new session: {e}"));
@@ -2370,6 +2484,33 @@ impl Dashboard {
     }
 
     fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // Split panes (#2438): the chord opens a split, and while one waits for
+        // its session, N makes a new one and Esc drops the pick.
+        if self.screen == Screen::Chat {
+            let ks = &ev.keystroke;
+            if let Some(layout) = split::chord_layout(
+                &ks.key,
+                ks.key_char.as_deref(),
+                ks.modifiers.control,
+                ks.modifiers.shift,
+            ) {
+                self.begin_split(layout, cx);
+                return;
+            }
+            if self.split_pick.is_some() {
+                match ks.key.as_str() {
+                    "escape" => {
+                        self.cancel_split_pick(cx);
+                        return;
+                    }
+                    "n" if !ks.modifiers.control && !ks.modifiers.platform && !ks.modifiers.alt => {
+                        self.split_new(cx);
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        }
         // Modifiers go in the line too: a bare key name cannot tell ctrl+h
         // from a typed h, which is exactly what a help-door report needs.
         let m = &ev.keystroke.modifiers;
@@ -2762,13 +2903,21 @@ impl Dashboard {
                         if let Some(ix) = self.sessions.cursor_index(id) {
                             self.rail_scroll.scroll_to_item(ix);
                         }
-                        self.open_session(id, cx);
+                        // During a split pick the arrows only walk the list (#2438).
+                        if self.split_pick.is_none() {
+                            self.open_session(id, cx);
+                        }
                     }
                     cx.notify();
                     return;
                 }
                 "enter" if self.rail_focused => {
                     if let Some(id) = self.sessions.cursor {
+                        if self.split_pick.is_some() {
+                            self.choose_split(id, cx);
+                            cx.notify();
+                            return;
+                        }
                         self.open_session(id, cx);
                         // Back to the composer, the place a newly opened
                         // conversation is about to be typed into.
@@ -3024,6 +3173,14 @@ impl Render for Dashboard {
                                     this.open_session(id, cx);
                                     this.start_topic_draft(cx);
                                 }
+                                sessions::MenuKind::SplitSide => {
+                                    this.open_session(id, cx);
+                                    this.begin_split(Layout::Side, cx);
+                                }
+                                sessions::MenuKind::SplitStack => {
+                                    this.open_session(id, cx);
+                                    this.begin_split(Layout::Stack, cx);
+                                }
                                 sessions::MenuKind::Delete => this.request_delete(id, cx),
                             }
                         });
@@ -3074,6 +3231,11 @@ impl Render for Dashboard {
                 }
                 // The find field is a jump aid: picking a row is its exit,
                 // and the keyboard goes back to the conversation.
+                // A split waiting for its second session takes this row (#2438).
+                if this.split_pick.is_some() {
+                    this.choose_split(id, cx);
+                    return;
+                }
                 this.close_rail_filter(cx);
                 this.rail_actions = None;
                 this.open_session(id, cx);
@@ -4616,23 +4778,70 @@ impl Render for Dashboard {
                             .child(SharedString::from(hint)),
                     )
                     .children(update_hint);
+                let primary_width = if self.split.is_some() {
+                    (pane_width - THEMES_PANEL_WIDTH) / 2.0 - 8.0
+                } else {
+                    pane_width - THEMES_PANEL_WIDTH
+                };
+                let primary =
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w_0()
+                        .min_h_0()
+                        .child(transcript::view(
+                            &self.transcript,
+                            &self.transcript_scroll,
+                            &self.live,
+                            self.busy,
+                            primary_width,
+                            fold_handlers,
+                            attachment_handlers,
+                        ));
+                let body = match &self.split {
+                    None => primary,
+                    Some(pane) => {
+                        let close = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                            this.split = None;
+                            cx.notify();
+                        });
+                        let secondary = div()
+                            .id("split-secondary")
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .child(split_header(pane, close))
+                            .child(transcript::view(
+                                &pane.transcript,
+                                &pane.scroll,
+                                &LiveTurn::default(),
+                                false,
+                                primary_width,
+                                HashMap::new(),
+                                HashMap::new(),
+                            ));
+                        div()
+                            .flex()
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .gap_2()
+                            .when(pane.layout.is_stacked(), |d| d.flex_col())
+                            .when(!pane.layout.is_stacked(), |d| d.flex_row())
+                            .child(primary)
+                            .child(secondary)
+                    }
+                };
                 let middle = div()
                     .flex()
                     .flex_row()
                     .flex_1()
                     .min_h_0()
                     .gap_3()
-                    .child(div().flex().flex_col().flex_1().min_w_0().min_h_0().child(
-                        transcript::view(
-                            &self.transcript,
-                            &self.transcript_scroll,
-                            &self.live,
-                            self.busy,
-                            pane_width - THEMES_PANEL_WIDTH,
-                            fold_handlers,
-                            attachment_handlers,
-                        ),
-                    ))
+                    .child(body)
                     .child(panel);
                 (middle.into_any_element(), footer.into_any_element())
             }
@@ -4948,6 +5157,12 @@ impl Render for Dashboard {
             });
             root = root.child(topic_info_overlay(&info, close));
         }
+        // While a split waits for its session the chat dims, and a card says what
+        // to do. The sidebar is left bright so its rows can be picked (#2438).
+        if let Some(layout) = self.split_pick {
+            let rail_px = px(self.rail_width * self.rem);
+            root = root.child(split_pick_overlay(layout, rail_px));
+        }
         // The name prompt takes the whole window: the scrim darkens everything
         // else, and a click outside the panel cancels, as Esc does (#2398).
         if let Some(draft) = self.topic_draft.clone() {
@@ -5222,6 +5437,9 @@ fn main() {
                         update_available: None,
                         update_prompt: None,
                         help_filter: None,
+                        split: None,
+                        split_pick: None,
+                        split_creating: false,
                         topic_draft_icon: None,
                         help_scroll: ScrollHandle::new(),
                         dragging_rail: false,
@@ -5793,6 +6011,82 @@ fn update_prompt_overlay(
         .justify_center()
         .bg(rgba(0x0a0a0acc))
         .child(panel)
+}
+
+/// The header of the second pane: its title and a close button (#2438).
+fn split_header(
+    pane: &SplitPane,
+    close: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let title = pane.title.clone();
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .px_2()
+        .py_1()
+        .border_b_1()
+        .border_color(rgb(palette::current().panel_hi))
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(palette::current().text_muted))
+                .child(SharedString::from(title)),
+        )
+        .child(
+            div()
+                .id("split-close")
+                .px_2()
+                .cursor_pointer()
+                .text_color(rgb(palette::current().text_muted))
+                .hover(|d| d.text_color(rgb(palette::current().accent)))
+                .on_click(close)
+                .child(SharedString::from("×")),
+        )
+}
+
+/// The dim over the chat and the card in its bottom right while a split waits
+/// for its second session (#2438). The scrim starts past the sidebar, so the
+/// rows stay bright and clickable.
+fn split_pick_overlay(layout: Layout, rail_px: gpui::Pixels) -> impl IntoElement {
+    let card = div()
+        .absolute()
+        .bottom(px(24.0))
+        .right(px(24.0))
+        .flex()
+        .flex_col()
+        .gap_1()
+        .p_3()
+        .rounded(px(10.0))
+        .border_1()
+        .border_color(rgb(palette::current().panel_hi))
+        .bg(rgb(palette::current().panel))
+        .child(
+            div()
+                .text_sm()
+                .text_color(rgb(palette::current().text))
+                .child(SharedString::from(format!(
+                    "Split {}: select a session to split with",
+                    layout.label()
+                ))),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(palette::current().text_faint))
+                .child("or press N for a new session · esc cancels"),
+        );
+    div()
+        .id("split-pick-scrim")
+        .occlude()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .right_0()
+        .left(rail_px)
+        .bg(rgba(0x0a0a0a88))
+        .child(card)
 }
 
 /// The icons a new topic can carry, as the picker offers them (#2414).

@@ -9,6 +9,7 @@ pub mod bang;
 pub mod commands;
 pub mod help_keys;
 pub mod keys;
+pub mod split;
 pub mod usage;
 
 #[cfg(test)]

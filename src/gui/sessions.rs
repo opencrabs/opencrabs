@@ -880,6 +880,8 @@ pub enum MenuKind {
     Delete,
     EnableTopics,
     NewTopic,
+    SplitSide,
+    SplitStack,
 }
 
 /// One item of the rail's context menu. The labels are the interface:
@@ -911,6 +913,15 @@ pub fn rail_menu_entries(favorited: bool, topics_enabled: bool) -> Vec<MenuEntry
             label: "Enable topics",
         });
     }
+    // Split | and Split _ start a split from this row (#2438).
+    entries.push(MenuEntry {
+        kind: MenuKind::SplitSide,
+        label: "Split |",
+    });
+    entries.push(MenuEntry {
+        kind: MenuKind::SplitStack,
+        label: "Split _",
+    });
     entries.push(MenuEntry {
         kind: MenuKind::Delete,
         label: "Delete",
@@ -1601,22 +1612,38 @@ mod tests {
     #[test]
     fn rail_menu_offers_pin_and_delete() {
         let off = rail_menu_entries(false, false);
-        assert_eq!(off.len(), 3, "pin, enable topics and delete");
+        assert_eq!(off.len(), 5, "pin, enable topics, two splits and delete");
         assert_eq!(off[0].label, "Pin");
         assert!(matches!(off[0].kind, MenuKind::Pin));
-        assert_eq!(off[2].label, "Delete");
-        assert!(matches!(off[2].kind, MenuKind::Delete));
+        assert_eq!(off[4].label, "Delete");
+        assert!(matches!(off[4].kind, MenuKind::Delete));
 
         let on = rail_menu_entries(false, true);
-        assert_eq!(on.len(), 3, "pin, new topic and delete");
+        assert_eq!(on.len(), 5, "pin, new topic, two splits and delete");
         assert_eq!(on[1].label, "New topic");
         assert!(matches!(on[1].kind, MenuKind::NewTopic));
-        assert_eq!(on[2].label, "Delete");
+        assert_eq!(on[4].label, "Delete");
 
         let pinned = rail_menu_entries(true, true);
         assert_eq!(pinned[0].label, "Unpin", "a pinned row offers the way out");
         assert!(matches!(pinned[0].kind, MenuKind::Pin));
-        assert_eq!(pinned[2].label, "Delete");
+        assert_eq!(pinned[4].label, "Delete");
+    }
+
+    /// Split | and Split _ sit before Delete on every row, so a split starts
+    /// from the row that was clicked (#2438).
+    #[test]
+    fn rail_menu_offers_both_splits_before_delete() {
+        let menu = rail_menu_entries(false, true);
+        let labels: Vec<&str> = menu.iter().map(|e| e.label).collect();
+        let split = labels
+            .iter()
+            .position(|l| *l == "Split |")
+            .expect("Split |");
+        assert_eq!(labels[split + 1], "Split _");
+        assert_eq!(labels.last().copied(), Some("Delete"));
+        assert!(matches!(menu[split].kind, MenuKind::SplitSide));
+        assert!(matches!(menu[split + 1].kind, MenuKind::SplitStack));
     }
 
     /// Enable topics is offered only on a session with topics off, between
@@ -1624,7 +1651,7 @@ mod tests {
     #[test]
     fn rail_menu_offers_enable_topics_only_while_topics_are_off() {
         let off = rail_menu_entries(false, false);
-        assert_eq!(off.len(), 3);
+        assert_eq!(off.len(), 5);
         assert_eq!(off[1].label, "Enable topics");
         assert!(matches!(off[1].kind, MenuKind::EnableTopics));
 
