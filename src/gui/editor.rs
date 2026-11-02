@@ -1307,26 +1307,28 @@ impl Element for EditorElement {
 
 impl Render for Editor {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Chips above the text, controls below it: the input stays the
+        // Chips above the text, the paperclip beside it: the input stays the
         // biggest thing in the box and the attachment row never pushes the
         // caret around.
         let mut body = div().flex().flex_col().gap_2();
         if !self.attachments.is_empty() {
             body = body.child(attachment_strip(&self.attachments, cx));
         }
-        body = body.child(EditorElement { input: cx.entity() }).child(
+        // The icon sits inside the input, to the right of the text, as the
+        // messaging apps place it; the text and its hint are gone (#2445).
+        body = body.child(
             div()
                 .flex()
                 .flex_row()
-                .items_center()
-                .justify_between()
-                .child(paperclip(cx))
+                .items_end()
+                .gap_2()
                 .child(
                     div()
-                        .text_xs()
-                        .text_color(rgb(palette::current().text_faint))
-                        .child("drop files to attach"),
-                ),
+                        .flex_1()
+                        .min_w_0()
+                        .child(EditorElement { input: cx.entity() }),
+                )
+                .child(paperclip(cx)),
         );
         div()
             .flex()
@@ -1492,15 +1494,16 @@ fn paperclip(cx: &mut Context<Editor>) -> impl IntoElement {
     div()
         .id("editor-attach")
         .flex()
-        .flex_row()
+        .flex_none()
         .items_center()
-        .gap_1()
+        .justify_center()
+        .size(gpui::rems(1.8))
+        .rounded_sm()
         .cursor_pointer()
-        .text_xs()
+        .text_size(gpui::rems(1.1))
         .text_color(rgb(palette::current().text_faint))
         .hover(|d| d.text_color(rgb(palette::current().accent)))
         .child("📎")
-        .child("attach")
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(|this, _ev: &MouseDownEvent, _window, cx| {
