@@ -2323,6 +2323,15 @@ impl Dashboard {
         } else {
             None
         };
+        // One line per open, so a click that lands and a click that never
+        // arrives can be told apart in the GUI log instead of guessed at
+        // (#2395). The path is the marker's own, which is the string the
+        // overlay will draw.
+        logging::info(&format!(
+            "preview: open {} ({:?})",
+            open.path.display(),
+            open.kind
+        ));
         self.preview = Some(open);
         self.preview_zoom = 1.0;
         cx.notify();
@@ -3629,7 +3638,7 @@ impl Render for Dashboard {
         // to open its own file (#2395).
         let mut attachment_handlers: std::collections::HashMap<String, transcript::ClickHandler> =
             std::collections::HashMap::new();
-        for key in self.transcript.attachment_paths() {
+        for key in transcript::attachment_paths_with_live(&self.transcript, &self.live) {
             let path = std::path::PathBuf::from(key.clone());
             let handler = cx.listener(move |this, _ev, _window, cx| {
                 this.open_preview(path.clone(), cx);
@@ -5610,6 +5619,10 @@ impl Render for Dashboard {
         // transcript behind it must not take a click meant for it (#2395).
         if let Some(open) = self.preview.clone() {
             let close = cx.listener(|this, _ev, _window, cx| {
+                // The other half of the pair: an open with no close after it
+                // stayed on screen, an open and a close in the same gesture is
+                // the overlay dismissing itself (#2395).
+                logging::info("preview: closed");
                 this.preview = None;
                 this.refocus_screen();
                 cx.notify();

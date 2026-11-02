@@ -600,6 +600,23 @@ impl TranscriptState {
     }
 }
 
+/// Every path whose tile must carry a click handler: the stored turns, plus
+/// the rows the live turn draws through that same block renderer. Only stored
+/// rows were counted before, so a picture sent a second ago was tiled but dead
+/// until the turn settled and its row got written (#2395).
+pub fn attachment_paths_with_live(state: &TranscriptState, live: &LiveTurn) -> Vec<String> {
+    let mut keys = state.attachment_paths();
+    for text in live.user.iter().chain(live.injected.iter()) {
+        for path in marker_paths(text) {
+            let key = path.to_string_lossy().to_string();
+            if !keys.contains(&key) {
+                keys.push(key);
+            }
+        }
+    }
+    keys
+}
+
 /// Fetch the newest window of the conversation plus the session's total row
 /// count, on a thread with a real stack (crash receipt in `main.rs`).
 /// `Database::connect` runs pragmas only, never migrations.
@@ -2090,6 +2107,36 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn preview_handlers_cover_the_live_turn() {
+        // #2395: the live turn draws its user rows through the same block
+        // renderer as stored turns, so those tiles need the same handlers.
+        // Counting only stored rows left a picture sent a second ago tiled
+        // but dead until the turn settled.
+        let mut state = TranscriptState::default();
+        state.turns = turns(&[row("user", "old <<IMG:/tmp/old.png>>", 1)], 1).1;
+        let mut live = LiveTurn::default();
+        live.user = Some("fresh <<IMG:/tmp/fresh.png>>".to_string());
+        // A queued message the agent took mid-turn is drawn as a user row too,
+        // and it can carry the same file as the stored turn behind it.
+        live.injected = vec!["queued <<IMG:/tmp/old.png>>".to_string()];
+
+        let keys = attachment_paths_with_live(&state, &live);
+        assert!(
+            keys.iter().any(|k| k.ends_with("old.png")),
+            "a stored tile keeps its handler"
+        );
+        assert!(
+            keys.iter().any(|k| k.ends_with("fresh.png")),
+            "the live row's tile gets one too"
+        );
+        assert_eq!(
+            keys.iter().filter(|k| k.ends_with("old.png")).count(),
+            1,
+            "a path shown twice is listed once, so one handler serves both tiles"
+        );
     }
 
     #[test]

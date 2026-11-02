@@ -16,9 +16,9 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use gpui::{
-    AnyElement, App, Bounds, ClipboardItem, Context, CursorStyle, Div, Element, ElementId,
-    ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
-    GlobalElementId, KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
+    AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, Div, Element,
+    ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
+    Focusable, GlobalElementId, KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, ObjectFit, PathPromptOptions, Pixels, Point, SharedString, Style, TextAlign,
     TextRun, UTF16Selection, Window, WrappedLine, actions, div, fill, img, point, prelude::*, px,
     relative, rgb, rgba, size,
@@ -1413,10 +1413,18 @@ fn attachment_strip(attachments: &[Attachment], cx: &mut Context<Editor>) -> Div
         // The thumbnail opens the same overlay a transcript tile opens. It is
         // its own element with its own id and the remove button is a sibling,
         // so the two clicks cannot collide: the ✕ handler never sees this one
-        // and this one never sees the ✕.
+        // and this one never sees the ✕. The gesture is the completed CLICK, the
+        // same one a transcript tile answers to, so both paths carry one
+        // meaning and the overlay is never mounted between a press and its
+        // release (#2395).
         let open_preview = {
             let path = attachment.path.clone();
-            cx.listener(move |_this, _ev: &MouseDownEvent, _window, cx| {
+            cx.listener(move |_this, _ev: &ClickEvent, _window, cx| {
+                // The chip's own receipt: if the log shows this line and no
+                // `preview: open` after it, the emit never reached the
+                // dashboard; if it shows neither, the click never arrived
+                // (#2395).
+                crate::logging::info(&format!("preview: chip {}", path.display()));
                 cx.stop_propagation();
                 cx.emit(EditorEvent::Preview(path.clone()));
             })
@@ -1459,7 +1467,7 @@ fn attachment_strip(attachments: &[Attachment], cx: &mut Context<Editor>) -> Div
             .justify_center()
             .flex_shrink_0()
             .cursor_pointer()
-            .on_mouse_down(MouseButton::Left, open_preview)
+            .on_click(open_preview)
             .child(art);
         strip = strip.child(
             div()
@@ -1822,6 +1830,17 @@ mod tests {
             .and_then(|rest| rest.split("};").next())
             .expect("the preview handler is built in one block");
         assert!(!preview_handler.contains("remove_attachment"));
+        // Opened on a completed click, never on the mouse down that starts it: one
+        // gesture, one meaning, the same shape a transcript tile uses, and no
+        // overlay mounted between a press and its release (#2395).
+        assert!(
+            src.contains(&[".on_click(open_", "preview)"].concat()),
+            "the thumbnail opens on the click that finished, like a tile"
+        );
+        assert!(
+            !src.contains(&[".on_mouse_down(MouseButton::Left, open_", "preview)"].concat()),
+            "nothing opens the overlay on the way down"
+        );
     }
 
     /// #2443: the chips stay inside the composer. An `img` that owns its own
