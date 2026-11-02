@@ -2173,7 +2173,19 @@ impl Render for Dashboard {
             // always-visible delete: an ✕ on every row reads as "close" and
             // costs conversations. Slide the row left, or press the pin key,
             // and the strip appears on that row alone.
+            let topics_on = self.sessions.is_topic_enabled(id);
             let action = if self.rail_actions == Some(id) {
+                // Topic icon: turn topics on for this session, or open the new
+                // topic prompt under it if they are already on (#2302, #2303).
+                let topic = cx.listener(move |this, _ev, _window, cx| {
+                    cx.stop_propagation();
+                    if this.sessions.is_topic_enabled(id) {
+                        this.open_session(id, cx);
+                        this.start_topic_draft(cx);
+                    } else {
+                        this.enable_topics(id, cx);
+                    }
+                });
                 let pin = cx.listener(move |this, _ev, _window, cx| {
                     cx.stop_propagation();
                     this.toggle_favorite(id, cx);
@@ -2190,6 +2202,7 @@ impl Render for Dashboard {
                         .items_center()
                         .gap_1()
                         .child(sessions::pin_button(favorite).on_click(pin))
+                        .child(sessions::topic_button(topics_on).on_click(topic))
                         .child(sessions::delete_button().on_click(del)),
                 )
             } else {
