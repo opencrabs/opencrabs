@@ -3606,10 +3606,10 @@ impl App {
         }
         if let KeyCode::Char(key) = event.code {
             let key = key.to_string();
-            if crate::ui_core::palette::opens(
+            // The terminal sends `ctrl-shift-f` as `ctrl-f`, so the shift
+            // cannot be part of the condition here (#2463).
+            if crate::ui_core::palette::opens_in_terminal(
                 event.modifiers.contains(KeyModifiers::CONTROL),
-                event.modifiers.contains(KeyModifiers::SHIFT),
-                event.modifiers.contains(KeyModifiers::SUPER),
                 &key,
             ) {
                 self.open_command_palette();

@@ -326,7 +326,7 @@ pub const ROWS: &[HelpRow] = &[
     row(
         HelpSection::Sessions,
         "ctrl+shift+f",
-        "Ctrl+Shift+F",
+        "Ctrl+F",
         Some("ctrl-shift-f"),
         "Seeker: find anything",
     ),
@@ -431,7 +431,7 @@ mod tests {
         "Enter",
         "/",
         "Ctrl+Shift+P",
-        "Ctrl+Shift+F",
+        "Ctrl+F",
         "D",
         "F",
         "Esc",

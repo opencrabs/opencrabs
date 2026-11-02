@@ -265,6 +265,17 @@ pub fn opens(control: bool, shift: bool, platform: bool, key: &str) -> bool {
         || (platform && key.eq_ignore_ascii_case("k"))
 }
 
+/// The chord that opens the card in a terminal, where the shift is not a
+/// separate event: a terminal delivers `ctrl-shift-f` as the raw control byte
+/// `0x06`, which is indistinguishable from `ctrl-f`, so asking for the shift
+/// made the card impossible to open. The terminal arm therefore takes the bare
+/// chord, and the shifted one still works wherever a terminal does report it.
+/// Nothing else in the terminal answers `ctrl-f`, so the two cannot collide
+/// (#2463).
+pub fn opens_in_terminal(control: bool, key: &str) -> bool {
+    control && key.eq_ignore_ascii_case("f")
+}
+
 /// The line to print when the query matched nothing. Chosen by a hash of the
 /// query, so the same query always gets the same line and the card does not
 /// flicker while the user keeps typing.
@@ -723,6 +734,16 @@ mod tests {
         assert!(!opens(true, true, false, "k"));
         assert!(!opens(false, false, false, "k"));
         assert!(!opens(true, false, true, "f"));
+    }
+
+    /// The terminal gets the bare chord, because that is all a terminal sends:
+    /// `ctrl-shift-f` arrives as `ctrl-f` there (#2463).
+    #[test]
+    fn the_terminal_chord_opens_without_the_shift() {
+        assert!(opens_in_terminal(true, "f"));
+        assert!(opens_in_terminal(true, "F"));
+        assert!(!opens_in_terminal(false, "f"));
+        assert!(!opens_in_terminal(true, "k"));
     }
 
     /// Every surface the card can find names a title, and every one but the
