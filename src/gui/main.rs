@@ -2642,6 +2642,60 @@ impl Render for Dashboard {
         // The input box and the live turn panel belong to the chat screen.
         // An editor parked under the usage ledger is the mixing the owner
         // called out, so usage draws the footer hint and nothing else.
+        // The bar sits above the transcript, at the top of the chat (#2394).
+        let mut topic_row: Option<AnyElement> = None;
+        // Topics live in the chat: the `...` button sits above the
+        // conversation for a session that has them on (#2303).
+        let is_topic = self
+            .transcript
+            .session
+            .is_some_and(|id| self.sessions.parents.contains_key(&id));
+        if self.screen == Screen::Chat && (self.open_chat_topics_on() || is_topic) {
+            let toggle = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                this.topic_menu = !this.topic_menu;
+                cx.notify();
+            });
+            let mut items: Vec<Stateful<Div>> = Vec::new();
+            if self.open_chat_topics_on() {
+                let new_topic = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                    this.start_topic_draft(cx);
+                });
+                items.push(sessions::menu_item("New topic").on_click(new_topic));
+            }
+            let view = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                this.topic_menu = false;
+                this.open_topic_info(cx);
+            });
+            items.push(sessions::menu_item("View topic info").on_click(view));
+            if is_topic {
+                let edit = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                    this.start_rename(cx);
+                });
+                items.push(sessions::menu_item("Edit topic").on_click(edit));
+                let closed_now = self
+                    .transcript
+                    .session
+                    .is_some_and(|id| self.sessions.is_closed(id));
+                let close_label = if closed_now {
+                    "Reopen topic"
+                } else {
+                    "Close topic"
+                };
+                let close = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                    this.topic_menu = false;
+                    this.toggle_closed_topic(cx);
+                });
+                items.push(sessions::menu_item(close_label).on_click(close));
+                let delete = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                    this.topic_menu = false;
+                    if let Some(id) = this.transcript.session {
+                        this.request_delete(id, cx);
+                    }
+                });
+                items.push(sessions::menu_item("Delete topic").on_click(delete));
+            }
+            topic_row = Some(topic_bar(self.topic_menu, toggle, items).into_any_element());
+        }
         let mut right = div()
             .flex()
             .flex_col()
@@ -2660,6 +2714,9 @@ impl Render for Dashboard {
         if self.screen != Screen::Chat {
             right = right.child(chrome);
         }
+        if let Some(bar) = topic_row {
+            right = right.child(bar);
+        }
         right = right.child(middle);
         right = match self.screen {
             Screen::Chat => {
@@ -2668,58 +2725,6 @@ impl Render for Dashboard {
                 // hints go back UNDER the input where they were: the owner
                 // called the move above the plan card out.
                 let mut col = right;
-                // Topics live in the chat: the `...` button sits above the
-                // conversation for a session that has them on (#2303).
-                let is_topic = self
-                    .transcript
-                    .session
-                    .is_some_and(|id| self.sessions.parents.contains_key(&id));
-                if self.open_chat_topics_on() || is_topic {
-                    let toggle = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
-                        this.topic_menu = !this.topic_menu;
-                        cx.notify();
-                    });
-                    let mut items: Vec<Stateful<Div>> = Vec::new();
-                    if self.open_chat_topics_on() {
-                        let new_topic = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
-                            this.start_topic_draft(cx);
-                        });
-                        items.push(sessions::menu_item("New topic").on_click(new_topic));
-                    }
-                    let view = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
-                        this.topic_menu = false;
-                        this.open_topic_info(cx);
-                    });
-                    items.push(sessions::menu_item("View topic info").on_click(view));
-                    if is_topic {
-                        let edit = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
-                            this.start_rename(cx);
-                        });
-                        items.push(sessions::menu_item("Edit topic").on_click(edit));
-                        let closed_now = self
-                            .transcript
-                            .session
-                            .is_some_and(|id| self.sessions.is_closed(id));
-                        let close_label = if closed_now {
-                            "Reopen topic"
-                        } else {
-                            "Close topic"
-                        };
-                        let close = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
-                            this.topic_menu = false;
-                            this.toggle_closed_topic(cx);
-                        });
-                        items.push(sessions::menu_item(close_label).on_click(close));
-                        let delete = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
-                            this.topic_menu = false;
-                            if let Some(id) = this.transcript.session {
-                                this.request_delete(id, cx);
-                            }
-                        });
-                        items.push(sessions::menu_item("Delete topic").on_click(delete));
-                    }
-                    col = col.child(topic_bar(self.topic_menu, toggle, items));
-                }
                 if let Some(plan_view) = self.plan.view() {
                     col = col.child(plan_view);
                 }
