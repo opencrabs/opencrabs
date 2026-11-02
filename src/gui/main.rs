@@ -80,6 +80,7 @@ use std::ops::Range;
 use std::rc::Rc;
 use uuid::Uuid;
 
+use opencrabs::brain::mission_control::McAnalytics;
 use opencrabs::config::Config;
 use opencrabs::tui::app::mission_control::log_viewer::LogViewerState;
 use opencrabs::tui::render::format_token_count_raw;
@@ -4126,7 +4127,17 @@ impl Render for Dashboard {
             }
             Screen::MissionControl => {
                 let shown = palette::current();
-                // The panels draw the snapshot the four services produced on
+                // The cards reflow with the width the pane actually has, read
+                // from the live window so a resize lands on the same frame
+                // (#2459). The rail is subtracted only when it is drawn.
+                let viewport = f32::from(window.viewport_size().width);
+                let rail = if self.rail_open {
+                    self.rail_width * self.rem
+                } else {
+                    0.0
+                };
+                let cols = mission_control::grid_columns(viewport - rail, self.rem);
+                // The cards draw the snapshot the four services produced on
                 // entry; the frame itself never reads SQLite (#2426).
                 let body = mission_control_body(
                     self.mc.as_ref(),
@@ -4134,6 +4145,7 @@ impl Render for Dashboard {
                     self.mc_err.as_ref(),
                     self.mc_loading,
                     shown,
+                    cols,
                 );
                 // A decision is never silent: the tool's own sentence sits
                 // above the panels, green when it landed and red when it did
@@ -6388,133 +6400,239 @@ fn main() {
     });
 }
 
-/// One Mission Control frame: the terminal's two-by-two grouping, drawn from
-/// the snapshot the four services produced when the screen opened. Every row
-/// here was read from a service; a quiet instance says so, and a failed read
-/// says that instead, because a panel that invents a row is worse than one
-/// that admits it has none (#2426).
+/// One Mission Control frame: a responsive grid of cards drawn from the
+/// snapshot the four services produced when the screen opened. Every row here
+/// was read from a service; a quiet instance says so, and a failed read says
+/// that instead, because a card that invents a row is worse than one that
+/// admits it has none (#2426).
+///
+/// The grid reflows with the pane (#2459). The terminal draws a fixed 2x2 and
+/// hides the panels that do not fit; a window has the room to draw all of
+/// them, so the column count follows the width it actually has and a resize
+/// never pushes a card out of the frame. Each card is sized by the grid and
+/// clips its own rows: a twenty-five item inbox must not decide how tall the
+/// screen is.
 fn mission_control_body(
     snapshot: Option<&mission_control::Snapshot>,
     nav: &mission_control::Nav,
     err: Option<&SharedString>,
     loading: bool,
     shown: palette::Palette,
+    cols: usize,
 ) -> impl IntoElement {
-    let row = |left: Div, right: Div| {
-        div()
-            .flex()
-            .flex_row()
-            .flex_1()
-            .min_h_0()
-            .gap_2()
-            .child(left.flex_1().min_h_0())
-            .child(right.flex_1().min_h_0())
-    };
-    let mut col = div()
+    let cards = mission_control_cards(snapshot, nav, shown);
+    let count = cards.len();
+    let mut grid = div()
         .id("mission-control-body")
         .flex()
         .flex_col()
         .flex_1()
+        .w_full()
+        .min_w_0()
         .min_h_0()
         .gap_2()
         .px_4()
         .pb_2();
     if let Some(err) = err {
-        col = col.child(text(format!("snapshot failed: {err}"), Size::Xs, shown.red));
+        grid = grid.child(text(format!("snapshot failed: {err}"), Size::Xs, shown.red));
     } else if loading && snapshot.is_none() {
-        col = col.child(text("reading the services…", Size::Xs, shown.text_muted));
+        grid = grid.child(text("reading the services…", Size::Xs, shown.text_muted));
     }
-    let on = |panel: mission_control::Panel| nav.panel == panel;
-    col.child(row(
-        mc_inbox_panel(snapshot, nav, shown),
-        mc_analytics_panel(snapshot, on(mission_control::Panel::Analytics), shown),
-    ))
-    .child(row(
-        mc_activity_panel(snapshot, nav, shown),
-        mc_schedule_panel(snapshot, nav, shown),
-    ))
+    let mut cards = cards.into_iter();
+    for slots in mission_control::grid_rows(count, cols) {
+        let mut row = div()
+            .flex()
+            .flex_row()
+            .flex_1()
+            .w_full()
+            .min_w_0()
+            .min_h_0()
+            .gap_2();
+        for slot in slots {
+            match slot {
+                Some(_) => {
+                    if let Some(card) = cards.next() {
+                        row = row.child(card);
+                    }
+                }
+                // An empty slot holds the last row's cards to the same width
+                // as the rows above instead of letting one card stretch over
+                // the whole pane.
+                None => row = row.child(div().flex_1().min_w_0().min_h_0()),
+            }
+        }
+        grid = grid.child(row);
+    }
+    grid
 }
 
-/// One panel: its title with the count the terminal puts in the same place,
-/// then the rows the services produced, one line each.
+/// The cards the screen can show, in reading order: the three lists the
+/// terminal keeps on its left, then the analytics breakdown, one card per
+/// section (#2459). An analytics section with nothing in it is skipped, so a
+/// new instance shows four cards rather than seven empty boxes.
+fn mission_control_cards(
+    snapshot: Option<&mission_control::Snapshot>,
+    nav: &mission_control::Nav,
+    shown: palette::Palette,
+) -> Vec<Div> {
+    let analytics = snapshot.map(|s| &s.analytics);
+    let focused = nav.panel == mission_control::Panel::Analytics;
+    let mut cards = vec![
+        mc_inbox_panel(snapshot, nav, shown),
+        mc_activity_panel(snapshot, nav, shown),
+        mc_schedule_panel(snapshot, nav, shown),
+        mc_totals_panel(snapshot, focused, shown),
+    ];
+    let Some(a) = analytics else {
+        return cards;
+    };
+    if !a.model_tools.is_empty() {
+        cards.push(mc_models_panel(a, shown));
+    }
+    if !a.flakiest_tools.is_empty() {
+        cards.push(mc_flakiest_panel(
+            a,
+            snapshot.map(|s| s.window).unwrap_or_default(),
+            shown,
+        ));
+    }
+    if a.phantom.total > 0 {
+        cards.push(mc_phantoms_panel(a, shown));
+    }
+    if !a.rsi_top_dimensions.is_empty() {
+        cards.push(mc_rsi_panel(a, shown));
+    }
+    if !a.brain_files.is_empty() {
+        cards.push(mc_brain_panel(a, shown));
+    }
+    if !a.top_tools.is_empty() {
+        cards.push(mc_top_tools_panel(a, shown));
+    }
+    cards
+}
+
+/// One row inside a card. The lists stay one truncated line each; the
+/// analytics numbers are a label and a value, so the value sits flush right
+/// and the label ellipsizes before it, which keeps the columns readable at any
+/// card width.
+enum McRow {
+    /// A whole line, truncated when the card is narrower than it.
+    Line(String, u32),
+    /// A label on the left, a value flush against the right.
+    Pair(String, String, u32),
+}
+
+impl McRow {
+    fn color(&self) -> u32 {
+        match self {
+            Self::Line(_, color) | Self::Pair(_, _, color) => *color,
+        }
+    }
+}
+
+/// One card: a title, then the rows the services produced. The card is a grid
+/// cell first, so it takes the width and height the grid gives it and never
+/// grows to fit its content: `min_w_0` stops a long shell command from
+/// widening its column, `min_h_0` plus `overflow_hidden` stop a long list from
+/// pushing the row below it out of the frame, and the row area scrolls when
+/// there is more than the card can show (#2459).
 fn mc_panel(
+    id: &'static str,
     title: String,
-    rows: Vec<(String, u32)>,
+    rows: Vec<McRow>,
     empty: &'static str,
     focused: bool,
     selected: Option<usize>,
     shown: palette::Palette,
 ) -> Div {
-    let mut col = div()
+    let title_color = if focused {
+        shown.focus
+    } else {
+        shown.text_title
+    };
+    let mut rows_view = div()
+        .id(SharedString::from(format!("mc-rows-{id}")))
         .flex()
         .flex_col()
+        .flex_1()
+        .w_full()
+        .min_w_0()
+        .min_h_0()
+        .gap_1()
+        .overflow_y_scroll();
+    if rows.is_empty() {
+        rows_view = rows_view.child(text(empty, Size::Xs, shown.text_faint));
+    }
+    for (index, row) in rows.into_iter().enumerate() {
+        let armed = selected == Some(index);
+        let color = if armed { shown.focus } else { row.color() };
+        let mut cell = div().w_full().min_w_0().text_color(rgb(color));
+        if armed {
+            cell = cell.bg(rgb(shown.selection)).rounded_sm().px_1();
+        }
+        match row {
+            McRow::Line(line, _) => cell = cell.text_xs().truncate().child(line),
+            McRow::Pair(label, value, _) => {
+                cell = cell
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(text(label, Size::Xs, color).flex_1().min_w_0().truncate())
+                    .child(text(value, Size::Xs, color).flex_none());
+            }
+        }
+        rows_view = rows_view.child(cell);
+    }
+    div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_w_0()
+        .min_h_0()
+        .overflow_hidden()
         .gap_1()
         .p_3()
         .rounded_sm()
         .border_1()
-        // The focused panel wears the ring the rest of the window uses, so the
+        // The focused card wears the ring the rest of the window uses, so the
         // keyboard's target is never a guess.
         .border_color(rgb(if focused { shown.focus } else { shown.panel_hi }))
         .bg(rgb(shown.panel))
-        .child(text(
-            title,
-            Size::Sm,
-            if focused {
-                shown.focus
-            } else {
-                shown.text_title
-            },
-        ));
-    if rows.is_empty() {
-        col = col.child(text(empty, Size::Xs, shown.text_faint));
-    }
-    for (index, (line, color)) in rows.into_iter().enumerate() {
-        let mut cell = div()
-            .text_xs()
-            .truncate()
-            .text_color(rgb(color))
-            .child(line);
-        if selected == Some(index) {
-            cell = cell
-                .bg(rgb(shown.selection))
-                .rounded_sm()
-                .px_1()
-                .text_color(rgb(shown.focus));
-        }
-        col = col.child(cell);
-    }
-    col
+        .child(text(title, Size::Sm, title_color))
+        .child(rows_view)
 }
 
-/// The RSI proposals nobody has decided yet: kind, label, then the summary
-/// the agent wrote for it. Six fit the panel; the terminal scrolls, and the
-/// window grows its own scrolling with the detail popup (task 10).
+/// The RSI proposals nobody has decided yet: kind and label, then the summary
+/// the agent wrote for it. Six fit the card and the window slides with the
+/// selection instead of hiding whatever fell past the sixth, so `j` never walks
+/// off the screen.
 fn mc_inbox_panel(
     snapshot: Option<&mission_control::Snapshot>,
     nav: &mission_control::Nav,
     shown: palette::Palette,
 ) -> Div {
     let items = snapshot.map(|s| s.inbox.as_slice()).unwrap_or_default();
-    // Six rows fit the panel. The window slides with the selection instead of
-    // hiding whatever fell past the sixth, so `j` never walks off the screen.
     let selected = nav.selected.min(items.len().saturating_sub(1));
     let (start, len) = mission_control::visible_window(items.len(), Some(selected), 6);
     let mut rows = Vec::new();
     for item in items.iter().skip(start).take(len) {
-        rows.push((
+        rows.push(McRow::Line(
             format!("{} \u{b7} {}", item.kind.label(), item.label),
             shown.text_normal,
         ));
-        rows.push((format!("  {}", item.summary), shown.text_faint));
+        rows.push(McRow::Line(format!("  {}", item.summary), shown.text_faint));
     }
+    let focused = nav.panel == mission_control::Panel::Inbox;
     mc_panel(
+        "inbox",
         format!("Inbox ({})", items.len()),
         rows,
         "No pending proposals.",
-        nav.panel == mission_control::Panel::Inbox,
+        focused,
         // The selected item's first line, in the rows actually drawn.
-        (nav.panel == mission_control::Panel::Inbox && !items.is_empty())
-            .then_some((selected - start) * 2),
+        (focused && !items.is_empty()).then_some((selected - start) * 2),
         shown,
     )
 }
@@ -6540,18 +6658,39 @@ fn mc_window_tabs(window: mission_control::TimeWindow) -> String {
     .join(" ")
 }
 
-/// Usage and reliability for the selected window: the totals first, the RSI
-/// liveness line the terminal leads with (#469), then the busiest tools.
-fn mc_analytics_panel(
+/// The label the flakiest card carries, the same words the terminal uses.
+fn mc_window_label(window: mission_control::TimeWindow) -> &'static str {
+    use mission_control::TimeWindow;
+    match window {
+        TimeWindow::Day => "24h",
+        TimeWindow::Week => "7d",
+        TimeWindow::Month => "30d",
+        TimeWindow::All => "all-time",
+    }
+}
+
+/// A failure rate's colour at both ends of the scale, so the flakiest card and
+/// the model card agree about what "bad" looks like.
+fn mc_rate_color(rate: f64, shown: palette::Palette) -> u32 {
+    if rate >= 25.0 {
+        shown.red
+    } else if rate >= 5.0 {
+        shown.warn
+    } else {
+        shown.text_muted
+    }
+}
+
+/// Usage and reliability for the selected window: the filter tabs, the totals
+/// the terminal leads with, the RSI liveness line (#469), and the brain size.
+fn mc_totals_panel(
     snapshot: Option<&mission_control::Snapshot>,
     focused: bool,
     shown: palette::Palette,
 ) -> Div {
-    let mut rows: Vec<(String, u32)> = Vec::new();
+    let mut rows: Vec<McRow> = Vec::new();
     if let Some(snap) = snapshot {
         let a = &snap.analytics;
-        // The terminal's totals card, line for line, so two clients never
-        // disagree about the same instance.
         let fail_pct = if a.tool_total_calls > 0 {
             (a.tool_total_fails as f64 / a.tool_total_calls as f64) * 100.0
         } else {
@@ -6559,35 +6698,40 @@ fn mc_analytics_panel(
         };
         // The snapshot carries the window it was read for; the tabs show that
         // one, so a slow read can never label November numbers as September's.
-        rows.push((mc_window_tabs(snap.window), shown.teal));
-        rows.push((
-            format!("Tools {} calls", a.tool_total_calls),
+        rows.push(McRow::Line(mc_window_tabs(snap.window), shown.teal));
+        rows.push(McRow::Pair(
+            "Tools".to_string(),
+            format!("{} calls", a.tool_total_calls),
             shown.text_normal,
         ));
-        rows.push((
-            format!("Fails {} ({fail_pct:.1}%)", a.tool_total_fails),
+        rows.push(McRow::Pair(
+            "Fails".to_string(),
+            format!("{} ({fail_pct:.1}%)", a.tool_total_fails),
             if a.tool_total_fails > 0 {
                 shown.warn
             } else {
                 shown.text_muted
             },
         ));
-        rows.push((
-            format!("Recov {} recovered", a.streaming.total),
+        rows.push(McRow::Pair(
+            "Recov".to_string(),
+            format!("{} recovered", a.streaming.total),
             shown.text_muted,
         ));
-        rows.push((
+        rows.push(McRow::Pair(
+            "Verify".to_string(),
             format!(
-                "Verify {} ok / {} rollbk",
+                "{} ok / {} rollbk",
                 a.brain_verify.passes, a.brain_verify.rollbacks
             ),
             shown.text_muted,
         ));
-        rows.push((
-            format!("RSI {} applied", a.rsi_applied_total),
+        rows.push(McRow::Pair(
+            "RSI".to_string(),
+            format!("{} applied", a.rsi_applied_total),
             shown.text_muted,
         ));
-        rows.push((
+        rows.push(McRow::Line(
             opencrabs::brain::mission_control::staleness::rsi_staleness_line(
                 chrono::Utc::now().timestamp(),
                 a.rsi_last_call_ts,
@@ -6595,50 +6739,192 @@ fn mc_analytics_panel(
             ),
             shown.text_faint,
         ));
-        rows.push((
-            format!(
-                "Brain {:.1} KB / {} files",
-                a.brain_total_kb,
-                a.brain_files.len()
-            ),
+        rows.push(McRow::Pair(
+            "Brain".to_string(),
+            format!("{:.1} KB / {} files", a.brain_total_kb, a.brain_files.len()),
             shown.text_muted,
         ));
-        if !a.flakiest_tools.is_empty() {
-            rows.push(("Flakiest".to_string(), shown.text_title));
-            for stat in a.flakiest_tools.iter().take(2) {
-                rows.push((
-                    format!("  {} \u{b7} {:.1}%", stat.name, stat.fail_rate),
-                    shown.warn,
-                ));
-            }
-        }
-        if a.phantom.total > 0 {
-            rows.push((
-                format!(
-                    "Phantoms {} detected, {} resolved",
-                    a.phantom.total, a.phantom.resolved
-                ),
-                shown.text_muted,
-            ));
-        }
-        if !a.top_tools.is_empty() {
-            rows.push(("Top tools".to_string(), shown.text_title));
-            for stat in a.top_tools.iter().take(3) {
-                rows.push((
-                    format!(
-                        "  {} \u{b7} {} calls \u{b7} {} failed",
-                        stat.name, stat.total, stat.failures
-                    ),
-                    shown.text_muted,
-                ));
-            }
-        }
     }
     mc_panel(
-        "Analytics".to_string(),
+        "totals",
+        "Totals".to_string(),
         rows,
         "No numbers yet.",
         focused,
+        None,
+        shown,
+    )
+}
+
+/// Per-model tool reliability, most calls first, each row carrying the
+/// terminal's ✓/⚠/✗ health glyph and its phantom rate (#900).
+fn mc_models_panel(a: &McAnalytics, shown: palette::Palette) -> Div {
+    let rows = a
+        .model_tools
+        .iter()
+        .take(8)
+        .map(|m| {
+            let phantoms = a
+                .phantom
+                .by_model
+                .iter()
+                .find(|(name, _, _)| name == &m.model)
+                .map(|(_, total, _)| *total)
+                .unwrap_or(0);
+            let phantom_rate = if m.total > 0 {
+                (phantoms as f64 / m.total as f64) * 100.0
+            } else {
+                0.0
+            };
+            let (glyph, color) = if m.fail_rate >= 15.0 || phantom_rate >= 10.0 {
+                ("\u{2717}", shown.red)
+            } else if m.fail_rate >= 5.0 || phantom_rate > 0.0 {
+                ("\u{26a0}", shown.warn)
+            } else {
+                ("\u{2713}", shown.green)
+            };
+            McRow::Pair(
+                m.model.clone(),
+                format!(
+                    "{glyph} {:.1}% fail \u{b7} {:.1}% ph",
+                    m.fail_rate, phantom_rate
+                ),
+                color,
+            )
+        })
+        .collect();
+    mc_panel(
+        "models",
+        "Model reliability".to_string(),
+        rows,
+        "No models yet.",
+        false,
+        None,
+        shown,
+    )
+}
+
+/// Highest failure rates, the window named in the title the way the terminal
+/// names it.
+fn mc_flakiest_panel(
+    a: &McAnalytics,
+    window: mission_control::TimeWindow,
+    shown: palette::Palette,
+) -> Div {
+    let rows = a
+        .flakiest_tools
+        .iter()
+        .take(8)
+        .map(|t| {
+            McRow::Pair(
+                t.name.clone(),
+                format!("{:.1}%", t.fail_rate),
+                mc_rate_color(t.fail_rate, shown),
+            )
+        })
+        .collect();
+    mc_panel(
+        "flakiest",
+        format!("Flakiest ({})", mc_window_label(window)),
+        rows,
+        "No flaky tools.",
+        false,
+        None,
+        shown,
+    )
+}
+
+/// Phantom tool calls: detected, resolved, then the per-model breakdown the
+/// terminal shows.
+fn mc_phantoms_panel(a: &McAnalytics, shown: palette::Palette) -> Div {
+    let mut rows = vec![McRow::Line(
+        format!(
+            "{} detected, {} resolved ({:.1}%)",
+            a.phantom.total, a.phantom.resolved, a.phantom.resolved_pct
+        ),
+        shown.green,
+    )];
+    for (model, total, resolved) in a.phantom.by_model.iter().take(6) {
+        rows.push(McRow::Pair(
+            model.clone(),
+            format!("{total} ({resolved} resolved)"),
+            shown.text_muted,
+        ));
+    }
+    mc_panel(
+        "phantoms",
+        "Phantoms".to_string(),
+        rows,
+        "No phantoms detected.",
+        false,
+        None,
+        shown,
+    )
+}
+
+/// RSI improvements applied, counted per dimension.
+fn mc_rsi_panel(a: &McAnalytics, shown: palette::Palette) -> Div {
+    let rows = a
+        .rsi_top_dimensions
+        .iter()
+        .take(8)
+        .map(|(dim, n)| McRow::Pair(dim.clone(), n.to_string(), shown.green))
+        .collect();
+    mc_panel(
+        "rsi",
+        "RSI applied".to_string(),
+        rows,
+        "Nothing applied yet.",
+        false,
+        None,
+        shown,
+    )
+}
+
+/// The brain files and their sizes, largest first.
+fn mc_brain_panel(a: &McAnalytics, shown: palette::Palette) -> Div {
+    let rows = a
+        .brain_files
+        .iter()
+        .take(14)
+        .map(|f| McRow::Pair(f.name.clone(), format!("{:.1} KB", f.kb), shown.text_muted))
+        .collect();
+    mc_panel(
+        "brain",
+        "Brain files".to_string(),
+        rows,
+        "No brain files.",
+        false,
+        None,
+        shown,
+    )
+}
+
+/// The busiest tools, with the call count the terminal pairs with each name.
+fn mc_top_tools_panel(a: &McAnalytics, shown: palette::Palette) -> Div {
+    let rows = a
+        .top_tools
+        .iter()
+        .take(10)
+        .map(|t| {
+            let color = if t.failures > 0 {
+                shown.text_normal
+            } else {
+                shown.text_muted
+            };
+            McRow::Pair(
+                t.name.clone(),
+                format!("{} calls \u{b7} {} failed", t.total, t.failures),
+                color,
+            )
+        })
+        .collect();
+    mc_panel(
+        "top-tools",
+        "Top tools".to_string(),
+        rows,
+        "No tools yet.",
+        false,
         None,
         shown,
     )
@@ -6662,7 +6948,7 @@ fn mc_activity_panel(
             McActivityLevel::Success => ("\u{2713}", shown.green),
             McActivityLevel::Info => ("\u{b7}", shown.text_muted),
         };
-        rows.push((
+        rows.push(McRow::Line(
             format!(
                 "{glyph} {} \u{b7} {}",
                 mc_relative_time(entry.timestamp),
@@ -6677,9 +6963,10 @@ fn mc_activity_panel(
         mission_control::ACTIVITY_ROWS,
     );
     let selected = focused.then(|| nav.selected.saturating_sub(start));
-    let rows: Vec<(String, u32)> = rows.into_iter().skip(start).take(len).collect();
+    let rows: Vec<McRow> = rows.into_iter().skip(start).take(len).collect();
     let selected = selected.filter(|_| !rows.is_empty());
     mc_panel(
+        "activity",
         format!("Activity ({})", entries.len()),
         rows,
         "No activity yet.",
@@ -6714,7 +7001,7 @@ fn mc_schedule_panel(
         } else {
             ""
         };
-        rows.push((
+        rows.push(McRow::Line(
             format!("{} \u{b7} {}{}", job.label, job.schedule, state),
             color,
         ));
@@ -6725,9 +7012,10 @@ fn mc_schedule_panel(
         mission_control::ACTIVITY_ROWS,
     );
     let selected = focused.then(|| nav.selected.saturating_sub(start));
-    let rows: Vec<(String, u32)> = rows.into_iter().skip(start).take(len).collect();
+    let rows: Vec<McRow> = rows.into_iter().skip(start).take(len).collect();
     let selected = selected.filter(|_| !rows.is_empty());
     mc_panel(
+        "schedule",
         format!("Schedule ({})", jobs.len()),
         rows,
         "No scheduled jobs.",

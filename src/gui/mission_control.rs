@@ -182,6 +182,70 @@ pub fn visible_window(total: usize, selected: Option<usize>, cap: usize) -> (usi
     (start, cap.min(total - start))
 }
 
+/// The narrowest column a card is drawn in, in rem, before the grid drops a
+/// column: enough for a title, a label and its value.
+pub const CARD_BASIS_REM: f32 = 22.0;
+
+/// The gap between two cards, in rem. `rems`, so the window's zoom scales the
+/// grid with everything else.
+pub const CARD_GAP_REM: f32 = 0.5;
+
+/// Most cards a single row will ever hold. Beyond six the cards stop being
+/// readable long before the window stops growing.
+pub const MAX_COLUMNS: usize = 6;
+
+/// How many cards fit one row at this pane width (#2459).
+///
+/// The pane width arrives in pixels and the card floor in rem, so the answer
+/// follows the window's zoom: a zoomed-in window keeps the same card size and
+/// shows fewer of them, which is what a card size in rem means. Never zero, so
+/// a collapsed or not-yet-measured window still draws one column instead of a
+/// grid with no cells.
+pub fn grid_columns(pane_width: f32, rem: f32) -> usize {
+    let rem = if rem.is_finite() && rem > 0.0 {
+        rem
+    } else {
+        16.0
+    };
+    if !pane_width.is_finite() || pane_width <= 0.0 {
+        return 1;
+    }
+    let basis = CARD_BASIS_REM * rem;
+    let gap = CARD_GAP_REM * rem;
+    let fits = ((pane_width + gap) / (basis + gap)).floor();
+    if !fits.is_finite() || fits < 1.0 {
+        1
+    } else {
+        (fits as usize).min(MAX_COLUMNS)
+    }
+}
+
+/// Place every card in a row-major grid of `cols` columns (#2459).
+///
+/// Each row lists one slot per column: `Some(index)` for a card and `None` for
+/// the empty slots that keep the last row's cards the same width as the rows
+/// above. Every card index appears exactly once, which is the property the
+/// screen depends on: a card that is dropped here is a panel nobody can see,
+/// and that is how the analytics and schedule panels went missing.
+pub fn grid_rows(cards: usize, cols: usize) -> Vec<Vec<Option<usize>>> {
+    let cols = cols.clamp(1, MAX_COLUMNS);
+    let mut rows = Vec::with_capacity(cards.div_ceil(cols));
+    let mut next = 0usize;
+    while next < cards {
+        let mut row = Vec::with_capacity(cols);
+        for _ in 0..cols {
+            if next < cards {
+                row.push(Some(next));
+                next += 1;
+            } else {
+                row.push(None);
+            }
+        }
+        rows.push(row);
+    }
+    rows
+}
+
 /// What a keystroke means for the analytics window (#2426).
 ///
 /// The split matters: a capital that names the window already on screen must
@@ -587,6 +651,59 @@ mod tests {
         // A selection left past the end by a shorter read still lands inside.
         assert_eq!(visible_window(20, Some(99), 6), (14, 6));
         assert_eq!(visible_window(0, Some(3), 6), (0, 0));
+    }
+
+    #[test]
+    fn mission_grid_columns_follow_the_pane_width() {
+        // Never zero: a collapsed or not-yet-measured window still draws one
+        // column instead of a grid with no cells.
+        assert_eq!(grid_columns(0.0, 16.0), 1);
+        assert_eq!(grid_columns(f32::NAN, 16.0), 1);
+        assert_eq!(grid_columns(300.0, 16.0), 1);
+        // 22rem cards with a 0.5rem gap: n cards need 360n - 8 pixels at the
+        // default rem, so these are the exact widths where a column appears.
+        assert_eq!(grid_columns(712.0, 16.0), 2);
+        assert_eq!(grid_columns(1072.0, 16.0), 3);
+        assert_eq!(grid_columns(1432.0, 16.0), 4);
+        // A very wide window stops at the cap rather than drawing slivers.
+        assert_eq!(grid_columns(5000.0, 16.0), MAX_COLUMNS);
+        // Zoom is part of the answer: at double rem the same width holds half
+        // the cards, because a card is measured in rem.
+        assert_eq!(grid_columns(1432.0, 32.0), 2);
+        // A nonsense rem falls back to the default instead of dividing by zero.
+        assert_eq!(grid_columns(712.0, 0.0), 2);
+    }
+
+    #[test]
+    fn mission_grid_places_every_card_exactly_once() {
+        // Ten cards over three columns: four rows, the last one padded so its
+        // card keeps the width of the rows above.
+        let rows = grid_rows(10, 3);
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[0], vec![Some(0), Some(1), Some(2)]);
+        assert_eq!(rows[3], vec![Some(9), None, None]);
+
+        // The property the screen leans on: a card dropped here is a panel
+        // nobody can see, which is how the analytics and schedule cards went
+        // missing. Every index lands exactly once at every width.
+        for cards in 0..=20usize {
+            for cols in 1..=MAX_COLUMNS {
+                let placed: Vec<usize> = grid_rows(cards, cols)
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .collect();
+                assert_eq!(
+                    placed,
+                    (0..cards).collect::<Vec<_>>(),
+                    "cards={cards} cols={cols}"
+                );
+            }
+        }
+
+        // No cards, no rows; a zero column count is read as one.
+        assert!(grid_rows(0, 3).is_empty());
+        assert_eq!(grid_rows(2, 0), vec![vec![Some(0)], vec![Some(1)]]);
     }
 
     #[test]
