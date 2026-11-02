@@ -7,6 +7,7 @@
 
 pub mod bang;
 pub mod commands;
+pub mod copy_select;
 pub mod help_keys;
 pub mod keys;
 pub mod split;

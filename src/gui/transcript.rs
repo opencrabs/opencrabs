@@ -17,11 +17,15 @@
 //! truncation everywhere (#2271).
 
 use crate::palette;
+use opencrabs::ui_core::copy_select::{self, covered_rows};
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use gpui::{
-    AbsoluteLength, AnyElement, App, ClickEvent, Div, ObjectFit, ScrollHandle, SharedString,
-    Stateful, Styled, StyledText, TextStyle, Window, div, img, prelude::*, px, rems, rgb,
+    AbsoluteLength, AnyElement, App, ClickEvent, Div, MouseButton, ObjectFit, ScrollHandle,
+    SharedString, Stateful, Styled, StyledText, TextStyle, Window, div, img, prelude::*, px, rems,
+    rgb, rgba,
 };
 
 use opencrabs::db::Database;
@@ -1574,6 +1578,79 @@ fn live_view(live: &LiveTurn, content_width: f32, handlers: &HashMap<String, Cli
 /// by default, exactly as in the TUI; `busy` keeps the running turn's
 /// in-flight text out of the fold so the answer is never hidden while it is
 /// still being written.
+/// Drag-to-copy over the transcript's rows (#2383). Each drawn row records its
+/// plain text in order; a drag from one row to another selects the rows between
+/// them, and releasing the mouse copies their text. Selection is per row, not
+/// per character.
+#[derive(Default)]
+pub struct CopyDrag {
+    texts: RefCell<Vec<String>>,
+    anchor: Cell<Option<usize>>,
+    end: Cell<Option<usize>>,
+    dragging: Cell<bool>,
+}
+
+impl CopyDrag {
+    /// The selected rows, first to last, when a drag covered more than one row.
+    fn range(&self) -> Option<(usize, usize)> {
+        covered_rows(self.anchor.get()?, self.end.get()?)
+    }
+
+    /// The text of the selected rows, joined by blank lines. None without a range.
+    fn copied_text(&self) -> Option<String> {
+        let (lo, hi) = self.range()?;
+        copy_select::copied_text(&self.texts.borrow(), lo, hi)
+    }
+}
+
+/// A row that takes part in a drag: its mouse down starts a selection at its
+/// ordinal, moving over it extends the selection, and it is tinted while selected.
+fn selectable_row(drag: &Rc<CopyDrag>, ordinal: usize, child: Div) -> Stateful<Div> {
+    let selected = drag
+        .range()
+        .is_some_and(|(lo, hi)| (lo..=hi).contains(&ordinal));
+    let start = drag.clone();
+    let extend = drag.clone();
+    div()
+        .id(SharedString::from(format!("tblock-{ordinal}")))
+        .when(selected, |d| d.bg(rgba(0x3311ff22)))
+        .on_mouse_down(MouseButton::Left, move |_ev, window, _app| {
+            start.anchor.set(Some(ordinal));
+            start.end.set(Some(ordinal));
+            start.dragging.set(true);
+            window.refresh();
+        })
+        .on_mouse_move(move |_ev, window, _app| {
+            if extend.dragging.get() {
+                extend.end.set(Some(ordinal));
+                window.refresh();
+            }
+        })
+        .child(child)
+}
+
+/// The plain text a row copies: what the row shows, without markup or folds.
+fn block_text(block: &Block) -> String {
+    match block {
+        Block::Msg { content, .. } => strip_markers(content).trim().to_string(),
+        Block::Thinking { content } => content.trim().to_string(),
+        Block::Tools { calls } => calls
+            .iter()
+            .map(|c| c.description.as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Block::Marker { .. } => String::new(),
+    }
+}
+
+/// What the transcript view listens to besides its turns: the attachment
+/// tiles' handlers, and the drag-to-copy state of the pane that copies (#2383).
+#[derive(Default)]
+pub struct ViewHooks {
+    pub attachments: HashMap<String, ClickHandler>,
+    pub drag: Option<Rc<CopyDrag>>,
+}
+
 pub fn view(
     state: &TranscriptState,
     scroll: &ScrollHandle,
@@ -1581,8 +1658,15 @@ pub fn view(
     busy: bool,
     content_width: f32,
     mut handlers: HashMap<String, ClickHandler>,
-    attachment_handlers: HashMap<String, ClickHandler>,
+    hooks: ViewHooks,
 ) -> Stateful<Div> {
+    let ViewHooks {
+        attachments: attachment_handlers,
+        drag,
+    } = hooks;
+    if let Some(d) = &drag {
+        d.texts.borrow_mut().clear();
+    }
     let mut col = div()
         .id("transcript")
         .flex()
@@ -1673,9 +1757,20 @@ pub fn view(
             {
                 continue;
             }
-            col = match block {
-                Block::Thinking { content } => col.child(thinking_block(content, full)),
-                _ => col.child(block_view(block, content_width, &attachment_handlers)),
+            let child = match block {
+                Block::Thinking { content } => thinking_block(content, full),
+                _ => block_view(block, content_width, &attachment_handlers),
+            };
+            col = match &drag {
+                Some(d) if !block_text(block).is_empty() => {
+                    let ordinal = {
+                        let mut texts = d.texts.borrow_mut();
+                        texts.push(block_text(block));
+                        texts.len() - 1
+                    };
+                    col.child(selectable_row(d, ordinal, child))
+                }
+                _ => col.child(child),
             };
         }
         if !drew_header && let Some(header) = fold_header(turn, folded) {
@@ -1687,6 +1782,17 @@ pub fn view(
     }
     if !live.is_empty() {
         col = col.child(live_view(live, content_width, &attachment_handlers));
+    }
+    // Releasing the mouse ends the drag and copies the selected rows (#2383). A
+    // click that never moved selects nothing, so it copies nothing.
+    if let Some(d) = drag {
+        col = col.on_mouse_up(MouseButton::Left, move |_ev, window, app| {
+            d.dragging.set(false);
+            if let Some(text) = d.copied_text() {
+                app.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+            }
+            window.refresh();
+        });
     }
     col
 }

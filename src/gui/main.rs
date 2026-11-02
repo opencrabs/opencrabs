@@ -51,7 +51,7 @@ use crate::screen_keys::{
 };
 use crate::theme::{BASE_REM, Size, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP, text};
 use opencrabs::ui_core::split::{self, Layout};
-use transcript::{LiveTurn, TranscriptState};
+use transcript::{CopyDrag, LiveTurn, TranscriptState};
 // The terminal's own command table, shared rather than copied.
 use opencrabs::ui_core::commands as slash;
 
@@ -68,6 +68,7 @@ use opencrabs::brain::agent::ProgressEvent;
 use opencrabs::utils::drop_landing::human_size;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
+use std::rc::Rc;
 use uuid::Uuid;
 
 use opencrabs::config::Config;
@@ -321,6 +322,8 @@ struct Dashboard {
     update_prompt: Option<bool>,
     /// The Help Center filter typed after `/`; None while it is not open (#2407).
     help_filter: Option<String>,
+    /// Drag-to-copy state shared by the chat's rows (#2383).
+    copy_drag: Rc<CopyDrag>,
     /// The second pane of a split, when one is open (#2438).
     split: Option<SplitPane>,
     /// The layout a split is waiting on a session for; the sidebar picks it (#2438).
@@ -3336,7 +3339,10 @@ impl Render for Dashboard {
                             self.busy,
                             pane_width,
                             fold_handlers,
-                            attachment_handlers,
+                            transcript::ViewHooks {
+                                attachments: attachment_handlers,
+                                drag: None,
+                            },
                         ))
                         .into_any_element(),
                     {
@@ -4797,7 +4803,10 @@ impl Render for Dashboard {
                             self.busy,
                             primary_width,
                             fold_handlers,
-                            attachment_handlers,
+                            transcript::ViewHooks {
+                                attachments: attachment_handlers,
+                                drag: Some(self.copy_drag.clone()),
+                            },
                         ));
                 let body = match &self.split {
                     None => primary,
@@ -4821,7 +4830,7 @@ impl Render for Dashboard {
                                 false,
                                 primary_width,
                                 HashMap::new(),
-                                HashMap::new(),
+                                transcript::ViewHooks::default(),
                             ));
                         div()
                             .flex()
@@ -5438,6 +5447,7 @@ fn main() {
                         update_prompt: None,
                         help_filter: None,
                         split: None,
+                        copy_drag: Rc::new(CopyDrag::default()),
                         split_pick: None,
                         split_creating: false,
                         topic_draft_icon: None,
