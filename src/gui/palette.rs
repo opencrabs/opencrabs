@@ -132,12 +132,22 @@ pub fn from_tui(theme: &Theme) -> Palette {
     }
 }
 
+/// Build the packed themes so `find_theme` and the themes list see them (#2408).
+/// The build runs once; later calls return at once.
+pub fn build_theme_pack() {
+    let _ = opencrabs::tui::theme_catalog::theme_pack::themes();
+}
+
 /// The palette for a theme name from `[gui]`. Unknown names log and fall back
 /// to the dark palette, so a typo never blanks the window.
 pub fn resolve(name: &str) -> Palette {
     if name.eq_ignore_ascii_case(DARK_NAME) {
         return DARK;
     }
+    // Packed themes only join the lookup once the pack is built. The TUI does
+    // this at startup (#2164); the window never did, so a packed name fell
+    // back to dark (#2408).
+    build_theme_pack();
     match find_theme(name) {
         Some(theme) => from_tui(theme),
         None => {

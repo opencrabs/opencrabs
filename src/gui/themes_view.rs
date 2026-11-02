@@ -12,6 +12,8 @@ use crate::theme::{Size, text};
 
 /// The theme names offered on the screen: built-in presets, then user presets.
 pub fn names() -> Vec<&'static str> {
+    // The list must show the packed themes too (#2408).
+    palette::build_theme_pack();
     theme_names()
 }
 
