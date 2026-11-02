@@ -179,6 +179,7 @@ pub const GUI_SUPPORTED: &[&str] = &[
     "/new",
     "/stop",
     "/sessions",
+    "/mission-control",
     "/models",
     "/onboard",
     "/channels",
@@ -375,7 +376,8 @@ mod tests {
         assert_eq!(support("/usage"), Support::Runs);
         // Real command, no window screen yet: not a typo.
         assert_eq!(support("/workspace"), Support::Missing);
-        assert_eq!(support("/mission-control"), Support::Missing);
+        // The window draws Mission Control now, so it runs there.
+        assert_eq!(support("/mission-control"), Support::Runs);
         assert_eq!(support("/not-a-command"), Support::Unknown);
         // The terminal's rule, kept: matching is exact.
         assert_eq!(support("/Usage"), Support::Unknown);

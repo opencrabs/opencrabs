@@ -100,6 +100,9 @@ enum Screen {
     Models,
     /// The onboarding wizard, full screen: the same steps, the same writes.
     Onboard,
+    /// Mission Control: the inbox, analytics, activity and schedule panels,
+    /// the window's copy of the terminal's own screen (#2426).
+    MissionControl,
 }
 
 /// The second pane of a split: its session, transcript, scroll and layout (#2438).
@@ -613,6 +616,7 @@ impl Dashboard {
         match action {
             ScreenAction::EnterUsage | ScreenAction::LeaveUsage => self.toggle_usage(cx),
             ScreenAction::EnterFiles | ScreenAction::LeaveFiles => self.toggle_files(cx),
+            ScreenAction::LeaveMissionControl => self.close_mission_control(cx),
             ScreenAction::ToggleHelp => self.toggle_help(cx),
         }
     }
@@ -650,6 +654,11 @@ impl Dashboard {
             commands::GuiAction::OpenUsage => {
                 if self.screen != Screen::Usage {
                     self.toggle_usage(cx);
+                }
+            }
+            commands::GuiAction::OpenMissionControl => {
+                if self.screen != Screen::MissionControl {
+                    self.open_mission_control(cx);
                 }
             }
             commands::GuiAction::ToggleHelp => self.toggle_help(cx),
@@ -1102,6 +1111,7 @@ impl Dashboard {
                 }
             }
             Screen::Files => self.screen = Screen::Usage,
+            Screen::MissionControl => self.screen = Screen::Usage,
             Screen::Models => self.screen = Screen::Usage,
             // Usage from the wizard: the screen closes first, so the ledger is
             // not left behind a half-filled form.
@@ -1111,6 +1121,27 @@ impl Dashboard {
             }
             Screen::Themes => self.close_themes(true, cx),
         }
+        self.refocus_screen();
+        cx.notify();
+    }
+
+    /// `/mission-control`: the window's copy of the terminal's screen. The
+    /// panels are drawn from the same services the terminal reads, so the
+    /// screen answers with live data rather than a mock row (#2426).
+    fn open_mission_control(&mut self, cx: &mut Context<Self>) {
+        self.onboard = None;
+        self.rail_actions = None;
+        self.screen = Screen::MissionControl;
+        // The root takes the keyboard, as on the ledger: the panel keys are
+        // not the composer's, and a stale editor focus would send a message.
+        self.refocus_screen();
+        cx.notify();
+    }
+
+    /// Esc, or `/usage` reached from here: back to the conversation with the
+    /// chat exactly where it was left.
+    fn close_mission_control(&mut self, cx: &mut Context<Self>) {
+        self.screen = Screen::Chat;
         self.refocus_screen();
         cx.notify();
     }
@@ -3313,6 +3344,7 @@ impl Render for Dashboard {
             Screen::Themes => "OpenCrabs \u{b7} themes".to_string(),
             Screen::Models => "OpenCrabs \u{b7} models".to_string(),
             Screen::Onboard => "OpenCrabs \u{b7} onboarding".to_string(),
+            Screen::MissionControl => "OpenCrabs \u{b7} mission control".to_string(),
             Screen::Chat => format!(
                 "OpenCrabs \u{b7} {}",
                 self.session_title().unwrap_or("chat")
@@ -3550,6 +3582,50 @@ impl Render for Dashboard {
                             .child("ctrl+h · help"),
                     );
                 (scroller.into_any_element(), footer.into_any_element())
+            }
+            Screen::MissionControl => {
+                let shown = palette::current();
+                // Two rows of two, the terminal's own grouping: the decisions
+                // waiting on you, then what the services have been doing.
+                let row = |left: &'static str, right: &'static str| {
+                    div()
+                        .flex()
+                        .flex_row()
+                        .flex_1()
+                        .min_h_0()
+                        .gap_2()
+                        .child(mission_control_panel(left, shown).flex_1().min_h_0())
+                        .child(mission_control_panel(right, shown).flex_1().min_h_0())
+                };
+                let body = div()
+                    .id("mission-control-body")
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .gap_2()
+                    .px_4()
+                    .pb_2()
+                    .child(row("Inbox", "Analytics"))
+                    .child(row("Activity", "Schedule"));
+                // The terminal's footer, in its own words: the keys the screen
+                // answers, so a hand that knows the terminal is already home.
+                let footer = div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .px_4()
+                    .py_1()
+                    .child(text("Tab/h/l switch panel", Size::Xs, shown.text_muted))
+                    .child(text("↑↓ navigate", Size::Xs, shown.text_muted))
+                    .child(text("Enter detail", Size::Xs, shown.text_muted))
+                    .child(text("a apply", Size::Xs, shown.text_muted))
+                    .child(text("r reject", Size::Xs, shown.text_muted))
+                    .child(text("D/W/M/A filter", Size::Xs, shown.text_muted))
+                    .child(text("L logs", Size::Xs, shown.text_muted))
+                    .child(text("Esc close", Size::Xs, shown.text_muted));
+                (body.into_any_element(), footer.into_any_element())
             }
             Screen::Onboard => match self.onboard.as_mut() {
                 None => {
@@ -5146,6 +5222,7 @@ impl Render for Dashboard {
             Screen::Themes => right.child(footer),
             Screen::Models => right.child(footer),
             Screen::Onboard => right.child(footer),
+            Screen::MissionControl => right.child(footer),
         };
 
         let mut root = div()
@@ -5715,6 +5792,25 @@ fn main() {
 /// The queued messages, above the input where the user can see what will go
 /// out next. Same shape as the TUI's pending list: one line per message, the
 /// count in the header, and a word on when they send.
+/// One Mission Control frame: its title, and the body the data will fill.
+///
+/// The shell is drawn before the snapshot reader lands (task 9 of #2426), so
+/// the body says the honest thing rather than showing a mocked row: a panel
+/// that invents data is worse than a panel that admits it has none.
+fn mission_control_panel(title: &'static str, shown: palette::Palette) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .p_3()
+        .rounded_sm()
+        .border_1()
+        .border_color(rgb(shown.panel_hi))
+        .bg(rgb(shown.panel))
+        .child(text(title, Size::Sm, shown.text_title))
+        .child(text("no snapshot yet", Size::Xs, shown.text_faint))
+}
+
 fn queue_strip(queued: &[agent_bridge::PendingMessage]) -> Div {
     let mut col = div()
         .flex()

@@ -22,6 +22,8 @@ pub enum ScreenAction {
     EnterFiles,
     /// ctrl+g or esc while the files list is showing.
     LeaveFiles,
+    /// esc while Mission Control is showing.
+    LeaveMissionControl,
     /// ctrl+h, or Cmd+? on a Mac.
     ToggleHelp,
 }
@@ -57,6 +59,7 @@ pub fn screen_chord(key: &str, mods: ChordMods, screen: Screen) -> Option<Screen
         return match screen {
             Screen::Usage => Some(ScreenAction::LeaveUsage),
             Screen::Files => Some(ScreenAction::LeaveFiles),
+            Screen::MissionControl => Some(ScreenAction::LeaveMissionControl),
             Screen::Chat | Screen::Themes | Screen::Models | Screen::Onboard => None,
         };
     }
@@ -93,6 +96,7 @@ pub fn action_label(action: Option<ScreenAction>) -> &'static str {
         Some(ScreenAction::LeaveUsage) => "LeaveUsage",
         Some(ScreenAction::EnterFiles) => "EnterFiles",
         Some(ScreenAction::LeaveFiles) => "LeaveFiles",
+        Some(ScreenAction::LeaveMissionControl) => "LeaveMissionControl",
         Some(ScreenAction::ToggleHelp) => "ToggleHelp",
         None => "none",
     }
@@ -104,9 +108,12 @@ pub fn action_label(action: Option<ScreenAction>) -> &'static str {
 pub fn focus_target(screen: Screen) -> FocusTarget {
     match screen {
         Screen::Chat => FocusTarget::Composer,
-        Screen::Usage | Screen::Files | Screen::Themes | Screen::Models | Screen::Onboard => {
-            FocusTarget::Root
-        }
+        Screen::Usage
+        | Screen::Files
+        | Screen::Themes
+        | Screen::Models
+        | Screen::Onboard
+        | Screen::MissionControl => FocusTarget::Root,
     }
 }
 
@@ -144,6 +151,18 @@ mod tests {
         assert_eq!(
             screen_chord("u", CTRL_SHIFT, Screen::Usage),
             Some(ScreenAction::LeaveUsage)
+        );
+    }
+
+    #[test]
+    fn esc_leaves_mission_control() {
+        assert_eq!(
+            screen_chord("escape", PLAIN, Screen::MissionControl),
+            Some(ScreenAction::LeaveMissionControl)
+        );
+        assert_eq!(
+            action_label(Some(ScreenAction::LeaveMissionControl)),
+            "LeaveMissionControl"
         );
     }
 
@@ -231,7 +250,12 @@ mod tests {
 
     #[test]
     fn focus_for_screen_puts_focus_on_the_root_off_chat() {
-        for screen in [Screen::Usage, Screen::Files, Screen::Themes] {
+        for screen in [
+            Screen::Usage,
+            Screen::Files,
+            Screen::Themes,
+            Screen::MissionControl,
+        ] {
             assert_eq!(focus_target(screen), FocusTarget::Root, "{screen:?}");
         }
     }

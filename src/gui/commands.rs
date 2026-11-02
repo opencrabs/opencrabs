@@ -28,6 +28,8 @@ pub enum GuiAction {
     OpenThemes,
     /// The usage ledger.
     OpenUsage,
+    /// Mission Control: the inbox, analytics, activity and schedule panels.
+    OpenMissionControl,
     /// The key reference overlay.
     ToggleHelp,
     /// A fresh conversation.
@@ -120,6 +122,7 @@ fn action_for(name: &str) -> GuiAction {
         "/stop" => GuiAction::StopTurn,
         "/sessions" => GuiAction::OpenSessions,
         "/models" => GuiAction::OpenModels,
+        "/mission-control" => GuiAction::OpenMissionControl,
         "/onboard" => GuiAction::OpenOnboard("/onboard"),
         "/channels" => GuiAction::OpenOnboard("/channels"),
         "/voice" => GuiAction::OpenOnboard("/voice"),
@@ -269,13 +272,21 @@ mod tests {
     }
 
     #[test]
+    fn mission_control_opens_the_window_screen() {
+        assert_eq!(
+            parse_command("/mission-control"),
+            Some(Outcome::Run(GuiAction::OpenMissionControl))
+        );
+    }
+
+    #[test]
     fn a_real_command_without_a_screen_says_so() {
         // Both are real: the window must not pretend they do not exist, and
         // must not hand them to the model either. `/onboard` and the step
         // commands are no longer in this set; they run in the window now.
         assert_eq!(
-            parse_command("/mission-control"),
-            Some(Outcome::Missing("/mission-control"))
+            parse_command("/workspace"),
+            Some(Outcome::Missing("/workspace"))
         );
         assert_eq!(
             parse_command("/compact"),
