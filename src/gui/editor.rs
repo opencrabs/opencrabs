@@ -243,6 +243,10 @@ pub struct Editor {
     /// the first edit opens it again: without this, dismissing a popup whose
     /// content is still a bare command word would be impossible.
     command_dismissed: bool,
+    /// The emoji list under a `:query`: the row the arrows stand on, and whether
+    /// Esc closed it for this draft (#2413).
+    emoji_index: usize,
+    emoji_dismissed: bool,
 }
 
 /// Set while a list in the window owns the arrow keys: the sessions rail, the
@@ -275,6 +279,8 @@ impl Editor {
             is_selecting: false,
             command_index: 0,
             command_dismissed: false,
+            emoji_index: 0,
+            emoji_dismissed: false,
         }
     }
 
@@ -363,6 +369,84 @@ impl Editor {
         }
     }
 
+    /// The `:query` the caret sits in: the colon's byte offset and the query,
+    /// lower cased. None when the text before the caret is not one.
+    fn emoji_query(&self) -> Option<(usize, String)> {
+        let before = self.content.get(..self.cursor_offset())?;
+        let colon = before.rfind(':')?;
+        let query = before.get(colon + 1..)?;
+        if query.is_empty() || query.contains([' ', ':', '\n']) {
+            return None;
+        }
+        Some((colon, query.to_lowercase()))
+    }
+
+    /// The emoji list for the `:query` under the caret, as the terminal shows
+    /// it: up to eight glyphs with their shortcodes, and the highlighted row.
+    pub fn emoji_popup(&self) -> Option<(Vec<(&'static str, &'static str)>, usize)> {
+        if self.emoji_dismissed {
+            return None;
+        }
+        let (_, query) = self.emoji_query()?;
+        let items: Vec<(&'static str, &'static str)> = emojis::iter()
+            .filter_map(|e| {
+                e.shortcodes()
+                    .find(|sc| sc.contains(query.as_str()))
+                    .map(|sc| (e.as_str(), sc))
+            })
+            .take(8)
+            .collect();
+        if items.is_empty() {
+            return None;
+        }
+        let index = self.emoji_index.min(items.len() - 1);
+        Some((items, index))
+    }
+
+    /// Whether a list is open under the caret: a command or an emoji (#2413).
+    pub fn list_open(&self) -> bool {
+        self.command_popup().is_some() || self.emoji_popup().is_some()
+    }
+
+    /// Up and down walk the emoji list while it is open.
+    fn step_emoji_popup(&mut self, delta: i64, cx: &mut Context<Self>) -> bool {
+        let Some((items, index)) = self.emoji_popup() else {
+            return false;
+        };
+        let last = items.len() as i64 - 1;
+        let next = (index as i64 + delta).clamp(0, last) as usize;
+        if next != self.emoji_index {
+            self.emoji_index = next;
+            cx.notify();
+        }
+        true
+    }
+
+    /// Replace `:query` with the highlighted glyph and keep typing after it.
+    fn accept_emoji(&mut self, cx: &mut Context<Self>) {
+        let (Some((colon, _)), Some((items, index))) = (self.emoji_query(), self.emoji_popup())
+        else {
+            return;
+        };
+        let glyph = items[index].0;
+        let end = self.cursor_offset();
+        self.content.replace_range(colon..end, glyph);
+        let caret = colon + glyph.len();
+        self.selected_range = caret..caret;
+        self.selection_reversed = false;
+        self.marked_range = None;
+        self.emoji_index = 0;
+        cx.notify();
+    }
+
+    /// Esc closes the emoji list and keeps the draft. The next edit reopens it.
+    pub fn dismiss_emoji_popup(&mut self, cx: &mut Context<Self>) {
+        if self.emoji_popup().is_some() {
+            self.emoji_dismissed = true;
+            cx.notify();
+        }
+    }
+
     /// Step the slash-command selection. Answers whether there was a list to
     /// step in, so the arrow handlers know whether to fall through to moving
     /// the caret: with a popup open, Up and Down walk names, not lines.
@@ -384,7 +468,12 @@ impl Editor {
     fn accept_command(&mut self, _: &AcceptCommand, _: &mut Window, cx: &mut Context<Self>) {
         // Tab with no list open is free: the window uses it to move focus (#2417).
         let Some((names, index)) = self.command_popup() else {
-            cx.propagate();
+            // An emoji list takes Tab; with no list open the window gets it (#2417).
+            if self.emoji_popup().is_some() {
+                self.accept_emoji(cx);
+            } else {
+                cx.propagate();
+            }
             return;
         };
         let Some(name) = names.get(index).copied() else {
@@ -452,6 +541,9 @@ impl Editor {
         if self.step_command_popup(-1, cx) {
             return;
         }
+        if self.step_emoji_popup(-1, cx) {
+            return;
+        }
         let rows = self.visual_rows();
         let target = vertical_row_target(&rows, self.cursor_offset(), -1);
         self.move_to(target, cx);
@@ -463,6 +555,9 @@ impl Editor {
             return;
         }
         if self.step_command_popup(1, cx) {
+            return;
+        }
+        if self.step_emoji_popup(1, cx) {
             return;
         }
         let rows = self.visual_rows();
@@ -535,6 +630,11 @@ impl Editor {
 
     /// Enter sends: non-empty content goes out as an event, the field clears.
     fn send(&mut self, _: &Send, _window: &mut Window, cx: &mut Context<Self>) {
+        // Enter on an open emoji list takes the highlighted glyph, as the TUI does.
+        if self.emoji_popup().is_some() {
+            self.accept_emoji(cx);
+            return;
+        }
         // A command it is still spelling runs the highlighted name, which is
         // what Enter on the terminal's suggestion list does. Attachments are
         // not part of a command, so a draft carrying them goes out as text.
@@ -567,6 +667,8 @@ impl Editor {
         self.marked_range = None;
         self.command_index = 0;
         self.command_dismissed = false;
+        self.emoji_dismissed = false;
+        self.emoji_index = 0;
         cx.notify();
     }
 
@@ -844,6 +946,8 @@ impl EntityInputHandler for Editor {
         self.marked_range.take();
         // The draft changed, so a dismissed list is offered again.
         self.command_dismissed = false;
+        self.emoji_dismissed = false;
+        self.emoji_index = 0;
         cx.notify();
     }
 
@@ -879,6 +983,8 @@ impl EntityInputHandler for Editor {
             .map(|new_range| new_range.start + range.start..new_range.end + range.end)
             .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
         self.command_dismissed = false;
+        self.emoji_dismissed = false;
+        self.emoji_index = 0;
         cx.notify();
     }
 
