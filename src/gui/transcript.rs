@@ -36,6 +36,7 @@ use opencrabs::tui::render::{
     TurnSummary, format_turn_header, format_turn_spinner_meta, is_deliverable_report,
 };
 
+use crate::attachment_view;
 use crate::editor::{Attachment, marker_paths, strip_markers};
 use crate::markdown;
 
@@ -128,7 +129,13 @@ pub fn settle_detached(
 /// A click listener the view attaches to one fold header. The view cannot
 /// build these itself: they need the owning view's `cx`, so the caller mints
 /// one per turn anchor and hands them in.
-pub type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
+///
+/// `Rc` and not `Box`: a transcript can carry the same path in more than one
+/// message, and each of those tiles has to open the file. One handler per
+/// unique path, cloned per tile, keeps a re-sent picture clickable (#2395).
+/// gpui's `on_click` takes an `impl Fn` and `Rc<dyn Fn>` does not implement
+/// `Fn`, so a tile forwards through a small closure of its own.
+pub type ClickHandler = std::rc::Rc<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 
 /// A rendered piece of the conversation. The TUI's `DisplayMessage` kinds,
 /// narrowed to what the gui pane draws.
@@ -497,6 +504,27 @@ impl TranscriptState {
     /// Every anchor on screen, so the caller can mint one click listener each.
     pub fn anchors(&self) -> Vec<String> {
         self.turns.iter().map(|t| t.anchor.clone()).collect()
+    }
+
+    /// Every attachment the tiles can open, in the marker's own path form and
+    /// without repeats. The caller mints one click listener per entry for the
+    /// same reason it does for anchors: only its own `cx` can build one, and a
+    /// tile must open its own file, not whichever was planned last.
+    pub fn attachment_paths(&self) -> Vec<String> {
+        let mut seen: Vec<String> = Vec::new();
+        for turn in &self.turns {
+            for block in &turn.blocks {
+                if let Block::Msg { content, .. } = block {
+                    for path in marker_paths(content) {
+                        let key = path.to_string_lossy().to_string();
+                        if !seen.contains(&key) {
+                            seen.push(key);
+                        }
+                    }
+                }
+            }
+        }
+        seen
     }
 }
 
@@ -979,10 +1007,20 @@ fn plain_block(content: &str) -> Div {
 /// on the marker, and a grey card around every message made the transcript
 /// read as a stack of boxes instead of a conversation. The timestamp stays on
 /// BOTH sides, which is what the user needed to tell when an answer landed.
-fn bubble(role: &str, content: &str, time: &str) -> Div {
+fn bubble(
+    role: &str,
+    content: &str,
+    time: &str,
+    content_width: f32,
+    handlers: &HashMap<String, ClickHandler>,
+) -> Div {
     let paths = marker_paths(content);
     let text = strip_markers(content);
-    let mut col = div().flex().flex_col().gap_1();
+    // `min_w_0` lets a wide row shrink to the pane instead of pushing it wide,
+    // and `flex_shrink_0` stops the column squeezing a row below the height its
+    // tiles reserved. Before #2395 the row had neither, so a tile laid out
+    // taller than `TILE` painted over the line above it.
+    let mut col = div().flex().flex_col().gap_1().min_w_0().flex_shrink_0();
     if !time.is_empty() {
         col = col.child(
             div()
@@ -999,7 +1037,7 @@ fn bubble(role: &str, content: &str, time: &str) -> Div {
         });
     }
     if !paths.is_empty() {
-        col = col.child(history_attachments(&paths));
+        col = col.child(history_attachments(&paths, content_width, handlers));
     }
     col
 }
@@ -1009,47 +1047,158 @@ fn bubble(role: &str, content: &str, time: &str) -> Div {
 /// plus the name. Filled from the `<<IMG:...>>` / `<<VID:...>>` markers the
 /// send path writes into the message, which is why a reloaded session shows
 /// exactly what was sent instead of a text stand-in for it.
-fn history_attachments(paths: &[std::path::PathBuf]) -> Div {
-    const TILE: f32 = 120.0;
-    let mut row = div().flex().flex_row().flex_wrap().gap_2().pt_1();
-    for path in paths {
-        let attachment = Attachment::for_display(path.clone());
-        let tile: AnyElement = if attachment.is_image() {
-            img(path.clone())
-                .w(px(TILE))
-                .h(px(TILE))
-                .rounded(px(6.0))
-                .object_fit(ObjectFit::Cover)
-                .into_any_element()
-        } else {
-            div()
-                .flex()
-                .items_center()
-                .justify_center()
-                .w(px(TILE))
-                .h(px(TILE))
-                .rounded(px(6.0))
-                .bg(rgb(palette::current().panel_hi))
-                .child(if attachment.is_video { "🎬" } else { "📄" })
-                .into_any_element()
-        };
-        row = row.child(
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .w(px(TILE))
-                .child(tile)
-                .child(
-                    div()
-                        .truncate()
-                        .text_xs()
-                        .text_color(rgb(palette::current().text_muted))
-                        .child(SharedString::from(attachment.name)),
-                ),
-        );
+///
+/// `content_width` is the width the bubble's content gets. `attachment_view`
+/// turns it into rows and one square tile box, and the strip reserves that
+/// height BEFORE the images lay out. That reservation is the fix for #2395:
+/// gpui re-derives an image's height from its own aspect ratio whenever the
+/// height is left `Auto`, so every tile pins both sides here and lets
+/// `object_fit` crop inside the box instead of growing it.
+fn history_attachments(
+    paths: &[std::path::PathBuf],
+    content_width: f32,
+    handlers: &HashMap<String, ClickHandler>,
+) -> Div {
+    let plan = attachment_view::plan(paths.len(), content_width);
+    if plan.is_empty() {
+        return div();
     }
-    row
+    let side = plan.tile.w;
+    let drawn = plan.cells() - usize::from(plan.folded > 0);
+    let mut strip = div()
+        .flex()
+        .flex_col()
+        .flex_shrink_0()
+        .overflow_hidden()
+        .gap_2()
+        .pt_1();
+    let mut index = 0usize;
+    for cells in &plan.rows {
+        let mut row = div()
+            .flex()
+            .flex_row()
+            .flex_shrink_0()
+            .items_start()
+            .gap_2();
+        for _ in 0..*cells {
+            row = row.child(if index < drawn {
+                let path = &paths[index];
+                let key = path.to_string_lossy().to_string();
+                // Cloned, not taken: the same file can appear in more than
+                // one message, and every tile of it must open it.
+                match handlers.get(&key).cloned() {
+                    // A tile you can see is a tile you can open: the click
+                    // goes to the overlay, which decides what the file is.
+                    Some(handler) => attachment_cell(path, side)
+                        .id(SharedString::from(format!("attachment-{key}")))
+                        .cursor_pointer()
+                        // gpui wants a real `Fn`, and `Rc<dyn Fn>` is not one,
+                        // so each tile forwards into the shared handler.
+                        .on_click(move |event, window, cx| handler(event, window, cx))
+                        .into_any_element(),
+                    None => attachment_cell(path, side).into_any_element(),
+                }
+            } else {
+                fold_cell(plan.folded, side)
+            });
+            index += 1;
+        }
+        strip = strip.child(row);
+    }
+    strip
+}
+
+/// One attachment: the picture (or its kind glyph) in a square box, the file
+/// name under it. The box owns the size, so the caption can never be the thing
+/// that decides how tall the row is.
+fn attachment_cell(path: &std::path::Path, side: f32) -> Div {
+    let attachment = Attachment::for_display(path.to_path_buf());
+    let tile: AnyElement = if attachment.is_image() {
+        div()
+            .w(px(side))
+            .h(px(side))
+            .flex_shrink_0()
+            .overflow_hidden()
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(rgb(palette::current().track))
+            .child(
+                img(path.to_path_buf())
+                    .size_full()
+                    .object_fit(ObjectFit::Cover),
+            )
+            .into_any_element()
+    } else {
+        // A document and a clip have nothing to draw, so the box states what a
+        // thumbnail would have shown: the kind by its glyph, then how big it
+        // is and the day it changed. One `stat`, on the same pass that already
+        // loads the images beside it.
+        let caption = crate::preview::FileFacts::probe(path).tile_caption();
+        let mut boxed = div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_1()
+            .w(px(side))
+            .h(px(side))
+            .flex_shrink_0()
+            .overflow_hidden()
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(rgb(palette::current().track))
+            .bg(rgb(palette::current().panel_hi))
+            .text_lg()
+            .child(if attachment.is_video {
+                "\u{1f3ac}"
+            } else {
+                "\u{1f4c4}"
+            });
+        if let Some(line) = caption {
+            boxed = boxed.child(
+                div()
+                    .px_1()
+                    .truncate()
+                    .text_xs()
+                    .text_color(rgb(palette::current().text_muted))
+                    .child(SharedString::from(line)),
+            );
+        }
+        boxed.into_any_element()
+    };
+    div()
+        .flex()
+        .flex_col()
+        .flex_shrink_0()
+        .w(px(side))
+        .gap_1()
+        .child(tile)
+        .child(
+            div()
+                .truncate()
+                .text_xs()
+                .text_color(rgb(palette::current().text_muted))
+                .child(SharedString::from(attachment.name)),
+        )
+}
+
+/// The last cell: how many files the strip did not draw.
+fn fold_cell(folded: usize, side: f32) -> AnyElement {
+    div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .w(px(side))
+        .h(px(side))
+        .flex_shrink_0()
+        .rounded(px(6.0))
+        .border_1()
+        .border_color(rgb(palette::current().track))
+        .bg(rgb(palette::current().panel_hi))
+        .text_sm()
+        .text_color(rgb(palette::current().text_muted))
+        .child(SharedString::from(format!("+{folded}")))
+        .into_any_element()
 }
 
 /// A thinking block: dim, italic, collapsed to a bounded preview so a long
@@ -1200,14 +1349,14 @@ fn fold_header(turn: &Turn, folded: bool) -> Option<Stateful<Div>> {
 
 /// One block, drawn. The fold decides WHETHER a block renders; this decides
 /// only what it looks like.
-fn block_view(block: &Block) -> Div {
+fn block_view(block: &Block, content_width: f32, handlers: &HashMap<String, ClickHandler>) -> Div {
     match block {
         Block::Msg {
             role,
             content,
             time,
             ..
-        } => bubble(role, content, time),
+        } => bubble(role, content, time, content_width, handlers),
         Block::Thinking { content } => thinking_block(content),
         Block::Tools { calls } => tools_block(calls),
         Block::Marker { hidden } => div()
@@ -1347,15 +1496,19 @@ fn live_status_text(live: &LiveTurn) -> String {
 /// answer as markdown, notices in amber. Nothing here folds: the turn has no
 /// settled answer yet, and hiding the working-out would blank the pane
 /// exactly when the user wants to see that something is happening.
-fn live_view(live: &LiveTurn) -> Div {
+fn live_view(live: &LiveTurn, content_width: f32, handlers: &HashMap<String, ClickHandler>) -> Div {
     let mut col = div().flex().flex_col().gap_2();
     if let Some(user) = &live.user {
-        col = col.child(block_view(&Block::Msg {
-            role: "user".into(),
-            content: user.clone(),
-            time: live_time(live.sent_at),
-            placeholder: false,
-        }));
+        col = col.child(block_view(
+            &Block::Msg {
+                role: "user".into(),
+                content: user.clone(),
+                time: live_time(live.sent_at),
+                placeholder: false,
+            },
+            content_width,
+            handlers,
+        ));
     }
     for notice in &live.notices {
         col = col.child(
@@ -1366,9 +1519,13 @@ fn live_view(live: &LiveTurn) -> Div {
         );
     }
     if !live.tools.is_empty() {
-        col = col.child(block_view(&Block::Tools {
-            calls: live.tools.clone(),
-        }));
+        col = col.child(block_view(
+            &Block::Tools {
+                calls: live.tools.clone(),
+            },
+            content_width,
+            handlers,
+        ));
     }
     // ONE status line for the whole turn, exactly the TUI's: a spinner frame,
     // the crab's name, and the same meta the terminal builds with
@@ -1390,12 +1547,16 @@ fn live_view(live: &LiveTurn) -> Div {
         );
     }
     if let Some(answer) = live.answer() {
-        col = col.child(block_view(&Block::Msg {
-            role: "assistant".into(),
-            content: answer.to_string(),
-            time: live_time(live.answer_at.or(live.sent_at)),
-            placeholder: false,
-        }));
+        col = col.child(block_view(
+            &Block::Msg {
+                role: "assistant".into(),
+                content: answer.to_string(),
+                time: live_time(live.answer_at.or(live.sent_at)),
+                placeholder: false,
+            },
+            content_width,
+            handlers,
+        ));
     }
     col
 }
@@ -1410,7 +1571,9 @@ pub fn view(
     scroll: &ScrollHandle,
     live: &LiveTurn,
     busy: bool,
+    content_width: f32,
     mut handlers: HashMap<String, ClickHandler>,
+    attachment_handlers: HashMap<String, ClickHandler>,
 ) -> Stateful<Div> {
     let mut col = div()
         .id("transcript")
@@ -1453,9 +1616,13 @@ pub fn view(
     }
 
     if state.hidden > 0 {
-        col = col.child(block_view(&Block::Marker {
-            hidden: state.hidden,
-        }));
+        col = col.child(block_view(
+            &Block::Marker {
+                hidden: state.hidden,
+            },
+            content_width,
+            &attachment_handlers,
+        ));
     }
     let last = state.turns.len().saturating_sub(1);
     for (ti, turn) in state.turns.iter().enumerate() {
@@ -1474,7 +1641,9 @@ pub fn view(
                 // The listener is per turn and used exactly here, so it is
                 // taken out of the map instead of cloned.
                 col = col.child(match handlers.remove(&turn.anchor) {
-                    Some(click) => header.on_click(click),
+                    Some(click) => {
+                        header.on_click(move |event, window, cx| click(event, window, cx))
+                    }
                     None => header,
                 });
                 drew_header = true;
@@ -1495,17 +1664,17 @@ pub fn view(
             {
                 continue;
             }
-            col = col.child(block_view(block));
+            col = col.child(block_view(block, content_width, &attachment_handlers));
         }
         if !drew_header && let Some(header) = fold_header(turn, folded) {
             col = col.child(match handlers.remove(&turn.anchor) {
-                Some(click) => header.on_click(click),
+                Some(click) => header.on_click(move |event, window, cx| click(event, window, cx)),
                 None => header,
             });
         }
     }
     if !live.is_empty() {
-        col = col.child(live_view(live));
+        col = col.child(live_view(live, content_width, &attachment_handlers));
     }
     col
 }

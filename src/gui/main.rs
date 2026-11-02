@@ -25,6 +25,7 @@
 //! runs one conversation at a time.
 
 mod agent_bridge;
+mod attachment_view;
 mod breakdown;
 mod commands;
 mod editor;
@@ -33,6 +34,7 @@ mod logging;
 mod markdown;
 mod palette;
 mod plan_strip;
+mod preview;
 mod screen_keys;
 mod sessions;
 mod theme;
@@ -53,8 +55,9 @@ use futures::channel::oneshot;
 use gpui::{
     AnyElement, App, Application, Bounds, ClickEvent, Context, Div, DragMoveEvent, Entity,
     ExternalPaths, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ScrollHandle, SharedString, Stateful, TitlebarOptions, Window, WindowBounds,
-    WindowOptions, div, prelude::*, px, rems, rgb, rgba, size,
+    MouseUpEvent, ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString, Stateful,
+    TitlebarOptions, Window, WindowBounds, WindowOptions, div, prelude::*, px, rems, rgb, rgba,
+    size,
 };
 use opencrabs::brain::agent::ProgressEvent;
 use opencrabs::utils::drop_landing::human_size;
@@ -247,6 +250,11 @@ const RAIL_DEFAULT_REM: f32 = 17.0;
 const RAIL_MIN_REM: f32 = 11.0;
 const RAIL_MAX_REM: f32 = 32.0;
 
+/// The side panel beside a previewing screen (`themes-sidebar`), plus the
+/// `gap_3` between it and the transcript. The transcript is planned against
+/// what is left, so its tiles never run under the panel.
+const THEMES_PANEL_WIDTH: f32 = 260.0;
+
 /// The phase 1 window. Every string on screen is real data or the real error.
 struct Dashboard {
     /// Which pane the right side draws: chat by default, usage on ctrl+u.
@@ -328,6 +336,18 @@ struct Dashboard {
     /// Whether the key reference is open (#2320). The overlay reads the same
     /// table the terminal's `/help` prints, so the two cannot disagree.
     help_open: bool,
+    /// The file a click on a transcript tile opened (#2395). One at a time:
+    /// the overlay is modal, so a second preview replaces the first instead of
+    /// stacking.
+    preview: Option<preview::Preview>,
+    /// How far the previewed image is zoomed, 1.0 at open. Reset on every open
+    /// so a fresh click never inherits the last picture's magnification.
+    preview_zoom: f32,
+    /// What a clip's overlay can show: its poster frame, length and size,
+    /// probed once on the click that opened it. Never gathered while painting,
+    /// because both facts come from a subprocess and a render that shells out
+    /// is a render that stutters.
+    preview_video: Option<preview::VideoFacts>,
     /// The `...` menu over the chat is open (#2303). Its only item is New topic.
     topic_menu: bool,
     /// The topic name being typed, while the name prompt is open (#2303).
@@ -1460,6 +1480,71 @@ impl Dashboard {
         cx.notify();
     }
 
+    /// Open a file a tile stands for. The overlay decides what to draw from the
+    /// path alone, so this stays one assignment: no state is derived at click
+    /// time that could disagree with what the overlay renders (#2395).
+    fn open_preview(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
+        let open = preview::Preview::of(path);
+        // A clip is the only kind whose overlay needs the disk: a poster frame
+        // has to be extracted, and its length read. Doing it here, on the
+        // click, is what keeps ffmpeg off the render path.
+        self.preview_video = if open.kind == preview::PreviewKind::Video {
+            Some(preview::VideoFacts::probe(
+                &opencrabs::config::opencrabs_home(),
+                &open.path,
+            ))
+        } else {
+            None
+        };
+        self.preview = Some(open);
+        self.preview_zoom = 1.0;
+        cx.notify();
+    }
+
+    /// The inside of the preview: the part that differs per kind. The shell
+    /// (title, kind, esc) is the same for all three, so a picture, a clip and
+    /// a document cannot drift apart in how they open or close.
+    fn preview_body(&self, open: &preview::Preview, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let path = open.path.clone();
+        let open_file = {
+            let path = path.clone();
+            cx.listener(move |_this, _ev, _window, _cx| {
+                preview::launch(&preview::open_command(&path));
+            })
+        };
+        let reveal_file = {
+            let path = path.clone();
+            cx.listener(move |_this, _ev, _window, _cx| {
+                preview::launch(&preview::reveal_command(&path));
+            })
+        };
+        let wheel = cx.listener(|this, ev: &ScrollWheelEvent, _window, cx| {
+            let lines = match ev.delta {
+                ScrollDelta::Lines(lines) => lines.y,
+                // A pixel delta is a trackpad: a hundredth of a notch per
+                // pixel keeps a fast flick from jumping the whole range.
+                ScrollDelta::Pixels(pixels) => f32::from(pixels.y) / 100.0,
+            };
+            let next = preview::zoom_after_scroll(this.preview_zoom, lines);
+            if next != this.preview_zoom {
+                this.preview_zoom = next;
+                cx.notify();
+            }
+        });
+        preview::body(
+            open,
+            preview::actions_row(
+                open.open_label(),
+                open.path.exists(),
+                open_file,
+                reveal_file,
+            ),
+            self.preview_zoom,
+            wheel,
+            self.preview_video.as_ref(),
+        )
+    }
+
     /// Delete a session, then let the rail fetch the truth back from the
     /// ledger. The row disappears because the row is gone, not because a
     /// local list was filtered.
@@ -2054,6 +2139,16 @@ impl Dashboard {
                 cx.notify();
                 return;
             }
+            // A preview is the nearest thing to the pointer that Esc can
+            // answer: it covers the window, so it goes before anything under
+            // it (#2395).
+            if self.preview.take().is_some() {
+                // The facts belong to the file that was open, so they leave
+                // with it: the next clip probes its own.
+                self.preview_video = None;
+                cx.notify();
+                return;
+            }
             // The confirm dialog sits above everything, so Esc answers it
             // first: cancelling leaves the conversation untouched.
             if self.confirm_delete.take().is_some() {
@@ -2522,8 +2617,29 @@ impl Render for Dashboard {
             let handler = cx.listener(move |this, _ev, _window, cx| {
                 this.toggle_turn(&key, cx);
             });
-            fold_handlers.insert(anchor, Box::new(handler));
+            fold_handlers.insert(anchor, std::rc::Rc::new(handler));
         }
+        // One click listener per attachment tile, minted here for the same
+        // reason as the folds: only this `cx` can build one, and each tile has
+        // to open its own file (#2395).
+        let mut attachment_handlers: std::collections::HashMap<String, transcript::ClickHandler> =
+            std::collections::HashMap::new();
+        for key in self.transcript.attachment_paths() {
+            let path = std::path::PathBuf::from(key.clone());
+            let handler = cx.listener(move |this, _ev, _window, cx| {
+                this.open_preview(path.clone(), cx);
+            });
+            attachment_handlers.insert(key, std::rc::Rc::new(handler));
+        }
+
+        // The transcript plans its attachment tiles from the width the pane
+        // actually has, read from the live viewport rather than a constant, so
+        // a row can never be planned wider than the box it is drawn into
+        // (#2395). The usage screen loses its side panel from the same number.
+        let pane_width = attachment_view::content_width(
+            f32::from(window.viewport_size().width),
+            self.rail_width * self.rem,
+        );
 
         let (middle, footer): (AnyElement, AnyElement) = match self.screen {
             Screen::Chat => {
@@ -2539,7 +2655,9 @@ impl Render for Dashboard {
                             &self.transcript_scroll,
                             &self.live,
                             self.busy,
+                            pane_width,
                             fold_handlers,
+                            attachment_handlers,
                         ))
                         .into_any_element(),
                     {
@@ -2841,7 +2959,9 @@ impl Render for Dashboard {
                             &self.transcript_scroll,
                             &self.live,
                             self.busy,
+                            pane_width - THEMES_PANEL_WIDTH,
                             fold_handlers,
+                            attachment_handlers,
                         ),
                     ))
                     .child(panel);
@@ -3124,6 +3244,20 @@ impl Render for Dashboard {
             });
             root = root.child(confirm_delete_overlay(title, confirm, cancel));
         }
+        // A preview sits over both panes, and over everything else on the
+        // window: it is where the user went to look at something, and the
+        // transcript behind it must not take a click meant for it (#2395).
+        if let Some(open) = self.preview.clone() {
+            let close = cx.listener(|this, _ev, _window, cx| {
+                this.preview = None;
+                this.refocus_screen();
+                cx.notify();
+            });
+            let body = self.preview_body(&open, cx);
+            let detail =
+                preview::detail_line(&open, self.preview_zoom, self.preview_video.as_ref());
+            root = root.child(preview::overlay(&open, detail, body, close));
+        }
         // The key reference, above the panes and above the delete dialog: it
         // is read-only, so nothing behind it can be armed while it is up.
         if self.help_open {
@@ -3374,6 +3508,11 @@ fn main() {
                         editor::EditorEvent::Sent(text) => {
                             this.send_message(text.clone(), cx);
                         }
+                        // A chip's thumbnail opens the same overlay a
+                        // transcript tile opens: one preview, one code path.
+                        editor::EditorEvent::Preview(path) => {
+                            this.open_preview(path.clone(), cx);
+                        }
                     })
                     .detach();
                     // The poll tick: drains bridge events onto the UI thread
@@ -3417,6 +3556,9 @@ fn main() {
                         rail_swipe: None,
                         rail_slide_opened: None,
                         confirm_delete: None,
+                        preview: None,
+                        preview_zoom: 1.0,
+                        preview_video: None,
                         help_open: false,
                         topic_menu: false,
                         topic_draft: None,
@@ -4389,6 +4531,123 @@ fn confirm_delete_overlay(
 #[cfg(test)]
 mod tests {
     use super::{THEMES_HISTORY_LEN, remember_preview};
+
+    /// A tile opens a preview of the file it stands for, Esc closes it, and
+    /// the overlay is painted above the panes. Read off the source because a
+    /// click and a key need a live window: each of these is one line that a
+    /// later edit could drop without any test noticing (#2395).
+    #[test]
+    fn preview_opens_from_a_tile_and_escape_closes_it() {
+        let src = include_str!("main.rs");
+        // Every needle is split in two: `include_str!` puts this test's own
+        // text inside `src`, so a whole literal would match itself right here
+        // and pin nothing at all.
+        assert!(
+            src.contains(&["this.open_pre", "view(path.clone(), cx)"].concat()),
+            "a tile opens the file it stands for"
+        );
+        assert!(
+            src.contains(&["let open = preview::Pre", "view::of(path);"].concat()),
+            "opening decides the kind from the path"
+        );
+        assert!(
+            src.contains(&["if self.preview.ta", "ke().is_some()"].concat()),
+            "Esc closes the preview before anything under it"
+        );
+        assert!(
+            src.contains(
+                &[
+                    "root = root.child(preview::over",
+                    "lay(&open, detail, body, close));"
+                ]
+                .concat()
+            ),
+            "the preview is painted over both panes"
+        );
+    }
+
+    /// The seams the attachment fix rests on, pinned by shape so a later
+    /// refactor cannot quietly drop one (#2395): a tile click reaches the
+    /// preview, the overlay is painted after the panes, and nothing on a
+    /// render path shells out to ffmpeg.
+    #[test]
+    fn the_attachment_seams_stay_where_they_are() {
+        let main = include_str!("main.rs");
+        let transcript = include_str!("transcript.rs");
+        let preview_src = include_str!("preview.rs");
+
+        // 1. A tile is addressable by the path it stands for, and its click
+        //    is the handler the view minted for that path: a picture opens the
+        //    file it shows, not whichever tile was planned last.
+        assert!(
+            transcript.contains(&["format!(\"attach", "ment-{key}\")"].concat()),
+            "a tile is addressable by the path it stands for"
+        );
+        assert!(
+            transcript.contains(
+                &[
+                    ".on_click(move |event, window, cx| ",
+                    "handler(event, window, cx))"
+                ]
+                .concat()
+            ),
+            "the tile click forwards into that path's handler"
+        );
+        assert!(
+            main.contains(&["this.open_pre", "view(path.clone(), cx)"].concat()),
+            "and that handler lands on the preview"
+        );
+        // A path can appear in more than one message, so a tile clones its
+        // handler instead of taking it: taking it would leave the second tile
+        // of the same file drawn but dead.
+        assert!(
+            transcript.contains(&["handlers.get(&key).clon", "ed()"].concat()),
+            "every tile of the same path keeps its click"
+        );
+        assert!(
+            transcript.contains(&["pub type ClickHandler = std::rc::", "Rc<dyn Fn"].concat()),
+            "one handler per path, cloned per tile"
+        );
+
+        // 2. Painting order is z order in gpui: the overlay has to be a child
+        //    added after the panes, or the transcript would take the clicks
+        //    meant for it.
+        let panes = main.find(&["root = root.child(ri", "ght);"].concat());
+        let overlay = main.find(&["root = root.child(preview::over", "lay("].concat());
+        let help = main.find(&["root = root.child(help_", "overlay(close));"].concat());
+        let (Some(panes), Some(overlay), Some(help)) = (panes, overlay, help) else {
+            panic!(
+                "the paint order changed shape: panes={panes:?} overlay={overlay:?} help={help:?}"
+            );
+        };
+        assert!(overlay > panes, "the preview is painted over the panes");
+        assert!(
+            overlay < help,
+            "the key reference still paints above the preview"
+        );
+
+        // 3. A poster is extracted on the click, never while drawing. The
+        //    transcript has no business with a subprocess, and the overlay body
+        //    only ever receives a frame that was already extracted for it.
+        assert!(
+            !transcript.contains("ffmpeg"),
+            "the transcript never extracts a poster frame"
+        );
+        let render_path = preview_src
+            .split(&["pub fn bo", "dy("].concat())
+            .nth(1)
+            .and_then(|rest| rest.split(&["fn file_", "body("].concat()).next())
+            .expect("the overlay body is one function");
+        assert!(
+            !render_path.contains("ffmpeg") && !render_path.contains("Command::"),
+            "the overlay draws the frame it was handed, it never runs a command to get one"
+        );
+        assert_eq!(
+            main.matches(&["VideoFacts::", "probe("].concat()).count(),
+            1,
+            "a clip is probed on the click and nowhere else"
+        );
+    }
 
     /// The themes sidebar keeps a short trail of what was previewed: newest
     /// last, no duplicates, and never longer than the strip is meant to be.

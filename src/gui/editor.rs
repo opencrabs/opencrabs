@@ -208,6 +208,9 @@ pub fn display_name(path: &Path) -> String {
 /// What the editor tells the window: a completed message ready to send.
 pub enum EditorEvent {
     Sent(String),
+    /// A chip's thumbnail was clicked. The editor does not own a preview
+    /// overlay, so it hands the path to whoever does instead of opening one.
+    Preview(std::path::PathBuf),
 }
 
 /// The editor view. Ranges internal to this struct are utf8; every value
@@ -1361,7 +1364,18 @@ fn attachment_strip(attachments: &[Attachment], cx: &mut Context<Editor>) -> Div
             cx.stop_propagation();
             this.remove_attachment(index, cx);
         });
-        let tile: AnyElement = if attachment.is_image() {
+        // The thumbnail opens the same overlay a transcript tile opens. It is
+        // its own element with its own id and the remove button is a sibling,
+        // so the two clicks cannot collide: the ✕ handler never sees this one
+        // and this one never sees the ✕.
+        let open_preview = {
+            let path = attachment.path.clone();
+            cx.listener(move |_this, _ev: &MouseDownEvent, _window, cx| {
+                cx.stop_propagation();
+                cx.emit(EditorEvent::Preview(path.clone()));
+            })
+        };
+        let art: AnyElement = if attachment.is_image() {
             img(attachment.path.clone())
                 .w(px(34.0))
                 .h(px(34.0))
@@ -1380,6 +1394,17 @@ fn attachment_strip(attachments: &[Attachment], cx: &mut Context<Editor>) -> Div
                 .child(if attachment.is_video { "🎬" } else { "📄" })
                 .into_any_element()
         };
+        let tile = div()
+            .id(ElementId::Name(
+                format!("attachment-preview-{index}").into(),
+            ))
+            .flex()
+            .items_center()
+            .justify_center()
+            .flex_shrink_0()
+            .cursor_pointer()
+            .on_mouse_down(MouseButton::Left, open_preview)
+            .child(art);
         strip = strip.child(
             div()
                 .flex()
@@ -1672,6 +1697,41 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).expect("scratch dir");
         dir
+    }
+
+    /// A chip's thumbnail and its ✕ are two elements with two ids and two
+    /// handlers, so the preview click cannot eat the remove click. Both are
+    /// built inside `attachment_strip`, which needs a window to run, so this
+    /// pins what that function writes instead of what it renders.
+    #[test]
+    fn an_attachment_chip_previews_without_stealing_the_remove_click() {
+        let src = include_str!("editor.rs");
+        // Distinct ids: the two hit areas are addressable separately, so a
+        // future selector or test cannot confuse one for the other.
+        assert!(
+            src.contains("attachment-preview-{index}"),
+            "the thumbnail is its own element"
+        );
+        assert!(
+            src.contains("attachment-remove-{index}"),
+            "the remove button is its own element"
+        );
+        assert!(
+            src.contains("cx.emit(EditorEvent::Preview(path.clone()));"),
+            "the thumbnail hands the path to whoever owns the overlay"
+        );
+        assert!(
+            src.contains("cx.stop_propagation();\n            this.remove_attachment(index, cx);"),
+            "the ✕ swallows its click before removing, so neither the chip nor the field fires"
+        );
+        // The preview handler must not remove, or clicking a picture would
+        // detach it.
+        let preview_handler = src
+            .split("let open_preview = {")
+            .nth(1)
+            .and_then(|rest| rest.split("};").next())
+            .expect("the preview handler is built in one block");
+        assert!(!preview_handler.contains("remove_attachment"));
     }
 
     /// Real files only: a missing path must not become a chip that lies.
