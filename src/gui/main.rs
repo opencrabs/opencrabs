@@ -314,6 +314,10 @@ struct Dashboard {
     /// terminal's default (a month, `tui::app::mission_control`) so both
     /// clients open on the same numbers.
     mc_window: mission_control::TimeWindow,
+    /// Which panel the keyboard is on, which row, and whether the detail is
+    /// open. The rules live in `mission_control::Nav` so they are tested
+    /// without a window.
+    mc_nav: mission_control::Nav,
     /// The window's rem size in px. The zoom keys move it and every
     /// rem-based length in the theme follows.
     rem: f32,
@@ -1146,6 +1150,11 @@ impl Dashboard {
         self.onboard = None;
         self.rail_actions = None;
         self.screen = Screen::MissionControl;
+        // A detail left open when the screen closed does not re-open: the
+        // screen starts on its panels, and the row is clamped to the snapshot
+        // that is on hand.
+        self.mc_nav.detail = false;
+        self.mc_nav.clamp(self.mc.as_ref());
         // The four services are read once, on entry, exactly as the terminal
         // does on open. A frame never waits on SQLite.
         self.fetch_mission_control(cx);
@@ -1178,6 +1187,9 @@ impl Dashboard {
                         }
                         Err(e) => this.mc_err = Some(e.into()),
                     }
+                    // A fresh read can be shorter than the last one; the
+                    // selection follows it instead of pointing past the end.
+                    this.mc_nav.clamp(this.mc.as_ref());
                 }
                 cx.notify();
             })
@@ -1191,6 +1203,36 @@ impl Dashboard {
     fn close_mission_control(&mut self, cx: &mut Context<Self>) {
         self.screen = Screen::Chat;
         self.refocus_screen();
+        cx.notify();
+    }
+
+    /// Mission Control's bare keys, the terminal's own bindings: Tab and `l`
+    /// walk the panels, `h` and Shift-Tab walk them back, `j`/`k` and the
+    /// arrows move the row, `g`/`G` jump to the ends, Enter opens the record.
+    fn mission_control_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
+        let ks = &ev.keystroke;
+        // Chords belong to the window (zoom, the screen doors), never to a
+        // panel: swallowing them would break the keys that leave the screen.
+        if ks.modifiers.control || ks.modifiers.platform || ks.modifiers.alt {
+            return;
+        }
+        match ks.key.as_str() {
+            "tab" | "l" => self.mc_nav.focus_next(self.mc.as_ref()),
+            "backtab" | "h" => self.mc_nav.focus_prev(self.mc.as_ref()),
+            "up" | "k" => self.mc_nav.move_selection(self.mc.as_ref(), -1),
+            "down" | "j" => self.mc_nav.move_selection(self.mc.as_ref(), 1),
+            "home" => self.mc_nav.home(),
+            "end" => self.mc_nav.end(self.mc.as_ref()),
+            "g" if ks.modifiers.shift => self.mc_nav.end(self.mc.as_ref()),
+            "g" => self.mc_nav.home(),
+            "enter" => {
+                if !self.mc_nav.detail {
+                    self.mc_nav.open_detail(self.mc.as_ref());
+                }
+            }
+            _ => return,
+        }
+        self.mc_nav.clamp(self.mc.as_ref());
         cx.notify();
     }
 
@@ -2890,6 +2932,13 @@ impl Dashboard {
                 cx.notify();
                 return;
             }
+            // An open Mission Control record is the nearest thing Esc can answer:
+            // it closes the popup and leaves the screen alone.
+            if self.screen == Screen::MissionControl && self.mc_nav.detail {
+                self.mc_nav.detail = false;
+                cx.notify();
+                return;
+            }
             // The usage ledger and the files list are full screens, so Esc
             // leaves them the same way their own chords do. It sits before
             // the turn gate: a running turn must not hold a screen open.
@@ -3139,6 +3188,12 @@ impl Dashboard {
         // confirms the step, Esc steps back (handled above).
         if self.screen == Screen::Onboard {
             self.onboard_key(ev, cx);
+            return;
+        }
+        // Mission Control owns the keyboard on its own screen: bare keys walk
+        // the panels and open the record, the terminal's own bindings.
+        if self.screen == Screen::MissionControl {
+            self.mission_control_key(ev, cx);
             return;
         }
         match input::decide(&mut self.dash, translate_key(ev)) {
@@ -3637,6 +3692,7 @@ impl Render for Dashboard {
                 // entry; the frame itself never reads SQLite (#2426).
                 let body = mission_control_body(
                     self.mc.as_ref(),
+                    &self.mc_nav,
                     self.mc_window,
                     self.mc_err.as_ref(),
                     self.mc_loading,
@@ -5484,6 +5540,19 @@ impl Render for Dashboard {
             });
             root = root.child(update_prompt_overlay(&version, second, confirm, cancel));
         }
+        // An open Mission Control record sits above the screen it belongs to, the
+        // way the preview does: Esc or a click on the scrim closes it (#2426).
+        if self.screen == Screen::MissionControl && self.mc_nav.detail {
+            let close = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                this.mc_nav.detail = false;
+                cx.notify();
+            });
+            root = root.child(mission_control_detail(
+                self.mc.as_ref(),
+                &self.mc_nav,
+                close,
+            ));
+        }
         // The drop target: a Finder drag tints the whole window so the target
         // is never guessed. It paints above both panes and vanishes the
         // moment the drag ends.
@@ -5724,6 +5793,7 @@ fn main() {
                         mc_err: None,
                         mc_loading: false,
                         mc_window: mission_control::TimeWindow::Month,
+                        mc_nav: mission_control::Nav::default(),
                         rem: BASE_REM,
                         db_path: db_path.clone(),
                         sessions: sessions_state,
@@ -5828,6 +5898,7 @@ fn main() {
 /// that admits it has none (#2426).
 fn mission_control_body(
     snapshot: Option<&mission_control::Snapshot>,
+    nav: &mission_control::Nav,
     window: mission_control::TimeWindow,
     err: Option<&SharedString>,
     loading: bool,
@@ -5857,13 +5928,19 @@ fn mission_control_body(
     } else if loading && snapshot.is_none() {
         col = col.child(text("reading the services…", Size::Xs, shown.text_muted));
     }
+    let on = |panel: mission_control::Panel| nav.panel == panel;
     col.child(row(
-        mc_inbox_panel(snapshot, shown),
-        mc_analytics_panel(snapshot, window, shown),
+        mc_inbox_panel(snapshot, nav, shown),
+        mc_analytics_panel(
+            snapshot,
+            window,
+            on(mission_control::Panel::Analytics),
+            shown,
+        ),
     ))
     .child(row(
-        mc_activity_panel(snapshot, shown),
-        mc_schedule_panel(snapshot, shown),
+        mc_activity_panel(snapshot, on(mission_control::Panel::Activity), shown),
+        mc_schedule_panel(snapshot, on(mission_control::Panel::Schedule), shown),
     ))
 }
 
@@ -5873,6 +5950,8 @@ fn mc_panel(
     title: String,
     rows: Vec<(String, u32)>,
     empty: &'static str,
+    focused: bool,
+    selected: Option<usize>,
     shown: palette::Palette,
 ) -> Div {
     let mut col = div()
@@ -5882,14 +5961,36 @@ fn mc_panel(
         .p_3()
         .rounded_sm()
         .border_1()
-        .border_color(rgb(shown.panel_hi))
+        // The focused panel wears the ring the rest of the window uses, so the
+        // keyboard's target is never a guess.
+        .border_color(rgb(if focused { shown.focus } else { shown.panel_hi }))
         .bg(rgb(shown.panel))
-        .child(text(title, Size::Sm, shown.text_title));
+        .child(text(
+            title,
+            Size::Sm,
+            if focused {
+                shown.focus
+            } else {
+                shown.text_title
+            },
+        ));
     if rows.is_empty() {
         col = col.child(text(empty, Size::Xs, shown.text_faint));
     }
-    for (line, color) in rows {
-        col = col.child(text(line, Size::Xs, color).truncate());
+    for (index, (line, color)) in rows.into_iter().enumerate() {
+        let mut cell = div()
+            .text_xs()
+            .truncate()
+            .text_color(rgb(color))
+            .child(line);
+        if selected == Some(index) {
+            cell = cell
+                .bg(rgb(shown.selection))
+                .rounded_sm()
+                .px_1()
+                .text_color(rgb(shown.focus));
+        }
+        col = col.child(cell);
     }
     col
 }
@@ -5897,10 +5998,18 @@ fn mc_panel(
 /// The RSI proposals nobody has decided yet: kind, label, then the summary
 /// the agent wrote for it. Six fit the panel; the terminal scrolls, and the
 /// window grows its own scrolling with the detail popup (task 10).
-fn mc_inbox_panel(snapshot: Option<&mission_control::Snapshot>, shown: palette::Palette) -> Div {
+fn mc_inbox_panel(
+    snapshot: Option<&mission_control::Snapshot>,
+    nav: &mission_control::Nav,
+    shown: palette::Palette,
+) -> Div {
     let items = snapshot.map(|s| s.inbox.as_slice()).unwrap_or_default();
+    // Six rows fit the panel. The window slides with the selection instead of
+    // hiding whatever fell past the sixth, so `j` never walks off the screen.
+    let selected = nav.selected.min(items.len().saturating_sub(1));
+    let start = selected.saturating_sub(5);
     let mut rows = Vec::new();
-    for item in items.iter().take(6) {
+    for item in items.iter().skip(start).take(6) {
         rows.push((
             format!("{} \u{b7} {}", item.kind.label(), item.label),
             shown.text_normal,
@@ -5911,6 +6020,10 @@ fn mc_inbox_panel(snapshot: Option<&mission_control::Snapshot>, shown: palette::
         format!("Inbox ({})", items.len()),
         rows,
         "No pending proposals.",
+        nav.panel == mission_control::Panel::Inbox,
+        // The selected item's first line, in the rows actually drawn.
+        (nav.panel == mission_control::Panel::Inbox && !items.is_empty())
+            .then_some((selected - start) * 2),
         shown,
     )
 }
@@ -5941,6 +6054,7 @@ fn mc_window_tabs(window: mission_control::TimeWindow) -> String {
 fn mc_analytics_panel(
     snapshot: Option<&mission_control::Snapshot>,
     window: mission_control::TimeWindow,
+    focused: bool,
     shown: palette::Palette,
 ) -> Div {
     let mut rows = Vec::new();
@@ -5976,11 +6090,22 @@ fn mc_analytics_panel(
             ));
         }
     }
-    mc_panel("Analytics".to_string(), rows, "No numbers yet.", shown)
+    mc_panel(
+        "Analytics".to_string(),
+        rows,
+        "No numbers yet.",
+        focused,
+        None,
+        shown,
+    )
 }
 
 /// The RSI journal, newest first, coloured by the level the service assigned.
-fn mc_activity_panel(snapshot: Option<&mission_control::Snapshot>, shown: palette::Palette) -> Div {
+fn mc_activity_panel(
+    snapshot: Option<&mission_control::Snapshot>,
+    focused: bool,
+    shown: palette::Palette,
+) -> Div {
     use opencrabs::brain::mission_control::McActivityLevel;
     let entries = snapshot.map(|s| s.activity.as_slice()).unwrap_or_default();
     let mut rows = Vec::new();
@@ -6004,12 +6129,18 @@ fn mc_activity_panel(snapshot: Option<&mission_control::Snapshot>, shown: palett
         format!("Activity ({})", entries.len()),
         rows,
         "No activity yet.",
+        focused,
+        None,
         shown,
     )
 }
 
 /// Cron jobs and pending approvals, with a paused job marked as paused.
-fn mc_schedule_panel(snapshot: Option<&mission_control::Snapshot>, shown: palette::Palette) -> Div {
+fn mc_schedule_panel(
+    snapshot: Option<&mission_control::Snapshot>,
+    focused: bool,
+    shown: palette::Palette,
+) -> Div {
     let jobs = snapshot.map(|s| s.schedule.as_slice()).unwrap_or_default();
     let mut rows = Vec::new();
     for job in jobs.iter().take(8) {
@@ -6030,8 +6161,138 @@ fn mc_schedule_panel(snapshot: Option<&mission_control::Snapshot>, shown: palett
         format!("Schedule ({})", jobs.len()),
         rows,
         "No scheduled jobs.",
+        focused,
+        None,
         shown,
     )
+}
+
+/// The full record for the selected proposal, drawn over everything: the same
+/// fields the terminal's detail popup shows (`tui/render/mission_control/
+/// detail_popup.rs`), read from the snapshot that is already on hand. Enter
+/// opens it, Esc closes it, and a click on the card is inert so reading it
+/// never throws it away.
+fn mission_control_detail(
+    snapshot: Option<&mission_control::Snapshot>,
+    nav: &mission_control::Nav,
+    close: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let shown = palette::current();
+    let item = snapshot.and_then(|s| s.inbox.get(nav.selected)).cloned();
+    let title = match &item {
+        Some(item) => format!("{} detail \u{b7} {}", nav.panel.title(), item.kind.label()),
+        None => format!("{} detail", nav.panel.title()),
+    };
+    let close = std::rc::Rc::new(close);
+    let scrim_close = close.clone();
+    let button_close = close.clone();
+    let mut card = div()
+        .id("mission-control-detail")
+        .flex()
+        .flex_col()
+        .gap_1()
+        .p_3()
+        .max_w(px(720.0))
+        .max_h(px(560.0))
+        .overflow_hidden()
+        .rounded(px(10.0))
+        .border_1()
+        .border_color(rgb(shown.panel_hi))
+        .bg(rgb(shown.panel))
+        // Inert: the click stops here instead of reaching the scrim.
+        .on_click(|_ev, _window, cx| cx.stop_propagation())
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .mb_1()
+                .child(
+                    div()
+                        .flex_1()
+                        .text_sm()
+                        .text_color(rgb(shown.focus))
+                        .truncate()
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .id("mission-control-detail-close")
+                        .text_xs()
+                        .text_color(rgb(shown.text_muted))
+                        .cursor_pointer()
+                        .child("esc")
+                        .on_click(move |ev, window, cx| button_close(ev, window, cx)),
+                ),
+        );
+    match item {
+        Some(item) => {
+            // The terminal's field order, so the two clients read alike.
+            card = card
+                .child(mc_kv("Kind", item.kind.label().to_string(), shown))
+                .child(mc_kv("Label", item.label.clone(), shown))
+                .child(mc_kv("Source", item.source.clone(), shown))
+                .child(mc_kv(
+                    "Filed",
+                    item.created_at.format("%Y-%m-%d %H:%M UTC").to_string(),
+                    shown,
+                ))
+                .child(mc_kv("ID", item.id.clone(), shown))
+                .child(
+                    div()
+                        .mt_2()
+                        .text_xs()
+                        .text_color(rgb(shown.text_title))
+                        .child("Summary"),
+                );
+            for line in item.summary.split('\n') {
+                card = card.child(text(line.to_string(), Size::Xs, shown.text_normal));
+            }
+        }
+        None => {
+            card = card.child(text("No proposal selected.", Size::Xs, shown.text_faint));
+        }
+    }
+    div()
+        .id("mission-control-detail-scrim")
+        // Modal: the dim scrim owns the pointer, so a click meant for a panel
+        // behind it cannot move the selection under the popup.
+        .occlude()
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .bg(rgba(0x0a0a0add))
+        .on_click(move |ev, window, cx| scrim_close(ev, window, cx))
+        .child(card)
+}
+
+/// One label/value line in the detail popup, in the terminal's columns.
+fn mc_kv(key: &str, value: String, shown: palette::Palette) -> Div {
+    div()
+        .flex()
+        .flex_row()
+        .gap_2()
+        .child(
+            div()
+                .w(px(56.0))
+                .text_xs()
+                .text_color(rgb(shown.text_title))
+                .child(key.to_string()),
+        )
+        .child(
+            div()
+                .flex_1()
+                .text_xs()
+                .text_color(rgb(shown.text_normal))
+                .truncate()
+                .child(value),
+        )
 }
 
 /// An event's age in the terminal's own shorthand, and "undated" when the

@@ -51,6 +51,126 @@ impl Snapshot {
     }
 }
 
+/// Which panel the keyboard is on, in the terminal's own order
+/// (`tui::app::mission_control::McPanel`): Tab and `l` walk it forward, `h`
+/// and Shift-Tab walk it back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Panel {
+    #[default]
+    Inbox,
+    Analytics,
+    Activity,
+    Schedule,
+}
+
+impl Panel {
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Inbox => "Inbox",
+            Self::Analytics => "Analytics",
+            Self::Activity => "Activity",
+            Self::Schedule => "Schedule",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::Inbox => Self::Analytics,
+            Self::Analytics => Self::Activity,
+            Self::Activity => Self::Schedule,
+            Self::Schedule => Self::Inbox,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        match self {
+            Self::Inbox => Self::Schedule,
+            Self::Analytics => Self::Inbox,
+            Self::Activity => Self::Analytics,
+            Self::Schedule => Self::Activity,
+        }
+    }
+
+    /// Rows the panel can select. Analytics is one page, exactly as the
+    /// terminal counts it, so Enter still has something to open there.
+    pub fn rows(self, snapshot: Option<&Snapshot>) -> usize {
+        match self {
+            Self::Inbox => snapshot.map_or(0, |s| s.inbox.len()),
+            Self::Analytics => usize::from(snapshot.is_some()),
+            Self::Activity => snapshot.map_or(0, |s| s.activity.len()),
+            Self::Schedule => snapshot.map_or(0, |s| s.schedule.len()),
+        }
+    }
+}
+
+/// The screen's keyboard state: the focused panel, the selected row and
+/// whether the detail popup is open. Pure data with pure transitions, so the
+/// walking rules are tested without a window.
+#[derive(Debug, Clone, Default)]
+pub struct Nav {
+    pub panel: Panel,
+    pub selected: usize,
+    pub detail: bool,
+}
+
+impl Nav {
+    /// Tab or `l`: the next panel, keeping the row index if it still exists,
+    /// the way the terminal keeps one selection across panels.
+    pub fn focus_next(&mut self, snapshot: Option<&Snapshot>) {
+        self.panel = self.panel.next();
+        self.clamp(snapshot);
+    }
+
+    /// Shift-Tab or `h`: the previous panel.
+    pub fn focus_prev(&mut self, snapshot: Option<&Snapshot>) {
+        self.panel = self.panel.prev();
+        self.clamp(snapshot);
+    }
+
+    /// `j` / down, `k` / up: move one row inside the focused panel.
+    pub fn move_selection(&mut self, snapshot: Option<&Snapshot>, delta: i64) {
+        let rows = self.panel.rows(snapshot);
+        if rows == 0 {
+            self.selected = 0;
+            self.detail = false;
+            return;
+        }
+        let last = rows - 1;
+        let moved = self.selected.min(last) as i64 + delta;
+        self.selected = moved.clamp(0, last as i64) as usize;
+    }
+
+    /// `g` / Home: the first row.
+    pub fn home(&mut self) {
+        self.selected = 0;
+    }
+
+    /// `G` / End: the last row the panel has.
+    pub fn end(&mut self, snapshot: Option<&Snapshot>) {
+        self.selected = self.panel.rows(snapshot).saturating_sub(1);
+    }
+
+    /// Enter: open the detail when the focused panel has something to show.
+    /// The inbox is the panel whose rows carry a record to read, which is why
+    /// the terminal opens it there and nowhere else so far.
+    pub fn open_detail(&mut self, snapshot: Option<&Snapshot>) {
+        if self.panel == Panel::Inbox && self.panel.rows(snapshot) > 0 {
+            self.detail = true;
+        }
+    }
+
+    /// A shorter snapshot or a fresh read: keep the selection inside it.
+    pub fn clamp(&mut self, snapshot: Option<&Snapshot>) {
+        let rows = self.panel.rows(snapshot);
+        if rows == 0 {
+            self.selected = 0;
+            self.detail = false;
+            return;
+        }
+        self.selected = self.selected.min(rows - 1);
+    }
+}
+
 /// Read the snapshot for `window` on a thread that owns its reactor.
 ///
 /// The thread is 4 MB and named, exactly like [`super::agent_bridge::load_files`],
@@ -175,5 +295,92 @@ mod tests {
         // The schedule panel marks a paused job; the fixture holds exactly one.
         assert_eq!(snapshot.schedule.iter().filter(|j| !j.enabled).count(), 1);
         assert_eq!(snapshot.tool_line(), "41 calls · 3 failed");
+    }
+
+    /// An inbox holding `items` proposals, for the keyboard tests.
+    fn inbox_snapshot(items: usize) -> Snapshot {
+        let mut snapshot = Snapshot::default();
+        snapshot.inbox = (0..items)
+            .map(|i| McInboxItem {
+                id: format!("prop_tool_{i}"),
+                label: format!("tool_{i}"),
+                summary: "why it was proposed".into(),
+                kind: opencrabs::brain::mission_control::McInboxKind::ProposedTool,
+                source: "rsi-autonomous".into(),
+                created_at: chrono::Utc::now(),
+                detail: None,
+            })
+            .collect();
+        snapshot
+    }
+
+    #[test]
+    fn mission_nav_walks_the_panels_in_the_terminals_order() {
+        let snapshot = inbox_snapshot(2);
+        let mut nav = Nav::default();
+        assert_eq!(nav.panel, Panel::Inbox);
+        nav.focus_next(Some(&snapshot));
+        assert_eq!(nav.panel, Panel::Analytics);
+        nav.focus_next(Some(&snapshot));
+        assert_eq!(nav.panel, Panel::Activity);
+        nav.focus_next(Some(&snapshot));
+        assert_eq!(nav.panel, Panel::Schedule);
+        // Tab past the last panel wraps to the first, never to a dead end.
+        nav.focus_next(Some(&snapshot));
+        assert_eq!(nav.panel, Panel::Inbox);
+        nav.focus_prev(Some(&snapshot));
+        assert_eq!(nav.panel, Panel::Schedule);
+    }
+
+    #[test]
+    fn mission_nav_keeps_the_selection_inside_the_snapshot() {
+        let snapshot = inbox_snapshot(3);
+        let mut nav = Nav::default();
+        nav.end(Some(&snapshot));
+        assert_eq!(nav.selected, 2);
+        // One more row down is still the last row, and one up leaves it.
+        nav.move_selection(Some(&snapshot), 1);
+        assert_eq!(nav.selected, 2);
+        nav.move_selection(Some(&snapshot), -1);
+        assert_eq!(nav.selected, 1);
+        nav.home();
+        assert_eq!(nav.selected, 0);
+        nav.move_selection(Some(&snapshot), -1);
+        assert_eq!(nav.selected, 0);
+
+        // A shorter read (a proposal got applied elsewhere) clamps the row.
+        let shorter = inbox_snapshot(1);
+        nav.end(Some(&shorter));
+        assert_eq!(nav.selected, 0);
+
+        // An empty read takes the row with it and closes the detail.
+        nav.selected = 4;
+        nav.detail = true;
+        nav.clamp(Some(&Snapshot::default()));
+        assert_eq!(nav.selected, 0);
+        assert!(!nav.detail);
+    }
+
+    #[test]
+    fn mission_nav_opens_a_detail_only_where_there_is_a_record() {
+        let empty = Snapshot::default();
+        let mut nav = Nav::default();
+        nav.open_detail(Some(&empty));
+        assert!(!nav.detail, "an empty inbox has nothing to open");
+        nav.open_detail(None);
+        assert!(!nav.detail, "no read yet means nothing to open");
+
+        let snapshot = inbox_snapshot(2);
+        nav.open_detail(Some(&snapshot));
+        assert!(nav.detail);
+
+        // The other panels have no record view yet, so Enter there is a no-op
+        // rather than a popup with nothing in it.
+        let mut nav = Nav {
+            panel: Panel::Schedule,
+            ..Nav::default()
+        };
+        nav.open_detail(Some(&snapshot));
+        assert!(!nav.detail);
     }
 }
