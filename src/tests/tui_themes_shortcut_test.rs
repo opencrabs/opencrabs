@@ -38,7 +38,7 @@ fn the_global_handler_routes_alt_t_to_the_picker() {
 #[test]
 fn the_help_table_lists_alt_t_for_the_terminal() {
     let row = help_keys::rows()
-        .find(|r| r.tui == "Alt+T")
+        .find(|r| r.tui == Some("Alt+T"))
         .expect("the help screen lists Alt+T for the terminal");
     assert!(row.description.to_lowercase().contains("theme"));
 }

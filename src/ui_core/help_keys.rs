@@ -60,8 +60,10 @@ pub struct HelpRow {
     pub section: HelpSection,
     /// Machine spelling, lowercase, `+` between modifiers and the key.
     pub neutral: &'static str,
-    /// How the terminal spells it.
-    pub tui: &'static str,
+    /// How the terminal spells it, or `None` when the terminal has no such
+    /// binding yet. `None` mirrors `gui`: a surface prints the chords it
+    /// answers and nothing else (#2438).
+    pub tui: Option<&'static str>,
     /// How the window spells it, or `None` while the window has no binding.
     pub gui: Option<&'static str>,
     /// What the chord does.
@@ -78,8 +80,27 @@ const fn row(
     HelpRow {
         section,
         neutral,
-        tui,
+        tui: Some(tui),
         gui,
+        description,
+    }
+}
+
+/// A chord the window answers and the terminal does not (#2438). The row
+/// prints in the window's help and is skipped by the terminal's, which is
+/// the honest shape: a terminal that lists a chord it ignores is worse than
+/// one that stays quiet.
+const fn window_row(
+    section: HelpSection,
+    neutral: &'static str,
+    gui: &'static str,
+    description: &'static str,
+) -> HelpRow {
+    HelpRow {
+        section,
+        neutral,
+        tui: None,
+        gui: Some(gui),
         description,
     }
 }
@@ -198,6 +219,20 @@ pub const ROWS: &[HelpRow] = &[
         "Scroll history",
     ),
     row(HelpSection::Chat, "at", "@", None, "File picker"),
+    // The split panes are a window feature: `ui_core::split` holds the chord
+    // and the layout rule, the terminal has no panes to put anywhere yet.
+    window_row(
+        HelpSection::Chat,
+        "ctrl+shift+|",
+        "ctrl-shift-|",
+        "Split: two sessions side by side",
+    ),
+    window_row(
+        HelpSection::Chat,
+        "ctrl+shift+_",
+        "ctrl-shift-_",
+        "Split: two sessions stacked",
+    ),
     // ── INPUT EDITING ──
     row(
         HelpSection::InputEditing,
@@ -399,7 +434,7 @@ mod tests {
 
     #[test]
     fn every_documented_tui_chord_is_present() {
-        let actual: Vec<&str> = rows().map(|r| r.tui).collect();
+        let actual: Vec<&str> = rows().filter_map(|r| r.tui).collect();
         assert_eq!(actual, TUI_LABELS.to_vec());
     }
 
@@ -427,7 +462,9 @@ mod tests {
             assert!(
                 r.neutral.chars().all(|c| c.is_ascii_lowercase()
                     || c.is_ascii_digit()
-                    || matches!(c, '+' | '/' | '@')),
+                    // `|` and `_` are the split chords' key glyphs: shift
+                    // and the glyph is the whole chord (#2438).
+                    || matches!(c, '+' | '/' | '@' | '|' | '_')),
                 "{} is not a machine spelling",
                 r.neutral
             );
@@ -452,7 +489,7 @@ mod tests {
             assert!(
                 chord
                     .chars()
-                    .all(|c| c.is_ascii_lowercase() || matches!(c, '-' | '/')),
+                    .all(|c| c.is_ascii_lowercase() || matches!(c, '-' | '/' | '|' | '_')),
                 "{chord} is not a window spelling"
             );
         }
@@ -475,10 +512,10 @@ mod tests {
         // Ctrl+H is a word delete in a terminal (state.rs:3805), so the terminal
         // must not advertise it as the help door.
         let help = find("help").expect("the help row must exist");
-        assert_eq!(help.tui, "/help");
+        assert_eq!(help.tui, Some("/help"));
         assert_eq!(help.gui, Some("ctrl-h"));
         assert!(
-            !rows().any(|r| r.tui.eq_ignore_ascii_case("ctrl+h")),
+            !rows().any(|r| r.tui.is_some_and(|t| t.eq_ignore_ascii_case("ctrl+h"))),
             "ctrl+h is a word delete in a terminal, not the help door"
         );
     }

@@ -312,7 +312,7 @@ fn docs_advertise_click_to_open() {
     // binding is pinned as data plus a check that the renderer still reads the
     // table rather than a hand-written list that could drift from the window.
     let click = crate::ui_core::help_keys::find("click").expect("shared table lists a click row");
-    assert_eq!(click.tui, "Mouse click");
+    assert_eq!(click.tui, Some("Mouse click"));
     assert!(
         click.description.contains("Open"),
         "the click row must describe opening URLs/paths: {}",
@@ -321,7 +321,7 @@ fn docs_advertise_click_to_open() {
     let help = include_str!("../tui/render/help.rs");
     assert!(
         help.contains("help_keys::section_rows(section)")
-            && help.contains("kv(row.tui, row.description"),
+            && help.contains("kv(label, row.description"),
         "/help dialog must render the shared chord table"
     );
 }

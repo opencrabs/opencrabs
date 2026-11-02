@@ -34,7 +34,7 @@ fn help_dialog_ctrl_c_row_documents_snap_and_fits_the_column() {
     // scanning the renderer's source text.
     let row = crate::ui_core::help_keys::find("ctrl+c")
         .expect("the help table must keep a ctrl-c row in the GLOBAL section");
-    assert_eq!(row.tui, "Ctrl+C");
+    assert_eq!(row.tui, Some("Ctrl+C"));
     assert!(
         row.description.contains("Snap bottom"),
         "#1771: the /help dialog must document that the first Ctrl+C press \
@@ -49,7 +49,7 @@ fn help_dialog_ctrl_c_row_documents_snap_and_fits_the_column() {
             row.description.len() <= 34,
             "#1771: {} help description is {} chars; keep it within the \
              no-wrap column budget (<= 34). Offending description: {}",
-            row.tui,
+            row.tui.unwrap_or("(window only)"),
             row.description.len(),
             row.description
         );

@@ -60,16 +60,21 @@ async fn every_shared_row_reaches_the_tui_help_dialog() {
     let text = screen_text(&mut app, 120, 100);
 
     for row in help_keys::rows() {
+        // A window-only row has no terminal chord to print, and the dialog
+        // leaves the whole row out rather than printing half of it (#2438).
+        let Some(label) = row.tui else {
+            continue;
+        };
         assert!(
-            text.contains(row.tui),
+            text.contains(label),
             "the /help dialog does not print the chord {:?} from the shared table",
-            row.tui
+            label
         );
         assert!(
             text.contains(row.description),
             "the /help dialog does not print the description {:?} for {:?}",
             row.description,
-            row.tui
+            label
         );
     }
 }

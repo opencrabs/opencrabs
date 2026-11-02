@@ -61,7 +61,11 @@ pub(super) fn render_help(f: &mut Frame, app: &mut App, area: Rect) {
         left.push(Line::from(""));
         left.push(section_header(section.title()));
         for row in crate::ui_core::help_keys::section_rows(section) {
-            left.push(kv(row.tui, row.description, cyan));
+            // A row with no terminal spelling is a window-only chord; the
+            // terminal stays quiet about keys it does not answer (#2438).
+            if let Some(label) = row.tui {
+                left.push(kv(label, row.description, cyan));
+            }
         }
     }
 
