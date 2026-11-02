@@ -38,6 +38,7 @@ actions!(
         WordLeft,
         WordRight,
         DeleteWordBack,
+        DeleteToLineStart,
         SelectLeft,
         SelectRight,
         SelectAll,
@@ -587,6 +588,23 @@ impl Editor {
     ) {
         if self.selected_range.is_empty() {
             self.select_to(previous_word_start(&self.content, self.cursor_offset()), cx)
+        }
+        self.replace_text_in_range(None, "", window, cx)
+    }
+
+    /// ctrl+u: delete from the caret back to the start of its line, the TUI's
+    /// binding. A selection is deleted as it is.
+    fn delete_to_line_start(
+        &mut self,
+        _: &DeleteToLineStart,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_range.is_empty() {
+            let caret = self.cursor_offset();
+            let before = self.content.get(..caret).unwrap_or("");
+            let line_start = before.rfind('\n').map_or(0, |i| i + 1);
+            self.select_to(line_start, cx);
         }
         self.replace_text_in_range(None, "", window, cx)
     }
@@ -1321,6 +1339,7 @@ impl Render for Editor {
             .on_action(cx.listener(Self::word_left))
             .on_action(cx.listener(Self::word_right))
             .on_action(cx.listener(Self::delete_word_back))
+            .on_action(cx.listener(Self::delete_to_line_start))
             .on_action(cx.listener(Self::select_left))
             .on_action(cx.listener(Self::select_right))
             .on_action(cx.listener(Self::select_all))
@@ -1487,6 +1506,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("enter", Send, None),
         KeyBinding::new("shift-enter", Newline, None),
         KeyBinding::new("ctrl-j", Newline, None),
+        KeyBinding::new("ctrl-u", DeleteToLineStart, None),
         KeyBinding::new("ctrl-w", DeleteWordBack, None),
         KeyBinding::new("tab", AcceptCommand, None),
     ]);

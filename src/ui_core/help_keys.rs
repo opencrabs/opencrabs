@@ -92,9 +92,9 @@ const fn row(
 /// `/help` while the window answers `ctrl+h`.
 ///
 /// Two rows deliberately carry different chords per surface. `Ctrl+U` is the
-/// editor's delete-to-line-start in the terminal (`state.rs:3868`) and the
-/// usage ledger in the window, which has no line-start delete yet, so the
-/// usage row prints `/usage` there and `ctrl-u` here. The sidebar answers
+/// usage ledger in the terminal, `ctrl+u`, and in the window `ctrl-shift-u`, so
+/// `ctrl-u` can be the composer's delete-to-line-start in both (#2430). The
+/// usage row prints `/usage` in the terminal and `ctrl-shift-u` here. The sidebar answers
 /// `ctrl+s` on both; `ctrl+l` stays a hidden alias in the terminal.
 pub const ROWS: &[HelpRow] = &[
     // ── GLOBAL ──
@@ -158,7 +158,7 @@ pub const ROWS: &[HelpRow] = &[
         HelpSection::Global,
         "usage",
         "/usage",
-        Some("ctrl-u"),
+        Some("ctrl-shift-u"),
         "Usage ledger",
     ),
     // ── CHAT ──
@@ -252,7 +252,7 @@ pub const ROWS: &[HelpRow] = &[
         HelpSection::InputEditing,
         "ctrl+u",
         "Ctrl+U",
-        None,
+        Some("ctrl-u"),
         "Delete to line start (vim)",
     ),
     // ── SESSIONS ──

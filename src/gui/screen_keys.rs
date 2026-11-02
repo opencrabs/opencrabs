@@ -60,7 +60,9 @@ pub fn screen_chord(key: &str, mods: ChordMods, screen: Screen) -> Option<Screen
             Screen::Chat | Screen::Themes | Screen::Models | Screen::Onboard => None,
         };
     }
-    if mods.control && key == "u" {
+    // ctrl+shift+u, not ctrl+u: plain ctrl+u is delete-to-line-start in the
+    // composer, the TUI's binding (#2430).
+    if mods.control && mods.shift && key == "u" {
         return Some(match screen {
             Screen::Usage => ScreenAction::LeaveUsage,
             _ => ScreenAction::EnterUsage,
@@ -117,6 +119,12 @@ mod tests {
         shift: false,
         platform: false,
     };
+    const CTRL_SHIFT: ChordMods = ChordMods {
+        control: true,
+        shift: true,
+        platform: false,
+    };
+
     const CTRL: ChordMods = ChordMods {
         control: true,
         shift: false,
@@ -132,9 +140,9 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_u_leaves_usage() {
+    fn ctrl_shift_u_leaves_usage() {
         assert_eq!(
-            screen_chord("u", CTRL, Screen::Usage),
+            screen_chord("u", CTRL_SHIFT, Screen::Usage),
             Some(ScreenAction::LeaveUsage)
         );
     }
@@ -148,15 +156,20 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_u_enters_usage() {
+    fn ctrl_shift_u_enters_usage() {
         assert_eq!(
-            screen_chord("u", CTRL, Screen::Chat),
+            screen_chord("u", CTRL_SHIFT, Screen::Chat),
             Some(ScreenAction::EnterUsage)
         );
         assert_eq!(
-            screen_chord("u", CTRL, Screen::Files),
+            screen_chord("u", CTRL_SHIFT, Screen::Files),
             Some(ScreenAction::EnterUsage)
         );
+    }
+
+    #[test]
+    fn plain_ctrl_u_is_left_to_the_composer() {
+        assert_eq!(screen_chord("u", CTRL, Screen::Chat), None);
     }
 
     #[test]
