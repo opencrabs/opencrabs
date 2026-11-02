@@ -1985,10 +1985,11 @@ impl Dashboard {
             // The command list lives inside the composer, so with it open Esc
             // closes the list and keeps the draft: the terminal's behaviour,
             // and the nearest thing answers first.
-            let spelling = self.editor.read(cx).command_popup().is_some();
+            let spelling = self.editor.read(cx).list_open();
             if spelling {
                 self.editor.update(cx, |editor, cx| {
                     editor.dismiss_command_popup(cx);
+                    editor.dismiss_emoji_popup(cx);
                 });
                 cx.notify();
                 return;
@@ -2069,7 +2070,7 @@ impl Dashboard {
             match ev.keystroke.key.as_str() {
                 // Tab moves the keyboard between the composer and the sidebar.
                 // While an emoji or command list is open, Tab accepts there (#2417).
-                "tab" if self.rail_focused || self.editor.read(cx).command_popup().is_none() => {
+                "tab" if self.rail_focused || !self.editor.read(cx).list_open() => {
                     self.rail_focused = !self.rail_focused;
                     if self.rail_focused {
                         self.sessions.cursor = self.sessions.cursor.or(self.sessions.selected);
@@ -2871,6 +2872,8 @@ impl Render for Dashboard {
                     let popup = self.editor.read(cx).command_popup();
                     if let Some((names, selected)) = popup {
                         col = col.child(command_popup_view(&names, selected));
+                    } else if let Some((items, selected)) = self.editor.read(cx).emoji_popup() {
+                        col = col.child(emoji_popup_view(&items, selected));
                     }
                 }
                 col = col.child(self.editor.clone());
@@ -3387,6 +3390,37 @@ fn popup_window(total: usize, selected: usize, visible: usize) -> Range<usize> {
 /// the selection walks past the last of them. Descriptions are clipped here
 /// rather than in the table, because the same strings are printed in full by
 /// the terminal's `/help`.
+/// The emoji list under a `:query` (#2413): the glyph and its shortcode per row,
+/// the highlighted row marked as the command list marks its own.
+fn emoji_popup_view(items: &[(&'static str, &'static str)], selected: usize) -> Div {
+    let mut col = div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .p_2()
+        .rounded_md()
+        .border_1()
+        .border_color(rgb(palette::current().panel_hi))
+        .bg(rgb(palette::current().panel));
+    for (index, (glyph, code)) in items.iter().enumerate() {
+        let on = index == selected;
+        col = col.child(
+            div()
+                .flex()
+                .flex_row()
+                .gap_2()
+                .px_2()
+                .py_0p5()
+                .rounded_sm()
+                .text_color(rgb(palette::current().text))
+                .when(on, |d| d.bg(rgb(palette::current().focus)))
+                .child(SharedString::from(glyph.to_string()))
+                .child(SharedString::from(format!(":{code}:"))),
+        );
+    }
+    col
+}
+
 fn command_popup_view(names: &[&'static str], selected: usize) -> Div {
     const VISIBLE: usize = 8;
     let window = popup_window(names.len(), selected, VISIBLE);
