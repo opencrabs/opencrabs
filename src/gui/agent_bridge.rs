@@ -29,6 +29,8 @@ use uuid::Uuid;
 
 /// A turn outcome the worker thread hands back to the UI thread.
 pub enum TurnEvent {
+    /// `/evolve` finished: the text to show in the chat notices (#2406).
+    EvolveDone(String),
     /// Progress straight from the agent service, with the session it came
     /// from. The id matters: sub-agents run their own sessions and their
     /// tool rows and token counts must never be painted into the
@@ -100,6 +102,53 @@ pub struct AgentBridge {
 /// Sink every event lands in. Cloned into the progress callback and the
 /// worker threads; drained by the window's poll tick.
 pub type EventSink = std::sync::mpsc::Sender<TurnEvent>;
+
+/// Run `/evolve` on its own thread, as the TUI does: download the latest
+/// release and report the outcome. The text comes back as `EvolveDone` (#2406).
+pub fn spawn_evolve(sink: EventSink, session_id: Uuid) {
+    let spawned = std::thread::Builder::new()
+        .stack_size(4 * 1024 * 1024)
+        .name("gui-evolve".into())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    crate::logging::error(&format!("evolve runtime: {e}"));
+                    let _ = sink.send(TurnEvent::EvolveDone(format!("Evolve error: {e}")));
+                    return;
+                }
+            };
+            let text = runtime.block_on(async move {
+                let tool = opencrabs::brain::tools::evolve::EvolveTool::new(None);
+                let ctx = opencrabs::brain::tools::ToolExecutionContext::new(session_id);
+                match opencrabs::brain::tools::Tool::execute(&tool, serde_json::json!({}), &ctx)
+                    .await
+                {
+                    Ok(result) if result.success => {
+                        if result.output.is_empty() {
+                            "Evolve finished.".to_string()
+                        } else {
+                            result.output
+                        }
+                    }
+                    Ok(result) => format!(
+                        "Evolve failed: {}",
+                        result.error.unwrap_or_else(|| "unknown error".to_string())
+                    ),
+                    Err(e) => format!("Evolve error: {e}"),
+                }
+            });
+            if let Err(e) = sink.send(TurnEvent::EvolveDone(text)) {
+                crate::logging::error(&format!("evolve result not delivered: {e}"));
+            }
+        });
+    if let Err(e) = spawned {
+        crate::logging::error(&format!("evolve thread: {e}"));
+    }
+}
 
 /// Build the full agent stack the TUI uses, on a 4 MB thread.
 ///

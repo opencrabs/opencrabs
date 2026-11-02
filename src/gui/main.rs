@@ -555,6 +555,13 @@ impl Dashboard {
             commands::GuiAction::StopTurn => self.stop_turn(cx),
             commands::GuiAction::OpenSessions => self.toggle_rail(cx),
             commands::GuiAction::Quit => cx.quit(),
+            commands::GuiAction::Evolve => {
+                let session = self.transcript.session.unwrap_or_else(Uuid::nil);
+                self.live
+                    .notices
+                    .push("Checking for a new release...".to_string());
+                agent_bridge::spawn_evolve(self.sink.clone(), session);
+            }
         }
     }
 
@@ -971,6 +978,10 @@ impl Dashboard {
                 }
                 agent_bridge::TurnEvent::SessionCreateFailed(e) => {
                     self.live.notices.push(format!("new session: {e}"));
+                }
+                agent_bridge::TurnEvent::EvolveDone(text) => {
+                    self.live.notices.push(text);
+                    cx.notify();
                 }
                 agent_bridge::TurnEvent::SessionDeleted(id) => {
                     logging::info(&format!("session deleted {id}"));

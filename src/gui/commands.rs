@@ -22,6 +22,8 @@ use opencrabs::ui_core::commands::{self, Support};
 /// What the window does about a command it runs.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum GuiAction {
+    /// Download the latest release and report it, as the TUI does (#2406).
+    Evolve,
     /// The themes screen: preview, keep, or restore.
     OpenThemes,
     /// The usage ledger.
@@ -93,6 +95,7 @@ pub fn parse_command(input: &str) -> Option<Outcome> {
 fn action_for(name: &str) -> GuiAction {
     match name {
         "/theme" => GuiAction::OpenThemes,
+        "/evolve" => GuiAction::Evolve,
         "/usage" => GuiAction::OpenUsage,
         "/help" => GuiAction::ToggleHelp,
         "/new" => GuiAction::NewSession,
