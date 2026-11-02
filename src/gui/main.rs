@@ -522,6 +522,10 @@ impl Dashboard {
             }
         }
         self.transcript.session = Some(id);
+        // The next launch opens this conversation. Both surfaces read the same
+        // file, so switching here means the terminal comes back to it too, and
+        // a restart no longer lands on whatever the rail listed first (#2444).
+        remember_open_session(id);
         self.transcript.error = None;
         self.transcript.turns = Vec::new();
         self.transcript.hidden = 0;
@@ -5300,6 +5304,29 @@ fn splitter(
         .on_mouse_down(MouseButton::Left, grab)
 }
 
+/// The conversation a launch opens: the one the user was in last time when it
+/// is still on the rail, else the newest. Pure, so the choice is testable
+/// without a window. A pointer at a session that was deleted (or a first run
+/// with no pointer at all) falls back to the rail's order, which is newest
+/// first (#2444).
+fn pick_initial_session(
+    items: &[opencrabs::db::models::Session],
+    last: Option<Uuid>,
+) -> Option<Uuid> {
+    match last {
+        Some(id) if items.iter().any(|s| s.id == id) => Some(id),
+        _ => items.first().map(|s| s.id),
+    }
+}
+
+/// Record the conversation the window is showing, so the next launch (this
+/// surface or the terminal) reopens it. Split out from `open_session` so the
+/// write is exercised on its own, under a scratch home, instead of through a
+/// whole Dashboard.
+fn remember_open_session(id: Uuid) {
+    opencrabs::utils::last_session::write(id);
+}
+
 fn main() {
     // First, so a panic during the first fetch still lands in the trail.
     logging::init();
@@ -5394,10 +5421,14 @@ fn main() {
             filter_active: false,
         },
     };
-    // Chat is the default screen: the newest conversation opens on launch.
-    // The usage ledger is something the user asks for (ctrl+u). They never
-    // share the pane, so a conversation can never render as "usage".
-    let initial_session = sessions_state.items.first().map(|s| s.id);
+    // Chat is the default screen: the conversation the user was in opens on
+    // launch, and a first run opens the newest. The usage ledger is something
+    // the user asks for (ctrl+u); the two never share the pane, so a
+    // conversation can never render as "usage" (#2444).
+    let initial_session = pick_initial_session(
+        &sessions_state.items,
+        opencrabs::utils::last_session::read(),
+    );
     Application::new().run(move |cx: &mut App| {
         // Dock icon first: a bare binary has no bundle, so macOS would show
         // its generic "exec" icon for the whole session otherwise.
@@ -6534,7 +6565,9 @@ fn confirm_delete_overlay(
 
 #[cfg(test)]
 mod tests {
-    use super::{THEMES_HISTORY_LEN, remember_preview};
+    use super::{
+        THEMES_HISTORY_LEN, pick_initial_session, remember_open_session, remember_preview,
+    };
 
     /// A tile opens a preview of the file it stands for, Esc closes it, and
     /// the overlay is painted above the panes. Read off the source because a
@@ -7052,6 +7085,87 @@ mod tests {
         let needle = ["register_local", "_route("].concat();
         let sites = src.match_indices(needle.as_str()).count();
         assert_eq!(sites, 1, "one local route registration, found {sites}");
+    }
+
+    /// Two sessions on the rail, newest first, the way `SessionRepository::list`
+    /// returns them (#2444).
+    fn rail() -> Vec<opencrabs::db::models::Session> {
+        let newest = opencrabs::db::models::Session::new(Some("newest".into()), None, None);
+        let older = opencrabs::db::models::Session::new(Some("older".into()), None, None);
+        vec![newest, older]
+    }
+
+    /// #2444: a launch opens the conversation the user was in, not whatever the
+    /// rail happens to list first. A pointer at a session that is gone, or no
+    /// pointer at all, falls back to the newest instead of opening nothing.
+    #[test]
+    fn a_launch_prefers_the_last_session_and_falls_back_to_the_newest() {
+        let items = rail();
+        let newest = items[0].id;
+        let older = items[1].id;
+
+        assert_eq!(
+            pick_initial_session(&items, Some(older)),
+            Some(older),
+            "the conversation in flight last time wins over the rail's order"
+        );
+        assert_eq!(
+            pick_initial_session(&items, None),
+            Some(newest),
+            "a first run opens the newest"
+        );
+        assert_eq!(
+            pick_initial_session(&items, Some(uuid::Uuid::new_v4())),
+            Some(newest),
+            "a pointer at a session that no longer exists falls back, never blanks the pane"
+        );
+        assert_eq!(
+            pick_initial_session(&[], Some(older)),
+            None,
+            "an empty rail opens nothing rather than inventing an id"
+        );
+    }
+
+    /// #2444: opening a conversation records it for the next launch, through
+    /// the one helper both surfaces share. A scratch home keeps the owner's own
+    /// pointer out of `cargo test`.
+    #[test]
+    fn opening_a_session_remembers_it_for_the_next_launch() {
+        let home = std::env::temp_dir().join(format!(
+            "opencrabs-gui-last-session-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&home).expect("scratch home");
+        let id = uuid::Uuid::new_v4();
+        opencrabs::config::profile::with_home_override(home, || {
+            remember_open_session(id);
+            assert_eq!(
+                opencrabs::utils::last_session::read(),
+                Some(id),
+                "the pointer the next launch reads names this conversation"
+            );
+        });
+
+        // And the wiring: `open_session` is the door every open goes through,
+        // so the record has to happen there and not on some path the user
+        // reaches only from the rail. Halves, so this test cannot match itself.
+        let src = include_str!("main.rs");
+        let call = ["remember_open", "_session(id)"].concat();
+        let (_, after) = src
+            .split_once(
+                ["fn open_", "session(&mut self, id: Uuid"]
+                    .concat()
+                    .as_str(),
+            )
+            .expect("open_session exists");
+        let (door, _) = after
+            .split_once("\n    fn ")
+            .expect("the next method ends it");
+        assert!(
+            door.contains(&call),
+            "open_session records the conversation it opened"
+        );
     }
 
     /// The completion event is handled, and the cross-session branch says so

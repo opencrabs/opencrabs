@@ -17,6 +17,7 @@ pub mod file_extract;
 pub mod git_branch;
 pub mod image;
 pub mod install;
+pub mod last_session;
 pub mod long_command;
 pub mod model_match;
 pub mod pdf_vision;

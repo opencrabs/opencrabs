@@ -660,19 +660,16 @@ impl App {
     }
 
     /// Persist the current session ID to `~/.opencrabs/last_session` so
-    /// the next startup can restore the correct session.
+    /// the next startup can restore the correct session. The file and its
+    /// parsing live in `utils::last_session`, which the GUI boots from too:
+    /// one writer, one reader, so the two surfaces cannot disagree (#2444).
     fn save_last_session_id(session_id: Uuid) {
-        let base = crate::config::opencrabs_home();
-        if let Err(e) = std::fs::write(base.join("last_session"), session_id.to_string()) {
-            tracing::warn!("Failed to persist last_session: {}", e);
-        }
+        crate::utils::last_session::write(session_id);
     }
 
     /// Read the last active session ID from disk.
     pub(crate) fn read_last_session_id() -> Option<Uuid> {
-        let base = crate::config::opencrabs_home();
-        let content = std::fs::read_to_string(base.join("last_session")).ok()?;
-        Uuid::parse_str(content.trim()).ok()
+        crate::utils::last_session::read()
     }
 
     /// Pre-load a session's messages into the pane cache (for restored split panes).
