@@ -262,6 +262,15 @@ fn zoom_step(key: &str, rem: f32) -> Option<f32> {
     }
 }
 
+/// The handler's rule: a zoom key acts only with cmd or ctrl held, so a bare
+/// minus typed into the composer stays text. The reset rides the same chord.
+fn zoom_step_for(key: &str, rem: f32, chord: bool) -> Option<f32> {
+    if !chord {
+        return None;
+    }
+    zoom_step(key, rem)
+}
+
 /// How many times a finished turn's reload is retried while its rows are
 /// still being written. Eight attempts at the poll cadence is ~1.2s, long
 /// enough for the write and short enough to stay invisible; past it the live
@@ -3175,7 +3184,7 @@ impl Dashboard {
         // Zoom with cmd or ctrl, in every mode and while the composer has focus.
         // It needs the chord, so a bare minus typed into the composer stays text.
         let chord = ev.keystroke.modifiers.platform || ev.keystroke.modifiers.control;
-        if let Some(next) = zoom_step(&ev.keystroke.key, self.rem).filter(|_| chord) {
+        if let Some(next) = zoom_step_for(&ev.keystroke.key, self.rem, chord) {
             self.rem = next;
             window.set_rem_size(px(self.rem));
             logging::debug(&format!("zoom -> {:.2}x", self.rem / BASE_REM));
@@ -7708,6 +7717,40 @@ mod tests {
     use super::{
         THEMES_HISTORY_LEN, pick_initial_session, remember_open_session, remember_preview,
     };
+
+    /// The zoom chords: they need cmd or ctrl, both spellings of plus zoom in,
+    /// both of minus zoom out, zero resets to the base rem, and any other key
+    /// does nothing even chorded. Each case is one arm of the handler's own
+    /// rule, so a later edit cannot drop one silently (#2425).
+    #[test]
+    fn zoom_keys_need_the_chord_and_cover_in_out_and_reset() {
+        use crate::theme::{BASE_REM, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP};
+
+        let rem = BASE_REM * 1.15;
+        // Without the chord these keys stay text in the composer.
+        assert_eq!(super::zoom_step_for("=", rem, false), None);
+        assert_eq!(super::zoom_step_for("0", rem, false), None);
+        // With it, both spellings of each direction act, and zero resets.
+        assert_eq!(
+            super::zoom_step_for("=", rem, true),
+            Some((rem * ZOOM_STEP).min(BASE_REM * ZOOM_MAX))
+        );
+        assert_eq!(
+            super::zoom_step_for("+", rem, true),
+            super::zoom_step_for("=", rem, true)
+        );
+        assert_eq!(
+            super::zoom_step_for("-", rem, true),
+            Some((rem / ZOOM_STEP).max(BASE_REM * ZOOM_MIN))
+        );
+        assert_eq!(
+            super::zoom_step_for("_", rem, true),
+            super::zoom_step_for("-", rem, true)
+        );
+        assert_eq!(super::zoom_step_for("0", rem, true), Some(BASE_REM));
+        // A key that is not a zoom key stays a keystroke, chord or not.
+        assert_eq!(super::zoom_step_for("a", rem, true), None);
+    }
 
     /// A tile opens a preview of the file it stands for, Esc closes it, and
     /// the overlay is painted above the panes. Read off the source because a
