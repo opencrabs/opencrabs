@@ -1158,9 +1158,17 @@ mod tests {
             command_line(&["open".to_string(), "/var/media/it's here.png".to_string()]),
             "open '/var/media/it'\\''s here.png'"
         );
+        // The opener is the platform's own (`open` on macOS, `xdg-open`
+        // elsewhere), so the expectation follows it: what this test pins is
+        // that the path survives quoting, not which binary CI happens to have.
+        let opener = if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        };
         assert_eq!(
             command_line(&open_command(&PathBuf::from("/var/media/a b.png"))),
-            "open '/var/media/a b.png'"
+            format!("{opener} '/var/media/a b.png'")
         );
     }
 
