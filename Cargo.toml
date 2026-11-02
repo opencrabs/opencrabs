@@ -135,7 +135,7 @@ syntect = { version = "5.2", default-features = false, features = [
     "dump-load",
     "regex-fancy",
 ] }
-pulldown-cmark = "0.13.5"
+pulldown-cmark = "0.13.6"
 strip-ansi = "0.1"
 tree-sitter = { version = "0.24", optional = true }
 tree-sitter-rust = { version = "0.23", optional = true }
