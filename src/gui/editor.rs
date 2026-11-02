@@ -382,7 +382,9 @@ impl Editor {
     /// Tab on a half-typed command fills the name and stops there: the argument
     /// is the user's to type, and running on Tab would take that choice away.
     fn accept_command(&mut self, _: &AcceptCommand, _: &mut Window, cx: &mut Context<Self>) {
+        // Tab with no list open is free: the window uses it to move focus (#2417).
         let Some((names, index)) = self.command_popup() else {
+            cx.propagate();
             return;
         };
         let Some(name) = names.get(index).copied() else {
