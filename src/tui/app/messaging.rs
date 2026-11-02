@@ -3062,6 +3062,26 @@ impl App {
 
     /// Push a system message into the chat display
     pub(crate) fn push_system_message(&mut self, content: String) {
+        // A retry replaces the retry line of this turn, wherever it sits, so
+        // the status never stacks under later tool summaries (#2427).
+        if content.starts_with("⏳ Retry") {
+            let in_turn = self
+                .messages
+                .iter_mut()
+                .rev()
+                .take_while(|m| m.role != "user");
+            if let Some(line) = in_turn
+                .into_iter()
+                .find(|m| m.role == "system" && m.content.starts_with("⏳ Retry"))
+            {
+                line.content = content;
+                line.timestamp = chrono::Utc::now();
+                if self.auto_scroll {
+                    self.scroll_offset = 0;
+                }
+                return;
+            }
+        }
         self.messages.push(DisplayMessage {
             id: Uuid::new_v4(),
             role: "system".to_string(),
