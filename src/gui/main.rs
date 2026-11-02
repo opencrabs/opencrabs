@@ -292,6 +292,10 @@ struct Dashboard {
     /// The update dialog: None when closed, Some(false) asks whether to update,
     /// Some(true) asks again before /evolve runs.
     update_prompt: Option<bool>,
+    /// The Help Center filter typed after `/`; None while it is not open (#2407).
+    help_filter: Option<String>,
+    /// The Help Center body's scroll position, so the arrows can move it (#2407).
+    help_scroll: ScrollHandle,
     /// A splitter drag is in flight. The move events land on the window root,
     /// not the 4px handle, so the pointer can leave the handle without ending
     /// the drag.
@@ -1976,11 +1980,56 @@ impl Dashboard {
         // Esc twice stops the running turn, the TUI's own gesture. It sits
         // before the editor gate because the editor owns the keyboard while
         // typing and would swallow it.
+        if self.help_open {
+            let ks = &ev.keystroke;
+            let scroll_by = match ks.key.as_str() {
+                "up" => Some(-48.0),
+                "down" => Some(48.0),
+                "pageup" => Some(-400.0),
+                "pagedown" => Some(400.0),
+                _ => None,
+            };
+            if let Some(dy) = scroll_by {
+                let offset = self.help_scroll.offset();
+                let max = self.help_scroll.max_offset().height;
+                let y = (offset.y + px(dy)).min(px(0.0)).max(-max);
+                self.help_scroll.set_offset(gpui::point(offset.x, y));
+                cx.notify();
+                return;
+            }
+            if let Some(filter) = self.help_filter.as_mut() {
+                match ks.key.as_str() {
+                    "backspace" => {
+                        filter.pop();
+                        cx.notify();
+                        return;
+                    }
+                    _ => {
+                        if let Some(ch) = ks.key_char.as_deref().and_then(|s| s.chars().next())
+                            && !ch.is_control()
+                            && !ks.modifiers.platform
+                            && !ks.modifiers.control
+                        {
+                            filter.push(ch);
+                            cx.notify();
+                            return;
+                        }
+                    }
+                }
+            } else if ks.key == "/" && !ks.modifiers.platform && !ks.modifiers.control {
+                self.help_filter = Some(String::new());
+                cx.notify();
+                return;
+            }
+        }
         if ev.keystroke.key == "escape" {
             // The key reference paints above everything and costs nothing to
             // close, so it goes first: the nearest thing to the user answers.
             if self.help_open {
-                self.help_open = false;
+                // A filter typed after `/` clears first; a second Esc closes (#2407).
+                if self.help_filter.take().is_none() {
+                    self.help_open = false;
+                }
                 cx.notify();
                 return;
             }
@@ -3057,11 +3106,13 @@ impl Render for Dashboard {
         // The key reference, above the panes and above the delete dialog: it
         // is read-only, so nothing behind it can be armed while it is up.
         if self.help_open {
-            let close = cx.listener(|this, _ev, _window, cx| {
-                this.help_open = false;
-                cx.notify();
-            });
-            root = root.child(help_overlay(close));
+            let view = HelpView {
+                version: opencrabs::VERSION,
+                update: self.update_available.clone(),
+                filter: self.help_filter.clone(),
+                scroll: self.help_scroll.clone(),
+            };
+            root = root.child(help_overlay(&view));
         }
         // The topic info panel sits above the panes, like the key reference (#2304).
         if let Some(info) = self.topic_info.clone() {
@@ -3310,6 +3361,8 @@ fn main() {
                         rail_focused: false,
                         update_available: None,
                         update_prompt: None,
+                        help_filter: None,
+                        help_scroll: ScrollHandle::new(),
                         dragging_rail: false,
                         drag_from: None,
                         drag_seen: None,
@@ -4001,60 +4054,41 @@ fn topic_info_overlay(
         .child(panel)
 }
 
-fn help_overlay(close: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> impl IntoElement {
-    let mut panel = div()
-        .id("help-panel")
-        .occlude()
-        .flex()
-        .flex_col()
-        .gap_2()
-        // Fills the window and stops at a readable size, so a narrow window
-        // (or one with the rail open) gets the whole space and a wide one
-        // keeps the panel from stretching across the screen.
-        .w_full()
-        .h_full()
-        .max_w(rems(40.0))
-        .max_h(rems(44.0))
-        .p_4()
-        .rounded(px(10.0))
-        .border_1()
-        .border_color(rgb(palette::current().panel_hi))
-        .bg(rgb(palette::current().panel));
+/// What the Help Center shows: the running version, a newer release if the
+/// check found one, the `/` filter, and the scroll position the arrows move.
+struct HelpView {
+    version: &'static str,
+    update: Option<String>,
+    filter: Option<String>,
+    scroll: ScrollHandle,
+}
 
-    panel = panel.child(
-        div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_between()
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(palette::current().text))
-                    .child(SharedString::from("keys")),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(palette::current().text_muted))
-                    .child(SharedString::from("esc")),
-            ),
-    );
-
+/// The Help Center (#2407): a full-window screen. The header carries the logo,
+/// the title and the version; the body lists every key and scrolls; the footer
+/// names the keys that drive the screen. Esc closes it.
+fn help_overlay(view: &HelpView) -> impl IntoElement {
+    let query = view.filter.as_deref().unwrap_or("").to_lowercase();
+    let mut body = div().flex().flex_col().gap_2().px_4().py_2();
     let mut printed: Option<opencrabs::ui_core::help_keys::HelpSection> = None;
     for (section, row) in help_rows() {
+        let chord = row.gui.unwrap_or_default();
+        let matches = query.is_empty()
+            || row.description.to_lowercase().contains(&query)
+            || chord.to_lowercase().contains(&query);
+        if !matches {
+            continue;
+        }
         if printed != Some(section) {
-            panel = panel.child(
+            body = body.child(
                 div()
-                    .mt_1()
+                    .mt_2()
                     .text_xs()
                     .text_color(rgb(palette::current().accent))
                     .child(SharedString::from(section.title())),
             );
             printed = Some(section);
         }
-        let chord = row.gui.unwrap_or_default();
-        panel = panel.child(
+        body = body.child(
             div()
                 .flex()
                 .flex_row()
@@ -4078,8 +4112,94 @@ fn help_overlay(close: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) ->
         );
     }
 
+    let mut title = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .child(
+            div()
+                .text_base()
+                .text_color(rgb(palette::current().text))
+                .child(SharedString::from("OpenCrabs Help Center")),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(palette::current().text_muted))
+                .child(SharedString::from(format!("v{}", view.version))),
+        );
+    if let Some(latest) = &view.update {
+        title = title.child(
+            div()
+                .text_xs()
+                .text_color(rgb(palette::current().accent))
+                .child(SharedString::from(format!("v{latest} available"))),
+        );
+    }
+    let header = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .px_4()
+        .py_3()
+        .border_b_1()
+        .border_color(rgb(palette::current().panel_hi))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_3()
+                .child(div().text_lg().child(SharedString::from("🦀")))
+                .child(title),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(palette::current().text_muted))
+                .child(SharedString::from("esc")),
+        );
+
+    let scroller = div()
+        .id("help-body")
+        .flex_1()
+        .min_h_0()
+        .overflow_y_scroll()
+        .track_scroll(&view.scroll)
+        .child(body);
+
+    let keys = div()
+        .flex()
+        .flex_row()
+        .gap_3()
+        .text_xs()
+        .text_color(rgb(palette::current().text_muted))
+        .child(SharedString::from("↑↓ scroll"))
+        .child(SharedString::from("/ search"))
+        .child(SharedString::from("esc back"));
+    let mut footer = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .px_4()
+        .py_2()
+        .border_t_1()
+        .border_color(rgb(palette::current().panel_hi))
+        .child(keys);
+    if let Some(filter) = &view.filter {
+        footer = footer.child(
+            div()
+                .text_xs()
+                .text_color(rgb(palette::current().accent))
+                .child(SharedString::from(format!("/ {filter}"))),
+        );
+    }
+
     div()
-        .id("help-scrim")
+        .id("help-screen")
         .occlude()
         .absolute()
         .top_0()
@@ -4087,11 +4207,11 @@ fn help_overlay(close: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) ->
         .size_full()
         .flex()
         .flex_col()
-        .items_center()
-        .justify_center()
-        .bg(rgba(0x0a0a0acc))
-        .on_click(close)
-        .child(panel)
+        .bg(rgb(palette::current().bg))
+        .text_color(rgb(palette::current().text))
+        .child(header)
+        .child(scroller)
+        .child(footer)
 }
 
 /// The delete confirmation: a dim card over both panes naming the
