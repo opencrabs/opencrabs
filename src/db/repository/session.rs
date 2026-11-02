@@ -220,6 +220,55 @@ impl SessionRepository {
     }
 
     /// Every session with topics turned on, as ids.
+    /// Set or clear one topic's icon. None clears it back to the default.
+    pub async fn set_topic_icon(&self, id: Uuid, icon: Option<&str>) -> Result<()> {
+        let (id_str, icon) = (id.to_string(), icon.map(str::to_string));
+        self.pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                conn.execute(
+                    "UPDATE sessions SET topic_icon = ?2 WHERE id = ?1",
+                    rusqlite::params![id_str, icon],
+                )
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to write topic_icon")?;
+        Ok(())
+    }
+
+    /// Every topic that has an icon of its own, with the icon.
+    pub async fn topic_icons(&self) -> Result<Vec<(Uuid, String)>> {
+        self.pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                let mut stmt = conn.prepare_cached(
+                    "SELECT id, topic_icon FROM sessions
+                     WHERE parent_id IS NOT NULL AND topic_icon IS NOT NULL",
+                )?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })?
+                    .collect::<rusqlite::Result<Vec<(String, String)>>>()?;
+                Ok::<_, rusqlite::Error>(rows)
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to read topic_icon")?
+            .into_iter()
+            .map(|(id, icon)| {
+                Uuid::parse_str(&id)
+                    .context("malformed session id")
+                    .map(|id| (id, icon))
+            })
+            .collect()
+    }
+
     pub async fn topic_enabled_ids(&self) -> Result<Vec<Uuid>> {
         self.pool
             .get()

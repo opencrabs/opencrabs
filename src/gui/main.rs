@@ -294,6 +294,8 @@ struct Dashboard {
     update_prompt: Option<bool>,
     /// The Help Center filter typed after `/`; None while it is not open (#2407).
     help_filter: Option<String>,
+    /// The icon picked for the topic being named; None means the default (#2414).
+    topic_draft_icon: Option<String>,
     /// The Help Center body's scroll position, so the arrows can move it (#2407).
     help_scroll: ScrollHandle,
     /// A splitter drag is in flight. The move events land on the window root,
@@ -1587,7 +1589,12 @@ impl Dashboard {
                     cx.stop_propagation();
                     this.open_session(id, cx);
                 });
-                topic_tab(id, title(id), id == open, move |ev, window, app| {
+                // A topic with its own icon shows it before the name (#2414).
+                let label = match self.sessions.topic_icons.get(&id) {
+                    Some(icon) => format!("{icon} {}", title(id)),
+                    None => title(id),
+                };
+                topic_tab(id, label, id == open, move |ev, window, app| {
                     click(ev, window, app)
                 })
                 .into_any_element()
@@ -1609,6 +1616,7 @@ impl Dashboard {
         if !self.open_chat_topics_on() {
             return;
         }
+        self.topic_draft_icon = None;
         self.topic_menu = false;
         self.topic_draft = Some(String::new());
         cx.notify();
@@ -1657,11 +1665,19 @@ impl Dashboard {
             return;
         };
         let db_path = self.db_path.clone();
-        cx.spawn(
-            async move |this, cx| match sessions::create_topic(db_path, parent, name).await {
+        let icon = self
+            .topic_draft_icon
+            .clone()
+            .unwrap_or_else(|| DEFAULT_TOPIC_ICON.to_string());
+        cx.spawn(async move |this, cx| {
+            match sessions::create_topic(db_path.clone(), parent, name).await {
                 Ok(topic) => {
+                    if let Err(e) = sessions::set_topic_icon(db_path, topic, Some(icon)).await {
+                        logging::error(&format!("topic icon {topic}: {e}"));
+                    }
                     this.update(cx, |this, cx| {
                         this.topic_draft = None;
+                        this.topic_draft_icon = None;
                         this.refresh_rail(cx);
                         this.refresh_topic_state(cx);
                         this.open_session(topic, cx);
@@ -1676,8 +1692,8 @@ impl Dashboard {
                     })
                     .ok();
                 }
-            },
-        )
+            }
+        })
         .detach();
         cx.notify();
     }
@@ -1688,6 +1704,7 @@ impl Dashboard {
         cx.spawn(async move |this, cx| {
             let parents = sessions::load_topic_parents(db_path.clone()).await;
             let closed = sessions::load_closed(db_path.clone()).await;
+            let icons = sessions::load_topic_icons(db_path.clone()).await;
             let topics = sessions::load_topics(db_path).await;
             this.update(cx, |this, cx| {
                 match closed {
@@ -1701,6 +1718,10 @@ impl Dashboard {
                 match topics {
                     Ok(ids) => this.sessions.topics = ids.into_iter().collect(),
                     Err(e) => logging::error(&format!("topics refresh: {e}")),
+                }
+                match icons {
+                    Ok(pairs) => this.sessions.topic_icons = pairs.into_iter().collect(),
+                    Err(e) => logging::error(&format!("topic icons refresh: {e}")),
                 }
                 cx.notify();
             })
@@ -3135,7 +3156,30 @@ impl Render for Dashboard {
                 this.topic_rename = None;
                 cx.notify();
             });
-            root = root.child(topic_prompt_overlay(label, &draft, cancel));
+            let icon = self
+                .topic_draft_icon
+                .clone()
+                .unwrap_or_else(|| DEFAULT_TOPIC_ICON.to_string());
+            let picks: Vec<Stateful<Div>> = TOPIC_ICONS
+                .iter()
+                .map(|glyph| {
+                    let glyph: &'static str = glyph;
+                    let pick = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
+                        this.topic_draft_icon = Some(glyph.to_string());
+                        cx.notify();
+                    });
+                    div()
+                        .id(SharedString::from(format!("topic-icon-{glyph}")))
+                        .px_1()
+                        .py_0p5()
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .hover(|d| d.bg(rgb(palette::current().panel_hi)))
+                        .on_click(pick)
+                        .child(SharedString::from(glyph))
+                })
+                .collect();
+            root = root.child(topic_prompt_overlay(label, &draft, &icon, picks, cancel));
         }
         // The update dialog (#2406): two stages, and /evolve runs only after the second yes.
         if let Some(second) = self.update_prompt {
@@ -3274,6 +3318,7 @@ fn main() {
             topics: topics.clone(),
             parents: parents.clone(),
             closed: closed.clone(),
+            topic_icons: HashMap::new(),
             selected: None,
             cursor: None,
             rail_menu: None,
@@ -3287,6 +3332,7 @@ fn main() {
             topics,
             parents,
             closed,
+            topic_icons: HashMap::new(),
             selected: None,
             cursor: None,
             rail_menu: None,
@@ -3362,6 +3408,7 @@ fn main() {
                         update_available: None,
                         update_prompt: None,
                         help_filter: None,
+                        topic_draft_icon: None,
                         help_scroll: ScrollHandle::new(),
                         dragging_rail: false,
                         drag_from: None,
@@ -3928,16 +3975,27 @@ fn update_prompt_overlay(
         .child(panel)
 }
 
-/// The name prompt for a topic (#2398): a centred card over a dark scrim, so
-/// the one thing that takes the keyboard is also the one thing on screen. The
-/// field shows a caret; Enter creates, Esc or a click outside cancels.
+/// The icons a new topic can carry, as the picker offers them (#2414).
+const TOPIC_ICONS: [&str; 12] = [
+    "💬", "📰", "💡", "⚡", "🎙", "🔥", "🦀", "🧪", "📈", "🛠", "📚", "🎯",
+];
+
+/// The icon a topic gets when none is picked (#2414).
+const DEFAULT_TOPIC_ICON: &str = "💬";
+
+/// The name prompt for a topic (#2398, #2414): a centred card over a dark scrim.
+/// The card holds the name field with the chosen icon before it, and a row of
+/// icons to pick from. Enter creates, Esc or a click outside cancels.
 fn topic_prompt_overlay(
     label: &str,
     draft: &str,
+    icon: &str,
+    picks: Vec<Stateful<Div>>,
     cancel: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     let field = div()
-        .w_full()
+        .flex_1()
+        .min_w_0()
         .px_3()
         .py_2()
         .rounded_md()
@@ -3946,6 +4004,17 @@ fn topic_prompt_overlay(
         .bg(rgb(palette::current().bg))
         .text_color(rgb(palette::current().text))
         .child(SharedString::from(format!("{draft}|")));
+    let icon_badge = div()
+        .flex_none()
+        .size(rems(2.4))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_md()
+        .bg(rgb(palette::current().bg))
+        .text_size(rems(1.4))
+        .child(SharedString::from(icon.to_string()));
+    let picker = div().flex().flex_row().flex_wrap().gap_1().children(picks);
     let panel = div()
         .id("topic-prompt-panel")
         .occlude()
@@ -3964,7 +4033,16 @@ fn topic_prompt_overlay(
                 .text_color(rgb(palette::current().text))
                 .child(SharedString::from(label.to_string())),
         )
-        .child(field)
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(icon_badge)
+                .child(field),
+        )
+        .child(picker)
         .child(
             div()
                 .text_xs()

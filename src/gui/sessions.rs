@@ -59,6 +59,8 @@ pub struct SessionsState {
     /// Sessions with topics turned on (#2302). Kept beside the rows for the
     /// same reason as favorites: the row model stays as it is.
     pub topics: HashSet<uuid::Uuid>,
+    /// The icon each topic carries, shown before its name (#2414).
+    pub topic_icons: HashMap<uuid::Uuid, String>,
     /// Topic id to its parent session id (#2303). A topic is grouped under
     /// its parent in the rail; the row model itself is unchanged.
     pub parents: HashMap<uuid::Uuid, uuid::Uuid>,
@@ -612,6 +614,79 @@ pub async fn load_topics(db_path: std::path::PathBuf) -> Result<Vec<uuid::Uuid>,
             Err(_) => Err("topics fetch thread dropped its result".into()),
         },
         Err(e) => Err(format!("topics fetch thread failed to spawn: {e}")),
+    }
+}
+
+/// Every topic's own icon. Read with the topic state, the same way the flag is.
+pub async fn load_topic_icons(
+    db_path: std::path::PathBuf,
+) -> Result<Vec<(uuid::Uuid, String)>, String> {
+    let (tx, rx) =
+        futures::channel::oneshot::channel::<Result<Vec<(uuid::Uuid, String)>, String>>();
+    let spawned = std::thread::Builder::new()
+        .name("topic-icons-fetch".into())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let result = match runtime {
+                Ok(rt) => rt
+                    .block_on(async {
+                        let db = Database::connect(&db_path).await?;
+                        let repo = SessionRepository::new(db.pool().clone());
+                        repo.topic_icons().await
+                    })
+                    .map_err(|e| format!("{e:#}")),
+                Err(e) => Err(format!("tokio runtime failed: {e}")),
+            };
+            if tx.send(result).is_err() {
+                crate::logging::error("topic icons result dropped: the window closed first");
+            }
+        });
+    match spawned {
+        Ok(_) => match rx.await {
+            Ok(result) => result,
+            Err(_) => Err("topic icons fetch thread dropped its result".into()),
+        },
+        Err(e) => Err(format!("topic icons fetch thread failed to spawn: {e}")),
+    }
+}
+
+/// Give one topic an icon, or clear it with None. The caller re-reads afterwards.
+pub async fn set_topic_icon(
+    db_path: std::path::PathBuf,
+    id: uuid::Uuid,
+    icon: Option<String>,
+) -> Result<(), String> {
+    let (tx, rx) = futures::channel::oneshot::channel::<Result<(), String>>();
+    let spawned = std::thread::Builder::new()
+        .name("topic-icon-write".into())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let result = match runtime {
+                Ok(rt) => rt
+                    .block_on(async {
+                        let db = Database::connect(&db_path).await?;
+                        let repo = SessionRepository::new(db.pool().clone());
+                        repo.set_topic_icon(id, icon.as_deref()).await
+                    })
+                    .map_err(|e| format!("{e:#}")),
+                Err(e) => Err(format!("tokio runtime failed: {e}")),
+            };
+            if tx.send(result).is_err() {
+                crate::logging::error("topic icon result dropped: the window closed first");
+            }
+        });
+    match spawned {
+        Ok(_) => match rx.await {
+            Ok(result) => result,
+            Err(_) => Err("topic icon write thread dropped its result".into()),
+        },
+        Err(e) => Err(format!("topic icon write thread failed to spawn: {e}")),
     }
 }
 
