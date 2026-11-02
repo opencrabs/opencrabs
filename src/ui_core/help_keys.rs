@@ -137,7 +137,7 @@ pub const ROWS: &[HelpRow] = &[
         HelpSection::Global,
         "ctrl+k",
         "Ctrl+K",
-        None,
+        Some("ctrl-k"),
         "Clear session",
     ),
     row(
@@ -180,7 +180,7 @@ pub const ROWS: &[HelpRow] = &[
         HelpSection::Chat,
         "ctrl+j",
         "Ctrl+J",
-        None,
+        Some("ctrl-j"),
         "New line (alt)",
     ),
     row(
@@ -245,7 +245,7 @@ pub const ROWS: &[HelpRow] = &[
         HelpSection::InputEditing,
         "ctrl+w",
         "Ctrl+W",
-        None,
+        Some("ctrl-w"),
         "Delete word (vim)",
     ),
     row(

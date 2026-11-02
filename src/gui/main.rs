@@ -1340,6 +1340,19 @@ impl Dashboard {
                     self.update_available = Some(version);
                     cx.notify();
                 }
+                agent_bridge::TurnEvent::MessagesCleared(id) => {
+                    if self.transcript.session == Some(id) {
+                        self.transcript.turns = Vec::new();
+                        self.transcript.hidden = 0;
+                        self.transcript.error = None;
+                    }
+                    self.live.notices.push("Session cleared.".to_string());
+                    cx.notify();
+                }
+                agent_bridge::TurnEvent::ClearFailed(text) => {
+                    self.live.notices.push(text);
+                    cx.notify();
+                }
                 agent_bridge::TurnEvent::EvolveDone(text) => {
                     self.live.notices.push(text);
                     cx.notify();
@@ -2623,6 +2636,27 @@ impl Dashboard {
             }
             cx.notify();
             return;
+        }
+        // Page keys scroll the transcript and ctrl+k clears the session (#2430).
+        // Both sit before the composer gate, so they work while the composer has focus.
+        if self.screen == Screen::Chat {
+            let key = ev.keystroke.key.as_str();
+            if matches!(key, "pageup" | "pagedown") {
+                let page = px(f32::from(window.viewport_size().height) * 0.8);
+                let offset = self.transcript_scroll.offset();
+                let max = self.transcript_scroll.max_offset().height;
+                let dy = if key == "pagedown" { -page } else { page };
+                let y = (offset.y + dy).min(px(0.0)).max(-max);
+                self.transcript_scroll.set_offset(gpui::point(offset.x, y));
+                cx.notify();
+                return;
+            }
+            if key == "k" && ev.keystroke.modifiers.control {
+                if let Some(id) = self.transcript.session {
+                    agent_bridge::spawn_clear_messages(self.db_path.clone(), id, self.sink.clone());
+                }
+                return;
+            }
         }
         // Zoom with cmd or ctrl, in every mode and while the composer has focus.
         // It needs the chord, so a bare minus typed into the composer stays text.

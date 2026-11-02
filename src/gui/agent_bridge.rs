@@ -29,6 +29,10 @@ use uuid::Uuid;
 
 /// A turn outcome the worker thread hands back to the UI thread.
 pub enum TurnEvent {
+    /// ctrl+k cleared this session's messages; the transcript empties (#2430).
+    MessagesCleared(Uuid),
+    /// ctrl+k could not clear the session: the reason, for the notices.
+    ClearFailed(String),
     /// A newer release exists; carries its version (#2406).
     UpdateAvailable(String),
     /// `/evolve` finished: the text to show in the chat notices (#2406).
@@ -148,6 +152,46 @@ pub fn spawn_update_checks(sink: EventSink) {
         });
     if let Err(e) = spawned {
         crate::logging::error(&format!("update check thread: {e}"));
+    }
+}
+
+/// Delete one session's messages from the ledger, as the TUI's ctrl+k does. The
+/// session row stays, so the conversation is kept and only its history clears (#2430).
+pub fn spawn_clear_messages(db_path: PathBuf, session_id: Uuid, sink: EventSink) {
+    let spawned = std::thread::Builder::new()
+        .stack_size(4 * 1024 * 1024)
+        .name("gui-clear-messages".into())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    crate::logging::error(&format!("clear runtime: {e}"));
+                    let _ = sink.send(TurnEvent::ClearFailed(format!("clear: {e}")));
+                    return;
+                }
+            };
+            let event = runtime.block_on(async move {
+                let db = match Database::connect(&db_path).await {
+                    Ok(db) => db,
+                    Err(e) => return TurnEvent::ClearFailed(format!("clear: {e}")),
+                };
+                let service = opencrabs::services::MessageService::new(ServiceContext::new(
+                    db.pool().clone(),
+                ));
+                match service.delete_messages_for_session(session_id).await {
+                    Ok(()) => TurnEvent::MessagesCleared(session_id),
+                    Err(e) => TurnEvent::ClearFailed(format!("clear: {e}")),
+                }
+            });
+            if let Err(e) = sink.send(event) {
+                crate::logging::error(&format!("clear result not delivered: {e}"));
+            }
+        });
+    if let Err(e) = spawned {
+        crate::logging::error(&format!("clear thread: {e}"));
     }
 }
 

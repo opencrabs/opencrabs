@@ -1486,6 +1486,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("end", End, None),
         KeyBinding::new("enter", Send, None),
         KeyBinding::new("shift-enter", Newline, None),
+        KeyBinding::new("ctrl-j", Newline, None),
+        KeyBinding::new("ctrl-w", DeleteWordBack, None),
         KeyBinding::new("tab", AcceptCommand, None),
     ]);
 }
