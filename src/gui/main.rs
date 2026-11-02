@@ -323,6 +323,9 @@ struct Dashboard {
     /// type, so the window reads a log with the same parser and the same
     /// filters (#1528).
     mc_logs: Option<LogViewerState>,
+    /// The result of the last apply or reject, said on the screen so the
+    /// decision is not silent. Cleared when the screen is reopened.
+    mc_notice: Option<mission_control::Notice>,
     /// The window's rem size in px. The zoom keys move it and every
     /// rem-based length in the theme follows.
     rem: f32,
@@ -1160,6 +1163,8 @@ impl Dashboard {
         // that is on hand.
         self.mc_nav.detail = false;
         self.mc_nav.clamp(self.mc.as_ref());
+        // A decision's message belongs to the visit that made it.
+        self.mc_notice = None;
         // The four services are read once, on entry, exactly as the terminal
         // does on open. A frame never waits on SQLite.
         self.fetch_mission_control(cx);
@@ -1273,6 +1278,18 @@ impl Dashboard {
                 return;
             }
         }
+        // Decide a proposal: `a` installs it, `r` archives it, the terminal's
+        // own letters. Lowercase on purpose: the capitals are already the
+        // analytics window filter, so `A` re-windows and `a` applies.
+        let decision = match ks.key.as_str() {
+            "a" => Some(mission_control::Decision::Apply),
+            "r" => Some(mission_control::Decision::Reject),
+            _ => None,
+        };
+        if let Some(decision) = decision {
+            self.decide_selected(decision, cx);
+            return;
+        }
         match ks.key.as_str() {
             "tab" | "l" => self.mc_nav.focus_next(self.mc.as_ref()),
             "backtab" | "h" => self.mc_nav.focus_prev(self.mc.as_ref()),
@@ -1291,6 +1308,62 @@ impl Dashboard {
         }
         self.mc_nav.clamp(self.mc.as_ref());
         cx.notify();
+    }
+
+    /// `a` / `r`: apply or reject the selected proposal through the same
+    /// `RsiProposalsTool` the terminal and the agent use, so an applied
+    /// proposal is byte-identical whichever client asked (#2426).
+    ///
+    /// Both keys are the inbox's, as in the terminal: the other panels hold
+    /// no proposal to decide.
+    fn decide_selected(&mut self, decision: mission_control::Decision, cx: &mut Context<Self>) {
+        if self.mc_nav.panel != mission_control::Panel::Inbox {
+            return;
+        }
+        let Some(item) = self
+            .mc
+            .as_ref()
+            .and_then(|snapshot| snapshot.inbox.get(self.mc_nav.selected))
+            .cloned()
+        else {
+            return;
+        };
+        let verb = match decision {
+            mission_control::Decision::Apply => "Apply",
+            mission_control::Decision::Reject => "Reject",
+        };
+        let Some(bridge) = agent_bridge::bridge() else {
+            self.mc_notice = Some(mission_control::Notice {
+                text: format!("{verb} failed: the agent is not running"),
+                ok: false,
+            });
+            cx.notify();
+            return;
+        };
+        let service = bridge.service.clone();
+        cx.spawn(async move |this, cx| {
+            let result = mission_control::decide(service, item.id, item.kind, decision).await;
+            this.update(cx, |this, cx| {
+                this.mc_notice = Some(match result {
+                    Ok(text) => mission_control::Notice { text, ok: true },
+                    Err(e) => mission_control::Notice {
+                        text: format!("{verb} failed: {e}"),
+                        ok: false,
+                    },
+                });
+                // A decided record must not leave its popup describing the
+                // row that took its place: the overlay closes, and the list
+                // plus the notice say what happened.
+                this.mc_nav.detail = false;
+                // The inbox is one row shorter now, so every panel is read
+                // again: the selection follows the list the row left behind.
+                this.mc_loading = false;
+                this.fetch_mission_control(cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// ctrl+shift+t: the themes screen. Opening it remembers the palette the
@@ -3760,6 +3833,31 @@ impl Render for Dashboard {
                     self.mc_loading,
                     shown,
                 );
+                // A decision is never silent: the tool's own sentence sits
+                // above the panels, green when it landed and red when it did
+                // not, until the screen is left.
+                let body = match self.mc_notice.clone() {
+                    Some(notice) => {
+                        let color = if notice.ok { shown.green } else { shown.red };
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_h_0()
+                            .w_full()
+                            .child(
+                                div()
+                                    .px_4()
+                                    .py_1()
+                                    .text_xs()
+                                    .text_color(rgb(color))
+                                    .child(notice.text),
+                            )
+                            .child(body)
+                            .into_any_element()
+                    }
+                    None => body.into_any_element(),
+                };
                 // The terminal's footer, in its own words: the keys the screen
                 // answers, so a hand that knows the terminal is already home.
                 let footer = div()
@@ -5868,6 +5966,7 @@ fn main() {
                         mc_window: mission_control::TimeWindow::Month,
                         mc_nav: mission_control::Nav::default(),
                         mc_logs: None,
+                        mc_notice: None,
                         rem: BASE_REM,
                         db_path: db_path.clone(),
                         sessions: sessions_state,

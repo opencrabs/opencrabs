@@ -10,17 +10,23 @@
 //! `Config` is never loaded from a gpui worker. gpui's threads are dispatch
 //! queue threads with small stacks and no reactor, and sqlx panics there.
 
+use opencrabs::brain::agent::AgentService;
 /// The analytics window is part of the snapshot's own interface (the panels
 /// label their numbers with it, and the keys move it), so the window
 /// re-exports it rather than making every caller reach into the crate.
 pub use opencrabs::brain::mission_control::TimeWindow;
 use opencrabs::brain::mission_control::{
-    McActivity, McAnalytics, McInboxItem, McScheduleItem, activity_service, analytics_service,
-    inbox_service, schedule_service,
+    McActivity, McAnalytics, McInboxItem, McInboxKind, McScheduleItem, activity_service,
+    analytics_service, inbox_service, schedule_service,
 };
+use opencrabs::brain::prompt_builder::BrainLoader;
+use opencrabs::brain::tools::ToolRegistry;
+use opencrabs::brain::tools::dynamic::DynamicToolLoader;
+use opencrabs::brain::tools::rsi_proposals::RsiProposalsTool;
 use opencrabs::db::{Database, Pool};
 use opencrabs::tui::app::mission_control::log_viewer::{self, LogViewerState};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// How many activity rows the panel asks for. The terminal shows the newest
 /// handful rather than the whole journal, and this is that same handful.
@@ -244,6 +250,84 @@ fn single_char(key: &str) -> Option<char> {
     }
 }
 
+/// What a key on the inbox asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Decision {
+    /// Install the proposal: the loaders write it live.
+    Apply,
+    /// Archive it without installing.
+    Reject,
+}
+
+/// What the screen says after a decision: the tool's own message, and
+/// whether it worked, so the strip can be green or red.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Notice {
+    pub text: String,
+    pub ok: bool,
+}
+
+/// Apply or reject one proposal with the paths already resolved.
+///
+/// Sync and path-explicit so a test can point every write at a scratch home
+/// without the override having to reach a spawned thread (the profile
+/// override is a task-local and does not cross `std::thread::spawn`).
+pub fn decide_with(
+    registry: Arc<ToolRegistry>,
+    id: &str,
+    kind: &McInboxKind,
+    decision: Decision,
+    tools_path: PathBuf,
+    brain_path: PathBuf,
+) -> Result<String, String> {
+    let tool = RsiProposalsTool::new(registry, tools_path, brain_path);
+    match decision {
+        Decision::Apply => tool.apply(id, kind),
+        Decision::Reject => tool.reject(id, None),
+    }
+}
+
+/// Decide one proposal on a thread of its own.
+///
+/// Resolving the two paths happens here because they are cheap home lookups;
+/// the writes themselves (tools.toml, commands.toml, SKILL.md, the archive)
+/// run off the gpui worker, which has a small stack and no reactor.
+pub async fn decide(
+    service: Arc<AgentService>,
+    id: String,
+    kind: McInboxKind,
+    decision: Decision,
+) -> Result<String, String> {
+    // The same two paths the terminal resolves, so an applied proposal lands
+    // in this instance's own files and nowhere else.
+    let Some(tools_path) = DynamicToolLoader::default_path() else {
+        return Err("no tools.toml path for this instance".to_string());
+    };
+    let brain_path = BrainLoader::resolve_path();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let spawned = std::thread::Builder::new()
+        .stack_size(4 * 1024 * 1024)
+        .name("gui-mission-decide".into())
+        .spawn(move || {
+            let result = decide_with(
+                service.tool_registry().clone(),
+                &id,
+                &kind,
+                decision,
+                tools_path,
+                brain_path,
+            );
+            let _ = tx.send(result);
+        });
+    match spawned {
+        Ok(_) => match rx.await {
+            Ok(result) => result,
+            Err(_) => Err("proposal thread dropped its result".to_string()),
+        },
+        Err(e) => Err(format!("proposal thread failed to spawn: {e}")),
+    }
+}
+
 /// Read the snapshot for `window` on a thread that owns its reactor.
 ///
 /// The thread is 4 MB and named, exactly like [`super::agent_bridge::load_files`],
@@ -296,6 +380,7 @@ pub async fn read_from_pool(pool: Pool, window: TimeWindow) -> Snapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opencrabs::brain::rsi_proposals::ProposalsStore;
     use opencrabs::config::profile::with_home_override;
 
     fn runtime() -> tokio::runtime::Runtime {
@@ -540,5 +625,85 @@ mod tests {
         };
         nav.open_detail(Some(&snapshot));
         assert!(!nav.detail);
+    }
+    /// A proposal the window's inbox can decide on: a trivial shell tool, so
+    /// the install path writes real bytes into `tools.toml` and registers a
+    /// real entry in the registry the bridge hands to the agent.
+    fn shell_tool_def(name: &str) -> opencrabs::brain::tools::dynamic::DynamicToolDef {
+        opencrabs::brain::tools::dynamic::DynamicToolDef {
+            name: name.to_string(),
+            description: "say hello".to_string(),
+            executor: opencrabs::brain::tools::dynamic::ExecutorType::Shell,
+            enabled: true,
+            requires_approval: false,
+            method: None,
+            url: None,
+            headers: std::collections::HashMap::new(),
+            timeout_secs: 5,
+            command: Some("echo hello".to_string()),
+            params: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn mission_decision_applies_and_rejects_through_the_terminals_tool() {
+        // The window must decide through `RsiProposalsTool`, not its own
+        // writes: this test proves an applied proposal really lands in
+        // tools.toml and leaves the inbox, and that a rejected one is
+        // archived without touching the file. Every path is the scratch home,
+        // so the live instance is never written.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path().to_path_buf();
+        with_home_override(home.clone(), || {
+            let store = ProposalsStore::with_dir(home.join("rsi"));
+            let tools_path = home.join("tools.toml");
+            let registry = Arc::new(ToolRegistry::new());
+
+            let keep = store
+                .add_tool_proposal("rsi-cycle", "repetitive work", shell_tool_def("hello_tool"))
+                .expect("file a tool proposal");
+            let drop_it = store
+                .add_tool_proposal("rsi-cycle", "same work again", shell_tool_def("bye_tool"))
+                .expect("file a second tool proposal");
+            assert_eq!(store.list_tool_proposals().len(), 2);
+
+            let applied = decide_with(
+                registry.clone(),
+                &keep,
+                &McInboxKind::ProposedTool,
+                Decision::Apply,
+                tools_path.clone(),
+                home.clone(),
+            );
+            assert!(applied.is_ok(), "apply failed: {applied:?}");
+            assert!(
+                store.list_tool_proposals().iter().all(|p| p.id != keep),
+                "an applied proposal leaves the inbox"
+            );
+            let written = std::fs::read_to_string(&tools_path).expect("tools.toml");
+            assert!(
+                written.contains("hello_tool"),
+                "apply writes the tool where the loader reads it"
+            );
+
+            let rejected = decide_with(
+                registry,
+                &drop_it,
+                &McInboxKind::ProposedTool,
+                Decision::Reject,
+                tools_path.clone(),
+                home.clone(),
+            );
+            assert!(rejected.is_ok(), "reject failed: {rejected:?}");
+            assert!(
+                store.list_tool_proposals().is_empty(),
+                "a rejected proposal leaves the inbox too"
+            );
+            let after = std::fs::read_to_string(&tools_path).expect("tools.toml");
+            assert!(
+                !after.contains("bye_tool"),
+                "reject archives without installing anything"
+            );
+        });
     }
 }

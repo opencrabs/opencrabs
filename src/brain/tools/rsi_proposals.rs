@@ -14,6 +14,7 @@
 use super::error::Result;
 use super::r#trait::{Tool, ToolCapability, ToolExecutionContext, ToolResult};
 use crate::brain::CommandLoader;
+use crate::brain::mission_control::McInboxKind;
 use crate::brain::rsi_proposals::{CommandProposal, ProposalsStore, SkillProposal, ToolProposal};
 use crate::brain::tools::ToolRegistry;
 use crate::brain::tools::dynamic::DynamicToolLoader;
@@ -79,6 +80,20 @@ impl RsiProposalsTool {
             }
         }
         out
+    }
+
+    /// Apply one pending proposal by id, with the kind picking the loader.
+    ///
+    /// Public because both front ends decide proposals: the terminal's
+    /// Mission Control (`tui::app::mission_control::actions`) and the
+    /// desktop window's inbox. One dispatch, one install path, so a
+    /// proposal applied from either client lands byte-identically.
+    pub fn apply(&self, id: &str, kind: &McInboxKind) -> std::result::Result<String, String> {
+        match kind {
+            McInboxKind::ProposedTool => self.apply_tool(id),
+            McInboxKind::ProposedCommand => self.apply_command(id),
+            McInboxKind::ProposedSkill => self.apply_skill(id),
+        }
     }
 
     pub(crate) fn apply_tool(&self, id: &str) -> std::result::Result<String, String> {
@@ -186,11 +201,11 @@ impl RsiProposalsTool {
         ))
     }
 
-    pub(crate) fn reject(
-        &self,
-        id: &str,
-        reason: Option<&str>,
-    ) -> std::result::Result<String, String> {
+    /// Reject one pending proposal by id, archiving it without installing.
+    ///
+    /// Public for the same reason as [`Self::apply`]: the window's inbox and
+    /// the terminal's inbox reject through one implementation.
+    pub fn reject(&self, id: &str, reason: Option<&str>) -> std::result::Result<String, String> {
         let store = self.store();
 
         if let Some(p) = store

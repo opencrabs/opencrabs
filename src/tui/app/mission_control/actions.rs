@@ -70,11 +70,9 @@ pub async fn apply_selected(app: &mut App) {
         }
     };
 
-    let result = match item.kind {
-        crate::brain::mission_control::McInboxKind::ProposedTool => tool.apply_tool(&item.id),
-        crate::brain::mission_control::McInboxKind::ProposedCommand => tool.apply_command(&item.id),
-        crate::brain::mission_control::McInboxKind::ProposedSkill => tool.apply_skill(&item.id),
-    };
+    // The kind picks the loader inside the tool, so the window's inbox can
+    // call the same entry point and install identically.
+    let result = tool.apply(&item.id, &item.kind);
 
     let msg = match result {
         Ok(s) => s,
