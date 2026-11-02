@@ -775,17 +775,25 @@ pub fn menu_item(label: &'static str) -> Stateful<Div> {
 /// edge. Absolute inside the row (which is relative), so it tracks the
 /// row through rail scrolls without window-coordinate math.
 pub fn menu_popover(items: Vec<Stateful<Div>>) -> Stateful<Div> {
+    // A solid card over the rows: it occludes so nothing beneath it paints
+    // through or takes a click, with a border and shadow so it reads as a
+    // layer above the list (#2384).
     let mut menu = div()
         .id("rail-context-menu")
+        .occlude()
         .absolute()
         .right_1()
         .top_1()
+        .min_w(rems(9.0))
         .flex()
         .flex_col()
         .gap_0p5()
         .p_1()
         .rounded_sm()
-        .bg(rgb(palette::current().panel_hi));
+        .border_1()
+        .border_color(rgb(palette::current().panel_hi))
+        .bg(rgb(palette::current().panel))
+        .shadow_md();
     for item in items {
         menu = menu.child(item);
     }
@@ -905,61 +913,51 @@ pub fn on_click(
     row.on_click(handler)
 }
 
-/// The pin button of a row's slide-out strip. The glyph states the action it
-/// performs: a hollow star pins, a filled one unpins.
-pub fn pin_button(favorited: bool) -> Stateful<Div> {
-    let (id, glyph, label, color) = if favorited {
-        (
-            "session-unpin",
-            "\u{2605}",
-            "unpin",
-            palette::current().accent,
-        )
-    } else {
-        (
-            "session-pin",
-            "\u{2606}",
-            "pin",
-            palette::current().text_muted,
-        )
-    };
+/// One icon in a row's slide-out strip. Icons only, so the strip stays small
+/// next to the title: the title keeps its room, and the glyph carries the
+/// action (#2384).
+fn action_icon(id: &'static str, glyph: &'static str, color: u32) -> Stateful<Div> {
     div()
         .id(id)
         .flex()
-        .flex_row()
+        .flex_none()
         .items_center()
-        .gap_1()
-        .px_2()
-        .py_1()
+        .justify_center()
+        .size(rems(1.6))
         .rounded_sm()
-        .bg(rgb(palette::current().panel_hi))
-        .text_xs()
+        .text_sm()
         .text_color(rgb(color))
         .cursor_pointer()
         .hover(|d| d.bg(rgb(palette::current().focus)))
         .child(SharedString::from(glyph))
-        .child(SharedString::from(label))
 }
 
-/// The delete button of a row's slide-out strip. It never deletes on its own:
+/// The pin icon of a row's slide-out strip. A hollow star pins, a filled one
+/// unpins.
+pub fn pin_button(favorited: bool) -> Stateful<Div> {
+    if favorited {
+        action_icon("session-unpin", "\u{2605}", palette::current().accent)
+    } else {
+        action_icon("session-pin", "\u{2606}", palette::current().text_muted)
+    }
+}
+
+/// The topic icon of a row's slide-out strip. With topics off it turns them
+/// on; with topics on it opens a new topic under the session (#2302, #2303).
+pub fn topic_button(topics_on: bool) -> Stateful<Div> {
+    let color = if topics_on {
+        palette::current().accent
+    } else {
+        palette::current().text_muted
+    };
+    action_icon("session-topic", "\u{2442}", color)
+}
+
+/// The delete icon of a row's slide-out strip. It never deletes on its own:
 /// the view routes every delete path through one confirmation dialog, so a
 /// mis-swipe cannot cost a conversation.
 pub fn delete_button() -> Stateful<Div> {
-    div()
-        .id("session-delete")
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap_1()
-        .px_2()
-        .py_1()
-        .rounded_sm()
-        .bg(rgb(palette::current().panel_hi))
-        .text_xs()
-        .text_color(rgb(palette::current().red))
-        .cursor_pointer()
-        .hover(|d| d.bg(rgb(palette::current().focus)))
-        .child(SharedString::from("delete"))
+    action_icon("session-delete", "\u{2715}", palette::current().red)
 }
 
 /// The rail column: header and error slot from the state, then the caller's
