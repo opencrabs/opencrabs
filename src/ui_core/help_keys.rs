@@ -323,6 +323,13 @@ pub const ROWS: &[HelpRow] = &[
         None,
         "Close or reopen the selected topic",
     ),
+    row(
+        HelpSection::Sessions,
+        "z",
+        "Z",
+        None,
+        "Fold or unfold the topic tree",
+    ),
 ];
 
 /// Every row in display order.
@@ -387,6 +394,7 @@ mod tests {
         "Esc",
         "T",
         "C",
+        "Z",
     ];
 
     #[test]

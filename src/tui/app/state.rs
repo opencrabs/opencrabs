@@ -470,6 +470,8 @@ pub struct App {
     pub(crate) topic_parents: std::collections::HashMap<Uuid, Uuid>,
     /// Closed sessions (#2305): dimmed in the dialog, refuse new turns.
     pub(crate) closed_sessions: HashSet<Uuid>,
+    /// Sessions whose topic tree is folded: their topics are not listed (#2427).
+    pub(crate) collapsed_sessions: HashSet<Uuid>,
     /// The name prompt for a new topic in the sessions dialog (#2306).
     pub(crate) topic_naming: bool,
     pub(crate) topic_name_buffer: String,
@@ -964,6 +966,7 @@ impl App {
             session_favorites: HashSet::new(),
             topic_parents: std::collections::HashMap::new(),
             closed_sessions: HashSet::new(),
+            collapsed_sessions: HashSet::new(),
             topic_naming: false,
             topic_name_buffer: String::new(),
             usage_ledger_stats: Vec::new(),

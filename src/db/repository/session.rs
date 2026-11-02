@@ -220,6 +220,47 @@ impl SessionRepository {
     }
 
     /// Every session with topics turned on, as ids.
+    /// Fold or unfold one session's topic tree. The choice is kept per session (#2427).
+    pub async fn set_topics_collapsed(&self, id: Uuid, collapsed: bool) -> Result<()> {
+        let id_str = id.to_string();
+        self.pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                conn.execute(
+                    "UPDATE sessions SET topics_collapsed = ?2 WHERE id = ?1",
+                    rusqlite::params![id_str, collapsed as i64],
+                )
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to write topics_collapsed")?;
+        Ok(())
+    }
+
+    /// Every session whose topic tree is folded.
+    pub async fn topics_collapsed_ids(&self) -> Result<Vec<Uuid>> {
+        self.pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                let mut stmt =
+                    conn.prepare_cached("SELECT id FROM sessions WHERE topics_collapsed = 1")?;
+                let ids = stmt
+                    .query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<String>>>()?;
+                Ok::<_, rusqlite::Error>(ids)
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to read topics_collapsed")?
+            .into_iter()
+            .map(|s| Uuid::parse_str(&s).context("malformed session id"))
+            .collect()
+    }
+
     /// Set or clear one topic's icon. None clears it back to the default.
     pub async fn set_topic_icon(&self, id: Uuid, icon: Option<&str>) -> Result<()> {
         let (id_str, icon) = (id.to_string(), icon.map(str::to_string));

@@ -2779,6 +2779,10 @@ impl App {
         } else if event.code == KeyCode::Char('c') || event.code == KeyCode::Char('C') {
             // Close or reopen the selected topic (#2305).
             self.toggle_closed_selected().await?;
+        } else if event.code == KeyCode::Char('z') || event.code == KeyCode::Char('Z') {
+            // Fold or unfold the selected session's topic tree (#2427). A plain
+            // f is the files browser, so the fold key is z, as in vim.
+            self.toggle_fold_selected().await?;
         } else if event.code == KeyCode::Char('r') || event.code == KeyCode::Char('R') {
             // Start renaming the selected session
             if let Some(session) = self.sessions.get(self.selected_session_index) {

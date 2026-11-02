@@ -164,6 +164,7 @@ pub(crate) const MIGRATION_SQL: &[&str] = &[
     include_str!("../migrations/20261031000001_add_session_favorites.sql"),
     include_str!("../migrations/20261101000001_add_session_topics.sql"),
     include_str!("../migrations/20261102000001_add_topic_icon.sql"),
+    include_str!("../migrations/20261103000001_add_topics_collapsed.sql"),
 ];
 
 pub(crate) fn build_migrations() -> Migrations<'static> {

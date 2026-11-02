@@ -884,6 +884,12 @@ impl App {
             .unwrap_or_default()
             .into_iter()
             .collect();
+        self.collapsed_sessions = topic_repo
+            .topics_collapsed_ids()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
         let in_list: std::collections::HashSet<Uuid> = self.sessions.iter().map(|s| s.id).collect();
         let parents = &self.topic_parents;
         let mut by_parent: std::collections::HashMap<Uuid, Vec<crate::db::models::Session>> =
@@ -901,7 +907,11 @@ impl App {
         for top in tops {
             let id = top.id;
             ordered.push(top);
-            if let Some(kids) = by_parent.remove(&id) {
+            // A folded tree lists nothing beneath its parent (#2427).
+            let folded = self.collapsed_sessions.contains(&id);
+            if let Some(kids) = by_parent.remove(&id)
+                && !folded
+            {
                 ordered.extend(kids);
             }
         }
@@ -960,6 +970,29 @@ impl App {
         } else {
             "Topic closed. It keeps its history and refuses new turns until reopened.".to_string()
         });
+        self.load_sessions().await
+    }
+
+    /// Fold or unfold the topic tree of the selected session, or of the parent
+    /// of the selected topic. Saved to the ledger, so the window shows the same
+    /// tree (#2427).
+    pub(crate) async fn toggle_fold_selected(&mut self) -> Result<()> {
+        let Some(selected) = self.sessions.get(self.selected_session_index).map(|s| s.id) else {
+            return Ok(());
+        };
+        let parent = self
+            .topic_parents
+            .get(&selected)
+            .copied()
+            .unwrap_or(selected);
+        let has_topics = self.topic_parents.values().any(|p| *p == parent);
+        if !has_topics {
+            self.push_system_message("This session has no topics to fold.".to_string());
+            return Ok(());
+        }
+        let folded = !self.collapsed_sessions.contains(&parent);
+        let repo = crate::db::repository::SessionRepository::new(self.session_service.pool());
+        repo.set_topics_collapsed(parent, folded).await?;
         self.load_sessions().await
     }
 

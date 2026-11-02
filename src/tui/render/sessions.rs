@@ -607,10 +607,18 @@ fn session_row(
         .get(&session.id)
         .is_some_and(|p| app.sessions.iter().any(|s| s.id == *p));
     let raw_title = session.title.as_deref().unwrap_or("New Chat");
+    // A session with topics carries a chevron that says whether its tree is
+    // folded: ▸ folded, ▾ open (#2427).
+    let has_topics = app.topic_parents.values().any(|p| *p == session.id);
+    let fold_mark = match (has_topics, app.collapsed_sessions.contains(&session.id)) {
+        (true, true) => "▸ ",
+        (true, false) => "▾ ",
+        _ => "",
+    };
     let title_owned = if is_topic {
         format!("  └ {raw_title}")
     } else {
-        raw_title.to_string()
+        format!("{fold_mark}{raw_title}")
     };
     let title = title_owned.as_str();
     let name = if app.session_favorites.contains(&session.id) {
