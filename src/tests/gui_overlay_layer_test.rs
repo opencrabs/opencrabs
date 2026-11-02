@@ -38,11 +38,15 @@ fn the_key_reference_fills_the_window() {
     // covers the window and takes the pointer, so a click lands in the
     // reference and not on a pane behind it.
     let screen = position(".id(\"help-screen\")");
-    let after = &GUI_MAIN[screen..];
+    let after = GUI_MAIN
+        .get(screen..)
+        .expect("the help screen marker is a char boundary");
     let header = after
         .find(".child(header)")
         .expect("the help screen stacks a header, a scroller and a footer");
-    let frame = &after[..header];
+    let frame = after
+        .get(..header)
+        .expect("the header marker is a char boundary");
     assert!(
         frame.contains(".size_full()"),
         "the help screen must fill the window"
