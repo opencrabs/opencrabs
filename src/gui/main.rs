@@ -57,12 +57,14 @@ use opencrabs::ui_core::split::{self, Layout};
 use transcript::{CopyDrag, LiveTurn, TranscriptState};
 // The terminal's own command table, shared rather than copied.
 use opencrabs::ui_core::commands as slash;
-// The deep find engine: ranking, keywords and state, shared with the terminal
+// The Seeker engine: ranking, keywords and state, shared with the terminal
 // so both clients print the same rows in the same order (#2458). Named `find`
 // because `palette` here is the window's colour table.
 use opencrabs::ui_core::palette::{
-    self as find, PaletteAction, PaletteItem, PaletteKind, PaletteState,
+    self as find, Channel, PaletteAction, PaletteItem, PaletteKind, PaletteState,
 };
+// The docs pages Seeker can open, built once in the shared core (#2461).
+use opencrabs::ui_core::docs;
 
 use futures::channel::oneshot;
 
@@ -298,6 +300,39 @@ const RAIL_MAX_REM: f32 = 32.0;
 /// what is left, so its tiles never run under the panel.
 const THEMES_PANEL_WIDTH: f32 = 260.0;
 
+/// Which messaging channels the config says are live: enabled and carrying the
+/// credential that channel needs. Read once when Seeker opens, so the hint says
+/// "not set up" only when that is true (#2462).
+fn configured_channels() -> Vec<Channel> {
+    let Ok(config) = Config::load() else {
+        return Vec::new();
+    };
+    let channels = &config.channels;
+    let filled = |value: &Option<String>| value.as_deref().is_some_and(|text| !text.is_empty());
+    let mut live = Vec::new();
+    if channels.telegram.enabled && filled(&channels.telegram.token) {
+        live.push(Channel::Telegram);
+    }
+    if channels.discord.enabled && filled(&channels.discord.token) {
+        live.push(Channel::Discord);
+    }
+    if channels.slack.enabled && filled(&channels.slack.token) && filled(&channels.slack.app_token)
+    {
+        live.push(Channel::Slack);
+    }
+    // WhatsApp pairs by QR: being enabled is the whole credential.
+    if channels.whatsapp.enabled {
+        live.push(Channel::WhatsApp);
+    }
+    if channels.trello.enabled
+        && filled(&channels.trello.app_token)
+        && filled(&channels.trello.token)
+    {
+        live.push(Channel::Trello);
+    }
+    live
+}
+
 /// The phase 1 window. Every string on screen is real data or the real error.
 struct Dashboard {
     /// Which pane the right side draws: chat by default, usage on ctrl+u.
@@ -315,10 +350,14 @@ struct Dashboard {
     /// new target, so an opener that forgets to ask still cannot leave the
     /// composer answering under the field that just took the keyboard.
     last_owner: Option<KeyboardOwner>,
-    /// The deep find card. The query, the ranking and the armed row live in
+    /// The Seeker card. The query, the ranking and the armed row live in
     /// `ui_core::palette`; this is whether the card is up, and what it was
     /// given to find when it opened (#2458).
     finder: Option<PaletteState>,
+    /// Which channels the config says are live, read once when the card opens,
+    /// so the hint can tell an unconfigured channel from a working one without
+    /// touching the disk on every keystroke (#2462).
+    finder_channels: Vec<Channel>,
     /// Monotonic tag on the latest period fetch; only its result is applied,
     /// so a slow fetch landing after a newer one cannot paint stale data.
     pending: u64,
@@ -729,6 +768,7 @@ impl Dashboard {
             return;
         }
         self.finder = Some(PaletteState::new(self.finder_items()));
+        self.finder_channels = configured_channels();
         self.refocus_overlay();
         logging::info("finder: opened");
         cx.notify();
@@ -758,6 +798,12 @@ impl Dashboard {
             })
             .collect();
         items.extend(find::surface_items());
+        // The docs pages: a query that is not a command, a screen or a
+        // conversation is usually a question the documentation answers (#2461).
+        items.extend(docs::items());
+        // The channel setup rows: the word that names a channel has to find the
+        // row that starts its setup, not only the page that describes it (#2462).
+        items.extend(find::channel_items());
         for skill in opencrabs::brain::skills::load_all_skills() {
             items.push(
                 PaletteItem::new(
@@ -766,7 +812,10 @@ impl Dashboard {
                     PaletteKind::Skill,
                     PaletteAction::RunSkill(skill.slash_name.clone()),
                 )
-                .with_keywords("skill workflow recipe"),
+                // The skill's own description carries the words a user types
+                // when they do not know its slash name: `telegram` has to find
+                // the channels skill, not only the docs page (#2462).
+                .with_keywords(&format!("skill workflow recipe {}", skill.description)),
             );
         }
         for session in &self.sessions.items {
@@ -837,6 +886,17 @@ impl Dashboard {
             }
             PaletteAction::RunSkill(name) | PaletteAction::RunUserCommand(name) => {
                 self.send_message(name, cx)
+            }
+            PaletteAction::SetupChannel(channel) => self.send_message(
+                format!(
+                    "Set up {} as a channel: walk me through each step and make the config change with me.",
+                    channel.name()
+                ),
+                cx,
+            ),
+            PaletteAction::OpenDocs(path) => {
+                let url = docs::url(path);
+                preview::launch(&preview::url_command(&url));
             }
         }
     }
@@ -6085,7 +6145,11 @@ impl Render for Dashboard {
                     )
                 })
                 .collect();
-            root = root.child(command_palette::overlay(state, handlers));
+            root = root.child(command_palette::overlay(
+                state,
+                handlers,
+                find::channel_hint(state.query(), &self.finder_channels),
+            ));
         }
         root
     }
@@ -6292,6 +6356,7 @@ fn main() {
                         refocus: Some(focus_target(keyboard_owner(&[], Screen::Chat))),
                         last_owner: None,
                         finder: None,
+                        finder_channels: Vec::new(),
                         pending: 0,
                         files: Vec::new(),
                         files_for: None,
@@ -8697,7 +8762,7 @@ mod tests {
             ("enter", "Open the highlighted session"),
             ("ctrl+f", "Find a session"),
             ("ctrl+shift+p", "Pin the selected session"),
-            ("ctrl+shift+f", "Deep find anything"),
+            ("ctrl+shift+f", "Seeker: find anything"),
             ("ctrl+d", "Delete the selected session"),
             ("ctrl+g", "Session files"),
             ("esc", "Cancel or step back"),
@@ -8790,7 +8855,7 @@ mod tests {
     }
 
     #[test]
-    fn deep_find_owns_the_keyboard_before_the_composer_does() {
+    fn seeker_owns_the_keyboard_before_the_composer_does() {
         // The card is only a launcher if it gets the characters: its branch
         // must run before the composer gate, or a focused editor types into
         // itself what the user meant for the field (#2458).

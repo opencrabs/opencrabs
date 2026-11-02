@@ -26,6 +26,11 @@ pub enum PaletteKind {
     Skill,
     /// A command from the user's own `commands.toml`.
     UserCommand,
+    /// A messaging channel the agent can be reached on: the row starts its
+    /// setup instead of describing it (#2462).
+    Channel,
+    /// A documentation page, opened in the default browser.
+    Docs,
 }
 
 impl PaletteKind {
@@ -38,6 +43,8 @@ impl PaletteKind {
             PaletteKind::Model => "model",
             PaletteKind::Skill => "skill",
             PaletteKind::UserCommand => "yours",
+            PaletteKind::Channel => "channel",
+            PaletteKind::Docs => "docs",
         }
     }
 
@@ -48,9 +55,14 @@ impl PaletteKind {
             PaletteKind::Command => 0,
             PaletteKind::Surface => 1,
             PaletteKind::Skill => 2,
-            PaletteKind::UserCommand => 3,
-            PaletteKind::Model => 4,
-            PaletteKind::Session => 5,
+            // A setup row is an action, so it sits with the surfaces: for the
+            // query `telegram` it is printed above the docs page that carries
+            // the same name (#2462).
+            PaletteKind::Channel => 1,
+            PaletteKind::Docs => 3,
+            PaletteKind::UserCommand => 4,
+            PaletteKind::Model => 5,
+            PaletteKind::Session => 6,
         }
     }
 }
@@ -167,6 +179,133 @@ pub fn surface_items() -> Vec<PaletteItem> {
         .collect()
 }
 
+/// A messaging channel the agent can be reached on, and the shape of its setup.
+///
+/// The steps are the ones the `channels` skill documents, kept short enough to
+/// read in a card row: what the channel needs before it can answer a message.
+/// Nothing here reads the config or the network: the frontend knows which
+/// channels are live and asks for the hint (#2462).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Channel {
+    Telegram,
+    Discord,
+    Slack,
+    WhatsApp,
+    Trello,
+}
+
+impl Channel {
+    /// Fixed order, so both frontends print the same five rows.
+    pub const ALL: &'static [Channel] = &[
+        Channel::Telegram,
+        Channel::Discord,
+        Channel::Slack,
+        Channel::WhatsApp,
+        Channel::Trello,
+    ];
+
+    /// The name the user types, and the word the query is matched on.
+    pub fn name(self) -> &'static str {
+        match self {
+            Channel::Telegram => "Telegram",
+            Channel::Discord => "Discord",
+            Channel::Slack => "Slack",
+            Channel::WhatsApp => "WhatsApp",
+            Channel::Trello => "Trello",
+        }
+    }
+
+    /// The credential the channel needs, in the order the setup asks for it.
+    pub fn steps(self) -> &'static str {
+        match self {
+            Channel::Telegram => "bot token, enabled = true, restart",
+            Channel::Discord => "bot token, channel ids, restart",
+            Channel::Slack => "bot token, app token, restart",
+            Channel::WhatsApp => "scan the QR, then enabled = true",
+            Channel::Trello => "api key, member token, board",
+        }
+    }
+
+    /// The page that documents this setup, for the docs row beside it.
+    pub fn doc_path(self) -> &'static str {
+        match self {
+            Channel::Telegram => "/channels/telegram.html",
+            Channel::Discord => "/channels/discord.html",
+            Channel::Slack => "/channels/slack.html",
+            Channel::WhatsApp => "/channels/whatsapp.html",
+            Channel::Trello => "/channels/trello.html",
+        }
+    }
+
+    /// Words that should find this channel without naming it.
+    pub fn keywords(self) -> &'static str {
+        match self {
+            Channel::Telegram => "telegram tg bot botfather chat group message",
+            Channel::Discord => "discord guild server chat bot",
+            Channel::Slack => "slack workspace socket mode bot",
+            Channel::WhatsApp => "whatsapp wa phone number qr pair",
+            Channel::Trello => "trello board card list kanban",
+        }
+    }
+
+    /// The line printed while the channel is not configured: what it takes,
+    /// counted, so the card answers "how hard is this" before the user commits.
+    /// True to the skill, and short enough for the terminal card (#2462).
+    pub fn setup_hint(self) -> &'static str {
+        match self {
+            Channel::Telegram => {
+                "Telegram is not set up: 3 steps, bot token from @BotFather, enabled = true, restart"
+            }
+            Channel::Discord => "Discord is not set up: 3 steps, bot token, channel ids, restart",
+            Channel::Slack => "Slack is not set up: 3 steps, bot token, app token, restart",
+            Channel::WhatsApp => "WhatsApp is not set up: 2 steps, scan the QR, enabled = true",
+            Channel::Trello => "Trello is not set up: 3 steps, api key, member token, board",
+        }
+    }
+
+    /// The channel a query names, if it names one. Matched on the name, or on a
+    /// word long enough to be a real stem, so `telegram` and `tele` both find
+    /// it while `telegraph` and a two letter prefix do not.
+    fn named_in(query: &str) -> Option<Channel> {
+        let query = query.to_lowercase();
+        Channel::ALL.iter().copied().find(|channel| {
+            let name = channel.name().to_lowercase();
+            query.contains(&name)
+                || query
+                    .split_whitespace()
+                    .any(|word| word.len() >= 4 && name.starts_with(word))
+        })
+    }
+}
+
+/// The setup rows: one per channel, titled with the channel's own name so the
+/// same word that finds the docs page also finds the row that starts the setup.
+pub fn channel_items() -> Vec<PaletteItem> {
+    Channel::ALL
+        .iter()
+        .map(|channel| {
+            PaletteItem::new(
+                channel.name(),
+                format!("set up: {}", channel.steps()),
+                PaletteKind::Channel,
+                PaletteAction::SetupChannel(*channel),
+            )
+            .with_keywords(channel.keywords())
+        })
+        .collect()
+}
+
+/// The hint printed under the field when the query names a channel that is not
+/// live yet. `configured` is what the frontend read from the config, so a
+/// channel that already answers messages gets no hint.
+pub fn channel_hint(query: &str, configured: &[Channel]) -> Option<&'static str> {
+    let channel = Channel::named_in(query)?;
+    if configured.contains(&channel) {
+        return None;
+    }
+    Some(channel.setup_hint())
+}
+
 /// What picking a row does. The frontend applies it; this module only names it.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum PaletteAction {
@@ -181,6 +320,14 @@ pub enum PaletteAction {
     },
     RunSkill(String),
     RunUserCommand(String),
+    /// Start the guided setup for a messaging channel. The frontend sends the
+    /// instruction, so the work happens in the conversation the user is
+    /// already in and the config write goes through the normal gate (#2462).
+    SetupChannel(Channel),
+    /// A documentation page, held as the path the sitemap publishes. The
+    /// frontends compose the URL with `ui_core::docs::url`, so the host lives
+    /// in one place.
+    OpenDocs(&'static str),
 }
 
 /// One pickable row, already flat: the frontend paints it and nothing else.
@@ -804,5 +951,69 @@ mod tests {
             state.selected().map(|row| row.item.action),
             Some(PaletteAction::RunSlash("/mission-control"))
         );
+    }
+
+    /// Every channel gets a row that starts its setup, titled with the name the
+    /// user types, so the row and the docs page answer to the same word (#2462).
+    #[test]
+    fn every_channel_gets_one_setup_row() {
+        let rows = channel_items();
+        assert_eq!(rows.len(), Channel::ALL.len());
+        for (row, channel) in rows.iter().zip(Channel::ALL) {
+            assert_eq!(row.kind, PaletteKind::Channel);
+            assert_eq!(row.title, channel.name());
+            assert_eq!(row.action, PaletteAction::SetupChannel(*channel));
+            assert!(
+                row.subtitle.contains("set up") || row.subtitle.contains("scan"),
+                "{} needs its steps, got {:?}",
+                channel.name(),
+                row.subtitle
+            );
+        }
+    }
+
+    /// The whole point: type the channel and the setup row is the first thing
+    /// Enter acts on, above the docs page that shares its name.
+    #[test]
+    fn typing_a_channel_arms_its_setup_row() {
+        let mut items = channel_items();
+        items.extend(crate::ui_core::docs::items());
+        let mut state = PaletteState::new(items);
+        for c in "telegram".chars() {
+            state.type_char(c);
+        }
+        assert_eq!(
+            state.selected().map(|row| row.item.action),
+            Some(PaletteAction::SetupChannel(Channel::Telegram))
+        );
+    }
+
+    /// The hint is for a channel that is not live: once it is configured the
+    /// card goes quiet instead of nagging about work already done.
+    #[test]
+    fn the_hint_only_speaks_for_an_unconfigured_channel() {
+        assert_eq!(
+            channel_hint("telegram", &[]),
+            Some(Channel::Telegram.setup_hint())
+        );
+        assert_eq!(
+            channel_hint("how do i setup telegram bot", &[]),
+            Some(Channel::Telegram.setup_hint())
+        );
+        assert_eq!(channel_hint("telegram", &[Channel::Telegram]), None);
+        assert_eq!(channel_hint("sessions", &[]), None);
+        assert_eq!(channel_hint("", &[]), None);
+    }
+
+    /// A short stem still names the channel, because people type `tele`; a
+    /// word that merely contains part of a channel name does not fire, and
+    /// neither does a two letter prefix.
+    #[test]
+    fn a_channel_is_matched_on_its_name_not_on_a_fragment() {
+        assert_eq!(Channel::named_in("te"), None);
+        assert_eq!(Channel::named_in("tele"), Some(Channel::Telegram));
+        assert_eq!(Channel::named_in("telegraph"), None);
+        assert_eq!(Channel::named_in("telegram"), Some(Channel::Telegram));
+        assert_eq!(Channel::named_in("WHATSAPP"), Some(Channel::WhatsApp));
     }
 }

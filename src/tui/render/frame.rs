@@ -379,7 +379,12 @@ pub fn render(f: &mut Frame, app: &mut App) {
     // user was in instead of a blank one.
     if let Some(state) = &app.command_palette {
         let area = f.area();
-        crate::tui::render::command_palette::render_command_palette(f, state, area);
+        crate::tui::render::command_palette::render_command_palette(
+            f,
+            state,
+            area,
+            &app.command_palette_channels,
+        );
     }
 }
 

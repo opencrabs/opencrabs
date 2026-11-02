@@ -505,10 +505,14 @@ pub struct App {
     /// Interactive theme picker (#1371). `Some` = dialog open; all keys are
     /// intercepted and routed through the picker's pure state machine.
     pub theme_picker: Option<crate::tui::render::theme_picker::ThemePickerState>,
-    /// Deep find (#2458). `Some` = the card is open and owns every key, the
+    /// Seeker (#2458). `Some` = the card is open and owns every key, the
     /// same engine the window runs, so both clients rank and print the same
     /// rows in the same order.
     pub command_palette: Option<crate::ui_core::palette::PaletteState>,
+    /// The channels the config says are live, read when the card opens so the
+    /// hint can tell an unconfigured channel from a working one without
+    /// touching the disk on every keystroke (#2462).
+    pub command_palette_channels: Vec<crate::ui_core::palette::Channel>,
     pub selected_session_index: usize,
     pub should_quit: bool,
     /// Pending resize dimensions — runner pre-resizes buffers to avoid blink
@@ -986,6 +990,7 @@ impl App {
             mouse_capture_enabled: true,
             theme_picker: None,
             command_palette: None,
+            command_palette_channels: Vec::new(),
             selected_session_index: 0,
             should_quit: false,
             pending_resize: None,
@@ -3460,6 +3465,7 @@ impl App {
             self.command_palette = None;
             return;
         }
+        self.command_palette_channels = live_channels();
         self.command_palette = Some(crate::ui_core::palette::PaletteState::new(
             self.palette_items(),
         ));
@@ -3483,6 +3489,12 @@ impl App {
             })
             .collect();
         items.extend(palette::surface_items());
+        // The docs pages: a query that is not a command or a conversation is
+        // usually a question the documentation answers (#2461).
+        items.extend(crate::ui_core::docs::items());
+        // The channel setup rows: the word that names a channel has to find the
+        // row that starts its setup, not only the page that describes it (#2462).
+        items.extend(palette::channel_items());
         for skill in &self.skills {
             items.push(
                 PaletteItem::new(
@@ -3491,7 +3503,10 @@ impl App {
                     PaletteKind::Skill,
                     PaletteAction::RunSkill(skill.slash_name.clone()),
                 )
-                .with_keywords("skill workflow recipe"),
+                // The skill's own description carries the words a user types
+                // when they do not know its slash name: `telegram` has to find
+                // the channels skill, not only the docs page (#2462).
+                .with_keywords(&format!("skill workflow recipe {}", skill.description)),
             );
         }
         for session in &self.sessions {
@@ -3574,6 +3589,37 @@ impl App {
             }
             PaletteAction::RunSkill(name) | PaletteAction::RunUserCommand(name) => {
                 let _ = self.handle_slash_command(&name).await;
+            }
+            PaletteAction::SetupChannel(channel) => {
+                // The setup runs as a normal turn, so the config write goes
+                // through the same gate a typed request would (#2462).
+                let prompt = format!(
+                    "Set up {} as a channel: walk me through each step and make the config change with me.",
+                    channel.name()
+                );
+                let sender = self.event_sender();
+                let _ = sender.send(crate::tui::events::TuiEvent::CommandSubmitted(prompt));
+                self.mode = AppMode::Chat;
+            }
+            PaletteAction::OpenDocs(path) => {
+                // Detached, exactly like a previewed file: waiting on the
+                // browser would freeze the event loop. A launcher that exits
+                // non-zero reports back through the same event the file
+                // opener uses (#2170).
+                let url = crate::ui_core::docs::url(path);
+                let label = url.clone();
+                let tx = self.event_sender();
+                let opened = crate::tui::launcher::open_url(&url, move |detail| {
+                    let _ = tx.send(crate::tui::events::TuiEvent::LauncherFailed {
+                        target: label,
+                        detail,
+                    });
+                });
+                self.notification = Some(match opened {
+                    Ok(()) => format!("Opening {url}"),
+                    Err(err) => format!("Could not open {url}: {err}"),
+                });
+                self.notification_shown_at = Some(std::time::Instant::now());
             }
         }
         Ok(())
@@ -4709,4 +4755,37 @@ pub(crate) fn plan_launch(force_onboard: bool, is_first_time: bool) -> LaunchPla
             first_run: is_first_time,
         }
     }
+}
+
+/// The messaging channels the config says are live: enabled and carrying the
+/// credential each one needs. WhatsApp pairs by QR, so being enabled is its
+/// whole credential (#2462).
+fn live_channels() -> Vec<crate::ui_core::palette::Channel> {
+    use crate::ui_core::palette::Channel;
+    let Ok(config) = crate::config::Config::load() else {
+        return Vec::new();
+    };
+    let channels = &config.channels;
+    let filled = |value: &Option<String>| value.as_deref().is_some_and(|text| !text.is_empty());
+    let mut live = Vec::new();
+    if channels.telegram.enabled && filled(&channels.telegram.token) {
+        live.push(Channel::Telegram);
+    }
+    if channels.discord.enabled && filled(&channels.discord.token) {
+        live.push(Channel::Discord);
+    }
+    if channels.slack.enabled && filled(&channels.slack.token) && filled(&channels.slack.app_token)
+    {
+        live.push(Channel::Slack);
+    }
+    if channels.whatsapp.enabled {
+        live.push(Channel::WhatsApp);
+    }
+    if channels.trello.enabled
+        && filled(&channels.trello.app_token)
+        && filled(&channels.trello.token)
+    {
+        live.push(Channel::Trello);
+    }
+    live
 }

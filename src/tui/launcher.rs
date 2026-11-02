@@ -136,6 +136,16 @@ where
     spawn_and_reap(opener_command(), &[target.as_os_str()], on_failure)
 }
 
+/// Open a URL in the default browser. Same opener as a file, because the
+/// system handler is the same program; the difference is only that the target
+/// is a string the caller composed rather than a path on disk.
+pub(crate) fn open_url<F>(url: &str, on_failure: F) -> io::Result<()>
+where
+    F: FnOnce(String) + Send + 'static,
+{
+    spawn_and_reap(opener_command(), &[OsStr::new(url)], on_failure)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

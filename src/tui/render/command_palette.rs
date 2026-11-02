@@ -18,13 +18,27 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::tui::render::chrome;
 use crate::tui::render::theme::{self, Role};
-use crate::ui_core::palette::{MAX_ROWS, PaletteState, roast};
+use crate::ui_core::palette::{Channel, MAX_ROWS, PaletteState, channel_hint, roast};
 
 /// How many rows the card can print for a given outer area: the borders, the
-/// field and the footer take the rest.
-fn page_height(area: Rect) -> usize {
+/// field and the footer take the rest, and the setup hint takes one more line
+/// when it is printed (#2462).
+fn page_height(area: Rect, hint: bool) -> usize {
     let card = card_area(area);
-    usize::from(card.height.saturating_sub(4)).min(MAX_ROWS)
+    let chrome = if hint { 5 } else { 4 };
+    usize::from(card.height.saturating_sub(chrome)).min(MAX_ROWS)
+}
+
+/// Cut the setup hint to the card's inner width, with an ellipsis. The strings
+/// name every step the setup takes, so they are longer than a narrow terminal's
+/// card, and ratatui would clip the tail without saying so (#2462).
+fn fit(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(width.saturating_sub(1)).collect();
+    out.push('…');
+    out
 }
 
 /// The card: 70% of the width, the height the rows need, centered.
@@ -52,7 +66,12 @@ pub fn dim_region(buf: &mut Buffer, keep: Rect) {
 
 /// Paint the card over the frame. The caller renders the app first, then this,
 /// so the dim has something to dim.
-pub(crate) fn render_command_palette(f: &mut Frame, state: &PaletteState, area: Rect) {
+pub(crate) fn render_command_palette(
+    f: &mut Frame,
+    state: &PaletteState,
+    area: Rect,
+    configured: &[Channel],
+) {
     let card = card_area(area);
     dim_region(f.buffer_mut(), card);
     f.render_widget(Clear, card);
@@ -61,14 +80,25 @@ pub(crate) fn render_command_palette(f: &mut Frame, state: &PaletteState, area: 
     let muted = theme::role(Role::GrayDim);
     let text = theme::role(Role::TextPrimary);
 
+    // The setup line for a channel the query names but the config does not
+    // carry: printed under the field, in the warning colour, because "you can
+    // have this" is news and the control legend is not (#2462).
+    let setup = channel_hint(state.query(), configured);
+
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(vec![
-        Span::styled(" find ", Style::default().fg(accent)),
+        Span::styled(" seeker ", Style::default().fg(accent)),
         Span::styled(state.query().to_string(), Style::default().fg(text)),
         // A caret so an empty field still looks like it is listening.
         Span::styled("▏", Style::default().fg(accent)),
     ]));
-    lines.push(Line::from(""));
+    match setup {
+        Some(hint) => lines.push(Line::from(Span::styled(
+            fit(hint, usize::from(card.width.saturating_sub(2))),
+            Style::default().fg(theme::role(Role::Warning)),
+        ))),
+        None => lines.push(Line::from("")),
+    }
 
     let rows = state.visible();
     if rows.is_empty() && !state.is_empty() {
@@ -77,7 +107,7 @@ pub(crate) fn render_command_palette(f: &mut Frame, state: &PaletteState, area: 
             Style::default().fg(theme::role(Role::Warning)),
         )));
     } else {
-        let page = page_height(area).max(1);
+        let page = page_height(area, setup.is_some()).max(1);
         let armed = state.cursor().unwrap_or(0);
         let scroll = state
             .scroll()
@@ -114,7 +144,7 @@ pub(crate) fn render_command_palette(f: &mut Frame, state: &PaletteState, area: 
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::role(Role::BorderModal)))
         .title(Line::from(Span::styled(
-            " find anything ",
+            " seeker ",
             Style::default().fg(accent).add_modifier(Modifier::BOLD),
         )))
         .title_bottom(Line::from(Span::styled(
@@ -175,7 +205,10 @@ mod tests {
     #[test]
     fn the_page_never_exceeds_the_card_or_the_row_cap() {
         let area = Rect::new(0, 0, 100, 40);
-        assert!(page_height(area) <= MAX_ROWS);
+        assert!(page_height(area, false) <= MAX_ROWS);
+        assert!(page_height(area, true) <= MAX_ROWS);
+        // The hint costs the list one row, never a row it did not have.
+        assert!(page_height(area, true) <= page_height(area, false));
         let state = PaletteState::new(
             (0..MAX_ROWS + 30)
                 .map(|ix| item(&format!("r{ix}")))

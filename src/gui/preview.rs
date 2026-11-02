@@ -125,6 +125,17 @@ pub fn open_command(path: &Path) -> Vec<String> {
     }
 }
 
+/// The command that opens a URL in the default browser. Same program as a
+/// file: the system handler decides, we only hand it a web address instead of
+/// a path. Kept next to `open_command` so the two cannot diverge.
+pub fn url_command(url: &str) -> Vec<String> {
+    if cfg!(target_os = "macos") {
+        vec!["open".to_string(), url.to_string()]
+    } else {
+        vec!["xdg-open".to_string(), url.to_string()]
+    }
+}
+
 /// The command that shows a file in its folder with the file selected.
 pub fn reveal_command(path: &Path) -> Vec<String> {
     let target = path.to_string_lossy().to_string();

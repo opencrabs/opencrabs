@@ -78,8 +78,14 @@ pub type PickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>
 
 /// The card. `pick` holds one handler per printed row, in the same order
 /// [`rows`] prints them, so a click acts on the row it landed on and nothing
-/// else.
-pub fn overlay(state: &PaletteState, pick: Vec<PickHandler>) -> impl IntoElement {
+/// else. `setup` is the line for a channel the query names but the config does
+/// not carry yet: it replaces the control hint, because at that moment the
+/// useful thing to know is not how to move the cursor (#2462).
+pub fn overlay(
+    state: &PaletteState,
+    pick: Vec<PickHandler>,
+    setup: Option<&'static str>,
+) -> impl IntoElement {
     let theme = palette::current();
     let printed = rows(state);
     let mut list = div().flex().flex_col().gap_1();
@@ -145,7 +151,11 @@ pub fn overlay(state: &PaletteState, pick: Vec<PickHandler>) -> impl IntoElement
     }
 
     let status = status(state);
-    let hint = if printed.is_empty() && !state.is_empty() {
+    let hint = if setup.is_some() {
+        // The hint under the field is the setup line; the control legend moves
+        // into the same row's subtitle space, because Enter is what runs it.
+        SharedString::from("enter starts the setup · esc closes")
+    } else if printed.is_empty() && !state.is_empty() {
         // The roast replaces the count, and the footer stays quiet so the line
         // is the only thing the eye lands on.
         SharedString::from("esc closes")
@@ -193,7 +203,7 @@ pub fn overlay(state: &PaletteState, pick: Vec<PickHandler>) -> impl IntoElement
                             div()
                                 .text_xs()
                                 .text_color(rgb(theme.accent))
-                                .child(SharedString::from("find")),
+                                .child(SharedString::from("seeker")),
                         )
                         .child(
                             div()
@@ -220,6 +230,14 @@ pub fn overlay(state: &PaletteState, pick: Vec<PickHandler>) -> impl IntoElement
                         .overflow_hidden()
                         .child(list),
                 )
+                .when_some(setup, |d, text| {
+                    d.child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(theme.warn))
+                            .child(SharedString::from(text)),
+                    )
+                })
                 .child(
                     div()
                         .text_xs()
