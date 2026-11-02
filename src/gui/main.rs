@@ -4612,9 +4612,9 @@ mod tests {
         // 2. Painting order is z order in gpui: the overlay has to be a child
         //    added after the panes, or the transcript would take the clicks
         //    meant for it.
-        let panes = main.find(&["root = root.child(ri", "ght);"].concat());
+        let panes = main.find(&["root = root.child(ri", "ght)"].concat());
         let overlay = main.find(&["root = root.child(preview::over", "lay("].concat());
-        let help = main.find(&["root = root.child(help_", "overlay(close));"].concat());
+        let help = main.find(&["root = root.child(help_", "overlay("].concat());
         let (Some(panes), Some(overlay), Some(help)) = (panes, overlay, help) else {
             panic!(
                 "the paint order changed shape: panes={panes:?} overlay={overlay:?} help={help:?}"
