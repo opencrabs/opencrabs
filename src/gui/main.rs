@@ -2624,19 +2624,20 @@ impl Dashboard {
             cx.notify();
             return;
         }
-        // While the editor holds focus it owns the keyboard: its actions
-        // (send, newline, movement) run through the keymap, and raw keys
-        // reaching this handler would double-handle Enter and friends.
-        if self.editor.read(cx).focus_handle.is_focused(window) {
-            return;
-        }
-        // Zoom before everything: it is a GUI-only concern with no UiKey, and
-        // it must work in every mode, breakdown open or not.
-        if let Some(next) = zoom_step(&ev.keystroke.key, self.rem) {
+        // Zoom with cmd or ctrl, in every mode and while the composer has focus.
+        // It needs the chord, so a bare minus typed into the composer stays text.
+        let chord = ev.keystroke.modifiers.platform || ev.keystroke.modifiers.control;
+        if let Some(next) = zoom_step(&ev.keystroke.key, self.rem).filter(|_| chord) {
             self.rem = next;
             window.set_rem_size(px(self.rem));
             logging::debug(&format!("zoom -> {:.2}x", self.rem / BASE_REM));
             cx.notify();
+            return;
+        }
+        // While the editor holds focus it owns the keyboard: its actions
+        // (send, newline, movement) run through the keymap, and raw keys
+        // reaching this handler would double-handle Enter and friends.
+        if self.editor.read(cx).focus_handle.is_focused(window) {
             return;
         }
         // Rail arrows and enter. This sits after the editor gate, so the
