@@ -832,9 +832,11 @@ impl Editor {
             (rel_y - row_top).max(Pixels::ZERO),
         );
         self.line_start(line)
+            // Both variants carry the index: Err is the boundary of a wrapped row,
+            // and dropping it sent a click past a row's end to the line start (#2439).
             + shaped
                 .closest_index_for_position(rel, line_height)
-                .unwrap_or(0)
+                .unwrap_or_else(|index| index)
                 .min(self.line_len(line))
     }
 
