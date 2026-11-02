@@ -851,9 +851,11 @@ impl Dashboard {
                     }
                 }
                 "space" => {
-                    // Space is the terminal's toggle on this list. On a text field
-                    // it is an ordinary character, so it still types one there.
-                    if !ob.toggle_focused_channel()
+                    // Space is the terminal's flip for every row that has one: a
+                    // channel, a voice engine, an image switch, the daemon switch.
+                    // On a text field it is an ordinary character and still types
+                    // one there (#2432).
+                    if !ob.activate_focused_row()
                         && let Some(ch) = typed
                     {
                         ob.type_char(ch);
@@ -3958,6 +3960,10 @@ impl Render for Dashboard {
                             ),
                         ] {
                             let here = current == mode;
+                            // The arrows land here first on a fresh install, so
+                            // the row they are on has to be visible (#2432).
+                            let focused =
+                                ob.focused_choice() == Some(onboard::ChoiceRow::Mode(mode));
                             choices = choices.child(
                                 div()
                                     .id(SharedString::from(format!("onboard-mode-{title}")))
@@ -3970,7 +3976,22 @@ impl Render for Dashboard {
                                     .rounded(px(6.0))
                                     .bg(rgb(if here { shown.panel_hi } else { shown.panel }))
                                     .border_1()
-                                    .border_color(rgb(if here { shown.focus } else { shown.track }))
+                                    .border_color(rgb(if focused {
+                                        shown.amber
+                                    } else if here {
+                                        shown.focus
+                                    } else {
+                                        shown.track
+                                    }))
+                                    .child(text(
+                                        if focused { "\u{25b8}" } else { " " },
+                                        Size::Xs,
+                                        if focused {
+                                            shown.amber
+                                        } else {
+                                            shown.text_faint
+                                        },
+                                    ))
                                     .child(text(
                                         if here { "\u{25cf}" } else { "\u{25cb}" },
                                         Size::Sm,
@@ -4184,6 +4205,11 @@ impl Render for Dashboard {
                             // options, same labels, same order.
                             let mut rows = div().flex().flex_col().gap_1();
                             for (provider, label, here) in ob.stt_options() {
+                                // The row the arrows and Space act on, so it has
+                                // to be visible: caret when focused, filled dot
+                                // when picked (#2432).
+                                let focused =
+                                    ob.focused_choice() == Some(onboard::ChoiceRow::Stt(provider));
                                 rows = rows.child(
                                     div()
                                         .id(SharedString::from(format!("onboard-stt-{label}")))
@@ -4194,7 +4220,22 @@ impl Render for Dashboard {
                                         .px_3()
                                         .py_2()
                                         .rounded(px(6.0))
+                                        .border_1()
+                                        .border_color(rgb(if focused {
+                                            shown.amber
+                                        } else {
+                                            shown.track
+                                        }))
                                         .bg(rgb(if here { shown.panel_hi } else { shown.panel }))
+                                        .child(text(
+                                            if focused { "\u{25b8}" } else { " " },
+                                            Size::Xs,
+                                            if focused {
+                                                shown.amber
+                                            } else {
+                                                shown.text_faint
+                                            },
+                                        ))
                                         .child(text(
                                             if here { "\u{25cf}" } else { "\u{25cb}" },
                                             Size::Sm,
@@ -4224,6 +4265,8 @@ impl Render for Dashboard {
 
                             let mut rows = div().flex().flex_col().gap_1();
                             for (provider, label, here) in ob.tts_options() {
+                                let focused =
+                                    ob.focused_choice() == Some(onboard::ChoiceRow::Tts(provider));
                                 rows = rows.child(
                                     div()
                                         .id(SharedString::from(format!("onboard-tts-{label}")))
@@ -4234,7 +4277,22 @@ impl Render for Dashboard {
                                         .px_3()
                                         .py_2()
                                         .rounded(px(6.0))
+                                        .border_1()
+                                        .border_color(rgb(if focused {
+                                            shown.amber
+                                        } else {
+                                            shown.track
+                                        }))
                                         .bg(rgb(if here { shown.panel_hi } else { shown.panel }))
+                                        .child(text(
+                                            if focused { "\u{25b8}" } else { " " },
+                                            Size::Xs,
+                                            if focused {
+                                                shown.amber
+                                            } else {
+                                                shown.text_faint
+                                            },
+                                        ))
                                         .child(text(
                                             if here { "\u{25cf}" } else { "\u{25cb}" },
                                             Size::Sm,
@@ -4347,6 +4405,9 @@ impl Render for Dashboard {
                                     onboard::ImageToggle::Generation,
                                 ),
                             ] {
+                                // The switch the arrows and Space act on (#2432).
+                                let focused =
+                                    ob.focused_choice() == Some(onboard::ChoiceRow::Image(target));
                                 column = column.child(
                                     div()
                                         .id(SharedString::from(format!("onboard-image-{label}")))
@@ -4357,7 +4418,22 @@ impl Render for Dashboard {
                                         .px_3()
                                         .py_2()
                                         .rounded(px(6.0))
-                                        .bg(rgb(shown.panel))
+                                        .border_1()
+                                        .border_color(rgb(if focused {
+                                            shown.amber
+                                        } else {
+                                            shown.track
+                                        }))
+                                        .bg(rgb(if focused { shown.panel_hi } else { shown.panel }))
+                                        .child(text(
+                                            if focused { "\u{25b8}" } else { " " },
+                                            Size::Xs,
+                                            if focused {
+                                                shown.amber
+                                            } else {
+                                                shown.text_faint
+                                            },
+                                        ))
                                         .child(text(
                                             if on { "\u{2713}" } else { "\u{25cb}" },
                                             Size::Sm,
@@ -4383,6 +4459,7 @@ impl Render for Dashboard {
 
                         if ob.step() == opencrabs::tui::onboarding::OnboardingStep::Daemon {
                             let on = ob.install_daemon();
+                            let focused = ob.focused_choice() == Some(onboard::ChoiceRow::Daemon);
                             column = column.child(
                                 div()
                                     .id("onboard-daemon")
@@ -4393,7 +4470,18 @@ impl Render for Dashboard {
                                     .px_3()
                                     .py_2()
                                     .rounded(px(6.0))
-                                    .bg(rgb(shown.panel))
+                                    .border_1()
+                                    .border_color(rgb(if focused {
+                                        shown.amber
+                                    } else {
+                                        shown.track
+                                    }))
+                                    .bg(rgb(if focused { shown.panel_hi } else { shown.panel }))
+                                    .child(text(
+                                        if focused { "\u{25b8}" } else { " " },
+                                        Size::Xs,
+                                        if focused { shown.amber } else { shown.text_faint },
+                                    ))
                                     .child(text(
                                         if on { "\u{2713}" } else { "\u{25cb}" },
                                         Size::Sm,

@@ -48,6 +48,22 @@ pub enum ImageToggle {
     Generation,
 }
 
+/// A row the keyboard can stand on and flip: the mode radios, the voice
+/// engines, the image switches and the daemon switch.
+///
+/// The terminal picks these with Up/Down on their own step; the window used to
+/// leave them reachable only by mouse, so the arrows walked text fields and
+/// nothing else (#2432). They are counted in `field_count`, so Tab reaches them
+/// and the caret has a row to stand on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ChoiceRow {
+    Mode(WizardMode),
+    Stt(SttProvider),
+    Tts(TtsProvider),
+    Image(ImageToggle),
+    Daemon,
+}
+
 /// What happened at the end of the flow. `Failed` carries the reason the
 /// terminal would print, so a window that cannot save says why instead of
 /// closing as if it had.
@@ -314,12 +330,13 @@ impl Onboard {
 
     /// How many rows the keyboard can stand on for this step. On the provider
     /// step field 0 is the provider list and the rest are text rows; on every
-    /// other step it is one row per text field, in paint order.
+    /// other step it is one row per choice switch, then one per text field, in
+    /// paint order.
     pub fn field_count(&self) -> usize {
         if self.wizard.step == OnboardingStep::ProviderAuth {
             return 1 + self.text_field_count();
         }
-        self.channel_row_count() + self.slots().len()
+        self.channel_row_count() + self.choice_row_count() + self.slots().len()
     }
 
     /// The channel toggles sit in front of the text fields on a channel step,
@@ -329,6 +346,75 @@ impl Onboard {
             CHANNEL_NAMES.len()
         } else {
             0
+        }
+    }
+
+    /// The choices this step paints as rows of their own, in paint order. The
+    /// window used to count only text fields here, which is why the arrows and
+    /// Tab skipped every switch on the mode, voice, image and daemon steps
+    /// (#2432).
+    pub fn choice_rows(&self) -> Vec<ChoiceRow> {
+        let w = &self.wizard;
+        match w.step {
+            OnboardingStep::ModeSelect => {
+                vec![
+                    ChoiceRow::Mode(WizardMode::QuickStart),
+                    ChoiceRow::Mode(WizardMode::Advanced),
+                ]
+            }
+            OnboardingStep::VoiceSetup => {
+                let mut rows = Vec::new();
+                for (provider, _, _) in self.stt_options() {
+                    rows.push(ChoiceRow::Stt(provider));
+                }
+                for (provider, _, _) in self.tts_options() {
+                    rows.push(ChoiceRow::Tts(provider));
+                }
+                rows
+            }
+            OnboardingStep::ImageSetup => vec![
+                ChoiceRow::Image(ImageToggle::Vision),
+                ChoiceRow::Image(ImageToggle::Generation),
+            ],
+            OnboardingStep::Daemon => vec![ChoiceRow::Daemon],
+            _ => Vec::new(),
+        }
+    }
+
+    pub fn choice_row_count(&self) -> usize {
+        self.choice_rows().len()
+    }
+
+    /// The choice under the keyboard, when it stands on one.
+    pub fn focused_choice(&self) -> Option<ChoiceRow> {
+        let index = self.field.checked_sub(self.channel_row_count())?;
+        self.choice_rows().get(index).copied()
+    }
+
+    /// Flip the choice under the keyboard. False when the keyboard is on a text
+    /// field, so Space knows it is an ordinary character there.
+    pub fn activate_focused_choice(&mut self) -> bool {
+        let Some(choice) = self.focused_choice() else {
+            return false;
+        };
+        self.apply_choice(choice);
+        true
+    }
+
+    /// Channels first, then the choices: the one key the window uses for "turn
+    /// this row on" on every step that has rows.
+    pub fn activate_focused_row(&mut self) -> bool {
+        self.activate_focused_choice() || self.toggle_focused_channel()
+    }
+
+    /// Apply one choice. Single picks are set, switches are flipped.
+    fn apply_choice(&mut self, choice: ChoiceRow) {
+        match choice {
+            ChoiceRow::Mode(mode) => self.set_mode(mode),
+            ChoiceRow::Stt(provider) => self.set_stt_provider(provider),
+            ChoiceRow::Tts(provider) => self.set_tts_provider(provider),
+            ChoiceRow::Image(which) => self.toggle_image(which),
+            ChoiceRow::Daemon => self.toggle_daemon(),
         }
     }
 
@@ -626,7 +712,7 @@ impl Onboard {
         if self.wizard.step == OnboardingStep::ProviderAuth {
             return None; // the provider step answers through `active_text_mut`
         }
-        let base = self.channel_row_count();
+        let base = self.channel_row_count() + self.choice_row_count();
         self.field
             .checked_sub(base)
             .and_then(|index| self.slots().get(index).map(|(_, target)| *target))
@@ -782,7 +868,7 @@ impl Onboard {
     /// and typing into it must send the keystrokes to the same string the row
     /// paints; this is the only thing that decides which.
     pub fn focus_text(&mut self, target: TextTarget) {
-        let base = self.channel_row_count();
+        let base = self.channel_row_count() + self.choice_row_count();
         if let Some(index) = self.slots().iter().position(|(_, slot)| *slot == target) {
             self.field = base + index;
         }
@@ -923,12 +1009,16 @@ impl Onboard {
         self.wizard.brain_error.as_deref()
     }
 
+    /// Back one step. False means the wizard is on its first step and the
+    /// caller closes it: the terminal's `prev_step` returns true to signal
+    /// cancel (ModeSelect only), which becomes this door's close signal.
     pub fn back(&mut self) -> bool {
-        let moved = self.wizard.prev_step();
-        if moved {
-            self.field = 0;
+        let cancelled = self.wizard.prev_step();
+        if cancelled {
+            return false;
         }
-        moved
+        self.field = 0;
+        true
     }
 
     /// Esc: clear an active model search, otherwise step back. False means
@@ -957,6 +1047,27 @@ impl Onboard {
                 self.model_step(delta);
                 return;
             }
+        }
+        // On a step with switches the arrows travel them, and the rows that
+        // are a single pick apply what the arrows land on. That is the
+        // terminal's own Up/Down on the mode and voice steps, and it is why the
+        // window's arrows used to look dead here: the rows were not counted at
+        // all (#2432). Tab still walks past them into the text rows.
+        let base = self.channel_row_count();
+        let choices = self.choice_row_count();
+        if choices > 0 && self.field >= base && self.field < base + choices {
+            let next =
+                base + ((self.field - base) as isize + delta).rem_euclid(choices as isize) as usize;
+            self.field = next;
+            match self.choice_rows()[next - base] {
+                ChoiceRow::Mode(mode) => self.set_mode(mode),
+                ChoiceRow::Stt(provider) => self.set_stt_provider(provider),
+                ChoiceRow::Tts(provider) => self.set_tts_provider(provider),
+                // A switch flips on Space or Enter, never by passing over it:
+                // an arrow that toggles on its way makes the list unusable.
+                ChoiceRow::Image(_) | ChoiceRow::Daemon => {}
+            }
+            return;
         }
         if delta < 0 {
             self.focus_prev();
@@ -1266,8 +1377,11 @@ mod tests {
             onboard.field = onboard.field_count() - 1;
             onboard.set_stt_provider(SttProvider::Groq);
             onboard.set_tts_provider(TtsProvider::Off);
-            assert_eq!(onboard.field_count(), 1, "one field left to stand on");
-            assert_eq!(onboard.field, 0, "the caret followed the rows shrinking");
+            assert_eq!(onboard.slots().len(), 1, "one text row left to stand on");
+            assert!(
+                onboard.field < onboard.field_count(),
+                "the caret stayed inside the rows that are still there"
+            );
             assert_eq!(
                 onboard.focused_text(),
                 Some(TextTarget::GroqKey),
@@ -1340,10 +1454,18 @@ mod tests {
             let mut onboard = Onboard::open_at(OnboardingStep::ImageSetup);
             onboard.wizard.image_vision_enabled = false;
             onboard.wizard.image_generation_enabled = true;
-            onboard.field = 1; // the api key, the last of two rows
+            onboard.field = onboard.field_count() - 1; // the last row: the key
             onboard.toggle_image(ImageToggle::Generation);
-            assert_eq!(onboard.field_count(), 0);
-            assert_eq!(onboard.field, 0, "the caret cannot sit past the end");
+            assert!(
+                onboard.slots().is_empty(),
+                "with both switches off nothing is asked for"
+            );
+            assert_eq!(onboard.field_count(), 2, "only the two switches are left");
+            assert_eq!(
+                onboard.focused_choice(),
+                Some(ChoiceRow::Image(ImageToggle::Generation)),
+                "the caret cannot sit past the end, it lands on a row still there"
+            );
         });
     }
 
@@ -1617,6 +1739,137 @@ mod tests {
             let (index, name) = rows.last().expect("a painted row");
             assert_eq!(*index, 39, "the click still selects from the full list");
             assert_eq!(name, &models[39], "the painted row is the picked model");
+        });
+    }
+
+    #[test]
+    fn esc_walks_back_one_step_until_the_first() {
+        let dir = home();
+        with_home_override(dir.path().to_path_buf(), || {
+            let mut onboard = Onboard::open_at(OnboardingStep::VoiceSetup);
+            // The terminal contract: prev_step() returning false means the
+            // step moved, so Esc walks back and the wizard stays open.
+            assert!(onboard.escape(), "Esc on VoiceSetup walks back");
+            assert_eq!(onboard.step(), OnboardingStep::Channels);
+            assert!(onboard.escape(), "Esc on Channels walks back");
+            assert_eq!(onboard.step(), OnboardingStep::ProviderAuth);
+        });
+    }
+
+    #[test]
+    fn esc_on_the_first_step_cancels_the_wizard() {
+        let dir = home();
+        with_home_override(dir.path().to_path_buf(), || {
+            let mut onboard = Onboard::open_at(OnboardingStep::ModeSelect);
+            // The terminal contract: prev_step() returning true means cancel,
+            // so Esc hands the caller the close signal instead of staying.
+            assert!(!onboard.escape(), "Esc on ModeSelect says close me");
+        });
+    }
+
+    #[test]
+    fn arrows_move_the_mode_row_and_pick_it() {
+        let dir = home();
+        with_home_override(dir.path().to_path_buf(), || {
+            let mut onboard = Onboard::open_at(OnboardingStep::ModeSelect);
+            // The terminal's own keys: Down picks Advanced, Up picks
+            // QuickStart. The window used to have one row here, so both arrows
+            // were a no-op on the first screen of the flow (#2432).
+            assert_eq!(onboard.field_count(), 2, "two modes, two rows");
+            assert_eq!(onboard.field, 0);
+            assert_eq!(onboard.mode(), WizardMode::QuickStart);
+            onboard.walk(1);
+            assert_eq!(onboard.field, 1, "the caret moved to the second row");
+            assert_eq!(onboard.mode(), WizardMode::Advanced, "and picked it");
+            onboard.walk(-1);
+            assert_eq!(onboard.field, 0);
+            assert_eq!(onboard.mode(), WizardMode::QuickStart);
+        });
+    }
+
+    #[test]
+    fn arrows_move_the_voice_engine_rows() {
+        let dir = home();
+        with_home_override(dir.path().to_path_buf(), || {
+            let mut onboard = Onboard::open_at(OnboardingStep::VoiceSetup);
+            let engines = onboard.stt_options();
+            assert!(engines.len() > 1, "the step offers more than one engine");
+            assert_eq!(
+                onboard.choice_row_count(),
+                engines.len() + onboard.tts_options().len(),
+                "every engine is a row the caret can stand on"
+            );
+            // Row 0 is the first transcription engine; one step down picks the
+            // second, which is what the terminal's Down does on this step.
+            assert_eq!(onboard.field, 0);
+            onboard.walk(1);
+            assert_eq!(onboard.field, 1);
+            assert_eq!(
+                onboard.wizard.stt_provider, engines[1].0,
+                "the arrow picked the engine it landed on"
+            );
+            assert_ne!(engines[0].0, engines[1].0);
+        });
+    }
+
+    #[test]
+    fn space_flips_the_row_under_the_keyboard() {
+        let dir = home();
+        with_home_override(dir.path().to_path_buf(), || {
+            // The daemon switch is one row: before, the caret could not reach it
+            // and only a mouse click could change it.
+            let mut onboard = Onboard::open_at(OnboardingStep::Daemon);
+            assert_eq!(onboard.field_count(), 1);
+            assert_eq!(onboard.focused_choice(), Some(ChoiceRow::Daemon));
+            let before = onboard.install_daemon();
+            assert!(onboard.activate_focused_row(), "space has a row to flip");
+            assert_ne!(onboard.install_daemon(), before, "and it flipped it");
+
+            // On an image switch the flip adds the model row, and the caret has
+            // to stay on a row that exists afterwards.
+            let mut image = Onboard::open_at(OnboardingStep::ImageSetup);
+            image.field = 1; // the generation switch
+            assert!(image.activate_focused_row());
+            assert!(image.image_generation(), "the generation switch turned on");
+            assert!(
+                image.field < image.field_count(),
+                "the caret is still on a row: field {} of {}",
+                image.field,
+                image.field_count()
+            );
+
+            // A text row is not a switch: space must type there, not flip.
+            let mut brain = Onboard::open_at(OnboardingStep::BrainSetup);
+            brain.focus_text(TextTarget::BrainMe);
+            assert!(
+                !brain.activate_focused_row(),
+                "a text field is not a row to flip"
+            );
+        });
+    }
+
+    #[test]
+    fn every_switch_step_has_rows_the_keyboard_can_reach() {
+        let dir = home();
+        with_home_override(dir.path().to_path_buf(), || {
+            for step in [
+                OnboardingStep::ModeSelect,
+                OnboardingStep::VoiceSetup,
+                OnboardingStep::ImageSetup,
+                OnboardingStep::Daemon,
+            ] {
+                let onboard = Onboard::open_at(step);
+                assert!(
+                    onboard.choice_row_count() > 0,
+                    "{:?} paints switches, so it must count them as rows",
+                    step
+                );
+                assert!(
+                    onboard.field_count() >= onboard.choice_row_count(),
+                    "{:?} rows fit inside the walk",
+                    step
+                );
+            }
         });
     }
 }
