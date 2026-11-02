@@ -571,6 +571,13 @@ impl Dashboard {
     /// then folded again (#2440). The first press opens the turn; the second
     /// shows its reasoning whole.
     fn toggle_newest_turn(&mut self, cx: &mut Context<Self>) {
+        // A turn in flight owns the chord: the card on screen is the live one,
+        // so ctrl+o opens or folds IT, the way it opens a settled turn (#2442).
+        if !self.live.is_empty() {
+            self.transcript.live_expanded = !self.transcript.live_expanded;
+            cx.notify();
+            return;
+        }
         let Some(anchor) = self.transcript.newest_anchor().map(str::to_string) else {
             return;
         };
@@ -1390,6 +1397,7 @@ impl Dashboard {
             return;
         };
         self.live.begin(text.clone());
+        self.transcript.live_expanded = false;
         self.settle_retries = 0;
         // The finished turn must add one to the persisted count before the
         // live copy may be dropped (see `reload_transcript`).
@@ -1627,8 +1635,7 @@ impl Dashboard {
                     let description =
                         opencrabs::tui::app::App::format_tool_description(&tool_name, &tool_input);
                     self.live
-                        .tools
-                        .push(transcript::ToolCall::running(tool_name, description));
+                        .push_tool(transcript::ToolCall::running(tool_name, description));
                 }
                 agent_bridge::TurnEvent::ProgressFor(
                     _,
@@ -1654,7 +1661,7 @@ impl Dashboard {
                             call.done = true;
                             call.success = success;
                         }
-                        None => self.live.tools.push(transcript::ToolCall {
+                        None => self.live.push_tool(transcript::ToolCall {
                             name: tool_name.clone(),
                             description: tool_name,
                             success,
@@ -1680,8 +1687,7 @@ impl Dashboard {
                     if Some(sid) == self.transcript.session {
                         self.live.thinking = false;
                         self.live
-                            .tools
-                            .push(transcript::ToolCall::detached(task_id, label));
+                            .push_tool(transcript::ToolCall::detached(task_id, label));
                     }
                 }
                 agent_bridge::TurnEvent::ProgressFor(
@@ -1855,6 +1861,7 @@ impl Dashboard {
             return;
         };
         self.live.begin(display_text);
+        self.transcript.live_expanded = false;
         self.settle_retries = 0;
         self.settle_expect = Some(self.transcript.turns.len() + 1);
         self.busy = true;
@@ -1892,6 +1899,7 @@ impl Dashboard {
         let msgs = std::mem::take(&mut self.queued);
         if let Some(joined) = agent_bridge::PendingMessage::join(&msgs) {
             self.live.begin(joined.display_text.clone());
+            self.transcript.live_expanded = false;
             self.settle_retries = 0;
             self.settle_expect = Some(self.transcript.turns.len() + 1);
             self.busy = true;
@@ -3301,6 +3309,14 @@ impl Render for Dashboard {
             });
             fold_handlers.insert(anchor, std::rc::Rc::new(handler));
         }
+        // The live card's own click, minted here for the same reason as the
+        // folds: only this `cx` can build one, and the card that is on screen
+        // is the one a click must fold (#2442).
+        let live_click: transcript::ClickHandler =
+            std::rc::Rc::new(cx.listener(|this, _ev: &gpui::ClickEvent, _window, cx| {
+                this.transcript.live_expanded = !this.transcript.live_expanded;
+                cx.notify();
+            }));
         // One click listener per attachment tile, minted here for the same
         // reason as the folds: only this `cx` can build one, and each tile has
         // to open its own file (#2395).
@@ -3342,6 +3358,9 @@ impl Render for Dashboard {
                             transcript::ViewHooks {
                                 attachments: attachment_handlers,
                                 drag: None,
+                                ctx_used: self.ctx_tokens,
+                                ctx_max: self.ctx_max,
+                                live_click: Some(live_click.clone()),
                             },
                         ))
                         .into_any_element(),
@@ -4806,6 +4825,9 @@ impl Render for Dashboard {
                             transcript::ViewHooks {
                                 attachments: attachment_handlers,
                                 drag: Some(self.copy_drag.clone()),
+                                ctx_used: self.ctx_tokens,
+                                ctx_max: self.ctx_max,
+                                live_click: Some(live_click.clone()),
                             },
                         ));
                 let body = match &self.split {

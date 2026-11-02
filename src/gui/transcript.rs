@@ -211,6 +211,20 @@ pub struct Turn {
     pub final_idx: Option<usize>,
 }
 
+/// One entry in the live card's body, in the order it happened. The Telegram
+/// status block grows this way: tool rows, narration and reasoning land inside
+/// ONE card as the turn runs (#2442).
+pub enum LiveEntry {
+    /// Index into [`LiveTurn::tools`]. A completion settles that row, so it
+    /// never appends a second entry for the same call.
+    Tool(usize),
+    /// Text the model said between tool calls, drawn as markdown.
+    Narration(String),
+    /// Reasoning, dimmed and capped, inside the card rather than as a loose
+    /// "thinking" line under it.
+    Reasoning(String),
+}
+
 /// The turn in flight: the question just sent, the model's streamed answer,
 /// the tool rows it opened and any notice. It renders as the conversation's
 /// last entry, not in a panel above the editor, so the answer appears exactly
@@ -233,6 +247,9 @@ pub struct LiveTurn {
     pub stream: String,
     /// Tool calls this turn opened, in order, with their live status.
     pub tools: Vec<ToolCall>,
+    /// The card's body in order: tools, narration and reasoning interleaved
+    /// exactly as they happened, so the block combines in place (#2442).
+    pub entries: Vec<LiveEntry>,
     /// Errors and queue notices: amber, never folded.
     pub notices: Vec<String>,
     /// The final answer once the turn reports `Done`. Kept on screen until
@@ -280,6 +297,7 @@ impl LiveTurn {
             && !self.thinking
             && self.stream.is_empty()
             && self.tools.is_empty()
+            && self.entries.is_empty()
             && self.notices.is_empty()
             && self.settled.is_none()
     }
@@ -301,6 +319,7 @@ impl LiveTurn {
         self.reasoning.clear();
         self.stream.clear();
         self.tools.clear();
+        self.entries.clear();
         self.notices.clear();
         self.settled = None;
         self.tokens = 0;
@@ -418,14 +437,46 @@ impl LiveTurn {
         if text.is_empty() {
             return;
         }
-        let tail = self.stream.trim_end();
-        if tail.ends_with(text) {
+        // The provider reports the same narration twice: streamed as chunks and
+        // again as intermediate text. When the streamed copy is what ends the
+        // pending stream, this text IS that copy, so it moves into the card
+        // instead of being drawn twice (#2442).
+        if self.stream.trim_end().ends_with(text) {
+            self.stream.clear();
+        }
+        self.push_narration_entry(text);
+    }
+
+    /// Put one narration paragraph in the card, unless the newest narration
+    /// entry already ends with it.
+    fn push_narration_entry(&mut self, text: &str) {
+        let text = text.trim();
+        if text.is_empty() {
             return;
         }
-        if !tail.is_empty() {
-            self.stream.push_str("\n\n");
+        if let Some(LiveEntry::Narration(last)) = self.entries.last()
+            && last.trim_end().ends_with(text)
+        {
+            return;
         }
-        self.note_chunk(text);
+        self.entries.push(LiveEntry::Narration(text.to_string()));
+    }
+
+    /// Whatever streamed since the last tool boundary was narration, not the
+    /// answer, so it moves into the card and the answer bubble starts clean.
+    fn flush_stream_into_narration(&mut self) {
+        let text = self.stream.trim().to_string();
+        self.stream.clear();
+        self.push_narration_entry(&text);
+    }
+
+    /// A tool started: the narration before it joins the card first, then the
+    /// row takes its place in the card's own order. The count lives in the
+    /// footer, so a call is never listed twice.
+    pub fn push_tool(&mut self, call: ToolCall) {
+        self.flush_stream_into_narration();
+        self.entries.push(LiveEntry::Tool(self.tools.len()));
+        self.tools.push(call);
     }
 
     /// The same guard for reasoning, which travels as `ReasoningChunk` and
@@ -470,6 +521,10 @@ impl LiveTurn {
             self.advance_streaming(now);
         }
         self.reasoning.push_str(text);
+        match self.entries.last_mut() {
+            Some(LiveEntry::Reasoning(open)) => open.push_str(text),
+            _ => self.entries.push(LiveEntry::Reasoning(text.to_string())),
+        }
     }
 
     /// The answer text on screen right now: the stream if any arrived, else
@@ -498,6 +553,10 @@ pub struct TranscriptState {
     /// reasoning is no longer cut short. The second ctrl+o sets it, as the TUI's
     /// second press does (#2440).
     pub details: HashSet<String>,
+    /// Whether the live card's body is open. Folding is the default, exactly
+    /// like a settled turn, and a click on the card or ctrl+o toggles it
+    /// (#2442).
+    pub live_expanded: bool,
     /// Set when the fetch failed; the pane says why instead of lying empty.
     pub error: Option<SharedString>,
 }
@@ -1267,11 +1326,14 @@ fn tools_block(calls: &[ToolCall]) -> Div {
 /// One call's status mark and the colour that carries it. Shared with the
 /// ledger's text so a test cannot read a mark the pane never draws.
 fn tool_mark(call: &ToolCall) -> (&'static str, u32) {
-    match (call.done, call.success) {
-        (false, _) => ("\u{b7}\u{b7}\u{b7}", palette::current().text_muted),
-        (true, true) => ("\u{2713}", palette::current().green),
-        (true, false) => ("\u{2717}", palette::current().red),
-    }
+    let color = match (call.done, call.success) {
+        (false, _) => palette::current().text_muted,
+        (true, true) => palette::current().green,
+        (true, false) => palette::current().red,
+    };
+    // The glyph is the Telegram trio, not the terminal's tick and cross: the
+    // live card has to read like the card the other surfaces draw (#2442).
+    (activity_glyph(call), color)
 }
 
 /// The expanded ledger as text. The count lives in the turn header, so this
@@ -1300,7 +1362,7 @@ fn fold_chevron(folded: bool) -> &'static str {
 /// a collapsed turn still says what it did.
 fn fold_header(turn: &Turn, folded: bool) -> Option<Stateful<Div>> {
     let base = turn.header.as_ref()?;
-    let mut row = div()
+    let row = div()
         .flex()
         .flex_row()
         .gap_1()
@@ -1317,17 +1379,9 @@ fn fold_header(turn: &Turn, folded: bool) -> Option<Stateful<Div>> {
                 .text_color(rgb(palette::current().teal))
                 .child(SharedString::from(base.clone())),
         );
-    // The card's ctx and rate, in the Telegram footer's own wording. It
-    // rides HERE rather than in the shared header string, which the terminal
-    // deliberately keeps ctx-free (#744, #2324 D1).
-    if let Some(segment) = turn.metrics.as_ref().and_then(|m| m.segment()) {
-        row = row.child(
-            div()
-                .text_xs()
-                .text_color(rgb(palette::current().text_muted))
-                .child(SharedString::from(segment)),
-        );
-    }
+    // The ctx budget and the rate live in `turn_footer` below, never here: a
+    // header says what the turn was, a footer says what it cost, which is the
+    // split Telegram and the TUI already use (#2442).
     let mut col = div()
         .id(SharedString::from(format!("fold-{}", turn.anchor)))
         .flex()
@@ -1357,6 +1411,205 @@ fn fold_header(turn: &Turn, folded: bool) -> Option<Stateful<Div>> {
         );
     }
     Some(col)
+}
+
+/// One settled turn's footer: the ctx budget and the rate it ran at, in the
+/// Telegram footer's own wording (#2324 D2). It is drawn BELOW the turn's last
+/// block, so the header names the turn and the footer states its cost (#2442).
+/// `None` when this process holds no metrics for the turn.
+fn turn_footer(turn: &Turn) -> Option<Div> {
+    let segment = turn_footer_text(turn)?;
+    Some(
+        div()
+            .px_2()
+            .text_xs()
+            .text_color(rgb(palette::current().text_muted))
+            .child(SharedString::from(segment)),
+    )
+}
+
+/// The footer's words, as drawn, so a test reads the same string the pane
+/// paints instead of inferring it (#2442).
+fn turn_footer_text(turn: &Turn) -> Option<String> {
+    turn.metrics.as_ref().and_then(|m| m.segment())
+}
+
+/// One drawn line of the card's body, in the order it happened. Pure data, so
+/// a test can read exactly the order and the words the pane paints (#2442).
+pub enum LiveCardLine {
+    /// A tool row: its Telegram mark, the colour that carries it, and the call.
+    Tool {
+        mark: &'static str,
+        color: u32,
+        text: String,
+    },
+    /// Narration between calls, drawn as markdown.
+    Narration(String),
+    /// Reasoning, dimmed and capped.
+    Reasoning(String),
+}
+
+/// The card's body as data: every entry in order, resolved against the rows it
+/// names. An entry whose row is gone is skipped instead of drawn blank.
+fn live_card_lines(live: &LiveTurn) -> Vec<LiveCardLine> {
+    let mut lines = Vec::new();
+    for entry in &live.entries {
+        match entry {
+            LiveEntry::Tool(index) => {
+                let Some(call) = live.tools.get(*index) else {
+                    continue;
+                };
+                let (mark, color) = tool_mark(call);
+                lines.push(LiveCardLine::Tool {
+                    mark,
+                    color,
+                    text: fit(call.description.trim(), 160),
+                });
+            }
+            LiveEntry::Narration(text) => lines.push(LiveCardLine::Narration(text.clone())),
+            LiveEntry::Reasoning(text) => {
+                lines.push(LiveCardLine::Reasoning(fit(text.trim(), 600)))
+            }
+        }
+    }
+    lines
+}
+
+/// The card's body: the same lines, as elements.
+fn live_card_body(live: &LiveTurn) -> Div {
+    let mut body = div()
+        .flex()
+        .flex_col()
+        .gap_0p5()
+        .px_2()
+        .pb_1()
+        .min_w_0()
+        .overflow_hidden();
+    for line in live_card_lines(live) {
+        match line {
+            LiveCardLine::Tool { mark, color, text } => {
+                body = body.child(
+                    div()
+                        .text_xs()
+                        .min_w_0()
+                        .text_color(rgb(color))
+                        .child(SharedString::from(format!("{mark} {text}"))),
+                );
+            }
+            LiveCardLine::Narration(text) => body = body.child(md_block(&text)),
+            LiveCardLine::Reasoning(text) => {
+                body = body.child(
+                    div()
+                        .text_xs()
+                        .italic()
+                        .min_w_0()
+                        .text_color(rgb(palette::current().text_muted))
+                        .child(SharedString::from(text)),
+                );
+            }
+        }
+    }
+    body
+}
+
+/// The live turn as ONE card, in the Telegram grammar (#2442): the header is
+/// the live status, the body is every entry in the order it happened, and the
+/// footer carries the count, the ctx budget, the rate and the clock. The pane
+/// used to draw a ledger, then a status line BELOW it, then a bare reasoning
+/// line, which is what made a busy turn read as a wall of rows with the
+/// summary underneath them.
+fn live_card(live: &LiveTurn, expanded: bool, ctx: (Option<u32>, u32)) -> Stateful<Div> {
+    let frame = if live.settled.is_some() {
+        "\u{2705}".to_string()
+    } else {
+        match live.started {
+            Some(t) => SPINNER_FRAMES
+                [(t.elapsed().as_millis() / 80) as usize % SPINNER_FRAMES.len()]
+            .to_string(),
+            None => SPINNER_FRAMES[0].to_string(),
+        }
+    };
+    let (lead, _) = live_status_line(live);
+    let mut head = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .px_2()
+        .pt_1()
+        .pb_1()
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(palette::current().text_muted))
+                .child(SharedString::from(frame)),
+        );
+    if !lead.is_empty() {
+        head = head.child(
+            div()
+                .text_xs()
+                .min_w_0()
+                .text_color(rgb(palette::current().accent))
+                .child(SharedString::from(lead)),
+        );
+    }
+    head = head.child(
+        div()
+            .text_xs()
+            .text_color(rgb(palette::current().text_muted))
+            .child(SharedString::from(fold_chevron(!expanded))),
+    );
+    let mut card = div()
+        .id("live-card")
+        .flex()
+        .flex_col()
+        .min_w_0()
+        .flex_shrink_0()
+        .rounded_sm()
+        .border_1()
+        .border_color(rgb(palette::current().panel_hi))
+        .bg(rgb(palette::current().panel))
+        .cursor_pointer()
+        .hover(|d| d.bg(rgb(palette::current().panel_hi)))
+        .child(head);
+    if expanded {
+        card = card.child(live_card_body(live));
+    }
+    if let Some(footer) = live_card_footer(live, ctx) {
+        card = card.child(
+            div()
+                .px_2()
+                .pb_1()
+                .text_xs()
+                .text_color(rgb(palette::current().text_muted))
+                .child(SharedString::from(footer)),
+        );
+    }
+    card
+}
+
+/// The card's footer, segment for segment the Telegram one: how many calls,
+/// the ctx budget, the rate it is streaming at, and the clock. `None` before
+/// the turn has anything to say, so an empty bar never sits under the header.
+fn live_card_footer(live: &LiveTurn, ctx: (Option<u32>, u32)) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if !live.tools.is_empty() {
+        parts.push(tool_count_label(live.tools.len()));
+    }
+    if ctx.1 > 0 {
+        let tps = live.tokens_per_sec();
+        let rate = (tps > 0.0).then_some(f64::from(tps));
+        parts.push(opencrabs::utils::string::format_ctx_footer(
+            ctx.0.unwrap_or(0),
+            ctx.1,
+            rate,
+        ));
+    }
+    let elapsed = live.elapsed_secs();
+    if elapsed > 0 {
+        parts.push(format!("{elapsed}s"));
+    }
+    (!parts.is_empty()).then(|| parts.join(" \u{b7} "))
 }
 
 /// One block, drawn. The fold decides WHETHER a block renders; this decides
@@ -1392,41 +1645,6 @@ const SPINNER_FRAMES: [&str; 10] = [
 fn live_time(at: Option<chrono::DateTime<chrono::Local>>) -> String {
     at.map(|t| t.format("%m-%d %H:%M:%S").to_string())
         .unwrap_or_default()
-}
-
-/// One live status line: a spinner frame, what the turn is doing right now,
-/// and how much it has done. The frame comes off the wall clock rather than a
-/// stored frame counter, so a repaint alone advances it and the line is never
-/// stale when the window wakes for another reason.
-fn status_line(live: &LiveTurn) -> Div {
-    let frame = match live.started {
-        Some(t) => SPINNER_FRAMES[(t.elapsed().as_millis() / 80) as usize % SPINNER_FRAMES.len()],
-        None => SPINNER_FRAMES[0],
-    };
-    let (lead, rest) = live_status_line(live);
-    let mut row = div().flex().flex_row().items_center().gap_1().child(
-        div()
-            .text_xs()
-            .text_color(rgb(palette::current().text_muted))
-            .child(SharedString::from(frame.to_string())),
-    );
-    if !lead.is_empty() {
-        row = row.child(
-            div()
-                .text_xs()
-                .text_color(rgb(palette::current().accent))
-                .child(SharedString::from(lead)),
-        );
-    }
-    if !rest.is_empty() {
-        row = row.child(
-            div()
-                .text_xs()
-                .text_color(rgb(palette::current().text_muted))
-                .child(SharedString::from(rest)),
-        );
-    }
-    row
 }
 
 /// The status glyph for a live call, the trio the Telegram flow uses
@@ -1508,7 +1726,14 @@ fn live_status_text(live: &LiveTurn) -> String {
 /// answer as markdown, notices in amber. Nothing here folds: the turn has no
 /// settled answer yet, and hiding the working-out would blank the pane
 /// exactly when the user wants to see that something is happening.
-fn live_view(live: &LiveTurn, content_width: f32, handlers: &HashMap<String, ClickHandler>) -> Div {
+fn live_view(
+    live: &LiveTurn,
+    content_width: f32,
+    expanded: bool,
+    ctx: (Option<u32>, u32),
+    live_click: Option<&ClickHandler>,
+    handlers: &HashMap<String, ClickHandler>,
+) -> Div {
     let mut col = div().flex().flex_col().gap_2();
     if let Some(user) = &live.user {
         col = col.child(block_view(
@@ -1530,34 +1755,17 @@ fn live_view(live: &LiveTurn, content_width: f32, handlers: &HashMap<String, Cli
                 .child(SharedString::from(notice.clone())),
         );
     }
-    if !live.tools.is_empty() {
-        col = col.child(block_view(
-            &Block::Tools {
-                calls: live.tools.clone(),
-            },
-            content_width,
-            handlers,
-        ));
-    }
-    // ONE status line for the whole turn, exactly the TUI's: a spinner frame,
-    // the crab's name, and the same meta the terminal builds with
-    // `format_turn_spinner_meta`. It stays up from the send until the answer
-    // settles, so a streaming reply still shows the clock and the counter
-    // climbing. The two renderers it replaced (a persisted block plus a bare
-    // placeholder) are what made the window say "thinking" twice, with neither
-    // a clock nor a token count.
-    if live.settled.is_none() {
-        col = col.child(status_line(live));
-    }
-    if !live.reasoning.is_empty() {
-        col = col.child(
-            div()
-                .text_xs()
-                .italic()
-                .text_color(rgb(palette::current().text_muted))
-                .child(SharedString::from(fit(live.reasoning.trim(), 600))),
-        );
-    }
+    // ONE card for the whole turn: header, body when open, footer. The three
+    // loose children it replaces (a ledger, a status line below it, and a bare
+    // reasoning line) are what made a busy turn unreadable (#2442).
+    let card = live_card(live, expanded, ctx);
+    col = col.child(match live_click {
+        Some(click) => {
+            let click = click.clone();
+            card.on_click(move |event, window, cx| click(event, window, cx))
+        }
+        None => card,
+    });
     if let Some(answer) = live.answer() {
         col = col.child(block_view(
             &Block::Msg {
@@ -1649,6 +1857,13 @@ fn block_text(block: &Block) -> String {
 pub struct ViewHooks {
     pub attachments: HashMap<String, ClickHandler>,
     pub drag: Option<Rc<CopyDrag>>,
+    /// The session's ctx budget, so the live card's footer can carry it the way
+    /// the Telegram footer does (#2442).
+    pub ctx_used: Option<u32>,
+    pub ctx_max: u32,
+    /// The live card's own click, minted by the caller for the same reason the
+    /// folds are: only the owning view can build one.
+    pub live_click: Option<ClickHandler>,
 }
 
 pub fn view(
@@ -1663,6 +1878,9 @@ pub fn view(
     let ViewHooks {
         attachments: attachment_handlers,
         drag,
+        ctx_used,
+        ctx_max,
+        live_click,
     } = hooks;
     if let Some(d) = &drag {
         d.texts.borrow_mut().clear();
@@ -1779,9 +1997,21 @@ pub fn view(
                 None => header,
             });
         }
+        // The metrics sit under the turn's last block, folded or open, so the
+        // header stays a name and the footer stays a cost (#2442).
+        if let Some(footer) = turn_footer(turn) {
+            col = col.child(footer);
+        }
     }
     if !live.is_empty() {
-        col = col.child(live_view(live, content_width, &attachment_handlers));
+        col = col.child(live_view(
+            live,
+            content_width,
+            state.live_expanded,
+            (ctx_used, ctx_max),
+            live_click.as_ref(),
+            &attachment_handlers,
+        ));
     }
     // Releasing the mouse ends the drag and copies the selected rows (#2383). A
     // click that never moved selects nothing, so it copies nothing.
@@ -1830,25 +2060,67 @@ mod tests {
             .collect()
     }
 
+    /// The card's narration lines, in order, so a test reads the words the
+    /// pane paints instead of the buffer they came from.
+    fn narration_lines(live: &LiveTurn) -> Vec<String> {
+        live_card_lines(live)
+            .into_iter()
+            .filter_map(|line| match line {
+                LiveCardLine::Narration(text) => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn intermediate_text_is_not_appended_twice() {
         // The provider sends the same narration as streamed chunks and again
-        // as intermediate text. Both paths land in `stream`; the paragraph
-        // must appear once.
+        // as intermediate text. Both paths land in the card, and the paragraph
+        // must appear once (#2442).
         let mut live = LiveTurn::default();
         live.begin("question".into());
         live.note_chunk("Checking the parser now.");
         live.push_narration("Checking the parser now.");
-        assert_eq!(live.stream, "Checking the parser now.");
+        assert_eq!(
+            live.stream, "",
+            "the streamed copy moved into the card instead of staying in the answer"
+        );
+        assert_eq!(
+            narration_lines(&live),
+            vec!["Checking the parser now.".to_string()],
+            "the paragraph appears once"
+        );
 
-        // New narration still joins as its own paragraph.
+        // New narration becomes its own card entry.
         live.push_narration("And the writer.");
-        assert_eq!(live.stream, "Checking the parser now.\n\nAnd the writer.");
+        assert_eq!(
+            narration_lines(&live),
+            vec![
+                "Checking the parser now.".to_string(),
+                "And the writer.".to_string()
+            ],
+            "the card keeps both paragraphs, in the order they arrived"
+        );
 
         // Reasoning takes the same guard.
         live.push_reasoning("think about it");
         live.push_reasoning("think about it");
         assert_eq!(live.reasoning, "think about it");
+
+        // Anything still streaming when a tool starts is narration, so it
+        // joins the card before the row rather than leaking into the answer.
+        live.note_chunk("one more line");
+        live.push_tool(ToolCall::running("bash".into(), "bash: ls".into()));
+        assert_eq!(
+            narration_lines(&live),
+            vec![
+                "Checking the parser now.".to_string(),
+                "And the writer.".to_string(),
+                "one more line".to_string()
+            ],
+            "the pending stream flushed into the card"
+        );
+        assert_eq!(live.stream, "", "the answer bubble starts clean");
     }
 
     #[test]
@@ -2065,8 +2337,8 @@ mod tests {
             "the count belongs to the header, not the body, got {ledger:?}"
         );
         assert_eq!(
-            ledger, "\u{2713} bash: cargo test\n\u{2717} read_file: src/gui/main.rs",
-            "each call keeps its own status mark"
+            ledger, "\u{2705} bash: cargo test\n\u{274c} read_file: src/gui/main.rs",
+            "each call keeps its own mark, in the Telegram trio the card uses"
         );
     }
 
@@ -2497,5 +2769,229 @@ mod tests {
         assert!(!settle_detached(&mut rows, "", true, 1.0));
         assert!(!rows[0].done);
         assert!(rows[0].task_id.is_none());
+    }
+
+    /// Where a needle sits in this file's own source. Pins read the renderer
+    /// they describe instead of trusting a comment about it.
+    fn src_at(src: &str, needle: &str) -> usize {
+        src.find(needle)
+            .unwrap_or_else(|| panic!("missing {needle:?} in the source"))
+    }
+
+    /// #2442: the card draws its header first, its body second and its footer
+    /// last. The three loose children it replaced had the status line BELOW
+    /// the rows, which is the shape the owner read as a wall of tools.
+    #[test]
+    fn the_live_card_puts_the_header_first_and_the_footer_last() {
+        let mut live = LiveTurn::default();
+        live.begin("look at it".into());
+        live.push_tool(ToolCall {
+            name: "bash".into(),
+            task_id: None,
+            description: "bash: git status".into(),
+            success: true,
+            done: true,
+        });
+        live.push_narration("Branch is clean");
+        live.push_tool(ToolCall::running(
+            "read_file".into(),
+            "read_file: src/gui/main.rs".into(),
+        ));
+
+        let lines = live_card_lines(&live);
+        assert_eq!(lines.len(), 3, "one line per entry, none for the echo");
+        assert!(
+            matches!(lines[0], LiveCardLine::Tool { .. }),
+            "the first call leads the body"
+        );
+        assert!(
+            matches!(lines[1], LiveCardLine::Narration(ref t) if t == "Branch is clean"),
+            "narration keeps the place it happened in"
+        );
+        assert!(
+            matches!(lines[2], LiveCardLine::Tool { .. }),
+            "the call after the narration follows it"
+        );
+        let footer =
+            live_card_footer(&live, (Some(12_000), 200_000)).expect("a footer once a tool ran");
+        assert!(footer.contains("2 tool calls"), "got {footer}");
+
+        // And the drawing order itself: header, then body, then footer.
+        const SRC: &str = include_str!("transcript.rs");
+        let head = [".child(", "head)"].concat();
+        let body = ["live_card_", "body(live)"].concat();
+        let foot = ["live_card_", "footer(live, ctx)"].concat();
+        assert!(
+            src_at(SRC, &head) < src_at(SRC, &body),
+            "the header is built before the body"
+        );
+        assert!(
+            src_at(SRC, &body) < src_at(SRC, &foot),
+            "the footer is drawn after the body"
+        );
+    }
+
+    /// #2442: the card combines while the turn is still in flight. Waiting for
+    /// `settled` is what made the running block look nothing like the one that
+    /// replaced it a second later.
+    #[test]
+    fn the_live_card_combines_in_flight_without_waiting_for_settle() {
+        let mut live = LiveTurn::default();
+        live.begin("run it".into());
+        live.push_tool(ToolCall::running("bash".into(), "bash: cargo test".into()));
+        assert!(live.settled.is_none(), "nothing settled yet");
+
+        let lines = live_card_lines(&live);
+        assert_eq!(lines.len(), 1, "the running row is already in the body");
+
+        live.settled = Some("done".into());
+        assert_eq!(
+            live_card_lines(&live).len(),
+            1,
+            "settling adds no second copy of the same row"
+        );
+    }
+
+    /// #2442: the rows wear Telegram's marks, not the terminal's tick and cross,
+    /// so the block reads like the card the other surfaces draw.
+    #[test]
+    fn tool_rows_use_the_telegram_icons() {
+        let running = ToolCall::running("bash".into(), "bash: ls".into());
+        let done = ToolCall {
+            name: "bash".into(),
+            task_id: None,
+            description: "bash: ls".into(),
+            success: true,
+            done: true,
+        };
+        let failed = ToolCall {
+            name: "bash".into(),
+            task_id: None,
+            description: "bash: ls".into(),
+            success: false,
+            done: true,
+        };
+        assert_eq!(
+            tool_mark(&running).0,
+            "\u{2699}\u{fe0f}",
+            "gear while running"
+        );
+        assert_eq!(tool_mark(&done).0, "\u{2705}", "check when it worked");
+        assert_eq!(tool_mark(&failed).0, "\u{274c}", "cross when it failed");
+        assert!(
+            !tool_mark(&done).0.contains('\u{2713}'),
+            "the terminal's tick must not leak into the card"
+        );
+    }
+
+    /// #2442: the ctx budget rides the footer. In the header it crowded the
+    /// turn's name, and the header is the only line a folded turn shows.
+    #[test]
+    fn the_ctx_budget_rides_the_footer_not_the_header() {
+        let mut live = LiveTurn::default();
+        live.begin("go".into());
+        live.push_tool(ToolCall::running("bash".into(), "bash: ls".into()));
+        let footer = live_card_footer(&live, (Some(72_000), 200_000)).expect("footer");
+        assert!(footer.contains("ctx: 72K/200K 36%"), "got {footer}");
+        let (lead, _) = live_status_line(&live);
+        assert!(
+            !lead.contains("ctx:"),
+            "the header must stay ctx free: {lead}"
+        );
+
+        // The settled card's footer too, and the header that lost it.
+        let turn = Turn {
+            header: Some("\u{2705} 1 step \u{b7} 1 tool call".into()),
+            metrics: Some(TurnMetrics {
+                ctx_used: 72_000,
+                ctx_max: 200_000,
+                tps: Some(58.0),
+            }),
+            preview: None,
+            anchor: "a".into(),
+            blocks: Vec::new(),
+            final_idx: None,
+        };
+        let text = turn_footer_text(&turn).expect("the footer carries the segment");
+        assert!(text.contains("ctx: 72K/200K 36%"), "got {text}");
+        assert!(
+            !turn.header.as_deref().unwrap_or_default().contains("ctx:"),
+            "the header never carries ctx"
+        );
+
+        // And `fold_header` itself no longer builds a segment: the pin reads the
+        // function's own source, so a later edit that puts it back fails here.
+        // The slice stops at fold_header's own closing brace, so it covers that
+        // body and not the doc comment below it, which talks about the footer.
+        const SRC: &str = include_str!("transcript.rs");
+        let (_, after) = SRC
+            .split_once(["fn fold_", "header(turn"].concat().as_str())
+            .expect("fold_header exists");
+        let (header_src, _) = after.split_once("\n}\n").expect("fold_header ends");
+        assert!(
+            !header_src.contains(["m", "etrics"].concat().as_str()),
+            "the fold header must not read the turn's metrics"
+        );
+        assert!(
+            !header_src.contains("ctx:"),
+            "the fold header must not paint the ctx segment"
+        );
+    }
+
+    /// #2442: a settled turn keeps its cost under the body, folded or open, and
+    /// a turn this process never measured claims no number at all.
+    #[test]
+    fn a_turn_footer_carries_the_metrics_once_the_turn_settles() {
+        let measured = Turn {
+            header: Some("\u{2705} 2 steps".into()),
+            metrics: Some(TurnMetrics {
+                ctx_used: 68_000,
+                ctx_max: 200_000,
+                tps: None,
+            }),
+            preview: None,
+            anchor: "b".into(),
+            blocks: Vec::new(),
+            final_idx: None,
+        };
+        assert_eq!(
+            turn_footer_text(&measured).as_deref(),
+            Some("ctx: 68K/200K 34%"),
+            "the footer states the budget the turn ran with"
+        );
+        let unmeasured = Turn {
+            header: Some("x".into()),
+            metrics: None,
+            preview: None,
+            anchor: "c".into(),
+            blocks: Vec::new(),
+            final_idx: None,
+        };
+        assert!(
+            turn_footer_text(&unmeasured).is_none(),
+            "no record, no number"
+        );
+    }
+
+    /// #2442: the live card is the only block now, so the pane never grows a
+    /// separate tools ledger with its own count beside it.
+    #[test]
+    fn the_live_pane_draws_one_card_not_a_ledger_plus_a_status_line() {
+        const SRC: &str = include_str!("transcript.rs");
+        let (_, after) = SRC
+            .split_once(["fn live_", "view("].concat().as_str())
+            .expect("live_view exists");
+        let (live_src, _) = after
+            .split_once(["/// The transcript pane"].concat().as_str())
+            .or_else(|| after.split_once("\n}\n"))
+            .expect("live_view ends");
+        assert!(
+            !live_src.contains(["Block::", "Tools"].concat().as_str()),
+            "the live pane must not draw the tools ledger any more"
+        );
+        assert!(
+            !live_src.contains(["status_", "line(live)"].concat().as_str()),
+            "nor a status line below the rows"
+        );
     }
 }
