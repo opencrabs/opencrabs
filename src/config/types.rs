@@ -2557,6 +2557,11 @@ pub struct GuiConfig {
     /// Theme while the system is light. Unset means Alucard.
     #[serde(default)]
     pub light_theme: Option<String>,
+
+    /// Where the topic tab row sits: `top`, `left`, `bottom` or `right`.
+    /// Unset or unknown means top.
+    #[serde(default)]
+    pub topic_tabs: Option<String>,
 }
 
 /// Debug configuration options
