@@ -37,6 +37,7 @@ mod screen_keys;
 mod sessions;
 mod theme;
 mod themes_view;
+mod topic_tabs;
 mod transcript;
 mod usage_view;
 
@@ -317,6 +318,8 @@ struct Dashboard {
     topic_menu: bool,
     /// The topic name being typed, while the name prompt is open (#2303).
     topic_draft: Option<String>,
+    /// Which side of the chat the topic row sits on (#2402).
+    topic_edge: topic_tabs::Edge,
     /// The topic being renamed, while the prompt is open for a rename (#2304).
     /// None means the prompt names a new topic.
     topic_rename: Option<uuid::Uuid>,
@@ -1566,6 +1569,15 @@ impl Dashboard {
     }
 
     /// Open the name prompt for a new topic under the open session (#2303).
+    /// Move the topic row to the next side and save the choice (#2402).
+    fn cycle_topic_edge(&mut self, cx: &mut Context<Self>) {
+        self.topic_edge = self.topic_edge.next();
+        if let Err(e) = Config::write_key_string("gui", "topic_tabs", self.topic_edge.as_str()) {
+            logging::error(&format!("topic tabs: could not save position: {e}"));
+        }
+        cx.notify();
+    }
+
     fn start_topic_draft(&mut self, cx: &mut Context<Self>) {
         if !self.open_chat_topics_on() {
             return;
@@ -2689,7 +2701,7 @@ impl Render for Dashboard {
         // An editor parked under the usage ledger is the mixing the owner
         // called out, so usage draws the footer hint and nothing else.
         // The bar sits above the transcript, at the top of the chat (#2394).
-        let mut topic_row: Option<AnyElement> = None;
+        let mut topic_row: Option<(topic_tabs::Edge, AnyElement)> = None;
         // Topics live in the chat: the `...` button sits above the
         // conversation for a session that has them on (#2303).
         let is_topic = self
@@ -2740,30 +2752,20 @@ impl Render for Dashboard {
                 });
                 items.push(sessions::menu_item("Delete topic").on_click(delete));
             }
-            // The tabs (#2400): the family's parent, then its topics, so the
-            // conversation can be switched without the sidebar.
+            // The tabs (#2400): the family's parent, then its topics. The
+            // leading button moves the whole row to another side (#2402).
             let tabs = self.topic_tabs(cx);
-            topic_row = Some(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .min_w_0()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap_1()
-                            .overflow_hidden()
-                            .children(tabs),
-                    )
-                    .child(topic_bar(self.topic_menu, toggle, items))
-                    .into_any_element(),
+            let toggle_edge = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                cx.stop_propagation();
+                this.cycle_topic_edge(cx);
+            });
+            let strip = topic_strip(
+                self.topic_edge,
+                toggle_edge,
+                tabs,
+                topic_bar(self.topic_menu, toggle, items),
             );
+            topic_row = Some((self.topic_edge, strip.into_any_element()));
         }
         let mut right = div()
             .flex()
@@ -2783,7 +2785,19 @@ impl Render for Dashboard {
         if self.screen != Screen::Chat {
             right = right.child(chrome);
         }
-        if let Some(bar) = topic_row {
+        // The row takes the side it was saved on: above the transcript,
+        // under the input, or beside the chat (#2402).
+        let (mut topic_top, mut topic_bottom, mut topic_side) = (None, None, None);
+        if let Some((edge, strip)) = topic_row {
+            match edge {
+                topic_tabs::Edge::Top => topic_top = Some(strip),
+                topic_tabs::Edge::Bottom => topic_bottom = Some(strip),
+                topic_tabs::Edge::Left | topic_tabs::Edge::Right => {
+                    topic_side = Some((edge, strip))
+                }
+            }
+        }
+        if let Some(bar) = topic_top {
             right = right.child(bar);
         }
         right = right.child(middle);
@@ -2816,6 +2830,9 @@ impl Render for Dashboard {
                     }
                 }
                 col = col.child(self.editor.clone());
+                if let Some(strip) = topic_bottom {
+                    col = col.child(strip);
+                }
                 col.child(footer)
             }
             Screen::Usage => right.child(footer),
@@ -2919,7 +2936,11 @@ impl Render for Dashboard {
         // The panes go in before every overlay. gpui paints children in the
         // order they are added, so a pane added after an overlay covers it:
         // the key reference then drew under the chat and under the rail.
-        root = root.child(right);
+        match topic_side {
+            Some((topic_tabs::Edge::Left, strip)) => root = root.child(strip).child(right),
+            Some((_, strip)) => root = root.child(right).child(strip),
+            None => root = root.child(right),
+        }
         // One dialog for every delete path, painted above both panes. The
         // conversation is only named so the user knows what they are about
         // to lose; nothing is erased until the confirm button is clicked.
@@ -3188,6 +3209,12 @@ fn main() {
                         help_open: false,
                         topic_menu: false,
                         topic_draft: None,
+                        topic_edge: topic_tabs::Edge::from_config(
+                            Config::load()
+                                .ok()
+                                .and_then(|c| c.gui.topic_tabs)
+                                .as_deref(),
+                        ),
                         topic_rename: None,
                         topic_info: None,
                         themes_origin: None,
@@ -3508,6 +3535,67 @@ fn topic_bar(
 }
 
 /// The name prompt above the input, while a topic is being named (#2303).
+/// The topic row (#2400, #2402): the leading button that moves it, the tabs,
+/// and the `...` menu. Across the top or bottom it is one row; down a side it
+/// is one column.
+fn topic_strip(
+    edge: topic_tabs::Edge,
+    toggle_edge: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    tabs: Vec<AnyElement>,
+    bar: impl IntoElement,
+) -> Div {
+    let leading = div()
+        .id("topic-edge-button")
+        .px_2()
+        .py_0p5()
+        .rounded_sm()
+        .flex_none()
+        .cursor_pointer()
+        .text_color(rgb(palette::current().text_muted))
+        .hover(|d| d.bg(rgb(palette::current().panel_hi)))
+        .on_click(toggle_edge)
+        .child(SharedString::from("\u{25EB}"));
+    if edge.is_vertical() {
+        div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .w(rems(12.0))
+            .gap_2()
+            .p_2()
+            .child(leading)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .overflow_hidden()
+                    .children(tabs),
+            )
+            .child(bar)
+    } else {
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .min_w_0()
+            .child(leading)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .overflow_hidden()
+                    .children(tabs),
+            )
+            .child(bar)
+    }
+}
+
 /// One tab of the topic strip (#2400). The open session is marked by an
 /// accent label and a raised background, the same as the rail's selection.
 fn topic_tab(
