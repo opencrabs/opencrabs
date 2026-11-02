@@ -5181,7 +5181,9 @@ fn main() {
                         state,
                         dash: DashboardState::default(),
                         focus: focus.clone(),
-                        refocus: None,
+                        // The chat opens with the composer holding focus, so its
+                        // caret shows and typing needs no click first (#2433).
+                        refocus: Some(focus_target(Screen::Chat)),
                         pending: 0,
                         files: Vec::new(),
                         files_for: None,
