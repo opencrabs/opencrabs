@@ -3413,7 +3413,13 @@ fn emoji_popup_view(items: &[(&'static str, &'static str)], selected: usize) -> 
                 .py_0p5()
                 .rounded_sm()
                 .text_color(rgb(palette::current().text))
-                .when(on, |d| d.bg(rgb(palette::current().focus)))
+                // A subtle fill with an accent edge: the focus colour under
+                // muted text was unreadable in the themes (#2421).
+                .when(on, |d| {
+                    d.bg(rgb(palette::current().panel_hi))
+                        .border_l_2()
+                        .border_color(rgb(palette::current().accent))
+                })
                 .child(SharedString::from(glyph.to_string()))
                 .child(SharedString::from(format!(":{code}:"))),
         );
