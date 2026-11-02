@@ -2065,12 +2065,16 @@ impl Dashboard {
         if self.screen == Screen::Chat && self.rail_open {
             match ev.keystroke.key.as_str() {
                 "up" | "down" => {
+                    // The arrows walk the rail and open the row they stand
+                    // on, so the chat shows it without an Enter. Focus stays
+                    // on the rail: the composer is not refocused here (#2404).
                     let delta = if ev.keystroke.key == "down" { 1 } else { -1 };
                     if let Some(id) = self.sessions.cursor_step(self.sessions.cursor, delta) {
                         self.sessions.cursor = Some(id);
                         if let Some(ix) = self.sessions.cursor_index(id) {
                             self.rail_scroll.scroll_to_item(ix);
                         }
+                        self.open_session(id, cx);
                     }
                     cx.notify();
                     return;
@@ -2123,8 +2127,19 @@ impl Dashboard {
             let names = themes_view::names();
             let last = names.len().saturating_sub(1);
             match ev.keystroke.key.as_str() {
-                "up" => self.themes_index = self.themes_index.saturating_sub(1),
-                "down" => self.themes_index = (self.themes_index + 1).min(last),
+                // The arrows walk the list and preview the theme they stand
+                // on, so a theme is judged without an Enter (#2404).
+                "up" | "down" => {
+                    let index = if ev.keystroke.key == "down" {
+                        (self.themes_index + 1).min(last)
+                    } else {
+                        self.themes_index.saturating_sub(1)
+                    };
+                    self.themes_index = index;
+                    if let Some(name) = names.get(index).copied() {
+                        self.preview_theme(name.to_string(), cx);
+                    }
+                }
                 "enter" => {
                     if let Some(name) = names.get(self.themes_index.min(last)).copied() {
                         self.preview_theme(name.to_string(), cx);
@@ -2183,6 +2198,10 @@ impl Dashboard {
 
 impl Render for Dashboard {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The composer leaves the arrows to a list that is on screen (#2404).
+        let window_owns_arrows =
+            (self.screen == Screen::Chat && self.rail_open) || self.screen == Screen::Themes;
+        cx.set_global(editor::ArrowsToWindow(window_owns_arrows));
         // The pending focus from the last transition is applied here because
         // this is the only place holding a window to focus through. Applying
         // it before the tree is built means the frame that shows the new
