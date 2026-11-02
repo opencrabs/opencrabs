@@ -5370,7 +5370,7 @@ impl Render for Dashboard {
                     && let Some((from_x, from_w)) = this.drag_from
                 {
                     let dx = f32::from(ev.position.x) - from_x;
-                    let next = from_w + dx / this.rem;
+                    let next = (from_w + dx) / this.rem;
                     if next < RAIL_MIN_REM {
                         // Dragged past the floor: close it, the same gesture
                         // the owner asked for instead of leaving a sliver.
