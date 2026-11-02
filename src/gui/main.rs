@@ -284,6 +284,9 @@ struct Dashboard {
     rail_width: f32,
     /// Whether the rail is drawn at all.
     rail_open: bool,
+    /// Whether the sidebar holds the keyboard. Tab moves it; while it does,
+    /// the arrows walk its rows, and the composer keeps them otherwise (#2417).
+    rail_focused: bool,
     /// A splitter drag is in flight. The move events land on the window root,
     /// not the 4px handle, so the pointer can leave the handle without ending
     /// the drag.
@@ -2064,7 +2067,25 @@ impl Dashboard {
         // arrows used to die in (#2351).
         if self.screen == Screen::Chat && self.rail_open {
             match ev.keystroke.key.as_str() {
-                "up" | "down" => {
+                // Tab moves the keyboard between the composer and the sidebar.
+                // While an emoji or command list is open, Tab accepts there (#2417).
+                "tab" if self.rail_focused || self.editor.read(cx).command_popup().is_none() => {
+                    self.rail_focused = !self.rail_focused;
+                    if self.rail_focused {
+                        self.sessions.cursor = self.sessions.cursor.or(self.sessions.selected);
+                    } else {
+                        self.refocus_screen();
+                    }
+                    cx.notify();
+                    return;
+                }
+                "escape" if self.rail_focused => {
+                    self.rail_focused = false;
+                    self.refocus_screen();
+                    cx.notify();
+                    return;
+                }
+                "up" | "down" if self.rail_focused => {
                     // The arrows walk the rail and open the row they stand
                     // on, so the chat shows it without an Enter. Focus stays
                     // on the rail: the composer is not refocused here (#2404).
@@ -2079,7 +2100,7 @@ impl Dashboard {
                     cx.notify();
                     return;
                 }
-                "enter" => {
+                "enter" if self.rail_focused => {
                     if let Some(id) = self.sessions.cursor {
                         self.open_session(id, cx);
                         // Back to the composer, the place a newly opened
@@ -2203,7 +2224,8 @@ impl Render for Dashboard {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // The composer leaves the arrows to a list that is on screen (#2404).
         let window_owns_arrows =
-            (self.screen == Screen::Chat && self.rail_open) || self.screen == Screen::Themes;
+            (self.screen == Screen::Chat && self.rail_open && self.rail_focused)
+                || self.screen == Screen::Themes;
         cx.set_global(editor::ArrowsToWindow(window_owns_arrows));
         // The pending focus from the last transition is applied here because
         // this is the only place holding a window to focus through. Applying
@@ -2875,7 +2897,12 @@ impl Render for Dashboard {
             // in their own press listener first (#2354).
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _ev, _window, cx| {
+                cx.listener(|this, ev: &MouseDownEvent, _window, cx| {
+                    // A press on the sidebar gives it the keyboard; a press
+                    // anywhere else hands the keys back to the composer (#2417).
+                    if this.rail_open {
+                        this.rail_focused = f32::from(ev.position.x) <= this.rail_width * this.rem;
+                    }
                     if this.sessions.rail_menu.take().is_some() {
                         cx.notify();
                     }
@@ -3221,6 +3248,7 @@ fn main() {
                         sessions: sessions_state,
                         rail_width: RAIL_DEFAULT_REM,
                         rail_open: true,
+                        rail_focused: false,
                         dragging_rail: false,
                         drag_from: None,
                         drag_seen: None,
