@@ -3628,14 +3628,19 @@ fn topic_strip(
     tabs: Vec<AnyElement>,
     bar: impl IntoElement,
 ) -> Div {
+    // A square target the size of the rail's action icons, so it is easy to
+    // hit and reads as a control rather than a stray glyph (#2414).
     let leading = div()
         .id("topic-edge-button")
-        .px_2()
-        .py_0p5()
+        .flex()
+        .items_center()
+        .justify_center()
+        .size(rems(1.9))
         .rounded_sm()
         .flex_none()
         .cursor_pointer()
         .text_color(rgb(palette::current().text_muted))
+        .text_size(rems(1.25))
         .hover(|d| d.bg(rgb(palette::current().panel_hi)))
         .on_click(toggle_edge)
         .child(SharedString::from("\u{25EB}"));
@@ -3665,15 +3670,17 @@ fn topic_strip(
             .gap_2()
             .min_w_0()
             .child(leading)
+            // The tabs wrap onto a second line rather than being cut off, so a
+            // narrow window never hides a topic (#2414).
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .flex()
                     .flex_row()
+                    .flex_wrap()
                     .items_center()
                     .gap_1()
-                    .overflow_hidden()
                     .children(tabs),
             )
             .child(bar)
