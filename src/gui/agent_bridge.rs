@@ -29,6 +29,8 @@ use uuid::Uuid;
 
 /// A turn outcome the worker thread hands back to the UI thread.
 pub enum TurnEvent {
+    /// A newer release exists; carries its version (#2406).
+    UpdateAvailable(String),
     /// `/evolve` finished: the text to show in the chat notices (#2406).
     EvolveDone(String),
     /// Progress straight from the agent service, with the session it came
@@ -102,6 +104,43 @@ pub struct AgentBridge {
 /// Sink every event lands in. Cloned into the progress callback and the
 /// worker threads; drained by the window's poll tick.
 pub type EventSink = std::sync::mpsc::Sender<TurnEvent>;
+
+/// How often the window asks GitHub for a newer release: twice a day (#2406).
+const UPDATE_CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(12 * 60 * 60);
+
+/// Check for a newer release now and then twice a day, on its own thread. A
+/// release found comes back as `UpdateAvailable` (#2406).
+pub fn spawn_update_checks(sink: EventSink) {
+    let spawned = std::thread::Builder::new()
+        .stack_size(4 * 1024 * 1024)
+        .name("gui-update-check".into())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    crate::logging::error(&format!("update check runtime: {e}"));
+                    return;
+                }
+            };
+            runtime.block_on(async move {
+                loop {
+                    if let Some(latest) = opencrabs::brain::tools::evolve::check_for_update().await
+                        && let Err(e) = sink.send(TurnEvent::UpdateAvailable(latest))
+                    {
+                        crate::logging::error(&format!("update notice not delivered: {e}"));
+                        return;
+                    }
+                    tokio::time::sleep(UPDATE_CHECK_EVERY).await;
+                }
+            });
+        });
+    if let Err(e) = spawned {
+        crate::logging::error(&format!("update check thread: {e}"));
+    }
+}
 
 /// Run `/evolve` on its own thread, as the TUI does: download the latest
 /// release and report the outcome. The text comes back as `EvolveDone` (#2406).

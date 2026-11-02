@@ -287,6 +287,11 @@ struct Dashboard {
     /// Whether the sidebar holds the keyboard. Tab moves it; while it does,
     /// the arrows walk its rows, and the composer keeps them otherwise (#2417).
     rail_focused: bool,
+    /// A newer release, when the update check found one (#2406).
+    update_available: Option<String>,
+    /// The update dialog: None when closed, Some(false) asks whether to update,
+    /// Some(true) asks again before /evolve runs.
+    update_prompt: Option<bool>,
     /// A splitter drag is in flight. The move events land on the window root,
     /// not the 4px handle, so the pointer can leave the handle without ending
     /// the drag.
@@ -978,6 +983,10 @@ impl Dashboard {
                 }
                 agent_bridge::TurnEvent::SessionCreateFailed(e) => {
                     self.live.notices.push(format!("new session: {e}"));
+                }
+                agent_bridge::TurnEvent::UpdateAvailable(version) => {
+                    self.update_available = Some(version);
+                    cx.notify();
                 }
                 agent_bridge::TurnEvent::EvolveDone(text) => {
                     self.live.notices.push(text);
@@ -2721,6 +2730,22 @@ impl Render for Dashboard {
                     ),
                     None => "arrows walk the list · enter previews · esc restores".to_string(),
                 };
+                // The footer names a newer release and opens the update dialog (#2406).
+                let update_hint = self.update_available.clone().map(|version| {
+                    let ask = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                        this.update_prompt = Some(false);
+                        cx.notify();
+                    });
+                    div()
+                        .id("update-hint")
+                        .text_xs()
+                        .text_color(rgb(shown.accent))
+                        .cursor_pointer()
+                        .on_click(ask)
+                        .child(SharedString::from(format!(
+                            "v{version} available · run /evolve to update"
+                        )))
+                });
                 let footer = div()
                     .flex()
                     .flex_row()
@@ -2732,7 +2757,8 @@ impl Render for Dashboard {
                             .text_xs()
                             .text_color(rgb(shown.text_muted))
                             .child(SharedString::from(hint)),
-                    );
+                    )
+                    .children(update_hint);
                 let middle = div()
                     .flex()
                     .flex_row()
@@ -3060,6 +3086,24 @@ impl Render for Dashboard {
             });
             root = root.child(topic_prompt_overlay(label, &draft, cancel));
         }
+        // The update dialog (#2406): two stages, and /evolve runs only after the second yes.
+        if let Some(second) = self.update_prompt {
+            let version = self.update_available.clone().unwrap_or_default();
+            let confirm = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
+                if second {
+                    this.update_prompt = None;
+                    this.run_command(commands::Outcome::Run(commands::GuiAction::Evolve), cx);
+                } else {
+                    this.update_prompt = Some(true);
+                }
+                cx.notify();
+            });
+            let cancel = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                this.update_prompt = None;
+                cx.notify();
+            });
+            root = root.child(update_prompt_overlay(&version, second, confirm, cancel));
+        }
         // The drop target: a Finder drag tints the whole window so the target
         // is never guessed. It paints above both panes and vanishes the
         // moment the drag ends.
@@ -3127,6 +3171,7 @@ fn main() {
             // switched on from config.toml, not only from the environment.
             logging::set_debug_from_config(config.debug.gui_debug_logs);
             agent_bridge::spawn_bootstrap(config, agent_sink.clone());
+            agent_bridge::spawn_update_checks(agent_sink.clone());
         }
         Err(e) => {
             let _ = agent_sink.send(agent_bridge::TurnEvent::BootstrapFailed(e));
@@ -3263,6 +3308,8 @@ fn main() {
                         rail_width: RAIL_DEFAULT_REM,
                         rail_open: true,
                         rail_focused: false,
+                        update_available: None,
+                        update_prompt: None,
                         dragging_rail: false,
                         drag_from: None,
                         drag_seen: None,
@@ -3730,6 +3777,102 @@ fn topic_tab(
         .hover(|d| d.bg(rgb(palette::current().panel_hi)))
         .on_click(on_click)
         .child(SharedString::from(label))
+}
+
+/// The update dialog (#2406). The first stage asks whether to update by
+/// running /evolve; the second stage asks again before the download starts.
+fn update_prompt_overlay(
+    version: &str,
+    second: bool,
+    confirm: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    cancel: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let (title, body, yes) = if second {
+        (
+            "Run /evolve now?",
+            "The release is downloaded, then OpenCrabs needs a restart.",
+            "run",
+        )
+    } else {
+        (
+            "Update to the new version?",
+            "Running /evolve downloads the latest release.",
+            "continue",
+        )
+    };
+    let panel = div()
+        .id("update-prompt-panel")
+        .occlude()
+        .flex()
+        .flex_col()
+        .gap_3()
+        .w(rems(26.0))
+        .p_4()
+        .rounded(px(10.0))
+        .border_1()
+        .border_color(rgb(palette::current().panel_hi))
+        .bg(rgb(palette::current().panel))
+        .child(
+            div()
+                .text_sm()
+                .text_color(rgb(palette::current().text))
+                .child(SharedString::from(title)),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(palette::current().text_muted))
+                .child(SharedString::from(format!("v{version} is available"))),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(palette::current().text_muted))
+                .child(SharedString::from(body)),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .justify_end()
+                .gap_2()
+                .child(
+                    div()
+                        .id("update-prompt-cancel")
+                        .px_3()
+                        .py_1()
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .text_color(rgb(palette::current().text_muted))
+                        .hover(|d| d.bg(rgb(palette::current().panel_hi)))
+                        .on_click(cancel)
+                        .child(SharedString::from("cancel")),
+                )
+                .child(
+                    div()
+                        .id("update-prompt-yes")
+                        .px_3()
+                        .py_1()
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .text_color(rgb(palette::current().accent))
+                        .hover(|d| d.bg(rgb(palette::current().panel_hi)))
+                        .on_click(confirm)
+                        .child(SharedString::from(yes)),
+                ),
+        );
+    div()
+        .id("update-prompt-scrim")
+        .occlude()
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(rgba(0x0a0a0acc))
+        .child(panel)
 }
 
 /// The name prompt for a topic (#2398): a centred card over a dark scrim, so
