@@ -88,6 +88,15 @@ pub enum TurnEvent {
     },
     /// Bootstrap itself died; carries the error text.
     BootstrapFailed(String),
+    /// A model switch finished; carries the line the terminal prints for it.
+    ModelSwitched(String),
+    /// A model switch could not be attempted; carries the reason.
+    ModelSwitchFailed(String),
+    /// Personalized brain files were written from the onboarding notes; carries
+    /// the line naming how many landed.
+    BrainReady(String),
+    /// Brain generation could not finish; carries the reason.
+    BrainFailed(String),
 }
 
 /// Everything the UI needs to drive turns. Built by [`bootstrap`], delivered
@@ -740,3 +749,131 @@ pub const POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// A message queued while a turn runs: the TUI's exact type, joined and
 /// submitted when the current turn completes.
 pub type PendingMessage = QueuedUserMessage;
+
+/// Switch the model behind the live service on a big-stack worker.
+///
+/// `direct_model_switch` is the terminal's own path: it writes the config,
+/// recreates the provider and updates the session row, so the window cannot
+/// drift from what the terminal would have done with the same line. It can do
+/// network work (a handshake per candidate), which is why it never runs on the
+/// UI thread and never on a gpui worker (tiny stacks, #2299).
+pub fn spawn_switch_model(
+    service: Arc<AgentService>,
+    session_id: Uuid,
+    pair: String,
+    sink: EventSink,
+) {
+    let error_sink = sink.clone();
+    let spawned = std::thread::Builder::new()
+        .stack_size(4 * 1024 * 1024)
+        .name("gui-model-switch".into())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    let _ = sink.send(TurnEvent::ModelSwitchFailed(format!("switch runtime: {e}")));
+                    return;
+                }
+            };
+            let line = runtime.block_on(opencrabs::channels::commands::direct_model_switch(
+                &service, session_id, &pair,
+            ));
+            let _ = sink.send(TurnEvent::ModelSwitched(line));
+        });
+    if let Err(e) = spawned {
+        let _ = error_sink.send(TurnEvent::ModelSwitchFailed(format!("switch thread: {e}")));
+    }
+}
+
+/// Generate the personalized brain files from the onboarding notes.
+///
+/// A direct port of the terminal's `generate_brain_files_background`
+/// (`tui/app/dialogs.rs`): one completion through the provider the just-saved
+/// config selected, parsed into the five brain files and written into the
+/// workspace. The terminal runs it in the background after setup so nobody
+/// waits on it; the window does the same and reports the outcome as a notice.
+pub fn spawn_brain_generation(
+    service: Arc<AgentService>,
+    prompt: String,
+    workspace: PathBuf,
+    sink: EventSink,
+) {
+    let error_sink = sink.clone();
+    let spawned = std::thread::Builder::new()
+        .stack_size(4 * 1024 * 1024)
+        .name("gui-brain-gen".into())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    let _ = sink.send(TurnEvent::BrainFailed(format!("runtime: {e}")));
+                    return;
+                }
+            };
+            let provider = service.provider().clone();
+            let model = service.provider_model().to_string();
+            let request = opencrabs::brain::provider::LLMRequest::new(
+                model,
+                vec![opencrabs::brain::provider::Message::user(prompt)],
+            )
+            .with_max_tokens(65536);
+            let result = runtime.block_on(async move {
+                match tokio::time::timeout(Duration::from_secs(120), provider.complete(request))
+                    .await
+                {
+                    Ok(Ok(response)) => {
+                        let text: String = response
+                            .content
+                            .iter()
+                            .filter_map(|block| match block {
+                                opencrabs::brain::provider::ContentBlock::Text { text } => {
+                                    Some(text.as_str())
+                                }
+                                _ => None,
+                            })
+                            .collect();
+                        let parsed = opencrabs::tui::onboarding::parse_brain_sections(&text);
+                        // SOUL and USER are the two a setup cannot do without;
+                        // without them the reply was prose, not sections.
+                        if parsed[0].is_none() || parsed[1].is_none() {
+                            return Err("the answer had no brain sections".to_string());
+                        }
+                        let files = [
+                            ("SOUL.md", &parsed[0]),
+                            ("USER.md", &parsed[1]),
+                            ("AGENTS.md", &parsed[2]),
+                            ("TOOLS.md", &parsed[3]),
+                            ("MEMORY.md", &parsed[4]),
+                        ];
+                        let mut written = 0;
+                        for (name, content) in &files {
+                            if let Some(content) = content {
+                                if let Err(e) = std::fs::write(workspace.join(name), content) {
+                                    return Err(format!("writing {name}: {e}"));
+                                }
+                                written += 1;
+                            }
+                        }
+                        Ok(written)
+                    }
+                    Ok(Err(e)) => Err(format!("generation failed: {e}")),
+                    Err(_) => Err("generation timed out after 120s".to_string()),
+                }
+            });
+            let _ = match result {
+                Ok(written) => sink.send(TurnEvent::BrainReady(format!(
+                    "{written} brain files personalized"
+                ))),
+                Err(e) => sink.send(TurnEvent::BrainFailed(e)),
+            };
+        });
+    if let Err(e) = spawned {
+        let _ = error_sink.send(TurnEvent::BrainFailed(format!("thread: {e}")));
+    }
+}

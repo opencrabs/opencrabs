@@ -170,8 +170,8 @@ pub const ALIASES: &[(&str, &str)] = &[("/themes", "/theme")];
 /// typo cannot quietly become a command that "exists" but no frontend answers.
 ///
 /// The rest of the table is not a gap in this list; it is the parity work that
-/// has its own issues (`/models`, `/onboard` and its single-step screens, plan
-/// approval, mission control).
+/// has its own issues (`/onboard` and its single-step screens, plan approval,
+/// mission control).
 pub const GUI_SUPPORTED: &[&str] = &[
     "/theme",
     "/usage",
@@ -179,6 +179,14 @@ pub const GUI_SUPPORTED: &[&str] = &[
     "/new",
     "/stop",
     "/sessions",
+    "/models",
+    "/onboard",
+    "/channels",
+    "/voice",
+    "/image",
+    "/daemon",
+    "/brain",
+    "/doctor",
     "/exit",
 ];
 
@@ -366,8 +374,8 @@ mod tests {
     fn support_separates_missing_from_unknown() {
         assert_eq!(support("/usage"), Support::Runs);
         // Real command, no window screen yet: not a typo.
-        assert_eq!(support("/models"), Support::Missing);
-        assert_eq!(support("/onboard"), Support::Missing);
+        assert_eq!(support("/workspace"), Support::Missing);
+        assert_eq!(support("/mission-control"), Support::Missing);
         assert_eq!(support("/not-a-command"), Support::Unknown);
         // The terminal's rule, kept: matching is exact.
         assert_eq!(support("/Usage"), Support::Unknown);

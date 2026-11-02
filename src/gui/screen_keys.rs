@@ -57,7 +57,7 @@ pub fn screen_chord(key: &str, mods: ChordMods, screen: Screen) -> Option<Screen
         return match screen {
             Screen::Usage => Some(ScreenAction::LeaveUsage),
             Screen::Files => Some(ScreenAction::LeaveFiles),
-            Screen::Chat | Screen::Themes => None,
+            Screen::Chat | Screen::Themes | Screen::Models | Screen::Onboard => None,
         };
     }
     if mods.control && key == "u" {
@@ -102,7 +102,9 @@ pub fn action_label(action: Option<ScreenAction>) -> &'static str {
 pub fn focus_target(screen: Screen) -> FocusTarget {
     match screen {
         Screen::Chat => FocusTarget::Composer,
-        Screen::Usage | Screen::Files | Screen::Themes => FocusTarget::Root,
+        Screen::Usage | Screen::Files | Screen::Themes | Screen::Models | Screen::Onboard => {
+            FocusTarget::Root
+        }
     }
 }
 

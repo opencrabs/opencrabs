@@ -33,7 +33,7 @@ pub use types::{
 pub use setup_gaps::SetupGap;
 pub use wizard::OnboardingWizard;
 
-pub(crate) use brain::parse_brain_sections;
+pub use brain::parse_brain_sections;
 #[cfg(test)]
 pub(crate) use fetch::opencode_models_url;
 pub use fetch::{fetch_provider_models, is_first_time};

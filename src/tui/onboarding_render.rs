@@ -41,7 +41,7 @@ fn accent_gold() -> Color {
 ///
 /// A list shorter than `max` returns the whole range, so short lists render
 /// exactly as they did before any windowing existed.
-pub(crate) fn visible_window(total: usize, selected: usize, max: usize) -> (usize, usize) {
+pub fn visible_window(total: usize, selected: usize, max: usize) -> (usize, usize) {
     if max == 0 || total <= max {
         return (0, total);
     }

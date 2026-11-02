@@ -32,6 +32,8 @@ mod editor;
 mod icon;
 mod logging;
 mod markdown;
+mod models;
+mod onboard;
 mod palette;
 mod plan_strip;
 mod preview;
@@ -90,6 +92,10 @@ enum Screen {
     Files,
     /// The themes screen (ctrl+shift+t): preview a theme, keep it or restore.
     Themes,
+    /// The model picker: every pair the terminal offers, the live one marked.
+    Models,
+    /// The onboarding wizard, full screen: the same steps, the same writes.
+    Onboard,
 }
 
 /// The ledger path, unchanged: `config.database.path`, with the same
@@ -369,6 +375,15 @@ struct Dashboard {
     /// how a good preview is found again without hunting the list.
     themes_index: usize,
     themes_history: Vec<String>,
+    /// The model picker's rows, built when the screen opens so a slow frame
+    /// never rebuilds the catalogue.
+    models_rows: Vec<models::Row>,
+    /// The row the arrows stand on.
+    models_index: usize,
+    /// The onboarding wizard while its screen is open. Built on first open:
+    /// constructing it reads the live config, which is not something to do on
+    /// every window start when most sessions never onboard.
+    onboard: Option<onboard::Onboard>,
     /// The plan checklist strip above the editor, re-read when its file moves.
     plan: plan_strip::PlanStripState,
     /// Which session the strip's path was resolved for, so the DB lookup runs
@@ -561,12 +576,19 @@ impl Dashboard {
     /// because a model asked to answer `/usage` writes a paragraph about
     /// usage instead of opening the ledger (#2374).
     fn run_command(&mut self, outcome: commands::Outcome, cx: &mut Context<Self>) {
-        let commands::Outcome::Run(action) = outcome else {
-            if let Some(line) = commands::message(&outcome) {
-                self.live.notices.push(line);
-                cx.notify();
+        // The pair has to travel with the action: `/models openai/gpt-5` is a
+        // switch, a bare `/models` is the picker, and dropping the argument
+        // would silently turn one into the other.
+        let (action, arg) = match outcome {
+            commands::Outcome::Run(action) => (action, None),
+            commands::Outcome::RunWith(action, arg) => (action, Some(arg)),
+            other => {
+                if let Some(line) = commands::message(&other) {
+                    self.live.notices.push(line);
+                    cx.notify();
+                }
+                return;
             }
-            return;
         };
         match action {
             commands::GuiAction::OpenThemes => {
@@ -585,6 +607,8 @@ impl Dashboard {
             commands::GuiAction::NewSession => self.new_session(cx),
             commands::GuiAction::StopTurn => self.stop_turn(cx),
             commands::GuiAction::OpenSessions => self.toggle_rail(cx),
+            commands::GuiAction::OpenModels => self.open_models(arg, cx),
+            commands::GuiAction::OpenOnboard(name) => self.open_onboard(name, arg, cx),
             commands::GuiAction::Quit => cx.quit(),
             commands::GuiAction::Evolve => {
                 let session = self.transcript.session.unwrap_or_else(Uuid::nil);
@@ -624,6 +648,301 @@ impl Dashboard {
         cx.notify();
     }
 
+    /// `/models` with no argument opens the picker. With an argument it is the
+    /// switch the terminal performs, and no screen opens: the reply is the
+    /// answer, exactly like the terminal's.
+    fn open_models(&mut self, arg: Option<String>, cx: &mut Context<Self>) {
+        // The catalogue is read once, here, so a frame never walks it.
+        let current =
+            agent_bridge::bridge().map(|b| (b.service.provider_name(), b.service.provider_model()));
+        self.models_rows = models::rows(
+            current
+                .as_ref()
+                .map(|(provider, model)| (provider.as_str(), model.as_str())),
+        );
+        if let Some(arg) = arg {
+            self.switch_model(arg, cx);
+            return;
+        }
+        // The highlight lands on the live pair, so Enter on the screen is a
+        // no-op instead of an accidental switch.
+        self.models_index = self
+            .models_rows
+            .iter()
+            .position(|row| row.current)
+            .unwrap_or(0);
+        self.screen = Screen::Models;
+        self.rail_actions = None;
+        self.sessions.rail_menu = None;
+        self.refocus_screen();
+        cx.notify();
+    }
+
+    /// The wizard owns the keyboard while its screen is open: Tab and the
+    /// arrows walk rows, typed characters land in the focused field, Enter
+    /// confirms the step and closes when there is nothing after it.
+    fn onboard_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
+        if self.onboard.is_none() {
+            self.screen = Screen::Chat;
+            cx.notify();
+            return;
+        }
+        let m = &ev.keystroke.modifiers;
+        let plain = !m.control && !m.platform && !m.alt;
+        let key = ev.keystroke.key.clone();
+        let typed = if plain {
+            ev.keystroke
+                .key_char
+                .as_ref()
+                .and_then(|s| s.chars().next())
+                .filter(|ch| !ch.is_control())
+        } else {
+            None
+        };
+        let mut confirm = false;
+        {
+            let ob = self.onboard.as_mut().expect("checked above");
+            match key.as_str() {
+                "tab" => ob.focus_next(),
+                "enter" => {
+                    // On the channel list Enter flips the row it stands on, the
+                    // same as the terminal; anywhere else it confirms the step.
+                    if ob.focused_channel().is_some() {
+                        ob.toggle_focused_channel();
+                    } else {
+                        confirm = true;
+                    }
+                }
+                "space" => {
+                    // Space is the terminal's toggle on this list. On a text field
+                    // it is an ordinary character, so it still types one there.
+                    if !ob.toggle_focused_channel()
+                        && let Some(ch) = typed
+                    {
+                        ob.type_char(ch);
+                    }
+                }
+                "up" => ob.walk(-1),
+                "down" => ob.walk(1),
+                "backspace" => {
+                    if !ob.backspace() {
+                        ob.focus_prev();
+                    }
+                }
+                _ => {
+                    if let Some(ch) = typed {
+                        ob.type_char(ch);
+                    }
+                }
+            }
+        }
+        if confirm {
+            match self.onboard.as_mut().map(|ob| ob.advance()) {
+                Some(onboard::Advance::Done) => {
+                    self.finish_onboard(cx);
+                    return;
+                }
+                Some(onboard::Advance::GenerateBrain) => {
+                    self.write_brain(cx);
+                }
+                Some(onboard::Advance::Blocked) => {
+                    // The reason is on the wizard and the pane draws it above
+                    // the footer, so the step stays put and nothing is lost.
+                }
+                _ => {}
+            }
+        }
+        cx.notify();
+    }
+
+    /// Start the brain writer on the prose the user typed into the brain step.
+    /// The step stays up until the thread reports back, so the window never
+    /// claims the files exist before they do.
+    fn write_brain(&mut self, cx: &mut Context<Self>) {
+        let picked = self
+            .onboard
+            .as_mut()
+            .and_then(|ob| ob.brain_prompt().map(|prompt| (prompt, ob.workspace())));
+        let Some((prompt, workspace)) = picked else {
+            return;
+        };
+        let Some(bridge) = agent_bridge::bridge() else {
+            // No service to write with: the step still finishes, its prose is
+            // handed to the writer on save instead of silently dropped.
+            if let Some(ob) = self.onboard.as_mut() {
+                ob.mark_brain_failed("the agent is offline".to_string());
+            }
+            return;
+        };
+        if let Some(ob) = self.onboard.as_mut() {
+            ob.mark_brain_generating();
+        }
+        self.live
+            .notices
+            .push("writing your brain files".to_string());
+        agent_bridge::spawn_brain_generation(
+            bridge.service.clone(),
+            prompt,
+            workspace,
+            self.sink.clone(),
+        );
+        cx.notify();
+    }
+
+    /// The flow is over: write what the wizard collected and close it. A
+    /// failure keeps the wizard on screen with the reason, because nothing was
+    /// saved (#914).
+    fn finish_onboard(&mut self, cx: &mut Context<Self>) {
+        let finished = self
+            .onboard
+            .as_mut()
+            .map(|ob| (ob.finish(), ob.workspace()));
+        match finished {
+            Some((onboard::Finish::Failed(e), _)) => {
+                logging::error(&format!("onboarding save: {e}"));
+                self.live.notices.push(format!("setup did not save: {e}"));
+            }
+            Some((onboard::Finish::Saved { brain_prompt }, workspace)) => {
+                self.onboard = None;
+                self.screen = Screen::Chat;
+                self.refocus_screen();
+                self.reload_agent(cx, Some("setup saved"));
+                if let Some(prompt) = brain_prompt {
+                    self.live
+                        .notices
+                        .push("generating personalized brain files".to_string());
+                    if let Some(bridge) = agent_bridge::bridge() {
+                        agent_bridge::spawn_brain_generation(
+                            bridge.service.clone(),
+                            prompt,
+                            workspace,
+                            self.sink.clone(),
+                        );
+                    }
+                }
+            }
+            None => {}
+        }
+        cx.notify();
+    }
+
+    /// Esc: one step back, or out of the wizard. Nothing is discarded that a
+    /// confirmed step already wrote.
+    fn onboard_escape(&mut self, cx: &mut Context<Self>) {
+        let stayed = self.onboard.as_mut().map(|ob| ob.escape()).unwrap_or(false);
+        if stayed {
+            cx.notify();
+        } else {
+            self.close_onboard(cx);
+        }
+    }
+
+    fn close_onboard(&mut self, cx: &mut Context<Self>) {
+        self.screen = Screen::Chat;
+        self.onboard = None;
+        self.refocus_screen();
+        cx.notify();
+    }
+
+    /// Bring the provider stack up on the config as it is on disk now.
+    ///
+    /// Saving the wizard is not enough by itself: a fresh install launches on
+    /// the placeholder provider, and the brain files are the system prompt, so
+    /// the stack has to be rebuilt on the settings that were just written. The
+    /// terminal does the same thing with `rebuild_agent_service`.
+    fn reload_agent(&mut self, cx: &mut Context<Self>, saved: Option<&str>) {
+        let config = match Config::load() {
+            Ok(config) => config,
+            Err(e) => {
+                self.live
+                    .notices
+                    .push(format!("saved, but the settings would not load: {e}"));
+                cx.notify();
+                return;
+            }
+        };
+        self.agent_ready = false;
+        if let Some(line) = saved {
+            self.live.notices.push(line.to_string());
+        }
+        agent_bridge::spawn_bootstrap(config, self.sink.clone());
+        cx.notify();
+    }
+
+    /// `/onboard` and the step commands. The wizard opens on the step the
+    /// command named, carrying the live config, so the screen shows what is
+    /// configured today rather than a blank form.
+    fn open_onboard(&mut self, command: &'static str, arg: Option<String>, cx: &mut Context<Self>) {
+        let Some(step) = onboard::step_for_command(command) else {
+            // Every door in `GUI_SUPPORTED` names a step; if a future edit
+            // adds one without a step, say so instead of opening at random.
+            self.live
+                .notices
+                .push(format!("{command} has no onboarding step wired yet."));
+            cx.notify();
+            return;
+        };
+        // A bare `/onboard` is the full run, resumed where the user stopped, so
+        // finishing it records the steps as done. A command that names one step
+        // is a quick jump: it must not mark the run complete (#2060).
+        let mut wizard = if command == "/onboard" {
+            onboard::Onboard::open()
+        } else {
+            onboard::Onboard::open_at(step)
+        };
+        // `/channels whatsapp` opens that dialog, not the menu: the terminal
+        // reads the same word off the line (#271). An unknown channel leaves
+        // the menu up, which is what `open_channel` reports.
+        if let Some(channel) = arg.as_deref() {
+            wizard.open_channel(channel);
+        }
+        // On a machine that already answers, the provider step starts on the
+        // pair the session is using instead of the first row of the catalogue
+        // (#2060). A first run keeps the built-in preselection from `open_at`.
+        if step != onboard::OnboardingStep::HealthCheck
+            && let Some(bridge) = agent_bridge::bridge()
+        {
+            wizard.seed_session_pair(
+                &bridge.service.provider_name(),
+                &bridge.service.provider_model(),
+            );
+        }
+        self.onboard = Some(wizard);
+        self.screen = Screen::Onboard;
+        self.rail_actions = None;
+        self.sessions.rail_menu = None;
+        self.refocus_screen();
+        cx.notify();
+    }
+
+    /// Ask the service to switch. The answer arrives as an event on the UI
+    /// thread, because a switch can do network work per candidate.
+    fn switch_model(&mut self, arg: String, cx: &mut Context<Self>) {
+        // A bare model id is allowed, the same as the terminal: the row it
+        // names is resolved before the ask goes out.
+        let pair = match models::find(&self.models_rows, &arg) {
+            Some(row) => row.pair(),
+            None => arg,
+        };
+        let Some(session) = self.transcript.session else {
+            self.live.notices.push(
+                "No conversation is open, so there is nothing to switch. Type /new first."
+                    .to_string(),
+            );
+            cx.notify();
+            return;
+        };
+        let Some(bridge) = agent_bridge::bridge() else {
+            self.live
+                .notices
+                .push("The agent is still starting. Try again in a moment.".to_string());
+            cx.notify();
+            return;
+        };
+        agent_bridge::spawn_switch_model(bridge.service.clone(), session, pair, self.sink.clone());
+        cx.notify();
+    }
+
     /// ctrl+u: open the usage ledger, or return to the conversation. The panes
     /// never mix and the chat stays exactly where it was.
     fn toggle_usage(&mut self, cx: &mut Context<Self>) {
@@ -641,6 +960,13 @@ impl Dashboard {
                 }
             }
             Screen::Files => self.screen = Screen::Usage,
+            Screen::Models => self.screen = Screen::Usage,
+            // Usage from the wizard: the screen closes first, so the ledger is
+            // not left behind a half-filled form.
+            Screen::Onboard => {
+                self.onboard = None;
+                self.screen = Screen::Usage;
+            }
             Screen::Themes => self.close_themes(true, cx),
         }
         self.refocus_screen();
@@ -1051,6 +1377,57 @@ impl Dashboard {
                     logging::error(&format!("agent offline: {e}"));
                     self.agent_error = Some(e.clone());
                     self.live.notices.push(format!("agent offline: {e}"));
+                }
+                agent_bridge::TurnEvent::ModelSwitched(line) => {
+                    logging::info(&format!("model switched: {line}"));
+                    self.live.notices.push(line);
+                    // The rail row carries the pair the service answers with,
+                    // so a switch is only real once the row is re-read.
+                    self.refresh_rail(cx);
+                    cx.notify();
+                }
+                agent_bridge::TurnEvent::ModelSwitchFailed(e) => {
+                    logging::error(&format!("model switch: {e}"));
+                    self.live.notices.push(format!("model switch: {e}"));
+                    cx.notify();
+                }
+                agent_bridge::TurnEvent::BrainReady(line) => {
+                    logging::info(&format!("brain: {line}"));
+                    self.live.notices.push(format!("brain: {line}"));
+                    // A brain written from the wizard's own step ends that
+                    // step; the setup itself is saved by the same finish path
+                    // the Enter key uses, so the two routes cannot diverge.
+                    let mut step_done = false;
+                    if let Some(ob) = self.onboard.as_mut()
+                        && ob.step() == onboard::OnboardingStep::BrainSetup
+                    {
+                        ob.mark_brain_generated();
+                        step_done = matches!(ob.advance(), onboard::Advance::Done);
+                    }
+                    if step_done {
+                        self.finish_onboard(cx);
+                    } else {
+                        // The brain files are the system prompt, so the stack
+                        // that just answered does not carry them yet: reload it
+                        // the same way a saved config does, and the next answer
+                        // does.
+                        self.reload_agent(cx, None);
+                    }
+                }
+                agent_bridge::TurnEvent::BrainFailed(e) => {
+                    logging::error(&format!("brain: {e}"));
+                    self.live
+                        .notices
+                        .push(format!("brain generation failed: {e}"));
+                    // The step keeps the reason and stays up: Enter still
+                    // finishes the setup, so a failed writer never traps the
+                    // user, and the prose is retried on save.
+                    if let Some(ob) = self.onboard.as_mut()
+                        && ob.step() == onboard::OnboardingStep::BrainSetup
+                    {
+                        ob.mark_brain_failed(e);
+                    }
+                    cx.notify();
                 }
                 agent_bridge::TurnEvent::ProgressFor(_, ProgressEvent::Thinking) => {
                     self.live.thinking = true;
@@ -2193,6 +2570,21 @@ impl Dashboard {
                 self.close_themes(true, cx);
                 return;
             }
+            // Esc on the models screen leaves it and changes nothing: the
+            // picker is a list, not a commitment.
+            if self.screen == Screen::Models {
+                self.screen = Screen::Chat;
+                self.refocus_screen();
+                cx.notify();
+                return;
+            }
+            // Esc in the wizard goes back one step, clearing a model search
+            // first, and closes the screen on the first step. The terminal's
+            // own rule, so one stray key never throws away a half-filled run.
+            if self.screen == Screen::Onboard {
+                self.onboard_escape(cx);
+                return;
+            }
             if !self.busy {
                 self.esc_at = None;
                 // Idle Esc hands the keyboard between the composer and the
@@ -2358,6 +2750,31 @@ impl Dashboard {
                 _ => {}
             }
             cx.notify();
+            return;
+        }
+        // The model picker is a list: arrows walk it and Enter switches to the
+        // row under the highlight. Esc leaves, handled above with the screens.
+        if self.screen == Screen::Models {
+            let last = self.models_rows.len().saturating_sub(1);
+            match ev.keystroke.key.as_str() {
+                "up" => self.models_index = self.models_index.saturating_sub(1),
+                "down" => self.models_index = (self.models_index + 1).min(last),
+                "enter" => {
+                    if let Some(row) = self.models_rows.get(self.models_index.min(last)) {
+                        let pair = row.pair();
+                        self.switch_model(pair, cx);
+                    }
+                }
+                _ => {}
+            }
+            cx.notify();
+            return;
+        }
+        // The wizard owns the keyboard while it is open: typed characters go
+        // into the focused field, Tab and the arrows walk the lists, Enter
+        // confirms the step, Esc steps back (handled above).
+        if self.screen == Screen::Onboard {
+            self.onboard_key(ev, cx);
             return;
         }
         match input::decide(&mut self.dash, translate_key(ev)) {
@@ -2587,6 +3004,8 @@ impl Render for Dashboard {
             ),
             Screen::Files => "OpenCrabs \u{b7} files".to_string(),
             Screen::Themes => "OpenCrabs \u{b7} themes".to_string(),
+            Screen::Models => "OpenCrabs \u{b7} models".to_string(),
+            Screen::Onboard => "OpenCrabs \u{b7} onboarding".to_string(),
             Screen::Chat => format!(
                 "OpenCrabs \u{b7} {}",
                 self.session_title().unwrap_or("chat")
@@ -2808,6 +3227,1158 @@ impl Render for Dashboard {
                             .text_xs()
                             .text_color(rgb(palette::current().text_muted))
                             .child("ctrl+h · help"),
+                    );
+                (scroller.into_any_element(), footer.into_any_element())
+            }
+            Screen::Onboard => match self.onboard.as_mut() {
+                None => {
+                    // Unreachable through the door: `open_onboard` builds the
+                    // wizard before it shows the screen. A window in this state
+                    // says so instead of drawing a blank pane.
+                    let shown = palette::current();
+                    (
+                        div()
+                            .flex_1()
+                            .p_6()
+                            .child(text(
+                                "The wizard is closed. Type /onboard to open it.",
+                                Size::Sm,
+                                shown.text_muted,
+                            ))
+                            .into_any_element(),
+                        div().into_any_element(),
+                    )
+                }
+                Some(ob) => {
+                    let shown = palette::current();
+                    let (number, total) = ob.progress();
+                    // The rail is the flow the current mode walks, with the
+                    // step the user stands on marked. Channel sub-steps are
+                    // reached from Channels and are not stops.
+                    let mut rail = div().flex().flex_col().gap_1().w(px(190.0)).pr_5();
+                    for (n, title, here) in ob.rail() {
+                        rail = rail.child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap_2()
+                                .child(text(
+                                    format!("{n:>2}"),
+                                    Size::Xs,
+                                    if here { shown.amber } else { shown.text_faint },
+                                ))
+                                .child(text(
+                                    title,
+                                    Size::Sm,
+                                    if here {
+                                        shown.text_strong
+                                    } else {
+                                        shown.text_muted
+                                    },
+                                )),
+                        );
+                    }
+                    let mut column = div().flex().flex_col().gap_3().flex_1().min_h_0().w_full();
+                    column = column.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(text(
+                                format!("step {number} of {total}"),
+                                Size::Xs,
+                                shown.text_faint,
+                            ))
+                            .child(text(ob.title(), Size::Xl, shown.text_title)),
+                    );
+
+                    if ob.step() == onboard::OnboardingStep::ProviderAuth {
+                        // The pair this step is pointed at, above the list: the
+                        // one line that answers "what will this window answer
+                        // with" without reading two lists.
+                        column = column.child(text(
+                            format!("{} · {}", ob.provider_id(), ob.model()),
+                            Size::Xs,
+                            shown.text_faint,
+                        ));
+                        // The provider list, the help the terminal shows under
+                        // it, then the fields that provider needs. Every row is
+                        // a real click: nothing here is a label pretending.
+                        // A window over the list, not the whole list. The
+                        // terminal windows this exact list (`visible_window`)
+                        // because every provider painted pushed the fields
+                        // below it off screen. The arrows walk all of them and
+                        // the counts say what is out of view.
+                        let selected = ob.wizard.ps.selected_provider;
+                        let (provider_rows, hidden_above, hidden_below) = ob.provider_rows(14);
+                        let mut list = div().flex().flex_col().gap_1().w_full();
+                        if hidden_above > 0 {
+                            list = list.child(text(
+                                format!("\u{2191} {hidden_above} more"),
+                                Size::Xs,
+                                shown.text_faint,
+                            ));
+                        }
+                        for (index, info) in provider_rows {
+                            let here = index == selected;
+                            let mut row = div()
+                                .id(SharedString::from(format!("onboard-provider-{index}")))
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap_2()
+                                .px_3()
+                                .py_2()
+                                .rounded(px(6.0))
+                                .child(text(
+                                    if here { "\u{25cf}" } else { " " },
+                                    Size::Sm,
+                                    if here { shown.amber } else { shown.text_muted },
+                                ))
+                                .child(text(
+                                    info.name,
+                                    Size::Sm,
+                                    if here { shown.text_strong } else { shown.text },
+                                ));
+                            if here {
+                                row = row.bg(rgb(shown.panel_hi));
+                            }
+                            list = list.child(row.on_click(cx.listener(
+                                move |this, _ev, _window, cx| {
+                                    if let Some(ob) = this.onboard.as_mut() {
+                                        ob.select_provider(index);
+                                    }
+                                    cx.notify();
+                                },
+                            )));
+                        }
+                        column = column.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(text("provider", Size::Xs, shown.text_faint))
+                                .child(div().id("onboard-providers").w_full().child(list).child(
+                                    if hidden_below > 0 {
+                                        text(
+                                            format!("\u{2193} {hidden_below} more below"),
+                                            Size::Xs,
+                                            shown.text_faint,
+                                        )
+                                    } else {
+                                        text("", Size::Xs, shown.text_faint)
+                                    },
+                                )),
+                        );
+
+                        let mut help = div().flex().flex_col().gap_1();
+                        for line in ob.help_lines() {
+                            help = help.child(text(*line, Size::Xs, shown.text_muted));
+                        }
+                        column = column.child(help);
+
+                        if let Some(key_field) = ob.key_field() {
+                            let focused = ob.field == key_field;
+                            let saved = ob.wizard.ps.api_key_input
+                                == opencrabs::tui::onboarding::EXISTING_KEY_SENTINEL;
+                            let value = if ob.wizard.ps.api_key_input.is_empty() {
+                                "paste the key".to_string()
+                            } else if saved {
+                                "a key is already saved \u{2014} type to replace it".to_string()
+                            } else {
+                                ob.wizard.ps.api_key_input.clone()
+                            };
+                            column = column.child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(text(
+                                        ob.key_label().to_string(),
+                                        Size::Xs,
+                                        shown.text_faint,
+                                    ))
+                                    .child(
+                                        div()
+                                            .id("onboard-key")
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .px_3()
+                                            .py_2()
+                                            .rounded(px(6.0))
+                                            .bg(rgb(if focused {
+                                                shown.panel_hi
+                                            } else {
+                                                shown.panel
+                                            }))
+                                            .border_1()
+                                            .border_color(rgb(if focused {
+                                                shown.focus
+                                            } else {
+                                                shown.track
+                                            }))
+                                            .child(text(
+                                                value,
+                                                Size::Sm,
+                                                if ob.wizard.ps.api_key_input.is_empty() || saved {
+                                                    shown.text_faint
+                                                } else {
+                                                    shown.text
+                                                },
+                                            ))
+                                            .child(text(
+                                                if focused { "\u{258f}" } else { "" },
+                                                Size::Sm,
+                                                shown.amber,
+                                            ))
+                                            .on_click(cx.listener(
+                                                move |this, _ev, _window, cx| {
+                                                    if let Some(ob) = this.onboard.as_mut() {
+                                                        ob.field = key_field;
+                                                    }
+                                                    cx.notify();
+                                                },
+                                            )),
+                                    ),
+                            );
+                        }
+
+                        if ob.wizard.ps.is_custom() {
+                            let base = 2 + usize::from(ob.key_needed());
+                            let fields = [
+                                ("name", ob.wizard.ps.custom_name.clone(), base),
+                                ("base url", ob.wizard.ps.base_url.clone(), base + 1),
+                                ("model", ob.wizard.ps.custom_model.clone(), base + 2),
+                            ];
+                            for (label, value, field) in fields {
+                                let focused = ob.field == field;
+                                column = column.child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .child(text(label, Size::Xs, shown.text_faint))
+                                        .child(
+                                            div()
+                                                .id(SharedString::from(format!(
+                                                    "onboard-custom-{field}"
+                                                )))
+                                                .flex()
+                                                .flex_row()
+                                                .items_center()
+                                                .px_3()
+                                                .py_2()
+                                                .rounded(px(6.0))
+                                                .bg(rgb(if focused {
+                                                    shown.panel_hi
+                                                } else {
+                                                    shown.panel
+                                                }))
+                                                .border_1()
+                                                .border_color(rgb(if focused {
+                                                    shown.focus
+                                                } else {
+                                                    shown.track
+                                                }))
+                                                .child(text(
+                                                    if value.is_empty() {
+                                                        "\u{2014}".to_string()
+                                                    } else {
+                                                        value
+                                                    },
+                                                    Size::Sm,
+                                                    if focused {
+                                                        shown.text
+                                                    } else {
+                                                        shown.text_normal
+                                                    },
+                                                ))
+                                                .child(text(
+                                                    if focused { "\u{258f}" } else { "" },
+                                                    Size::Sm,
+                                                    shown.amber,
+                                                ))
+                                                .on_click(cx.listener(
+                                                    move |this, _ev, _window, cx| {
+                                                        if let Some(ob) = this.onboard.as_mut() {
+                                                            ob.field = field;
+                                                        }
+                                                        cx.notify();
+                                                    },
+                                                )),
+                                        ),
+                                );
+                            }
+                        }
+
+                        // The model list: the provider's own catalogue, or the
+                        // config's fallback, filtered by whatever is typed in
+                        // the search row above it.
+                        let models = ob.models();
+                        let chosen = ob.model();
+                        let search_focused = ob.field == ob.search_field();
+                        // Same window as the provider list: ten models painted
+                        // whole is fine, a hundred is not, and the selection
+                        // has to stay in view when the arrows move.
+                        let (visible_models, hidden_models_above, hidden_models_below) =
+                            ob.model_rows(14);
+                        let mut model_rows = div().flex().flex_col().gap_1().w_full();
+                        if hidden_models_above > 0 {
+                            model_rows = model_rows.child(text(
+                                format!("\u{2191} {hidden_models_above} more"),
+                                Size::Xs,
+                                shown.text_faint,
+                            ));
+                        }
+                        for (index, name) in visible_models.iter() {
+                            // Copied out of the borrow: the click closure has to
+                            // own the index, or it pins the whole row list.
+                            let index = *index;
+                            let here = *name == chosen;
+                            let mut row = div()
+                                .id(SharedString::from(format!("onboard-model-{index}")))
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap_2()
+                                .px_3()
+                                .py_1()
+                                .rounded(px(6.0))
+                                .child(text(
+                                    if here { "\u{25cf}" } else { " " },
+                                    Size::Sm,
+                                    if here { shown.amber } else { shown.text_muted },
+                                ))
+                                .child(text(
+                                    name.clone(),
+                                    Size::Sm,
+                                    if here { shown.text_strong } else { shown.text },
+                                ));
+                            if here {
+                                row = row.bg(rgb(shown.panel_hi));
+                            }
+                            model_rows = model_rows.child(row.on_click(cx.listener(
+                                move |this, _ev, _window, cx| {
+                                    if let Some(ob) = this.onboard.as_mut() {
+                                        ob.wizard.ps.selected_model = index;
+                                    }
+                                    cx.notify();
+                                },
+                            )));
+                        }
+                        column = column.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(text(
+                                    if ob.is_fetching() {
+                                        "model \u{b7} fetching the provider catalogue".to_string()
+                                    } else {
+                                        format!("model \u{b7} {} available", models.len())
+                                    },
+                                    Size::Xs,
+                                    shown.text_faint,
+                                ))
+                                .child(
+                                    div()
+                                        .id("onboard-search")
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .px_3()
+                                        .py_2()
+                                        .rounded(px(6.0))
+                                        .bg(rgb(if search_focused {
+                                            shown.panel_hi
+                                        } else {
+                                            shown.panel
+                                        }))
+                                        .border_1()
+                                        .border_color(rgb(if search_focused {
+                                            shown.focus
+                                        } else {
+                                            shown.track
+                                        }))
+                                        .child(text(
+                                            if ob.wizard.ps.model_filter.is_empty() {
+                                                "search the list".to_string()
+                                            } else {
+                                                ob.wizard.ps.model_filter.clone()
+                                            },
+                                            Size::Sm,
+                                            if ob.wizard.ps.model_filter.is_empty() {
+                                                shown.text_faint
+                                            } else {
+                                                shown.text
+                                            },
+                                        ))
+                                        .child(text(
+                                            if search_focused { "\u{258f}" } else { "" },
+                                            Size::Sm,
+                                            shown.amber,
+                                        ))
+                                        .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                            if let Some(ob) = this.onboard.as_mut() {
+                                                let field = ob.search_field();
+                                                ob.field = field;
+                                            }
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    div().id("onboard-models").w_full().child(model_rows).child(
+                                        if hidden_models_below > 0 {
+                                            text(
+                                                format!(
+                                                    "\u{2193} {hidden_models_below} more below"
+                                                ),
+                                                Size::Xs,
+                                                shown.text_faint,
+                                            )
+                                        } else {
+                                            text("", Size::Xs, shown.text_faint)
+                                        },
+                                    ),
+                                ),
+                        );
+                    } else if ob.step() == onboard::OnboardingStep::ModeSelect {
+                        // The first choice the terminal asks: how much of the
+                        // flow to walk. Same two options, same step counts, so
+                        // the promise here matches the progress counter.
+                        let current = ob.mode();
+                        let mut choices = div().flex().flex_col().gap_2();
+                        for (mode, title, note) in [
+                            (
+                                onboard::WizardMode::QuickStart,
+                                "QuickStart",
+                                format!(
+                                    "sensible defaults, {} steps",
+                                    onboard::OnboardingStep::quick_total()
+                                ),
+                            ),
+                            (
+                                onboard::WizardMode::Advanced,
+                                "Advanced",
+                                format!(
+                                    "full control, all {} steps",
+                                    onboard::OnboardingStep::total()
+                                ),
+                            ),
+                        ] {
+                            let here = current == mode;
+                            choices = choices.child(
+                                div()
+                                    .id(SharedString::from(format!("onboard-mode-{title}")))
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_2()
+                                    .px_3()
+                                    .py_2()
+                                    .rounded(px(6.0))
+                                    .bg(rgb(if here { shown.panel_hi } else { shown.panel }))
+                                    .border_1()
+                                    .border_color(rgb(if here { shown.focus } else { shown.track }))
+                                    .child(text(
+                                        if here { "\u{25cf}" } else { "\u{25cb}" },
+                                        Size::Sm,
+                                        if here { shown.amber } else { shown.text_faint },
+                                    ))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap_1()
+                                            .child(text(
+                                                title,
+                                                Size::Sm,
+                                                if here { shown.text_strong } else { shown.text },
+                                            ))
+                                            .child(text(note, Size::Xs, shown.text_muted)),
+                                    )
+                                    .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                        if let Some(ob) = this.onboard.as_mut() {
+                                            ob.set_mode(mode);
+                                        }
+                                        cx.notify();
+                                    })),
+                            );
+                        }
+                        column = column.child(choices);
+                    } else if ob.step() == opencrabs::tui::onboarding::OnboardingStep::HealthCheck {
+                        // The terminal spreads these checks over ticks so a
+                        // Pending row is visible for one frame. The window
+                        // resolves them on the click and paints the verdicts,
+                        // which is the part anyone came for.
+                        let results = ob.health().to_vec();
+                        let complete = ob.health_complete();
+                        let passed = ob.all_health_passed();
+                        let mut rows = div().flex().flex_col().gap_1();
+                        if results.is_empty() {
+                            rows = rows.child(text(
+                                "The checks have not run yet.",
+                                Size::Sm,
+                                shown.text_muted,
+                            ));
+                        }
+                        for (label, status) in results {
+                            let (mark, colour, detail) = match status {
+                                opencrabs::tui::onboarding::HealthStatus::Pending => {
+                                    ("\u{25cb}", shown.text_faint, None)
+                                }
+                                opencrabs::tui::onboarding::HealthStatus::Running => {
+                                    ("\u{25cb}", shown.amber, None)
+                                }
+                                opencrabs::tui::onboarding::HealthStatus::Pass => {
+                                    ("\u{2713}", shown.green, None)
+                                }
+                                opencrabs::tui::onboarding::HealthStatus::Fail(reason) => {
+                                    ("\u{2717}", shown.red, Some(reason))
+                                }
+                            };
+                            let mut row = div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .px_3()
+                                .py_2()
+                                .rounded(px(6.0))
+                                .bg(rgb(shown.panel))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(text(mark, Size::Sm, colour))
+                                        .child(text(label, Size::Sm, shown.text)),
+                                );
+                            if let Some(reason) = detail {
+                                row = row.child(text(reason, Size::Xs, shown.text_muted));
+                            }
+                            rows = rows.child(row);
+                        }
+                        column = column.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(text("checks", Size::Xs, shown.text_faint))
+                                .child(rows),
+                        );
+                        // The terminal ends the list with a verdict, so a
+                        // clean run reads as one sentence and not as six
+                        // marks the user has to add up.
+                        if complete {
+                            let (verdict, colour) = if passed {
+                                ("All checks passed!", shown.green)
+                            } else {
+                                ("Some checks failed.", shown.red)
+                            };
+                            column = column.child(text(verdict, Size::Sm, colour));
+                        }
+                        column = column.child(
+                            div()
+                                .id("onboard-health-run")
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap_2()
+                                .px_3()
+                                .py_2()
+                                .rounded(px(6.0))
+                                .bg(rgb(shown.panel_hi))
+                                .child(text(
+                                    if complete {
+                                        "run the checks again"
+                                    } else {
+                                        "run the checks"
+                                    },
+                                    Size::Sm,
+                                    shown.text_strong,
+                                ))
+                                .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                    if let Some(ob) = this.onboard.as_mut() {
+                                        ob.run_health();
+                                    }
+                                    cx.notify();
+                                })),
+                        );
+                    } else {
+                        if ob.is_channel_step() {
+                            // The setup steps, verbatim from the terminal, so
+                            // a window user is told where to create the bot
+                            // instead of hunting for it.
+                            let help_lines = ob.channel_help();
+                            if !help_lines.is_empty() {
+                                let mut help = div().flex().flex_col().gap_1();
+                                for line in help_lines {
+                                    help = help.child(text(*line, Size::Xs, shown.text_muted));
+                                }
+                                column = column.child(help);
+                            }
+                            // The terminal's own channel list. Toggling a row
+                            // here is the same flip the terminal makes, and the
+                            // fields each enabled channel asks for are painted
+                            // underneath from the shared slot table.
+                            let mut list = div().flex().flex_col().gap_1();
+                            for (index, (name, description, on)) in
+                                ob.channels().into_iter().enumerate()
+                            {
+                                // The row the keyboard stands on is the row
+                                // Space flips, so it has to be visible.
+                                let focused = ob.field == index;
+                                let mut row = div()
+                                    .id(SharedString::from(format!("onboard-channel-{index}")))
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_2()
+                                    .px_3()
+                                    .py_2()
+                                    .rounded(px(6.0))
+                                    .child(text(
+                                        if focused { "\u{25b8}" } else { " " },
+                                        Size::Xs,
+                                        if focused {
+                                            shown.amber
+                                        } else {
+                                            shown.text_faint
+                                        },
+                                    ))
+                                    .child(text(
+                                        if on { "\u{2713}" } else { "\u{25cb}" },
+                                        Size::Sm,
+                                        if on { shown.green } else { shown.text_faint },
+                                    ))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap_1()
+                                            .child(text(
+                                                name,
+                                                Size::Sm,
+                                                if on { shown.text_strong } else { shown.text },
+                                            ))
+                                            .child(text(description, Size::Xs, shown.text_muted)),
+                                    );
+                                if focused {
+                                    row = row.bg(rgb(shown.panel_hi));
+                                }
+                                list = list.child(row.on_click(cx.listener(
+                                    move |this, _ev, _window, cx| {
+                                        if let Some(ob) = this.onboard.as_mut() {
+                                            ob.field = index;
+                                            ob.toggle_channel(index);
+                                        }
+                                        cx.notify();
+                                    },
+                                )));
+                            }
+                            column = column.child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(text("channels", Size::Xs, shown.text_faint))
+                                    .child(list),
+                            );
+                        }
+
+                        if ob.step() == onboard::OnboardingStep::VoiceSetup {
+                            // The terminal asks this step as a radio choice first
+                            // and only then shows the fields that choice needs. Same
+                            // options, same labels, same order.
+                            let mut rows = div().flex().flex_col().gap_1();
+                            for (provider, label, here) in ob.stt_options() {
+                                rows = rows.child(
+                                    div()
+                                        .id(SharedString::from(format!("onboard-stt-{label}")))
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap_2()
+                                        .px_3()
+                                        .py_2()
+                                        .rounded(px(6.0))
+                                        .bg(rgb(if here { shown.panel_hi } else { shown.panel }))
+                                        .child(text(
+                                            if here { "\u{25cf}" } else { "\u{25cb}" },
+                                            Size::Sm,
+                                            if here { shown.amber } else { shown.text_faint },
+                                        ))
+                                        .child(text(
+                                            label,
+                                            Size::Sm,
+                                            if here { shown.text_strong } else { shown.text },
+                                        ))
+                                        .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                            if let Some(ob) = this.onboard.as_mut() {
+                                                ob.set_stt_provider(provider);
+                                            }
+                                            cx.notify();
+                                        })),
+                                );
+                            }
+                            column = column.child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(text("transcription", Size::Xs, shown.text_faint))
+                                    .child(rows),
+                            );
+
+                            let mut rows = div().flex().flex_col().gap_1();
+                            for (provider, label, here) in ob.tts_options() {
+                                rows = rows.child(
+                                    div()
+                                        .id(SharedString::from(format!("onboard-tts-{label}")))
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap_2()
+                                        .px_3()
+                                        .py_2()
+                                        .rounded(px(6.0))
+                                        .bg(rgb(if here { shown.panel_hi } else { shown.panel }))
+                                        .child(text(
+                                            if here { "\u{25cf}" } else { "\u{25cb}" },
+                                            Size::Sm,
+                                            if here { shown.amber } else { shown.text_faint },
+                                        ))
+                                        .child(text(
+                                            label,
+                                            Size::Sm,
+                                            if here { shown.text_strong } else { shown.text },
+                                        ))
+                                        .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                            if let Some(ob) = this.onboard.as_mut() {
+                                                ob.set_tts_provider(provider);
+                                            }
+                                            cx.notify();
+                                        })),
+                                );
+                            }
+                            column = column.child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(text("speech", Size::Xs, shown.text_faint))
+                                    .child(rows),
+                            );
+
+                            // OpenAI TTS is ten voices behind one radio list
+                            // in the terminal, so the window paints the same list
+                            // instead of asking anyone to type a voice name blind.
+                            if ob.wizard.tts_provider
+                                == opencrabs::tui::onboarding::TtsProvider::OpenAi
+                            {
+                                let mut voices = div().flex().flex_col().gap_1();
+                                for (voice, here) in ob.tts_voice_options() {
+                                    voices = voices.child(
+                                        div()
+                                            .id(SharedString::from(format!(
+                                                "onboard-tts-voice-{voice}"
+                                            )))
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap_2()
+                                            .px_3()
+                                            .py_1()
+                                            .rounded(px(6.0))
+                                            .bg(rgb(if here {
+                                                shown.panel_hi
+                                            } else {
+                                                shown.panel
+                                            }))
+                                            .child(text(
+                                                if here { "\u{25cf}" } else { "\u{25cb}" },
+                                                Size::Sm,
+                                                if here { shown.amber } else { shown.text_faint },
+                                            ))
+                                            .child(text(
+                                                voice,
+                                                Size::Sm,
+                                                if here { shown.text_strong } else { shown.text },
+                                            ))
+                                            .on_click(cx.listener(
+                                                move |this, _ev, _window, cx| {
+                                                    if let Some(ob) = this.onboard.as_mut() {
+                                                        ob.set_tts_voice(voice);
+                                                    }
+                                                    cx.notify();
+                                                },
+                                            )),
+                                    );
+                                }
+                                column = column.child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .child(text("voice", Size::Xs, shown.text_faint))
+                                        .child(voices),
+                                );
+                            }
+
+                            for note in ob.voice_notes() {
+                                column = column.child(text(note, Size::Xs, shown.text_muted));
+                            }
+                        }
+
+                        if ob.step() == onboard::OnboardingStep::ImageSetup {
+                            // The terminal names the house provider above the
+                            // switches, so the window says the same thing.
+                            column = column.child(text(
+                                "provider \u{b7} google \u{b7} nano banana",
+                                Size::Xs,
+                                shown.text_faint,
+                            ));
+                            // Two switches the terminal asks for on this step: read
+                            // images sent to a channel, and generate images on
+                            // request. Both are stored as their own config keys.
+                            for (label, note, on, target) in [
+                                (
+                                    "understand images",
+                                    "look at a picture sent in a chat",
+                                    ob.image_vision(),
+                                    onboard::ImageToggle::Vision,
+                                ),
+                                (
+                                    "generate images",
+                                    "draw a picture from a prompt",
+                                    ob.image_generation(),
+                                    onboard::ImageToggle::Generation,
+                                ),
+                            ] {
+                                column = column.child(
+                                    div()
+                                        .id(SharedString::from(format!("onboard-image-{label}")))
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap_2()
+                                        .px_3()
+                                        .py_2()
+                                        .rounded(px(6.0))
+                                        .bg(rgb(shown.panel))
+                                        .child(text(
+                                            if on { "\u{2713}" } else { "\u{25cb}" },
+                                            Size::Sm,
+                                            if on { shown.green } else { shown.text_faint },
+                                        ))
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .flex_col()
+                                                .gap_1()
+                                                .child(text(label, Size::Sm, shown.text))
+                                                .child(text(note, Size::Xs, shown.text_muted)),
+                                        )
+                                        .on_click(cx.listener(move |_this, _ev, _window, cx| {
+                                            if let Some(ob) = _this.onboard.as_mut() {
+                                                ob.toggle_image(target);
+                                            }
+                                            cx.notify();
+                                        })),
+                                );
+                            }
+                        }
+
+                        if ob.step() == opencrabs::tui::onboarding::OnboardingStep::Daemon {
+                            let on = ob.install_daemon();
+                            column = column.child(
+                                div()
+                                    .id("onboard-daemon")
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_2()
+                                    .px_3()
+                                    .py_2()
+                                    .rounded(px(6.0))
+                                    .bg(rgb(shown.panel))
+                                    .child(text(
+                                        if on { "\u{2713}" } else { "\u{25cb}" },
+                                        Size::Sm,
+                                        if on { shown.green } else { shown.text_faint },
+                                    ))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap_1()
+                                            .child(text(
+                                                format!("install as {}", ob.daemon_platform()),
+                                                Size::Sm,
+                                                shown.text,
+                                            ))
+                                            .child(text(
+                                                "so OpenCrabs keeps answering with no window or terminal open",
+                                                Size::Xs,
+                                                shown.text_muted,
+                                            )),
+                                    )
+                                    .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                        if let Some(ob) = this.onboard.as_mut() {
+                                            ob.toggle_daemon();
+                                        }
+                                        cx.notify();
+                                    })),
+                            );
+                        }
+
+                        // Text rows come from the wizard's own slot table, so a
+                        // row's label and the string it edits cannot drift.
+                        let mut fields = div().flex().flex_col().gap_2();
+                        for (label, target) in ob.slots() {
+                            let focused = ob.focused_text() == Some(target);
+                            let value = ob.text_mut(target).clone();
+                            let saved = value == opencrabs::tui::onboarding::EXISTING_KEY_SENTINEL;
+                            let (painted, faint) = if saved {
+                                (
+                                    "a key is already saved, type to replace it".to_string(),
+                                    true,
+                                )
+                            } else if value.is_empty() {
+                                // An empty generation model is not "nothing":
+                                // the step falls back to a specific model, so
+                                // the row names it instead of playing blank.
+                                match target {
+                                    onboard::TextTarget::ImageModel => (
+                                        format!(
+                                            "{} (default)",
+                                            onboard::Onboard::default_image_model()
+                                        ),
+                                        true,
+                                    ),
+                                    _ => ("type here".to_string(), true),
+                                }
+                            } else {
+                                (value, false)
+                            };
+                            fields = fields.child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(text(label, Size::Xs, shown.text_faint))
+                                    .child(
+                                        div()
+                                            .id(SharedString::from(format!(
+                                                "onboard-field-{label}"
+                                            )))
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .px_3()
+                                            .py_2()
+                                            .rounded(px(6.0))
+                                            .bg(rgb(if focused {
+                                                shown.panel_hi
+                                            } else {
+                                                shown.panel
+                                            }))
+                                            .border_1()
+                                            .border_color(rgb(if focused {
+                                                shown.focus
+                                            } else {
+                                                shown.track
+                                            }))
+                                            .child(text(
+                                                painted,
+                                                Size::Sm,
+                                                if faint { shown.text_faint } else { shown.text },
+                                            ))
+                                            .child(text(
+                                                if focused { "\u{258f}" } else { "" },
+                                                Size::Sm,
+                                                shown.amber,
+                                            ))
+                                            .on_click(cx.listener(
+                                                move |this, _ev, _window, cx| {
+                                                    if let Some(ob) = this.onboard.as_mut() {
+                                                        ob.focus_text(target);
+                                                    }
+                                                    cx.notify();
+                                                },
+                                            )),
+                                    ),
+                            );
+                        }
+                        column = column.child(fields);
+                    }
+
+                    if ob.step() == opencrabs::tui::onboarding::OnboardingStep::BrainSetup {
+                        // The step does work before it can move, so it says
+                        // where that work stands instead of looking like a
+                        // text field that does nothing on Enter.
+                        let (mark, colour, note) = if ob.brain_generating() {
+                            ("\u{25cb}", shown.amber, "writing your brain files")
+                        } else if ob.brain_generated() {
+                            ("\u{2713}", shown.green, "your brain files are written")
+                        } else if let Some(why) = ob.brain_error() {
+                            ("\u{2717}", shown.red, why)
+                        } else {
+                            (
+                                "\u{25cb}",
+                                shown.text_faint,
+                                "enter writes them from the words above",
+                            )
+                        };
+                        column = column.child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap_2()
+                                .px_3()
+                                .py_2()
+                                .rounded(px(6.0))
+                                .bg(rgb(shown.panel))
+                                .child(text(mark, Size::Sm, colour))
+                                .child(text(note.to_string(), Size::Sm, colour)),
+                        );
+                    }
+
+                    if let Some(err) = ob.error() {
+                        column = column.child(
+                            div()
+                                .px_3()
+                                .py_2()
+                                .rounded(px(6.0))
+                                .bg(rgb(shown.panel))
+                                .border_1()
+                                .border_color(rgb(shown.red))
+                                .child(text(err.to_string(), Size::Sm, shown.red)),
+                        );
+                    }
+
+                    let footer = div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .w_full()
+                        .child(div().text_xs().text_color(rgb(shown.text_muted)).child(
+                            if ob.is_channel_step() {
+                                // Space is the key that flips a channel here,
+                                // so the hint names it instead of "save".
+                                "space \u{b7} toggle \u{b7} enter \u{b7} continue \u{b7} esc \u{b7} back"
+                            } else if ob.step()
+                                == opencrabs::tui::onboarding::OnboardingStep::BrainSetup
+                            {
+                                // This step writes files before it moves, so
+                                // the hint says what Enter starts.
+                                "enter \u{b7} write my brain files \u{b7} esc \u{b7} back"
+                            } else if ob.wizard.quick_jump {
+                                "enter \u{b7} save \u{b7} esc \u{b7} close"
+                            } else {
+                                "enter \u{b7} continue \u{b7} esc \u{b7} back"
+                            },
+                        ))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(shown.text_muted))
+                                .child("tab \u{b7} next field \u{b7} arrows \u{b7} walk"),
+                        );
+                    (
+                        div()
+                            .flex()
+                            .flex_row()
+                            .flex_1()
+                            .min_h_0()
+                            .child(rail)
+                            .child(
+                                div()
+                                    .id("onboard-body")
+                                    .flex_1()
+                                    .min_h_0()
+                                    .overflow_y_scroll()
+                                    .child(column),
+                            )
+                            .into_any_element(),
+                        footer.into_any_element(),
+                    )
+                }
+            },
+            Screen::Models => {
+                // Every pair the terminal offers, the live one marked. Enter
+                // switches to the row under the highlight and stays, so a user
+                // can compare without reopening; Esc goes back.
+                let shown = palette::current();
+                let last = self.models_rows.len().saturating_sub(1);
+                let current = self.models_index.min(last);
+                let mut list = div().flex().flex_col().gap_1();
+                for (index, row) in self.models_rows.iter().enumerate() {
+                    let pair = row.pair();
+                    let selected = index == current;
+                    let mut entry = div()
+                        .id(SharedString::from(format!("model-row-{index}")))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .px_3()
+                        .py_2()
+                        .rounded(px(6.0))
+                        .child(text(
+                            if row.current { "\u{25cf}" } else { " " },
+                            Size::Sm,
+                            if row.current {
+                                shown.amber
+                            } else {
+                                shown.text_muted
+                            },
+                        ))
+                        .child(text(pair, Size::Sm, shown.text))
+                        .child(text(row.provider_name.clone(), Size::Xs, shown.text_muted));
+                    if selected {
+                        entry = entry.bg(rgb(shown.panel_hi));
+                    }
+                    list =
+                        list.child(entry.on_click(cx.listener(move |this, _ev, _window, cx| {
+                            this.models_index = index;
+                            let pair = this
+                                .models_rows
+                                .get(index)
+                                .map(models::Row::pair)
+                                .unwrap_or_default();
+                            this.switch_model(pair, cx);
+                        })));
+                }
+                let scroller = div()
+                    .id("models-body")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(list);
+                let count = self.models_rows.len();
+                let footer = div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .w_full()
+                    .child(div().text_xs().text_color(rgb(shown.text_muted)).child(
+                        SharedString::from(format!(
+                            "{count} model{}",
+                            if count == 1 { "" } else { "s" }
+                        )),
+                    ))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(shown.text_muted))
+                            .child("enter \u{b7} switch \u{b7} esc \u{b7} back"),
                     );
                 (scroller.into_any_element(), footer.into_any_element())
             }
@@ -3112,6 +4683,8 @@ impl Render for Dashboard {
             Screen::Usage => right.child(footer),
             Screen::Files => right.child(footer),
             Screen::Themes => right.child(footer),
+            Screen::Models => right.child(footer),
+            Screen::Onboard => right.child(footer),
         };
 
         let mut root = div()
@@ -3574,6 +5147,9 @@ fn main() {
                         themes_pick: None,
                         themes_index: 0,
                         themes_history: Vec::new(),
+                        models_rows: Vec::new(),
+                        models_index: 0,
+                        onboard: None,
                         plan: plan_strip::PlanStripState::default(),
                         plan_for: None,
                         transcript: transcript::TranscriptState {

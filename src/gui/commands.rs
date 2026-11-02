@@ -36,6 +36,12 @@ pub enum GuiAction {
     StopTurn,
     /// The sessions rail: the window's own list of conversations.
     OpenSessions,
+    /// The model picker, or a switch when the line named a pair.
+    OpenModels,
+    /// The onboarding wizard, opened at the step this command names
+    /// (`/channels`, `/voice`, `/daemon`, ...). The name travels with the
+    /// action so each door lands on its own step and no two share an arm.
+    OpenOnboard(&'static str),
     /// Close the window.
     Quit,
 }
@@ -45,6 +51,10 @@ pub enum GuiAction {
 pub enum Outcome {
     /// Run this and stop: the line never becomes a turn.
     Run(GuiAction),
+    /// Run this with the text after the command, kept as typed. `/models
+    /// openai/gpt-5` is the same action as a bare `/models`, but the pair has
+    /// to travel with it or the switch has nothing to switch to.
+    RunWith(GuiAction, String),
     /// A command the terminal answers and this window has no screen for.
     /// Carries the canonical name, so the line can name it back.
     Missing(&'static str),
@@ -67,7 +77,15 @@ pub fn parse_command(input: &str) -> Option<Outcome> {
     let invocation = commands::parse(input)?;
     Some(match commands::support(&invocation.name) {
         Support::Runs => match commands::lookup(&invocation.name) {
-            Some(cmd) => Outcome::Run(action_for(cmd.name)),
+            Some(cmd) => {
+                let action = action_for(cmd.name);
+                let arg = invocation.arg.trim();
+                if takes_argument(action) && !arg.is_empty() {
+                    Outcome::RunWith(action, arg.to_string())
+                } else {
+                    Outcome::Run(action)
+                }
+            }
             // `support` said Runs, so `lookup` returning nothing would mean the
             // two disagree. Saying "unknown" is the safe read; the parity test
             // in this module fails first if it ever happens.
@@ -101,6 +119,14 @@ fn action_for(name: &str) -> GuiAction {
         "/new" => GuiAction::NewSession,
         "/stop" => GuiAction::StopTurn,
         "/sessions" => GuiAction::OpenSessions,
+        "/models" => GuiAction::OpenModels,
+        "/onboard" => GuiAction::OpenOnboard("/onboard"),
+        "/channels" => GuiAction::OpenOnboard("/channels"),
+        "/voice" => GuiAction::OpenOnboard("/voice"),
+        "/image" => GuiAction::OpenOnboard("/image"),
+        "/daemon" => GuiAction::OpenOnboard("/daemon"),
+        "/brain" => GuiAction::OpenOnboard("/brain"),
+        "/doctor" => GuiAction::OpenOnboard("/doctor"),
         "/exit" => GuiAction::Quit,
         // Unreachable through `parse_command`: only names that `support`
         // reports as Runs arrive here. Opening the ledger is the closest thing
@@ -109,12 +135,23 @@ fn action_for(name: &str) -> GuiAction {
     }
 }
 
+/// Whether an action reads the text after the command. The
+/// `/models provider/model` switch is the first one that does.
+fn takes_argument(action: GuiAction) -> bool {
+    // `/channels whatsapp` opens that channel's dialog instead of the menu, the
+    // same argument the terminal reads off the full line (#271).
+    matches!(
+        action,
+        GuiAction::OpenModels | GuiAction::OpenOnboard("/channels")
+    )
+}
+
 /// The line the transcript shows for an outcome that does not act.
 ///
 /// `Run` produces nothing: the action itself is the answer.
 pub fn message(outcome: &Outcome) -> Option<String> {
     match outcome {
-        Outcome::Run(_) => None,
+        Outcome::Run(_) | Outcome::RunWith(..) => None,
         Outcome::Missing(name) => Some(format!(
             "{name} is a real command, but this window has no screen for it yet. \
              The terminal answers it today."
@@ -173,20 +210,79 @@ mod tests {
             parse_command("/sessions"),
             Some(Outcome::Run(GuiAction::OpenSessions))
         );
+        assert_eq!(
+            parse_command("/models"),
+            Some(Outcome::Run(GuiAction::OpenModels))
+        );
         assert_eq!(parse_command("/exit"), Some(Outcome::Run(GuiAction::Quit)));
+    }
+
+    #[test]
+    fn the_onboard_doors_open_the_step_they_name() {
+        // Each name is its own action carrying its own name: the wizard opens
+        // on `/channels` for /channels, not on the first step.
+        for name in [
+            "/onboard",
+            "/channels",
+            "/voice",
+            "/image",
+            "/daemon",
+            "/brain",
+            "/doctor",
+        ] {
+            assert_eq!(
+                parse_command(name),
+                Some(Outcome::Run(GuiAction::OpenOnboard(name))),
+                "{name}"
+            );
+            assert_eq!(message(&parse_command(name).expect("a command")), None);
+        }
+    }
+
+    #[test]
+    fn models_keeps_the_pair_it_was_given() {
+        // The switch needs the pair: dropping the argument would open a
+        // picker and silently ignore what the user asked for.
+        assert_eq!(
+            parse_command("/models openai/gpt-5"),
+            Some(Outcome::RunWith(
+                GuiAction::OpenModels,
+                "openai/gpt-5".to_string()
+            ))
+        );
+        assert_eq!(
+            parse_command("  /models   openai/gpt-5  "),
+            Some(Outcome::RunWith(
+                GuiAction::OpenModels,
+                "openai/gpt-5".to_string()
+            ))
+        );
+        // A bare name still opens the picker.
+        assert_eq!(
+            parse_command("/models   "),
+            Some(Outcome::Run(GuiAction::OpenModels))
+        );
+        assert_eq!(
+            message(&parse_command("/models x/y").expect("a command")),
+            None
+        );
     }
 
     #[test]
     fn a_real_command_without_a_screen_says_so() {
         // Both are real: the window must not pretend they do not exist, and
-        // must not hand them to the model either.
-        assert_eq!(parse_command("/models"), Some(Outcome::Missing("/models")));
+        // must not hand them to the model either. `/onboard` and the step
+        // commands are no longer in this set; they run in the window now.
         assert_eq!(
-            parse_command("/onboard"),
-            Some(Outcome::Missing("/onboard"))
+            parse_command("/mission-control"),
+            Some(Outcome::Missing("/mission-control"))
         );
-        let line = message(&parse_command("/models").expect("a command")).expect("a line");
-        assert!(line.contains("/models"), "{line}");
+        assert_eq!(
+            parse_command("/compact"),
+            Some(Outcome::Missing("/compact"))
+        );
+        let line = message(&parse_command("/compact").expect("a command")).expect("a line");
+        assert!(line.contains("/compact"), "{line}");
     }
 
     #[test]
