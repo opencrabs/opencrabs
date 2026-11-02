@@ -1377,7 +1377,16 @@ impl Render for Editor {
 /// `img` (gpui loads it from disk, so a broken path shows nothing rather
 /// than a fake tile); videos and every other file get a glyph plus the name.
 fn attachment_strip(attachments: &[Attachment], cx: &mut Context<Editor>) -> Div {
-    let mut strip = div().flex().flex_row().flex_wrap().gap_2();
+    // `w_full().min_w_0()` is what keeps the row inside the composer: without
+    // it the strip sized itself from the chips and ran past the input until
+    // the window clipped it (#2443).
+    let mut strip = div()
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .w_full()
+        .min_w_0()
+        .gap_2();
     for (index, attachment) in attachments.iter().enumerate() {
         let remove = cx.listener(move |this, _ev: &MouseDownEvent, _window, cx| {
             // The ✕ must not also reach the editor: a click there would move
@@ -1396,12 +1405,21 @@ fn attachment_strip(attachments: &[Attachment], cx: &mut Context<Editor>) -> Div
                 cx.emit(EditorEvent::Preview(path.clone()));
             })
         };
+        // The box owns the size and clips the picture, the shape
+        // `transcript::attachment_cell` proved: an `img` that sizes itself
+        // bleeds out of the composer instead of staying in its tile (#2443).
         let art: AnyElement = if attachment.is_image() {
-            img(attachment.path.clone())
+            div()
                 .w(px(34.0))
                 .h(px(34.0))
+                .flex_shrink_0()
+                .overflow_hidden()
                 .rounded(px(4.0))
-                .object_fit(ObjectFit::Cover)
+                .child(
+                    img(attachment.path.clone())
+                        .size_full()
+                        .object_fit(ObjectFit::Cover),
+                )
                 .into_any_element()
         } else {
             div()
@@ -1410,6 +1428,7 @@ fn attachment_strip(attachments: &[Attachment], cx: &mut Context<Editor>) -> Div
                 .justify_center()
                 .w(px(34.0))
                 .h(px(34.0))
+                .flex_shrink_0()
                 .rounded(px(4.0))
                 .bg(rgb(palette::current().bg))
                 .child(if attachment.is_video { "🎬" } else { "📄" })
@@ -1433,12 +1452,16 @@ fn attachment_strip(attachments: &[Attachment], cx: &mut Context<Editor>) -> Div
                 .items_center()
                 .gap_2()
                 .p_1()
+                .min_w_0()
+                .overflow_hidden()
                 .rounded(px(6.0))
                 .bg(rgb(palette::current().panel_hi))
                 .child(tile)
                 .child(
                     div()
                         .max_w(px(160.0))
+                        .min_w_0()
+                        .flex_shrink()
                         .truncate()
                         .text_xs()
                         .text_color(rgb(palette::current().text))
@@ -1447,6 +1470,7 @@ fn attachment_strip(attachments: &[Attachment], cx: &mut Context<Editor>) -> Div
                 .child(
                     div()
                         .id(ElementId::Name(format!("attachment-remove-{index}").into()))
+                        .flex_shrink_0()
                         .cursor_pointer()
                         .text_xs()
                         .text_color(rgb(palette::current().text_faint))
@@ -1756,6 +1780,49 @@ mod tests {
             .and_then(|rest| rest.split("};").next())
             .expect("the preview handler is built in one block");
         assert!(!preview_handler.contains("remove_attachment"));
+    }
+
+    /// #2443: the chips stay inside the composer. An `img` that owns its own
+    /// size bled over the input's corner and ran past the window, so the tile
+    /// is a fixed clipped box, the strip is bounded, and the name is the only
+    /// part allowed to shrink.
+    #[test]
+    fn attachment_chips_stay_inside_the_composer() {
+        let src = include_str!("editor.rs");
+        let strip = src
+            .split("fn attachment_strip(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("attachment_strip is one function");
+        assert!(
+            strip.contains(".w_full()") && strip.contains(".min_w_0()"),
+            "the strip is bounded by the composer instead of its content"
+        );
+        assert!(
+            strip.contains(".overflow_hidden()"),
+            "a chip clips its own contents"
+        );
+        // The picture is drawn inside a box that owns both dimensions; the
+        // bare `img(...).w(...).h(...)` shape is what overflowed.
+        let image_branch = strip
+            .split("if attachment.is_image() {")
+            .nth(1)
+            .and_then(|rest| rest.split("} else {").next())
+            .expect("the image branch is identifiable");
+        assert!(
+            image_branch.contains("img(attachment.path.clone())")
+                && image_branch.contains(".size_full()")
+                && image_branch.contains("ObjectFit::Cover"),
+            "the picture fills a box instead of deciding its own size"
+        );
+        assert!(
+            image_branch.contains(".flex_shrink_0()"),
+            "the tile keeps its 34px box when the row runs out of width"
+        );
+        assert!(
+            strip.contains(".truncate()") && strip.contains(".flex_shrink()"),
+            "the name is what gives way, not the chip"
+        );
     }
 
     /// Real files only: a missing path must not become a chip that lies.
