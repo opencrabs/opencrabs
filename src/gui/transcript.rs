@@ -2115,13 +2115,17 @@ mod tests {
         // renderer as stored turns, so those tiles need the same handlers.
         // Counting only stored rows left a picture sent a second ago tiled
         // but dead until the turn settled.
-        let mut state = TranscriptState::default();
-        state.turns = turns(&[row("user", "old <<IMG:/tmp/old.png>>", 1)], 1).1;
-        let mut live = LiveTurn::default();
-        live.user = Some("fresh <<IMG:/tmp/fresh.png>>".to_string());
+        let state = TranscriptState {
+            turns: turns(&[row("user", "old <<IMG:/tmp/old.png>>", 1)], 1).1,
+            ..Default::default()
+        };
         // A queued message the agent took mid-turn is drawn as a user row too,
         // and it can carry the same file as the stored turn behind it.
-        live.injected = vec!["queued <<IMG:/tmp/old.png>>".to_string()];
+        let live = LiveTurn {
+            user: Some("fresh <<IMG:/tmp/fresh.png>>".to_string()),
+            injected: vec!["queued <<IMG:/tmp/old.png>>".to_string()],
+            ..Default::default()
+        };
 
         let keys = attachment_paths_with_live(&state, &live);
         assert!(
