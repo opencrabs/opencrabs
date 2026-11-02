@@ -33,6 +33,7 @@ mod editor;
 mod icon;
 mod logging;
 mod markdown;
+mod mission_control;
 mod models;
 mod onboard;
 mod palette;
@@ -300,6 +301,19 @@ struct Dashboard {
     files: Vec<agent_bridge::SessionFile>,
     files_for: Option<Uuid>,
     files_err: Option<SharedString>,
+    /// Mission Control's snapshot: the four services read once, so a frame
+    /// never touches SQLite or the disk (#2426).
+    mc: Option<mission_control::Snapshot>,
+    /// Why the last read failed, when it did. The screen says so instead of
+    /// drawing an empty instance as if nothing were waiting on the user.
+    mc_err: Option<SharedString>,
+    /// A read is in flight. The screen shows the last snapshot and this flag
+    /// rather than clearing to a blank pane.
+    mc_loading: bool,
+    /// The analytics window the snapshot was read for. It starts at the
+    /// terminal's default (a month, `tui::app::mission_control`) so both
+    /// clients open on the same numbers.
+    mc_window: mission_control::TimeWindow,
     /// The window's rem size in px. The zoom keys move it and every
     /// rem-based length in the theme follows.
     rem: f32,
@@ -1132,10 +1146,44 @@ impl Dashboard {
         self.onboard = None;
         self.rail_actions = None;
         self.screen = Screen::MissionControl;
+        // The four services are read once, on entry, exactly as the terminal
+        // does on open. A frame never waits on SQLite.
+        self.fetch_mission_control(cx);
         // The root takes the keyboard, as on the ledger: the panel keys are
         // not the composer's, and a stale editor focus would send a message.
         self.refocus_screen();
         cx.notify();
+    }
+
+    /// Read the Mission Control snapshot on the bridge's DB thread and apply
+    /// it only if the screen is still asking for that same window; a stale
+    /// read paints nothing.
+    fn fetch_mission_control(&mut self, cx: &mut Context<Self>) {
+        if self.mc_loading {
+            return;
+        }
+        self.mc_loading = true;
+        self.mc_err = None;
+        let db_path = self.db_path.clone();
+        let window = self.mc_window;
+        cx.spawn(async move |this, cx| {
+            let result = mission_control::load(db_path, window).await;
+            this.update(cx, |this, cx| {
+                this.mc_loading = false;
+                if this.mc_window == window {
+                    match result {
+                        Ok(snapshot) => {
+                            this.mc = Some(snapshot);
+                            this.mc_err = None;
+                        }
+                        Err(e) => this.mc_err = Some(e.into()),
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Esc, or `/usage` reached from here: back to the conversation with the
@@ -3585,29 +3633,15 @@ impl Render for Dashboard {
             }
             Screen::MissionControl => {
                 let shown = palette::current();
-                // Two rows of two, the terminal's own grouping: the decisions
-                // waiting on you, then what the services have been doing.
-                let row = |left: &'static str, right: &'static str| {
-                    div()
-                        .flex()
-                        .flex_row()
-                        .flex_1()
-                        .min_h_0()
-                        .gap_2()
-                        .child(mission_control_panel(left, shown).flex_1().min_h_0())
-                        .child(mission_control_panel(right, shown).flex_1().min_h_0())
-                };
-                let body = div()
-                    .id("mission-control-body")
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_h_0()
-                    .gap_2()
-                    .px_4()
-                    .pb_2()
-                    .child(row("Inbox", "Analytics"))
-                    .child(row("Activity", "Schedule"));
+                // The panels draw the snapshot the four services produced on
+                // entry; the frame itself never reads SQLite (#2426).
+                let body = mission_control_body(
+                    self.mc.as_ref(),
+                    self.mc_window,
+                    self.mc_err.as_ref(),
+                    self.mc_loading,
+                    shown,
+                );
                 // The terminal's footer, in its own words: the keys the screen
                 // answers, so a hand that knows the terminal is already home.
                 let footer = div()
@@ -5686,6 +5720,10 @@ fn main() {
                         files: Vec::new(),
                         files_for: None,
                         files_err: None,
+                        mc: None,
+                        mc_err: None,
+                        mc_loading: false,
+                        mc_window: mission_control::TimeWindow::Month,
                         rem: BASE_REM,
                         db_path: db_path.clone(),
                         sessions: sessions_state,
@@ -5783,22 +5821,61 @@ fn main() {
     });
 }
 
-/// The TUI's ctx counter, rebuilt for the footer: same numbers, same
-/// grammar (`ctx: 12K/200K (6%)`) and the same colour thresholds, so the
-/// desktop window cannot drift from the terminal (`tui::render::input`).
-///
-/// `None` (no answer yet) or an unknown window draws a dash, exactly like
-/// the TUI's placeholder, instead of a percentage of nothing.
-/// The queued messages, above the input where the user can see what will go
-/// out next. Same shape as the TUI's pending list: one line per message, the
-/// count in the header, and a word on when they send.
-/// One Mission Control frame: its title, and the body the data will fill.
-///
-/// The shell is drawn before the snapshot reader lands (task 9 of #2426), so
-/// the body says the honest thing rather than showing a mocked row: a panel
-/// that invents data is worse than a panel that admits it has none.
-fn mission_control_panel(title: &'static str, shown: palette::Palette) -> Div {
-    div()
+/// One Mission Control frame: the terminal's two-by-two grouping, drawn from
+/// the snapshot the four services produced when the screen opened. Every row
+/// here was read from a service; a quiet instance says so, and a failed read
+/// says that instead, because a panel that invents a row is worse than one
+/// that admits it has none (#2426).
+fn mission_control_body(
+    snapshot: Option<&mission_control::Snapshot>,
+    window: mission_control::TimeWindow,
+    err: Option<&SharedString>,
+    loading: bool,
+    shown: palette::Palette,
+) -> impl IntoElement {
+    let row = |left: Div, right: Div| {
+        div()
+            .flex()
+            .flex_row()
+            .flex_1()
+            .min_h_0()
+            .gap_2()
+            .child(left.flex_1().min_h_0())
+            .child(right.flex_1().min_h_0())
+    };
+    let mut col = div()
+        .id("mission-control-body")
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h_0()
+        .gap_2()
+        .px_4()
+        .pb_2();
+    if let Some(err) = err {
+        col = col.child(text(format!("snapshot failed: {err}"), Size::Xs, shown.red));
+    } else if loading && snapshot.is_none() {
+        col = col.child(text("reading the services…", Size::Xs, shown.text_muted));
+    }
+    col.child(row(
+        mc_inbox_panel(snapshot, shown),
+        mc_analytics_panel(snapshot, window, shown),
+    ))
+    .child(row(
+        mc_activity_panel(snapshot, shown),
+        mc_schedule_panel(snapshot, shown),
+    ))
+}
+
+/// One panel: its title with the count the terminal puts in the same place,
+/// then the rows the services produced, one line each.
+fn mc_panel(
+    title: String,
+    rows: Vec<(String, u32)>,
+    empty: &'static str,
+    shown: palette::Palette,
+) -> Div {
+    let mut col = div()
         .flex()
         .flex_col()
         .gap_1()
@@ -5807,10 +5884,177 @@ fn mission_control_panel(title: &'static str, shown: palette::Palette) -> Div {
         .border_1()
         .border_color(rgb(shown.panel_hi))
         .bg(rgb(shown.panel))
-        .child(text(title, Size::Sm, shown.text_title))
-        .child(text("no snapshot yet", Size::Xs, shown.text_faint))
+        .child(text(title, Size::Sm, shown.text_title));
+    if rows.is_empty() {
+        col = col.child(text(empty, Size::Xs, shown.text_faint));
+    }
+    for (line, color) in rows {
+        col = col.child(text(line, Size::Xs, color).truncate());
+    }
+    col
 }
 
+/// The RSI proposals nobody has decided yet: kind, label, then the summary
+/// the agent wrote for it. Six fit the panel; the terminal scrolls, and the
+/// window grows its own scrolling with the detail popup (task 10).
+fn mc_inbox_panel(snapshot: Option<&mission_control::Snapshot>, shown: palette::Palette) -> Div {
+    let items = snapshot.map(|s| s.inbox.as_slice()).unwrap_or_default();
+    let mut rows = Vec::new();
+    for item in items.iter().take(6) {
+        rows.push((
+            format!("{} \u{b7} {}", item.kind.label(), item.label),
+            shown.text_normal,
+        ));
+        rows.push((format!("  {}", item.summary), shown.text_faint));
+    }
+    mc_panel(
+        format!("Inbox ({})", items.len()),
+        rows,
+        "No pending proposals.",
+        shown,
+    )
+}
+
+/// The analytics tab line: the terminal's D/W/M/All, the active one bracketed.
+fn mc_window_tabs(window: mission_control::TimeWindow) -> String {
+    use mission_control::TimeWindow;
+    [
+        (TimeWindow::Day, "D"),
+        (TimeWindow::Week, "W"),
+        (TimeWindow::Month, "M"),
+        (TimeWindow::All, "All"),
+    ]
+    .iter()
+    .map(|(w, label)| {
+        if *w == window {
+            format!("[{label}]")
+        } else {
+            (*label).to_string()
+        }
+    })
+    .collect::<Vec<_>>()
+    .join(" ")
+}
+
+/// Usage and reliability for the selected window: the totals first, the RSI
+/// liveness line the terminal leads with (#469), then the busiest tools.
+fn mc_analytics_panel(
+    snapshot: Option<&mission_control::Snapshot>,
+    window: mission_control::TimeWindow,
+    shown: palette::Palette,
+) -> Div {
+    let mut rows = Vec::new();
+    if let Some(a) = snapshot.map(|s| &s.analytics) {
+        let now = chrono::Utc::now().timestamp();
+        // The snapshot carries the window it was read for; the tabs show that
+        // one, so a slow read can never label November numbers as September's.
+        let read_for = snapshot.map(|s| s.window).unwrap_or(window);
+        rows.push((mc_window_tabs(read_for), shown.teal));
+        rows.push((
+            snapshot.map(|s| s.tool_line()).unwrap_or_default(),
+            shown.text_normal,
+        ));
+        rows.push((
+            format!("{} improvements applied", a.rsi_applied_total),
+            shown.text_muted,
+        ));
+        rows.push((
+            opencrabs::brain::mission_control::staleness::rsi_staleness_line(
+                now,
+                a.rsi_last_call_ts,
+                a.tool_events_since_rsi,
+            ),
+            shown.text_faint,
+        ));
+        for stat in a.top_tools.iter().take(3) {
+            rows.push((
+                format!(
+                    "{} \u{b7} {} calls \u{b7} {} failed",
+                    stat.name, stat.total, stat.failures
+                ),
+                shown.text_muted,
+            ));
+        }
+    }
+    mc_panel("Analytics".to_string(), rows, "No numbers yet.", shown)
+}
+
+/// The RSI journal, newest first, coloured by the level the service assigned.
+fn mc_activity_panel(snapshot: Option<&mission_control::Snapshot>, shown: palette::Palette) -> Div {
+    use opencrabs::brain::mission_control::McActivityLevel;
+    let entries = snapshot.map(|s| s.activity.as_slice()).unwrap_or_default();
+    let mut rows = Vec::new();
+    for entry in entries.iter().take(8) {
+        let color = match entry.level {
+            McActivityLevel::Error => shown.red,
+            McActivityLevel::Warn => shown.warn,
+            McActivityLevel::Success => shown.green,
+            McActivityLevel::Info => shown.text_muted,
+        };
+        rows.push((
+            format!(
+                "{} \u{b7} {}",
+                mc_relative_time(entry.timestamp),
+                entry.detail
+            ),
+            color,
+        ));
+    }
+    mc_panel(
+        format!("Activity ({})", entries.len()),
+        rows,
+        "No activity yet.",
+        shown,
+    )
+}
+
+/// Cron jobs and pending approvals, with a paused job marked as paused.
+fn mc_schedule_panel(snapshot: Option<&mission_control::Snapshot>, shown: palette::Palette) -> Div {
+    let jobs = snapshot.map(|s| s.schedule.as_slice()).unwrap_or_default();
+    let mut rows = Vec::new();
+    for job in jobs.iter().take(8) {
+        let color = if job.awaiting_user {
+            shown.amber
+        } else if job.enabled {
+            shown.text_normal
+        } else {
+            shown.text_faint
+        };
+        let state = if job.enabled { "" } else { " \u{b7} paused" };
+        rows.push((
+            format!("{} \u{b7} {}{}", job.label, job.schedule, state),
+            color,
+        ));
+    }
+    mc_panel(
+        format!("Schedule ({})", jobs.len()),
+        rows,
+        "No scheduled jobs.",
+        shown,
+    )
+}
+
+/// An event's age in the terminal's own shorthand, and "undated" when the
+/// journal had no parseable time: a missing date must never read as now.
+fn mc_relative_time(ts: Option<chrono::DateTime<chrono::Utc>>) -> String {
+    let Some(ts) = ts else {
+        return "undated".to_string();
+    };
+    let secs = (chrono::Utc::now() - ts).num_seconds().max(0);
+    if secs < 60 {
+        format!("{secs}s ago")
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86_400)
+    }
+}
+
+/// The queued messages, above the input where the user can see what will go
+/// out next. Same shape as the TUI's pending list: one line per message, the
+/// count in the header, and a word on when they send.
 fn queue_strip(queued: &[agent_bridge::PendingMessage]) -> Div {
     let mut col = div()
         .flex()
@@ -6019,6 +6263,12 @@ fn git_branch(dir: &std::path::Path) -> Option<String> {
     if name.is_empty() { None } else { Some(name) }
 }
 
+/// The TUI's ctx counter, rebuilt for the footer: same numbers, same
+/// grammar (`ctx: 12K/200K (6%)`) and the same colour thresholds, so the
+/// desktop window cannot drift from the terminal (`tui::render::input`).
+///
+/// `None` (no answer yet) or an unknown window draws a dash, exactly like
+/// the TUI's placeholder, instead of a percentage of nothing.
 fn ctx_footer(used: Option<u32>, max: u32) -> (String, u32) {
     let Some(used) = used.filter(|_| max > 0) else {
         return ("ctx: -".to_string(), palette::current().text_faint);
