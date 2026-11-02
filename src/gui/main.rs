@@ -1524,6 +1524,47 @@ impl Dashboard {
             .is_some_and(|id| self.sessions.is_topic_enabled(id))
     }
 
+    /// The tab strip for the open chat's topic family (#2400): the parent,
+    /// then each of its topics in list order. The open one is highlighted, and
+    /// a click opens that session.
+    fn topic_tabs(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let Some(open) = self.transcript.session else {
+            return Vec::new();
+        };
+        let root = self.sessions.parents.get(&open).copied().unwrap_or(open);
+        if !self.sessions.is_topic_enabled(root) {
+            return Vec::new();
+        }
+        let title = |id: Uuid| {
+            self.sessions
+                .items
+                .iter()
+                .find(|s| s.id == id)
+                .and_then(|s| s.title.clone())
+                .unwrap_or_else(|| "Untitled".to_string())
+        };
+        let mut ids = vec![root];
+        ids.extend(
+            self.sessions
+                .items
+                .iter()
+                .filter(|s| self.sessions.parents.get(&s.id) == Some(&root))
+                .map(|s| s.id),
+        );
+        ids.into_iter()
+            .map(|id| {
+                let click = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
+                    cx.stop_propagation();
+                    this.open_session(id, cx);
+                });
+                topic_tab(id, title(id), id == open, move |ev, window, app| {
+                    click(ev, window, app)
+                })
+                .into_any_element()
+            })
+            .collect()
+    }
+
     /// Open the name prompt for a new topic under the open session (#2303).
     fn start_topic_draft(&mut self, cx: &mut Context<Self>) {
         if !self.open_chat_topics_on() {
@@ -2699,7 +2740,30 @@ impl Render for Dashboard {
                 });
                 items.push(sessions::menu_item("Delete topic").on_click(delete));
             }
-            topic_row = Some(topic_bar(self.topic_menu, toggle, items).into_any_element());
+            // The tabs (#2400): the family's parent, then its topics, so the
+            // conversation can be switched without the sidebar.
+            let tabs = self.topic_tabs(cx);
+            topic_row = Some(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .overflow_hidden()
+                            .children(tabs),
+                    )
+                    .child(topic_bar(self.topic_menu, toggle, items))
+                    .into_any_element(),
+            );
         }
         let mut right = div()
             .flex()
@@ -3444,6 +3508,34 @@ fn topic_bar(
 }
 
 /// The name prompt above the input, while a topic is being named (#2303).
+/// One tab of the topic strip (#2400). The open session is marked by an
+/// accent label and a raised background, the same as the rail's selection.
+fn topic_tab(
+    id: Uuid,
+    label: String,
+    current: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    let colour = if current {
+        palette::current().accent
+    } else {
+        palette::current().text_muted
+    };
+    div()
+        .id(SharedString::from(format!("topic-tab-{id}")))
+        .px_2()
+        .py_0p5()
+        .rounded_sm()
+        .flex_none()
+        .text_sm()
+        .text_color(rgb(colour))
+        .cursor_pointer()
+        .when(current, |d| d.bg(rgb(palette::current().panel_hi)))
+        .hover(|d| d.bg(rgb(palette::current().panel_hi)))
+        .on_click(on_click)
+        .child(SharedString::from(label))
+}
+
 /// The name prompt for a topic (#2398): a centred card over a dark scrim, so
 /// the one thing that takes the keyboard is also the one thing on screen. The
 /// field shows a caret; Enter creates, Esc or a click outside cancels.
