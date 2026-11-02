@@ -2140,9 +2140,12 @@ impl Dashboard {
                         self.preview_theme(name.to_string(), cx);
                     }
                 }
+                // Enter applies the highlighted theme: the same keep as the
+                // Keep button, so the choice is saved to [gui] (#2415).
                 "enter" => {
                     if let Some(name) = names.get(self.themes_index.min(last)).copied() {
                         self.preview_theme(name.to_string(), cx);
+                        self.keep_theme(cx);
                     }
                 }
                 _ => {}
