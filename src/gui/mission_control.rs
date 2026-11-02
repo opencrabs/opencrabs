@@ -182,6 +182,38 @@ pub fn visible_window(total: usize, selected: Option<usize>, cap: usize) -> (usi
     (start, cap.min(total - start))
 }
 
+/// What a keystroke means for the analytics window (#2426).
+///
+/// The split matters: a capital that names the window already on screen must
+/// still be swallowed, or it falls through to the inbox's bare letters and
+/// `Shift+A` would apply a proposal instead of re-filtering. Only a capital
+/// naming a different window costs a read.
+pub enum WindowKey {
+    /// Not one of the filter's capitals: the caller keeps going.
+    Pass,
+    /// A capital naming the window already shown: consume it, do not read.
+    Same,
+    /// A capital naming another window: switch and re-read.
+    Switch(TimeWindow),
+}
+
+/// Decide what one capital does to the analytics window, given the window on
+/// screen. `D`/`W`/`M`/`A` are the terminal's keys.
+pub fn window_key(current: TimeWindow, key: &str) -> WindowKey {
+    let asked = match key {
+        "d" => TimeWindow::Day,
+        "w" => TimeWindow::Week,
+        "m" => TimeWindow::Month,
+        "a" => TimeWindow::All,
+        _ => return WindowKey::Pass,
+    };
+    if asked == current {
+        WindowKey::Same
+    } else {
+        WindowKey::Switch(asked)
+    }
+}
+
 /// Apply one keystroke to the log viewer, in the terminal's own mapping
 /// (#1528). The state, its scrolling, its filters and its file paging are the
 /// terminal's type, so there is no second parser and nothing to disagree.
@@ -555,6 +587,36 @@ mod tests {
         // A selection left past the end by a shorter read still lands inside.
         assert_eq!(visible_window(20, Some(99), 6), (14, 6));
         assert_eq!(visible_window(0, Some(3), 6), (0, 0));
+    }
+
+    #[test]
+    fn mission_window_keys_reload_only_when_the_window_changes() {
+        // The terminal's capitals, and nothing else, name an analytics window.
+        assert!(matches!(
+            window_key(TimeWindow::All, "d"),
+            WindowKey::Switch(TimeWindow::Day)
+        ));
+        assert!(matches!(
+            window_key(TimeWindow::All, "w"),
+            WindowKey::Switch(TimeWindow::Week)
+        ));
+        assert!(matches!(
+            window_key(TimeWindow::All, "m"),
+            WindowKey::Switch(TimeWindow::Month)
+        ));
+        assert!(matches!(
+            window_key(TimeWindow::Day, "a"),
+            WindowKey::Switch(TimeWindow::All)
+        ));
+        // Asking again for the window already shown costs no read, but the key
+        // is still the filter's: `Same` is swallowed, never passed on to the
+        // inbox, where `a` and `Shift+A` are both in play (#2426).
+        assert!(matches!(window_key(TimeWindow::Day, "d"), WindowKey::Same));
+        assert!(matches!(window_key(TimeWindow::All, "a"), WindowKey::Same));
+        // Anything else leaves the window and the key alone.
+        assert!(matches!(window_key(TimeWindow::All, "x"), WindowKey::Pass));
+        assert!(matches!(window_key(TimeWindow::All, ""), WindowKey::Pass));
+        assert!(matches!(window_key(TimeWindow::All, "r"), WindowKey::Pass));
     }
 
     #[test]

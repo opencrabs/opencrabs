@@ -1259,23 +1259,22 @@ impl Dashboard {
             return;
         }
         // The window filter the footer advertises: D/W/M/A, the terminal's
-        // capitals, so the bare letters stay free for apply and reject.
+        // capitals, so the bare letters stay free for apply and reject. A new
+        // window is a new read: the numbers are the services' to produce,
+        // never arithmetic done in the frame. Asking again for the window
+        // already on screen is not a read at all (#2426).
         if ks.modifiers.shift {
-            let window = match ks.key.as_str() {
-                "d" => Some(mission_control::TimeWindow::Day),
-                "w" => Some(mission_control::TimeWindow::Week),
-                "m" => Some(mission_control::TimeWindow::Month),
-                "a" => Some(mission_control::TimeWindow::All),
-                _ => None,
-            };
-            if let Some(window) = window {
-                if self.mc_window != window {
+            match mission_control::window_key(self.mc_window, &ks.key) {
+                mission_control::WindowKey::Switch(window) => {
                     self.mc_window = window;
-                    // A new window is a new read: the numbers are the services'
-                    // to produce, never arithmetic done in the frame.
                     self.fetch_mission_control(cx);
+                    return;
                 }
-                return;
+                // The window is already the one asked for: the capital is
+                // still the filter's, so it is swallowed rather than falling
+                // through to the inbox, where `a` applies a proposal.
+                mission_control::WindowKey::Same => return,
+                mission_control::WindowKey::Pass => {}
             }
         }
         // Decide a proposal: `a` installs it, `r` archives it, the terminal's
