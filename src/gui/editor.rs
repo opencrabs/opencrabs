@@ -1188,31 +1188,34 @@ impl Element for EditorElement {
                 .unwrap_or_default();
             let height = line_height * (line.wrap_boundaries().len() + 1) as f32;
 
-            // Selection and cursor map onto a real line only when the field
-            // has content; the placeholder paints bare.
+            // A selection only maps onto a real line when the field has
+            // content; the placeholder paints bare. The caret is decided by
+            // `caret_in_row`, which paints one on an empty field too.
             let mut selection = Vec::new();
             let mut caret = None;
-            if !empty {
-                if !selected.is_empty() && selected.start < line_end && selected.end > line_start {
-                    let sel_start = selected.start.clamp(line_start, line_end) - line_start;
-                    let sel_end = selected.end.clamp(line_start, line_end) - line_start;
-                    for (seg_start, seg_end) in visual_segments(&line, text.len()) {
-                        let lo = sel_start.max(seg_start);
-                        let hi = sel_end.min(seg_end);
-                        if lo >= hi {
-                            continue;
-                        }
-                        if let (Some(from), Some(to)) = (
-                            line.position_for_index(lo, line_height),
-                            line.position_for_index(hi, line_height),
-                        ) {
-                            selection.push((from, to));
-                        }
+            if !empty
+                && !selected.is_empty()
+                && selected.start < line_end
+                && selected.end > line_start
+            {
+                let sel_start = selected.start.clamp(line_start, line_end) - line_start;
+                let sel_end = selected.end.clamp(line_start, line_end) - line_start;
+                for (seg_start, seg_end) in visual_segments(&line, text.len()) {
+                    let lo = sel_start.max(seg_start);
+                    let hi = sel_end.min(seg_end);
+                    if lo >= hi {
+                        continue;
+                    }
+                    if let (Some(from), Some(to)) = (
+                        line.position_for_index(lo, line_height),
+                        line.position_for_index(hi, line_height),
+                    ) {
+                        selection.push((from, to));
                     }
                 }
-                if selected.is_empty() && cursor >= line_start && cursor <= line_end {
-                    caret = line.position_for_index(cursor - line_start, line_height);
-                }
+            }
+            if let Some(offset) = caret_in_row(empty, &selected, cursor, line_start, line_end) {
+                caret = line.position_for_index(offset, line_height);
             }
 
             rows.push(RowPaint {
@@ -1545,6 +1548,30 @@ pub fn bind_keys(cx: &mut App) {
 // struct so unit tests can seat them without a gpui app context, which no
 // headless test can build.
 
+/// Where the caret sits inside one painted row, as a byte offset from that
+/// row's start, or `None` when this row paints no caret.
+///
+/// An empty field still paints one, at the start of its single row: the
+/// placeholder is what the user sees, and without a caret a focused composer
+/// gives no sign that typing lands anywhere (#2446). A row that holds a
+/// selection paints the selection instead, and a caret that belongs to a
+/// different row is that row's business.
+fn caret_in_row(
+    empty: bool,
+    selected: &Range<usize>,
+    cursor: usize,
+    line_start: usize,
+    line_end: usize,
+) -> Option<usize> {
+    if empty {
+        return Some(0);
+    }
+    if !selected.is_empty() {
+        return None;
+    }
+    (cursor >= line_start && cursor <= line_end).then(|| cursor - line_start)
+}
+
 fn line_count(content: &str) -> usize {
     content.split('\n').count()
 }
@@ -1727,8 +1754,9 @@ fn line_col(content: &str, offset: usize) -> (usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::{
-        Attachment, line_col, line_count, line_len, line_start, marker_paths, message_with_markers,
-        next_word_end, previous_word_start, strip_markers, vertical_row_target,
+        Attachment, caret_in_row, line_col, line_count, line_len, line_start, marker_paths,
+        message_with_markers, next_word_end, previous_word_start, strip_markers,
+        vertical_row_target,
     };
     use std::path::PathBuf;
 
@@ -2067,5 +2095,28 @@ mod tests {
         assert_eq!(delete_word_back_once("olá mundo", 10), "olá ");
         // A caret at the very start has nothing to remove and must not panic.
         assert_eq!(delete_word_back_once("alpha", 0), "alpha");
+    }
+
+    #[test]
+    fn an_empty_field_paints_a_caret_at_the_start_of_its_row() {
+        // A focused, empty composer shows the placeholder and nothing else
+        // unless the caret paints, so the field looks dead (#2446).
+        assert_eq!(caret_in_row(true, &(0..0), 0, 0, 0), Some(0));
+        assert_eq!(caret_in_row(true, &(0..0), 0, 0, 12), Some(0));
+    }
+
+    #[test]
+    fn the_caret_lands_only_in_the_row_that_holds_it() {
+        // "one\ntwo": row two starts at byte 4, so a caret at 4 is row two's.
+        assert_eq!(caret_in_row(false, &(0..0), 2, 0, 3), Some(2));
+        assert_eq!(caret_in_row(false, &(0..0), 5, 4, 7), Some(1));
+        assert_eq!(caret_in_row(false, &(0..0), 4, 0, 3), None);
+    }
+
+    #[test]
+    fn a_selection_takes_the_row_over_from_the_caret() {
+        // Selecting text paints the selection; a caret on top of it would
+        // draw two marks for one position.
+        assert_eq!(caret_in_row(false, &(2..5), 5, 0, 7), None);
     }
 }
