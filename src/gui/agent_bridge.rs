@@ -385,7 +385,8 @@ async fn build(config: Config, sink: EventSink) -> Result<AgentBridge, String> {
         .with_tool_registry(tool_registry)
         .with_subagent_manager(subagent_manager)
         .with_progress_callback(Some(forwarder))
-        .with_message_enqueue_callback(Some(enqueue.clone()));
+        .with_message_enqueue_callback(Some(enqueue.clone()))
+        .with_message_queue_callback(Some(queue_drain_callback()));
 
     // Delivery route for a completion on a session no channel owns: a
     // sub-agent reached from a tool carries no callback of its own and
@@ -791,6 +792,65 @@ pub fn drain(rx: &Receiver<TurnEvent>) -> Vec<TurnEvent> {
 /// The poll cadence for the UI tick. 50 ms is below human perception for
 /// streaming text and cheap when idle.
 pub const POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Messages the user typed while a turn ran, keyed by session. The agent takes
+/// them between tool calls, the way the terminal does, so a queued message
+/// reaches the running turn instead of waiting for it to end (#2441).
+static QUEUE: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<Uuid, Vec<QueuedUserMessage>>>,
+> = std::sync::OnceLock::new();
+
+/// The session the composer is writing into, so Up can recall its last queued
+/// message without the editor knowing the session (#2441).
+static COMPOSER_SESSION: std::sync::Mutex<Option<Uuid>> = std::sync::Mutex::new(None);
+
+fn queue() -> std::sync::MutexGuard<'static, std::collections::HashMap<Uuid, Vec<QueuedUserMessage>>>
+{
+    QUEUE
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Queue a message the user typed while `session_id` is busy.
+pub fn queue_push(session_id: Uuid, msg: QueuedUserMessage) {
+    queue().entry(session_id).or_default().push(msg);
+}
+
+/// What is waiting for `session_id`, oldest first. The strip shows these.
+pub fn queue_snapshot(session_id: Uuid) -> Vec<QueuedUserMessage> {
+    queue().get(&session_id).cloned().unwrap_or_default()
+}
+
+/// Take everything waiting for `session_id`, so it is sent once.
+pub fn queue_take(session_id: Uuid) -> Vec<QueuedUserMessage> {
+    queue().remove(&session_id).unwrap_or_default()
+}
+
+/// Up in an empty composer: take the newest queued message back for editing.
+pub fn queue_recall_last() -> Option<String> {
+    let session = (*COMPOSER_SESSION.lock().ok()?)?;
+    let mut map = queue();
+    let entry = map.get_mut(&session)?;
+    let last = entry.pop()?;
+    if entry.is_empty() {
+        map.remove(&session);
+    }
+    Some(last.display_text)
+}
+
+/// Point the composer at `session_id`, so recall and the strip agree with it.
+pub fn set_composer_session(session_id: Option<Uuid>) {
+    if let Ok(mut s) = COMPOSER_SESSION.lock() {
+        *s = session_id;
+    }
+}
+
+/// The agent's between-tool-calls hook: everything queued for the session,
+/// joined into one message. The agent calls it after each tool round.
+fn queue_drain_callback() -> opencrabs::brain::agent::service::MessageQueueCallback {
+    Arc::new(|session_id| Box::pin(async move { QueuedUserMessage::join(&queue_take(session_id)) }))
+}
 
 /// A message queued while a turn runs: the TUI's exact type, joined and
 /// submitted when the current turn completes.

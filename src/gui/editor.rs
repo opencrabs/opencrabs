@@ -542,6 +542,17 @@ impl Editor {
             cx.propagate();
             return;
         }
+        // Up in an empty composer takes the newest queued message back to edit (#2441).
+        if self.content.is_empty()
+            && let Some(text) = crate::agent_bridge::queue_recall_last()
+        {
+            self.content = text;
+            let end = self.content.len();
+            self.selected_range = end..end;
+            self.selection_reversed = false;
+            cx.notify();
+            return;
+        }
         if self.step_command_popup(-1, cx) {
             return;
         }

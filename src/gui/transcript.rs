@@ -252,6 +252,9 @@ pub struct LiveTurn {
     pub entries: Vec<LiveEntry>,
     /// Errors and queue notices: amber, never folded.
     pub notices: Vec<String>,
+    /// Queued messages the agent took between tool calls, in the order they
+    /// landed. Drawn as user rows in the live turn until the reload has them (#2441).
+    pub injected: Vec<String>,
     /// The final answer once the turn reports `Done`. Kept on screen until
     /// the reload proves the row is persisted, so a turn that streamed
     /// nothing still shows its answer instead of blanking the pane.
@@ -299,6 +302,7 @@ impl LiveTurn {
             && self.tools.is_empty()
             && self.entries.is_empty()
             && self.notices.is_empty()
+            && self.injected.is_empty()
             && self.settled.is_none()
     }
 
@@ -315,6 +319,7 @@ impl LiveTurn {
     /// The DB has the turn: drop the live copy.
     pub fn clear(&mut self) {
         self.user = None;
+        self.injected.clear();
         self.thinking = false;
         self.reasoning.clear();
         self.stream.clear();
@@ -1754,6 +1759,21 @@ fn live_view(
                 .text_color(rgb(palette::current().amber))
                 .child(SharedString::from(notice.clone())),
         );
+    }
+    // Queued messages the agent took between tool calls, as user rows in
+    // order, so a message typed mid-turn shows up where it entered the turn
+    // rather than after it (#2441).
+    for text in &live.injected {
+        col = col.child(block_view(
+            &Block::Msg {
+                role: "user".into(),
+                content: text.clone(),
+                time: live_time(live.sent_at),
+                placeholder: false,
+            },
+            content_width,
+            handlers,
+        ));
     }
     // ONE card for the whole turn: header, body when open, footer. The three
     // loose children it replaces (a ledger, a status line below it, and a bare

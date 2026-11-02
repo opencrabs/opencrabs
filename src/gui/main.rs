@@ -526,6 +526,9 @@ impl Dashboard {
         // file, so switching here means the terminal comes back to it too, and
         // a restart no longer lands on whatever the rail listed first (#2444).
         remember_open_session(id);
+        // The queue belongs to the conversation on screen: a message typed for
+        // one session must never be drained into another (#2441).
+        agent_bridge::set_composer_session(Some(id));
         self.transcript.error = None;
         self.transcript.turns = Vec::new();
         self.transcript.hidden = 0;
@@ -1379,11 +1382,15 @@ impl Dashboard {
             return;
         }
         if self.busy {
-            // Queued messages live in the strip above the input, the same
-            // place the TUI draws them. Writing them into the transcript put
-            // the queue in the middle of the conversation.
-            self.queued
-                .push(agent_bridge::PendingMessage::plain(text.clone()));
+            // The message joins the session's queue, which the agent drains
+            // between tool calls, the terminal's own path (#2441). With no
+            // session open it waits in the window's own list.
+            match self.transcript.session {
+                Some(sid) => {
+                    agent_bridge::queue_push(sid, agent_bridge::PendingMessage::plain(text))
+                }
+                None => self.queued.push(agent_bridge::PendingMessage::plain(text)),
+            }
             cx.notify();
             return;
         }
@@ -1679,6 +1686,15 @@ impl Dashboard {
                 // Every API response and tool execution reports the context
                 // size it just ran with, so the footer tracks the turn while
                 // it is still in flight.
+                // The agent took a queued message between tool calls: it shows
+                // in the live turn right away, where the terminal puts it (#2441).
+                agent_bridge::TurnEvent::ProgressFor(
+                    sid,
+                    ProgressEvent::QueuedUserMessage { text },
+                ) if self.transcript.session == Some(sid) => {
+                    self.live.injected.push(text);
+                    cx.notify();
+                }
                 agent_bridge::TurnEvent::ProgressFor(_, ProgressEvent::TokenCount(count)) => {
                     self.ctx_tokens = Some(count.min(u32::MAX as usize) as u32);
                 }
@@ -1888,8 +1904,21 @@ impl Dashboard {
     }
 
     /// Send everything queued while busy, joined into one turn.
+    /// What the strip shows: the window's own list, then the session's queue.
+    fn queued_for_strip(&self) -> Vec<agent_bridge::PendingMessage> {
+        let mut out = self.queued.clone();
+        if let Some(sid) = self.transcript.session {
+            out.extend(agent_bridge::queue_snapshot(sid));
+        }
+        out
+    }
+
     fn drain_pending(&mut self, cx: &mut Context<Self>) {
-        if self.queued.is_empty() || self.busy {
+        let waiting_in_store = self
+            .transcript
+            .session
+            .is_some_and(|sid| !agent_bridge::queue_snapshot(sid).is_empty());
+        if (self.queued.is_empty() && !waiting_in_store) || self.busy {
             return;
         }
         let Some(bridge) = agent_bridge::bridge() else {
@@ -1902,7 +1931,8 @@ impl Dashboard {
             self.new_session(cx);
             return;
         };
-        let msgs = std::mem::take(&mut self.queued);
+        let mut msgs = std::mem::take(&mut self.queued);
+        msgs.extend(agent_bridge::queue_take(sid));
         if let Some(joined) = agent_bridge::PendingMessage::join(&msgs) {
             self.live.begin(joined.display_text.clone());
             self.transcript.live_expanded = false;
@@ -5084,8 +5114,9 @@ impl Render for Dashboard {
                 if let Some(plan_view) = self.plan.view() {
                     col = col.child(plan_view);
                 }
-                if !self.queued.is_empty() {
-                    col = col.child(queue_strip(&self.queued));
+                let waiting = self.queued_for_strip();
+                if !waiting.is_empty() {
+                    col = col.child(queue_strip(&waiting));
                 }
                 // A detached command sits directly above the editor: the same
                 // place the TUI puts it (on the input box's top border), which
@@ -5697,7 +5728,7 @@ fn queue_strip(queued: &[agent_bridge::PendingMessage]) -> Div {
                 .text_xs()
                 .text_color(rgb(palette::current().amber))
                 .child(SharedString::from(format!(
-                    "queued {} · sends when this turn ends",
+                    "queued {} · sent between tool calls · ↑ edits the last",
                     queued.len()
                 ))),
         );
