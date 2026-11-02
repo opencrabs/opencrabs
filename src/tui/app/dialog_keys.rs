@@ -656,8 +656,11 @@ const TABLE_19: &[DialogKey] = &[
         verb: "projects",
     },
     DialogKey {
-        events: &[kc(KeyCode::Char('f'), KeyModifiers::CONTROL)],
-        label: "^F",
+        events: &[kc(
+            KeyCode::Char('p'),
+            KeyModifiers::CONTROL.union(KeyModifiers::SHIFT),
+        )],
+        label: "^⇧P",
         verb: "pin",
     },
     DialogKey {

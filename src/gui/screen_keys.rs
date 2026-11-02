@@ -102,18 +102,68 @@ pub fn action_label(action: Option<ScreenAction>) -> &'static str {
     }
 }
 
-/// Focus for a screen: the composer on the conversation, the root everywhere
-/// else. Both halves of the owner's report are this one decision: the caret
-/// was never put back on return, and no receiver was named on entry.
-pub fn focus_target(screen: Screen) -> FocusTarget {
+/// An inline overlay that can hold the keyboard while it is open. The caller
+/// passes them bottom to top, so the last one is what the user is nearest.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum OverlayId {
+    /// The session rail, armed with Tab.
+    Rail,
+    /// The rail's find field, armed with ctrl+f.
+    RailFind,
+    /// The topic name prompt.
+    TopicPrompt,
+    /// The read only topic facts panel.
+    TopicInfo,
+    /// The key reference, filter included.
+    Help,
+    /// The delete confirmation.
+    ConfirmDelete,
+    /// A file preview, which covers the window.
+    Preview,
+    /// One row's slide out action strip.
+    RowActions,
+    /// A row's context menu.
+    RailMenu,
+    /// Waiting for a second session while a split is set up.
+    SplitPick,
+    /// Deep find.
+    CommandPalette,
+}
+
+/// Who answers a keystroke. Exactly one of these is true at a time, which is
+/// what the window lacked: every inline overlay opened while the composer
+/// stayed focused, so the composer's keymap answered Enter and the arrows
+/// under a field that claimed to own them (#2454, #2455).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum KeyboardOwner {
+    /// Nothing else is showing, so typing belongs to the message field.
+    Composer,
+    /// An inline overlay is on top and takes every key.
+    Overlay(OverlayId),
+    /// A full screen is showing, so its own key branch answers.
+    Screen(Screen),
+}
+
+/// The one decision. Overlays win in stack order, then a screen that is not
+/// the conversation, then the composer.
+pub fn keyboard_owner(overlays: &[OverlayId], screen: Screen) -> KeyboardOwner {
+    if let Some(top) = overlays.last() {
+        return KeyboardOwner::Overlay(*top);
+    }
     match screen {
-        Screen::Chat => FocusTarget::Composer,
-        Screen::Usage
-        | Screen::Files
-        | Screen::Themes
-        | Screen::Models
-        | Screen::Onboard
-        | Screen::MissionControl => FocusTarget::Root,
+        Screen::Chat => KeyboardOwner::Composer,
+        other => KeyboardOwner::Screen(other),
+    }
+}
+
+/// Where focus belongs for an owner: the composer only when the composer owns
+/// the keyboard, the window root otherwise. Focus is the mechanism, so the
+/// composer's keymap and its input handler are out of the dispatch path while
+/// anything else is open, instead of each overlay patching around them.
+pub fn focus_target(owner: KeyboardOwner) -> FocusTarget {
+    match owner {
+        KeyboardOwner::Composer => FocusTarget::Composer,
+        KeyboardOwner::Overlay(_) | KeyboardOwner::Screen(_) => FocusTarget::Root,
     }
 }
 
@@ -245,7 +295,10 @@ mod tests {
 
     #[test]
     fn focus_for_screen_puts_the_caret_in_the_composer_on_chat() {
-        assert_eq!(focus_target(Screen::Chat), FocusTarget::Composer);
+        assert_eq!(
+            focus_target(keyboard_owner(&[], Screen::Chat)),
+            FocusTarget::Composer
+        );
     }
 
     #[test]
@@ -256,7 +309,52 @@ mod tests {
             Screen::Themes,
             Screen::MissionControl,
         ] {
-            assert_eq!(focus_target(screen), FocusTarget::Root, "{screen:?}");
+            assert_eq!(
+                focus_target(keyboard_owner(&[], screen)),
+                FocusTarget::Root,
+                "{screen:?}"
+            );
         }
+    }
+
+    /// The owner is the topmost overlay, whatever the screen says. Before
+    /// this, an overlay opened under a focused composer and the composer
+    /// kept answering (#2454, #2455).
+    #[test]
+    fn keyboard_owner_prefers_the_topmost_overlay() {
+        let overlays = [OverlayId::Rail, OverlayId::Help, OverlayId::Preview];
+        assert_eq!(
+            keyboard_owner(&overlays, Screen::Chat),
+            KeyboardOwner::Overlay(OverlayId::Preview)
+        );
+        // A screen does not outrank an overlay either: deep find opens over
+        // the models screen and keeps the keys.
+        assert_eq!(
+            keyboard_owner(&[OverlayId::CommandPalette], Screen::Models),
+            KeyboardOwner::Overlay(OverlayId::CommandPalette)
+        );
+    }
+
+    #[test]
+    fn keyboard_owner_falls_back_to_the_screen_then_the_composer() {
+        assert_eq!(keyboard_owner(&[], Screen::Chat), KeyboardOwner::Composer);
+        assert_eq!(
+            keyboard_owner(&[], Screen::Themes),
+            KeyboardOwner::Screen(Screen::Themes)
+        );
+    }
+
+    /// Focus is the whole mechanism: an overlay gets the window root, so the
+    /// composer's keymap is not in the dispatch path at all.
+    #[test]
+    fn only_the_composer_owner_focuses_the_composer() {
+        for owner in [
+            KeyboardOwner::Overlay(OverlayId::RailFind),
+            KeyboardOwner::Overlay(OverlayId::ConfirmDelete),
+            KeyboardOwner::Screen(Screen::Usage),
+        ] {
+            assert_eq!(focus_target(owner), FocusTarget::Root, "{owner:?}");
+        }
+        assert_eq!(focus_target(KeyboardOwner::Composer), FocusTarget::Composer);
     }
 }

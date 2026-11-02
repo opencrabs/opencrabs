@@ -505,6 +505,10 @@ pub struct App {
     /// Interactive theme picker (#1371). `Some` = dialog open; all keys are
     /// intercepted and routed through the picker's pure state machine.
     pub theme_picker: Option<crate::tui::render::theme_picker::ThemePickerState>,
+    /// Deep find (#2458). `Some` = the card is open and owns every key, the
+    /// same engine the window runs, so both clients rank and print the same
+    /// rows in the same order.
+    pub command_palette: Option<crate::ui_core::palette::PaletteState>,
     pub selected_session_index: usize,
     pub should_quit: bool,
     /// Pending resize dimensions — runner pre-resizes buffers to avoid blink
@@ -981,6 +985,7 @@ impl App {
             auto_scroll: true,
             mouse_capture_enabled: true,
             theme_picker: None,
+            command_palette: None,
             selected_session_index: 0,
             should_quit: false,
             pending_resize: None,
@@ -3448,6 +3453,132 @@ impl App {
         Ok(())
     }
 
+    /// Open the deep find card, or close it when it is already up, so the
+    /// chord is a toggle like every other one in the terminal (#2458).
+    fn open_command_palette(&mut self) {
+        if self.command_palette.is_some() {
+            self.command_palette = None;
+            return;
+        }
+        self.command_palette = Some(crate::ui_core::palette::PaletteState::new(
+            self.palette_items(),
+        ));
+    }
+
+    /// The rows the card can find: the shared command table, the destinations
+    /// it can open, the saved skills and the conversation ledger. Built from
+    /// what the terminal already holds, so opening the card never fetches.
+    fn palette_items(&self) -> Vec<crate::ui_core::palette::PaletteItem> {
+        use crate::ui_core::palette::{self, PaletteAction, PaletteItem, PaletteKind};
+        let mut items: Vec<PaletteItem> = crate::ui_core::commands::SLASH_COMMANDS
+            .iter()
+            .map(|cmd| {
+                PaletteItem::new(
+                    cmd.name,
+                    cmd.description,
+                    PaletteKind::Command,
+                    PaletteAction::RunSlash(cmd.name),
+                )
+                .with_keywords(palette::keywords_for(cmd.name))
+            })
+            .collect();
+        items.extend(palette::surface_items());
+        for skill in &self.skills {
+            items.push(
+                PaletteItem::new(
+                    skill.slash_name.clone(),
+                    skill.description.clone(),
+                    PaletteKind::Skill,
+                    PaletteAction::RunSkill(skill.slash_name.clone()),
+                )
+                .with_keywords("skill workflow recipe"),
+            );
+        }
+        for session in &self.sessions {
+            let title = session
+                .title
+                .clone()
+                .unwrap_or_else(|| "Untitled conversation".to_string());
+            items.push(PaletteItem::new(
+                title,
+                session.updated_at.format("%Y-%m-%d %H:%M").to_string(),
+                PaletteKind::Session,
+                PaletteAction::OpenSession(session.id.as_u128()),
+            ));
+        }
+        items
+    }
+
+    /// Every key while the card is up belongs to it (#2458).
+    async fn command_palette_key(&mut self, event: &crossterm::event::KeyEvent) -> Result<()> {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        if event.code == KeyCode::Esc {
+            self.command_palette = None;
+            return Ok(());
+        }
+        let mut run = None;
+        if let Some(state) = self.command_palette.as_mut() {
+            match event.code {
+                KeyCode::Enter => run = state.selected().map(|row| row.item.action),
+                KeyCode::Up => state.move_by(-1, crate::ui_core::palette::MAX_ROWS),
+                KeyCode::Down => state.move_by(1, crate::ui_core::palette::MAX_ROWS),
+                KeyCode::Backspace => state.backspace(),
+                KeyCode::Char(c)
+                    if !event.modifiers.contains(KeyModifiers::CONTROL)
+                        && !event.modifiers.contains(KeyModifiers::SUPER) =>
+                {
+                    state.type_char(c);
+                }
+                _ => {}
+            }
+        }
+        if let Some(action) = run {
+            self.command_palette = None;
+            self.apply_palette_action(action).await?;
+        }
+        Ok(())
+    }
+
+    /// Run what the picked row names. Commands go through the same dispatcher
+    /// the composer uses, so a pick and a typed command land in one place.
+    async fn apply_palette_action(
+        &mut self,
+        action: crate::ui_core::palette::PaletteAction,
+    ) -> Result<()> {
+        use crate::ui_core::palette::{PaletteAction, Surface};
+        match action {
+            PaletteAction::RunSlash(name) => {
+                let _ = self.handle_slash_command(name).await;
+            }
+            PaletteAction::OpenSurface(surface) => match surface.command() {
+                Some(command) => {
+                    let _ = self.handle_slash_command(command).await;
+                }
+                // The session-files view has no slash command; it is a view
+                // the terminal opens on its own key, so the row opens the
+                // same view rather than a command that would fail.
+                None => {
+                    debug_assert_eq!(surface, Surface::Files);
+                    self.open_session_files_view().await?;
+                }
+            },
+            PaletteAction::OpenSession(id) => {
+                self.load_session(Uuid::from_u128(id)).await?;
+                self.mode = AppMode::Chat;
+            }
+            PaletteAction::SwitchModel { provider, model } => {
+                let _ = self
+                    .handle_slash_command(&format!("/models {provider}/{model}"))
+                    .await;
+            }
+            PaletteAction::RunSkill(name) | PaletteAction::RunUserCommand(name) => {
+                let _ = self.handle_slash_command(&name).await;
+            }
+        }
+        Ok(())
+    }
+
     /// Handle keyboard input
     async fn handle_key_event(&mut self, event: crossterm::event::KeyEvent) -> Result<()> {
         use super::events::keys;
@@ -3463,6 +3594,27 @@ impl App {
         if self.mouse_frag_gate.absorb(&event.code) {
             tracing::debug!("[MOUSEFRAG] dropped fragment {:?} at dispatch", event.code);
             return Ok(());
+        }
+
+        // Deep find (#2458): the chord opens one card that finds a
+        // conversation, a command or a surface, and while it is up it owns
+        // every key. It is checked before every dialog so no field underneath
+        // can eat a character meant for the card.
+        if self.command_palette.is_some() {
+            self.command_palette_key(&event).await?;
+            return Ok(());
+        }
+        if let KeyCode::Char(key) = event.code {
+            let key = key.to_string();
+            if crate::ui_core::palette::opens(
+                event.modifiers.contains(KeyModifiers::CONTROL),
+                event.modifiers.contains(KeyModifiers::SHIFT),
+                event.modifiers.contains(KeyModifiers::SUPER),
+                &key,
+            ) {
+                self.open_command_palette();
+                return Ok(());
+            }
         }
 
         // Ctrl+C expanded command panel (#1775). Modal: while open, every

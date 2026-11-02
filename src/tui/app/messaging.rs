@@ -1013,6 +1013,40 @@ impl App {
         Ok(())
     }
 
+    /// Open the session-files browser for the conversation in view (#2458).
+    ///
+    /// The view is reached from a bare `f` in the sessions list and from the
+    /// deep find card; both call this, so the two cannot drift into loading
+    /// different lists for the same session.
+    pub(crate) async fn open_session_files_view(&mut self) -> Result<()> {
+        let Some(session_id) = self
+            .current_session
+            .as_ref()
+            .map(|session| session.id)
+            .or_else(|| {
+                self.sessions
+                    .get(self.selected_session_index)
+                    .map(|session| session.id)
+            })
+        else {
+            self.notification = Some("No conversation to browse files for".to_string());
+            self.notification_shown_at = Some(std::time::Instant::now());
+            return Ok(());
+        };
+        match self.file_service.list_files_for_session(session_id).await {
+            Ok(files) => {
+                self.session_files = files;
+                self.selected_file_index = 0;
+                self.switch_mode(AppMode::SessionFiles).await?;
+            }
+            Err(e) => {
+                self.notification = Some(format!("Failed to load files: {e}"));
+                self.notification_shown_at = Some(std::time::Instant::now());
+            }
+        }
+        Ok(())
+    }
+
     /// Handle slash commands locally (returns true if handled)
     pub(crate) async fn handle_slash_command(&mut self, input: &str) -> bool {
         let cmd = input.split_whitespace().next().unwrap_or("");

@@ -184,6 +184,16 @@ impl SessionsState {
         self.rail_target()
     }
 
+    /// What Enter in the find field opens: the armed row while it still
+    /// matches the query, else the top match. Resolving it here keeps the
+    /// rule out of the window's key handler, so it is tested without one
+    /// (#2454).
+    pub fn find_target(&self) -> Option<uuid::Uuid> {
+        self.cursor
+            .filter(|_| self.cursor_visible())
+            .or_else(|| self.cursor_step(None, 1))
+    }
+
     /// Dismiss the context menu. Deliberately the only thing it touches:
     /// a dismissal is an eraser, never an action, so no favorite flips
     /// and no delete arms on the way out (#2354).
@@ -1691,5 +1701,38 @@ mod tests {
             Some(uuid::Uuid::from_u128(1)),
             "a dismissal must not change the open chat"
         );
+    }
+
+    /// #2454: Enter in the find field opens what the field found. The armed
+    /// row wins while it still matches; a row the query filtered out can
+    /// never be opened behind the field.
+    #[test]
+    fn rail_find_enter_opens_the_armed_row() {
+        let state = SessionsState {
+            items: vec![session(1, "alpha"), session(2, "beta"), session(3, "gamma")],
+            filter: "ga".to_string(),
+            filter_active: true,
+            cursor: Some(uuid::Uuid::from_u128(3)),
+            ..Default::default()
+        };
+        assert_eq!(state.find_target(), Some(uuid::Uuid::from_u128(3)));
+    }
+
+    #[test]
+    fn rail_find_enter_falls_back_to_the_top_match() {
+        let mut state = SessionsState {
+            items: vec![session(1, "alpha"), session(2, "beta"), session(3, "gamma")],
+            filter: "ga".to_string(),
+            filter_active: true,
+            // Armed on a row the query no longer shows: the top match is the
+            // only honest target.
+            cursor: Some(uuid::Uuid::from_u128(2)),
+            ..Default::default()
+        };
+        assert_eq!(state.find_target(), Some(uuid::Uuid::from_u128(3)));
+
+        // Nothing matches: Enter opens nothing rather than the open chat.
+        state.filter = "zzz".to_string();
+        assert_eq!(state.find_target(), None);
     }
 }

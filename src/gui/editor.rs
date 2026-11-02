@@ -253,18 +253,6 @@ pub struct Editor {
     emoji_dismissed: bool,
 }
 
-/// Set while a list in the window owns the arrow keys: the sessions rail, the
-/// themes list or the model picker (#2404). The composer then leaves up and
-/// down to the window, so one press moves one list, not the caret too.
-#[derive(Default)]
-pub struct ArrowsToWindow(pub bool);
-
-impl gpui::Global for ArrowsToWindow {}
-
-fn arrows_belong_to_window(cx: &App) -> bool {
-    cx.try_global::<ArrowsToWindow>().is_some_and(|g| g.0)
-}
-
 impl Editor {
     pub fn new(cx: &mut Context<Self>) -> Self {
         Self {
@@ -538,10 +526,6 @@ impl Editor {
     /// like the lines the reader sees. At the top row Up goes to the very
     /// start, and at the bottom row Down goes to the very end.
     fn up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
-        if arrows_belong_to_window(cx) {
-            cx.propagate();
-            return;
-        }
         // Up in an empty composer takes the newest queued message back to edit (#2441).
         if self.content.is_empty()
             && let Some(text) = crate::agent_bridge::queue_recall_last()
@@ -565,10 +549,6 @@ impl Editor {
     }
 
     fn down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
-        if arrows_belong_to_window(cx) {
-            cx.propagate();
-            return;
-        }
         if self.step_command_popup(1, cx) {
             return;
         }

@@ -372,6 +372,15 @@ pub fn render(f: &mut Frame, app: &mut App) {
         let area = f.area();
         crate::tui::render::hints::render_command_panel(f, area, app.dialog_help_scope);
     }
+
+    // Deep find (#2458), topmost: while it is up it owns every key, so nothing
+    // may paint over the card whose field is taking the characters. The app is
+    // drawn first and this dims it, so the frame still reads as the screen the
+    // user was in instead of a blank one.
+    if let Some(state) = &app.command_palette {
+        let area = f.area();
+        crate::tui::render::command_palette::render_command_palette(f, state, area);
+    }
 }
 
 /// Render the chat area as split panes.

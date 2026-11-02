@@ -2854,13 +2854,17 @@ impl App {
                     self.selected_session_index = self.sessions.len().saturating_sub(1);
                 }
             }
-        } else if (event.code == KeyCode::Char('f') || event.code == KeyCode::Char('F'))
-            && (event.modifiers == KeyModifiers::CONTROL || event.modifiers == KeyModifiers::SUPER)
+        } else if (event.code == KeyCode::Char('p') || event.code == KeyCode::Char('P'))
+            && (event.modifiers.contains(KeyModifiers::CONTROL)
+                || event.modifiers.contains(KeyModifiers::SUPER))
+            && event.modifiers.contains(KeyModifiers::SHIFT)
         {
-            // Pin/unpin the selected session. A pin is a view property: it
-            // lives in the sidecar table, never touches `updated_at`, and
-            // floats the session to the top of this list without disturbing
-            // the recency order under it.
+            // Pin/unpin the selected session (#2457): the pin moved off
+            // `ctrl-f` so `ctrl-shift-f` could open the deep find card on
+            // both clients, and it now rides `p` on both. A pin is a view
+            // property: it lives in the sidecar table, never touches
+            // `updated_at`, and floats the session to the top of this list
+            // without disturbing the recency order under it.
             if let Some(session) = self.sessions.get(self.selected_session_index) {
                 let session_id = session.id;
                 // Pulled out before `load_sessions` below: `session` borrows
@@ -2896,23 +2900,13 @@ impl App {
         } else if (event.code == KeyCode::Char('f') || event.code == KeyCode::Char('F'))
             && event.modifiers.is_empty()
         {
-            // Open session files browser (modifiers excluded so the
-            // Ctrl/Cmd+F pin binding above cannot also land here)
-            if let Some(session) = self.sessions.get(self.selected_session_index) {
-                let session_id = session.id;
-                match self.file_service.list_files_for_session(session_id).await {
-                    Ok(files) => {
-                        self.session_files = files;
-                        self.selected_file_index = 0;
-                        self.switch_mode(AppMode::SessionFiles).await?;
-                    }
-                    Err(e) => {
-                        self.notification = Some(format!("Failed to load files: {e}"));
-                        self.notification_shown_at = Some(std::time::Instant::now());
-                    }
-                }
-            }
-        } else if event.code == KeyCode::Char('p') || event.code == KeyCode::Char('P') {
+            // Open session files browser. Modifiers are excluded so no chord
+            // can also land here; the deep find card opens the same view
+            // through the same method (#2458).
+            self.open_session_files_view().await?;
+        } else if (event.code == KeyCode::Char('p') || event.code == KeyCode::Char('P'))
+            && event.modifiers.is_empty()
+        {
             // Open projects browser
             match self.project_service.list_projects().await {
                 Ok(projects) => {
@@ -3340,5 +3334,32 @@ mod clipboard_backend_tests {
             ("opencrabs-no-such-clipboard-xyz", &[]),
         ];
         assert!(!copy_with_backends(backends, "payload"));
+    }
+}
+
+#[cfg(test)]
+mod palette_wiring_tests {
+    /// The pin chord moved to `ctrl-shift-p` when the deep find card took
+    /// `ctrl-shift-f` (#2457), and the bare `p` that opens the projects
+    /// browser gained a modifier guard in the same move. A source scan,
+    /// because the handler needs a full app to exercise; the behaviour it
+    /// pins is which chord reaches which branch.
+    #[test]
+    fn the_pin_chord_is_ctrl_shift_p_and_bare_p_still_opens_projects() {
+        let src = include_str!("input.rs");
+        let pin = src
+            .find("KeyCode::Char('p') || event.code == KeyCode::Char('P'))\n            && (event.modifiers.contains(KeyModifiers::CONTROL)")
+            .expect("the pin branch rides p with a control modifier");
+        assert!(
+            src.contains("&& event.modifiers.contains(KeyModifiers::SHIFT)"),
+            "the pin must require shift"
+        );
+        let projects = src
+            .find("} else if (event.code == KeyCode::Char('p') || event.code == KeyCode::Char('P'))\n            && event.modifiers.is_empty()")
+            .expect("the projects branch must refuse modifiers");
+        assert!(
+            pin < projects,
+            "the pin branch is answered before the bare p"
+        );
     }
 }

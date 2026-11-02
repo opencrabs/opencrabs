@@ -8,6 +8,7 @@
 pub(crate) mod background;
 pub(crate) mod chat;
 pub(crate) mod chrome;
+mod command_palette;
 mod dialogs;
 mod frame;
 

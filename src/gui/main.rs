@@ -28,6 +28,7 @@ mod agent_bridge;
 mod attachment_view;
 mod bang;
 mod breakdown;
+mod command_palette;
 mod commands;
 mod editor;
 mod icon;
@@ -48,13 +49,20 @@ mod transcript;
 mod usage_view;
 
 use crate::screen_keys::{
-    ChordMods, FocusTarget, ScreenAction, action_label, focus_target, screen_chord,
+    ChordMods, FocusTarget, KeyboardOwner, OverlayId, ScreenAction, action_label, focus_target,
+    keyboard_owner, screen_chord,
 };
 use crate::theme::{BASE_REM, Size, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP, text};
 use opencrabs::ui_core::split::{self, Layout};
 use transcript::{CopyDrag, LiveTurn, TranscriptState};
 // The terminal's own command table, shared rather than copied.
 use opencrabs::ui_core::commands as slash;
+// The deep find engine: ranking, keywords and state, shared with the terminal
+// so both clients print the same rows in the same order (#2458). Named `find`
+// because `palette` here is the window's colour table.
+use opencrabs::ui_core::palette::{
+    self as find, PaletteAction, PaletteItem, PaletteKind, PaletteState,
+};
 
 use futures::channel::oneshot;
 
@@ -302,6 +310,14 @@ struct Dashboard {
     /// so the caret is never left on an element that stopped drawing and a
     /// screen key always has a named receiver.
     refocus: Option<FocusTarget>,
+    /// The owner focus was last set for. A frame where it changed applies the
+    /// new target, so an opener that forgets to ask still cannot leave the
+    /// composer answering under the field that just took the keyboard.
+    last_owner: Option<KeyboardOwner>,
+    /// The deep find card. The query, the ranking and the armed row live in
+    /// `ui_core::palette`; this is whether the card is up, and what it was
+    /// given to find when it opened (#2458).
+    finder: Option<PaletteState>,
     /// Monotonic tag on the latest period fetch; only its result is applied,
     /// so a slow fetch landing after a newer one cannot paint stale data.
     pending: u64,
@@ -636,13 +652,217 @@ impl Dashboard {
         cx.notify();
     }
 
-    /// Ask the next frame to put focus where the new screen expects it.
+    /// Every overlay open right now, bottom to top. The keyboard owner is
+    /// derived from this one list, so an opener cannot forget to move focus
+    /// and a closer cannot forget to hand it back (#2454, #2455).
+    fn open_overlays(&self) -> Vec<OverlayId> {
+        // A full screen is its own surface: the rail and the chat overlays are
+        // not drawn over it, so nothing below can own a key there.
+        if self.screen != Screen::Chat {
+            return Vec::new();
+        }
+        let mut open = Vec::new();
+        if self.rail_open && self.rail_focused {
+            open.push(OverlayId::Rail);
+        }
+        if self.split_pick.is_some() {
+            open.push(OverlayId::SplitPick);
+        }
+        if self.topic_info.is_some() {
+            open.push(OverlayId::TopicInfo);
+        }
+        if self.topic_draft.is_some() {
+            open.push(OverlayId::TopicPrompt);
+        }
+        if self.help_open {
+            open.push(OverlayId::Help);
+        }
+        if self.preview.is_some() {
+            open.push(OverlayId::Preview);
+        }
+        if self.rail_actions.is_some() {
+            open.push(OverlayId::RowActions);
+        }
+        if self.sessions.rail_menu.is_some() {
+            open.push(OverlayId::RailMenu);
+        }
+        if self.confirm_delete.is_some() {
+            open.push(OverlayId::ConfirmDelete);
+        }
+        if self.sessions.filter_active {
+            open.push(OverlayId::RailFind);
+        }
+        if self.finder.is_some() {
+            open.push(OverlayId::CommandPalette);
+        }
+        open
+    }
+
+    /// Ask the next frame to put focus where the current screen expects it.
     ///
     /// A transition calls this instead of touching focus itself: only the
     /// render holds a window to focus through, and this is the one place that
-    /// decides which element a screen owns (#2350, #2356).
+    /// decides which element owns the keyboard (#2350, #2356, #2454).
     fn refocus_screen(&mut self) {
-        self.refocus = Some(focus_target(self.screen));
+        self.refocus = Some(focus_target(keyboard_owner(
+            &self.open_overlays(),
+            self.screen,
+        )));
+    }
+
+    /// An overlay just opened or closed. Same derived decision, named so a
+    /// call site reads as taking the keyboard rather than re-labelling the
+    /// screen.
+    fn refocus_overlay(&mut self) {
+        self.refocus_screen();
+    }
+
+    /// Open the deep find card (`ctrl-shift-f`, `cmd-k`): one field over the
+    /// window that finds a conversation, a command or a surface with the same
+    /// scoring the terminal uses (#2458).
+    ///
+    /// It opens only when nothing else owns the keyboard, so two overlays
+    /// never stack and the card always has something to hand focus back to.
+    fn open_finder(&mut self, cx: &mut Context<Self>) {
+        if !self.open_overlays().is_empty() {
+            return;
+        }
+        self.finder = Some(PaletteState::new(self.finder_items()));
+        self.refocus_overlay();
+        logging::info("finder: opened");
+        cx.notify();
+    }
+
+    /// Close the card and hand the keyboard back to what was under it.
+    fn close_finder(&mut self, cx: &mut Context<Self>) {
+        self.finder = None;
+        self.refocus_screen();
+        cx.notify();
+    }
+
+    /// The rows the card can find, built from what this window already holds:
+    /// the shared command table, the destinations both clients can open, and
+    /// the conversation rail.
+    fn finder_items(&self) -> Vec<PaletteItem> {
+        let mut items: Vec<PaletteItem> = slash::SLASH_COMMANDS
+            .iter()
+            .map(|cmd| {
+                PaletteItem::new(
+                    cmd.name,
+                    cmd.description,
+                    PaletteKind::Command,
+                    PaletteAction::RunSlash(cmd.name),
+                )
+                .with_keywords(find::keywords_for(cmd.name))
+            })
+            .collect();
+        items.extend(find::surface_items());
+        for skill in opencrabs::brain::skills::load_all_skills() {
+            items.push(
+                PaletteItem::new(
+                    skill.slash_name.clone(),
+                    skill.description.clone(),
+                    PaletteKind::Skill,
+                    PaletteAction::RunSkill(skill.slash_name.clone()),
+                )
+                .with_keywords("skill workflow recipe"),
+            );
+        }
+        for session in &self.sessions.items {
+            let title = session
+                .title
+                .clone()
+                .unwrap_or_else(|| "Untitled conversation".to_string());
+            items.push(PaletteItem::new(
+                title,
+                session.updated_at.format("%Y-%m-%d %H:%M").to_string(),
+                PaletteKind::Session,
+                PaletteAction::OpenSession(session.id.as_u128()),
+            ));
+        }
+        items
+    }
+
+    /// Every key while the card is up belongs to it: typing narrows the list,
+    /// the arrows move the armed row and Enter runs it. Nothing falls through
+    /// to the composer, which is the whole point of the card (#2458).
+    fn finder_key(&mut self, ks: &gpui::Keystroke, cx: &mut Context<Self>) {
+        let Some(state) = self.finder.as_mut() else {
+            return;
+        };
+        match ks.key.as_str() {
+            "escape" => {
+                self.close_finder(cx);
+                return;
+            }
+            "enter" => {
+                self.run_finder_pick(cx);
+                return;
+            }
+            "up" => state.move_by(-1, find::MAX_ROWS),
+            "down" => state.move_by(1, find::MAX_ROWS),
+            "backspace" => state.backspace(),
+            "space" => state.type_char(' '),
+            _ => {
+                // A chord is not a character: ctrl+c still means what it
+                // meant, and it must not type a `c` into the field.
+                if ks.modifiers.control || ks.modifiers.platform || ks.modifiers.alt {
+                    return;
+                }
+                if let Some(text) = ks.key_char.as_deref() {
+                    for ch in text.chars() {
+                        state.type_char(ch);
+                    }
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Run the row Enter is on, or the best match when no arrow was pressed.
+    fn run_finder_pick(&mut self, cx: &mut Context<Self>) {
+        let Some(row) = self.finder.as_ref().and_then(|state| state.selected()) else {
+            self.close_finder(cx);
+            return;
+        };
+        self.finder = None;
+        self.refocus_screen();
+        match row.item.action {
+            PaletteAction::RunSlash(name) => self.send_message(name.to_string(), cx),
+            PaletteAction::OpenSession(id) => self.open_session(Uuid::from_u128(id), cx),
+            PaletteAction::OpenSurface(surface) => self.open_surface(surface, cx),
+            PaletteAction::SwitchModel { provider, model } => {
+                self.send_message(format!("/models {provider}/{model}"), cx)
+            }
+            PaletteAction::RunSkill(name) | PaletteAction::RunUserCommand(name) => {
+                self.send_message(name, cx)
+            }
+        }
+    }
+
+    /// Open the destination a surface row names, through the same toggles the
+    /// chords use, so a pick and a key press land in exactly the same place.
+    fn open_surface(&mut self, surface: find::Surface, cx: &mut Context<Self>) {
+        match surface {
+            find::Surface::Usage => self.toggle_usage(cx),
+            find::Surface::Files => self.toggle_files(cx),
+            find::Surface::Themes => self.toggle_themes(cx),
+            find::Surface::Models => self.open_models(None, cx),
+            find::Surface::Sessions => self.toggle_rail(cx),
+            find::Surface::Help => self.toggle_help(cx),
+            find::Surface::Skills => self.send_message("/skills".to_string(), cx),
+            find::Surface::Profiles => self.send_message("/profiles".to_string(), cx),
+            find::Surface::MissionControl => self.open_mission_control(cx),
+        }
+    }
+
+    /// A click on printed row `ix`: arm it, then take the same path Enter
+    /// takes, so a click and a key press can never act on different rows.
+    fn pick_finder_row(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if let Some(state) = self.finder.as_mut() {
+            state.arm(ix);
+        }
+        self.run_finder_pick(cx);
     }
 
     /// Run what the screen table named. The table decides and this applies, so
@@ -2799,6 +3019,28 @@ impl Dashboard {
     }
 
     fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // The deep find card owns every key while it is up, and the chord that
+        // opens it sits ahead of every other reader: one field that finds a
+        // conversation, a command or a surface is only useful if the composer
+        // underneath cannot eat the characters (#2458). ctrl-shift-f is the
+        // chord every platform can send; cmd-k is the window's own alias.
+        {
+            let ks = &ev.keystroke;
+            let chord = find::opens(
+                ks.modifiers.control,
+                ks.modifiers.shift,
+                ks.modifiers.platform,
+                &ks.key,
+            );
+            if self.finder.is_some() {
+                self.finder_key(ks, cx);
+                return;
+            }
+            if chord && self.screen == Screen::Chat {
+                self.open_finder(cx);
+                return;
+            }
+        }
         // Split panes (#2438): the chord opens a split, and while one waits for
         // its session, N makes a new one and Esc drops the pick.
         if self.screen == Screen::Chat {
@@ -2884,11 +3126,11 @@ impl Dashboard {
         // chats whose title (or id prefix) matches, live, with the match
         // count on the bar. Any exit clears it, so the rail never hides a
         // filter behind a closed field.
-        // ctrl+shift+f pins the row the keyboard is on, or the open
-        // conversation when the rail has not armed one. It comes before the
-        // plain find key because both carry `f`; shift decides which one it
-        // was.
-        if ev.keystroke.modifiers.control && ev.keystroke.modifiers.shift && ev.keystroke.key == "f"
+        // ctrl+shift+p pins the row the keyboard is on, or the open
+        // conversation when the rail has not armed one. It rides `p` on both
+        // clients, so the terminal and the window pin with the same keys
+        // (#2457); ctrl+shift+f is the deep find card.
+        if ev.keystroke.modifiers.control && ev.keystroke.modifiers.shift && ev.keystroke.key == "p"
         {
             if let Some(id) = self.sessions.pin_target() {
                 self.toggle_favorite(id, cx);
@@ -2900,6 +3142,12 @@ impl Dashboard {
                 self.close_rail_filter(cx);
             } else {
                 self.sessions.filter_active = true;
+                // The field takes the keyboard, so the composer's Enter and
+                // arrows stop answering while it says it is listening (#2454).
+                if self.sessions.cursor.is_none() || !self.sessions.cursor_visible() {
+                    self.sessions.cursor = self.sessions.cursor_step(None, 1);
+                }
+                self.refocus_overlay();
                 cx.notify();
             }
             return;
@@ -2961,7 +3209,28 @@ impl Dashboard {
         if self.sessions.filter_active {
             let ks = &ev.keystroke;
             match ks.key.as_str() {
-                "escape" | "enter" => self.close_rail_filter(cx),
+                "escape" => self.close_rail_filter(cx),
+                "enter" => {
+                    // Enter opens the row the field found, the terminal's own
+                    // behaviour. It used to close the search and send nothing.
+                    let target = self.sessions.find_target();
+                    self.close_rail_filter(cx);
+                    if let Some(id) = target {
+                        self.open_session(id, cx);
+                    }
+                }
+                "up" | "down" => {
+                    // The arrows step the rail from inside the field, and the
+                    // match that scrolls into view is the one Enter opens.
+                    let delta = if ks.key == "down" { 1 } else { -1 };
+                    if let Some(id) = self.sessions.cursor_step(self.sessions.cursor, delta) {
+                        self.sessions.cursor = Some(id);
+                        if let Some(ix) = self.sessions.cursor_index(id) {
+                            self.rail_scroll.scroll_to_item(ix);
+                        }
+                    }
+                    cx.notify();
+                }
                 "backspace" => {
                     self.sessions.filter.pop();
                     self.normalize_cursor();
@@ -3028,6 +3297,25 @@ impl Dashboard {
                 return;
             }
         }
+        // The delete confirmation is a modal with two answers, so it owns
+        // both keys while it is up: Enter confirms, Esc cancels, and every
+        // other keystroke is swallowed rather than reaching anything behind
+        // it (#2456).
+        if let Some(id) = self.confirm_delete {
+            match ev.keystroke.key.as_str() {
+                "enter" => {
+                    self.confirm_delete = None;
+                    self.rail_actions = None;
+                    self.delete_session(id, cx);
+                }
+                "escape" => {
+                    self.confirm_delete = None;
+                }
+                _ => {}
+            }
+            cx.notify();
+            return;
+        }
         if ev.keystroke.key == "escape" {
             // The key reference paints above everything and costs nothing to
             // close, so it goes first: the nearest thing to the user answers.
@@ -3046,12 +3334,6 @@ impl Dashboard {
                 // The facts belong to the file that was open, so they leave
                 // with it: the next clip probes its own.
                 self.preview_video = None;
-                cx.notify();
-                return;
-            }
-            // The confirm dialog sits above everything, so Esc answers it
-            // first: cancelling leaves the conversation untouched.
-            if self.confirm_delete.take().is_some() {
                 cx.notify();
                 return;
             }
@@ -3123,13 +3405,12 @@ impl Dashboard {
             }
             if !self.busy {
                 self.esc_at = None;
-                // Idle Esc hands the keyboard between the composer and the
-                // rail: the one keyboard bridge that makes arrow navigation
-                // reachable without a mouse click first (#2351). Second Esc
-                // hands it back.
-                if self.editor.read(cx).focus_handle.is_focused(window) {
-                    window.blur();
-                } else {
+                // Idle Esc hands the keyboard back. The rail's mode is the
+                // only thing Esc owns here, and Tab is what arms it. The old
+                // blur bridge existed only because focus never moved off the
+                // composer (#2351, #2454).
+                if self.rail_focused {
+                    self.rail_focused = false;
                     self.refocus_screen();
                 }
                 cx.notify();
@@ -3191,6 +3472,25 @@ impl Dashboard {
             cx.notify();
             return;
         }
+        // Tab moves the keyboard between the composer and the rail. It runs before
+        // the composer gate, because taking the keyboard away from a focused
+        // composer is the whole point (#2351, #2454). While an emoji or command
+        // list is open, Tab accepts there instead (#2417).
+        if ev.keystroke.key == "tab"
+            && self.screen == Screen::Chat
+            && self.rail_open
+            && (self.rail_focused || !self.editor.read(cx).list_open())
+        {
+            self.rail_focused = !self.rail_focused;
+            if self.rail_focused {
+                self.sessions.cursor = self.sessions.cursor.or(self.sessions.selected);
+            }
+            // The owner decides where focus lands: the root while the rail
+            // holds the keyboard, the composer once it hands back.
+            self.refocus_screen();
+            cx.notify();
+            return;
+        }
         // While the editor holds focus it owns the keyboard: its actions
         // (send, newline, movement) run through the keymap, and raw keys
         // reaching this handler would double-handle Enter and friends.
@@ -3203,24 +3503,6 @@ impl Dashboard {
         // arrows used to die in (#2351).
         if self.screen == Screen::Chat && self.rail_open {
             match ev.keystroke.key.as_str() {
-                // Tab moves the keyboard between the composer and the sidebar.
-                // While an emoji or command list is open, Tab accepts there (#2417).
-                "tab" if self.rail_focused || !self.editor.read(cx).list_open() => {
-                    self.rail_focused = !self.rail_focused;
-                    if self.rail_focused {
-                        self.sessions.cursor = self.sessions.cursor.or(self.sessions.selected);
-                    } else {
-                        self.refocus_screen();
-                    }
-                    cx.notify();
-                    return;
-                }
-                "escape" if self.rail_focused => {
-                    self.rail_focused = false;
-                    self.refocus_screen();
-                    cx.notify();
-                    return;
-                }
                 "up" | "down" if self.rail_focused => {
                     // The arrows walk the rail and open the row they stand
                     // on, so the chat shows it without an Enter. Focus stays
@@ -3397,14 +3679,17 @@ impl Dashboard {
 
 impl Render for Dashboard {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // The composer leaves the arrows to a list that is on screen (#2404).
-        let window_owns_arrows =
-            (self.screen == Screen::Chat && self.rail_open && self.rail_focused)
-                || self.screen == Screen::Themes;
-        cx.set_global(editor::ArrowsToWindow(window_owns_arrows));
-        // The pending focus from the last transition is applied here because
-        // this is the only place holding a window to focus through. Applying
-        // it before the tree is built means the frame that shows the new
+        // Focus follows the keyboard owner, decided here because this is the
+        // only place holding a window to focus through. A transition that
+        // forgot to ask would leave the composer answering under an open
+        // field, which is the bug class #2455 came from, so the owner is
+        // reconciled every frame instead of trusted from each call site.
+        let owner = keyboard_owner(&self.open_overlays(), self.screen);
+        if self.last_owner != Some(owner) {
+            self.last_owner = Some(owner);
+            self.refocus = Some(focus_target(owner));
+        }
+        // Applied before the tree is built, so the frame that shows the new
         // screen is the frame that can be typed into.
         if let Some(target) = self.refocus.take() {
             match target {
@@ -5774,6 +6059,22 @@ impl Render for Dashboard {
                     ),
             );
         }
+        // The deep find card paints above every other surface, because it is
+        // the one thing that takes every key while it is up (#2458). One
+        // handler per printed row, built here where the context lives.
+        if let Some(state) = self.finder.as_ref() {
+            let printed = command_palette::rows(state).len();
+            let handlers: Vec<command_palette::PickHandler> = (0..printed)
+                .map(|ix| -> command_palette::PickHandler {
+                    Box::new(
+                        cx.listener(move |this: &mut Self, _ev: &ClickEvent, _window, cx| {
+                            this.pick_finder_row(ix, cx);
+                        }),
+                    )
+                })
+                .collect();
+            root = root.child(command_palette::overlay(state, handlers));
+        }
         root
     }
 }
@@ -5976,7 +6277,9 @@ fn main() {
                         focus: focus.clone(),
                         // The chat opens with the composer holding focus, so its
                         // caret shows and typing needs no click first (#2433).
-                        refocus: Some(focus_target(Screen::Chat)),
+                        refocus: Some(focus_target(keyboard_owner(&[], Screen::Chat))),
+                        last_owner: None,
+                        finder: None,
                         pending: 0,
                         files: Vec::new(),
                         files_for: None,
@@ -8105,7 +8408,8 @@ mod tests {
             ("up/down", "Move the highlight in the list"),
             ("enter", "Open the highlighted session"),
             ("ctrl+f", "Find a session"),
-            ("ctrl+shift+f", "Pin the selected session"),
+            ("ctrl+shift+p", "Pin the selected session"),
+            ("ctrl+shift+f", "Deep find anything"),
             ("ctrl+d", "Delete the selected session"),
             ("ctrl+g", "Session files"),
             ("esc", "Cancel or step back"),
@@ -8121,6 +8425,7 @@ mod tests {
                 Some(match chord {
                     "up/down" => "up/down",
                     "ctrl+f" => "ctrl-f",
+                    "ctrl+shift+p" => "ctrl-shift-p",
                     "ctrl+shift+f" => "ctrl-shift-f",
                     "ctrl+d" => "ctrl-d",
                     "ctrl+s" => "ctrl-s",
@@ -8163,6 +8468,64 @@ mod tests {
             src.contains("for (section, row) in help_rows()"),
             "the renderer must paint the list the test checks"
         );
+    }
+
+    #[test]
+    fn delete_dialog_answers_enter_and_escape() {
+        // The confirmation is a modal with two answers, so the keyboard gets
+        // both (#2456). It sits before the Esc ladder, because a dialog that
+        // owns the keyboard has to answer every key itself, and `delete` runs
+        // from the same branch the button's click runs.
+        let src = include_str!("main.rs");
+        let branch = [
+            "if let Some(id) = self.confirm_delete {\n            match ev.keystroke.key.as_str() {\n                \"enter\" => {",
+            "self.delete_session(id, cx);",
+        ];
+        assert!(
+            src.contains(branch[0]),
+            "Enter must confirm the delete dialog"
+        );
+        assert!(
+            src.contains(branch[1]),
+            "the confirm path must delete the row it names"
+        );
+        let gate = src
+            .find(branch[0])
+            .expect("the dialog branch is in the handler");
+        let esc_ladder = src
+            .find("if ev.keystroke.key == \"escape\" {")
+            .expect("the Esc ladder is in the handler");
+        assert!(
+            gate < esc_ladder,
+            "the dialog answers before the ladder, not after it"
+        );
+    }
+
+    #[test]
+    fn deep_find_owns_the_keyboard_before_the_composer_does() {
+        // The card is only a launcher if it gets the characters: its branch
+        // must run before the composer gate, or a focused editor types into
+        // itself what the user meant for the field (#2458).
+        let src = include_str!("main.rs");
+        let hook = src
+            .find("self.finder_key(ks, cx)")
+            .expect("the card must answer keys in on_key");
+        let gate = src
+            .find("if self.editor.read(cx).focus_handle.is_focused(window)")
+            .expect("the composer gate is in the handler");
+        assert!(
+            hook < gate,
+            "the card reads keys before the composer, not after it"
+        );
+        for needle in [
+            "fn finder_key",
+            "fn open_finder",
+            "fn run_finder_pick",
+            "fn finder_items",
+            "OverlayId::CommandPalette",
+        ] {
+            assert!(src.contains(needle), "{needle} is part of the wiring");
+        }
     }
 
     #[test]

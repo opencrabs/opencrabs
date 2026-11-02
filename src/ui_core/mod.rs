@@ -10,6 +10,7 @@ pub mod commands;
 pub mod copy_select;
 pub mod help_keys;
 pub mod keys;
+pub mod palette;
 pub mod split;
 pub mod usage;
 
@@ -20,9 +21,13 @@ mod purity_tests {
     //! break that silently at compile time for the GUI, never for us.
 
     /// Every source file in `ui_core`, with its contents.
-    fn sources() -> [(&'static str, &'static str); 11] {
+    fn sources() -> [(&'static str, &'static str); 15] {
         [
+            ("ui_core/bang.rs", include_str!("bang.rs")),
+            ("ui_core/copy_select.rs", include_str!("copy_select.rs")),
             ("ui_core/mod.rs", include_str!("mod.rs")),
+            ("ui_core/palette.rs", include_str!("palette.rs")),
+            ("ui_core/split.rs", include_str!("split.rs")),
             ("ui_core/commands.rs", include_str!("commands.rs")),
             ("ui_core/help_keys.rs", include_str!("help_keys.rs")),
             ("ui_core/keys.rs", include_str!("keys.rs")),
@@ -79,5 +84,42 @@ mod purity_tests {
             });
             assert!(hit.is_none(), "{name} references a terminal type: {hit:?}");
         }
+    }
+
+    /// Every `.rs` file under `ui_core` is in the scan list above. The list is
+    /// a fixed-size array, so a new file adds no coverage until someone
+    /// remembers to bump it: this fails instead, naming the file that was
+    /// added silently (#2458).
+    #[test]
+    fn the_scan_list_equals_the_directory() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let root = src.join("ui_core");
+        let mut on_disk: Vec<String> = Vec::new();
+        fn walk(dir: &std::path::Path, src: &std::path::Path, out: &mut Vec<String>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, src, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let rel = path
+                        .strip_prefix(src)
+                        .unwrap_or(&path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    out.push(rel);
+                }
+            }
+        }
+        walk(&root, &src, &mut on_disk);
+        on_disk.sort();
+        let mut listed: Vec<String> = sources().iter().map(|(name, _)| name.to_string()).collect();
+        listed.sort();
+        assert_eq!(
+            listed, on_disk,
+            "the purity scan list and src/ui_core disagree"
+        );
     }
 }
