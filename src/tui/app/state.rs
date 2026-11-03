@@ -1369,9 +1369,9 @@ impl App {
     /// doc both survive reloads and restarts by design.
     pub(crate) fn reload_plan(&mut self) {
         let path = self.pane_manager.focused_plan_path().cloned();
-        let doc =
-            path.as_ref()
-                .and_then(|path| crate::utils::plan_files::load_plan_from_path(path));
+        let doc = path
+            .as_ref()
+            .and_then(|path| crate::utils::plan_files::load_plan_from_path(path));
         self.pane_manager.set_focused_plan(path, doc);
     }
 

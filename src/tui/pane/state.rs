@@ -393,8 +393,8 @@ impl PaneManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::plan::PlanDocument;
     use crate::tui::pane::layout::SplitDirection;
+    use crate::tui::plan::PlanDocument;
 
     fn doc(title: &str) -> PlanDocument {
         serde_json::from_str(&format!(r#"{{"tasks":[],"title":"{title}"}}"#))
@@ -437,7 +437,10 @@ mod tests {
     #[test]
     fn inactive_pane_keeps_its_plan_after_focus_moves() {
         let mut mgr = PaneManager::new();
-        mgr.set_focused_plan(Some(std::path::PathBuf::from("/tmp/a.json")), Some(doc("first")));
+        mgr.set_focused_plan(
+            Some(std::path::PathBuf::from("/tmp/a.json")),
+            Some(doc("first")),
+        );
         mgr.split(SplitDirection::Horizontal);
         mgr.set_focused_plan(
             Some(std::path::PathBuf::from("/tmp/b.json")),
@@ -453,7 +456,11 @@ mod tests {
         // ...while the inactive pane still owns its own plan, so a split
         // render can show it without a reload (#2494).
         assert_eq!(
-            mgr.get(PaneId::ROOT).unwrap().plan_document.as_ref().map(|d| d.title.as_str()),
+            mgr.get(PaneId::ROOT)
+                .unwrap()
+                .plan_document
+                .as_ref()
+                .map(|d| d.title.as_str()),
             Some("first")
         );
     }
@@ -461,7 +468,10 @@ mod tests {
     #[test]
     fn clear_focused_plan_keeps_the_resolved_path() {
         let mut mgr = PaneManager::new();
-        mgr.set_focused_plan(Some(std::path::PathBuf::from("/tmp/a.json")), Some(doc("first")));
+        mgr.set_focused_plan(
+            Some(std::path::PathBuf::from("/tmp/a.json")),
+            Some(doc("first")),
+        );
         mgr.clear_focused_plan();
         assert!(mgr.focused_plan().is_none());
         assert_eq!(
