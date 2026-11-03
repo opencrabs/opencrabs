@@ -204,8 +204,7 @@ pub fn overlay(
                     .text_color(rgb(INK))
                     .truncate()
                     .child(SharedString::from(if empty {
-                        "Seeker: Find sessions, features, skills, docs, debug and more."
-                            .to_string()
+                        "Seeker: Find sessions, features, skills, docs, debug and more.".to_string()
                     } else {
                         state.query().to_string()
                     })),
@@ -236,8 +235,7 @@ pub fn overlay(
                                 .text_color(rgb(theme.accent))
                         })
                         .when(!active, |d| {
-                            d.border_color(rgba(0xffffff14))
-                                .text_color(rgb(INK_MUTED))
+                            d.border_color(rgba(0xffffff14)).text_color(rgb(INK_MUTED))
                         })
                         .hover(|d| d.border_color(rgb(theme.accent)))
                         .on_click(move |_ev, _window, cx| {
@@ -286,11 +284,7 @@ pub fn overlay(
                     .child(
                         div()
                             .text_sm()
-                            .text_color(rgb(if rowv.missing {
-                                INK_MUTED
-                            } else {
-                                INK
-                            }))
+                            .text_color(rgb(if rowv.missing { INK_MUTED } else { INK }))
                             .truncate()
                             .child(SharedString::from(rowv.title.clone())),
                     )
@@ -315,12 +309,7 @@ pub fn overlay(
                         .child("terminal only"),
                 );
             } else if armed {
-                cell = cell.child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(INK_MUTED))
-                        .child("↵ enter"),
-                );
+                cell = cell.child(div().text_xs().text_color(rgb(INK_MUTED)).child("↵ enter"));
             }
             if let Some(handler) = handlers.next() {
                 cell = cell.on_click(handler);

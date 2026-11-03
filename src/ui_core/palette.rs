@@ -205,7 +205,9 @@ pub const SURFACES: &[Surface] = &[
 /// the card lists one row per destination instead of the same name twice
 /// (#2491).
 pub fn is_surface_command(name: &str) -> bool {
-    SURFACES.iter().any(|surface| surface.command() == Some(name))
+    SURFACES
+        .iter()
+        .any(|surface| surface.command() == Some(name))
 }
 
 /// The destination rows, built here rather than in each frontend, so a screen
