@@ -192,7 +192,7 @@ pub const ROWS: &[HelpRow] = &[
         "ctrl+shift+f",
         "Ctrl+Shift+F",
         Some("ctrl-shift-f"),
-        "Seeker: find anything",
+        "Seeker: find, docs, setup, topic, pin, ask",
     ),
     // The window's rem zoom (#2425). The terminal has no rem to scale: font
     // size there belongs to the emulator, so these rows are window-only.
@@ -594,7 +594,7 @@ mod tests {
         assert_eq!(row.section, HelpSection::Global);
         assert_eq!(row.tui, Some("Ctrl+Shift+F"));
         assert_eq!(row.gui, Some("ctrl-shift-f"));
-        assert_eq!(row.description, "Seeker: find anything");
+        assert_eq!(row.description, "Seeker: find, docs, setup, topic, pin, ask");
     }
 
     #[test]
