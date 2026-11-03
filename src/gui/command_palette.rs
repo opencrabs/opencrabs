@@ -1,7 +1,7 @@
-//! The Seeker card: an always-dark glass pill floating over a dimmed window
-//! (#2491), Spotlight-shaped: rounded, shadowed, top-center, a wordmark on
-//! the field, kind chips under it, and a curated menu that waits three
-//! seconds before it shows.
+//! The Seeker overlay: Spotlight's shape, fatter. The field is its own fat
+//! pill floating on top, the results a second rounded card below it with a
+//! gap (#2491); kind chips under the pill, and a curated menu that waits
+//! three seconds before it shows.
 //!
 //! The ranking, the keyword table and the state live in `ui_core::palette`, so
 //! the terminal and the window print the same rows in the same order (#2458).
@@ -102,15 +102,18 @@ fn chip_defs() -> Vec<(&'static str, Option<PaletteKind>)> {
     ]
 }
 
-/// The card. `pick` holds one handler per printed row, in the same order
+/// Spotlight's shape: the field is its own fat pill floating on top, and
+/// the results are a second rounded card below it with a gap between the
+/// two. `pick` holds one handler per printed row, in the same order
 /// [`rows`] prints them, so a click acts on the row it landed on and nothing
 /// else. `chip` is the press handler for the kind chips. `setup` is the line
 /// for a channel the query names but the config does not carry yet (#2462).
 /// `idle_revealed` is the caller's [`PaletteState::idle_ready`] verdict: a
-/// fresh card paints the field alone until it says otherwise (#2491).
-/// The card is always dark glass, so its ink is fixed light-on-dark. A
-/// theme's `text` colour belongs to the surface behind the window, and using
-/// it here printed near-black words on a dark card under every light theme.
+/// fresh card paints the pill alone until it says otherwise (#2491).
+/// Both elements are always dark glass, so their ink is fixed light-on-dark.
+/// A theme's `text` colour belongs to the surface behind the window, and
+/// using it here printed near-black words on a dark card under every light
+/// theme.
 const INK: u32 = 0xf2f3f5;
 const INK_MUTED: u32 = 0x9ba0aa;
 const INK_WARM: u32 = 0xe8b96a;
@@ -133,8 +136,8 @@ pub fn overlay(
     let reveal = pick_armed || !idle || idle_revealed;
 
     // The glass is always dark, Spotlight-style, light theme included: the
-    // theme keeps its say through the accent on the armed row, the active
-    // chip and the wordmark crab (#2491).
+    // theme keeps its say through the accent on the armed row and the
+    // active chip (#2491).
     let glass = if idle && idle_revealed && !pick_armed {
         // The idle menu sits under the solid field: more transparency at
         // the bottom than the top, so the list reads as a hint, not a wall.
@@ -153,71 +156,71 @@ pub fn overlay(
     let armed_bg = rgba((theme.accent << 8) | 0x2e);
     let chip = Rc::new(chip);
 
-    let mut card = div()
+    // Inert: a click on the shell stops here instead of reaching the
+    // scrim, so reading the list never closes it.
+    let mut shell = div()
         .id("command-palette")
         .flex()
         .flex_col()
+        .gap_2()
         .w(rems(34.0))
-        .max_h(px(480.0))
-        .rounded(px(24.0))
-        .border_1()
-        .border_color(rgba(0xffffff2e))
-        .bg(glass)
-        .shadow_md()
-        .overflow_hidden()
-        // Inert: a click on the card stops here instead of reaching
-        // the scrim, so reading the list never closes it.
         .on_click(|_ev, _window, cx| cx.stop_propagation());
 
-    // The field: one fat capsule, the way Spotlight's bar reads at a glance.
-    // The crab mark on the left, the query or the invitation after it, and a
-    // bright caret that blinks while the card owns the keyboard (#2491).
+    // The field: Spotlight's floating pill, fatter than his, with the
+    // invitation wrapping to two grey lines. No icon in the bar; the caret
+    // blinks while the pill owns the keyboard (#2491, #2495).
     let caret = |on: bool| {
         div()
             .w(px(2.5))
-            .h(px(26.0))
+            .h(px(30.0))
             .rounded(px(2.0))
             .bg(rgb(if on { INK } else { 0x1b1b25 }))
     };
     let empty = state.query().is_empty();
-    card = card.child(
-        div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_3()
-            .mx_3()
-            .mt_3()
-            .mb_2()
-            .px_4()
-            .py_3()
-            .rounded_full()
-            .bg(rgba(0x1b1b25f7))
-            .border_1()
-            .border_color(rgba(0xffffff24))
-            .child(div().text_lg().child("🦀"))
-            .when(empty, |d| d.child(caret(caret_on)))
-            .child(
-                div()
-                    .flex_1()
-                    .text_xl()
-                    .text_color(rgb(INK))
-                    .truncate()
-                    .child(SharedString::from(if empty {
-                        "Seeker: Find sessions, features, skills, docs, debug and more.".to_string()
-                    } else {
-                        state.query().to_string()
-                    })),
-            )
-            .when(!empty, |d| d.child(caret(caret_on))),
-    );
+    let pill = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_3()
+        .px_5()
+        .py_4()
+        .rounded_full()
+        .bg(rgba(0x1b1b25fa))
+        .border_1()
+        .border_color(rgba(0xffffff2e))
+        .shadow_md()
+        .when(empty, |d| d.child(caret(caret_on)))
+        .child(
+            div()
+                .flex_1()
+                .text_xl()
+                .text_color(rgb(if empty { INK_MUTED } else { INK }))
+                .child(SharedString::from(if empty {
+                    "Seeker: Find sessions, features, skills, docs, debug and more.".to_string()
+                } else {
+                    state.query().to_string()
+                })),
+        )
+        .when(!empty, |d| d.child(caret(caret_on)));
+    shell = shell.child(pill);
+
+    let mut card = div()
+        .flex()
+        .flex_col()
+        .max_h(px(480.0))
+        .rounded(px(20.0))
+        .border_1()
+        .border_color(rgba(0xffffff2e))
+        .bg(glass)
+        .shadow_md()
+        .overflow_hidden();
 
     if reveal {
         // The kind chips. Hidden while a session pick is armed: a narrowed
         // conversation list has no kinds to filter (#2491).
         if !pick_armed {
             let wanted = state.kind_filter();
-            let mut row = div().flex().flex_row().gap_1().px_3().pb_1();
+            let mut row = div().flex().flex_row().gap_1().px_3().pt_2().pb_1();
             for (ix, (label, kind)) in chip_defs().into_iter().enumerate() {
                 let active = wanted == kind;
                 let press = chip.clone();
@@ -250,7 +253,7 @@ pub fn overlay(
 
         // The rows: title only, subtitle and enter hint on the armed row,
         // and the one right-edge word that does work, terminal only (#2491).
-        let mut list = div().flex().flex_col().gap_0p5().px_1();
+        let mut list = div().flex().flex_col().gap_0p5().px_2().pb_1();
         let mut handlers = pick.into_iter();
         for (ix, rowv) in printed.iter().enumerate() {
             let armed = rowv.armed;
@@ -261,8 +264,8 @@ pub fn overlay(
                 .items_center()
                 .gap_2()
                 .px_2()
-                .py_1()
-                .rounded(px(10.0))
+                .py_1p5()
+                .rounded(px(12.0))
                 .cursor_pointer()
                 .when(armed, |d| d.bg(armed_bg));
             if armed && !rowv.missing {
@@ -327,7 +330,7 @@ pub fn overlay(
             card = card.child(
                 div()
                     .px_3()
-                    .pb_2()
+                    .pb_3()
                     .text_xs()
                     .text_color(rgb(INK_MUTED))
                     .child(SharedString::from(status(state))),
@@ -358,12 +361,14 @@ pub fn overlay(
             card = card.child(
                 div()
                     .px_3()
-                    .pb_2()
+                    .pb_3()
                     .text_xs()
                     .text_color(rgb(INK_MUTED))
                     .child("enter run · up/down move · esc close"),
             );
         }
+
+        shell = shell.child(card);
     }
 
     div()
@@ -383,7 +388,9 @@ pub fn overlay(
         .justify_start()
         .pt(rems(6.5))
         .bg(rgba(0x08080acc))
-        .child(card)
+        // scrim.child(shell): the pill and the results card float as one
+        // island; the shell carries both, never the card alone (#2495).
+        .child(shell)
 }
 
 /// The kind label for a row, exposed so a test can check the column without
