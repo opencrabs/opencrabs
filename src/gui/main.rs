@@ -71,14 +71,15 @@ use opencrabs::ui_core::docs;
 use futures::channel::oneshot;
 
 use gpui::{
-    AnyElement, App, Application, Bounds, ClickEvent, Context, Div, DragMoveEvent, Entity,
-    ExternalPaths, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    AnyElement, App, Application, Bounds, ClickEvent, Context, CursorStyle, Div, DragMoveEvent,
+    Entity, ExternalPaths, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString, Stateful,
     TitlebarOptions, Window, WindowBounds, WindowOptions, div, prelude::*, px, rems, rgb, rgba,
     size,
 };
 use opencrabs::brain::agent::ProgressEvent;
 use opencrabs::utils::drop_landing::human_size;
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::rc::Rc;
@@ -437,6 +438,18 @@ struct Dashboard {
     split: Option<SplitPane>,
     /// Which pane holds the caret and answers `ctrl+x` (#2474).
     pane_focus: PaneFocus,
+    /// The chat's share of the pane area, moved by dragging the rule between
+    /// the panes and returned to an even split when a new one opens (#2476).
+    split_ratio: f32,
+    /// Where the pane area begins and ends along both axes, in px, written by
+    /// the body itself every frame (#2476). Mapping pointer travel onto the
+    /// share needs the span it travels across, and an element is never told
+    /// its own children's bounds any other way.
+    split_area: Rc<Cell<Option<[f32; 4]>>>,
+    /// A divider drag in flight: where the pointer was along the drag axis in
+    /// px, and the share when it began. The moves land on the window root the
+    /// way the rail splitter's do, so the pointer can leave the handle.
+    split_drag: Option<(f32, f32)>,
     /// The layout a split is waiting on a session for; the sidebar picks it (#2438).
     split_pick: Option<Layout>,
     /// A split's new session is being created, so the created row fills the pane.
@@ -1071,6 +1084,7 @@ impl Dashboard {
     fn close_focused_pane(&mut self, cx: &mut Context<Self>) {
         let was = self.pane_focus;
         self.pane_focus = PaneFocus::Primary;
+        self.split_drag = None;
         match (was, self.split.take()) {
             (PaneFocus::Primary, Some(pane)) => self.open_session(pane.session, cx),
             _ => {
@@ -1085,7 +1099,23 @@ impl Dashboard {
     fn close_secondary_pane(&mut self, cx: &mut Context<Self>) {
         self.split = None;
         self.pane_focus = PaneFocus::Primary;
+        self.split_drag = None;
         self.refocus_screen();
+        cx.notify();
+    }
+
+    /// Tab moves the caret between the two panes (#2475). With no split open
+    /// there is nothing to switch, so the rail keeps the key as it always did.
+    /// The pane holding the caret wears the accent in its header and takes the
+    /// page keys, which is how a read-only transcript holds a caret at all.
+    fn cycle_pane_focus(&mut self, cx: &mut Context<Self>) {
+        self.pane_focus = match self.pane_focus {
+            PaneFocus::Primary => PaneFocus::Secondary,
+            PaneFocus::Secondary => PaneFocus::Primary,
+        };
+        // A receipt in the daily log, so "Tab did nothing" can be told apart
+        // from "Tab moved the caret and the header did not show it".
+        logging::debug(&format!("pane focus -> {:?}", self.pane_focus));
         cx.notify();
     }
 
@@ -1103,6 +1133,10 @@ impl Dashboard {
         }
         self.split_pick = None;
         self.rail_focused = false;
+        // A new pick starts the panes even again: the share a previous split
+        // was dragged to belongs to that split, not to this one (#2476).
+        self.split_ratio = split::EVEN_SHARE;
+        self.split_drag = None;
         // The pane just picked is the one the caret and ctrl+x land on, so a
         // split opens ready to act on what was clicked (#2474).
         self.pane_focus = PaneFocus::Secondary;
@@ -3303,12 +3337,7 @@ impl Dashboard {
         // its session, N makes a new one and Esc drops the pick.
         if self.screen == Screen::Chat {
             let ks = &ev.keystroke;
-            if let Some(layout) = split::chord_layout(
-                &ks.key,
-                ks.key_char.as_deref(),
-                ks.modifiers.control,
-                ks.modifiers.shift,
-            ) {
+            if let Some(layout) = split_chord(ks) {
                 self.begin_split(layout, cx);
                 return;
             }
@@ -3717,11 +3746,18 @@ impl Dashboard {
             let key = ev.keystroke.key.as_str();
             if matches!(key, "pageup" | "pagedown") {
                 let page = px(f32::from(window.viewport_size().height) * 0.8);
-                let offset = self.transcript_scroll.offset();
-                let max = self.transcript_scroll.max_offset().height;
                 let dy = if key == "pagedown" { -page } else { page };
+                // The page keys act on the pane Tab moved the caret to, so a
+                // split scrolls the session the accent is on rather than the
+                // chat underneath it (#2475).
+                let scroll = match (self.split.as_ref(), self.pane_focus) {
+                    (Some(pane), PaneFocus::Secondary) => &pane.scroll,
+                    _ => &self.transcript_scroll,
+                };
+                let offset = scroll.offset();
+                let max = scroll.max_offset().height;
                 let y = (offset.y + dy).min(px(0.0)).max(-max);
-                self.transcript_scroll.set_offset(gpui::point(offset.x, y));
+                scroll.set_offset(gpui::point(offset.x, y));
                 cx.notify();
                 return;
             }
@@ -3740,6 +3776,22 @@ impl Dashboard {
             window.set_rem_size(px(self.rem));
             logging::debug(&format!("zoom -> {:.2}x", self.rem / BASE_REM));
             cx.notify();
+            return;
+        }
+        // Tab moves the caret between the two panes while a split is open, so
+        // the accent follows the keyboard instead of staying where the split
+        // started (#2475). It runs ahead of the rail and of the composer gate
+        // for the same reason: a live split owns Tab while it exists. An open
+        // emoji or command list keeps the key, the way it already did (#2417).
+        if ev.keystroke.key == "tab"
+            && !ev.keystroke.modifiers.control
+            && !ev.keystroke.modifiers.platform
+            && !ev.keystroke.modifiers.alt
+            && self.screen == Screen::Chat
+            && self.split.is_some()
+            && !self.editor.read(cx).list_open()
+        {
+            self.cycle_pane_focus(cx);
             return;
         }
         // Tab moves the keyboard between the composer and the rail. It runs before
@@ -4258,7 +4310,9 @@ impl Render for Dashboard {
                 // width, less the gap_2 that separates them, so a row is
                 // never planned wider than the box it is painted into.
                 let primary_width = match &self.split {
-                    Some(pane) => split_pane_width(pane_width, pane.layout.is_stacked()),
+                    Some(pane) => {
+                        split_pane_width(pane_width, pane.layout.is_stacked(), self.split_ratio)
+                    }
                     None => pane_width,
                 };
                 let primary = transcript::view(
@@ -4290,12 +4344,38 @@ impl Render for Dashboard {
                             Some(title) => SharedString::from(title.to_string()),
                             None => SharedString::from("Chat"),
                         };
+                        // The rule starts the drag and the root finishes it, so
+                        // the pointer can slide off the 12px strip without the
+                        // panes snapping back (#2476).
+                        let grab_split = cx.listener(|this, ev: &MouseDownEvent, _window, cx| {
+                            let Some(pane) = this.split.as_ref() else {
+                                return;
+                            };
+                            if ev.click_count == 2 {
+                                // Double-clicking the rule puts the panes
+                                // back to even, the quick way out of a
+                                // share dragged somewhere awkward (#2476).
+                                this.split_ratio = split::EVEN_SHARE;
+                                this.split_drag = None;
+                                cx.notify();
+                                return;
+                            }
+                            let axis = if pane.layout.is_stacked() {
+                                ev.position.y
+                            } else {
+                                ev.position.x
+                            };
+                            this.split_drag = Some((f32::from(axis), this.split_ratio));
+                        });
                         split_body(
                             primary,
                             primary_title,
                             self.pane_focus,
                             pane,
-                            primary_width,
+                            pane_width,
+                            self.split_ratio,
+                            self.split_area.clone(),
+                            grab_split,
                             close_primary,
                             close_secondary,
                         )
@@ -5981,9 +6061,11 @@ impl Render for Dashboard {
                     )
                     .children(update_hint);
                 let primary_width = match &self.split {
-                    Some(pane) => {
-                        split_pane_width(pane_width - THEMES_PANEL_WIDTH, pane.layout.is_stacked())
-                    }
+                    Some(pane) => split_pane_width(
+                        pane_width - THEMES_PANEL_WIDTH,
+                        pane.layout.is_stacked(),
+                        self.split_ratio,
+                    ),
                     None => pane_width - THEMES_PANEL_WIDTH,
                 };
                 let primary =
@@ -6021,12 +6103,18 @@ impl Render for Dashboard {
                             Some(title) => SharedString::from(title.to_string()),
                             None => SharedString::from("Chat"),
                         };
+                        // The preview draws the split but never resizes it: its
+                        // panes are narrower than the real ones, so it records
+                        // into a throwaway cell and the drag is a no-op.
                         split_body(
                             primary.into_any_element(),
                             primary_title,
                             self.pane_focus,
                             pane,
-                            primary_width,
+                            pane_width - THEMES_PANEL_WIDTH,
+                            self.split_ratio,
+                            Rc::new(Cell::new(None)),
+                            |_ev: &MouseDownEvent, _window: &mut Window, _cx: &mut App| {},
                             close_primary,
                             close_secondary,
                         )
@@ -6237,6 +6325,26 @@ impl Render for Dashboard {
                     }
                     cx.notify();
                 }
+                // The divider drag, mapped onto the pane span recorded at paint
+                // time. The floor lives in split::share_after_drag, so a fast
+                // drag narrows a pane but never shuts it (#2476).
+                if let Some((from_axis, from_share)) = this.split_drag {
+                    let stacked = this
+                        .split
+                        .as_ref()
+                        .is_some_and(|pane| pane.layout.is_stacked());
+                    if let Some([x0, y0, x1, y1]) = this.split_area.get() {
+                        let span = if stacked { y1 - y0 } else { x1 - x0 };
+                        let now = if stacked {
+                            f32::from(ev.position.y)
+                        } else {
+                            f32::from(ev.position.x)
+                        };
+                        this.split_ratio =
+                            split::share_after_drag(from_share, now - from_axis, span);
+                        cx.notify();
+                    }
+                }
                 // A rail row slid left far enough: open its actions. The
                 // threshold keeps a wobbling click from revealing anything.
                 if let Some((id, from_x)) = this.rail_swipe
@@ -6282,6 +6390,7 @@ impl Render for Dashboard {
                     this.dragging_rail = false;
                     this.drag_from = None;
                     this.rail_swipe = None;
+                    this.split_drag = None;
                 }),
             );
         if self.rail_open {
@@ -6724,6 +6833,9 @@ fn main() {
                         help_filter: None,
                         split: None,
                         pane_focus: PaneFocus::Primary,
+                        split_ratio: split::EVEN_SHARE,
+                        split_area: Rc::new(Cell::new(None)),
+                        split_drag: None,
                         copy_drag: Rc::new(CopyDrag::default()),
                         split_pick: None,
                         split_creating: false,
@@ -8246,6 +8358,21 @@ fn pane_header(
     } else {
         palette::current().text_muted
     };
+    // The focused pane wears the accent as a full-width band under its header,
+    // so which pane Tab moved to is legible at a glance and not only from the
+    // title colour (#2475). A one-pixel rule in the panel colour read as
+    // nothing on both themes, which is why the band is two pixels and the
+    // unfocused header sits on the same contrast as the divider.
+    let rule_color = if focused {
+        palette::current().accent
+    } else {
+        split_rule_color()
+    };
+    let header_bg = if focused {
+        palette::current().panel_hi
+    } else {
+        palette::current().bg
+    };
     div()
         .flex()
         .flex_row()
@@ -8255,8 +8382,9 @@ fn pane_header(
         .gap_2()
         .px_2()
         .py_1()
-        .border_b_1()
-        .border_color(rgb(palette::current().panel_hi))
+        .bg(rgb(header_bg))
+        .border_b_2()
+        .border_color(rgb(rule_color))
         .child(
             div()
                 .flex_1()
@@ -8281,31 +8409,82 @@ fn pane_header(
 /// The gap either side of the rule between two panes, in px: `gap_2()`.
 const SPLIT_GAP_PX: f32 = 8.0;
 
-/// The visible rule that separates two panes, in px (#2473). Without it the
-/// boundary is a bare gap, and on a dark theme two transcripts read as one.
-const SPLIT_DIVIDER_PX: f32 = 1.0;
+/// The rule that separates two panes, in px (#2473). Two pixels rather than
+/// one, and drawn in the faint text colour rather than a panel tone: at one
+/// pixel of `panel_hi` the boundary disappeared into both themes, so a split
+/// still read as one transcript with a gap in it.
+const SPLIT_DIVIDER_PX: f32 = 2.0;
 
-/// What one pane may plan its rows against (#2473). Side by side the halves
-/// share the content width less the gap either side of the rule and the rule
-/// itself. Stacked, each pane spans the full width and only the height is
-/// divided, so a row there is planned against all of it.
-fn split_pane_width(content: f32, stacked: bool) -> f32 {
+/// How wide the strip that takes the drag is, in px (#2476). The rule inside
+/// it stays [`SPLIT_DIVIDER_PX`]; the strip either side of it is transparent
+/// and takes the pointer, because a two pixel target is a pixel hunt.
+const SPLIT_HANDLE_PX: f32 = 12.0;
+
+/// The chord that opens a split (#2438, #2471): `ctrl-shift-pipe` puts the
+/// panes side by side and `ctrl-shift-underscore` stacks them.
+///
+/// The window reads it through here rather than inline so the two shapes the
+/// platforms send are handled in one place: the base key with shift held, and
+/// the shifted glyph on its own, which is all macOS reports once it has folded
+/// shift into the character. The rule for which shape means what lives in
+/// [`split::chord_layout`].
+fn split_chord(ks: &gpui::Keystroke) -> Option<split::Layout> {
+    split::chord_layout(
+        &ks.key,
+        ks.key_char.as_deref(),
+        ks.modifiers.control,
+        ks.modifiers.shift,
+    )
+}
+
+/// The colour of the rule between two panes (#2473). `text_faint` is the
+/// quietest colour that still contrasts with `bg` on every theme, where
+/// `panel_hi` sat within a few points of the background on the light ones.
+fn split_rule_color() -> u32 {
+    palette::current().text_faint
+}
+
+/// What one pane may plan its rows against (#2473, #2476). Side by side the
+/// halves share the content width less the gap either side of the handle and
+/// the handle itself, and `share` is the chat's part of that. Stacked, each
+/// pane spans the full width and only the height is divided, so a row there is
+/// planned against all of it.
+fn split_pane_width(content: f32, stacked: bool, share: f32) -> f32 {
     if stacked {
         content
     } else {
-        (content - SPLIT_GAP_PX * 2.0 - SPLIT_DIVIDER_PX) / 2.0
+        (content - SPLIT_GAP_PX * 2.0 - SPLIT_HANDLE_PX) * share
     }
 }
 
 /// The rule between two panes: vertical when they sit side by side, horizontal
-/// when they stack (#2473).
-fn split_divider(stacked: bool) -> impl IntoElement {
+/// when they stack, and draggable to resize both (#2473, #2476). The strip is
+/// the target and the rule inside it is what is drawn, so the layout is
+/// unchanged but the pointer has a real target to grab.
+fn split_divider(
+    stacked: bool,
+    grab: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
     div()
         .id("split-divider")
         .flex_none()
-        .when(stacked, |d| d.h(px(SPLIT_DIVIDER_PX)).w_full())
-        .when(!stacked, |d| d.w(px(SPLIT_DIVIDER_PX)).h_full())
-        .bg(rgb(palette::current().panel_hi))
+        .flex()
+        .items_center()
+        .justify_center()
+        .when(stacked, |d| d.h(px(SPLIT_HANDLE_PX)).w_full())
+        .when(!stacked, |d| d.w(px(SPLIT_HANDLE_PX)).h_full())
+        .cursor(if stacked {
+            CursorStyle::ResizeUpDown
+        } else {
+            CursorStyle::ResizeLeftRight
+        })
+        .on_mouse_down(MouseButton::Left, grab)
+        .child(
+            div()
+                .when(stacked, |d| d.h(px(SPLIT_DIVIDER_PX)).w_full())
+                .when(!stacked, |d| d.w(px(SPLIT_DIVIDER_PX)).h_full())
+                .bg(rgb(split_rule_color())),
+        )
 }
 
 /// The two panes of a split: the chat first, then the picked session beside it
@@ -8317,19 +8496,27 @@ fn split_body(
     primary_title: SharedString,
     focus: PaneFocus,
     pane: &SplitPane,
-    pane_width: f32,
+    content: f32,
+    share: f32,
+    area: Rc<Cell<Option<[f32; 4]>>>,
+    grab: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
     close_primary: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     close_secondary: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let stacked = pane.layout.is_stacked();
-    // Both halves take the same share. The chat used to be handed in bare, so
-    // it sized to its content and the split read as a chat with a strip
-    // beside it rather than two equal panes (#2473).
+    // The chat takes `share` of the pane area and the picked pane the rest. A
+    // clamp here means a stale or nonsensical share can never draw a pane away
+    // before the drag's own floor gets a chance to hold it (#2476).
+    let share = share.clamp(0.1, 0.9);
+    // The chat used to be handed in bare, so it sized to its content and the
+    // split read as a chat with a strip beside it rather than two panes
+    // (#2473).
     let half = div()
         .id("split-primary")
         .flex()
         .flex_col()
-        .flex_1()
+        .flex_shrink()
+        .flex_basis(gpui::relative(share))
         .min_w_0()
         .min_h_0()
         .child(pane_header(
@@ -8343,7 +8530,8 @@ fn split_body(
         .id("split-secondary")
         .flex()
         .flex_col()
-        .flex_1()
+        .flex_shrink()
+        .flex_basis(gpui::relative(1.0 - share))
         .min_w_0()
         .min_h_0()
         .child(pane_header(
@@ -8357,7 +8545,7 @@ fn split_body(
             &pane.scroll,
             &LiveTurn::default(),
             false,
-            pane_width,
+            split_pane_width(content, stacked, 1.0 - share),
             HashMap::new(),
             transcript::ViewHooks::default(),
         ));
@@ -8369,8 +8557,22 @@ fn split_body(
         .gap_2()
         .when(stacked, |d| d.flex_col())
         .when(!stacked, |d| d.flex_row())
+        // The span a drag maps onto, read from the two outer panes instead of
+        // assumed from the viewport: the footer, the input and the topic strip
+        // all sit inside the window, so the viewport is not the pane area and a
+        // share measured against it would drift from the pointer (#2476).
+        .on_children_prepainted(move |bounds, _window, _cx| {
+            let (Some(first), Some(last)) = (bounds.first(), bounds.last()) else {
+                return;
+            };
+            let start_x = f32::from(first.origin.x);
+            let start_y = f32::from(first.origin.y);
+            let end_x = f32::from(last.origin.x + last.size.width);
+            let end_y = f32::from(last.origin.y + last.size.height);
+            area.set(Some([start_x, start_y, end_x, end_y]));
+        })
         .child(half)
-        .child(split_divider(stacked))
+        .child(split_divider(stacked, grab))
         .child(secondary)
         .into_any_element()
 }

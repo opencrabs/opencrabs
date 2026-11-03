@@ -32,8 +32,8 @@ fn a_split_widens_nothing_when_it_is_absent() {
         "the chat pane plans its rows against the width it is actually drawn into"
     );
     assert!(
-        chat.contains("split_pane_width(pane_width, pane.layout.is_stacked())"),
-        "two panes share the content width through split_pane_width, which subtracts the gap and the rule"
+        chat.contains("split_pane_width(pane_width, pane.layout.is_stacked(), self.split_ratio)"),
+        "two panes share the content width through split_pane_width, which subtracts the gap and the handle"
     );
 }
 
@@ -88,6 +88,36 @@ fn both_panes_carry_a_header_and_a_close_button() {
 }
 
 #[test]
+fn the_focused_pane_wears_a_band_under_its_header() {
+    let header = GUI_MAIN
+        .split("fn pane_header(")
+        .nth(1)
+        .expect("pane_header is defined")
+        .split("\n}\n")
+        .next()
+        .expect("the helper has a body");
+    // A one-pixel rule in the panel colour, plus a title that only shifted
+    // hue, was invisible on both themes: Tab moved the caret and the window
+    // looked unchanged (#2475).
+    assert!(
+        header.contains("let header_bg = if focused {"),
+        "the focused header takes its own background"
+    );
+    assert!(
+        header.contains(".bg(rgb(header_bg))"),
+        "the header paints that background"
+    );
+    assert!(
+        header.contains(".border_b_2()"),
+        "the band under the header is thick enough to read"
+    );
+    assert!(
+        header.contains("split_rule_color()"),
+        "the unfocused header sits on the same contrast as the divider"
+    );
+}
+
+#[test]
 fn ctrl_x_closes_the_focused_pane() {
     let keys = GUI_MAIN
         .split("fn on_key(")
@@ -138,16 +168,17 @@ fn choosing_a_session_repaints_before_the_transcript_loads() {
 }
 
 #[test]
-fn both_halves_take_the_same_share_of_the_width() {
+fn both_halves_take_their_share_of_the_width() {
     let body = GUI_MAIN
         .split("fn split_body(")
         .nth(1)
         .expect("split_body is defined");
     // The chat used to be handed in bare, so it sized to its content and the
-    // split read as a chat with a strip beside it (#2473).
+    // split read as a chat with a strip beside it (#2473). It now takes a
+    // share that the divider drag moves (#2476).
     assert!(
         body.contains("let half = div()"),
-        "the primary pane is wrapped so it can take an equal share"
+        "the primary pane is wrapped so it can take a share of the row"
     );
     assert!(
         body.contains(".child(half)") && body.contains(".child(secondary)"),
@@ -155,12 +186,27 @@ fn both_halves_take_the_same_share_of_the_width() {
     );
     // The rule is what makes the boundary readable on a dark theme.
     assert!(
-        body.contains("split_divider(stacked)"),
-        "a visible rule sits between the panes"
+        body.contains("split_divider(stacked, grab)"),
+        "a visible rule sits between the panes, and the strip around it takes the drag"
     );
     assert!(
-        GUI_MAIN.contains("const SPLIT_DIVIDER_PX: f32 = 1.0;"),
-        "the rule has a named width"
+        GUI_MAIN.contains("const SPLIT_DIVIDER_PX: f32 = 2.0;"),
+        "the rule has a named width, and one pixel of a panel tone was invisible"
+    );
+    assert!(
+        GUI_MAIN.contains("fn split_rule_color() -> u32 {"),
+        "the rule reads a colour that contrasts with the background"
+    );
+    assert!(
+        !GUI_MAIN
+            .split("fn split_divider(")
+            .nth(1)
+            .expect("split_divider is defined")
+            .split("\n}\n")
+            .next()
+            .expect("the helper has a body")
+            .contains("panel_hi"),
+        "the rule is not drawn in a panel tone, which sits on the background"
     );
 }
 
@@ -178,7 +224,111 @@ fn a_stacked_pane_plans_against_the_whole_width() {
         "stacked panes share the height, not the width, so a row gets all of it"
     );
     assert!(
-        helper.contains("SPLIT_GAP_PX * 2.0") && helper.contains("SPLIT_DIVIDER_PX"),
-        "side by side the halves subtract the gap either side and the rule"
+        helper.contains("SPLIT_GAP_PX * 2.0") && helper.contains("SPLIT_HANDLE_PX"),
+        "side by side the halves subtract the gap either side and the handle"
+    );
+}
+
+/// #2476: the halves are sized by a share the drag moves, not by an even flex,
+/// so resizing is possible at all and the default still splits 50/50.
+#[test]
+fn the_divider_resizes_both_panes() {
+    let body = GUI_MAIN
+        .split("fn split_body(")
+        .nth(1)
+        .expect("split_body is defined");
+    assert!(
+        body.contains(".flex_basis(gpui::relative(share))")
+            && body.contains(".flex_basis(gpui::relative(1.0 - share))"),
+        "each half takes its own share, so a drag can make one bigger than the other"
+    );
+    assert!(
+        body.contains("on_children_prepainted"),
+        "the pane area is recorded at paint time, so the drag maps onto the real boxes"
+    );
+    assert!(
+        GUI_MAIN.contains("this.split_drag = Some((f32::from(axis), this.split_ratio));"),
+        "pressing the rule starts a drag and remembers where it started"
+    );
+    assert!(
+        GUI_MAIN.contains("split::share_after_drag(from_share, now - from_axis, span)"),
+        "the moves are measured against the pane span, with the floor enforced in split"
+    );
+    assert!(
+        GUI_MAIN.contains("const SPLIT_HANDLE_PX: f32 = 12.0;"),
+        "the rule has a grabbable strip, since a 2px target cannot be hit reliably"
+    );
+}
+
+#[test]
+fn tab_moves_the_caret_between_the_panes() {
+    let keys = GUI_MAIN
+        .split("fn on_key(")
+        .nth(1)
+        .expect("on_key is defined")
+        .split("\n    fn ")
+        .next()
+        .expect("the handler has a body");
+    // A split opens holding the caret, but until Tab moved it the other pane
+    // was only reachable by mouse, so ctrl+x could not target it (#2475).
+    let cycle = keys
+        .find("self.cycle_pane_focus(cx);")
+        .expect("Tab cycles the panes while a split is open");
+    let rail = keys
+        .find("self.rail_focused = !self.rail_focused;")
+        .expect("Tab still walks to the rail");
+    assert!(
+        cycle < rail,
+        "the split claims Tab before the rail does, so a live split keeps the key"
+    );
+    assert!(
+        keys.contains("&& self.split.is_some()")
+            && keys.contains("&& !self.editor.read(cx).list_open()"),
+        "nothing switches panes when there is no split, and an open picker keeps Tab"
+    );
+    let cycle_fn = GUI_MAIN
+        .split("fn cycle_pane_focus(")
+        .nth(1)
+        .expect("cycle_pane_focus is defined");
+    assert!(
+        cycle_fn.contains("PaneFocus::Primary => PaneFocus::Secondary")
+            && cycle_fn.contains("PaneFocus::Secondary => PaneFocus::Primary"),
+        "the caret goes both ways, so two presses return it"
+    );
+}
+
+#[test]
+fn the_page_keys_scroll_the_pane_holding_the_caret() {
+    let keys = GUI_MAIN
+        .split("fn on_key(")
+        .nth(1)
+        .expect("on_key is defined")
+        .split("\n    fn ")
+        .next()
+        .expect("the handler has a body");
+    // A read-only transcript holds the caret by taking the page keys. Without
+    // this the second pane could be focused and still not scroll (#2475).
+    assert!(
+        keys.contains("(Some(pane), PaneFocus::Secondary) => &pane.scroll,"),
+        "the page keys follow the caret into the second pane"
+    );
+    assert!(
+        keys.contains("_ => &self.transcript_scroll,"),
+        "with no split, or the chat focused, the page keys scroll the chat"
+    );
+}
+
+/// #2471: the chord has to reach the reader in a shape the window can send.
+/// The handler used to demand control and shift together, which no keystroke
+/// on macOS satisfies for `|` because shift is folded into the glyph.
+#[test]
+fn the_chord_is_read_through_one_place() {
+    assert!(
+        GUI_MAIN.contains("fn split_chord(ks: &gpui::Keystroke)"),
+        "the window reads the chord in one place, not inline at the call site"
+    );
+    assert!(
+        GUI_MAIN.contains("if let Some(layout) = split_chord(ks)"),
+        "opening a split goes through that reader"
     );
 }
