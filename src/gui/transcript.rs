@@ -1552,11 +1552,19 @@ fn live_card(live: &LiveTurn, expanded: bool, ctx: (Option<u32>, u32)) -> Statef
         }
     };
     let (lead, _) = live_status_line(live);
+    // #2468: the head row owns the card's width and the lead takes the slack
+    // as a single line. Without a width of its own the row sized to its
+    // content, the content was the lead, and the lead was measured against the
+    // width it was about to define: gpui resolved that circle by giving the
+    // text one character of room, so the lead stacked vertically until a zoom
+    // forced a fresh measure.
     let mut head = div()
         .flex()
         .flex_row()
         .items_center()
         .gap_1()
+        .w_full()
+        .min_w_0()
         .px_2()
         .pt_1()
         .pb_1()
@@ -1570,7 +1578,9 @@ fn live_card(live: &LiveTurn, expanded: bool, ctx: (Option<u32>, u32)) -> Statef
         head = head.child(
             div()
                 .text_xs()
+                .flex_1()
                 .min_w_0()
+                .truncate()
                 .text_color(rgb(palette::current().accent))
                 .child(SharedString::from(lead)),
         );
@@ -1585,6 +1595,7 @@ fn live_card(live: &LiveTurn, expanded: bool, ctx: (Option<u32>, u32)) -> Statef
         .id("live-card")
         .flex()
         .flex_col()
+        .w_full()
         .min_w_0()
         .flex_shrink_0()
         .rounded_sm()
@@ -2361,6 +2372,44 @@ mod tests {
         assert!(
             header.contains("1m 30s"),
             "the span between the rows is 90s, got {header:?}"
+        );
+    }
+
+    /// #2468: the live lead must never wrap. It was the only child of the head
+    /// row that could shrink, and the row sized itself from the lead it was
+    /// about to contain, so the text was measured against roughly one
+    /// character and stacked vertically until a zoom forced a fresh measure.
+    /// The card takes its width from the pane, the head owns that width, and
+    /// the lead takes the slack on one line and clips with an ellipsis.
+    #[test]
+    fn the_thinking_lead_is_drawn_on_one_line() {
+        const SRC: &str = include_str!("transcript.rs");
+        let card = &SRC[src_at(SRC, "fn live_card(")..src_at(SRC, "fn live_card_footer(")];
+        assert!(
+            card.contains(".w_full()"),
+            "the card takes the pane's width, not its own content's"
+        );
+
+        let lead_arm = &card[card
+            .find("if !lead.is_empty() {")
+            .expect("the head draws the lead")
+            ..card
+                .find("let mut card = div()")
+                .expect("the card follows the head")];
+        assert!(
+            lead_arm.contains(".flex_1()") || lead_arm.contains(".flex_grow()"),
+            "the lead takes the row's slack instead of hugging its content"
+        );
+        assert!(
+            lead_arm.contains(".truncate()"),
+            "a status line clips with an ellipsis; it never wraps"
+        );
+
+        let head = &card[card.find("let mut head = div()").expect("the head row")
+            ..card.find("if !lead.is_empty()").expect("the lead arm")];
+        assert!(
+            head.contains(".w_full()"),
+            "the head row owns the card's width"
         );
     }
 
