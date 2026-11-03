@@ -57,6 +57,7 @@ use crate::screen_keys::{
 };
 use crate::theme::{BASE_REM, Size, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP, text};
 use opencrabs::ui_core::split::{self, Layout};
+use opencrabs::ui_core::topic_bar;
 use transcript::{CopyDrag, LiveTurn, TranscriptState};
 // The terminal's own command table, shared rather than copied.
 use opencrabs::ui_core::commands as slash;
@@ -795,7 +796,7 @@ impl Dashboard {
         self.refocus_screen();
     }
 
-    /// Open the Seeker card (`ctrl-shift-f`, `cmd-k`): one field over the
+    /// Open the Seeker card (`alt+space`, `cmd-k`): one field over the
     /// window that finds a conversation, a command or a surface with the same
     /// scoring the terminal uses (#2458).
     ///
@@ -3039,9 +3040,32 @@ impl Dashboard {
             .is_some_and(|id| self.sessions.is_topic_enabled(id))
     }
 
-    /// The tab strip for the open chat's topic family (#2400): the parent,
-    /// then each of its topics in list order. The open one is highlighted, and
-    /// a click opens that session.
+    /// The conversation's own name, for the card above the topic bar (#2480).
+    ///
+    /// The card names the session a topic belongs to, never the topic: the
+    /// topic is already marked in the row below it, and Telegram's forum header
+    /// keeps the chat title on top for the same reason.
+    fn open_chat_name(&self) -> Option<String> {
+        let open = self.transcript.session?;
+        let root = self.sessions.parents.get(&open).copied().unwrap_or(open);
+        Some(
+            self.sessions
+                .items
+                .iter()
+                .find(|s| s.id == root)
+                .and_then(|s| s.title.clone())
+                .unwrap_or_else(|| "Untitled".to_string()),
+        )
+    }
+
+    /// The tab strip for the open chat's topic family (#2400, #2480): `All`
+    /// first, then each of its topics in list order. The open one is marked,
+    /// and a click opens that session.
+    ///
+    /// The conversation's own name is not a chip. It used to lead the strip
+    /// (`vec![root]`), which put the session in the row of its own topics and
+    /// made it read as a sibling. The name belongs to the card above, and
+    /// `All` is the way back to it.
     fn topic_tabs(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let Some(open) = self.transcript.session else {
             return Vec::new();
@@ -3058,34 +3082,52 @@ impl Dashboard {
                 .and_then(|s| s.title.clone())
                 .unwrap_or_else(|| "Untitled".to_string())
         };
-        let mut ids = vec![root];
-        ids.extend(
-            self.sessions
-                .items
-                .iter()
-                .filter(|s| self.sessions.parents.get(&s.id) == Some(&root))
-                .map(|s| s.id),
-        );
-        ids.into_iter()
-            .map(|id| {
+        let topics: Vec<Uuid> = self
+            .sessions
+            .items
+            .iter()
+            .filter(|s| self.sessions.parents.get(&s.id) == Some(&root))
+            .map(|s| s.id)
+            .collect();
+        // A horizontal bar leads with the icon, a rail stacks it above the name
+        // (#2480). Both edges hug their content, so one chip can never fill the
+        // rail the way it did before.
+        let shape = topic_bar::chip_shape(self.topic_edge.is_vertical());
+        topic_bar::bar_entries(root, &topics)
+            .into_iter()
+            .map(|entry| {
+                let id = entry.session(root);
+                let current = entry.is_open(root, open);
                 let click = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
                     cx.stop_propagation();
                     this.open_session(id, cx);
                 });
-                // The icon sits before the name and is not a word, so the
-                // two-word shortening (#2477) is applied to the name alone.
-                // A stored picture is drawn; a stored emoji stays text (#2478).
-                let stored = self.sessions.topic_icons.get(&id).cloned();
-                let picture = stored.as_deref().and_then(topic_icons::tab_icon);
-                let label = topic_label(&title(id));
-                let label = match (&picture, stored.as_deref()) {
-                    (Some(_), _) => label,
-                    (None, Some(icon)) => format!("{icon} {label}"),
-                    (None, None) => label,
+                // `All` is the whole conversation, so it carries no topic icon.
+                let (label, picture) = match entry {
+                    topic_bar::BarEntry::All => ("All".to_string(), None),
+                    topic_bar::BarEntry::Topic(id) => {
+                        // The icon sits before the name and is not a word, so the
+                        // two-word shortening (#2477) is applied to the name alone.
+                        // A stored picture is drawn; a stored emoji stays text (#2478).
+                        let stored = self.sessions.topic_icons.get(&id).cloned();
+                        let picture = stored.as_deref().and_then(topic_icons::tab_icon);
+                        let label = topic_label(&title(id));
+                        let label = match (&picture, stored.as_deref()) {
+                            (Some(_), _) => label,
+                            (None, Some(icon)) => format!("{icon} {label}"),
+                            (None, None) => label,
+                        };
+                        (label, picture)
+                    }
                 };
-                topic_tab(id, label, picture, id == open, move |ev, window, app| {
-                    click(ev, window, app)
-                })
+                topic_tab(
+                    id,
+                    label,
+                    picture,
+                    shape,
+                    current,
+                    move |ev, window, app| click(ev, window, app),
+                )
                 .into_any_element()
             })
             .collect()
@@ -3362,16 +3404,11 @@ impl Dashboard {
         // The Seeker card owns every key while it is up, and the chord that
         // opens it sits ahead of every other reader: one field that finds a
         // conversation, a command or a surface is only useful if the composer
-        // underneath cannot eat the characters (#2458). ctrl-shift-f is the
+        // underneath cannot eat the characters (#2458). alt+space is the
         // chord every platform can send; cmd-k is the window's own alias.
         {
             let ks = &ev.keystroke;
-            let chord = find::opens(
-                ks.modifiers.control,
-                ks.modifiers.shift,
-                ks.modifiers.platform,
-                &ks.key,
-            );
+            let chord = find::opens(ks.modifiers.alt, ks.modifiers.platform, &ks.key);
             if self.finder.is_some() {
                 self.finder_key(ks, cx);
                 return;
@@ -3476,7 +3513,7 @@ impl Dashboard {
         // ctrl+shift+p pins the row the keyboard is on, or the open
         // conversation when the rail has not armed one. It rides `p` on both
         // clients, so the terminal and the window pin with the same keys
-        // (#2457); ctrl+shift+f is the Seeker card.
+        // (#2457); alt+space is the Seeker card.
         if ev.keystroke.modifiers.control && ev.keystroke.modifiers.shift && ev.keystroke.key == "p"
         {
             if let Some(id) = self.sessions.pin_target() {
@@ -6263,10 +6300,13 @@ impl Render for Dashboard {
             .px_6()
             .pt_3()
             .pb_4();
-        // The chat screen has no header: the session name leads the footer
-        // instead. The other screens keep their title above the body.
+        // The chat screen leads with the conversation's name in a card (#2480),
+        // then the topic row under it, the way Telegram's forum header reads.
+        // The other screens keep their title above the body.
         if self.screen != Screen::Chat {
             right = right.child(chrome);
+        } else if let Some(name) = self.open_chat_name() {
+            right = right.child(session_title_card(&name));
         }
         // The row takes the side it was saved on: above the transcript,
         // under the input, or beside the chat (#2402).
@@ -8170,6 +8210,33 @@ fn help_rows() -> Vec<(
     out
 }
 
+/// The conversation's name above the topic bar (#2480).
+///
+/// Telegram's forum header puts the chat title on top and the topics under it.
+/// The GUI chat screen had no header at all (the comment below used to say the
+/// session name led the footer), so a row of topic chips was the first thing
+/// the eye met and the session it belonged to was nowhere.
+///
+/// One card, no tab styling, and the two-word rule does not apply: the name is
+/// the full name, and only the chips are shortened.
+fn session_title_card(name: &str) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .flex_none()
+        .w_full()
+        .px_3()
+        .py_2()
+        .rounded_md()
+        .bg(rgb(palette::current().panel))
+        .border_1()
+        .border_color(rgb(palette::current().panel_hi))
+        .text_base()
+        .text_color(rgb(palette::current().text_normal))
+        .child(SharedString::from(name.to_string()))
+}
+
 /// The chat's `...` button, right aligned, with its items below it while the
 /// menu is open (#2303, #2304). Only drawn for a topic or a session with topics on.
 fn topic_bar(
@@ -8228,15 +8295,18 @@ fn topic_strip(
             .flex_col()
             .flex_none()
             .w(rems(12.0))
+            .items_center()
             .gap_2()
             .p_2()
             .child(leading)
             .child(
+                // Centred so each chip sits at its own width (#2480). Stretched
+                // chips were the wall of colour the owner screenshotted.
                 div()
                     .flex()
                     .flex_col()
+                    .items_center()
                     .gap_1()
-                    .overflow_hidden()
                     .children(tabs),
             )
             .child(bar)
@@ -8292,16 +8362,22 @@ fn topic_label(name: &str) -> String {
     label
 }
 
-/// One tab of the topic strip (#2400). The open session is marked the way
-/// Telegram's topic bar marks it: the icon and the name take the accent
-/// colour and a 2px accent rule sits under the tab (#2478).
+/// One tab of the topic strip (#2400, #2480). The open session is marked the
+/// way Telegram's topic bar marks it: the icon and the name take the accent
+/// colour, and a 2px accent rule sits under the tab on a horizontal bar or on
+/// its leading edge down a rail.
 ///
-/// The rule is always 2px, transparent while the tab is closed, so switching
+/// The mark is always 2px, transparent while the tab is closed, so switching
 /// topics never changes a tab's height and the row does not jump.
+///
+/// A chip is a label, so it hugs its content: `.flex_none()` plus the shape's
+/// own padding. The vertical rail shipped without that and one chip grew to
+/// the column's width, which is the wall of colour the owner reported.
 fn topic_tab(
     id: Uuid,
     label: String,
     icon: Option<AnyElement>,
+    shape: topic_bar::ChipShape,
     current: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
@@ -8315,21 +8391,32 @@ fn topic_tab(
     } else {
         0x00000000
     };
+    let vertical = shape == topic_bar::ChipShape::IconAbove;
     div()
         .id(SharedString::from(format!("topic-tab-{id}")))
         .flex()
-        .flex_row()
-        .items_center()
-        .gap_1()
-        .px_2()
-        .py_0p5()
-        .rounded_sm()
         .flex_none()
+        .items_center()
         .text_sm()
         .text_color(rgb(colour))
         .cursor_pointer()
-        .border_b_2()
-        .border_color(rgba(rule))
+        .when(vertical, |d| {
+            d.flex_col()
+                .gap_1()
+                .px_1p5()
+                .py_1()
+                .border_l_2()
+                .border_color(rgba(rule))
+        })
+        .when(!vertical, |d| {
+            d.flex_row()
+                .gap_1()
+                .px_2()
+                .py_0p5()
+                .border_b_2()
+                .border_color(rgba(rule))
+        })
+        .rounded_sm()
         .when(current, |d| d.bg(rgb(palette::current().panel_hi)))
         .hover(|d| d.bg(rgb(palette::current().panel_hi)))
         .on_click(on_click)

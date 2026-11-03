@@ -868,6 +868,7 @@ pub mod tui_user_themes_test;
 pub mod ui_core_bang_test;
 pub mod ui_core_copy_select_test;
 pub mod ui_core_split_test;
+pub mod ui_core_topic_bar_test;
 pub mod usage_categorizer_test;
 pub mod usage_dashboard_test;
 pub mod usage_data_test;
