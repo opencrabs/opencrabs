@@ -208,7 +208,7 @@ pub fn overlay(
         .flex()
         .flex_col()
         .max_h(px(480.0))
-        .rounded(px(20.0))
+        .rounded(px(24.0))
         .border_1()
         .border_color(rgba(0xffffff2e))
         .bg(glass)
