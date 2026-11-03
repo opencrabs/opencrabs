@@ -121,18 +121,20 @@ pub enum Surface {
 }
 
 impl Surface {
-    /// The row title, which is also what the query is matched against.
+    /// The row title: the bare command, which is also what the query is
+    /// matched against. A screen and the command that opens it print one
+    /// name, and it is the name the user already types (#2491).
     pub fn title(self) -> &'static str {
         match self {
-            Surface::Usage => "Usage ledger",
-            Surface::Files => "Session files",
-            Surface::Themes => "Themes",
-            Surface::Models => "Models",
-            Surface::Sessions => "Sessions",
-            Surface::Help => "Key reference",
-            Surface::Skills => "Skills",
-            Surface::Profiles => "Profiles",
-            Surface::MissionControl => "Mission Control",
+            Surface::Usage => "/usage",
+            Surface::Files => "session files",
+            Surface::Themes => "/theme",
+            Surface::Models => "/models",
+            Surface::Sessions => "/sessions",
+            Surface::Help => "/help",
+            Surface::Skills => "/skills",
+            Surface::Profiles => "/profiles",
+            Surface::MissionControl => "/mission-control",
         }
     }
 
@@ -191,7 +193,6 @@ impl Surface {
 pub const SURFACES: &[Surface] = &[
     Surface::Sessions,
     Surface::Usage,
-    Surface::Files,
     Surface::Themes,
     Surface::Models,
     Surface::Help,
@@ -199,6 +200,13 @@ pub const SURFACES: &[Surface] = &[
     Surface::Profiles,
     Surface::MissionControl,
 ];
+
+/// True when a destination already prints this command as its row title, so
+/// the card lists one row per destination instead of the same name twice
+/// (#2491).
+pub fn is_surface_command(name: &str) -> bool {
+    SURFACES.iter().any(|surface| surface.command() == Some(name))
+}
 
 /// The destination rows, built here rather than in each frontend, so a screen
 /// one client can open is never offered by the other.
@@ -1096,7 +1104,7 @@ mod tests {
             command("/brain"),
             command("/compact"),
             command("/cd"),
-            item("Usage ledger", PaletteKind::Surface),
+            item("/usage", PaletteKind::Surface),
         ]);
         let titles: Vec<String> = state
             .visible()
@@ -1104,7 +1112,7 @@ mod tests {
             .map(|row| row.item.title)
             .collect();
         assert!(
-            titles.contains(&"Usage ledger".to_string()),
+            titles.contains(&"/usage".to_string()),
             "the usage surface stays on the idle card"
         );
         assert!(
@@ -1447,26 +1455,20 @@ mod tests {
         assert!(!opens_in_terminal(true, "f"));
     }
 
-    /// Every surface the card can find names a title, and every one but the
-    /// session-files view names the command the terminal runs for it. That
-    /// exception is pinned: a surface that grows without a command fails here
-    /// instead of landing on a row the terminal cannot open (#2458).
+    /// Every destination prints the bare command that opens it, so no row
+    /// carries a screen name the user never typed (#2491).
     #[test]
-    fn every_surface_but_files_names_a_command() {
+    fn every_surface_names_the_command_that_opens_it() {
         let items = surface_items();
         assert_eq!(items.len(), SURFACES.len());
-        let mut without = Vec::new();
         for surface in SURFACES {
-            assert!(!surface.title().is_empty());
-            match surface.command() {
-                Some(command) => assert!(command.starts_with('/'), "{command}"),
-                None => without.push(*surface),
-            }
+            let command = surface.command().expect("every surface names a command");
+            assert!(command.starts_with('/'), "{command}");
+            assert_eq!(surface.title(), command);
         }
-        assert_eq!(without, vec![Surface::Files]);
         for item in items {
             assert_eq!(item.kind, PaletteKind::Surface);
-            assert!(!item.title.is_empty());
+            assert!(item.title.starts_with('/'), "{}", item.title);
         }
     }
 

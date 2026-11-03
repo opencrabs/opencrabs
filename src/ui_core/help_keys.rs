@@ -180,7 +180,7 @@ pub const ROWS: &[HelpRow] = &[
         "usage",
         "/usage",
         Some("ctrl-shift-u"),
-        "Usage ledger",
+        "tokens, cost and context",
     ),
     // The card opens from anywhere, so it belongs at the top of the help
     // rather than under the session list, where the last block ran off the

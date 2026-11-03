@@ -3478,6 +3478,9 @@ impl App {
         use crate::ui_core::palette::{self, PaletteAction, PaletteItem, PaletteKind};
         let mut items: Vec<PaletteItem> = crate::ui_core::commands::SLASH_COMMANDS
             .iter()
+            // A destination prints its own command row: listing both would
+            // show `/usage` twice (#2491).
+            .filter(|cmd| !palette::is_surface_command(cmd.name))
             .map(|cmd| {
                 PaletteItem::new(
                     cmd.name,

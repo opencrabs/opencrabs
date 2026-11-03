@@ -108,12 +108,20 @@ fn chip_defs() -> Vec<(&'static str, Option<PaletteKind>)> {
 /// for a channel the query names but the config does not carry yet (#2462).
 /// `idle_revealed` is the caller's [`PaletteState::idle_ready`] verdict: a
 /// fresh card paints the field alone until it says otherwise (#2491).
+/// The card is always dark glass, so its ink is fixed light-on-dark. A
+/// theme's `text` colour belongs to the surface behind the window, and using
+/// it here printed near-black words on a dark card under every light theme.
+const INK: u32 = 0xf2f3f5;
+const INK_MUTED: u32 = 0x9ba0aa;
+const INK_WARM: u32 = 0xe8b96a;
+
 pub fn overlay(
     state: &PaletteState,
     pick: Vec<PickHandler>,
     chip: ChipHandler,
     setup: Option<&'static str>,
     idle_revealed: bool,
+    caret_on: bool,
 ) -> impl IntoElement {
     let theme = palette::current();
     let printed = rows(state);
@@ -132,14 +140,14 @@ pub fn overlay(
         // the bottom than the top, so the list reads as a hint, not a wall.
         linear_gradient(
             180.0,
-            linear_color_stop(rgba(0x14141cee), 0.0),
-            linear_color_stop(rgba(0x14141c59), 1.0),
+            linear_color_stop(rgba(0x14141cf2), 0.0),
+            linear_color_stop(rgba(0x14141cbf), 1.0),
         )
     } else {
         linear_gradient(
             180.0,
-            linear_color_stop(rgba(0x14141cf2), 0.0),
-            linear_color_stop(rgba(0x14141cd9), 1.0),
+            linear_color_stop(rgba(0x14141cfa), 0.0),
+            linear_color_stop(rgba(0x14141cf2), 1.0),
         )
     };
     let armed_bg = rgba((theme.accent << 8) | 0x2e);
@@ -151,9 +159,9 @@ pub fn overlay(
         .flex_col()
         .w(rems(34.0))
         .max_h(px(480.0))
-        .rounded(px(16.0))
+        .rounded(px(24.0))
         .border_1()
-        .border_color(rgba(0xffffff1f))
+        .border_color(rgba(0xffffff2e))
         .bg(glass)
         .shadow_md()
         .overflow_hidden()
@@ -161,37 +169,48 @@ pub fn overlay(
         // the scrim, so reading the list never closes it.
         .on_click(|_ev, _window, cx| cx.stop_propagation());
 
-    // The field: the wordmark on the left, because our name is not Spotlight's
-    // and the card should say whose it is; the query or the invitation on the
-    // right of it (#2491).
+    // The field: one fat capsule, the way Spotlight's bar reads at a glance.
+    // The crab mark on the left, the query or the invitation after it, and a
+    // bright caret that blinks while the card owns the keyboard (#2491).
+    let caret = |on: bool| {
+        div()
+            .w(px(2.5))
+            .h(px(26.0))
+            .rounded(px(2.0))
+            .bg(rgb(if on { INK } else { 0x1b1b25 }))
+    };
+    let empty = state.query().is_empty();
     card = card.child(
         div()
             .flex()
             .flex_row()
             .items_center()
-            .gap_2()
-            .px_3()
-            .py_2()
-            .child(div().text_xs().child("🦀"))
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(theme.text_muted))
-                    .child("OpenCrabs"),
-            )
+            .gap_3()
+            .mx_3()
+            .mt_3()
+            .mb_2()
+            .px_4()
+            .py_3()
+            .rounded_full()
+            .bg(rgba(0x1b1b25f7))
+            .border_1()
+            .border_color(rgba(0xffffff24))
+            .child(div().text_lg().child("🦀"))
+            .when(empty, |d| d.child(caret(caret_on)))
             .child(
                 div()
                     .flex_1()
-                    .text_base()
-                    .text_color(rgb(theme.text))
+                    .text_xl()
+                    .text_color(rgb(INK))
                     .truncate()
-                    .child(SharedString::from(if state.query().is_empty() {
-                        "Seek sessions, features, skills, docs, troubleshooting and more"
+                    .child(SharedString::from(if empty {
+                        "Seeker: Find sessions, features, skills, docs, debug and more."
                             .to_string()
                     } else {
                         state.query().to_string()
                     })),
-            ),
+            )
+            .when(!empty, |d| d.child(caret(caret_on))),
     );
 
     if reveal {
@@ -218,7 +237,7 @@ pub fn overlay(
                         })
                         .when(!active, |d| {
                             d.border_color(rgba(0xffffff14))
-                                .text_color(rgb(theme.text_muted))
+                                .text_color(rgb(INK_MUTED))
                         })
                         .hover(|d| d.border_color(rgb(theme.accent)))
                         .on_click(move |_ev, _window, cx| {
@@ -245,7 +264,7 @@ pub fn overlay(
                 .gap_2()
                 .px_2()
                 .py_1()
-                .rounded(px(6.0))
+                .rounded(px(10.0))
                 .cursor_pointer()
                 .when(armed, |d| d.bg(armed_bg));
             if armed && !rowv.missing {
@@ -268,9 +287,9 @@ pub fn overlay(
                         div()
                             .text_sm()
                             .text_color(rgb(if rowv.missing {
-                                theme.text_muted
+                                INK_MUTED
                             } else {
-                                theme.text
+                                INK
                             }))
                             .truncate()
                             .child(SharedString::from(rowv.title.clone())),
@@ -279,7 +298,7 @@ pub fn overlay(
                         d.child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(theme.text_muted))
+                                .text_color(rgb(INK_MUTED))
                                 .truncate()
                                 .child(SharedString::from(rowv.subtitle.clone())),
                         )
@@ -292,14 +311,14 @@ pub fn overlay(
                 cell = cell.child(
                     div()
                         .text_xs()
-                        .text_color(rgb(theme.text_muted))
+                        .text_color(rgb(INK_MUTED))
                         .child("terminal only"),
                 );
             } else if armed {
                 cell = cell.child(
                     div()
                         .text_xs()
-                        .text_color(rgb(theme.text_muted))
+                        .text_color(rgb(INK_MUTED))
                         .child("↵ enter"),
                 );
             }
@@ -321,7 +340,7 @@ pub fn overlay(
                     .px_3()
                     .pb_2()
                     .text_xs()
-                    .text_color(rgb(theme.text_muted))
+                    .text_color(rgb(INK_MUTED))
                     .child(SharedString::from(status(state))),
             );
         }
@@ -333,7 +352,7 @@ pub fn overlay(
                         .px_3()
                         .pb_1()
                         .text_xs()
-                        .text_color(rgb(theme.warn))
+                        .text_color(rgb(INK_WARM))
                         .child(SharedString::from(text)),
                 )
                 .child(
@@ -341,7 +360,7 @@ pub fn overlay(
                         .px_3()
                         .pb_2()
                         .text_xs()
-                        .text_color(rgb(theme.text_muted))
+                        .text_color(rgb(INK_MUTED))
                         .child("enter starts the setup · esc closes"),
                 );
         } else if !idle && !miss && !asks {
@@ -352,7 +371,7 @@ pub fn overlay(
                     .px_3()
                     .pb_2()
                     .text_xs()
-                    .text_color(rgb(theme.text_muted))
+                    .text_color(rgb(INK_MUTED))
                     .child("enter run · up/down move · esc close"),
             );
         }
@@ -374,7 +393,7 @@ pub fn overlay(
         // a command surface, not a dialog (#2491).
         .justify_start()
         .pt(rems(6.5))
-        .bg(rgba(0x0a0a0a99))
+        .bg(rgba(0x08080acc))
         .child(card)
 }
 

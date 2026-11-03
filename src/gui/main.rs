@@ -376,6 +376,10 @@ struct Dashboard {
     /// so the hint can tell an unconfigured channel from a working one without
     /// touching the disk on every keystroke (#2462).
     finder_channels: Vec<Channel>,
+    /// Whether the card's caret is on this half of the blink. The card is a
+    /// drawn div, not an input widget, so nothing blinks for it unless a
+    /// timer says so (#2491).
+    finder_caret: bool,
     /// Monotonic tag on the latest period fetch; only its result is applied,
     /// so a slow fetch landing after a newer one cannot paint stale data.
     pending: u64,
@@ -808,6 +812,29 @@ impl Dashboard {
         }
         self.finder = Some(PaletteState::new(self.finder_items()));
         self.finder_channels = configured_channels();
+        self.finder_caret = true;
+        // The caret blinks on a timer, and the loop dies with the card (#2491).
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(530))
+                    .await;
+                let open = this
+                    .update(cx, |view, cx| {
+                        if view.finder.is_none() {
+                            return false;
+                        }
+                        view.finder_caret = !view.finder_caret;
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !open {
+                    break;
+                }
+            }
+        })
+        .detach();
         self.refocus_overlay();
         logging::info("finder: opened");
         cx.notify();
@@ -826,6 +853,9 @@ impl Dashboard {
     fn finder_items(&self) -> Vec<PaletteItem> {
         let mut items: Vec<PaletteItem> = slash::SLASH_COMMANDS
             .iter()
+            // A destination prints its own command row: listing both would
+            // show `/usage` twice (#2491).
+            .filter(|cmd| !find::is_surface_command(cmd.name))
             .map(|cmd| {
                 PaletteItem::new(
                     cmd.name,
@@ -6707,6 +6737,7 @@ impl Render for Dashboard {
                 chip,
                 find::channel_hint(state.query(), &self.finder_channels),
                 idle_revealed,
+                self.finder_caret,
             ));
         }
         root
@@ -6915,6 +6946,7 @@ fn main() {
                         last_owner: None,
                         finder: None,
                         finder_channels: Vec::new(),
+                        finder_caret: true,
                         pending: 0,
                         files: Vec::new(),
                         files_for: None,
