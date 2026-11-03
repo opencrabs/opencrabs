@@ -15,8 +15,8 @@ use crate::palette;
 use std::collections::{HashMap, HashSet};
 
 use gpui::{
-    AnyView, App, ClickEvent, Context, Div, InteractiveElement, Render, ScrollHandle, SharedString,
-    Stateful, Styled, Window, deferred, div, prelude::*, rems, rgb,
+    AnyElement, AnyView, App, ClickEvent, Context, Div, InteractiveElement, Render, ScrollHandle,
+    SharedString, Stateful, Styled, Window, deferred, div, prelude::*, rems, rgb,
 };
 
 use opencrabs::db::Database;
@@ -1288,6 +1288,7 @@ pub fn rail(
     rows: Vec<Stateful<Div>>,
     width_rem: f32,
     scroll: &ScrollHandle,
+    footer: Option<AnyElement>,
 ) -> Stateful<Div> {
     let mut col = div()
         .id("session-rail")
@@ -1338,6 +1339,12 @@ pub fn rail(
 
     for row in rows {
         col = col.child(row);
+    }
+    // The channel chip (#2452) sits at the end of the rail: with a short
+    // list it pins to the bottom edge, with a full list it waits at the
+    // end of the scroll like any other row.
+    if let Some(footer) = footer {
+        col = col.child(footer);
     }
     col
 }

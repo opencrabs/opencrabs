@@ -6,6 +6,7 @@
 //! binary can link it as-is.
 
 pub mod bang;
+pub mod channel_status;
 pub mod commands;
 pub mod copy_select;
 pub mod docs;
@@ -24,9 +25,13 @@ mod purity_tests {
     //! break that silently at compile time for the GUI, never for us.
 
     /// Every source file in `ui_core`, with its contents.
-    fn sources() -> [(&'static str, &'static str); 18] {
+    fn sources() -> [(&'static str, &'static str); 19] {
         [
             ("ui_core/bang.rs", include_str!("bang.rs")),
+            (
+                "ui_core/channel_status.rs",
+                include_str!("channel_status.rs"),
+            ),
             ("ui_core/copy_select.rs", include_str!("copy_select.rs")),
             ("ui_core/docs.rs", include_str!("docs.rs")),
             ("ui_core/mod.rs", include_str!("mod.rs")),

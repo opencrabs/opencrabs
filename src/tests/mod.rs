@@ -79,7 +79,6 @@ pub mod bg_resume_test;
 pub mod boot_report_test;
 pub mod bot_owner_placeholder_seed_test;
 pub mod brain_agent_context_test;
-pub mod brain_agent_service_phantom_lang_test;
 pub mod brain_agent_service_phantom_test;
 pub mod brain_agent_service_work_status_test;
 pub mod brain_commands_test;
@@ -180,6 +179,7 @@ pub mod channel_new_session_test;
 pub mod channel_restart_target_test;
 pub mod channel_search_test;
 pub mod channel_session_resolve_test;
+pub mod channel_status_test;
 pub mod channel_user_command_owner_gate_test;
 #[cfg(feature = "telegram")]
 pub mod channels_telegram_cowork_test;

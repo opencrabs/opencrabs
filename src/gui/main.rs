@@ -56,6 +56,7 @@ use crate::screen_keys::{
     keyboard_owner, screen_chord,
 };
 use crate::theme::{BASE_REM, Size, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP, text};
+use opencrabs::ui_core::channel_status;
 use opencrabs::ui_core::rail;
 use opencrabs::ui_core::split::{self, Layout};
 use opencrabs::ui_core::topic_bar;
@@ -352,6 +353,40 @@ fn configured_channels() -> Vec<Channel> {
     live
 }
 
+/// Who owns the channels right now (#2452): a token lock on disk says
+/// something claimed them, a live instance lock says that something is
+/// still running. Read-only: the GUI never constructs a ChannelManager
+/// and never starts one on its own.
+fn channel_ownership() -> channel_status::Ownership {
+    let locks = opencrabs::config::profile::base_opencrabs_dir().join("locks");
+    // Token locks are files named `{channel}_{hash}.lock`; the instance,
+    // paths and scheduler locks live in their own subdirectories, so the
+    // suffix test on files only sees the channel claims.
+    let lock_present = std::fs::read_dir(&locks)
+        .map(|entries| {
+            entries.filter_map(Result::ok).any(|e| {
+                let name = e.file_name();
+                let name = name.to_string_lossy();
+                e.path().is_file() && name.ends_with(".lock") && name.contains('_')
+            })
+        })
+        .unwrap_or(false);
+    let profile = opencrabs::config::profile::active_profile().unwrap_or("default");
+    let live = opencrabs::config::profile::instance_running_in(&locks.join("instance"), profile);
+    channel_status::ownership(lock_present, live)
+}
+
+/// The chip line for the current config and lock state: `None` when every
+/// configured channel is served or nothing is configured (#2452).
+fn channel_chip_line() -> Option<SharedString> {
+    let channels = configured_channels();
+    if channels.is_empty() {
+        return None;
+    }
+    let names: Vec<&str> = channels.iter().map(|c| c.name()).collect();
+    channel_status::status_line(&names, &channel_ownership()).map(SharedString::from)
+}
+
 /// The phase 1 window. Every string on screen is real data or the real error.
 struct Dashboard {
     /// Which pane the right side draws: chat by default, usage on ctrl+u.
@@ -377,6 +412,18 @@ struct Dashboard {
     /// so the hint can tell an unconfigured channel from a working one without
     /// touching the disk on every keystroke (#2462).
     finder_channels: Vec<Channel>,
+    /// The channel chip (#2452): `Some(line)` draws a quiet notice at the
+    /// bottom of the rail that the configured channels have no live owner,
+    /// with a Start daemon action. `None` means either everything is being
+    /// served or nothing is configured; the probe refreshes every few
+    /// seconds, off the UI thread.
+    channel_chip: Option<SharedString>,
+    /// The Start daemon click is in flight: a second click while launchctl
+    /// or systemctl is running would stack two installs.
+    daemon_starting: bool,
+    /// What the last Start daemon attempt failed with, so the chip can say
+    /// why nothing changed after the click.
+    daemon_error: Option<SharedString>,
     /// Whether the card's caret is on this half of the blink. The card is a
     /// drawn div, not an input widget, so nothing blinks for it unless a
     /// timer says so (#2491).
@@ -630,6 +677,59 @@ fn remember_preview(history: &mut Vec<String>, name: &str) {
 }
 
 impl Dashboard {
+    /// Re-read the channel chip now (#2452): after a Start click succeeds,
+    /// the daemon appears within a second or two, so poll instead of
+    /// waiting for the next 5-second tick. All IO runs off the UI thread.
+    fn refresh_channel_chip(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let line = cx
+                .background_executor()
+                .spawn(async { channel_chip_line() })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.channel_chip != line {
+                    this.channel_chip = line;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// The chip's action (#2452): install and start the daemon service via
+    /// the onboarding path (launchd on macOS, systemd user unit on Linux).
+    /// This is the only way the GUI ever starts one, and only on a click:
+    /// nothing here spawns a ChannelManager or claims a channel lock.
+    fn start_daemon(&mut self, cx: &mut Context<Self>) {
+        if self.daemon_starting {
+            return;
+        }
+        self.daemon_starting = true;
+        self.daemon_error = None;
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async { opencrabs::tui::onboarding::config::install_daemon_service() })
+                .await;
+            this.update(cx, |this, cx| {
+                this.daemon_starting = false;
+                match result {
+                    Ok(()) => {
+                        // The probe loop and the refresh below confirm the
+                        // daemon is live; the chip drops on its own word.
+                        this.refresh_channel_chip(cx);
+                        logging::info("daemon service installed");
+                    }
+                    Err(e) => {
+                        this.daemon_error = Some(SharedString::from(e));
+                        cx.notify();
+                    }
+                }
+            })
+        })
+        .detach();
+    }
+
     /// Title of the conversation the chat pane is on, if the rail knows it.
     fn session_title(&self) -> Option<&str> {
         self.transcript.session.and_then(|id| {
@@ -4382,11 +4482,55 @@ impl Render for Dashboard {
             let r = r.on_mouse_down(MouseButton::Left, press);
             rail_rows.push(sessions::on_click(r, handler));
         }
+        // The channel chip (#2452): quiet notice plus the one action, drawn
+        // at the end of the rail only while a configured channel has no
+        // live owner. `Start daemon` runs the onboarding installer once;
+        // the probe loop flips the chip off when the daemon is live.
+        let chip_footer = self.channel_chip.clone().map(|line| {
+            let start = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                this.start_daemon(cx);
+            });
+            let shown = palette::current();
+            let mut chip = div()
+                .id("channel-chip")
+                .flex()
+                .flex_col()
+                .gap_1()
+                .mt_auto()
+                .flex_none()
+                .p_1p5()
+                .rounded_md()
+                .border_1()
+                .border_color(rgb(shown.track))
+                .bg(rgb(shown.panel_hi))
+                .text_xs()
+                .text_color(rgb(shown.text_muted))
+                .child(line);
+            if let Some(err) = &self.daemon_error {
+                chip = chip.child(div().text_color(rgb(shown.red)).child(err.clone()));
+            }
+            let action = if self.daemon_starting {
+                "starting..."
+            } else {
+                "Start daemon"
+            };
+            chip.child(
+                div()
+                    .id("channel-chip-start")
+                    .text_color(rgb(shown.accent))
+                    .cursor_pointer()
+                    .hover(|s| s.text_color(rgb(shown.text)))
+                    .child(action)
+                    .on_click(start),
+            )
+            .into_any_element()
+        });
         let rail = sessions::rail(
             &self.sessions,
             rail_rows,
             self.rail_width,
             &self.rail_scroll,
+            chip_footer,
         );
 
         // One label drives the in-window chrome and the OS titlebar: the old
@@ -6990,6 +7134,32 @@ fn main() {
                         }
                     })
                     .detach();
+                    // The channel chip's slow probe (#2452): one lock-dir read
+                    // every few seconds, all of it off the UI thread. Exits
+                    // with the view like every other loop here.
+                    cx.spawn(async move |this, cx| {
+                        loop {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_secs(5))
+                                .await;
+                            let line = cx
+                                .background_executor()
+                                .spawn(async { channel_chip_line() })
+                                .await;
+                            if this
+                                .update(cx, |this, cx| {
+                                    if this.channel_chip != line {
+                                        this.channel_chip = line;
+                                        cx.notify();
+                                    }
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    })
+                    .detach();
                     Dashboard {
                         screen: Screen::Chat,
                         state,
@@ -7002,6 +7172,9 @@ fn main() {
                         finder: None,
                         finder_channels: Vec::new(),
                         finder_caret: true,
+                        channel_chip: channel_chip_line(),
+                        daemon_starting: false,
+                        daemon_error: None,
                         pending: 0,
                         files: Vec::new(),
                         files_for: None,
