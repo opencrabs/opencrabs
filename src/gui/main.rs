@@ -378,13 +378,34 @@ fn channel_ownership() -> channel_status::Ownership {
 
 /// The chip line for the current config and lock state: `None` when every
 /// configured channel is served or nothing is configured (#2452).
+///
+/// UI THREAD ONLY: `Config::load` builds the whole config by value and on
+/// a GPUI background worker that build overflows the small stack (SIGILL,
+/// 2026-11-03). Background callers use `channel_chip_line_from` with the
+/// names read here once and passed in.
 fn channel_chip_line() -> Option<SharedString> {
-    let channels = configured_channels();
-    if channels.is_empty() {
+    let names: Vec<String> = configured_channels()
+        .iter()
+        .map(|c| c.name().to_string())
+        .collect();
+    channel_chip_line_from(&names)
+}
+
+/// The chip line from a fixed set of channel names: the probe path. Never
+/// touches Config, so it is safe on a background worker; the lock and
+/// instance checks are small directory reads (#2452).
+fn channel_chip_line_from(names: &[String]) -> Option<SharedString> {
+    if names.is_empty() {
         return None;
     }
-    let names: Vec<&str> = channels.iter().map(|c| c.name()).collect();
-    channel_status::status_line(&names, &channel_ownership()).map(SharedString::from)
+    let borrowed: Vec<&str> = names.iter().map(String::as_str).collect();
+    let line = channel_status::status_line(&borrowed, &channel_ownership()).map(SharedString::from);
+    logging::debug(&format!(
+        "chip probe: {} channels -> {}",
+        names.len(),
+        line.as_ref().map(|s| s.as_ref()).unwrap_or("hidden")
+    ));
+    line
 }
 
 /// The phase 1 window. Every string on screen is real data or the real error.
@@ -418,6 +439,11 @@ struct Dashboard {
     /// served or nothing is configured; the probe refreshes every few
     /// seconds, off the UI thread.
     channel_chip: Option<SharedString>,
+    /// The configured channel names, read from the config ONCE when the
+    /// window opens, on the UI thread. The 5s probe never calls Config:
+    /// on a GPUI background worker the config build overflows the small
+    /// stack and killed the window with SIGILL (2026-11-03 crash reports).
+    chip_channel_names: Vec<String>,
     /// The Start daemon click is in flight: a second click while launchctl
     /// or systemctl is running would stack two installs.
     daemon_starting: bool,
@@ -681,13 +707,18 @@ impl Dashboard {
     /// the daemon appears within a second or two, so poll instead of
     /// waiting for the next 5-second tick. All IO runs off the UI thread.
     fn refresh_channel_chip(&mut self, cx: &mut Context<Self>) {
+        let names = self.chip_channel_names.clone();
         cx.spawn(async move |this, cx| {
             let line = cx
                 .background_executor()
-                .spawn(async { channel_chip_line() })
+                .spawn(async move { channel_chip_line_from(&names) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if this.channel_chip != line {
+                    logging::info(&format!(
+                        "channel chip -> {}",
+                        line.as_ref().map(|s| s.as_ref()).unwrap_or("hidden")
+                    ));
                     this.channel_chip = line;
                     cx.notify();
                 }
@@ -7136,19 +7167,40 @@ fn main() {
                     .detach();
                     // The channel chip's slow probe (#2452): one lock-dir read
                     // every few seconds, all of it off the UI thread. Exits
-                    // with the view like every other loop here.
+                    // with the view like every other loop here. The names are
+                    // read from the config ONCE, here on the UI thread; the
+                    // worker never calls Config::load (SIGILL, 2026-11-03).
+                    let chip_names: Vec<String> = {
+                        let names: Vec<String> = configured_channels()
+                            .iter()
+                            .map(|c| c.name().to_string())
+                            .collect();
+                        logging::info(&format!(
+                            "channel chip probe up: {} configured channel(s)",
+                            names.len()
+                        ));
+                        names
+                    };
+                    let probe_names = chip_names.clone();
                     cx.spawn(async move |this, cx| {
                         loop {
                             cx.background_executor()
                                 .timer(std::time::Duration::from_secs(5))
                                 .await;
+                            // Each tick's future owns a copy: spawned work
+                            // must be 'static and may outlive the tick.
+                            let names = probe_names.clone();
                             let line = cx
                                 .background_executor()
-                                .spawn(async { channel_chip_line() })
+                                .spawn(async move { channel_chip_line_from(&names) })
                                 .await;
                             if this
                                 .update(cx, |this, cx| {
                                     if this.channel_chip != line {
+                                        logging::info(&format!(
+                                            "channel chip -> {}",
+                                            line.as_ref().map(|s| s.as_ref()).unwrap_or("hidden")
+                                        ));
                                         this.channel_chip = line;
                                         cx.notify();
                                     }
@@ -7172,6 +7224,7 @@ fn main() {
                         finder: None,
                         finder_channels: Vec::new(),
                         finder_caret: true,
+                        chip_channel_names: chip_names,
                         channel_chip: channel_chip_line(),
                         daemon_starting: false,
                         daemon_error: None,
