@@ -158,8 +158,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     //     input, queue preview, and a chat floor, so chat never gets
     //     crushed into a sliver against the card's edge (#1750).
     let plan_height = app
-        .plan_document
-        .as_ref()
+        .plan_document()
         .filter(|p| p.status == crate::tui::plan::PlanStatus::Active)
         .map(|p| {
             let desired: u16 = if p.tasks.is_empty() {

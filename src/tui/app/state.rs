@@ -894,12 +894,6 @@ pub struct App {
     /// Raw SSH password text being typed (never displayed, only dots)
     pub ssh_input: String,
 
-    /// Active plan document for the current session (loaded from disk)
-    pub plan_document: Option<crate::tui::plan::PlanDocument>,
-
-    /// Path to the plan JSON file for the current session
-    pub plan_file_path: Option<std::path::PathBuf>,
-
     /// Split pane manager — tracks pane layout, focus, and per-pane state
     pub pane_manager: PaneManager,
     /// Cached messages for inactive panes (keyed by session_id).
@@ -1122,8 +1116,6 @@ impl App {
             sudo_input: String::new(),
             ssh_pending: None,
             ssh_input: String::new(),
-            plan_document: None,
-            plan_file_path: None,
             pane_manager: PaneManager::load_layout(),
             pane_message_cache: HashMap::new(),
             background_sessions: HashMap::new(),
@@ -1348,13 +1340,24 @@ impl App {
         true
     }
 
+    /// The focused pane's cached plan document (render-time read).
+    pub fn plan_document(&self) -> Option<&crate::tui::plan::PlanDocument> {
+        self.pane_manager.focused_plan()
+    }
+
+    /// The focused pane's resolved plan JSON path.
+    pub fn plan_file_path(&self) -> Option<&std::path::PathBuf> {
+        self.pane_manager.focused_plan_path()
+    }
+
     /// Set the plan file path for a session and attempt to load it.
     pub(crate) async fn set_plan_file_for_session(&mut self, session_id: Uuid) {
         // Resolve through the shared store so the path is project/profile-aware
         // (and falls back to the legacy flat dir) instead of hardcoding
         // `agents/session/` under a raw `$HOME` that ignores the active profile.
-        self.plan_file_path = Some(crate::utils::plan_files::plan_json_read_path(session_id).await);
-        self.reload_plan();
+        let path = crate::utils::plan_files::plan_json_read_path(session_id).await;
+        let doc = crate::utils::plan_files::load_plan_from_path(&path);
+        self.pane_manager.set_focused_plan(Some(path), doc);
     }
 
     /// Reload the plan document from disk through the shared plan store.
@@ -1365,10 +1368,11 @@ impl App {
     /// a seed-failed empty-task one awaiting retry) and an Editing design
     /// doc both survive reloads and restarts by design.
     pub(crate) fn reload_plan(&mut self) {
-        self.plan_document = self
-            .plan_file_path
-            .as_ref()
-            .and_then(|path| crate::utils::plan_files::load_plan_from_path(path));
+        let path = self.pane_manager.focused_plan_path().cloned();
+        let doc =
+            path.as_ref()
+                .and_then(|path| crate::utils::plan_files::load_plan_from_path(path));
+        self.pane_manager.set_focused_plan(path, doc);
     }
 
     /// Get the shared session ID handle (for channels like Telegram/WhatsApp)
@@ -4058,6 +4062,13 @@ impl App {
         // Split pane focus & close (global — work from Chat mode)
         if keys::is_close_pane(&event) && self.pane_manager.is_split() {
             self.pane_manager.close_focused();
+            // The closed pane's input dies with it; adopt whatever the
+            // pane that gained focus had stashed (#2494).
+            self.pane_manager.adopt_input(
+                &mut self.input_buffer,
+                &mut self.cursor_position,
+                &mut self.input_history_index,
+            );
             self.pane_manager.save_layout();
             if let Some(pane) = self.pane_manager.focused_pane()
                 && let Some(session_id) = pane.session_id
@@ -4092,7 +4103,19 @@ impl App {
             return Ok(());
         }
         if keys::is_focus_next_pane(&event) && self.pane_manager.is_split() {
+            // Input belongs to the pane it was typed in: stash it with the
+            // pane we're leaving, adopt the target pane's own text (#2494).
+            self.pane_manager.stash_input(
+                &mut self.input_buffer,
+                &mut self.cursor_position,
+                &mut self.input_history_index,
+            );
             self.pane_manager.focus_next();
+            self.pane_manager.adopt_input(
+                &mut self.input_buffer,
+                &mut self.cursor_position,
+                &mut self.input_history_index,
+            );
             if let Some(pane) = self.pane_manager.focused_pane()
                 && let Some(session_id) = pane.session_id
             {

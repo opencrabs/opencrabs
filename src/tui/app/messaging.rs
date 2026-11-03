@@ -271,6 +271,14 @@ impl App {
         // `load_session` further down this file. Persisting the layout
         // makes the binding survive restarts when the pane is split.
         if let Some(pane) = self.pane_manager.focused_pane_mut() {
+            // A brand-new session must not inherit text typed for the old
+            // one: clear the pane's stashed input on an actual rebind (#2494).
+            if pane.session_id != Some(session.id) {
+                pane.clear_input();
+                self.input_buffer.clear();
+                self.cursor_position = 0;
+                self.input_history_index = None;
+            }
             pane.session_id = Some(session.id);
         }
         if self.pane_manager.is_split() {
@@ -639,6 +647,16 @@ impl App {
 
         // Keep focused pane in sync with loaded session
         if let Some(pane) = self.pane_manager.focused_pane_mut() {
+            // Loading a DIFFERENT session into this pane clears its stashed
+            // input: half-typed text belonged to the previous conversation
+            // and must never fire into the new one (#2494). A same-session
+            // reload (Tab-back, session list refresh) keeps it.
+            if pane.session_id != Some(session_id) {
+                pane.clear_input();
+                self.input_buffer.clear();
+                self.cursor_position = 0;
+                self.input_history_index = None;
+            }
             pane.session_id = Some(session_id);
         }
         // Persist layout so pane-to-session mapping survives restarts
@@ -1265,6 +1283,13 @@ impl App {
                     return true;
                 }
                 let closed = self.pane_manager.close_all_but_focused();
+                // The closed panes' input died with them; adopt whatever the
+                // surviving focused pane had stashed (#2494).
+                self.pane_manager.adopt_input(
+                    &mut self.input_buffer,
+                    &mut self.cursor_position,
+                    &mut self.input_history_index,
+                );
                 self.pane_manager.save_layout();
                 if let Some(sid) = self.pane_manager.focused_pane().and_then(|p| p.session_id)
                     && self.current_session.as_ref().map(|s| s.id) != Some(sid)
@@ -1474,7 +1499,7 @@ impl App {
                     reply = format!("⏹️ Cancelled the running turn. {reply}");
                 }
                 self.push_system_message(reply);
-                self.plan_document = None;
+                self.pane_manager.clear_focused_plan();
                 true
             }
             s if s == "/architecture" || s.starts_with("/architecture ") => {
@@ -3198,7 +3223,7 @@ impl App {
         // Terminal plans no longer linger on disk — completing archives and
         // discarding deletes — so a vanished file is the only "moved on"
         // signal, and the shared loader resolves legacy terminal statuses.
-        if self.plan_document.is_some() {
+        if self.plan_document().is_some() {
             self.reload_plan();
         }
 
@@ -3862,7 +3887,7 @@ impl App {
         // restore gap) carries an involuntarily-remapped pair that must never
         // overwrite the session's saved choice — that was the silent-switch bug.
         let response_started_on_session_provider = response.started_on_session_provider;
-        let plan_path = self.plan_file_path.clone();
+        let plan_path = self.plan_file_path().cloned();
 
         tokio::spawn(async move {
             // Persist the {provider, model} pair from the response onto the

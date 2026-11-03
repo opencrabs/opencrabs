@@ -2802,8 +2802,21 @@ impl App {
                     pane.session_id = Some(sid);
                 }
             }
+            // Stash the working input with the original pane before split
+            // moves focus; the new pane starts empty and awaits its own
+            // session (#2494).
+            self.pane_manager.stash_input(
+                &mut self.input_buffer,
+                &mut self.cursor_position,
+                &mut self.input_history_index,
+            );
             self.pane_manager
                 .split(crate::tui::pane::SplitDirection::Horizontal);
+            self.pane_manager.adopt_input(
+                &mut self.input_buffer,
+                &mut self.cursor_position,
+                &mut self.input_history_index,
+            );
             self.pane_manager.save_layout();
             // Stay on sessions screen — user picks which session goes in the new pane.
             // When they press Enter, load_session assigns it to the focused (new) pane.
@@ -2815,8 +2828,18 @@ impl App {
                     pane.session_id = Some(sid);
                 }
             }
+            self.pane_manager.stash_input(
+                &mut self.input_buffer,
+                &mut self.cursor_position,
+                &mut self.input_history_index,
+            );
             self.pane_manager
                 .split(crate::tui::pane::SplitDirection::Vertical);
+            self.pane_manager.adopt_input(
+                &mut self.input_buffer,
+                &mut self.cursor_position,
+                &mut self.input_history_index,
+            );
             self.pane_manager.save_layout();
             // Stay on sessions screen — user picks which session goes in the new pane.
         } else if event.code == KeyCode::Char('d') || event.code == KeyCode::Char('D') {
