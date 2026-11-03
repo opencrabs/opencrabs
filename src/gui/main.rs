@@ -56,8 +56,8 @@ use crate::screen_keys::{
     keyboard_owner, screen_chord,
 };
 use crate::theme::{BASE_REM, Size, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP, text};
-use opencrabs::ui_core::split::{self, Layout};
 use opencrabs::ui_core::rail;
+use opencrabs::ui_core::split::{self, Layout};
 use opencrabs::ui_core::topic_bar;
 use transcript::{CopyDrag, LiveTurn, TranscriptState};
 // The terminal's own command table, shared rather than copied.
@@ -3125,7 +3125,10 @@ impl Dashboard {
                 .iter()
                 .find(|s| s.id == id)
                 .and_then(|s| s.title.as_deref());
-            rail::rail_title(stored, self.sessions.topic_titles.get(&id).map(String::as_str))
+            rail::rail_title(
+                stored,
+                self.sessions.topic_titles.get(&id).map(String::as_str),
+            )
         };
         let topics: Vec<Uuid> = self
             .sessions
@@ -6340,7 +6343,12 @@ impl Render for Dashboard {
                 self.topic_edge,
                 toggle_edge,
                 tabs,
-                topic_bar(self.topic_menu, toggle, items),
+                topic_bar(
+                    self.topic_menu,
+                    toggle,
+                    items,
+                    self.topic_edge.is_vertical(),
+                ),
             );
             topic_row = Some((self.topic_edge, strip.into_any_element()));
         }
@@ -8315,12 +8323,18 @@ fn session_title_card(name: &str) -> impl IntoElement {
         .child(SharedString::from(name.to_string()))
 }
 
-/// The chat's `...` button, right aligned, with its items below it while the
-/// menu is open (#2303, #2304). Only drawn for a topic or a session with topics on.
+/// The chat's `...` button with its items below it while the menu is open
+/// (#2303, #2304). The bar hugs its content: a `w_full` bar inside the strip
+/// squeezed the tabs to nothing across a row and flung the `...` to the
+/// rail's far edge down a column, the detached-dots layout the owner
+/// screenshotted three times (#2480, #2490). Down a rail the stack aligns to
+/// the leading edge like the chips above it; across a row it aligns right so
+/// the menu reads from the row's end.
 fn topic_bar(
     open: bool,
     toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     items: Vec<Stateful<Div>>,
+    vertical: bool,
 ) -> impl IntoElement {
     let button = div()
         .id("topic-menu-button")
@@ -8332,7 +8346,13 @@ fn topic_bar(
         .hover(|d| d.bg(rgb(palette::current().panel_hi)))
         .on_click(toggle)
         .child("...");
-    let mut bar = div().flex().flex_col().items_end().w_full().child(button);
+    let mut bar = div()
+        .flex()
+        .flex_col()
+        .flex_none()
+        .when(vertical, |d| d.items_start())
+        .when(!vertical, |d| d.items_end())
+        .child(button);
     if open {
         for item in items {
             bar = bar.child(item);
