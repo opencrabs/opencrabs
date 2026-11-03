@@ -186,8 +186,7 @@ pub fn overlay(
                     .text_color(rgb(theme.text))
                     .truncate()
                     .child(SharedString::from(if state.query().is_empty() {
-                        "Seek sessions, features, skills, docs, troubleshooting and more"
-                            .to_string()
+                        "Sessions, feats, skills, docs, troubleshooting and more".to_string()
                     } else {
                         state.query().to_string()
                     })),
