@@ -16,12 +16,12 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use gpui::{
-    AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, Div, Element,
-    ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
-    Focusable, GlobalElementId, KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ObjectFit, PathPromptOptions, Pixels, Point, SharedString, Style, TextAlign,
-    TextRun, UTF16Selection, Window, WrappedLine, actions, div, fill, img, point, prelude::*, px,
-    relative, rgb, rgba, size,
+    AnyElement, App, Bounds, ClickEvent, ClipboardEntry, ClipboardItem, Context, CursorStyle, Div,
+    Element, ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
+    Focusable, GlobalElementId, ImageFormat, KeyBinding, LayoutId, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ObjectFit, PathPromptOptions, Pixels, Point, SharedString, Style,
+    TextAlign, TextRun, UTF16Selection, Window, WrappedLine, actions, div, fill, img, point,
+    prelude::*, px, relative, rgb, rgba, size,
 };
 
 use unicode_segmentation::UnicodeSegmentation;
@@ -332,6 +332,22 @@ impl Editor {
             .ok();
         })
         .detach();
+    }
+
+    /// The clipboard's image, when the clipboard holds a picture and no text
+    /// (#2479). A screenshot carries no text, so image only is the same rule
+    /// the TUI hint follows; an entry with text stays a text paste.
+    pub fn clipboard_image(cx: &App) -> Option<(ImageFormat, Vec<u8>)> {
+        let item = cx.read_from_clipboard()?;
+        if item.text().is_some() {
+            return None;
+        }
+        item.entries().iter().find_map(|entry| {
+            let ClipboardEntry::Image(image) = entry else {
+                return None;
+            };
+            Some((image.format, image.bytes.clone()))
+        })
     }
 
     /// The slash-command list to draw above the field, or `None` when the field
@@ -685,6 +701,16 @@ impl Editor {
     }
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
+        // A screenshot copies no text: the picture lands on a scratch file and
+        // attaches through the same `attach_paths` door a Finder drop takes
+        // (#2479). An entry with text stays a text paste.
+        if let Some(image) = Self::clipboard_image(cx)
+            && let Some(path) = write_clipboard_image(&image)
+            && self.attach_paths([path]) > 0
+        {
+            cx.notify();
+            return;
+        }
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
             self.replace_text_in_range(None, &text, window, cx);
         }
@@ -1125,7 +1151,7 @@ impl Element for EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        let (content, selected, cursor, placeholder, empty) = {
+        let (content, selected, cursor, placeholder, empty, bare) = {
             let input = self.input.read(cx);
             (
                 input.content.clone(),
@@ -1133,7 +1159,17 @@ impl Element for EditorElement {
                 input.cursor_offset(),
                 input.placeholder.to_string(),
                 input.content.is_empty(),
+                input.attachments.is_empty(),
             )
+        };
+        // The composer says when a screenshot is waiting (#2479): an empty
+        // field over an image-only clipboard swaps the hint in for the name,
+        // the same notice the TUI prints under its input. A picture already
+        // in the strip is the answer the hint would give, so it stands down.
+        let placeholder = if empty && bare && Editor::clipboard_image(cx).is_some() {
+            CLIPBOARD_IMAGE_HINT.to_string()
+        } else {
+            placeholder
         };
         let style = window.text_style();
         let font_size = style.font_size.to_pixels(window.rem_size());
@@ -1753,13 +1789,51 @@ fn line_col(content: &str, offset: usize) -> (usize, usize) {
     (last, line_len(content, last))
 }
 
+/// What the composer says while an image sits unpasted in the clipboard
+/// (#2479). The TUI prints the same notice with its own key; here the field's
+/// own binding is `cmd-v`.
+const CLIPBOARD_IMAGE_HINT: &str = "\u{1f4cb} Image in clipboard - \u{2318}V to paste";
+
+/// The file extension a clipboard image format maps to. `png` covers the
+/// screenshot case; the rest are the formats a browser can hand over.
+fn image_format_extension(format: ImageFormat) -> &'static str {
+    match format {
+        ImageFormat::Png => "png",
+        ImageFormat::Jpeg => "jpg",
+        ImageFormat::Webp => "webp",
+        ImageFormat::Gif => "gif",
+        ImageFormat::Svg => "svg",
+        ImageFormat::Bmp => "bmp",
+        ImageFormat::Tiff => "tiff",
+    }
+}
+
+/// Write clipboard image bytes to a scratch file so the attachment pipeline,
+/// which is path based, can pick the paste up (#2479). The file outlives the
+/// send on purpose: the transcript stores the path, and a file deleted at
+/// once would leave the message pointing at nothing.
+fn write_clipboard_image(image: &(ImageFormat, Vec<u8>)) -> Option<PathBuf> {
+    let (format, bytes) = image;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_millis();
+    let path = std::env::temp_dir().join(format!(
+        "opencrabs-paste-{stamp}.{}",
+        image_format_extension(*format)
+    ));
+    std::fs::write(&path, bytes).ok()?;
+    Some(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        Attachment, caret_in_row, line_col, line_count, line_len, line_start, marker_paths,
-        message_with_markers, next_word_end, previous_word_start, strip_markers,
-        vertical_row_target,
+        Attachment, CLIPBOARD_IMAGE_HINT, caret_in_row, image_format_extension, line_col,
+        line_count, line_len, line_start, marker_paths, message_with_markers, next_word_end,
+        previous_word_start, strip_markers, vertical_row_target, write_clipboard_image,
     };
+    use gpui::ImageFormat;
     use std::path::PathBuf;
 
     /// A throwaway directory with real files in it: the classifier stats the
@@ -2131,5 +2205,99 @@ mod tests {
         // Selecting text paints the selection; a caret on top of it would
         // draw two marks for one position.
         assert_eq!(caret_in_row(false, &(2..5), 5, 0, 7), None);
+    }
+
+    /// #2479: a screenshot copies picture bytes with no text next to them.
+    /// The paste writes those bytes to a scratch file so the path-based
+    /// attachment pipeline can carry it, the same door a Finder drop takes.
+    #[test]
+    fn a_clipboard_image_lands_on_disk_for_the_attachment_door() {
+        let bytes = b"\x89PNG\r\n\x1a\nfake".to_vec();
+        let path = write_clipboard_image(&(ImageFormat::Png, bytes.clone()))
+            .expect("the image reaches a file");
+        assert_eq!(path.extension().and_then(|e| e.to_str()), Some("png"));
+        assert_eq!(
+            std::fs::read(&path).expect("the file holds the bytes"),
+            bytes
+        );
+        assert!(
+            path.starts_with(std::env::temp_dir()),
+            "a clipboard paste never writes into the checkout"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The format the clipboard reports decides the suffix, so a browser
+    /// handover is not saved as a mislabelled `.png` (#2479).
+    #[test]
+    fn every_clipboard_image_format_maps_to_its_own_extension() {
+        let pairs = [
+            (ImageFormat::Png, "png"),
+            (ImageFormat::Jpeg, "jpg"),
+            (ImageFormat::Webp, "webp"),
+            (ImageFormat::Gif, "gif"),
+            (ImageFormat::Svg, "svg"),
+            (ImageFormat::Bmp, "bmp"),
+            (ImageFormat::Tiff, "tiff"),
+        ];
+        let mut seen = Vec::new();
+        for (format, want) in pairs {
+            assert_eq!(image_format_extension(format), want);
+            assert!(!seen.contains(&want), "{want} is used by two formats");
+            seen.push(want);
+        }
+    }
+
+    /// A paste with text beside the picture stays a text paste: dropping the
+    /// typed words would swallow what the user copied (#2479).
+    #[test]
+    fn the_paste_reads_an_image_only_clipboard() {
+        let src = include_str!("editor.rs");
+        let helper = src
+            .split("pub fn clipboard_image(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }\n").next())
+            .expect("the clipboard read is one helper");
+        assert!(
+            helper.contains("if item.text().is_some()"),
+            "text wins over the picture, like every paste before this"
+        );
+        let paste = src
+            .split("fn paste(&mut self, _: &Paste")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }\n").next())
+            .expect("paste is one function");
+        assert!(
+            paste.contains("Self::clipboard_image(cx)"),
+            "the paste asks the clipboard for a picture first"
+        );
+        assert!(
+            paste.contains("self.attach_paths([path]) > 0"),
+            "the file goes through the same attachment door a drop uses"
+        );
+        assert!(
+            paste.find("attach_paths").unwrap_or(usize::MAX)
+                < paste.find("read_from_clipboard").unwrap_or(usize::MAX),
+            "an attached picture returns before the text branch is reached"
+        );
+    }
+
+    /// The hint lives in the composer, not a toast: an empty field says a
+    /// screenshot is waiting, and it says which key pastes it (#2479).
+    #[test]
+    fn the_composer_names_the_waiting_clipboard_image() {
+        assert!(
+            CLIPBOARD_IMAGE_HINT.contains("Image in clipboard"),
+            "the hint names what is waiting: {CLIPBOARD_IMAGE_HINT}"
+        );
+        assert!(
+            CLIPBOARD_IMAGE_HINT.contains("V to paste"),
+            "the hint names the key that pastes it: {CLIPBOARD_IMAGE_HINT}"
+        );
+        let src = include_str!("editor.rs");
+        assert!(
+            src.contains("if empty && bare && Editor::clipboard_image(cx).is_some()"),
+            "the hint only stands in while the field is empty and bare"
+        );
     }
 }
