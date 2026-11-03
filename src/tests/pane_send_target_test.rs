@@ -12,7 +12,7 @@ use crate::db::Database;
 use crate::services::ServiceContext;
 use crate::tests::agent_service_mocks::MockProvider;
 use crate::tui::app::App;
-use crate::tui::pane::SplitDirection;
+use crate::tui::pane::{PaneManager, SplitDirection};
 
 async fn app() -> App {
     let db = Database::connect_in_memory().await.unwrap();
@@ -21,17 +21,21 @@ async fn app() -> App {
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let service = Arc::new(AgentService::new_for_test(provider, context.clone()).await);
     #[cfg(feature = "whatsapp")]
-    {
-        App::new(
-            service,
-            context,
-            Arc::new(crate::channels::whatsapp::WhatsAppState::new()),
-        )
-    }
+    let app_value = App::new(
+        service,
+        context,
+        Arc::new(crate::channels::whatsapp::WhatsAppState::new()),
+    );
     #[cfg(not(feature = "whatsapp"))]
-    {
-        App::new(service, context)
-    }
+    let app_value = App::new(service, context);
+    // Tests must be hermetic: App::new restores the host's persisted pane
+    // layout (~/.opencrabs/layout.json), so a fresh App can already carry
+    // real panes with real sessions bound (3 leaves on the dev Mac made
+    // ids.len() read 4 after one split). Reset to one clean unbound pane;
+    // each test binds exactly what it needs.
+    let mut app = app_value;
+    app.pane_manager = PaneManager::new();
+    app
 }
 
 /// Split a fresh app into two panes: the focused (second) pane bound to
