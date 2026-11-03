@@ -2384,18 +2384,36 @@ mod tests {
     #[test]
     fn the_thinking_lead_is_drawn_on_one_line() {
         const SRC: &str = include_str!("transcript.rs");
-        let card = &SRC[src_at(SRC, "fn live_card(")..src_at(SRC, "fn live_card_footer(")];
+        // Substring scans, never byte offsets: this file is the thing being
+        // read, so a hand-rolled index is one rustfmt pass away from a panic
+        // mid-codepoint.
+        let card = SRC
+            .split_once("fn live_card(")
+            .expect("the live card")
+            .1
+            .split_once("fn live_card_footer(")
+            .expect("the card footer")
+            .0;
         assert!(
             card.contains(".w_full()"),
             "the card takes the pane's width, not its own content's"
         );
 
-        let lead_arm = &card[card
-            .find("if !lead.is_empty() {")
-            .expect("the head draws the lead")
-            ..card
-                .find("let mut card = div()")
-                .expect("the card follows the head")];
+        let head_and_lead = card
+            .split_once("let mut head = div()")
+            .expect("the head row")
+            .1;
+        let head = head_and_lead
+            .split_once("if !lead.is_empty() {")
+            .expect("the lead arm")
+            .0;
+        let lead_arm = head_and_lead
+            .split_once("if !lead.is_empty() {")
+            .expect("the lead arm")
+            .1
+            .split_once("let mut card = div()")
+            .expect("the card follows the head")
+            .0;
         assert!(
             lead_arm.contains(".flex_1()") || lead_arm.contains(".flex_grow()"),
             "the lead takes the row's slack instead of hugging its content"
@@ -2404,9 +2422,6 @@ mod tests {
             lead_arm.contains(".truncate()"),
             "a status line clips with an ellipsis; it never wraps"
         );
-
-        let head = &card[card.find("let mut head = div()").expect("the head row")
-            ..card.find("if !lead.is_empty()").expect("the lead arm")];
         assert!(
             head.contains(".w_full()"),
             "the head row owns the card's width"
