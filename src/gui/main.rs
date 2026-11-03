@@ -4528,6 +4528,8 @@ impl Render for Dashboard {
                 .flex_col()
                 .gap_1()
                 .mt_auto()
+                .w_full()
+                .min_w_0()
                 .flex_none()
                 .p_1p5()
                 .rounded_md()
