@@ -334,8 +334,8 @@ mod tests {
     /// in the same words the terminal uses.
     #[test]
     fn text_command_cd_reports_the_directory() {
-        assert_eq!(cd_reply("/tmp/x"), "Working directory: /tmp/x");
+        assert_eq!(cd_reply("/opt/x"), "Working directory: /opt/x");
         assert_eq!(cd_not_a_directory("nope"), "Not a directory: nope");
-        assert!(cd_current("/tmp/x").contains("/tmp/x"));
+        assert!(cd_current("/opt/x").contains("/opt/x"));
     }
 }
