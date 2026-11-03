@@ -1792,7 +1792,7 @@ async fn fetch_latest_whispercrabs_release(client: &reqwest::Client) -> Result<s
 /// The old version returned on `path.exists()` alone, so a cached binary was
 /// never refreshed: the first release after the one a user installed would
 /// have stranded them forever, with no API call and no message.
-pub(crate) async fn ensure_whispercrabs() -> Result<PathBuf> {
+pub async fn ensure_whispercrabs() -> Result<PathBuf> {
     let bin_dir = helper_bin_dir();
     std::fs::create_dir_all(&bin_dir)?;
 

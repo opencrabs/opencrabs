@@ -6,6 +6,10 @@ pub(crate) mod clickable;
 pub(crate) mod clipboard_route;
 pub(crate) mod dialog_keys;
 pub(crate) mod dialogs;
+/// The WhisperCrabs installer, for frontends that launch the floating mic the
+/// way the terminal does: `/whisper` in the window is the same download and the
+/// same binary, never a second implementation.
+pub use dialogs::ensure_whispercrabs;
 pub(crate) mod dropped_path;
 pub(crate) mod duplicate_submit;
 pub(crate) mod help_catalog;
