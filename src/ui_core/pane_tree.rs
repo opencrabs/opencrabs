@@ -43,10 +43,7 @@ fn add_share(node: &mut PaneTree, by: f32) {
 /// deficit moves instead of being divided away by a renormalize.
 fn clamp_floors(children: &mut [PaneTree], floor: f32) {
     for _ in 0..children.len() {
-        let Some(small) = (0..children.len())
-            .filter(|&i| children[i].share() < floor - 1e-6)
-            .next()
-        else {
+        let Some(small) = (0..children.len()).find(|&i| children[i].share() < floor - 1e-6) else {
             return;
         };
         let deficit = floor - children[small].share();
