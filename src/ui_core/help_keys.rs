@@ -594,10 +594,7 @@ mod tests {
         assert_eq!(row.section, HelpSection::Global);
         assert_eq!(row.tui, Some("Ctrl+Shift+F"));
         assert_eq!(row.gui, Some("ctrl-shift-f"));
-        assert_eq!(
-            row.description,
-            "Seeker: find/docs/topic/pin/ask"
-        );
+        assert_eq!(row.description, "Seeker: find/docs/topic/pin/ask");
     }
 
     #[test]
