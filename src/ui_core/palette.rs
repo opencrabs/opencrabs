@@ -583,7 +583,8 @@ fn match_from(query: &str, text: &str, weight: u16) -> Option<u16> {
     // The mid-word last resort: a whole run of the token, in order. Single
     // chars stay strict, one letter mid-word is noise, not an answer.
     let contiguous: Option<usize> = if needle.len() > 1 {
-        hay.windows(needle.len()).position(|w| w == needle.as_slice())
+        hay.windows(needle.len())
+            .position(|w| w == needle.as_slice())
     } else {
         None
     };
@@ -1011,7 +1012,10 @@ mod tests {
         }
         let rows = state.visible();
         assert_eq!(rows.len(), 1, "the miss offers exactly the ask row");
-        assert_eq!(state.selected().map(|row| row.item.kind), Some(PaletteKind::Ask));
+        assert_eq!(
+            state.selected().map(|row| row.item.kind),
+            Some(PaletteKind::Ask)
+        );
         assert_eq!(rows[0].item.subtitle, roast("qwx"));
 
         let line = roast("qwx");
@@ -1338,7 +1342,11 @@ mod tests {
             for c in query.chars() {
                 state.type_char(c);
             }
-            state.visible().into_iter().map(|row| row.item.title).collect()
+            state
+                .visible()
+                .into_iter()
+                .map(|row| row.item.title)
+                .collect()
         }
 
         assert_eq!(
