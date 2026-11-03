@@ -6,7 +6,7 @@ use super::super::events::AppMode;
 use super::super::onboarding_render;
 use ratatui::{
     Frame,
-    layout::{Constraint, Direction, Layout, Rect, Rects},
+    layout::{Constraint, Direction, Layout, Rect},
     style::Style,
     widgets::{Block, Clear},
 };
@@ -347,7 +347,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
 fn render_chat_surface(
     f: &mut Frame,
     app: &mut App,
-    chunks: &Rects,
+    chunks: &[Rect],
     plan_height: u16,
     queue_height: u16,
 ) -> Rect {

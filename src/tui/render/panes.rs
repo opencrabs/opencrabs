@@ -15,7 +15,6 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Padding, Paragraph},
 };
-use unicode_width::UnicodeWidthStr;
 
 /// Render a single inactive (non-focused) pane.
 /// Shows the session's cached messages as a read-only chat view, plus the
@@ -511,11 +510,10 @@ fn render_pane_input_readonly(f: &mut Frame, buffer: &str, area: Rect) {
         return;
     }
     let inner_h = area.height.saturating_sub(2) as usize;
-    let lines: Vec<Line> = buffer
-        .lines()
-        .rev()
-        .take(inner_h)
-        .rev()
+    let all: Vec<&str> = buffer.lines().collect();
+    let start = all.len().saturating_sub(inner_h);
+    let lines: Vec<Line> = all[start..]
+        .iter()
         .map(|l| {
             Line::from(Span::styled(
                 l.to_string(),
