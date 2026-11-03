@@ -1005,6 +1005,15 @@ impl Dashboard {
 
     /// A click on printed row `ix`: arm it, then take the same path Enter
     /// takes, so a click and a key press can never act on different rows.
+    /// A kind chip pressed on the Seeker card: the list reshapes through the
+    /// engine's own filter, so both frontends filter identically (#2491).
+    fn set_finder_kind_filter(&mut self, want: Option<PaletteKind>, cx: &mut Context<Self>) {
+        if let Some(state) = self.finder.as_mut() {
+            state.set_kind_filter(want);
+            cx.notify();
+        }
+    }
+
     fn pick_finder_row(&mut self, ix: usize, cx: &mut Context<Self>) {
         if let Some(state) = self.finder.as_mut() {
             state.arm(ix);
@@ -3405,7 +3414,8 @@ impl Dashboard {
         // opens it sits ahead of every other reader: one field that finds a
         // conversation, a command or a surface is only useful if the composer
         // underneath cannot eat the characters (#2458). alt+space is the
-        // chord every platform can send; cmd-k is the window's own alias.
+        // chord every platform can send and every finger can reach; cmd-k
+        // stays as the window's own alias (#2491).
         {
             let ks = &ev.keystroke;
             let chord = find::opens(ks.modifiers.alt, ks.modifiers.platform, &ks.key);
@@ -6685,10 +6695,18 @@ impl Render for Dashboard {
                     )
                 })
                 .collect();
+            let entity = cx.entity().downgrade();
+            let chip: command_palette::ChipHandler =
+                Box::new(move |want: Option<PaletteKind>, cx: &mut App| {
+                    let _ = entity.update(cx, |this, cx| this.set_finder_kind_filter(want, cx));
+                });
+            let idle_revealed = state.idle_ready(std::time::Instant::now());
             root = root.child(command_palette::overlay(
                 state,
                 handlers,
+                chip,
                 find::channel_hint(state.query(), &self.finder_channels),
+                idle_revealed,
             ));
         }
         root

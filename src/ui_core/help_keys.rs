@@ -184,14 +184,13 @@ pub const ROWS: &[HelpRow] = &[
     ),
     // The card opens from anywhere, so it belongs at the top of the help
     // rather than under the session list, where the last block ran off the
-    // bottom of the screen (#2463). The terminal prints the shifted chord
-    // because that is the key a person presses; the terminal delivers it as
-    // the same byte as `ctrl-f`, which is why the terminal arm answers both.
+    // bottom of the screen (#2463). The chord is alt+space: alt arrives as
+    // the ESC prefix, so every platform sends it cleanly (#2491).
     row(
         HelpSection::Global,
-        "ctrl+shift+f",
-        "Ctrl+Shift+F",
-        Some("ctrl-shift-f"),
+        "alt+space",
+        "Alt+Space",
+        Some("alt-space"),
         "Seeker: find/docs/topic/pin/ask",
     ),
     // The window's rem zoom (#2425). The terminal has no rem to scale: font
@@ -464,7 +463,7 @@ mod tests {
         "Mouse click",
         "/help",
         "/usage",
-        "Ctrl+Shift+F",
+        "Alt+Space",
         "Enter",
         "Shift+Enter",
         "Ctrl+J",
@@ -590,10 +589,10 @@ mod tests {
         // #2463: the card opens on every screen, so it prints at the top of
         // the help instead of under SESSIONS, where it ran off the bottom of
         // the terminal's screen and off the window's first page.
-        let row = find("ctrl+shift+f").expect("the card chord must be documented");
+        let row = find("alt+space").expect("the card chord must be documented");
         assert_eq!(row.section, HelpSection::Global);
-        assert_eq!(row.tui, Some("Ctrl+Shift+F"));
-        assert_eq!(row.gui, Some("ctrl-shift-f"));
+        assert_eq!(row.tui, Some("Alt+Space"));
+        assert_eq!(row.gui, Some("alt-space"));
         assert_eq!(row.description, "Seeker: find/docs/topic/pin/ask");
     }
 

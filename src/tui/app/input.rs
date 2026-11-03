@@ -2860,8 +2860,8 @@ impl App {
             && event.modifiers.contains(KeyModifiers::SHIFT)
         {
             // Pin/unpin the selected session (#2457): the pin moved off
-            // `ctrl-f` so `ctrl-shift-f` could open the Seeker card on
-            // both clients, and it now rides `p` on both. A pin is a view
+            // `ctrl-f` when the Seeker card took a chord (alt+space since
+            // #2491), and it now rides `p` on both. A pin is a view
             // property: it lives in the sidecar table, never touches
             // `updated_at`, and floats the session to the top of this list
             // without disturbing the recency order under it.
@@ -3339,8 +3339,8 @@ mod clipboard_backend_tests {
 
 #[cfg(test)]
 mod palette_wiring_tests {
-    /// The pin chord moved to `ctrl-shift-p` when the Seeker card took
-    /// `ctrl-shift-f` (#2457), and the bare `p` that opens the projects
+    /// The pin chord moved to `ctrl-shift-p` when the Seeker card took a
+    /// chord (alt+space since #2491) (#2457), and the bare `p` that opens the projects
     /// browser gained a modifier guard in the same move. A source scan,
     /// because the handler needs a full app to exercise; the behaviour it
     /// pins is which chord reaches which branch.

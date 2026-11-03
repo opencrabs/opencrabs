@@ -11,6 +11,8 @@
 //! keyword table, the ordering and the state all live here, with no terminal
 //! and no UI toolkit in sight (#2458).
 
+use std::time::{Duration, Instant};
+
 /// What a row is, which decides how it is labelled and how ties break.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum PaletteKind {
@@ -81,6 +83,24 @@ impl PaletteKind {
             // An action, so it sits with the destinations, above chats.
             PaletteKind::NewTopic => 1,
             PaletteKind::Favorite => 1,
+        }
+    }
+
+    /// The rank the IDLE card orders by: with nothing typed every score is
+    /// equal, so this decides the whole list. Destinations lead (the screen
+    /// the word names), the two action rows follow, then commands, docs and
+    /// finally chats, because an idle launcher is a menu, not a command
+    /// dump (#2491).
+    fn idle_rank(self) -> u8 {
+        match self {
+            PaletteKind::Surface => 0,
+            // Actions sit with the destinations, under the screens.
+            PaletteKind::NewTopic | PaletteKind::Favorite => 1,
+            PaletteKind::Command | PaletteKind::UserCommand | PaletteKind::Channel => 2,
+            PaletteKind::Docs => 3,
+            PaletteKind::Session => 4,
+            PaletteKind::Skill | PaletteKind::Model => 5,
+            PaletteKind::Ask => 7,
         }
     }
 }
@@ -482,23 +502,22 @@ const ROASTS: &[&str] = &[
 ];
 
 /// The chord that opens the card, as plain booleans so neither frontend has
-/// to translate its own key type into the other's. `ctrl-shift-f` is the one
-/// every platform can send; `cmd-k` is the window's alias, and on macOS the
-/// command key arrives as `platform` (#2458).
-pub fn opens(control: bool, shift: bool, platform: bool, key: &str) -> bool {
-    (control && shift && key.eq_ignore_ascii_case("f"))
+/// to translate its own key type into the other's. `alt+space` is the one
+/// every platform can send and every finger can reach; `cmd-k` stays as the
+/// window's alias, and on macOS the command key arrives as `platform`
+/// (#2458, #2491). A terminal names space `space`, the window names it the
+/// same way, so both spellings are accepted here.
+pub fn opens(alt: bool, platform: bool, key: &str) -> bool {
+    (alt && (key == " " || key.eq_ignore_ascii_case("space")))
         || (platform && key.eq_ignore_ascii_case("k"))
 }
 
-/// The chord that opens the card in a terminal, where the shift is not a
-/// separate event: a terminal delivers `ctrl-shift-f` as the raw control byte
-/// `0x06`, which is indistinguishable from `ctrl-f`, so asking for the shift
-/// made the card impossible to open. The terminal arm therefore takes the bare
-/// chord, and the shifted one still works wherever a terminal does report it.
-/// Nothing else in the terminal answers `ctrl-f`, so the two cannot collide
-/// (#2463).
-pub fn opens_in_terminal(control: bool, key: &str) -> bool {
-    control && key.eq_ignore_ascii_case("f")
+/// The chord that opens the card in a terminal. Alt arrives there as the ESC
+/// prefix, which crossterm reports as the ALT modifier on the space event, so
+/// `alt+space` reaches this gate intact; the ctrl byte-collision hack of
+/// #2463 is retired because the chord no longer needs it (#2491).
+pub fn opens_in_terminal(alt: bool, key: &str) -> bool {
+    alt && (key == " " || key.eq_ignore_ascii_case("space"))
 }
 
 /// The line to print when the query matched nothing. Chosen by a hash of the
@@ -669,11 +688,22 @@ pub struct PaletteState {
     /// Armed by the create-topic or favorite row: the card becomes a session
     /// picker, its field empty, conversations only (#2482, #2486, #2487).
     pick: Option<PickFor>,
+    /// A kind chip pressed on the card: only rows of that kind print
+    /// (#2491). None means no chip, the default.
+    kind_filter: Option<PaletteKind>,
+    /// When the card opened: the idle suggestions hold for
+    /// `IDLE_REVEAL_DELAY` after this, so the first paint stays clean (#2491).
+    opened_at: Instant,
 }
 
 /// How many rows the card prints. A list longer than this is scrolled, not
 /// rendered: the card is a launcher, not a catalogue.
 pub const MAX_ROWS: usize = 60;
+
+/// The idle suggestions wait this long after the card opens, so the first
+/// paint is the field and the placeholder alone. Apple shows its shortcuts
+/// only after a beat; we do the same (#2491).
+pub const IDLE_REVEAL_DELAY: Duration = Duration::from_secs(3);
 
 impl PaletteState {
     pub fn new(items: Vec<PaletteItem>) -> Self {
@@ -683,6 +713,8 @@ impl PaletteState {
             scroll: 0,
             items,
             pick: None,
+            kind_filter: None,
+            opened_at: Instant::now(),
         }
     }
 
@@ -695,6 +727,8 @@ impl PaletteState {
             scroll: 0,
             items,
             pick: Some(purpose),
+            kind_filter: None,
+            opened_at: Instant::now(),
         }
     }
 
@@ -712,6 +746,26 @@ impl PaletteState {
 
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
+    }
+
+    /// Whether a session-pick purpose is armed: the chips hide while it is,
+    /// because a narrowed conversation list has no kinds to filter (#2491).
+    pub fn pick(&self) -> Option<PickFor> {
+        self.pick
+    }
+
+    /// The kind chip the card is narrowed to, if any (#2491).
+    pub fn kind_filter(&self) -> Option<PaletteKind> {
+        self.kind_filter
+    }
+
+    /// Press or release a kind chip. The list reshapes under the cursor, so
+    /// the cursor disarms and the best row of the narrowed list becomes the
+    /// one Enter acts on.
+    pub fn set_kind_filter(&mut self, kind: Option<PaletteKind>) {
+        self.kind_filter = kind;
+        self.cursor = None;
+        self.scroll = 0;
     }
 
     /// Arm a row by its index in [`PaletteState::visible`], clamped to the
@@ -779,7 +833,19 @@ impl PaletteState {
     }
 
     /// The rows the card prints, best first. Deterministic: score, then kind,
-    /// then title, so two frontends cannot disagree about the order.
+    /// then title, so two frontends cannot disagree about the order. With
+    /// nothing typed the kind step is the idle rank instead: destinations
+    /// lead, commands follow, chats last (#2491).
+    /// Whether the idle suggestions may print yet: the card has been open
+    /// for `IDLE_REVEAL_DELAY` with nothing typed and no picker armed. The
+    /// frontends gate the idle block on this; the ranker stays clock-free so
+    /// its tests stay deterministic (#2491).
+    pub fn idle_ready(&self, now: Instant) -> bool {
+        self.query.trim().is_empty()
+            && self.pick.is_none()
+            && now.duration_since(self.opened_at) >= IDLE_REVEAL_DELAY
+    }
+
     pub fn visible(&self) -> Vec<PaletteRow> {
         let mut rows: Vec<PaletteRow> = self
             .items
@@ -789,6 +855,12 @@ impl PaletteState {
                 // empty, so the whole rail prints until typing narrows it
                 // (#2482).
                 if self.pick.is_some() && item.kind != PaletteKind::Session {
+                    return None;
+                }
+                // A pressed chip drops every row of another kind (#2491).
+                if let Some(wanted) = self.kind_filter
+                    && item.kind != wanted
+                {
                     return None;
                 }
                 let mut item = item.clone();
@@ -806,10 +878,14 @@ impl PaletteState {
                 score(&self.query, &item).map(|score| PaletteRow { item, score })
             })
             .collect();
+        // Which kind rank decides: the typed card ranks actions first, the
+        // idle card leads with destinations (#2491).
+        let idle = self.query.trim().is_empty();
+        let kind_rank = |k: PaletteKind| if idle { k.idle_rank() } else { k.rank() };
         rows.sort_by(|a, b| {
             b.score
                 .cmp(&a.score)
-                .then(a.item.kind.rank().cmp(&b.item.kind.rank()))
+                .then(kind_rank(a.item.kind).cmp(&kind_rank(b.item.kind)))
                 .then(
                     a.item
                         .title
@@ -817,12 +893,26 @@ impl PaletteState {
                         .cmp(&b.item.title.to_lowercase()),
                 )
         });
+        // The idle card trades the brain and compact commands for the
+        // surfaces that already carry them (usage, mission control); the
+        // reveal stays the full default list, curated, so nothing the old
+        // card showed goes missing (#2491). Every state shares one cap.
+        if idle && self.pick.is_none() && self.kind_filter.is_none() {
+            rows.retain(|row| {
+                !(row.item.kind == PaletteKind::Command
+                    && matches!(row.item.title.as_str(), "/brain" | "/compact"))
+            });
+        }
         rows.truncate(MAX_ROWS);
         // A real query that matched nothing still deserves an answer: one row
         // that starts a fresh session carrying the typed text (#2482). The
         // roast rides along as the subtitle, so the miss keeps its sense of
         // humour while doing something useful.
-        if rows.is_empty() && !self.query.trim().is_empty() && self.pick.is_none() {
+        if rows.is_empty()
+            && !self.query.trim().is_empty()
+            && self.pick.is_none()
+            && self.kind_filter.is_none()
+        {
             let query = self.query.clone();
             rows.push(PaletteRow {
                 item: PaletteItem {
@@ -944,10 +1034,12 @@ mod tests {
         );
     }
 
-    /// Order is a contract between the two frontends: score, then kind, then
-    /// title. Two equal-scoring rows must not swap places between paints.
+    /// Order is a contract between the two frontends. Idle, the card is a
+    /// menu of destinations: surfaces lead, then the action rows, then
+    /// commands, conversations last, whatever the titles spell (#2491).
+    /// Typed, score wins first and the kind only breaks ties.
     #[test]
-    fn equal_scores_order_by_kind_then_title() {
+    fn idle_orders_destinations_first_and_typed_orders_score_first() {
         let state = PaletteState::new(vec![
             item("zebra", PaletteKind::Session),
             item("alpha", PaletteKind::Surface),
@@ -959,7 +1051,131 @@ mod tests {
             .into_iter()
             .map(|row| row.item.title)
             .collect();
-        assert_eq!(titles, vec!["beta", "alpha", "gamma", "zebra"]);
+        assert_eq!(
+            titles,
+            vec!["alpha", "gamma", "beta", "zebra"],
+            "an idle card leads with destinations, not a command dump"
+        );
+
+        // Typed: two rows with the same title and score are split by the
+        // typed kind rank, an action before a conversation.
+        let mut state = PaletteState::new(vec![
+            item("alpha", PaletteKind::Session),
+            item("alpha", PaletteKind::Command),
+        ]);
+        state.type_char('a');
+        let kinds: Vec<PaletteKind> = state
+            .visible()
+            .into_iter()
+            .map(|row| row.item.kind)
+            .collect();
+        assert_eq!(kinds, vec![PaletteKind::Command, PaletteKind::Session]);
+    }
+
+    /// The idle suggestions hold for three seconds after the card opens,
+    /// so the first paint is the field and the placeholder alone (#2491).
+    #[test]
+    fn the_idle_suggestions_wait_three_seconds_before_revealing() {
+        let state = PaletteState::new(vec![item("alpha", PaletteKind::Surface)]);
+        assert!(
+            !state.idle_ready(Instant::now()),
+            "a freshly opened card keeps its suggestions hidden"
+        );
+        assert!(
+            state.idle_ready(Instant::now() + IDLE_REVEAL_DELAY + Duration::from_millis(1)),
+            "three quiet seconds reveal the suggestions"
+        );
+    }
+
+    /// The idle card trades the brain and compact commands for the surfaces
+    /// that already carry them: usage and mission control lead instead
+    /// (#2491).
+    #[test]
+    fn the_idle_card_swaps_brain_and_compact_for_their_surfaces() {
+        let state = PaletteState::new(vec![
+            command("/brain"),
+            command("/compact"),
+            command("/cd"),
+            item("Usage ledger", PaletteKind::Surface),
+        ]);
+        let titles: Vec<String> = state
+            .visible()
+            .into_iter()
+            .map(|row| row.item.title)
+            .collect();
+        assert!(
+            titles.contains(&"Usage ledger".to_string()),
+            "the usage surface stays on the idle card"
+        );
+        assert!(
+            !titles.contains(&"/brain".to_string()),
+            "brain is redundant with the usage surface"
+        );
+        assert!(
+            !titles.contains(&"/compact".to_string()),
+            "compact is redundant with mission control"
+        );
+        assert!(titles.contains(&"/cd".to_string()), "other commands stay");
+    }
+
+    /// The action rows sit between the surfaces and the commands on the idle
+    /// card, so create topic and favorite are one glance away (#2491).
+    #[test]
+    fn the_idle_card_sits_action_rows_between_surfaces_and_commands() {
+        let state = PaletteState::new(vec![
+            item("/help", PaletteKind::Command),
+            item("create topic", PaletteKind::NewTopic),
+            item("Sessions", PaletteKind::Surface),
+            item("favorite any session", PaletteKind::Favorite),
+        ]);
+        let titles: Vec<String> = state
+            .visible()
+            .into_iter()
+            .map(|row| row.item.title)
+            .collect();
+        assert_eq!(
+            titles,
+            vec!["Sessions", "create topic", "favorite any session", "/help"]
+        );
+    }
+
+    /// A kind chip narrows the card to that kind, pressing it again (None)
+    /// gives the whole list back, and the cursor disarms either way so
+    /// Enter acts on the narrowed list's best row (#2491).
+    #[test]
+    fn a_kind_chip_narrows_the_card_to_that_kind() {
+        let mut state = PaletteState::new(vec![
+            item("/help", PaletteKind::Command),
+            item("Themes", PaletteKind::Surface),
+            item("Seeker", PaletteKind::Docs),
+        ]);
+        state.arm(2);
+        assert_eq!(state.cursor(), Some(2));
+
+        state.set_kind_filter(Some(PaletteKind::Docs));
+        let printed = state.visible();
+        assert_eq!(printed.len(), 1, "the chip keeps only its own kind");
+        assert_eq!(printed[0].item.kind, PaletteKind::Docs);
+        assert_eq!(state.cursor(), None, "a chip press disarms the cursor");
+
+        state.set_kind_filter(None);
+        assert_eq!(state.visible().len(), 3, "releasing the chip restores all");
+    }
+
+    /// A miss while a chip is active shows an empty list, never the ask row:
+    /// the chip owns what the query means, so offering a fresh session
+    /// would answer a question nobody asked (#2491).
+    #[test]
+    fn the_ask_row_stays_quiet_while_a_chip_filters() {
+        let mut state = PaletteState::new(vec![item("/help", PaletteKind::Command)]);
+        state.set_kind_filter(Some(PaletteKind::Docs));
+        for c in "zzz".chars() {
+            state.type_char(c);
+        }
+        assert!(
+            state.visible().is_empty(),
+            "a filtered miss stays empty, no ask row"
+        );
     }
 
     /// The cursor starts unarmed so Enter acts on the best match, and the
@@ -1168,44 +1384,67 @@ mod tests {
         assert!(score("zzz", &target).is_none());
     }
 
-    /// An empty query lists everything, bounded, so the card opens on a useful
-    /// list instead of a blank panel.
+    /// The idle card opens on the curated menu: destinations lead, the two
+    /// redundant command rows are gone (their screens carry them), chats and
+    /// docs trail, and the print stays bounded by the one catalogue cap
+    /// (#2491).
     #[test]
-    fn an_empty_query_lists_everything_up_to_the_cap() {
-        let state = PaletteState::new(
-            (0..MAX_ROWS + 20)
-                .map(|ix| item(&format!("row{ix:03}"), PaletteKind::Command))
-                .collect(),
-        );
-        assert_eq!(state.visible().len(), MAX_ROWS);
+    fn an_empty_query_lists_the_curated_idle_menu() {
+        let mut items: Vec<PaletteItem> = Vec::new();
+        for name in ["/brain", "/compact", "/help", "/evolve"] {
+            items.push(command(name));
+        }
+        items.push(item("usage", PaletteKind::Surface));
+        items.push(item("sessions", PaletteKind::Surface));
+        items.push(item("docs page", PaletteKind::Docs));
+        items.push(item("chat one", PaletteKind::Session));
+        let state = PaletteState::new(items);
+        let titles: Vec<String> = state
+            .visible()
+            .into_iter()
+            .map(|row| row.item.title)
+            .collect();
+        // Eight rows went in; brain and compact do not print on idle.
+        assert_eq!(titles.len(), 6, "brain and compact are dropped on idle");
+        assert!(!titles.contains(&"/brain".to_string()));
+        assert!(!titles.contains(&"/compact".to_string()));
+        // Destinations lead; the surface tie breaks by title.
+        assert_eq!(titles[0], "sessions");
+        assert_eq!(titles[1], "usage");
+        // Then commands, docs, chats, in idle_rank order.
+        assert_eq!(titles[2], "/evolve");
+        assert_eq!(titles[3], "/help");
+        assert_eq!(titles[4], "docs page");
+        assert_eq!(titles[5], "chat one");
         assert_eq!(
-            state.selected().map(|row| row.item.title),
-            Some("row000".to_string()),
-            "Enter with nothing typed acts on the first row"
+            state.selected().map(|row| row.item.title.clone()),
+            Some("sessions".to_string()),
+            "Enter with nothing typed acts on the first destination"
         );
     }
 
-    /// One chord table for both clients: ctrl-shift-f everywhere, cmd-k in the
+    /// One chord table for both clients: alt+space everywhere, cmd-k in the
     /// window, and nothing else opens the card.
     #[test]
     fn only_the_two_named_chords_open_the_card() {
-        assert!(opens(true, true, false, "f"));
-        assert!(opens(true, true, false, "F"));
-        assert!(opens(false, false, true, "k"));
-        assert!(!opens(true, false, false, "f"));
-        assert!(!opens(true, true, false, "k"));
-        assert!(!opens(false, false, false, "k"));
-        assert!(!opens(true, false, true, "f"));
+        assert!(opens(true, false, " "));
+        assert!(opens(true, false, "space"));
+        assert!(opens(false, true, "k"));
+        assert!(!opens(false, false, " "));
+        assert!(!opens(true, false, "k"));
+        assert!(!opens(true, false, "f"));
+        assert!(!opens(false, true, " "));
     }
 
-    /// The terminal gets the bare chord, because that is all a terminal sends:
-    /// `ctrl-shift-f` arrives as `ctrl-f` there (#2463).
+    /// The terminal gets the bare chord: crossterm reports the ESC prefix of
+    /// alt+space as the ALT modifier on the space event, so the gate sees the
+    /// chord intact (#2491).
     #[test]
-    fn the_terminal_chord_opens_without_the_shift() {
-        assert!(opens_in_terminal(true, "f"));
-        assert!(opens_in_terminal(true, "F"));
-        assert!(!opens_in_terminal(false, "f"));
-        assert!(!opens_in_terminal(true, "k"));
+    fn the_terminal_chord_is_alt_space() {
+        assert!(opens_in_terminal(true, " "));
+        assert!(opens_in_terminal(true, "space"));
+        assert!(!opens_in_terminal(false, " "));
+        assert!(!opens_in_terminal(true, "f"));
     }
 
     /// Every surface the card can find names a title, and every one but the

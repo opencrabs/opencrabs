@@ -1,4 +1,7 @@
-//! The Seeker card: a centered panel over a dimmed window.
+//! The Seeker card: an always-dark glass pill floating over a dimmed window
+//! (#2491), Spotlight-shaped: rounded, shadowed, top-center, a wordmark on
+//! the field, kind chips under it, and a curated menu that waits three
+//! seconds before it shows.
 //!
 //! The ranking, the keyword table and the state live in `ui_core::palette`, so
 //! the terminal and the window print the same rows in the same order (#2458).
@@ -6,7 +9,11 @@
 //! footer. The content is built by [`rows`], which is pure, so what the card
 //! says can be tested without a window.
 
-use gpui::{App, ClickEvent, SharedString, Window, div, prelude::*, px, rems, rgb, rgba};
+use gpui::{
+    App, ClickEvent, SharedString, Window, div, linear_color_stop, linear_gradient, prelude::*, px,
+    rems, rgb, rgba,
+};
+use std::rc::Rc;
 
 use crate::palette;
 use opencrabs::ui_core::commands::{Support, support};
@@ -79,24 +86,158 @@ pub fn status(state: &PaletteState) -> String {
 /// site that fills it, says what the box holds.
 pub type PickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 
+/// One kind chip's press: `None` is the All chip. The caller builds it,
+/// because only it can mutate the state behind the card (#2491).
+pub type ChipHandler = Box<dyn Fn(Option<PaletteKind>, &mut App) + 'static>;
+
+/// The chips the card prints, in paint order. Four kinds cover what the card
+/// actually lists; anything rarer stays reachable by typing its word.
+fn chip_defs() -> Vec<(&'static str, Option<PaletteKind>)> {
+    vec![
+        ("all", None),
+        ("screens", Some(PaletteKind::Surface)),
+        ("commands", Some(PaletteKind::Command)),
+        ("docs", Some(PaletteKind::Docs)),
+        ("sessions", Some(PaletteKind::Session)),
+    ]
+}
+
 /// The card. `pick` holds one handler per printed row, in the same order
 /// [`rows`] prints them, so a click acts on the row it landed on and nothing
-/// else. `setup` is the line for a channel the query names but the config does
-/// not carry yet: it replaces the control hint, because at that moment the
-/// useful thing to know is not how to move the cursor (#2462).
+/// else. `chip` is the press handler for the kind chips. `setup` is the line
+/// for a channel the query names but the config does not carry yet (#2462).
+/// `idle_revealed` is the caller's [`PaletteState::idle_ready`] verdict: a
+/// fresh card paints the field alone until it says otherwise (#2491).
 pub fn overlay(
     state: &PaletteState,
     pick: Vec<PickHandler>,
+    chip: ChipHandler,
     setup: Option<&'static str>,
+    idle_revealed: bool,
 ) -> impl IntoElement {
     let theme = palette::current();
     let printed = rows(state);
-    let mut list = div().flex().flex_col().gap_1();
-    let mut handlers = pick.into_iter();
-    for (ix, row) in printed.iter().enumerate() {
-        let armed = row.armed;
-        let mut cell =
-            div()
+    let idle = state.query().trim().is_empty();
+    let pick_armed = state.pick().is_some();
+    // The reveal gate: picker rows and typed results print at once, the
+    // idle menu holds for IDLE_REVEAL_DELAY so the first paint is the field
+    // and the invitation alone (#2491).
+    let reveal = pick_armed || !idle || idle_revealed;
+
+    // The glass is always dark, Spotlight-style, light theme included: the
+    // theme keeps its say through the accent on the armed row, the active
+    // chip and the wordmark crab (#2491).
+    let glass = if idle && idle_revealed && !pick_armed {
+        // The idle menu sits under the solid field: more transparency at
+        // the bottom than the top, so the list reads as a hint, not a wall.
+        linear_gradient(
+            180.0,
+            linear_color_stop(rgba(0x14141cee), 0.0),
+            linear_color_stop(rgba(0x14141c59), 1.0),
+        )
+    } else {
+        linear_gradient(
+            180.0,
+            linear_color_stop(rgba(0x14141cf2), 0.0),
+            linear_color_stop(rgba(0x14141cd9), 1.0),
+        )
+    };
+    let armed_bg = rgba((theme.accent << 8) | 0x2e);
+    let chip = Rc::new(chip);
+
+    let mut card = div()
+        .id("command-palette")
+        .flex()
+        .flex_col()
+        .w(rems(34.0))
+        .max_h(px(480.0))
+        .rounded(px(16.0))
+        .border_1()
+        .border_color(rgba(0xffffff1f))
+        .bg(glass)
+        .shadow_md()
+        .overflow_hidden()
+        // Inert: a click on the card stops here instead of reaching
+        // the scrim, so reading the list never closes it.
+        .on_click(|_ev, _window, cx| cx.stop_propagation());
+
+    // The field: the wordmark on the left, because our name is not Spotlight's
+    // and the card should say whose it is; the query or the invitation on the
+    // right of it (#2491).
+    card = card.child(
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .px_3()
+            .py_2()
+            .child(div().text_xs().child("🦀"))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(theme.text_muted))
+                    .child("OpenCrabs"),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .text_base()
+                    .text_color(rgb(theme.text))
+                    .truncate()
+                    .child(SharedString::from(if state.query().is_empty() {
+                        "Seek sessions, features, skills, docs, troubleshooting and more"
+                            .to_string()
+                    } else {
+                        state.query().to_string()
+                    })),
+            ),
+    );
+
+    if reveal {
+        // The kind chips. Hidden while a session pick is armed: a narrowed
+        // conversation list has no kinds to filter (#2491).
+        if !pick_armed {
+            let wanted = state.kind_filter();
+            let mut row = div().flex().flex_row().gap_1().px_3().pb_1();
+            for (ix, (label, kind)) in chip_defs().into_iter().enumerate() {
+                let active = wanted == kind;
+                let press = chip.clone();
+                row = row.child(
+                    div()
+                        .id(("palette-chip", ix))
+                        .px_2()
+                        .py_0p5()
+                        .rounded_full()
+                        .border_1()
+                        .text_xs()
+                        .cursor_pointer()
+                        .when(active, |d| {
+                            d.border_color(rgb(theme.accent))
+                                .text_color(rgb(theme.accent))
+                        })
+                        .when(!active, |d| {
+                            d.border_color(rgba(0xffffff14))
+                                .text_color(rgb(theme.text_muted))
+                        })
+                        .hover(|d| d.border_color(rgb(theme.accent)))
+                        .on_click(move |_ev, _window, cx| {
+                            cx.stop_propagation();
+                            press(kind, cx);
+                        })
+                        .child(SharedString::from(label)),
+                );
+            }
+            card = card.child(row);
+        }
+
+        // The rows: title only, subtitle and enter hint on the armed row,
+        // and the one right-edge word that does work, terminal only (#2491).
+        let mut list = div().flex().flex_col().gap_0p5().px_1();
+        let mut handlers = pick.into_iter();
+        for (ix, rowv) in printed.iter().enumerate() {
+            let armed = rowv.armed;
+            let mut cell = div()
                 .id(("palette-row", ix))
                 .flex()
                 .flex_row()
@@ -104,67 +245,118 @@ pub fn overlay(
                 .gap_2()
                 .px_2()
                 .py_1()
-                .rounded_sm()
-                .when(armed, |d| d.bg(rgb(theme.selection)))
+                .rounded(px(6.0))
                 .cursor_pointer()
-                .child(
+                .when(armed, |d| d.bg(armed_bg));
+            if armed && !rowv.missing {
+                cell = cell.child(
                     div()
                         .w(px(10.0))
                         .text_xs()
                         .text_color(rgb(theme.accent))
-                        .child(SharedString::from(row.marker)),
+                        .child(SharedString::from(MARKER)),
+                );
+            } else {
+                cell = cell.child(div().w(px(10.0)));
+            }
+            cell = cell.child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(if rowv.missing {
+                                theme.text_muted
+                            } else {
+                                theme.text
+                            }))
+                            .truncate()
+                            .child(SharedString::from(rowv.title.clone())),
+                    )
+                    .when(armed && !rowv.subtitle.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(theme.text_muted))
+                                .truncate()
+                                .child(SharedString::from(rowv.subtitle.clone())),
+                        )
+                    }),
+            );
+            if rowv.missing {
+                // A command the terminal runs and this window does not keeps
+                // its tag, dimmed; hiding it would leave a user who saw it
+                // in the terminal wondering why it vanished (#2458).
+                cell = cell.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(theme.text_muted))
+                        .child("terminal only"),
+                );
+            } else if armed {
+                cell = cell.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(theme.text_muted))
+                        .child("↵ enter"),
+                );
+            }
+            if let Some(handler) = handlers.next() {
+                cell = cell.on_click(handler);
+            }
+            list = list.child(cell);
+        }
+        card = card.child(div().flex().flex_col().overflow_hidden().child(list));
+
+        // Status only when it does work: the roast on a miss, the ask row's
+        // naming. The count is chrome; the rows are the answer (#2491).
+        let miss = printed.is_empty() && !state.is_empty();
+        let vis = state.visible();
+        let asks = vis.len() == 1 && vis[0].item.kind == PaletteKind::Ask;
+        if miss || asks {
+            card = card.child(
+                div()
+                    .px_3()
+                    .pb_2()
+                    .text_xs()
+                    .text_color(rgb(theme.text_muted))
+                    .child(SharedString::from(status(state))),
+            );
+        }
+
+        if let Some(text) = setup {
+            card = card
+                .child(
+                    div()
+                        .px_3()
+                        .pb_1()
+                        .text_xs()
+                        .text_color(rgb(theme.warn))
+                        .child(SharedString::from(text)),
                 )
                 .child(
                     div()
-                        .flex_1()
-                        .flex()
-                        .flex_col()
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(if row.missing {
-                                    theme.text_muted
-                                } else {
-                                    theme.text
-                                }))
-                                .truncate()
-                                .child(SharedString::from(row.title.clone())),
-                        )
-                        .when(!row.subtitle.is_empty(), |d| {
-                            d.child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(theme.text_muted))
-                                    .truncate()
-                                    .child(SharedString::from(row.subtitle.clone())),
-                            )
-                        }),
-                )
-                .child(div().text_xs().text_color(rgb(theme.text_muted)).child(
-                    SharedString::from(if row.missing {
-                        "terminal only"
-                    } else {
-                        row.kind
-                    }),
-                ));
-        if let Some(handler) = handlers.next() {
-            cell = cell.on_click(handler);
+                        .px_3()
+                        .pb_2()
+                        .text_xs()
+                        .text_color(rgb(theme.text_muted))
+                        .child("enter starts the setup · esc closes"),
+                );
+        } else if !idle && !miss && !asks {
+            // The legend prints only under a typed list; an idle card ends
+            // at its rows so the glass stays a hint (#2491).
+            card = card.child(
+                div()
+                    .px_3()
+                    .pb_2()
+                    .text_xs()
+                    .text_color(rgb(theme.text_muted))
+                    .child("enter run · up/down move · esc close"),
+            );
         }
-        list = list.child(cell);
     }
-
-    let status = status(state);
-    let hint = if setup.is_some() {
-        // The hint under the field is the setup line; the control legend moves
-        // into the same row's subtitle space, because Enter is what runs it.
-        SharedString::from("enter starts the setup · esc closes")
-    } else if printed.is_empty() && !state.is_empty() {
-        // The roast replaces the count, and the footer stays quiet so the line
-        // is the only thing the eye lands on.
-        SharedString::from("esc closes")
-    } else {
-        SharedString::from("enter run · up/down move · esc close")
-    };
 
     div()
         .id("command-palette-scrim")
@@ -178,76 +370,12 @@ pub fn overlay(
         .flex()
         .flex_col()
         .items_center()
-        .justify_center()
-        .bg(rgba(0x0a0a0add))
-        .child(
-            div()
-                .id("command-palette")
-                .flex()
-                .flex_col()
-                .gap_2()
-                .w(rems(46.0))
-                .max_h(px(520.0))
-                .p_3()
-                .rounded(px(10.0))
-                .border_1()
-                .border_color(rgb(theme.panel_hi))
-                .bg(rgb(theme.panel))
-                // Inert: a click on the card stops here instead of reaching
-                // the scrim, so reading the list never closes it.
-                .on_click(|_ev, _window, cx| cx.stop_propagation())
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap_2()
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(theme.accent))
-                                .child(SharedString::from("seeker")),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .text_base()
-                                .text_color(rgb(theme.text))
-                                .truncate()
-                                .child(SharedString::from(state.query().to_string())),
-                        ),
-                )
-                .when(!status.is_empty(), |d| {
-                    d.child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(theme.text_muted))
-                            .child(SharedString::from(status.clone())),
-                    )
-                })
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .overflow_hidden()
-                        .child(list),
-                )
-                .when_some(setup, |d, text| {
-                    d.child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(theme.warn))
-                            .child(SharedString::from(text)),
-                    )
-                })
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(theme.text_muted))
-                        .child(hint),
-                ),
-        )
+        // Spotlight floats the card high, not centered: the eye reads it as
+        // a command surface, not a dialog (#2491).
+        .justify_start()
+        .pt(rems(6.5))
+        .bg(rgba(0x0a0a0a99))
+        .child(card)
 }
 
 /// The kind label for a row, exposed so a test can check the column without
@@ -358,10 +486,21 @@ mod tests {
             .iter()
             .map(|cmd| item(cmd.name, PaletteKind::Command))
             .collect();
-        let printed = rows(&state_with(items));
 
-        assert_eq!(printed.len(), SLASH_COMMANDS.len(), "every command prints");
-        for row in &printed {
+        // The idle menu is curated since #2491: it leads with surfaces and
+        // drops /brain and /compact, whose screens already carry them. The
+        // contract is reachability, not the dump: typing a command's own
+        // name finds its row, and no found command is terminal only.
+        for cmd in SLASH_COMMANDS {
+            let mut probe = state_with(items.clone());
+            for ch in cmd.name.chars() {
+                probe.type_char(ch);
+            }
+            let printed = rows(&probe);
+            let row = printed
+                .iter()
+                .find(|row| row.title == cmd.name)
+                .unwrap_or_else(|| panic!("{} not found by its own name", cmd.name));
             assert!(
                 !row.missing,
                 "{} is marked terminal only but the window runs it",

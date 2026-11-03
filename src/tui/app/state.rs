@@ -3730,10 +3730,11 @@ impl App {
         }
         if let KeyCode::Char(key) = event.code {
             let key = key.to_string();
-            // The terminal sends `ctrl-shift-f` as `ctrl-f`, so the shift
-            // cannot be part of the condition here (#2463).
+            // Alt arrives as the ESC prefix, reported as the ALT modifier
+            // on the space event, so `alt+space` opens the card intact; the
+            // ctrl byte hack of #2463 is retired (#2491).
             if crate::ui_core::palette::opens_in_terminal(
-                event.modifiers.contains(KeyModifiers::CONTROL),
+                event.modifiers.contains(KeyModifiers::ALT),
                 &key,
             ) {
                 self.open_command_palette();
