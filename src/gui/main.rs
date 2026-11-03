@@ -1059,6 +1059,10 @@ impl Dashboard {
             scroll: ScrollHandle::new(),
             layout,
         });
+        // Paint the pane now, with its header, rather than waiting for the
+        // transcript load to come back: an empty second pane that appears at
+        // once reads as a split, where a silent wait reads as nothing (#2438).
+        cx.notify();
         let db_path = self.db_path.clone();
         cx.spawn(async move |this, cx| {
             let result = transcript::load_recent(db_path, id).await;
@@ -4011,6 +4015,41 @@ impl Render for Dashboard {
 
         let (middle, footer): (AnyElement, AnyElement) = match self.screen {
             Screen::Chat => {
+                // The chat is the primary pane, and a split draws its session
+                // beside or below it (#2438). Two panes share the content
+                // width, less the gap_2 that separates them, so a row is
+                // never planned wider than the box it is painted into.
+                let primary_width = if self.split.is_some() {
+                    (pane_width - 8.0) / 2.0
+                } else {
+                    pane_width
+                };
+                let primary = transcript::view(
+                    &self.transcript,
+                    &self.transcript_scroll,
+                    &self.live,
+                    self.busy,
+                    primary_width,
+                    fold_handlers,
+                    transcript::ViewHooks {
+                        attachments: attachment_handlers,
+                        drag: None,
+                        ctx_used: self.ctx_tokens,
+                        ctx_max: self.ctx_max,
+                        live_click: Some(live_click.clone()),
+                    },
+                )
+                .into_any_element();
+                let body = match &self.split {
+                    None => primary,
+                    Some(pane) => {
+                        let close = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                            this.split = None;
+                            cx.notify();
+                        });
+                        split_body(primary, pane, primary_width, close)
+                    }
+                };
                 (
                     div()
                         .flex()
@@ -4018,21 +4057,7 @@ impl Render for Dashboard {
                         .flex_1()
                         .min_h_0()
                         .gap_2()
-                        .child(transcript::view(
-                            &self.transcript,
-                            &self.transcript_scroll,
-                            &self.live,
-                            self.busy,
-                            pane_width,
-                            fold_handlers,
-                            transcript::ViewHooks {
-                                attachments: attachment_handlers,
-                                drag: None,
-                                ctx_used: self.ctx_tokens,
-                                ctx_max: self.ctx_max,
-                                live_click: Some(live_click.clone()),
-                            },
-                        ))
+                        .child(body)
                         .into_any_element(),
                     {
                         // Key hints left, ctx budget right: the TUI's own footer
@@ -5653,39 +5678,13 @@ impl Render for Dashboard {
                             },
                         ));
                 let body = match &self.split {
-                    None => primary,
+                    None => primary.into_any_element(),
                     Some(pane) => {
                         let close = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
                             this.split = None;
                             cx.notify();
                         });
-                        let secondary = div()
-                            .id("split-secondary")
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .min_w_0()
-                            .min_h_0()
-                            .child(split_header(pane, close))
-                            .child(transcript::view(
-                                &pane.transcript,
-                                &pane.scroll,
-                                &LiveTurn::default(),
-                                false,
-                                primary_width,
-                                HashMap::new(),
-                                transcript::ViewHooks::default(),
-                            ));
-                        div()
-                            .flex()
-                            .flex_1()
-                            .min_w_0()
-                            .min_h_0()
-                            .gap_2()
-                            .when(pane.layout.is_stacked(), |d| d.flex_col())
-                            .when(!pane.layout.is_stacked(), |d| d.flex_row())
-                            .child(primary)
-                            .child(secondary)
+                        split_body(primary.into_any_element(), pane, primary_width, close)
                     }
                 };
                 let middle = div()
@@ -7912,6 +7911,46 @@ fn split_header(
                 .on_click(close)
                 .child(SharedString::from("×")),
         )
+}
+
+/// The two panes of a split: the chat first, then the picked session beside it
+/// (side) or below it (stack), with its own header and close button. The chat
+/// screen and the themes preview both draw through this, so the second pane
+/// cannot be wired into one of them and forgotten in the other (#2438).
+fn split_body(
+    primary: AnyElement,
+    pane: &SplitPane,
+    pane_width: f32,
+    close: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    let secondary = div()
+        .id("split-secondary")
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_w_0()
+        .min_h_0()
+        .child(split_header(pane, close))
+        .child(transcript::view(
+            &pane.transcript,
+            &pane.scroll,
+            &LiveTurn::default(),
+            false,
+            pane_width,
+            HashMap::new(),
+            transcript::ViewHooks::default(),
+        ));
+    div()
+        .flex()
+        .flex_1()
+        .min_w_0()
+        .min_h_0()
+        .gap_2()
+        .when(pane.layout.is_stacked(), |d| d.flex_col())
+        .when(!pane.layout.is_stacked(), |d| d.flex_row())
+        .child(primary)
+        .child(secondary)
+        .into_any_element()
 }
 
 /// The dim over the chat and the card in its bottom right while a split waits
