@@ -9,6 +9,7 @@ use crate::brain::tools::ToolExecutionContext;
 use crate::services::{MessageService, SessionService};
 use serde_json::Value;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -544,7 +545,7 @@ impl AgentService {
             super::compaction_prompts::build_continuation(
                 kind,
                 self.silent_compaction,
-                self.auto_approve_tools,
+                self.auto_approve_tools.load(Ordering::Relaxed),
                 super::compaction_prompts::PlanRecovery::for_session(session_id).await,
             ),
             &skills,
@@ -1507,7 +1508,8 @@ impl AgentService {
         // `approval_policy = "auto-always"` silently suppresses the ask the
         // override exists to make. The loop gate below already honours the
         // override; this mirror must not un-do it.
-        let context_auto_approve = self.auto_approve_tools && !has_override_approval;
+        let context_auto_approve =
+            self.auto_approve_tools.load(Ordering::Relaxed) && !has_override_approval;
         let mut tool_context = ToolExecutionContext::new(session_id)
             .with_auto_approve(context_auto_approve)
             .with_working_directory(
@@ -6905,7 +6907,8 @@ impl AgentService {
                 // respects the auto_approve_tools flag and tool-level policy.
                 let needs_approval = if let Some(tool) = self.tool_registry.get(&tool_name) {
                     tool.requires_approval_for_input(&tool_input)
-                        && (!self.auto_approve_tools || has_override_approval)
+                        && (!self.auto_approve_tools.load(Ordering::Relaxed)
+                            || has_override_approval)
                         && !tool_context.auto_approve
                 } else {
                     false

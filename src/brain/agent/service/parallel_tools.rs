@@ -17,6 +17,7 @@ use crate::brain::provider::ContentBlock;
 use crate::brain::tools::r#trait::ToolExecutionContext;
 use futures::StreamExt;
 use serde_json::Value;
+use std::sync::atomic::Ordering;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -66,7 +67,8 @@ impl super::AgentService {
             match self.tool_registry.get(name) {
                 Some(tool) => {
                     let needs_approval = tool.requires_approval_for_input(input)
-                        && (!self.auto_approve_tools || has_override_approval)
+                        && (!self.auto_approve_tools.load(Ordering::Relaxed)
+                            || has_override_approval)
                         && !tool_context.auto_approve;
                     !needs_approval
                 }

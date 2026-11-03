@@ -5,6 +5,7 @@ use crate::brain::provider::{ContentBlock, LLMRequest, Message, Provider};
 use crate::services::{MessageService, SessionService};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -672,7 +673,7 @@ impl AgentService {
             model_name.to_string(),
             super::request_budget::compaction_summary_request_allowance(),
             self.get_working_directory_for_session(session_id),
-            self.auto_approve_tools,
+            self.auto_approve_tools.load(Ordering::Relaxed),
             self.skill_inventory_for_session(session_id),
             cancel,
             self.compaction_attempt_deadline(session_id),

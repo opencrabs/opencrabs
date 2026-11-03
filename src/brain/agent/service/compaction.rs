@@ -17,6 +17,7 @@ use super::builder::AgentService;
 use super::compaction_notice::CompactionNotifier;
 use super::types::{ProgressCallback, ProgressEvent};
 use crate::brain::agent::context::{AgentContext, CompactionScope};
+use std::sync::atomic::Ordering;
 use uuid::Uuid;
 
 /// What `enforce_context_budget` did to the context on this visit.
@@ -721,7 +722,7 @@ impl AgentService {
         let model = model_name.to_string();
         let max_output = super::request_budget::compaction_summary_request_allowance();
         let working_dir = self.get_working_directory_for_session(session_id);
-        let auto_approve = self.auto_approve_tools;
+        let auto_approve = self.auto_approve_tools.load(Ordering::Relaxed);
         let subagents = self.subagent_manager.clone();
         let attempt_deadline = self.compaction_attempt_deadline(session_id);
         // #1960: read the live skill inventory BEFORE the spawn, so the

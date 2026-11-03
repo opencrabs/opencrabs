@@ -5,6 +5,7 @@ use crate::brain::tools::ToolRegistry;
 use crate::services::ServiceContext;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use uuid::Uuid;
 
 /// Maximum number of recently-touched paths surfaced to the agent in
@@ -347,8 +348,13 @@ pub struct AgentService {
     /// (#213). `None` → the static `default_system_brain` is used as-is.
     pub(super) brain_rebuild: Option<BrainRebuild>,
 
-    /// Whether to auto-approve tool execution
-    pub(super) auto_approve_tools: bool,
+    /// Whether to auto-approve tool execution.
+    ///
+    /// Atomic so a frontend can flip it at runtime (`/approve auto-always`)
+    /// without rebuilding the service: the GUI keeps one long-lived service
+    /// for the life of the window, so a value baked in at construction would
+    /// leave the policy change written to config but never applied.
+    pub(super) auto_approve_tools: AtomicBool,
     /// Audit recording (#1705): when true, read-class tool calls persist a
     /// `turn_retrievals` row and turn finalization persists a
     /// `turn_outcomes` row for the /audit viewer. Resolved from
@@ -547,9 +553,9 @@ impl AgentService {
             // Resolving at construction rather than per tool call is
             // deliberate: the policy check that reads config hits the disk, and
             // the tool gate runs for every call.
-            auto_approve_tools: crate::utils::approval::policy_auto_approves(
+            auto_approve_tools: AtomicBool::new(crate::utils::approval::policy_auto_approves(
                 &config.agent.approval_policy,
-            ),
+            )),
             audit_recording: config.features.audit_recording,
             claude_turn_tasks: std::sync::Mutex::default(),
             headless: false,
@@ -922,7 +928,17 @@ impl AgentService {
     /// Whether tools run without an interactive approval, after folding the
     /// config policy together with any explicit caller grant.
     pub fn auto_approves_tools(&self) -> bool {
+        self.auto_approve_tools.load(Ordering::Relaxed)
+    }
+
+    /// Change the auto-approval grant at runtime, so a policy switch applies
+    /// to the next tool call instead of the next process.
+    ///
+    /// The caller writes `approval_policy` to config and calls this; both
+    /// halves are needed, or the screen and the file disagree.
+    pub fn set_auto_approve_tools(&self, auto_approve: bool) {
         self.auto_approve_tools
+            .store(auto_approve, Ordering::Relaxed);
     }
 
     /// Grant auto-approval on top of whatever the config policy already allows.
@@ -935,8 +951,10 @@ impl AgentService {
     ///
     /// `true` still forces it on for callers with their own grant, such as
     /// subagents whose spawn the parent already approved.
-    pub fn with_auto_approve_tools(mut self, auto_approve: bool) -> Self {
-        self.auto_approve_tools |= auto_approve;
+    pub fn with_auto_approve_tools(self, auto_approve: bool) -> Self {
+        if auto_approve {
+            self.auto_approve_tools.store(true, Ordering::Relaxed);
+        }
         self
     }
 
