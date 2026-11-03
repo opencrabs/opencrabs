@@ -3601,6 +3601,14 @@ impl App {
                 let _ = sender.send(crate::tui::events::TuiEvent::CommandSubmitted(prompt));
                 self.mode = AppMode::Chat;
             }
+            PaletteAction::Ask(text) => {
+                // The miss row starts a fresh session with the typed text as
+                // its first request, through the same submit seam a typed
+                // line uses, so no second session path exists (#2482).
+                let sender = self.event_sender();
+                let _ = sender.send(crate::tui::events::TuiEvent::CommandSubmitted(text));
+                self.mode = AppMode::Chat;
+            }
             PaletteAction::OpenDocs(path) => {
                 // Detached, exactly like a previewed file: waiting on the
                 // browser would freeze the event loop. A launcher that exits

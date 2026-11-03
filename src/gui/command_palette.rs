@@ -59,13 +59,16 @@ pub fn status(state: &PaletteState) -> String {
     match state.query() {
         "" => String::new(),
         query => {
-            let hits = state.visible().len();
-            if hits == 0 {
+            let rows = state.visible();
+            if rows.is_empty() {
+                // No rows at all: blank words. The roast still says it.
                 roast(query).to_string()
-            } else if hits == 1 {
+            } else if rows.len() == 1 && rows[0].item.kind == PaletteKind::Ask {
+                "no match. enter asks a fresh session".to_string()
+            } else if rows.len() == 1 {
                 "1 match".to_string()
             } else {
-                format!("{hits} matches")
+                format!("{} matches", rows.len())
             }
         }
     }
@@ -311,17 +314,18 @@ mod tests {
         assert_eq!(printed[0].kind, "session");
     }
 
-    /// No match shows the roast, never an empty panel with a silent footer.
+    /// A miss offers the ask row and names it in the status line, never an
+    /// empty panel with a silent footer (#2482).
     #[test]
-    fn a_miss_shows_the_roast_instead_of_a_count() {
+    fn a_miss_offers_the_ask_row_and_the_status_names_it() {
         let mut state = state_with(vec![item("alpha", PaletteKind::Command)]);
         for c in "zzz".chars() {
             state.type_char(c);
         }
-        let line = status(&state);
-        assert!(!line.is_empty(), "a miss must say something");
-        assert_eq!(line, roast("zzz"));
-        assert!(rows(&state).is_empty());
+        let printed = rows(&state);
+        assert_eq!(printed.len(), 1, "a miss must offer exactly the ask row");
+        assert_eq!(printed[0].kind, kind_label(PaletteKind::Ask));
+        assert_eq!(status(&state), "no match. enter asks a fresh session");
     }
 
     /// A single hit says "1 match", not "1 matches".

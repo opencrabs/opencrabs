@@ -932,6 +932,10 @@ impl Dashboard {
                 ),
                 cx,
             ),
+            // The miss row asks in a fresh session. send_message is the
+            // whole seam: with none open it queues the text and creates the
+            // session itself (#2482).
+            PaletteAction::Ask(text) => self.send_message(text, cx),
             PaletteAction::OpenDocs(path) => {
                 let url = docs::url(path);
                 preview::launch(&preview::url_command(&url));

@@ -31,6 +31,9 @@ pub enum PaletteKind {
     Channel,
     /// A documentation page, opened in the default browser.
     Docs,
+    /// The miss row: the query matched nothing, so the card offers to start
+    /// a fresh session with the typed text as the request (#2482).
+    Ask,
 }
 
 impl PaletteKind {
@@ -45,6 +48,7 @@ impl PaletteKind {
             PaletteKind::UserCommand => "yours",
             PaletteKind::Channel => "channel",
             PaletteKind::Docs => "docs",
+            PaletteKind::Ask => "ask",
         }
     }
 
@@ -63,6 +67,9 @@ impl PaletteKind {
             PaletteKind::UserCommand => 4,
             PaletteKind::Model => 5,
             PaletteKind::Session => 6,
+            // The miss row only ever prints alone, so its rank is a formality:
+            // dead last keeps it out of the way should that ever change.
+            PaletteKind::Ask => 7,
         }
     }
 }
@@ -328,6 +335,10 @@ pub enum PaletteAction {
     /// frontends compose the URL with `ui_core::docs::url`, so the host lives
     /// in one place.
     OpenDocs(&'static str),
+    /// The miss row's action: start a fresh session and send the typed text
+    /// as its first request (#2482). The frontend funnels it through its own
+    /// submit seam, so no second session-creation path exists.
+    Ask(String),
 }
 
 /// One pickable row, already flat: the frontend paints it and nothing else.
@@ -718,6 +729,23 @@ impl PaletteState {
                 )
         });
         rows.truncate(MAX_ROWS);
+        // A real query that matched nothing still deserves an answer: one row
+        // that starts a fresh session carrying the typed text (#2482). The
+        // roast rides along as the subtitle, so the miss keeps its sense of
+        // humour while doing something useful.
+        if rows.is_empty() && !self.query.trim().is_empty() {
+            let query = self.query.clone();
+            rows.push(PaletteRow {
+                item: PaletteItem {
+                    title: query.clone(),
+                    subtitle: roast(&query).to_string(),
+                    kind: PaletteKind::Ask,
+                    keywords: String::new(),
+                    action: PaletteAction::Ask(query),
+                },
+                score: 0,
+            });
+        }
         rows
     }
 
@@ -883,23 +911,52 @@ mod tests {
         assert_eq!(state.scroll(), 4, "rows 4..7 are the visible window");
     }
 
-    /// Nothing matched: the card stays open with no rows and prints one roast.
-    /// The line is stable for a query, so it does not flicker as the user
-    /// types, and it never names the user.
+    /// Nothing matched: the ask row carries the query and the roast is its
+    /// subtitle. The line is stable for a query, so it does not flicker as
+    /// the user types, and it never names the user.
     #[test]
     fn no_match_keeps_a_stable_short_line() {
         let mut state = PaletteState::new(vec![command("/help")]);
         for c in "qwx".chars() {
             state.type_char(c);
         }
-        assert!(state.visible().is_empty());
-        assert_eq!(state.selected(), None);
+        let rows = state.visible();
+        assert_eq!(rows.len(), 1, "the miss offers exactly the ask row");
+        assert_eq!(state.selected().map(|row| row.item.kind), Some(PaletteKind::Ask));
+        assert_eq!(rows[0].item.subtitle, roast("qwx"));
 
         let line = roast("qwx");
         assert_eq!(line, roast("qwx"), "the same query gets the same line");
         assert_eq!(line, roast("QWX"), "case does not change it");
         assert!(line.chars().count() < 80, "the line must fit one row");
         assert!(line.is_ascii(), "the card prints plain punctuation only");
+    }
+
+    /// A query nothing matches offers a fresh session carrying it: exactly one
+    /// row, the typed text on it, Enter sends it (#2482).
+    #[test]
+    fn seeker_no_match_offers_a_new_session_carrying_the_query() {
+        let mut state = PaletteState::new(vec![command("/whisper")]);
+        let query = "I want to set up a browser automation";
+        for c in query.chars() {
+            state.type_char(c);
+        }
+        let rows = state.visible();
+        assert_eq!(rows.len(), 1, "a miss must offer exactly the ask row");
+        assert_eq!(rows[0].item.kind, PaletteKind::Ask);
+        assert_eq!(rows[0].item.title, query);
+        assert_eq!(rows[0].item.action, PaletteAction::Ask(query.to_string()));
+    }
+
+    /// A query with a real match never grows the ask row.
+    #[test]
+    fn seeker_no_match_row_stays_hidden_when_something_matches() {
+        let mut state = PaletteState::new(vec![command("/whisper")]);
+        for c in "whisper".chars() {
+            state.type_char(c);
+        }
+        let rows = state.visible();
+        assert!(rows.iter().all(|row| row.item.kind != PaletteKind::Ask));
     }
 
     /// Titles are matched character by character, so a multi-byte title is
