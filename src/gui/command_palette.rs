@@ -196,7 +196,7 @@ pub fn overlay(
                 .text_xl()
                 .text_color(rgb(if empty { INK_MUTED } else { INK }))
                 .child(SharedString::from(if empty {
-                    "Seeker: Find sessions, features, skills, docs, debug and more.".to_string()
+                    "Seeker: sessions, feats, skills, docs, debug and more.".to_string()
                 } else {
                     state.query().to_string()
                 })),
