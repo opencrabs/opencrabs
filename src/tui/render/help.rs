@@ -58,6 +58,12 @@ pub(super) fn render_help(f: &mut Frame, app: &mut App, area: Rect) {
     // same one the desktop window renders (#2320). Two hand-written lists would
     // drift, and then the two surfaces would disagree about the same key.
     for section in crate::ui_core::help_keys::HelpSection::ALL {
+        // SESSIONS prints in the right column, above the mode references it
+        // belongs with. Printing it here too would list the same keys twice
+        // (#2463).
+        if section == crate::ui_core::help_keys::HelpSection::Sessions {
+            continue;
+        }
         left.push(Line::from(""));
         left.push(section_header(section.title()));
         for row in crate::ui_core::help_keys::section_rows(section) {
@@ -131,19 +137,21 @@ pub(super) fn render_help(f: &mut Frame, app: &mut App, area: Rect) {
     ]);
 
     // ── RIGHT COLUMN ──
-    let right = vec![
-        section_header("SESSIONS"),
-        kv("↑ / ↓", "Navigate", cyan),
-        kv("Enter", "Load session", cyan),
-        kv("N", "New session", cyan),
-        kv("R", "Rename", cyan),
-        kv("D", "Delete", cyan),
-        kv("/", "Search sessions", cyan),
-        kv("F", "Session files", cyan),
-        kv("P", "Projects", cyan),
-        kv("Esc", "Back to chat", cyan),
-        Line::from(""),
-        section_header("FILE ARTIFACTS"),
+    // The session keys print here, above the mode references they belong
+    // with, and they come from the shared table. The hand-written copy this
+    // used to be never learned the card's chord, which is how the one list
+    // people read ended up missing it (#2463).
+    let mut right = vec![section_header("SESSIONS")];
+    for row in
+        crate::ui_core::help_keys::section_rows(crate::ui_core::help_keys::HelpSection::Sessions)
+    {
+        if let Some(label) = row.tui {
+            right.push(kv(label, row.description, cyan));
+        }
+    }
+    right.push(Line::from(""));
+    right.push(section_header("FILE ARTIFACTS"));
+    right.extend([
         kv("↑ / ↓", "Navigate files", cyan),
         kv("Enter", "Open file", cyan),
         kv("D", "Remove tracking", cyan),
@@ -230,7 +238,7 @@ pub(super) fn render_help(f: &mut Frame, app: &mut App, area: Rect) {
             ),
         ]),
         Line::from(""),
-    ];
+    ]);
 
     // Full-bleed (#2162): content fills everything above the last two rows.
     // The second to last is a dim rule and the last is the shared command

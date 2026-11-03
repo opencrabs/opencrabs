@@ -182,6 +182,38 @@ pub const ROWS: &[HelpRow] = &[
         Some("ctrl-shift-u"),
         "Usage ledger",
     ),
+    // The card opens from anywhere, so it belongs at the top of the help
+    // rather than under the session list, where the last block ran off the
+    // bottom of the screen (#2463). The terminal prints the shifted chord
+    // because that is the key a person presses; the terminal delivers it as
+    // the same byte as `ctrl-f`, which is why the terminal arm answers both.
+    row(
+        HelpSection::Global,
+        "ctrl+shift+f",
+        "Ctrl+Shift+F",
+        Some("ctrl-shift-f"),
+        "Seeker: find anything",
+    ),
+    // The window's rem zoom (#2425). The terminal has no rem to scale: font
+    // size there belongs to the emulator, so these rows are window-only.
+    window_row(
+        HelpSection::Global,
+        "ctrl+plus",
+        "ctrl-plus",
+        "Zoom the window in",
+    ),
+    window_row(
+        HelpSection::Global,
+        "ctrl+minus",
+        "ctrl-minus",
+        "Zoom the window out",
+    ),
+    window_row(
+        HelpSection::Global,
+        "ctrl+zero",
+        "ctrl-zero",
+        "Zoom back to 100%",
+    ),
     // ── CHAT ──
     row(
         HelpSection::Chat,
@@ -325,13 +357,6 @@ pub const ROWS: &[HelpRow] = &[
     ),
     row(
         HelpSection::Sessions,
-        "ctrl+shift+f",
-        "Ctrl+F",
-        Some("ctrl-shift-f"),
-        "Seeker: find anything",
-    ),
-    row(
-        HelpSection::Sessions,
         "ctrl+d",
         "D",
         Some("ctrl-d"),
@@ -344,6 +369,14 @@ pub const ROWS: &[HelpRow] = &[
         Some("ctrl-g"),
         "Session files",
     ),
+    row(
+        HelpSection::Sessions,
+        "r",
+        "R",
+        None,
+        "Rename the selected session",
+    ),
+    row(HelpSection::Sessions, "p", "P", None, "Browse projects"),
     row(
         HelpSection::Sessions,
         "esc",
@@ -413,6 +446,7 @@ mod tests {
         "Mouse click",
         "/help",
         "/usage",
+        "Ctrl+Shift+F",
         "Enter",
         "Shift+Enter",
         "Ctrl+J",
@@ -431,9 +465,10 @@ mod tests {
         "Enter",
         "/",
         "Ctrl+Shift+P",
-        "Ctrl+F",
         "D",
         "F",
+        "R",
+        "P",
         "Esc",
         "T",
         "C",
@@ -526,5 +561,34 @@ mod tests {
             !rows().any(|r| r.tui.is_some_and(|t| t.eq_ignore_ascii_case("ctrl+h"))),
             "ctrl+h is a word delete in a terminal, not the help door"
         );
+    }
+
+    #[test]
+    fn the_card_chord_is_in_the_first_block_on_both_surfaces() {
+        // #2463: the card opens on every screen, so it prints at the top of
+        // the help instead of under SESSIONS, where it ran off the bottom of
+        // the terminal's screen and off the window's first page.
+        let row = find("ctrl+shift+f").expect("the card chord must be documented");
+        assert_eq!(row.section, HelpSection::Global);
+        assert_eq!(row.tui, Some("Ctrl+Shift+F"));
+        assert_eq!(row.gui, Some("ctrl-shift-f"));
+        assert_eq!(row.description, "Seeker: find anything");
+    }
+
+    #[test]
+    fn the_window_zoom_chords_are_listed_and_the_terminal_stays_quiet() {
+        // The window scales its rem (#2425); a terminal's font size belongs
+        // to the emulator, so the terminal's help must not claim those keys
+        // (#2438) while the window's must list them.
+        for (neutral, gui) in [
+            ("ctrl+plus", "ctrl-plus"),
+            ("ctrl+minus", "ctrl-minus"),
+            ("ctrl+zero", "ctrl-zero"),
+        ] {
+            let row = find(neutral).unwrap_or_else(|| panic!("{neutral} is missing"));
+            assert_eq!(row.gui, Some(gui), "{neutral} lost its window spelling");
+            assert_eq!(row.tui, None, "{neutral} is not a terminal chord");
+            assert_eq!(row.section, HelpSection::Global);
+        }
     }
 }
