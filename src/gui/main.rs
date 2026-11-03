@@ -10250,11 +10250,14 @@ mod tests {
             );
         });
 
-        // And the wiring: `open_session` is the door every open goes through,
-        // so the record has to happen there and not on some path the user
-        // reaches only from the rail. Halves, so this test cannot match itself.
+        // And the wiring: `open_session` is the door every open goes through.
+        // Since #2452 the door delegates to `begin_conversation` and the
+        // record lives one layer down there, so both links of the composed
+        // path are pinned: the door routes through the helper and the helper
+        // does the recording. Halves, so this test cannot match itself.
         let src = include_str!("main.rs");
         let call = ["remember_open", "_session(id)"].concat();
+        let delegate = ["begin_conversation", "(id, cx)"].concat();
         let (_, after) = src
             .split_once(
                 ["fn open_", "session(&mut self, id: Uuid"]
@@ -10266,8 +10269,18 @@ mod tests {
             .split_once("\n    fn ")
             .expect("the next method ends it");
         assert!(
-            door.contains(&call),
-            "open_session records the conversation it opened"
+            door.contains(&delegate),
+            "open_session routes through begin_conversation"
+        );
+        let (_, helper) = src
+            .split_once(["fn begin_", "conversation(&mut self"].concat().as_str())
+            .expect("begin_conversation exists");
+        let (recording, _) = helper
+            .split_once("\n    fn ")
+            .expect("the next method ends it");
+        assert!(
+            recording.contains(&call),
+            "begin_conversation records the conversation it opens"
         );
     }
 
