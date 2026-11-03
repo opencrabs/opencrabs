@@ -2163,6 +2163,13 @@ impl App {
 
             self.input_buffer.clear();
             self.cursor_position = 0;
+            // The focused pane's cached copy dies with the send too: the
+            // pane is the source of truth for inactive rendering and the
+            // next stash, and a stale duplicate would resurrect the sent
+            // text on refocus.
+            if let Some(pane) = self.pane_manager.focused_pane_mut() {
+                pane.clear_input();
+            }
             self.attachments.clear();
             self.focused_attachment = None;
             self.slash_suggestions_active = false;

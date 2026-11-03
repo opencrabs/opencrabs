@@ -3187,6 +3187,18 @@ impl App {
         self.send_message_inner(content, false).await
     }
 
+    /// The session a submit must target: the focused pane's session in
+    /// split mode, the window-level current session in single mode. The
+    /// send path resolves through this so a pane's message can never ride
+    /// a stale window-level bind into another pane's conversation.
+    pub(crate) fn send_target_session_id(&self) -> Option<Uuid> {
+        if self.pane_manager.is_split() {
+            self.pane_manager.focused_pane().and_then(|p| p.session_id)
+        } else {
+            self.current_session.as_ref().map(|s| s.id)
+        }
+    }
+
     /// Send a prompt that came from a slash command, skill, or user-command
     /// expansion. Skips the prompt analyzer: soft-nudge is for natural-language
     /// user chat only, not for prose a command or skill author wrote.
@@ -3195,6 +3207,29 @@ impl App {
     }
 
     async fn send_message_inner(&mut self, content: String, command_sourced: bool) -> Result<()> {
+        // Split mode targets the focused pane's session, never the
+        // window-level bind: async events can rebind current_session while
+        // the user keeps typing in a pane, and the send must follow the pane
+        // the text was typed in. Divergence is repaired with the same load a
+        // focus switch performs, so every downstream use below sees the
+        // pane's session. An unbound focused pane has no honest target:
+        // refuse the send rather than let it fall through to the window bind
+        // and cross wires.
+        if self.pane_manager.is_split() {
+            match self.send_target_session_id() {
+                Some(target) if self.current_session.as_ref().map(|s| s.id) != Some(target) => {
+                    self.load_session(target).await?;
+                }
+                Some(_) => {}
+                None => {
+                    self.push_system_message(
+                        "This pane has no session bound. Open or create a session in it first."
+                            .to_string(),
+                    );
+                    return Ok(());
+                }
+            }
+        }
         // A closed topic refuses new turns, with a notice that says why, so the
         // message is never dropped without a word (#2305).
         if self

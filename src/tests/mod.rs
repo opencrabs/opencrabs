@@ -952,6 +952,7 @@ pub mod oc_consumer_migration_test;
 pub mod oc_opaqueness_wall_test;
 pub mod oc_reverse_maps_test;
 pub mod oc_send_scope_test;
+pub mod pane_send_target_test;
 pub mod parallel_tools_test;
 #[cfg(feature = "telegram")]
 pub mod path_lock_test;
