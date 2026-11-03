@@ -3498,6 +3498,8 @@ impl App {
         // The create-topic row: one shared definition, the same words on the
         // window and here (#2482).
         items.push(palette::new_topic_item());
+        // The favorite row: same picker, the pick pins the conversation (#2487).
+        items.push(palette::favorite_item());
         for skill in &self.skills {
             items.push(
                 PaletteItem::new(
@@ -3616,7 +3618,17 @@ impl App {
                 // The same card re-armed: field empty, conversations only,
                 // so a few letters pick the session (#2482).
                 self.command_palette_channels = live_channels();
-                self.command_palette = Some(crate::ui_core::palette::PaletteState::topic_pick(
+                self.command_palette = Some(crate::ui_core::palette::PaletteState::picking(
+                    crate::ui_core::palette::PickFor::NewTopic,
+                    self.palette_items(),
+                ));
+            }
+            PaletteAction::Favorite => {
+                // Same card, same picker, different purpose: the pick pins
+                // the conversation (#2487).
+                self.command_palette_channels = live_channels();
+                self.command_palette = Some(crate::ui_core::palette::PaletteState::picking(
+                    crate::ui_core::palette::PickFor::Favorite,
                     self.palette_items(),
                 ));
             }
@@ -3631,6 +3643,41 @@ impl App {
                 self.switch_mode(AppMode::Sessions).await?;
                 self.topic_naming = true;
                 self.topic_name_buffer.clear();
+            }
+            PaletteAction::FavoriteToggle(id) => {
+                // The exact toggle the rail's pin button walks, reached by
+                // id instead of the dialog's cursor (#2487).
+                let uuid = Uuid::from_u128(id);
+                // Pulled out before `load_sessions` below: the row borrows
+                // `self.sessions`, and the reload needs `&mut self`.
+                let title = self
+                    .sessions
+                    .iter()
+                    .find(|s| s.id == uuid)
+                    .and_then(|s| s.title.clone())
+                    .unwrap_or_else(|| "Untitled".to_string());
+                let pinned = self.session_favorites.contains(&uuid);
+                if pinned {
+                    self.session_service
+                        .unfavorite_session(&uuid.to_string())
+                        .await?;
+                } else {
+                    self.session_service
+                        .favorite_session(&uuid.to_string())
+                        .await?;
+                }
+                self.load_sessions().await?;
+                // The reload re-sorted the list, so follow the toggled
+                // session to its new row, the same way the pin key does.
+                if let Some(pos) = self.sessions.iter().position(|s| s.id == uuid) {
+                    self.selected_session_index = pos;
+                }
+                self.notification = Some(if pinned {
+                    format!("Unpinned: {title}")
+                } else {
+                    format!("Pinned to top: {title}")
+                });
+                self.notification_shown_at = Some(std::time::Instant::now());
             }
             PaletteAction::OpenDocs(path) => {
                 // Detached, exactly like a previewed file: waiting on the

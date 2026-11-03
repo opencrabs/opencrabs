@@ -144,7 +144,7 @@ pub const PAGES: &[DocPage] = &[
     DocPage {
         title: "Sessions",
         path: "/features/sessions.html",
-        keywords: "session conversation resume history rail",
+        keywords: "session conversation resume history rail favorite favourite pin star",
     },
     DocPage {
         title: "Cron jobs",

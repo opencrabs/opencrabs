@@ -37,6 +37,9 @@ pub enum PaletteKind {
     /// The create-topic row: picking it re-arms the same card as a session
     /// picker, and the conversation picked there receives the topic (#2482).
     NewTopic,
+    /// The favorite row: same picker, but the pick pins the conversation to
+    /// the top of the rail instead of naming a topic (#2487).
+    Favorite,
 }
 
 impl PaletteKind {
@@ -53,6 +56,7 @@ impl PaletteKind {
             PaletteKind::Docs => "docs",
             PaletteKind::Ask => "ask",
             PaletteKind::NewTopic => "new topic",
+            PaletteKind::Favorite => "favorite",
         }
     }
 
@@ -76,6 +80,7 @@ impl PaletteKind {
             PaletteKind::Ask => 7,
             // An action, so it sits with the destinations, above chats.
             PaletteKind::NewTopic => 1,
+            PaletteKind::Favorite => 1,
         }
     }
 }
@@ -331,6 +336,19 @@ pub fn new_topic_item() -> PaletteItem {
     .with_keywords("create topic new topic make topic start a topic")
 }
 
+/// The favorite row both frontends list: same picker as create topic, but
+/// the pick pins the conversation to the top of the rail (#2487). One
+/// definition, so the window and the terminal offer the same words.
+pub fn favorite_item() -> PaletteItem {
+    PaletteItem::new(
+        "favorite any session",
+        "pick a conversation, pin it to the top",
+        PaletteKind::Favorite,
+        PaletteAction::Favorite,
+    )
+    .with_keywords("favorite favourite pin star session bookmark top")
+}
+
 /// What picking a row does. The frontend applies it; this module only names it.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum PaletteAction {
@@ -364,6 +382,22 @@ pub enum PaletteAction {
     /// topic dialog under it, the same one its key or menu item already
     /// walks (#2482).
     NewTopicOn(u128),
+    /// Arm the card as a session picker for a favorite: same card, same
+    /// empty field (#2487).
+    Favorite,
+    /// The conversation picked in the favorite picker: the frontend runs
+    /// its own pin toggle on it, the same one its rail button walks (#2487).
+    FavoriteToggle(u128),
+}
+
+/// Why the card is armed as a session picker. The purpose decides what a
+/// picked conversation does (#2486, #2487).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PickFor {
+    /// The pick names the conversation for the topic dialog.
+    NewTopic,
+    /// The pick pins the conversation to the top of the rail.
+    Favorite,
 }
 
 /// One pickable row, already flat: the frontend paints it and nothing else.
@@ -632,9 +666,9 @@ pub struct PaletteState {
     cursor: Option<usize>,
     scroll: usize,
     items: Vec<PaletteItem>,
-    /// Armed by the create-topic row: the card becomes a session picker,
-    /// its field empty, conversations only (#2482).
-    topic_pick: bool,
+    /// Armed by the create-topic or favorite row: the card becomes a session
+    /// picker, its field empty, conversations only (#2482, #2486, #2487).
+    pick: Option<PickFor>,
 }
 
 /// How many rows the card prints. A list longer than this is scrolled, not
@@ -648,20 +682,19 @@ impl PaletteState {
             cursor: None,
             scroll: 0,
             items,
-            topic_pick: false,
+            pick: None,
         }
     }
 
-    /// The card re-armed as a session picker for a new topic: the field
-    /// starts empty and every conversation prints until typing narrows the
-    /// list (#2482).
-    pub fn topic_pick(items: Vec<PaletteItem>) -> Self {
+    /// The card re-armed as a session picker: the field starts empty and
+    /// every conversation prints until typing narrows the list (#2482).
+    pub fn picking(purpose: PickFor, items: Vec<PaletteItem>) -> Self {
         Self {
             query: String::new(),
             cursor: None,
             scroll: 0,
             items,
-            topic_pick: true,
+            pick: Some(purpose),
         }
     }
 
@@ -755,16 +788,20 @@ impl PaletteState {
                 // Picker mode lists conversations only: the field starts
                 // empty, so the whole rail prints until typing narrows it
                 // (#2482).
-                if self.topic_pick && item.kind != PaletteKind::Session {
+                if self.pick.is_some() && item.kind != PaletteKind::Session {
                     return None;
                 }
                 let mut item = item.clone();
-                // A pick in picker mode names the conversation for the topic
-                // dialog; it never opens the chat (#2482).
-                if self.topic_pick
+                // A pick names the conversation for the armed purpose: the
+                // topic dialog or the pin toggle, never opening the chat
+                // (#2482, #2486, #2487).
+                if let Some(purpose) = self.pick
                     && let PaletteAction::OpenSession(id) = item.action
                 {
-                    item.action = PaletteAction::NewTopicOn(id);
+                    item.action = match purpose {
+                        PickFor::NewTopic => PaletteAction::NewTopicOn(id),
+                        PickFor::Favorite => PaletteAction::FavoriteToggle(id),
+                    };
                 }
                 score(&self.query, &item).map(|score| PaletteRow { item, score })
             })
@@ -785,7 +822,7 @@ impl PaletteState {
         // that starts a fresh session carrying the typed text (#2482). The
         // roast rides along as the subtitle, so the miss keeps its sense of
         // humour while doing something useful.
-        if rows.is_empty() && !self.query.trim().is_empty() && !self.topic_pick {
+        if rows.is_empty() && !self.query.trim().is_empty() && self.pick.is_none() {
             let query = self.query.clone();
             rows.push(PaletteRow {
                 item: PaletteItem {
@@ -1011,6 +1048,48 @@ mod tests {
         assert!(rows.iter().all(|row| row.item.kind != PaletteKind::Ask));
     }
 
+    /// The favorite row answers to the words a user types (#2487).
+    #[test]
+    fn seeker_favorite_row_answers_to_the_words() {
+        let row = favorite_item();
+        assert_eq!(row.kind, PaletteKind::Favorite);
+        assert_eq!(row.action, PaletteAction::Favorite);
+        let mut state = PaletteState::new(vec![
+            command("/new"),
+            row,
+            item("topics we made", PaletteKind::Session),
+        ]);
+        for c in "favorite".chars() {
+            state.type_char(c);
+        }
+        assert_eq!(
+            state.selected().map(|r| r.item.kind),
+            Some(PaletteKind::Favorite),
+            "the row prints on top"
+        );
+    }
+
+    /// Picking the favorite row arms the same session picker, and the pick
+    /// carries the pin toggle instead of opening the chat (#2487).
+    #[test]
+    fn seeker_favorite_pick_toggles_the_picked_session() {
+        let sessions = vec![PaletteItem::new(
+            "invoices",
+            "2026-11-02 21:00",
+            PaletteKind::Session,
+            PaletteAction::OpenSession(2),
+        )];
+        let mut state = PaletteState::picking(PickFor::Favorite, sessions);
+        for c in "inv".chars() {
+            state.type_char(c);
+        }
+        assert_eq!(
+            state.selected().map(|r| r.item.action),
+            Some(PaletteAction::FavoriteToggle(2)),
+            "the pick pins the session, it does not open the chat"
+        );
+    }
+
     /// The create-topic row answers to the words a user types, over anything
     /// else naming a session (#2482).
     #[test]
@@ -1053,7 +1132,7 @@ mod tests {
                 PaletteAction::OpenSession(2),
             ),
         ];
-        let mut state = PaletteState::topic_pick(sessions);
+        let mut state = PaletteState::picking(PickFor::NewTopic, sessions);
         assert_eq!(
             state.visible().len(),
             2,
