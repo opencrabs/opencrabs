@@ -79,6 +79,7 @@ pub mod bg_resume_test;
 pub mod boot_report_test;
 pub mod bot_owner_placeholder_seed_test;
 pub mod brain_agent_context_test;
+pub mod brain_agent_service_phantom_lang_test;
 pub mod brain_agent_service_phantom_test;
 pub mod brain_agent_service_work_status_test;
 pub mod brain_commands_test;
