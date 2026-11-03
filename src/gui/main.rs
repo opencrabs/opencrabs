@@ -3030,10 +3030,13 @@ impl Dashboard {
                     cx.stop_propagation();
                     this.open_session(id, cx);
                 });
-                // A topic with its own icon shows it before the name (#2414).
+                // A topic with its own icon shows it before the name, and
+                // the name is shortened to the tab's two words (#2414, #2477).
+                // The icon is not a word, so it is added after the shortening
+                // rather than counted as one.
                 let label = match self.sessions.topic_icons.get(&id) {
-                    Some(icon) => format!("{icon} {}", title(id)),
-                    None => title(id),
+                    Some(icon) => format!("{icon} {}", topic_label(&title(id))),
+                    None => topic_label(&title(id)),
                 };
                 topic_tab(id, label, id == open, move |ev, window, app| {
                     click(ev, window, app)
@@ -8219,6 +8222,33 @@ fn topic_strip(
     }
 }
 
+/// The most words a topic tab prints (#2477). A tab is a label, not the name:
+/// Telegram's topic bar shows a short title and keeps the rest on the topic
+/// itself, and a tab that grows with a long name pushes its neighbours off the
+/// strip.
+const TOPIC_TAB_WORDS: usize = 2;
+
+/// The label a topic tab prints: at most [`TOPIC_TAB_WORDS`] words, with an
+/// ellipsis when the name runs longer (#2477).
+///
+/// Only the tab is shortened. The stored name is never touched, so the
+/// sidebar, the session list and the rename prompt still read the name that
+/// was given, and shortening the tab cannot lose it.
+fn topic_label(name: &str) -> String {
+    let mut words = name.split_whitespace();
+    let mut label = String::new();
+    for word in words.by_ref().take(TOPIC_TAB_WORDS) {
+        if !label.is_empty() {
+            label.push(' ');
+        }
+        label.push_str(word);
+    }
+    if words.next().is_some() {
+        label.push('\u{2026}');
+    }
+    label
+}
+
 /// One tab of the topic strip (#2400). The open session is marked by an
 /// accent label and a raised background, the same as the rail's selection.
 fn topic_tab(
@@ -9372,6 +9402,21 @@ mod tests {
             ctx_footer(Some(900), 0),
             ("ctx: -".to_string(), palette::current().text_faint)
         );
+    }
+
+    #[test]
+    fn a_topic_tab_shows_two_words_and_elides_the_rest() {
+        assert_eq!(topic_label("Refactor the split"), "Refactor the\u{2026}");
+        assert_eq!(topic_label("Two words"), "Two words");
+        assert_eq!(topic_label("OpenCrabs"), "OpenCrabs");
+        // Runs of whitespace collapse instead of becoming empty words, so a
+        // double space does not eat the second word's slot.
+        assert_eq!(topic_label("  too   many   spaces  "), "too many\u{2026}");
+        // The tab is shortened, the name is not: the rest of the window still
+        // shows the whole thing (#2477).
+        let stored = String::from("Refactor the split pane");
+        assert_eq!(topic_label(&stored), "Refactor the\u{2026}");
+        assert_eq!(stored, "Refactor the split pane");
     }
 
     #[test]
