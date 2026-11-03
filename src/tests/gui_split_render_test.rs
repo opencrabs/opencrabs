@@ -44,7 +44,7 @@ fn the_second_pane_is_composed_in_one_place() {
         .nth(1)
         .expect("split_body is defined");
     assert!(
-        helper.contains("split_header(pane, close)"),
+        helper.contains("\"split-close-secondary\""),
         "the second pane carries its session header and close button"
     );
     assert!(
@@ -57,6 +57,62 @@ fn the_second_pane_is_composed_in_one_place() {
         GUI_MAIN.matches("\"split-secondary\"").count(),
         1,
         "the second pane is built in split_body only, so both screens draw the same thing"
+    );
+}
+
+#[test]
+fn both_panes_carry_a_header_and_a_close_button() {
+    let helper = GUI_MAIN
+        .split("fn split_body(")
+        .nth(1)
+        .expect("split_body is defined");
+    // Only the second pane used to have a header, so one session read as a
+    // named session and the other as a nameless strip (#2474).
+    assert!(
+        helper.contains("\"split-close-primary\""),
+        "the chat pane carries a header too"
+    );
+    assert!(
+        helper.contains("\"split-close-secondary\""),
+        "the picked pane keeps its header"
+    );
+    assert!(
+        GUI_MAIN.contains("fn pane_header("),
+        "one helper draws both headers, so the two cannot drift"
+    );
+    assert!(
+        GUI_MAIN.contains("focus == PaneFocus::Primary")
+            && GUI_MAIN.contains("focus == PaneFocus::Secondary"),
+        "the pane holding the caret wears the accent, so the focus is visible"
+    );
+}
+
+#[test]
+fn ctrl_x_closes_the_focused_pane() {
+    let keys = GUI_MAIN
+        .split("fn on_key(")
+        .nth(1)
+        .expect("on_key is defined")
+        .split("fn ")
+        .next()
+        .expect("the handler has a body");
+    assert!(
+        keys.contains("&& ks.key == \"x\"")
+            && keys.contains("&& self.split.is_some()")
+            && keys.contains("self.close_focused_pane(cx);"),
+        "ctrl+x closes the focused pane, the chord the terminal answers"
+    );
+    let close = GUI_MAIN
+        .split("fn close_focused_pane(")
+        .nth(1)
+        .expect("close_focused_pane is defined");
+    assert!(
+        close.contains("(PaneFocus::Primary, Some(pane)) => self.open_session(pane.session, cx)"),
+        "closing the chat hands the window to the picked session rather than dropping it"
+    );
+    assert!(
+        close.contains("self.pane_focus = PaneFocus::Primary;"),
+        "focus returns to the chat, so the next chord lands somewhere known"
     );
 }
 
