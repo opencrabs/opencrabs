@@ -842,6 +842,9 @@ impl Dashboard {
         // The channel setup rows: the word that names a channel has to find the
         // row that starts its setup, not only the page that describes it (#2462).
         items.extend(find::channel_items());
+        // The create-topic row: one shared definition, the same words here
+        // and on the terminal (#2482).
+        items.push(find::new_topic_item());
         for skill in opencrabs::brain::skills::load_all_skills() {
             items.push(
                 PaletteItem::new(
@@ -936,6 +939,20 @@ impl Dashboard {
             // whole seam: with none open it queues the text and creates the
             // session itself (#2482).
             PaletteAction::Ask(text) => self.send_message(text, cx),
+            PaletteAction::NewTopic => {
+                // The same card re-armed: field empty, conversations only,
+                // so a few letters pick the session (#2482).
+                self.finder = Some(PaletteState::topic_pick(self.finder_items()));
+                self.finder_channels = configured_channels();
+                self.refocus_overlay();
+                cx.notify();
+            }
+            PaletteAction::NewTopicOn(id) => {
+                // The exact path the "New topic" menu item walks: the
+                // conversation on screen, then the draft dialog (#2482).
+                self.open_session(Uuid::from_u128(id), cx);
+                self.start_topic_draft(cx);
+            }
             PaletteAction::OpenDocs(path) => {
                 let url = docs::url(path);
                 preview::launch(&preview::url_command(&url));

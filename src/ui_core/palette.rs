@@ -34,6 +34,9 @@ pub enum PaletteKind {
     /// The miss row: the query matched nothing, so the card offers to start
     /// a fresh session with the typed text as the request (#2482).
     Ask,
+    /// The create-topic row: picking it re-arms the same card as a session
+    /// picker, and the conversation picked there receives the topic (#2482).
+    NewTopic,
 }
 
 impl PaletteKind {
@@ -49,6 +52,7 @@ impl PaletteKind {
             PaletteKind::Channel => "channel",
             PaletteKind::Docs => "docs",
             PaletteKind::Ask => "ask",
+            PaletteKind::NewTopic => "new topic",
         }
     }
 
@@ -70,6 +74,8 @@ impl PaletteKind {
             // The miss row only ever prints alone, so its rank is a formality:
             // dead last keeps it out of the way should that ever change.
             PaletteKind::Ask => 7,
+            // An action, so it sits with the destinations, above chats.
+            PaletteKind::NewTopic => 1,
         }
     }
 }
@@ -313,6 +319,18 @@ pub fn channel_hint(query: &str, configured: &[Channel]) -> Option<&'static str>
     Some(channel.setup_hint())
 }
 
+/// The create-topic row both frontends list. One definition, so the window
+/// and the terminal offer the same words and land in the same picker (#2482).
+pub fn new_topic_item() -> PaletteItem {
+    PaletteItem::new(
+        "create topic",
+        "pick a conversation, name the topic, done",
+        PaletteKind::NewTopic,
+        PaletteAction::NewTopic,
+    )
+    .with_keywords("create topic new topic make topic start a topic")
+}
+
 /// What picking a row does. The frontend applies it; this module only names it.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum PaletteAction {
@@ -339,6 +357,13 @@ pub enum PaletteAction {
     /// as its first request (#2482). The frontend funnels it through its own
     /// submit seam, so no second session-creation path exists.
     Ask(String),
+    /// Arm the card as a session picker for a new topic: the same card, its
+    /// field empty, listing only conversations (#2482).
+    NewTopic,
+    /// The conversation picked in the picker: the frontend opens its own
+    /// topic dialog under it, the same one its key or menu item already
+    /// walks (#2482).
+    NewTopicOn(u128),
 }
 
 /// One pickable row, already flat: the frontend paints it and nothing else.
@@ -532,8 +557,7 @@ fn match_from(query: &str, text: &str, weight: u16) -> Option<u16> {
     let mut hi = 0;
     let mut last_hit: Option<usize> = None;
     for (ni, want) in needle.iter().enumerate() {
-        let found;
-        if ni == 0 {
+        let found = if ni == 0 {
             // The first char must START a word: scan every occurrence. When
             // no word-start hit exists at all, the contiguous run is the
             // honest fallback, accepted mid-word and scored low by the normal
@@ -553,15 +577,15 @@ fn match_from(query: &str, text: &str, weight: u16) -> Option<u16> {
                 }
                 from = pos + 1;
             }
-            found = match word_start_hit {
+            match word_start_hit {
                 Some(p) => p,
                 None => contiguous?,
-            };
+            }
         } else {
             // Later chars have no anchoring job: first hit at or after the
             // previous one wins.
-            found = hay[hi..].iter().position(|c| c == want)? + hi;
-        }
+            hay[hi..].iter().position(|c| c == want)? + hi
+        };
         let at_word_start = found == 0 || !hay[found - 1].is_alphanumeric();
         let consecutive = last_hit.is_some_and(|last| last + 1 == found);
         score += if at_word_start {
@@ -608,6 +632,9 @@ pub struct PaletteState {
     cursor: Option<usize>,
     scroll: usize,
     items: Vec<PaletteItem>,
+    /// Armed by the create-topic row: the card becomes a session picker,
+    /// its field empty, conversations only (#2482).
+    topic_pick: bool,
 }
 
 /// How many rows the card prints. A list longer than this is scrolled, not
@@ -621,6 +648,20 @@ impl PaletteState {
             cursor: None,
             scroll: 0,
             items,
+            topic_pick: false,
+        }
+    }
+
+    /// The card re-armed as a session picker for a new topic: the field
+    /// starts empty and every conversation prints until typing narrows the
+    /// list (#2482).
+    pub fn topic_pick(items: Vec<PaletteItem>) -> Self {
+        Self {
+            query: String::new(),
+            cursor: None,
+            scroll: 0,
+            items,
+            topic_pick: true,
         }
     }
 
@@ -711,10 +752,21 @@ impl PaletteState {
             .items
             .iter()
             .filter_map(|item| {
-                score(&self.query, item).map(|score| PaletteRow {
-                    item: item.clone(),
-                    score,
-                })
+                // Picker mode lists conversations only: the field starts
+                // empty, so the whole rail prints until typing narrows it
+                // (#2482).
+                if self.topic_pick && item.kind != PaletteKind::Session {
+                    return None;
+                }
+                let mut item = item.clone();
+                // A pick in picker mode names the conversation for the topic
+                // dialog; it never opens the chat (#2482).
+                if self.topic_pick
+                    && let PaletteAction::OpenSession(id) = item.action
+                {
+                    item.action = PaletteAction::NewTopicOn(id);
+                }
+                score(&self.query, &item).map(|score| PaletteRow { item, score })
             })
             .collect();
         rows.sort_by(|a, b| {
@@ -733,7 +785,7 @@ impl PaletteState {
         // that starts a fresh session carrying the typed text (#2482). The
         // roast rides along as the subtitle, so the miss keeps its sense of
         // humour while doing something useful.
-        if rows.is_empty() && !self.query.trim().is_empty() {
+        if rows.is_empty() && !self.query.trim().is_empty() && !self.topic_pick {
             let query = self.query.clone();
             rows.push(PaletteRow {
                 item: PaletteItem {
@@ -957,6 +1009,71 @@ mod tests {
         }
         let rows = state.visible();
         assert!(rows.iter().all(|row| row.item.kind != PaletteKind::Ask));
+    }
+
+    /// The create-topic row answers to the words a user types, over anything
+    /// else naming a session (#2482).
+    #[test]
+    fn seeker_create_topic_row_answers_to_the_words() {
+        let row = new_topic_item();
+        assert_eq!(row.kind, PaletteKind::NewTopic);
+        assert_eq!(row.action, PaletteAction::NewTopic);
+        let mut state = PaletteState::new(vec![
+            command("/new"),
+            row,
+            item("topics we made", PaletteKind::Session),
+        ]);
+        for c in "create topic".chars() {
+            state.type_char(c);
+        }
+        assert_eq!(
+            state.selected().map(|r| r.item.kind),
+            Some(PaletteKind::NewTopic),
+            "the row prints on top"
+        );
+    }
+
+    /// Picking the row re-arms the card as a picker: empty field, every
+    /// conversation, typing narrows, and a pick names the session for the
+    /// topic dialog instead of opening the chat. A miss in the picker stays
+    /// silent; it must not offer a fresh session mid-pick (#2482).
+    #[test]
+    fn seeker_create_topic_pick_names_the_session_for_the_dialog() {
+        let sessions = vec![
+            PaletteItem::new(
+                "crabsland ops",
+                "2026-11-03 08:00",
+                PaletteKind::Session,
+                PaletteAction::OpenSession(1),
+            ),
+            PaletteItem::new(
+                "invoices",
+                "2026-11-02 21:00",
+                PaletteKind::Session,
+                PaletteAction::OpenSession(2),
+            ),
+        ];
+        let mut state = PaletteState::topic_pick(sessions);
+        assert_eq!(
+            state.visible().len(),
+            2,
+            "an empty field prints every conversation"
+        );
+        for c in "inv".chars() {
+            state.type_char(c);
+        }
+        assert_eq!(
+            state.selected().map(|r| r.item.action),
+            Some(PaletteAction::NewTopicOn(2)),
+            "the pick names the session, it does not open the chat"
+        );
+        for c in "zzz".chars() {
+            state.type_char(c);
+        }
+        assert!(
+            state.visible().is_empty(),
+            "a miss in the picker stays silent"
+        );
     }
 
     /// Titles are matched character by character, so a multi-byte title is

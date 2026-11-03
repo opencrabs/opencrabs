@@ -3495,6 +3495,9 @@ impl App {
         // The channel setup rows: the word that names a channel has to find the
         // row that starts its setup, not only the page that describes it (#2462).
         items.extend(palette::channel_items());
+        // The create-topic row: one shared definition, the same words on the
+        // window and here (#2482).
+        items.push(palette::new_topic_item());
         for skill in &self.skills {
             items.push(
                 PaletteItem::new(
@@ -3608,6 +3611,26 @@ impl App {
                 let sender = self.event_sender();
                 let _ = sender.send(crate::tui::events::TuiEvent::CommandSubmitted(text));
                 self.mode = AppMode::Chat;
+            }
+            PaletteAction::NewTopic => {
+                // The same card re-armed: field empty, conversations only,
+                // so a few letters pick the session (#2482).
+                self.command_palette_channels = live_channels();
+                self.command_palette = Some(crate::ui_core::palette::PaletteState::topic_pick(
+                    self.palette_items(),
+                ));
+            }
+            PaletteAction::NewTopicOn(id) => {
+                // The exact path the list's own `t` key walks: point the
+                // dialog at the picked conversation, then ask for the name
+                // (#2482).
+                let uuid = Uuid::from_u128(id);
+                if let Some(pos) = self.sessions.iter().position(|s| s.id == uuid) {
+                    self.selected_session_index = pos;
+                }
+                self.switch_mode(AppMode::Sessions).await?;
+                self.topic_naming = true;
+                self.topic_name_buffer.clear();
             }
             PaletteAction::OpenDocs(path) => {
                 // Detached, exactly like a previewed file: waiting on the
