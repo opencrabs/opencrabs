@@ -1069,6 +1069,21 @@ impl Dashboard {
         cx.notify();
     }
 
+    /// Tab moves the caret between the two panes (#2475). With no split open
+    /// there is nothing to switch, so the rail keeps the key as it always did.
+    /// The pane holding the caret wears the accent in its header and takes the
+    /// page keys, which is how a read-only transcript holds a caret at all.
+    fn cycle_pane_focus(&mut self, cx: &mut Context<Self>) {
+        self.pane_focus = match self.pane_focus {
+            PaneFocus::Primary => PaneFocus::Secondary,
+            PaneFocus::Secondary => PaneFocus::Primary,
+        };
+        // A receipt in the daily log, so "Tab did nothing" can be told apart
+        // from "Tab moved the caret and the header did not show it".
+        logging::debug(&format!("pane focus -> {:?}", self.pane_focus));
+        cx.notify();
+    }
+
     /// Fill the second pane with `id` and load its newest messages (#2438).
     fn choose_split(&mut self, id: Uuid, cx: &mut Context<Self>) {
         let Some(layout) = self.split_pick else {
@@ -3569,11 +3584,18 @@ impl Dashboard {
             let key = ev.keystroke.key.as_str();
             if matches!(key, "pageup" | "pagedown") {
                 let page = px(f32::from(window.viewport_size().height) * 0.8);
-                let offset = self.transcript_scroll.offset();
-                let max = self.transcript_scroll.max_offset().height;
                 let dy = if key == "pagedown" { -page } else { page };
+                // The page keys act on the pane Tab moved the caret to, so a
+                // split scrolls the session the accent is on rather than the
+                // chat underneath it (#2475).
+                let scroll = match (self.split.as_ref(), self.pane_focus) {
+                    (Some(pane), PaneFocus::Secondary) => &pane.scroll,
+                    _ => &self.transcript_scroll,
+                };
+                let offset = scroll.offset();
+                let max = scroll.max_offset().height;
                 let y = (offset.y + dy).min(px(0.0)).max(-max);
-                self.transcript_scroll.set_offset(gpui::point(offset.x, y));
+                scroll.set_offset(gpui::point(offset.x, y));
                 cx.notify();
                 return;
             }
@@ -3592,6 +3614,22 @@ impl Dashboard {
             window.set_rem_size(px(self.rem));
             logging::debug(&format!("zoom -> {:.2}x", self.rem / BASE_REM));
             cx.notify();
+            return;
+        }
+        // Tab moves the caret between the two panes while a split is open, so
+        // the accent follows the keyboard instead of staying where the split
+        // started (#2475). It runs ahead of the rail and of the composer gate
+        // for the same reason: a live split owns Tab while it exists. An open
+        // emoji or command list keeps the key, the way it already did (#2417).
+        if ev.keystroke.key == "tab"
+            && !ev.keystroke.modifiers.control
+            && !ev.keystroke.modifiers.platform
+            && !ev.keystroke.modifiers.alt
+            && self.screen == Screen::Chat
+            && self.split.is_some()
+            && !self.editor.read(cx).list_open()
+        {
+            self.cycle_pane_focus(cx);
             return;
         }
         // Tab moves the keyboard between the composer and the rail. It runs before
@@ -7981,6 +8019,21 @@ fn pane_header(
     } else {
         palette::current().text_muted
     };
+    // The focused pane wears the accent as a full-width band under its header,
+    // so which pane Tab moved to is legible at a glance and not only from the
+    // title colour (#2475). A one-pixel rule in the panel colour read as
+    // nothing on both themes, which is why the band is two pixels and the
+    // unfocused header sits on the same contrast as the divider.
+    let rule_color = if focused {
+        palette::current().accent
+    } else {
+        split_rule_color()
+    };
+    let header_bg = if focused {
+        palette::current().panel_hi
+    } else {
+        palette::current().bg
+    };
     div()
         .flex()
         .flex_row()
@@ -7990,8 +8043,9 @@ fn pane_header(
         .gap_2()
         .px_2()
         .py_1()
-        .border_b_1()
-        .border_color(rgb(palette::current().panel_hi))
+        .bg(rgb(header_bg))
+        .border_b_2()
+        .border_color(rgb(rule_color))
         .child(
             div()
                 .flex_1()
@@ -8016,9 +8070,18 @@ fn pane_header(
 /// The gap either side of the rule between two panes, in px: `gap_2()`.
 const SPLIT_GAP_PX: f32 = 8.0;
 
-/// The visible rule that separates two panes, in px (#2473). Without it the
-/// boundary is a bare gap, and on a dark theme two transcripts read as one.
-const SPLIT_DIVIDER_PX: f32 = 1.0;
+/// The rule that separates two panes, in px (#2473). Two pixels rather than
+/// one, and drawn in the faint text colour rather than a panel tone: at one
+/// pixel of `panel_hi` the boundary disappeared into both themes, so a split
+/// still read as one transcript with a gap in it.
+const SPLIT_DIVIDER_PX: f32 = 2.0;
+
+/// The colour of the rule between two panes (#2473). `text_faint` is the
+/// quietest colour that still contrasts with `bg` on every theme, where
+/// `panel_hi` sat within a few points of the background on the light ones.
+fn split_rule_color() -> u32 {
+    palette::current().text_faint
+}
 
 /// What one pane may plan its rows against (#2473). Side by side the halves
 /// share the content width less the gap either side of the rule and the rule
@@ -8040,7 +8103,7 @@ fn split_divider(stacked: bool) -> impl IntoElement {
         .flex_none()
         .when(stacked, |d| d.h(px(SPLIT_DIVIDER_PX)).w_full())
         .when(!stacked, |d| d.w(px(SPLIT_DIVIDER_PX)).h_full())
-        .bg(rgb(palette::current().panel_hi))
+        .bg(rgb(split_rule_color()))
 }
 
 /// The two panes of a split: the chat first, then the picked session beside it

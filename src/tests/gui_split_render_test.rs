@@ -88,6 +88,36 @@ fn both_panes_carry_a_header_and_a_close_button() {
 }
 
 #[test]
+fn the_focused_pane_wears_a_band_under_its_header() {
+    let header = GUI_MAIN
+        .split("fn pane_header(")
+        .nth(1)
+        .expect("pane_header is defined")
+        .split("\n}\n")
+        .next()
+        .expect("the helper has a body");
+    // A one-pixel rule in the panel colour, plus a title that only shifted
+    // hue, was invisible on both themes: Tab moved the caret and the window
+    // looked unchanged (#2475).
+    assert!(
+        header.contains("let header_bg = if focused {"),
+        "the focused header takes its own background"
+    );
+    assert!(
+        header.contains(".bg(rgb(header_bg))"),
+        "the header paints that background"
+    );
+    assert!(
+        header.contains(".border_b_2()"),
+        "the band under the header is thick enough to read"
+    );
+    assert!(
+        header.contains("split_rule_color()"),
+        "the unfocused header sits on the same contrast as the divider"
+    );
+}
+
+#[test]
 fn ctrl_x_closes_the_focused_pane() {
     let keys = GUI_MAIN
         .split("fn on_key(")
@@ -159,8 +189,23 @@ fn both_halves_take_the_same_share_of_the_width() {
         "a visible rule sits between the panes"
     );
     assert!(
-        GUI_MAIN.contains("const SPLIT_DIVIDER_PX: f32 = 1.0;"),
-        "the rule has a named width"
+        GUI_MAIN.contains("const SPLIT_DIVIDER_PX: f32 = 2.0;"),
+        "the rule has a named width, and one pixel of a panel tone was invisible"
+    );
+    assert!(
+        GUI_MAIN.contains("fn split_rule_color() -> u32 {"),
+        "the rule reads a colour that contrasts with the background"
+    );
+    assert!(
+        !GUI_MAIN
+            .split("fn split_divider(")
+            .nth(1)
+            .expect("split_divider is defined")
+            .split("\n}\n")
+            .next()
+            .expect("the helper has a body")
+            .contains("panel_hi"),
+        "the rule is not drawn in a panel tone, which sits on the background"
     );
 }
 
@@ -180,5 +225,63 @@ fn a_stacked_pane_plans_against_the_whole_width() {
     assert!(
         helper.contains("SPLIT_GAP_PX * 2.0") && helper.contains("SPLIT_DIVIDER_PX"),
         "side by side the halves subtract the gap either side and the rule"
+    );
+}
+
+#[test]
+fn tab_moves_the_caret_between_the_panes() {
+    let keys = GUI_MAIN
+        .split("fn on_key(")
+        .nth(1)
+        .expect("on_key is defined")
+        .split("\n    fn ")
+        .next()
+        .expect("the handler has a body");
+    // A split opens holding the caret, but until Tab moved it the other pane
+    // was only reachable by mouse, so ctrl+x could not target it (#2475).
+    let cycle = keys
+        .find("self.cycle_pane_focus(cx);")
+        .expect("Tab cycles the panes while a split is open");
+    let rail = keys
+        .find("self.rail_focused = !self.rail_focused;")
+        .expect("Tab still walks to the rail");
+    assert!(
+        cycle < rail,
+        "the split claims Tab before the rail does, so a live split keeps the key"
+    );
+    assert!(
+        keys.contains("&& self.split.is_some()")
+            && keys.contains("&& !self.editor.read(cx).list_open()"),
+        "nothing switches panes when there is no split, and an open picker keeps Tab"
+    );
+    let cycle_fn = GUI_MAIN
+        .split("fn cycle_pane_focus(")
+        .nth(1)
+        .expect("cycle_pane_focus is defined");
+    assert!(
+        cycle_fn.contains("PaneFocus::Primary => PaneFocus::Secondary")
+            && cycle_fn.contains("PaneFocus::Secondary => PaneFocus::Primary"),
+        "the caret goes both ways, so two presses return it"
+    );
+}
+
+#[test]
+fn the_page_keys_scroll_the_pane_holding_the_caret() {
+    let keys = GUI_MAIN
+        .split("fn on_key(")
+        .nth(1)
+        .expect("on_key is defined")
+        .split("\n    fn ")
+        .next()
+        .expect("the handler has a body");
+    // A read-only transcript holds the caret by taking the page keys. Without
+    // this the second pane could be focused and still not scroll (#2475).
+    assert!(
+        keys.contains("(Some(pane), PaneFocus::Secondary) => &pane.scroll,"),
+        "the page keys follow the caret into the second pane"
+    );
+    assert!(
+        keys.contains("_ => &self.transcript_scroll,"),
+        "with no split, or the chat focused, the page keys scroll the chat"
     );
 }
