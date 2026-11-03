@@ -371,13 +371,21 @@ impl PaletteItem {
 /// Domain words mapped onto the command that does the work. The left side is
 /// what a user types when they do not know the command's name.
 const KEYWORDS: &[(&str, &str)] = &[
-    ("voice dictation speech transcribe microphone", "/whisper"),
+    (
+        "terminal voice local voice mic microphone dictation speech transcribe audio stt tts record",
+        "/whisper",
+    ),
     ("update upgrade latest version release", "/evolve"),
     (
         "rsi mc control analytics inbox dashboard",
         "/mission-control",
     ),
     ("commands keys shortcuts help what can you do", "/help"),
+    ("new session new conversation fresh start topic", "/new"),
+    (
+        "channels telegram discord slack whatsapp trello connect setup bot",
+        "/channels",
+    ),
     ("cost tokens spend budget context ctx", "/usage"),
     (
         "compact trim context window summarise summarize",
@@ -457,24 +465,39 @@ pub fn score(query: &str, item: &PaletteItem) -> Option<u16> {
     if query.is_empty() {
         return Some(0);
     }
-    let title = match_score(query, &item.title);
-    let words = match_weighted(query, &item.keywords, 6);
-    match (title, words) {
-        (None, None) => None,
-        (Some(t), None) => Some(t),
-        (None, Some(w)) => Some(w),
-        (Some(t), Some(w)) => Some(t.max(w)),
+    // A phrase is matched one word at a time, and every word has to land
+    // somewhere: "terminal voice" asks two things at once, so a row that only
+    // knows the word "voice" is not the answer. Flattening the phrase into a
+    // single subsequence (the old rule) demanded both words appear letter for
+    // letter inside one field, which no keyword list can satisfy, so the query
+    // that names the microphone matched nothing at all (#2461).
+    //
+    // Each word must START a word in the field, then may be abbreviated to a
+    // subsequence ("trbl" still reaches "troubleshooting"). Without that
+    // anchor a sentence like "i want to setup a browser" matched by reading
+    // stray letters out of every keyword string it passed.
+    let mut total: u16 = 0;
+    for token in query.split_whitespace() {
+        let title = match_from(token, &item.title, 10);
+        let words = match_from(token, &item.keywords, 6);
+        let best = match (title, words) {
+            (None, None) => return None,
+            (Some(t), None) => t,
+            (None, Some(w)) => w,
+            (Some(t), Some(w)) => t.max(w),
+        };
+        total = total.saturating_add(best);
     }
+    Some(total)
 }
 
-/// Score one text field, full weight.
-fn match_score(query: &str, text: &str) -> Option<u16> {
-    match_weighted(query, text, 10)
-}
-
-/// Subsequence scoring over one field. `weight` scales the answer so keywords
-/// can sit below a title match without a second scoring rule.
-fn match_weighted(query: &str, text: &str, weight: u16) -> Option<u16> {
+/// Score one text field. The first token char has to START a word: that is
+/// what turns a phrase into separate questions instead of one long blur of
+/// stray letters read out of any keyword string (#2461). When no word starts
+/// with the token, a full contiguous run still counts, ranked lowest: "ção"
+/// lives mid-word in "Configuração" and is exactly what a user types when
+/// the start of the word is not the part they remember.
+fn match_from(query: &str, text: &str, weight: u16) -> Option<u16> {
     if text.is_empty() {
         return None;
     }
@@ -487,11 +510,47 @@ fn match_weighted(query: &str, text: &str, weight: u16) -> Option<u16> {
         return Some(0);
     }
     let hay: Vec<char> = text.chars().flat_map(|c| c.to_lowercase()).collect();
+    // The mid-word last resort: a whole run of the token, in order. Single
+    // chars stay strict, one letter mid-word is noise, not an answer.
+    let contiguous: Option<usize> = if needle.len() > 1 {
+        hay.windows(needle.len()).position(|w| w == needle.as_slice())
+    } else {
+        None
+    };
     let mut score: i32 = 0;
     let mut hi = 0;
     let mut last_hit: Option<usize> = None;
     for (ni, want) in needle.iter().enumerate() {
-        let found = hay[hi..].iter().position(|c| c == want)? + hi;
+        let found;
+        if ni == 0 {
+            // The first char must START a word: scan every occurrence. When
+            // no word-start hit exists at all, the contiguous run is the
+            // honest fallback, accepted mid-word and scored low by the normal
+            // scoring below. The fallback is taken OUTSIDE the hunt: feeding
+            // its position back into a hunt that had just rejected that same
+            // spot looped forever on "ção" in "Configuração" (the fallback
+            // always sits behind the scan cursor by definition, since the
+            // cursor only advanced past rejected word starts).
+            let mut from = 0usize;
+            let mut word_start_hit = None;
+            while let Some(p) = hay[from..].iter().position(|c| c == want) {
+                let pos = p + from;
+                let starts_word = pos == 0 || !hay[pos - 1].is_alphanumeric();
+                if starts_word {
+                    word_start_hit = Some(pos);
+                    break;
+                }
+                from = pos + 1;
+            }
+            found = match word_start_hit {
+                Some(p) => p,
+                None => contiguous?,
+            };
+        } else {
+            // Later chars have no anchoring job: first hit at or after the
+            // previous one wins.
+            found = hay[hi..].iter().position(|c| c == want)? + hi;
+        }
         let at_word_start = found == 0 || !hay[found - 1].is_alphanumeric();
         let consecutive = last_hit.is_some_and(|last| last + 1 == found);
         score += if at_word_start {
@@ -985,6 +1044,76 @@ mod tests {
         assert_eq!(
             state.selected().map(|row| row.item.action),
             Some(PaletteAction::SetupChannel(Channel::Telegram))
+        );
+    }
+
+    /// The phrases a person actually types on the way to a page, a command or
+    /// a channel (#2461). A multi-word query used to be flattened into one
+    /// subsequence, so "terminal voice" had to appear letter for letter inside
+    /// a single field and matched nothing at all.
+    #[test]
+    fn a_phrase_arms_the_row_that_answers_it() {
+        fn all_items() -> Vec<PaletteItem> {
+            let mut items: Vec<PaletteItem> = crate::ui_core::commands::SLASH_COMMANDS
+                .iter()
+                .map(|cmd| {
+                    PaletteItem::new(
+                        cmd.name,
+                        cmd.description,
+                        PaletteKind::Command,
+                        PaletteAction::RunSlash(cmd.name),
+                    )
+                    .with_keywords(keywords_for(cmd.name))
+                })
+                .collect();
+            items.extend(surface_items());
+            items.extend(crate::ui_core::docs::items());
+            items.extend(channel_items());
+            items
+        }
+
+        fn armed(query: &str) -> Option<PaletteAction> {
+            let mut state = PaletteState::new(all_items());
+            for c in query.chars() {
+                state.type_char(c);
+            }
+            state.selected().map(|row| row.item.action)
+        }
+
+        fn titles(query: &str) -> Vec<String> {
+            let mut state = PaletteState::new(all_items());
+            for c in query.chars() {
+                state.type_char(c);
+            }
+            state.visible().into_iter().map(|row| row.item.title).collect()
+        }
+
+        assert_eq!(
+            armed("terminal voice"),
+            Some(PaletteAction::RunSlash("/whisper")),
+            "the phrase that names the microphone has to arm it"
+        );
+        assert_eq!(
+            armed("upgrade"),
+            Some(PaletteAction::RunSlash("/evolve")),
+            "an answer about upgrading is the updater's row"
+        );
+        assert_eq!(
+            armed("daemon troubleshooting"),
+            Some(PaletteAction::OpenDocs(
+                "/getting-started/troubleshooting.html"
+            )),
+            "a daemon problem is a troubleshooting page"
+        );
+        assert_eq!(
+            armed("automation every morning"),
+            Some(PaletteAction::OpenDocs("/features/cron-jobs.html")),
+            "a daily automation is the cron page"
+        );
+        let trello = titles("trello");
+        assert!(
+            trello.contains(&"Trello".to_string()),
+            "the setup row has to be reachable: {trello:?}"
         );
     }
 
