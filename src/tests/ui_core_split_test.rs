@@ -95,10 +95,11 @@ fn a_new_split_starts_even() {
 
 #[test]
 fn a_short_pane_gives_the_strip_up_first() {
-    // Seven rows is a stacked pane on a 30-row terminal: after the border
-    // there is room for the input and a readable transcript and nothing else,
-    // so the strip drops to zero rather than crushing the answer (#2494).
-    let rows = pane_rows(7, 3);
+    // Eight rows is a stacked pane on a 30-row terminal: after the border
+    // there is room for the input (its real box is three rows) and the
+    // transcript floor and nothing else, so the strip drops to zero rather
+    // than crushing the answer (#2494).
+    let rows = pane_rows(8, 3);
     assert_eq!(rows.strip, 0);
     assert_eq!(rows.input, PANE_INPUT_ROWS);
     assert_eq!(rows.body, PANE_BODY_FLOOR);

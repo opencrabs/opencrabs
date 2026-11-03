@@ -477,27 +477,26 @@ pub(super) fn render_pane_strips(
         return;
     };
 
-    if let Some(area) = strip {
-        if let Some(plan) = pane
+    if let Some(area) = strip
+        && let Some(plan) = pane
             .plan_document
             .clone()
             .filter(|p| p.status == PlanStatus::Active)
-        {
-            f.render_widget(Paragraph::new(pane_strip_lines(&plan)), area);
-        }
+    {
+        f.render_widget(Paragraph::new(pane_strip_lines(&plan)), area);
     }
 
-    if let Some(area) = queue {
-        if let Some(sid) = pane.session_id {
-            let msgs = app
-                .queued_messages
-                .lock()
-                .ok()
-                .and_then(|q| q.get(&sid).cloned())
-                .unwrap_or_default();
-            if !msgs.is_empty() {
-                f.render_widget(Paragraph::new(pane_queue_line(&msgs)), area);
-            }
+    if let Some(area) = queue
+        && let Some(sid) = pane.session_id
+    {
+        let msgs = app
+            .queued_messages
+            .lock()
+            .ok()
+            .and_then(|q| q.get(&sid).cloned())
+            .unwrap_or_default();
+        if !msgs.is_empty() {
+            f.render_widget(Paragraph::new(pane_queue_line(&msgs)), area);
         }
     }
 }
