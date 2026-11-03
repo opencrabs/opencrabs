@@ -21,9 +21,26 @@ fn ctrl_shift_underscore_stacks() {
 }
 
 #[test]
-fn the_chord_needs_both_control_and_shift() {
+fn macos_folding_shift_into_the_glyph_still_splits() {
+    // The reported bug (#2471): a keystroke that plainly typed `|` with
+    // control arrives with shift already folded into the glyph and reported as
+    // false, so requiring both modifiers made the chord unreachable.
+    assert_eq!(chord_layout("|", None, true, false), Some(Layout::Side));
+    assert_eq!(chord_layout("_", None, true, false), Some(Layout::Stack));
+}
+
+#[test]
+fn the_base_key_still_needs_shift() {
+    // A layout that sends the unshifted key has to say shift was held: ctrl+-
+    // is zoom out and a bare ctrl+backslash is nothing.
+    assert_eq!(chord_layout("\\", None, true, false), None);
+    assert_eq!(chord_layout("-", None, true, false), None);
+}
+
+#[test]
+fn the_chord_needs_control() {
     assert_eq!(chord_layout("\\", Some("|"), false, true), None);
-    assert_eq!(chord_layout("\\", Some("|"), true, false), None);
+    assert_eq!(chord_layout("|", None, false, false), None);
     assert_eq!(chord_layout("a", Some("a"), true, true), None);
 }
 

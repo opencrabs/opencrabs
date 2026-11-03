@@ -317,3 +317,18 @@ fn the_page_keys_scroll_the_pane_holding_the_caret() {
         "with no split, or the chat focused, the page keys scroll the chat"
     );
 }
+
+/// #2471: the chord has to reach the reader in a shape the window can send.
+/// The handler used to demand control and shift together, which no keystroke
+/// on macOS satisfies for `|` because shift is folded into the glyph.
+#[test]
+fn the_chord_is_read_through_one_place() {
+    assert!(
+        GUI_MAIN.contains("fn split_chord(ks: &gpui::Keystroke)"),
+        "the window reads the chord in one place, not inline at the call site"
+    );
+    assert!(
+        GUI_MAIN.contains("if let Some(layout) = split_chord(ks)"),
+        "opening a split goes through that reader"
+    );
+}

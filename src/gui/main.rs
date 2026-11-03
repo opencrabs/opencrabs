@@ -3189,12 +3189,7 @@ impl Dashboard {
         // its session, N makes a new one and Esc drops the pick.
         if self.screen == Screen::Chat {
             let ks = &ev.keystroke;
-            if let Some(layout) = split::chord_layout(
-                &ks.key,
-                ks.key_char.as_deref(),
-                ks.modifiers.control,
-                ks.modifiers.shift,
-            ) {
+            if let Some(layout) = split_chord(ks) {
                 self.begin_split(layout, cx);
                 return;
             }
@@ -8159,6 +8154,23 @@ const SPLIT_DIVIDER_PX: f32 = 2.0;
 /// it stays [`SPLIT_DIVIDER_PX`]; the strip either side of it is transparent
 /// and takes the pointer, because a two pixel target is a pixel hunt.
 const SPLIT_HANDLE_PX: f32 = 12.0;
+
+/// The chord that opens a split (#2438, #2471): `ctrl-shift-pipe` puts the
+/// panes side by side and `ctrl-shift-underscore` stacks them.
+///
+/// The window reads it through here rather than inline so the two shapes the
+/// platforms send are handled in one place: the base key with shift held, and
+/// the shifted glyph on its own, which is all macOS reports once it has folded
+/// shift into the character. The rule for which shape means what lives in
+/// [`split::chord_layout`].
+fn split_chord(ks: &gpui::Keystroke) -> Option<split::Layout> {
+    split::chord_layout(
+        &ks.key,
+        ks.key_char.as_deref(),
+        ks.modifiers.control,
+        ks.modifiers.shift,
+    )
+}
 
 /// The colour of the rule between two panes (#2473). `text_faint` is the
 /// quietest colour that still contrasts with `bg` on every theme, where
