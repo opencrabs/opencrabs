@@ -6568,15 +6568,9 @@ impl Render for Dashboard {
         if self.screen != Screen::Chat {
             right = right.child(chrome);
         } else if let Some(name) = self.open_chat_name() {
-            // In a row so the card hugs the name instead of stretching into a
-            // full-width empty band (#2480).
-            right = right.child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .w_full()
-                    .child(session_title_card(&name)),
-            );
+            // Plain forum-header text, no box: a box reads as a button and the
+            // rest of the row reads as broken layout (#2480).
+            right = right.child(session_title_header(&name));
         }
         // The row takes the side it was saved on: above the transcript,
         // under the input, or beside the chat (#2402).
@@ -8550,24 +8544,20 @@ fn help_rows() -> Vec<(
 /// session name led the footer), so a row of topic chips was the first thing
 /// the eye met and the session it belonged to was nowhere.
 ///
-/// One card, no tab styling, and the two-word rule does not apply: the name is
-/// the full name, and only the chips are shortened. The card hugs its text
-/// (the call site puts it in a row): a full-width box holding one short name is
-/// a band of empty panel that reads as a broken layout.
-fn session_title_card(name: &str) -> impl IntoElement {
+/// Plain header text, flush left, no box, and the two-word rule does not
+/// apply: the name is the full name, and only the chips are shortened. The
+/// first version drew a bordered card around the name; even hugging its text
+/// it rendered as a button floating in an empty row, which the owner rejected
+/// on sight (2026-11-03). A forum header is text, not a control: nothing to
+/// the right of the name is header space, the way every chat app reads.
+fn session_title_header(name: &str) -> impl IntoElement {
     div()
-        .flex()
-        .flex_row()
-        .items_center()
         .flex_none()
-        .px_3()
-        .py_2()
-        .rounded_md()
-        .bg(rgb(palette::current().panel))
-        .border_1()
-        .border_color(rgb(palette::current().panel_hi))
-        .text_base()
+        .min_w_0()
+        .text_lg()
+        .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(rgb(palette::current().text_normal))
+        .truncate()
         .child(SharedString::from(name.to_string()))
 }
 
