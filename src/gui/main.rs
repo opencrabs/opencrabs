@@ -4019,10 +4019,9 @@ impl Render for Dashboard {
                 // beside or below it (#2438). Two panes share the content
                 // width, less the gap_2 that separates them, so a row is
                 // never planned wider than the box it is painted into.
-                let primary_width = if self.split.is_some() {
-                    (pane_width - 8.0) / 2.0
-                } else {
-                    pane_width
+                let primary_width = match &self.split {
+                    Some(pane) => split_pane_width(pane_width, pane.layout.is_stacked()),
+                    None => pane_width,
                 };
                 let primary = transcript::view(
                     &self.transcript,
@@ -5650,10 +5649,11 @@ impl Render for Dashboard {
                             .child(SharedString::from(hint)),
                     )
                     .children(update_hint);
-                let primary_width = if self.split.is_some() {
-                    (pane_width - THEMES_PANEL_WIDTH) / 2.0 - 8.0
-                } else {
-                    pane_width - THEMES_PANEL_WIDTH
+                let primary_width = match &self.split {
+                    Some(pane) => {
+                        split_pane_width(pane_width - THEMES_PANEL_WIDTH, pane.layout.is_stacked())
+                    }
+                    None => pane_width - THEMES_PANEL_WIDTH,
                 };
                 let primary =
                     div()
@@ -7913,6 +7913,36 @@ fn split_header(
         )
 }
 
+/// The gap either side of the rule between two panes, in px: `gap_2()`.
+const SPLIT_GAP_PX: f32 = 8.0;
+
+/// The visible rule that separates two panes, in px (#2473). Without it the
+/// boundary is a bare gap, and on a dark theme two transcripts read as one.
+const SPLIT_DIVIDER_PX: f32 = 1.0;
+
+/// What one pane may plan its rows against (#2473). Side by side the halves
+/// share the content width less the gap either side of the rule and the rule
+/// itself. Stacked, each pane spans the full width and only the height is
+/// divided, so a row there is planned against all of it.
+fn split_pane_width(content: f32, stacked: bool) -> f32 {
+    if stacked {
+        content
+    } else {
+        (content - SPLIT_GAP_PX * 2.0 - SPLIT_DIVIDER_PX) / 2.0
+    }
+}
+
+/// The rule between two panes: vertical when they sit side by side, horizontal
+/// when they stack (#2473).
+fn split_divider(stacked: bool) -> impl IntoElement {
+    div()
+        .id("split-divider")
+        .flex_none()
+        .when(stacked, |d| d.h(px(SPLIT_DIVIDER_PX)).w_full())
+        .when(!stacked, |d| d.w(px(SPLIT_DIVIDER_PX)).h_full())
+        .bg(rgb(palette::current().panel_hi))
+}
+
 /// The two panes of a split: the chat first, then the picked session beside it
 /// (side) or below it (stack), with its own header and close button. The chat
 /// screen and the themes preview both draw through this, so the second pane
@@ -7923,6 +7953,17 @@ fn split_body(
     pane_width: f32,
     close: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
+    let stacked = pane.layout.is_stacked();
+    // Both halves take the same share. The chat used to be handed in bare, so
+    // it sized to its content and the split read as a chat with a strip
+    // beside it rather than two equal panes (#2473).
+    let half = div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_w_0()
+        .min_h_0()
+        .child(primary);
     let secondary = div()
         .id("split-secondary")
         .flex()
@@ -7946,9 +7987,10 @@ fn split_body(
         .min_w_0()
         .min_h_0()
         .gap_2()
-        .when(pane.layout.is_stacked(), |d| d.flex_col())
-        .when(!pane.layout.is_stacked(), |d| d.flex_row())
-        .child(primary)
+        .when(stacked, |d| d.flex_col())
+        .when(!stacked, |d| d.flex_row())
+        .child(half)
+        .child(split_divider(stacked))
         .child(secondary)
         .into_any_element()
 }

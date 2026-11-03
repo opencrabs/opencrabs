@@ -28,12 +28,12 @@ fn the_chat_screen_draws_the_second_pane() {
 fn a_split_widens_nothing_when_it_is_absent() {
     let chat = chat_arm();
     assert!(
-        chat.contains("let primary_width = if self.split.is_some() {"),
+        chat.contains("let primary_width = match &self.split {"),
         "the chat pane plans its rows against the width it is actually drawn into"
     );
     assert!(
-        chat.contains("(pane_width - 8.0) / 2.0"),
-        "two panes share the content width, less the gap between them"
+        chat.contains("split_pane_width(pane_width, pane.layout.is_stacked())"),
+        "two panes share the content width through split_pane_width, which subtracts the gap and the rule"
     );
 }
 
@@ -48,7 +48,9 @@ fn the_second_pane_is_composed_in_one_place() {
         "the second pane carries its session header and close button"
     );
     assert!(
-        helper.contains(".when(pane.layout.is_stacked(), |d| d.flex_col())"),
+        helper.contains("let stacked = pane.layout.is_stacked();")
+            && helper.contains(".when(stacked, |d| d.flex_col())")
+            && helper.contains(".when(!stacked, |d| d.flex_row())"),
         "Split _ stacks the panes, Split | sets them side by side"
     );
     assert_eq!(
@@ -76,5 +78,51 @@ fn choosing_a_session_repaints_before_the_transcript_loads() {
     assert!(
         painted < tail.find("cx.spawn").unwrap_or(painted + 1),
         "the repaint happens before the transcript load is spawned"
+    );
+}
+
+#[test]
+fn both_halves_take_the_same_share_of_the_width() {
+    let body = GUI_MAIN
+        .split("fn split_body(")
+        .nth(1)
+        .expect("split_body is defined");
+    // The chat used to be handed in bare, so it sized to its content and the
+    // split read as a chat with a strip beside it (#2473).
+    assert!(
+        body.contains("let half = div()"),
+        "the primary pane is wrapped so it can take an equal share"
+    );
+    assert!(
+        body.contains(".child(half)") && body.contains(".child(secondary)"),
+        "both halves are children of the split row"
+    );
+    // The rule is what makes the boundary readable on a dark theme.
+    assert!(
+        body.contains("split_divider(stacked)"),
+        "a visible rule sits between the panes"
+    );
+    assert!(
+        GUI_MAIN.contains("const SPLIT_DIVIDER_PX: f32 = 1.0;"),
+        "the rule has a named width"
+    );
+}
+
+#[test]
+fn a_stacked_pane_plans_against_the_whole_width() {
+    let helper = GUI_MAIN
+        .split("fn split_pane_width(")
+        .nth(1)
+        .expect("split_pane_width is defined")
+        .split("\n}\n")
+        .next()
+        .expect("the helper has a body");
+    assert!(
+        helper.contains("if stacked {\n        content\n    }"),
+        "stacked panes share the height, not the width, so a row gets all of it"
+    );
+    assert!(
+        helper.contains("SPLIT_GAP_PX * 2.0") && helper.contains("SPLIT_DIVIDER_PX"),
+        "side by side the halves subtract the gap either side and the rule"
     );
 }
