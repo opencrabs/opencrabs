@@ -580,14 +580,13 @@ fn match_from(query: &str, text: &str, weight: u16) -> Option<u16> {
         return Some(0);
     }
     let hay: Vec<char> = text.chars().flat_map(|c| c.to_lowercase()).collect();
-    // The mid-word last resort: a whole run of the token, in order. Single
-    // chars stay strict, one letter mid-word is noise, not an answer.
-    let contiguous: Option<usize> = if needle.len() > 1 {
-        hay.windows(needle.len())
-            .position(|w| w == needle.as_slice())
-    } else {
-        None
-    };
+    // The mid-word last resort: a whole run of the token, in order, ranked
+    // lowest. Single chars get it too: the old substring matcher found "a"
+    // mid-word in "beta" and the count test pins that, so the anchor never
+    // narrows a query below what the card answered before (#2482).
+    let contiguous: Option<usize> = hay
+        .windows(needle.len())
+        .position(|w| w == needle.as_slice());
     let mut score: i32 = 0;
     let mut hi = 0;
     let mut last_hit: Option<usize> = None;
