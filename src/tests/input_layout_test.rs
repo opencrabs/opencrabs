@@ -98,6 +98,11 @@ async fn app_with_input_box() -> App {
     );
     #[cfg(not(feature = "whatsapp"))]
     let mut app = App::new(service, context);
+    // Hermetic against the host: App::new restores ~/.opencrabs/layout.json,
+    // so a fresh App can come up split and paint pane chrome around the
+    // focused pane's input. Reset to one pane so the window input box this
+    // module's row geometry assumes is the one that draws.
+    app.pane_manager = crate::tui::pane::PaneManager::new();
     app.input_area_x = 0;
     app.input_area_y = 10;
     app.input_area_width = 40;
