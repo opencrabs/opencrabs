@@ -133,6 +133,16 @@ struct SplitPane {
     layout: Layout,
 }
 
+/// Which pane a split gives the caret and the `ctrl+x` (#2474, #2475).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum PaneFocus {
+    /// The session the window was already on.
+    #[default]
+    Primary,
+    /// The one picked when the split opened.
+    Secondary,
+}
+
 /// The ledger path, unchanged: `config.database.path`, with the same
 /// default (`~/.opencrabs/opencrabs.db`) when config cannot be read at all.
 fn ledger_path() -> std::path::PathBuf {
@@ -425,6 +435,8 @@ struct Dashboard {
     copy_drag: Rc<CopyDrag>,
     /// The second pane of a split, when one is open (#2438).
     split: Option<SplitPane>,
+    /// Which pane holds the caret and answers `ctrl+x` (#2474).
+    pane_focus: PaneFocus,
     /// The layout a split is waiting on a session for; the sidebar picks it (#2438).
     split_pick: Option<Layout>,
     /// A split's new session is being created, so the created row fills the pane.
@@ -1031,6 +1043,9 @@ impl Dashboard {
             self.toggle_rail(cx);
         }
         self.split_pick = Some(layout);
+        // A fresh split starts with the chat in front, whatever the last one
+        // left behind (#2474).
+        self.pane_focus = PaneFocus::Primary;
         self.rail_focused = true;
         self.sessions.cursor = self.transcript.session;
         // Focus goes to the window, not the composer, so the sidebar keys and the
@@ -1043,6 +1058,33 @@ impl Dashboard {
     fn cancel_split_pick(&mut self, cx: &mut Context<Self>) {
         self.split_pick = None;
         self.rail_focused = false;
+        self.refocus_screen();
+        cx.notify();
+    }
+
+    /// The `ctrl-x` close, and the × on either header: close the pane holding
+    /// the caret (#2474). Closing the second pane ends the split; closing the
+    /// first hands the window to the second, because removing the primary would
+    /// otherwise leave a session the user never asked to see in its place.
+    /// Focus returns to the primary either way, so the next chord lands
+    /// somewhere known.
+    fn close_focused_pane(&mut self, cx: &mut Context<Self>) {
+        let was = self.pane_focus;
+        self.pane_focus = PaneFocus::Primary;
+        match (was, self.split.take()) {
+            (PaneFocus::Primary, Some(pane)) => self.open_session(pane.session, cx),
+            _ => {
+                self.refocus_screen();
+                cx.notify();
+            }
+        }
+    }
+
+    /// The × on the second pane: the same close ctrl+x performs, without
+    /// needing the caret to have been there first (#2474).
+    fn close_secondary_pane(&mut self, cx: &mut Context<Self>) {
+        self.split = None;
+        self.pane_focus = PaneFocus::Primary;
         self.refocus_screen();
         cx.notify();
     }
@@ -1061,6 +1103,9 @@ impl Dashboard {
         }
         self.split_pick = None;
         self.rail_focused = false;
+        // The pane just picked is the one the caret and ctrl+x land on, so a
+        // split opens ready to act on what was clicked (#2474).
+        self.pane_focus = PaneFocus::Secondary;
         self.refocus_screen();
         let title = self
             .sessions
@@ -3280,6 +3325,18 @@ impl Dashboard {
                     _ => {}
                 }
             }
+            // ctrl+x closes the pane holding the caret, the same chord the
+            // terminal answers (#2474). It sits ahead of the composer so the
+            // key never reaches the editor as a cut.
+            if ks.modifiers.control
+                && !ks.modifiers.platform
+                && !ks.modifiers.alt
+                && ks.key == "x"
+                && self.split.is_some()
+            {
+                self.close_focused_pane(cx);
+                return;
+            }
         }
         // Modifiers go in the line too: a bare key name cannot tell ctrl+h
         // from a typed h, which is exactly what a help-door report needs.
@@ -4200,10 +4257,9 @@ impl Render for Dashboard {
                 // beside or below it (#2438). Two panes share the content
                 // width, less the gap_2 that separates them, so a row is
                 // never planned wider than the box it is painted into.
-                let primary_width = if self.split.is_some() {
-                    (pane_width - 8.0) / 2.0
-                } else {
-                    pane_width
+                let primary_width = match &self.split {
+                    Some(pane) => split_pane_width(pane_width, pane.layout.is_stacked()),
+                    None => pane_width,
                 };
                 let primary = transcript::view(
                     &self.transcript,
@@ -4224,11 +4280,25 @@ impl Render for Dashboard {
                 let body = match &self.split {
                     None => primary,
                     Some(pane) => {
-                        let close = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
-                            this.split = None;
-                            cx.notify();
+                        let close_primary = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                            this.close_focused_pane(cx);
                         });
-                        split_body(primary, pane, primary_width, close)
+                        let close_secondary = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                            this.close_secondary_pane(cx);
+                        });
+                        let primary_title = match self.session_title() {
+                            Some(title) => SharedString::from(title.to_string()),
+                            None => SharedString::from("Chat"),
+                        };
+                        split_body(
+                            primary,
+                            primary_title,
+                            self.pane_focus,
+                            pane,
+                            primary_width,
+                            close_primary,
+                            close_secondary,
+                        )
                     }
                 };
                 (
@@ -5910,10 +5980,11 @@ impl Render for Dashboard {
                             .child(SharedString::from(hint)),
                     )
                     .children(update_hint);
-                let primary_width = if self.split.is_some() {
-                    (pane_width - THEMES_PANEL_WIDTH) / 2.0 - 8.0
-                } else {
-                    pane_width - THEMES_PANEL_WIDTH
+                let primary_width = match &self.split {
+                    Some(pane) => {
+                        split_pane_width(pane_width - THEMES_PANEL_WIDTH, pane.layout.is_stacked())
+                    }
+                    None => pane_width - THEMES_PANEL_WIDTH,
                 };
                 let primary =
                     div()
@@ -5940,11 +6011,25 @@ impl Render for Dashboard {
                 let body = match &self.split {
                     None => primary.into_any_element(),
                     Some(pane) => {
-                        let close = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
-                            this.split = None;
-                            cx.notify();
+                        let close_primary = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                            this.close_focused_pane(cx);
                         });
-                        split_body(primary.into_any_element(), pane, primary_width, close)
+                        let close_secondary = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                            this.close_secondary_pane(cx);
+                        });
+                        let primary_title = match self.session_title() {
+                            Some(title) => SharedString::from(title.to_string()),
+                            None => SharedString::from("Chat"),
+                        };
+                        split_body(
+                            primary.into_any_element(),
+                            primary_title,
+                            self.pane_focus,
+                            pane,
+                            primary_width,
+                            close_primary,
+                            close_secondary,
+                        )
                     }
                 };
                 let middle = div()
@@ -6638,6 +6723,7 @@ fn main() {
                         update_prompt: None,
                         help_filter: None,
                         split: None,
+                        pane_focus: PaneFocus::Primary,
                         copy_drag: Rc::new(CopyDrag::default()),
                         split_pick: None,
                         split_creating: false,
@@ -8145,30 +8231,44 @@ fn update_prompt_overlay(
         .child(panel)
 }
 
-/// The header of the second pane: its title and a close button (#2438).
-fn split_header(
-    pane: &SplitPane,
+/// One pane's header: the session's name and the × that closes that pane
+/// (#2474). Every pane carries one, so a split reads as two sessions rather
+/// than a session beside a nameless strip, and the pane holding the caret
+/// wears the accent so Tab's move is visible.
+fn pane_header(
+    id: &'static str,
+    title: SharedString,
+    focused: bool,
     close: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
-    let title = pane.title.clone();
+    let title_color = if focused {
+        palette::current().accent
+    } else {
+        palette::current().text_muted
+    };
     div()
         .flex()
         .flex_row()
+        .flex_none()
         .items_center()
         .justify_between()
+        .gap_2()
         .px_2()
         .py_1()
         .border_b_1()
         .border_color(rgb(palette::current().panel_hi))
         .child(
             div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
                 .text_xs()
-                .text_color(rgb(palette::current().text_muted))
-                .child(SharedString::from(title)),
+                .text_color(rgb(title_color))
+                .child(title),
         )
         .child(
             div()
-                .id("split-close")
+                .id(id)
                 .px_2()
                 .cursor_pointer()
                 .text_color(rgb(palette::current().text_muted))
@@ -8178,16 +8278,67 @@ fn split_header(
         )
 }
 
+/// The gap either side of the rule between two panes, in px: `gap_2()`.
+const SPLIT_GAP_PX: f32 = 8.0;
+
+/// The visible rule that separates two panes, in px (#2473). Without it the
+/// boundary is a bare gap, and on a dark theme two transcripts read as one.
+const SPLIT_DIVIDER_PX: f32 = 1.0;
+
+/// What one pane may plan its rows against (#2473). Side by side the halves
+/// share the content width less the gap either side of the rule and the rule
+/// itself. Stacked, each pane spans the full width and only the height is
+/// divided, so a row there is planned against all of it.
+fn split_pane_width(content: f32, stacked: bool) -> f32 {
+    if stacked {
+        content
+    } else {
+        (content - SPLIT_GAP_PX * 2.0 - SPLIT_DIVIDER_PX) / 2.0
+    }
+}
+
+/// The rule between two panes: vertical when they sit side by side, horizontal
+/// when they stack (#2473).
+fn split_divider(stacked: bool) -> impl IntoElement {
+    div()
+        .id("split-divider")
+        .flex_none()
+        .when(stacked, |d| d.h(px(SPLIT_DIVIDER_PX)).w_full())
+        .when(!stacked, |d| d.w(px(SPLIT_DIVIDER_PX)).h_full())
+        .bg(rgb(palette::current().panel_hi))
+}
+
 /// The two panes of a split: the chat first, then the picked session beside it
-/// (side) or below it (stack), with its own header and close button. The chat
-/// screen and the themes preview both draw through this, so the second pane
-/// cannot be wired into one of them and forgotten in the other (#2438).
+/// (side) or below it (stack), each with its own header and × (#2438, #2474).
+/// The chat screen and the themes preview both draw through this, so the second
+/// pane cannot be wired into one of them and forgotten in the other (#2438).
 fn split_body(
     primary: AnyElement,
+    primary_title: SharedString,
+    focus: PaneFocus,
     pane: &SplitPane,
     pane_width: f32,
-    close: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    close_primary: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    close_secondary: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
+    let stacked = pane.layout.is_stacked();
+    // Both halves take the same share. The chat used to be handed in bare, so
+    // it sized to its content and the split read as a chat with a strip
+    // beside it rather than two equal panes (#2473).
+    let half = div()
+        .id("split-primary")
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_w_0()
+        .min_h_0()
+        .child(pane_header(
+            "split-close-primary",
+            primary_title,
+            focus == PaneFocus::Primary,
+            close_primary,
+        ))
+        .child(primary);
     let secondary = div()
         .id("split-secondary")
         .flex()
@@ -8195,7 +8346,12 @@ fn split_body(
         .flex_1()
         .min_w_0()
         .min_h_0()
-        .child(split_header(pane, close))
+        .child(pane_header(
+            "split-close-secondary",
+            SharedString::from(pane.title.clone()),
+            focus == PaneFocus::Secondary,
+            close_secondary,
+        ))
         .child(transcript::view(
             &pane.transcript,
             &pane.scroll,
@@ -8211,9 +8367,10 @@ fn split_body(
         .min_w_0()
         .min_h_0()
         .gap_2()
-        .when(pane.layout.is_stacked(), |d| d.flex_col())
-        .when(!pane.layout.is_stacked(), |d| d.flex_row())
-        .child(primary)
+        .when(stacked, |d| d.flex_col())
+        .when(!stacked, |d| d.flex_row())
+        .child(half)
+        .child(split_divider(stacked))
         .child(secondary)
         .into_any_element()
 }
