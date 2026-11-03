@@ -103,7 +103,7 @@ fn a_short_pane_gives_the_strip_up_first() {
     assert_eq!(rows.strip, 0);
     assert_eq!(rows.input, PANE_INPUT_ROWS);
     assert_eq!(rows.body, PANE_BODY_FLOOR);
-    assert_eq!(rows.inner(), 7 - PANE_CHROME_ROWS);
+    assert_eq!(rows.inner(), 8 - PANE_CHROME_ROWS);
 }
 
 #[test]
