@@ -6346,7 +6346,15 @@ impl Render for Dashboard {
         if self.screen != Screen::Chat {
             right = right.child(chrome);
         } else if let Some(name) = self.open_chat_name() {
-            right = right.child(session_title_card(&name));
+            // In a row so the card hugs the name instead of stretching into a
+            // full-width empty band (#2480).
+            right = right.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .w_full()
+                    .child(session_title_card(&name)),
+            );
         }
         // The row takes the side it was saved on: above the transcript,
         // under the input, or beside the chat (#2402).
@@ -8268,14 +8276,15 @@ fn help_rows() -> Vec<(
 /// the eye met and the session it belonged to was nowhere.
 ///
 /// One card, no tab styling, and the two-word rule does not apply: the name is
-/// the full name, and only the chips are shortened.
+/// the full name, and only the chips are shortened. The card hugs its text
+/// (the call site puts it in a row): a full-width box holding one short name is
+/// a band of empty panel that reads as a broken layout.
 fn session_title_card(name: &str) -> impl IntoElement {
     div()
         .flex()
         .flex_row()
         .items_center()
         .flex_none()
-        .w_full()
         .px_3()
         .py_2()
         .rounded_md()
@@ -8345,19 +8354,16 @@ fn topic_strip(
             .flex_col()
             .flex_none()
             .w(rems(12.0))
-            .items_center()
+            .items_start()
             .gap_2()
             .p_2()
             .child(leading)
             .child(
-                // Centred so each chip sits at its own width (#2480). Stretched
-                // chips were the wall of colour the owner screenshotted.
-                div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap_1()
-                    .children(tabs),
+                // Chips sit at their own width on the rail's leading edge, the
+                // way Telegram's forum list reads. Centring them left a small
+                // square control floating in 90% empty column, and stretching
+                // them was the wall of colour the owner screenshotted (#2480).
+                div().flex().flex_col().items_start().gap_1().children(tabs),
             )
             .child(bar)
     } else {
