@@ -6568,9 +6568,10 @@ impl Render for Dashboard {
         if self.screen != Screen::Chat {
             right = right.child(chrome);
         } else if let Some(name) = self.open_chat_name() {
-            // Plain forum-header text, no box: a box reads as a button and the
-            // rest of the row reads as broken layout (#2480).
-            right = right.child(session_title_header(&name));
+            // Bordered chip hugging the name, the owner's Photoshop spec
+            // (#2480): the strip of empty row to its right is header space,
+            // same as the mockup.
+            right = right.child(session_title_chip(&name));
         }
         // The row takes the side it was saved on: above the transcript,
         // under the input, or beside the chat (#2402).
@@ -8544,17 +8545,26 @@ fn help_rows() -> Vec<(
 /// session name led the footer), so a row of topic chips was the first thing
 /// the eye met and the session it belonged to was nowhere.
 ///
-/// Plain header text, flush left, no box, and the two-word rule does not
-/// apply: the name is the full name, and only the chips are shortened. The
-/// first version drew a bordered card around the name; even hugging its text
-/// it rendered as a button floating in an empty row, which the owner rejected
-/// on sight (2026-11-03). A forum header is text, not a control: nothing to
-/// the right of the name is header space, the way every chat app reads.
-fn session_title_header(name: &str) -> impl IntoElement {
+/// Plain header text, flush left, and the two-word rule does not
+/// apply: the name is the full name, and only the chips are shortened.
+///
+/// The chip shape is the owner's Photoshop spec (2026-11-03): a bordered,
+/// tinted, rounded chip that hugs the name, its height roughly 1.7x the cap
+/// height. The first card used py_2, which measured 2.5-3x cap height on the
+/// owner's screen: a fat band with the text swimming in vertical dead space.
+/// py_1 with px_2 is the mockup ratio; the border and tint stay, he asked for
+/// them and rejecting a later regression does not un-ask it.
+fn session_title_chip(name: &str) -> impl IntoElement {
     div()
         .flex_none()
         .min_w_0()
-        .text_lg()
+        .px_2()
+        .py_1()
+        .rounded_md()
+        .bg(rgb(palette::current().panel))
+        .border_1()
+        .border_color(rgb(palette::current().panel_hi))
+        .text_base()
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(rgb(palette::current().text_normal))
         .truncate()
