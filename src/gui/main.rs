@@ -8491,6 +8491,11 @@ fn split_divider(
 /// (side) or below it (stack), each with its own header and × (#2438, #2474).
 /// The chat screen and the themes preview both draw through this, so the second
 /// pane cannot be wired into one of them and forgotten in the other (#2438).
+/// Every argument is a fact the two call sites fill differently: the element,
+/// its title, which pane holds focus, the measured geometry, and the drag and
+/// close handlers. Bundling them only to satisfy the linter would box the
+/// closures and hide which pane owns which handler.
+#[allow(clippy::too_many_arguments)]
 fn split_body(
     primary: AnyElement,
     primary_title: SharedString,
