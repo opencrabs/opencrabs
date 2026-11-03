@@ -2968,27 +2968,27 @@ impl Dashboard {
         // The pane's own queue drains behind its own turn, the same rule the
         // window queue follows (#2474). The pane keeps no live turn: the rows
         // land on the reload.
-        if !self.busy {
-            if let Some(pane) = self.split.as_mut() {
-                let sid = pane.session;
-                let mut msgs = std::mem::take(&mut pane.pending);
-                msgs.extend(agent_bridge::queue_take(sid));
-                if let Some(joined) = agent_bridge::PendingMessage::join(&msgs) {
-                    self.busy = true;
-                    self.turn_session = Some(sid);
-                    let cancel = tokio_util::sync::CancellationToken::new();
-                    self.cancel = Some(cancel.clone());
-                    let attached = editor::marker_paths(&joined.context_text);
-                    agent_bridge::spawn_turn(
-                        bridge.service.clone(),
-                        sid,
-                        joined.context_text,
-                        self.sink.clone(),
-                        cancel,
-                    );
-                    if !attached.is_empty() {
-                        agent_bridge::spawn_track_files(self.db_path.clone(), sid, attached);
-                    }
+        if !self.busy
+            && let Some(pane) = self.split.as_mut()
+        {
+            let sid = pane.session;
+            let mut msgs = std::mem::take(&mut pane.pending);
+            msgs.extend(agent_bridge::queue_take(sid));
+            if let Some(joined) = agent_bridge::PendingMessage::join(&msgs) {
+                self.busy = true;
+                self.turn_session = Some(sid);
+                let cancel = tokio_util::sync::CancellationToken::new();
+                self.cancel = Some(cancel.clone());
+                let attached = editor::marker_paths(&joined.context_text);
+                agent_bridge::spawn_turn(
+                    bridge.service.clone(),
+                    sid,
+                    joined.context_text,
+                    self.sink.clone(),
+                    cancel,
+                );
+                if !attached.is_empty() {
+                    agent_bridge::spawn_track_files(self.db_path.clone(), sid, attached);
                 }
             }
         }
