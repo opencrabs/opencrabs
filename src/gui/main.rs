@@ -57,6 +57,7 @@ use crate::screen_keys::{
 };
 use crate::theme::{BASE_REM, Size, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP, text};
 use opencrabs::ui_core::split::{self, Layout};
+use opencrabs::ui_core::rail;
 use opencrabs::ui_core::topic_bar;
 use transcript::{CopyDrag, LiveTurn, TranscriptState};
 // The terminal's own command table, shared rather than copied.
@@ -3087,14 +3088,16 @@ impl Dashboard {
     fn open_chat_name(&self) -> Option<String> {
         let open = self.transcript.session?;
         let root = self.sessions.parents.get(&open).copied().unwrap_or(open);
-        Some(
-            self.sessions
-                .items
-                .iter()
-                .find(|s| s.id == root)
-                .and_then(|s| s.title.clone())
-                .unwrap_or_else(|| "Untitled".to_string()),
-        )
+        let stored = self
+            .sessions
+            .items
+            .iter()
+            .find(|s| s.id == root)
+            .and_then(|s| s.title.as_deref());
+        Some(rail::rail_title(
+            stored,
+            self.sessions.topic_titles.get(&root).map(String::as_str),
+        ))
     }
 
     /// The tab strip for the open chat's topic family (#2400, #2480): `All`
@@ -3113,13 +3116,16 @@ impl Dashboard {
         if !self.sessions.is_topic_enabled(root) {
             return Vec::new();
         }
+        // The topic store outranks the stored session name (#2490): a rename
+        // in Telegram reaches this label on the next refresh pass.
         let title = |id: Uuid| {
-            self.sessions
+            let stored = self
+                .sessions
                 .items
                 .iter()
                 .find(|s| s.id == id)
-                .and_then(|s| s.title.clone())
-                .unwrap_or_else(|| "Untitled".to_string())
+                .and_then(|s| s.title.as_deref());
+            rail::rail_title(stored, self.sessions.topic_titles.get(&id).map(String::as_str))
         };
         let topics: Vec<Uuid> = self
             .sessions
@@ -3335,8 +3341,19 @@ impl Dashboard {
     fn refresh_rail(&mut self, cx: &mut Context<Self>) {
         let db_path = self.db_path.clone();
         cx.spawn(async move |this, cx| {
-            let result = sessions::load_sessions(db_path).await;
+            let result = sessions::load_sessions(db_path.clone()).await;
+            // One batched lookup per refresh pass, never per row per frame
+            // (#2490): the topic store outranks the stored session name and a
+            // rename has to reach the rail without a restart.
+            let titles = match &result {
+                Ok(items) => sessions::load_telegram_topic_titles(db_path, items).await,
+                Err(_) => Ok(HashMap::new()),
+            };
             this.update(cx, |this, cx| {
+                match titles {
+                    Ok(pairs) => this.sessions.topic_titles = pairs,
+                    Err(e) => logging::error(&format!("topic titles refresh: {e}")),
+                }
                 match result {
                     Ok(items) => {
                         this.sessions.items = items;
@@ -6862,6 +6879,7 @@ fn main() {
             parents: parents.clone(),
             closed: closed.clone(),
             topic_icons: HashMap::new(),
+            topic_titles: HashMap::new(),
             collapsed: HashSet::new(),
             selected: None,
             cursor: None,
@@ -6877,6 +6895,7 @@ fn main() {
             parents,
             closed,
             topic_icons: HashMap::new(),
+            topic_titles: HashMap::new(),
             collapsed: HashSet::new(),
             selected: None,
             cursor: None,

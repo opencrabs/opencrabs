@@ -12,6 +12,7 @@ pub mod docs;
 pub mod help_keys;
 pub mod keys;
 pub mod palette;
+pub mod rail;
 pub mod split;
 pub mod topic_bar;
 pub mod usage;
@@ -23,7 +24,7 @@ mod purity_tests {
     //! break that silently at compile time for the GUI, never for us.
 
     /// Every source file in `ui_core`, with its contents.
-    fn sources() -> [(&'static str, &'static str); 17] {
+    fn sources() -> [(&'static str, &'static str); 18] {
         [
             ("ui_core/bang.rs", include_str!("bang.rs")),
             ("ui_core/copy_select.rs", include_str!("copy_select.rs")),
@@ -31,6 +32,7 @@ mod purity_tests {
             ("ui_core/mod.rs", include_str!("mod.rs")),
             ("ui_core/palette.rs", include_str!("palette.rs")),
             ("ui_core/split.rs", include_str!("split.rs")),
+            ("ui_core/rail.rs", include_str!("rail.rs")),
             ("ui_core/topic_bar.rs", include_str!("topic_bar.rs")),
             ("ui_core/commands.rs", include_str!("commands.rs")),
             ("ui_core/help_keys.rs", include_str!("help_keys.rs")),

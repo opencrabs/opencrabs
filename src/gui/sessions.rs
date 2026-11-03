@@ -61,6 +61,13 @@ pub struct SessionsState {
     pub topics: HashSet<uuid::Uuid>,
     /// The icon each topic carries, shown before its name (#2414).
     pub topic_icons: HashMap<uuid::Uuid, String>,
+    /// The live name each Telegram topic carries, resolved once per refresh
+    /// pass in ONE query (#2490).
+    ///
+    /// Keyed by session id, so a row looks its title up with no allocation and
+    /// no database call inside the paint. Rows that are not topic-bound
+    /// Telegram sessions simply have no entry and keep their stored name.
+    pub topic_titles: HashMap<uuid::Uuid, String>,
     /// Topic id to its parent session id (#2303). A topic is grouped under
     /// its parent in the rail; the row model itself is unchanged.
     pub parents: HashMap<uuid::Uuid, uuid::Uuid>,
@@ -739,6 +746,78 @@ pub async fn load_topic_icons(
             Err(_) => Err("topic icons fetch thread dropped its result".into()),
         },
         Err(e) => Err(format!("topic icons fetch thread failed to spawn: {e}")),
+    }
+}
+
+/// The live name of every Telegram topic session in `items`, in ONE query
+/// (#2490).
+///
+/// The row a rail draws is a snapshot: a session keeps the name it was created
+/// with. Telegram is the truth, and a rename lands in `channel_messages`
+/// (`#143`). Resolving per refresh means the rail follows a rename on its next
+/// pass with no restart, and batching the pairs into one query means a list of
+/// two hundred rows still costs one lookup per pass, not two hundred.
+pub async fn load_telegram_topic_titles(
+    db_path: std::path::PathBuf,
+    items: &[Session],
+) -> Result<HashMap<uuid::Uuid, String>, String> {
+    use opencrabs::db::repository::channel_message::ChannelMessageRepository;
+    use opencrabs::ui_core::rail;
+
+    let mut wanted: Vec<(uuid::Uuid, String, String)> = Vec::new();
+    for session in items {
+        let Some(title) = session.title.as_deref() else {
+            continue;
+        };
+        let Some((chat_id, thread_id)) = rail::topic_thread(title) else {
+            continue;
+        };
+        wanted.push((session.id, chat_id.to_string(), thread_id.to_string()));
+    }
+    if wanted.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let (tx, rx) =
+        futures::channel::oneshot::channel::<Result<HashMap<uuid::Uuid, String>, String>>();
+    let spawned = std::thread::Builder::new()
+        .name("topic-titles-fetch".into())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let result = match runtime {
+                Ok(rt) => rt
+                    .block_on(async {
+                        let db = Database::connect(&db_path).await?;
+                        let repo = ChannelMessageRepository::new(db.pool().clone());
+                        let pairs: Vec<(String, String)> = wanted
+                            .iter()
+                            .map(|(_, chat, thread)| (chat.clone(), thread.clone()))
+                            .collect();
+                        let names = repo.topic_names("telegram", &pairs).await?;
+                        let mut out = HashMap::with_capacity(wanted.len());
+                        for (id, chat, thread) in wanted {
+                            if let Some(name) = names.get(&(chat, thread)) {
+                                out.insert(id, name.clone());
+                            }
+                        }
+                        Ok(out)
+                    })
+                    .map_err(|e: anyhow::Error| format!("{e:#}")),
+                Err(e) => Err(format!("tokio runtime failed: {e}")),
+            };
+            if tx.send(result).is_err() {
+                crate::logging::error("topic titles result dropped: the window closed first");
+            }
+        });
+    match spawned {
+        Ok(_) => match rx.await {
+            Ok(result) => result,
+            Err(_) => Err("topic titles fetch thread dropped its result".into()),
+        },
+        Err(e) => Err(format!("topic titles fetch thread failed to spawn: {e}")),
     }
 }
 

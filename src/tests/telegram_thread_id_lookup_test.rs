@@ -380,3 +380,87 @@ async fn latest_topic_name_falls_back_without_rename_rows() {
         .unwrap();
     assert_eq!(name.as_deref(), Some("first"));
 }
+
+#[tokio::test]
+async fn topic_names_batch_serves_every_thread_with_rename_precedence() {
+    let db = Database::connect_in_memory().await.unwrap();
+    db.run_migrations().await.unwrap();
+    let repo = ChannelMessageRepository::new(db.pool().clone());
+
+    // Thread 5 is renamed after creation; thread 7 never is. One batched
+    // query must serve both with the same precedence the row-at-a-time
+    // lookup keeps (#2490): rename > creation name > nothing.
+    repo.insert(&msg("rr", "m1", Some("5"), Some("alpha")))
+        .await
+        .unwrap();
+    repo.insert(&msg("rr", "e1", Some("5"), Some("beta")))
+        .await
+        .unwrap();
+    repo.insert(&msg("rr", "m2", Some("5"), Some("alpha")))
+        .await
+        .unwrap();
+    repo.insert(&msg("rr2", "m1", Some("7"), Some("first")))
+        .await
+        .unwrap();
+
+    let names = repo
+        .topic_names(
+            "telegram",
+            &[("rr".into(), "5".into()), ("rr2".into(), "7".into())],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        names
+            .get(&("rr".to_string(), "5".to_string()))
+            .map(String::as_str),
+        Some("beta"),
+        "rename must win per thread"
+    );
+    assert_eq!(
+        names
+            .get(&("rr2".to_string(), "7".to_string()))
+            .map(String::as_str),
+        Some("first"),
+        "creation name stands when no rename exists"
+    );
+    assert_eq!(names.len(), 2, "exactly the requested threads come back");
+}
+
+#[tokio::test]
+async fn topic_names_collapses_duplicate_pairs_and_drops_unknown_threads() {
+    let db = Database::connect_in_memory().await.unwrap();
+    db.run_migrations().await.unwrap();
+    let repo = ChannelMessageRepository::new(db.pool().clone());
+
+    repo.insert(&msg("rr", "m1", Some("5"), Some("alpha")))
+        .await
+        .unwrap();
+
+    // Same pair twice must not break the VALUES list or double the work;
+    // a thread with no name row must simply be absent, never an error.
+    let names = repo
+        .topic_names(
+            "telegram",
+            &[
+                ("rr".into(), "5".into()),
+                ("rr".into(), "5".into()),
+                ("rr".into(), "404".into()),
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(names.len(), 1, "duplicates collapse, unknown threads drop");
+    assert_eq!(
+        names
+            .get(&("rr".to_string(), "5".to_string()))
+            .map(String::as_str),
+        Some("alpha")
+    );
+
+    let empty = repo.topic_names("telegram", &[]).await.unwrap();
+    assert!(
+        empty.is_empty(),
+        "an empty batch short-circuits to an empty map"
+    );
+}

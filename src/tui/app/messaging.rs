@@ -9,6 +9,7 @@ use super::onboarding::OnboardingWizard;
 use super::*;
 use anyhow::Result;
 use serde_json::Value;
+use std::collections::HashMap;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -877,6 +878,48 @@ impl App {
             .unwrap_or_default()
             .into_iter()
             .collect();
+
+        // The live name of every Telegram topic in this list, in ONE query
+        // (#2490). Telegram owns a topic's name: a rename lands in
+        // `channel_messages` and the rail follows on this load, no restart.
+        // Batched because a per-row lookup here would be a query per row per
+        // reload.
+        self.topic_titles = {
+            use crate::db::repository::channel_message::ChannelMessageRepository;
+            use crate::ui_core::rail;
+
+            let mut pairs = Vec::new();
+            let mut ids = Vec::new();
+            for s in &self.sessions {
+                let Some(title) = s.title.as_deref() else {
+                    continue;
+                };
+                let Some((chat_id, thread_id)) = rail::topic_thread(title) else {
+                    continue;
+                };
+                ids.push((s.id, chat_id.to_string(), thread_id.to_string()));
+                pairs.push((chat_id.to_string(), thread_id.to_string()));
+            }
+            if pairs.is_empty() {
+                HashMap::new()
+            } else {
+                let channel_repo = ChannelMessageRepository::new(self.session_service.pool());
+                match channel_repo.topic_names("telegram", &pairs).await {
+                    Ok(names) => ids
+                        .into_iter()
+                        .filter_map(|(id, chat_id, thread_id)| {
+                            names
+                                .get(&(chat_id, thread_id))
+                                .map(|name| (id, name.clone()))
+                        })
+                        .collect(),
+                    Err(e) => {
+                        tracing::warn!("topic titles: {e:#}");
+                        HashMap::new()
+                    }
+                }
+            }
+        };
         let in_list: std::collections::HashSet<Uuid> = self.sessions.iter().map(|s| s.id).collect();
         let parents = &self.topic_parents;
         let mut by_parent: std::collections::HashMap<Uuid, Vec<crate::db::models::Session>> =

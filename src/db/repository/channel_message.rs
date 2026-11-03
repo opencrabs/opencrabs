@@ -7,6 +7,7 @@ use crate::db::database::interact_err;
 use crate::db::models::ChannelMessage;
 use anyhow::{Context, Result};
 use rusqlite::{OptionalExtension, params};
+use std::collections::HashMap;
 
 /// Summary of a known chat
 pub struct ChatSummary {
@@ -664,6 +665,80 @@ impl ChannelMessageRepository {
             .await
             .map_err(interact_err)?
             .context("Failed to fetch latest topic name")
+    }
+
+    /// The live name of every requested thread, in ONE query (#2490).
+    ///
+    /// The rails resolve a whole batch of topic sessions per refresh pass, so
+    /// [`Self::latest_topic_name`] per row would be one query per row per pass.
+    /// This reads every requested thread at once and keeps that lookup's
+    /// precedence exactly: a rename (`topic_edited`) outranks a creation name,
+    /// newest first.
+    ///
+    /// `threads` is `(chat_id, thread_id)` pairs; duplicates are collapsed
+    /// before the query is built, so a caller never has to dedupe.
+    pub async fn topic_names(
+        &self,
+        channel: &str,
+        threads: &[(String, String)],
+    ) -> Result<HashMap<(String, String), String>> {
+        let mut wanted: Vec<(String, String)> = threads.to_vec();
+        wanted.sort();
+        wanted.dedup();
+        if wanted.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let ch = channel.to_string();
+        self.pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(
+                move |conn| -> Result<HashMap<(String, String), String>, rusqlite::Error> {
+                // One window function instead of a correlated subquery per
+                // pair: the ranking is the same ORDER BY `latest_topic_name`
+                // uses, applied per thread.
+                let mut sql = String::from(
+                    "SELECT channel_chat_id, thread_id, topic_name FROM ( \
+                       SELECT channel_chat_id, thread_id, topic_name, \
+                              ROW_NUMBER() OVER (PARTITION BY channel_chat_id, thread_id \
+                                ORDER BY (message_type = 'topic_edited') DESC, created_at DESC) AS rn \
+                       FROM channel_messages \
+                       WHERE channel = ?1 AND topic_name IS NOT NULL AND topic_name != '' \
+                         AND (channel_chat_id, thread_id) IN (VALUES ",
+                );
+                let slots: Vec<String> = (0..wanted.len())
+                    .map(|i| format!("(?{}, ?{})", i * 2 + 2, i * 2 + 3))
+                    .collect();
+                sql.push_str(&slots.join(", "));
+                sql.push_str(")) WHERE rn = 1");
+
+                let mut values: Vec<String> = Vec::with_capacity(wanted.len() * 2 + 1);
+                values.push(ch);
+                for (chat_id, thread_id) in &wanted {
+                    values.push(chat_id.clone());
+                    values.push(thread_id.clone());
+                }
+
+                let mut stmt = conn.prepare(&sql)?;
+                let rows = stmt.query_map(rusqlite::params_from_iter(values.iter()), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })?;
+                let mut out = HashMap::with_capacity(wanted.len());
+                for row in rows {
+                    let (chat_id, thread_id, name) = row?;
+                    out.insert((chat_id, thread_id), name);
+                }
+                Ok(out)
+            },
+            )
+            .await
+            .map_err(interact_err)?
+            .context("Failed to fetch topic names")
     }
 
     /// Recent user-sent request texts across ALL chats, newest first (#504).
