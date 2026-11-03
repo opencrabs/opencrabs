@@ -17,6 +17,10 @@ pub use opencrabs::tui::onboarding::{OnboardingStep, WizardMode};
 pub fn step_for_command(command: &str) -> Option<OnboardingStep> {
     match command {
         "/onboard" => Some(OnboardingStep::ModeSelect),
+        // `/workspace` is the wizard's own workspace step in the terminal
+        // (`tui::onboarding::deep_link`), so the window jumps to the same one
+        // instead of answering "terminal only" (#2469).
+        "/workspace" => Some(OnboardingStep::Workspace),
         "/channels" => Some(OnboardingStep::Channels),
         "/voice" => Some(OnboardingStep::VoiceSetup),
         "/image" => Some(OnboardingStep::ImageSetup),
@@ -1224,7 +1228,39 @@ mod tests {
             step_for_command("/doctor"),
             Some(OnboardingStep::HealthCheck)
         );
+        // #2469: `/workspace` was answered "terminal only" while the wizard it
+        // jumps to was already in the window. The terminal maps it to the same
+        // step (`tui::onboarding::deep_link`), so the two cannot disagree.
+        assert_eq!(
+            step_for_command("/workspace"),
+            Some(OnboardingStep::Workspace)
+        );
         assert_eq!(step_for_command("/nope"), None);
+    }
+
+    /// #2469: every name `step_for_command` answers must also be a command the
+    /// window claims to run, or the palette badges a screen it refuses.
+    #[test]
+    fn every_workspace_command_is_whitelisted_for_the_window() {
+        for name in [
+            "/onboard",
+            "/workspace",
+            "/channels",
+            "/voice",
+            "/image",
+            "/daemon",
+            "/brain",
+            "/doctor",
+        ] {
+            assert!(
+                step_for_command(name).is_some(),
+                "{name} has no wizard step"
+            );
+            assert!(
+                opencrabs::ui_core::commands::GUI_SUPPORTED.contains(&name),
+                "{name} opens a step but is missing from GUI_SUPPORTED"
+            );
+        }
     }
 
     #[test]

@@ -19,6 +19,8 @@
 
 use opencrabs::ui_core::commands::{self, Support};
 
+use super::text_commands::{self, TextCommand};
+
 /// What the window does about a command it runs.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum GuiAction {
@@ -40,12 +42,19 @@ pub enum GuiAction {
     OpenSessions,
     /// The model picker, or a switch when the line named a pair.
     OpenModels,
+    /// The skills list: every skill the terminal can invoke (#2466).
+    OpenSkills,
     /// The onboarding wizard, opened at the step this command names
     /// (`/channels`, `/voice`, `/daemon`, ...). The name travels with the
     /// action so each door lands on its own step and no two share an arm.
     OpenOnboard(&'static str),
     /// Close the window.
     Quit,
+    /// A command whose answer is text, or a turn the window composes itself
+    /// (#2469). The variant travels with the action so one arm covers the
+    /// whole family and the whitelist cannot list a name this window has no
+    /// answer for.
+    Text(TextCommand),
 }
 
 /// The window's reading of a submitted line.
@@ -79,15 +88,24 @@ pub fn parse_command(input: &str) -> Option<Outcome> {
     let invocation = commands::parse(input)?;
     Some(match commands::support(&invocation.name) {
         Support::Runs => match commands::lookup(&invocation.name) {
-            Some(cmd) => {
-                let action = action_for(cmd.name);
-                let arg = invocation.arg.trim();
-                if takes_argument(action) && !arg.is_empty() {
-                    Outcome::RunWith(action, arg.to_string())
-                } else {
-                    Outcome::Run(action)
+            Some(cmd) => match action_for(cmd.name) {
+                Some(action) => {
+                    let arg = invocation.arg.trim();
+                    if takes_argument(action) && !arg.is_empty() {
+                        Outcome::RunWith(action, arg.to_string())
+                    } else {
+                        Outcome::Run(action)
+                    }
                 }
-            }
+                // `support` said Runs and no arm answered: the two disagree.
+                // Saying "unknown" is the safe read; the parity test in this
+                // module fails first if it ever happens. A silent fallback to
+                // another screen used to hide exactly this (#2470).
+                None => Outcome::Unknown {
+                    typed: invocation.name,
+                    suggestion: None,
+                },
+            },
             // `support` said Runs, so `lookup` returning nothing would mean the
             // two disagree. Saying "unknown" is the safe read; the parity test
             // in this module fails first if it ever happens.
@@ -112,8 +130,8 @@ pub fn parse_command(input: &str) -> Option<Outcome> {
 ///
 /// Every name that list declares must land here, and every arm here must be in
 /// that list: `every_supported_name_has_an_action` walks both directions.
-fn action_for(name: &str) -> GuiAction {
-    match name {
+fn action_for(name: &str) -> Option<GuiAction> {
+    Some(match name {
         "/theme" => GuiAction::OpenThemes,
         "/evolve" => GuiAction::Evolve,
         "/usage" => GuiAction::OpenUsage,
@@ -122,8 +140,12 @@ fn action_for(name: &str) -> GuiAction {
         "/stop" => GuiAction::StopTurn,
         "/sessions" => GuiAction::OpenSessions,
         "/models" => GuiAction::OpenModels,
+        "/skills" => GuiAction::OpenSkills,
         "/mission-control" => GuiAction::OpenMissionControl,
         "/onboard" => GuiAction::OpenOnboard("/onboard"),
+        // The workspace step exists in the wizard already; the window just
+        // never offered the door the terminal's table declares (#2469).
+        "/workspace" => GuiAction::OpenOnboard("/workspace"),
         "/channels" => GuiAction::OpenOnboard("/channels"),
         "/voice" => GuiAction::OpenOnboard("/voice"),
         "/image" => GuiAction::OpenOnboard("/image"),
@@ -131,11 +153,8 @@ fn action_for(name: &str) -> GuiAction {
         "/brain" => GuiAction::OpenOnboard("/brain"),
         "/doctor" => GuiAction::OpenOnboard("/doctor"),
         "/exit" => GuiAction::Quit,
-        // Unreachable through `parse_command`: only names that `support`
-        // reports as Runs arrive here. Opening the ledger is the closest thing
-        // to harmless if a future edit breaks that.
-        _ => GuiAction::OpenUsage,
-    }
+        other => return text_commands::classify(other).map(GuiAction::Text),
+    })
 }
 
 /// Whether an action reads the text after the command. The
@@ -145,7 +164,7 @@ fn takes_argument(action: GuiAction) -> bool {
     // same argument the terminal reads off the full line (#271).
     matches!(
         action,
-        GuiAction::OpenModels | GuiAction::OpenOnboard("/channels")
+        GuiAction::OpenModels | GuiAction::OpenOnboard("/channels") | GuiAction::Text(_)
     )
 }
 
@@ -280,20 +299,22 @@ mod tests {
     }
 
     #[test]
-    fn a_real_command_without_a_screen_says_so() {
-        // Both are real: the window must not pretend they do not exist, and
-        // must not hand them to the model either. `/onboard` and the step
-        // commands are no longer in this set; they run in the window now.
-        assert_eq!(
-            parse_command("/workspace"),
-            Some(Outcome::Missing("/workspace"))
-        );
-        assert_eq!(
-            parse_command("/compact"),
-            Some(Outcome::Missing("/compact"))
-        );
-        let line = message(&parse_command("/compact").expect("a command")).expect("a line");
-        assert!(line.contains("/compact"), "{line}");
+    fn no_command_is_left_without_a_screen() {
+        // Every name the terminal offers answers on the window (#2469,
+        // #2470). The `Missing` arm stays for the day a new command lands in
+        // SLASH_COMMANDS before its window wiring does, so its line is still
+        // checked here: a real command must never be handed to the model.
+        for command in opencrabs::ui_core::commands::SLASH_COMMANDS {
+            let name = command.name;
+            let outcome = parse_command(name).expect("a real command");
+            assert!(
+                !matches!(outcome, Outcome::Missing(_)),
+                "{name} is listed but answers nothing on the window"
+            );
+        }
+
+        let line = message(&Outcome::Missing("/unwired")).expect("a line");
+        assert!(line.contains("/unwired"), "{line}");
     }
 
     #[test]
@@ -349,6 +370,98 @@ mod tests {
             commands::GUI_SUPPORTED.len(),
             "two names share one action: {:?}",
             commands::GUI_SUPPORTED
+        );
+    }
+
+    /// A stable name for each action, matched with no wildcard arm.
+    ///
+    /// Adding a variant to [`GuiAction`] fails to compile here until it is
+    /// named, which is the point: `/evolve` shipped an implemented arm that
+    /// [`commands::GUI_SUPPORTED`] never listed, so the palette badged it
+    /// "terminal only" while the window could already run it (#2470).
+    fn action_name(action: &GuiAction) -> &'static str {
+        match action {
+            GuiAction::Evolve => "Evolve",
+            GuiAction::OpenThemes => "OpenThemes",
+            GuiAction::OpenUsage => "OpenUsage",
+            GuiAction::OpenMissionControl => "OpenMissionControl",
+            GuiAction::ToggleHelp => "ToggleHelp",
+            GuiAction::NewSession => "NewSession",
+            GuiAction::StopTurn => "StopTurn",
+            GuiAction::OpenSessions => "OpenSessions",
+            GuiAction::OpenModels => "OpenModels",
+            GuiAction::OpenSkills => "OpenSkills",
+            GuiAction::OpenOnboard(_) => "OpenOnboard",
+            GuiAction::Quit => "Quit",
+            GuiAction::Text(_) => "Text",
+        }
+    }
+
+    /// Every action the window implements.
+    ///
+    /// Kept beside [`action_name`]: the exhaustive match forces a new variant
+    /// to be named, and this list forces it to be reachable. A name here that
+    /// no whitelisted command reaches is a dead arm; an action reached by the
+    /// whitelist but missing here is an unlisted feature.
+    const IMPLEMENTED: &[&str] = &[
+        "Evolve",
+        "OpenThemes",
+        "OpenUsage",
+        "OpenMissionControl",
+        "ToggleHelp",
+        "NewSession",
+        "StopTurn",
+        "OpenSessions",
+        "OpenModels",
+        "OpenSkills",
+        "OpenOnboard",
+        "Quit",
+        "Text",
+    ];
+
+    /// #2469: the text commands answer through `GuiAction::Text`, so the
+    /// whitelist, the dispatcher and this module's own table must name the
+    /// same set. A name added to one and not the others is exactly the drift
+    /// that made the window answer "terminal only" for a command it could run.
+    #[test]
+    fn every_text_command_is_whitelisted_and_dispatches_to_text() {
+        for name in text_commands::NAMES {
+            assert!(
+                commands::GUI_SUPPORTED.contains(name),
+                "{name} is answered by the window but missing from GUI_SUPPORTED"
+            );
+            match parse_command(name) {
+                Some(Outcome::Run(GuiAction::Text(_)))
+                | Some(Outcome::RunWith(GuiAction::Text(_), _)) => {}
+                other => panic!("{name} did not dispatch to Text: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn every_action_reachable_from_a_whitelisted_name() {
+        let reachable: std::collections::HashSet<&'static str> = commands::GUI_SUPPORTED
+            .iter()
+            .filter_map(|name| match parse_command(name) {
+                Some(Outcome::Run(action)) => Some(action_name(&action)),
+                Some(Outcome::RunWith(action, _)) => Some(action_name(&action)),
+                _ => None,
+            })
+            .collect();
+
+        let implemented: std::collections::HashSet<&'static str> =
+            IMPLEMENTED.iter().copied().collect();
+
+        let dead: Vec<&&str> = implemented.difference(&reachable).collect();
+        assert!(
+            dead.is_empty(),
+            "implemented but unreachable from GUI_SUPPORTED: {dead:?}"
+        );
+
+        let unlisted: Vec<&&str> = reachable.difference(&implemented).collect();
+        assert!(
+            unlisted.is_empty(),
+            "reachable but missing from IMPLEMENTED: {unlisted:?}"
         );
     }
 }

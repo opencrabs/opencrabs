@@ -164,7 +164,13 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
 /// called themes and the key chord is "themes"; the terminal has always spelled
 /// the command `/theme`. Both resolve to the one table entry so neither
 /// frontend grows a second name.
-pub const ALIASES: &[(&str, &str)] = &[("/themes", "/theme")];
+pub const ALIASES: &[(&str, &str)] = &[
+    ("/themes", "/theme"),
+    // The terminal has always answered both spellings; the window reads the
+    // same table, so it answers them too (#2469).
+    ("/showplan", "/show-plan"),
+    ("/show_plan", "/show-plan"),
+];
 
 /// Commands this frontend runs today, checked against the table by a test so a
 /// typo cannot quietly become a command that "exists" but no frontend answers.
@@ -181,14 +187,33 @@ pub const GUI_SUPPORTED: &[&str] = &[
     "/sessions",
     "/mission-control",
     "/models",
+    "/skills",
     "/onboard",
+    "/workspace",
     "/channels",
     "/voice",
     "/image",
     "/daemon",
     "/brain",
     "/doctor",
+    "/evolve",
     "/exit",
+    // The text commands (#2469). Their answers live in `gui::text_commands`;
+    // the engine behind each one is the terminal's own.
+    "/compact",
+    "/clear",
+    "/rtk",
+    "/plan",
+    "/show-plan",
+    "/execute",
+    "/discard",
+    "/approve",
+    "/cd",
+    "/goal",
+    "/profiles",
+    "/restart",
+    "/whisper",
+    "/cowork",
 ];
 
 /// Whether a frontend can run a command it recognises.
@@ -374,8 +399,18 @@ mod tests {
     #[test]
     fn support_separates_missing_from_unknown() {
         assert_eq!(support("/usage"), Support::Runs);
-        // Real command, no window screen yet: not a typo.
-        assert_eq!(support("/workspace"), Support::Missing);
+        // `/workspace` used to be the example of a real command with no
+        // screen; the window jumps to the wizard's own workspace step now, so
+        // it runs there and nothing in the table is left unanswered (#2469).
+        assert_eq!(support("/workspace"), Support::Runs);
+        for cmd in SLASH_COMMANDS {
+            assert_ne!(
+                support(cmd.name),
+                Support::Missing,
+                "{} is in the table but has no window screen",
+                cmd.name
+            );
+        }
         // The window draws Mission Control now, so it runs there.
         assert_eq!(support("/mission-control"), Support::Runs);
         assert_eq!(support("/not-a-command"), Support::Unknown);

@@ -341,11 +341,13 @@ mod tests {
         assert_eq!(status(&state), "2 matches");
     }
 
-    /// A command the terminal runs and this window does not keeps its row and
-    /// is marked, so a user who saw it in the terminal is not left wondering
-    /// why it vanished here (#2458).
+    /// Every command the terminal runs prints its row here, and since the
+    /// window answers all of them none is marked "terminal only" any more
+    /// (#2469, #2470). The mark itself is kept: the day a command lands in
+    /// the shared table before its window wiring does, this same loop marks
+    /// it rather than the row vanishing.
     #[test]
-    fn a_command_this_window_cannot_run_keeps_its_row_and_is_marked() {
+    fn every_command_row_is_runnable_on_the_window() {
         use opencrabs::ui_core::commands::{SLASH_COMMANDS, Support, support};
 
         let items: Vec<PaletteItem> = SLASH_COMMANDS
@@ -354,24 +356,27 @@ mod tests {
             .collect();
         let printed = rows(&state_with(items));
 
+        assert_eq!(printed.len(), SLASH_COMMANDS.len(), "every command prints");
+        for row in &printed {
+            assert!(
+                !row.missing,
+                "{} is marked terminal only but the window runs it",
+                row.title
+            );
+        }
+
+        // The gap that would mark a row is gone, so the badge's own trigger is
+        // asserted directly: a name the shared table does not know is not a
+        // gap, it is a typo.
         let gap = SLASH_COMMANDS
             .iter()
-            .find(|cmd| support(cmd.name) == Support::Missing)
-            .expect("the shared table has at least one window gap");
-        let row = printed
-            .iter()
-            .find(|row| row.title == gap.name)
-            .expect("a missing command keeps its row");
-        assert!(row.missing, "{} must be marked missing", gap.name);
+            .filter(|cmd| support(cmd.name) == Support::Missing)
+            .count();
+        assert_eq!(gap, 0, "the window answers every command in the table");
 
-        let runs = SLASH_COMMANDS
-            .iter()
-            .find(|cmd| support(cmd.name) == Support::Runs)
-            .expect("the shared table has at least one command this window runs");
-        let row = printed
-            .iter()
-            .find(|row| row.title == runs.name)
-            .expect("a runnable command prints its row");
-        assert!(!row.missing, "{} must not be marked missing", runs.name);
+        // Only command rows can carry the mark; a session or model row that
+        // happens to be named like one never does.
+        let sessions = rows(&state_with(vec![item("/usage", PaletteKind::Session)]));
+        assert!(!sessions[0].missing, "a session row is never terminal only");
     }
 }

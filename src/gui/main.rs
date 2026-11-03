@@ -42,6 +42,8 @@ mod plan_strip;
 mod preview;
 mod screen_keys;
 mod sessions;
+mod skills_view;
+mod text_commands;
 mod theme;
 mod themes_view;
 mod topic_tabs;
@@ -116,6 +118,9 @@ enum Screen {
     /// Mission Control: the inbox, analytics, activity and schedule panels,
     /// the window's copy of the terminal's own screen (#2426).
     MissionControl,
+    /// The skills list: every skill the terminal can invoke, from the same
+    /// loader, runnable from the window (#2466).
+    Skills,
 }
 
 /// The second pane of a split: its session, transcript, scroll and layout (#2438).
@@ -496,6 +501,13 @@ struct Dashboard {
     models_rows: Vec<models::Row>,
     /// The row the arrows stand on.
     models_index: usize,
+    /// The skills screen's rows, read from the terminal's own loader when the
+    /// screen opens so the list can never drift from `/skills` in the TUI,
+    /// and the row the arrows stand on.
+    skills_all: Vec<opencrabs::brain::skills::Skill>,
+    skills_rows: Vec<opencrabs::brain::skills::Skill>,
+    skills_query: String,
+    skills_index: usize,
     /// The onboarding wizard while its screen is open. Built on first open:
     /// constructing it reads the live config, which is not something to do on
     /// every window start when most sessions never onboard.
@@ -911,8 +923,14 @@ impl Dashboard {
             find::Surface::Models => self.open_models(None, cx),
             find::Surface::Sessions => self.toggle_rail(cx),
             find::Surface::Help => self.toggle_help(cx),
-            find::Surface::Skills => self.send_message("/skills".to_string(), cx),
-            find::Surface::Profiles => self.send_message("/profiles".to_string(), cx),
+            find::Surface::Skills => self.open_skills(cx),
+            // `/profiles` is a text command now (#2469): the palette row takes
+            // the same door as typing it, never the model.
+            find::Surface::Profiles => {
+                if let Some(outcome) = commands::parse_command("/profiles") {
+                    self.run_command(outcome, cx);
+                }
+            }
             find::Surface::MissionControl => self.open_mission_control(cx),
         }
     }
@@ -982,7 +1000,9 @@ impl Dashboard {
             commands::GuiAction::StopTurn => self.stop_turn(cx),
             commands::GuiAction::OpenSessions => self.toggle_rail(cx),
             commands::GuiAction::OpenModels => self.open_models(arg, cx),
+            commands::GuiAction::OpenSkills => self.open_skills(cx),
             commands::GuiAction::OpenOnboard(name) => self.open_onboard(name, arg, cx),
+            commands::GuiAction::Text(command) => self.run_text_command(command, arg, cx),
             commands::GuiAction::Quit => cx.quit(),
             commands::GuiAction::Evolve => {
                 let session = self.transcript.session.unwrap_or_else(Uuid::nil);
@@ -1086,6 +1106,75 @@ impl Dashboard {
         .detach();
     }
 
+    /// The commands that answer in text or compose a turn (#2469).
+    ///
+    /// `/compact` and `/goal` are dispatched here because they need
+    /// `send_message`, which only the window has. Everything else runs on the
+    /// bridge against the engine's own entry points, so the answer a window
+    /// user reads is the one the terminal prints.
+    fn run_text_command(
+        &mut self,
+        command: text_commands::TextCommand,
+        arg: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        use text_commands::TextCommand as C;
+        let arg = arg.unwrap_or_default();
+        match command {
+            C::Compact => {
+                let pct = match (self.ctx_tokens, self.ctx_max) {
+                    (Some(used), max) if max > 0 => f64::from(used) / f64::from(max) * 100.0,
+                    _ => 0.0,
+                };
+                // Send first, then report (#1375): a notice printed before the
+                // trigger claims a compaction that may never start.
+                self.send_message(
+                    "[SYSTEM: Compact context now. Summarize this conversation for continuity.]"
+                        .to_string(),
+                    cx,
+                );
+                self.live
+                    .notices
+                    .push(opencrabs::tui::compact_notice::requested(pct));
+                cx.notify();
+            }
+            C::Cowork => {
+                // No screen in either frontend: the agent calls the tool that
+                // builds the deep link, exactly as the terminal asks it to.
+                self.send_message(text_commands::cowork_prompt(&arg), cx);
+            }
+            C::Goal => {
+                if opencrabs::brain::goal::is_bare(&arg) {
+                    // Bare `/goal` is denied with the usage line and never
+                    // reaches the model, exactly as the terminal does.
+                    self.live
+                        .notices
+                        .push(opencrabs::brain::goal::goal_usage_warning());
+                    cx.notify();
+                } else {
+                    self.send_message(opencrabs::brain::goal::goal_command_prompt(&arg), cx);
+                }
+            }
+            other => {
+                let Some(session) = self.transcript.session else {
+                    self.live
+                        .notices
+                        .push("No conversation is open. Type /new first.".to_string());
+                    cx.notify();
+                    return;
+                };
+                agent_bridge::spawn_text_command(
+                    self.db_path.clone(),
+                    session,
+                    text_commands::name(other).to_string(),
+                    arg,
+                    self.sink.clone(),
+                );
+                cx.notify();
+            }
+        }
+    }
+
     /// N in the pick: a new session that fills the second pane (#2438).
     fn split_new(&mut self, cx: &mut Context<Self>) {
         self.split_creating = true;
@@ -1145,6 +1234,51 @@ impl Dashboard {
         self.sessions.rail_menu = None;
         self.refocus_screen();
         cx.notify();
+    }
+
+    /// `/skills` opens the list the terminal's own dialog shows: every skill
+    /// the loader returns, built-ins first, from the same three places. Enter
+    /// runs the one under the highlight by submitting its prompt body, which
+    /// is exactly what the slash does in the TUI (#2466).
+    fn open_skills(&mut self, cx: &mut Context<Self>) {
+        self.skills_all = skills_view::rows();
+        self.skills_query.clear();
+        self.refresh_skills();
+        self.skills_index = 0;
+        self.screen = Screen::Skills;
+        self.rail_actions = None;
+        self.sessions.rail_menu = None;
+        self.refocus_screen();
+        cx.notify();
+    }
+
+    /// Narrow the visible rows to `skills_query`, the same filter the
+    /// terminal's dialog applies on every keystroke. The selection restarts at
+    /// the top because the row that was highlighted may no longer exist.
+    fn refresh_skills(&mut self) {
+        self.skills_rows = skills_view::matching(&self.skills_all, &self.skills_query)
+            .into_iter()
+            .cloned()
+            .collect();
+        let last = self.skills_rows.len().saturating_sub(1);
+        self.skills_index = self.skills_index.min(last);
+    }
+
+    /// Run the skill at `index`: back to the conversation, then the same
+    /// prompt the terminal would have sent. `prompt`, not the raw body, so a
+    /// `review_gate` skill carries its reminder into the turn.
+    fn run_skill(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(skill) = self.skills_rows.get(index) else {
+            return;
+        };
+        let prompt = skills_view::prompt(skill);
+        let slash = skill.slash_name.clone();
+        self.screen = Screen::Chat;
+        self.rail_actions = None;
+        self.sessions.rail_menu = None;
+        self.refocus_screen();
+        self.live.notices.push(format!("Running {slash}"));
+        self.send_message(prompt, cx);
     }
 
     /// The wizard owns the keyboard while its screen is open: Tab and the
@@ -1440,6 +1574,9 @@ impl Dashboard {
                 self.screen = Screen::Usage;
             }
             Screen::Themes => self.close_themes(true, cx),
+            // The skills list is a full screen too: ctrl+shift+u leaves it for
+            // the ledger, the same as any other screen.
+            Screen::Skills => self.screen = Screen::Usage,
         }
         self.refocus_screen();
         cx.notify();
@@ -2063,6 +2200,17 @@ impl Dashboard {
                 agent_bridge::TurnEvent::EvolveDone(text) => {
                     self.live.notices.push(text);
                     cx.notify();
+                }
+                // A text command answered on the bridge: one line, the same
+                // wording the terminal prints (#2469).
+                agent_bridge::TurnEvent::CommandReply(text) => {
+                    self.live.notices.push(text);
+                    cx.notify();
+                }
+                // A text command that needs one visible turn: `/plan <query>`,
+                // `/execute` seeding the checklist, or `/goal`.
+                agent_bridge::TurnEvent::CommandTurn(text) => {
+                    self.send_message(text, cx);
                 }
                 agent_bridge::TurnEvent::SessionDeleted(id) => {
                     logging::info(&format!("session deleted {id}"));
@@ -3455,7 +3603,7 @@ impl Dashboard {
             }
             // Esc on the models screen leaves it and changes nothing: the
             // picker is a list, not a commitment.
-            if self.screen == Screen::Models {
+            if self.screen == Screen::Models || self.screen == Screen::Skills {
                 self.screen = Screen::Chat;
                 self.refocus_screen();
                 cx.notify();
@@ -3679,6 +3827,38 @@ impl Dashboard {
                     }
                 }
                 _ => {}
+            }
+            cx.notify();
+            return;
+        }
+        // The skills screen is a list too: arrows walk it and Enter runs the
+        // skill under the highlight, the same act as typing its slash.
+        if self.screen == Screen::Skills {
+            let last = self.skills_rows.len().saturating_sub(1);
+            match ev.keystroke.key.as_str() {
+                "up" => self.skills_index = self.skills_index.saturating_sub(1),
+                "down" => self.skills_index = (self.skills_index + 1).min(last),
+                "enter" => self.run_skill(self.skills_index.min(last), cx),
+                "backspace" => {
+                    self.skills_query.pop();
+                    self.skills_index = 0;
+                    self.refresh_skills();
+                }
+                _ => {
+                    // Typing narrows the list, as it does in the terminal's
+                    // dialog: a list of forty skills is unreadable without it.
+                    if let Some(ch) = ev
+                        .keystroke
+                        .key_char
+                        .as_ref()
+                        .and_then(|s| s.chars().next())
+                        && !ch.is_control()
+                    {
+                        self.skills_query.push(ch);
+                        self.skills_index = 0;
+                        self.refresh_skills();
+                    }
+                }
             }
             cx.notify();
             return;
@@ -3949,6 +4129,7 @@ impl Render for Dashboard {
             Screen::Files => "OpenCrabs \u{b7} files".to_string(),
             Screen::Themes => "OpenCrabs \u{b7} themes".to_string(),
             Screen::Models => "OpenCrabs \u{b7} models".to_string(),
+            Screen::Skills => "OpenCrabs \u{b7} skills".to_string(),
             Screen::Onboard => "OpenCrabs \u{b7} onboarding".to_string(),
             Screen::MissionControl => "OpenCrabs \u{b7} mission control".to_string(),
             Screen::Chat => format!(
@@ -5514,6 +5695,85 @@ impl Render for Dashboard {
                     );
                 (scroller.into_any_element(), footer.into_any_element())
             }
+            Screen::Skills => {
+                // The same list `/skills` opens in the terminal, from the same
+                // loader. A skill is run by its row: Enter or a click submits
+                // the prompt the slash would have submitted (#2466).
+                let shown = palette::current();
+                let last = self.skills_rows.len().saturating_sub(1);
+                let current = self.skills_index.min(last);
+                let mut list = div().flex().flex_col().gap_1();
+                for (index, skill) in self.skills_rows.iter().enumerate() {
+                    let selected = index == current;
+                    let name = skill.slash_name.clone();
+                    let description = skill.description.clone();
+                    let tag = skills_view::source_label(skill);
+                    let mut head = div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(text(name, Size::Sm, shown.text))
+                        .child(text(tag, Size::Xs, shown.text_muted));
+                    if skill.review_gate {
+                        // The gate is visible before it runs: a skill that will
+                        // stop for approval says so on its row.
+                        head = head.child(text("review gate", Size::Xs, shown.amber));
+                    }
+                    let mut entry = div()
+                        .id(SharedString::from(format!("skill-row-{index}")))
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .px_3()
+                        .py_2()
+                        .rounded(px(6.0))
+                        .child(head)
+                        .child(text(description, Size::Xs, shown.text_muted));
+                    if selected {
+                        entry = entry.bg(rgb(shown.panel_hi));
+                    }
+                    list =
+                        list.child(entry.on_click(cx.listener(move |this, _ev, _window, cx| {
+                            this.skills_index = index;
+                            this.run_skill(index, cx);
+                        })));
+                }
+                let scroller = div()
+                    .id("skills-body")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(list);
+                let count = self.skills_rows.len();
+                // The typed filter is shown, so a short list never looks like a
+                // loader failure: the row says what is being narrowed by.
+                let counted = if self.skills_query.is_empty() {
+                    format!("{count} skill{}", if count == 1 { "" } else { "s" })
+                } else {
+                    format!(
+                        "{count} of {} skills \u{b7} filter: {}",
+                        self.skills_all.len(),
+                        self.skills_query
+                    )
+                };
+                let footer = div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .w_full()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(shown.text_muted))
+                            .child(SharedString::from(counted)),
+                    )
+                    .child(div().text_xs().text_color(rgb(shown.text_muted)).child(
+                        "enter \u{b7} run \u{b7} type \u{b7} filter \u{b7} esc \u{b7} back",
+                    ));
+                (scroller.into_any_element(), footer.into_any_element())
+            }
             Screen::Themes => {
                 // The list is a sidebar, not a takeover: the conversation stays
                 // on screen and the preview repaints the whole window around
@@ -5844,6 +6104,7 @@ impl Render for Dashboard {
             Screen::Files => right.child(footer),
             Screen::Themes => right.child(footer),
             Screen::Models => right.child(footer),
+            Screen::Skills => right.child(footer),
             Screen::Onboard => right.child(footer),
             Screen::MissionControl => right.child(footer),
         };
@@ -6409,6 +6670,10 @@ fn main() {
                         themes_history: Vec::new(),
                         models_rows: Vec::new(),
                         models_index: 0,
+                        skills_all: Vec::new(),
+                        skills_rows: Vec::new(),
+                        skills_query: String::new(),
+                        skills_index: 0,
                         onboard: None,
                         plan: plan_strip::PlanStripState::default(),
                         plan_for: None,

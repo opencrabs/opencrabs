@@ -98,6 +98,13 @@ pub enum TurnEvent {
     ModelSwitched(String),
     /// A model switch could not be attempted; carries the reason.
     ModelSwitchFailed(String),
+    /// A text command answered off the UI thread; the line goes to the
+    /// notices (#2469).
+    CommandReply(String),
+    /// A text command asking for one visible turn to be dispatched on the UI
+    /// thread: `/plan <query>`, `/execute` seeding the checklist, or `/clear`
+    /// asking the agent to acknowledge the cut.
+    CommandTurn(String),
     /// Personalized brain files were written from the onboarding notes; carries
     /// the line naming how many landed.
     BrainReady(String),
@@ -981,5 +988,268 @@ pub fn spawn_brain_generation(
         });
     if let Err(e) = spawned {
         let _ = error_sink.send(TurnEvent::BrainFailed(format!("thread: {e}")));
+    }
+}
+
+/// Run one of the window's text commands off the UI thread (#2469).
+///
+/// The work is the engine's own: plan mode is `utils::plan_mode`, clear is
+/// `AgentService::clear_context` (the call the channels make, which persists
+/// the marker the loader cuts at), restart is `SelfUpdater`, and the approval
+/// policy is the value `Config::write_key` already persists for the terminal.
+/// Nothing here re-implements a command; it only decides which engine call
+/// answers the line and what the window should paint.
+pub fn spawn_text_command(
+    db_path: PathBuf,
+    session_id: Uuid,
+    name: String,
+    arg: String,
+    sink: EventSink,
+) {
+    let spawned = std::thread::Builder::new()
+        .stack_size(4 * 1024 * 1024)
+        .name("gui-text-command".into())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    crate::logging::error(&format!("command runtime: {e}"));
+                    let _ = sink.send(TurnEvent::CommandReply(format!("command: {e}")));
+                    return;
+                }
+            };
+            let events = runtime.block_on(run_text_command(&db_path, session_id, &name, &arg));
+            for event in events {
+                if let Err(e) = sink.send(event) {
+                    crate::logging::error(&format!("command result not delivered: {e}"));
+                    break;
+                }
+            }
+        });
+    if let Err(e) = spawned {
+        crate::logging::error(&format!("command thread: {e}"));
+    }
+}
+
+/// The engine calls behind one text command, in order.
+async fn run_text_command(
+    db_path: &std::path::Path,
+    session_id: Uuid,
+    name: &str,
+    arg: &str,
+) -> Vec<TurnEvent> {
+    use super::text_commands as tc;
+
+    let Some(command) = tc::classify(name) else {
+        return vec![TurnEvent::CommandReply(format!(
+            "{name} is not a window command."
+        ))];
+    };
+
+    match command {
+        tc::TextCommand::Plan => {
+            let line = opencrabs::utils::plan_mode::enter_plan_mode(session_id).await;
+            let mut out = vec![TurnEvent::CommandReply(line)];
+            // `/plan <query>` enters plan mode and uses the trailing text as
+            // the planning intent, exactly as the channels do (#579).
+            if !arg.is_empty() {
+                out.push(TurnEvent::CommandTurn(arg.to_string()));
+            }
+            out
+        }
+        tc::TextCommand::ShowPlan => vec![TurnEvent::CommandReply(
+            opencrabs::utils::plan_mode::show_plan(session_id).await,
+        )],
+        tc::TextCommand::Execute => match opencrabs::utils::plan_mode::try_approve(
+            session_id,
+            opencrabs::tui::plan::ApprovalSource::User,
+        )
+        .await
+        {
+            opencrabs::utils::plan_mode::ApproveOutcome::Refused(text) => {
+                vec![TurnEvent::CommandReply(text)]
+            }
+            opencrabs::utils::plan_mode::ApproveOutcome::SeedTurn { prompt } => {
+                vec![TurnEvent::CommandTurn(prompt)]
+            }
+        },
+        tc::TextCommand::Discard => {
+            let pool = match Database::connect(db_path).await {
+                Ok(db) => db.pool().clone(),
+                Err(e) => {
+                    return vec![TurnEvent::CommandReply(format!(
+                        "/discard could not open the database: {e}"
+                    ))];
+                }
+            };
+            let svc = ServiceContext::new(pool);
+            vec![TurnEvent::CommandReply(
+                opencrabs::utils::plan_mode::discard(session_id, &svc).await,
+            )]
+        }
+        tc::TextCommand::Clear => match bridge() {
+            Some(bridge) => match bridge.service.clear_context(session_id).await {
+                Ok(receipt) => vec![TurnEvent::CommandReply(
+                    opencrabs::tui::clear_notice::cleared(&receipt),
+                )],
+                Err(e) => vec![TurnEvent::CommandReply(
+                    opencrabs::tui::clear_notice::failed(&e),
+                )],
+            },
+            None => vec![TurnEvent::CommandReply(
+                "/clear needs the agent running; it is offline right now.".to_string(),
+            )],
+        },
+        tc::TextCommand::Rtk => {
+            #[cfg(feature = "rtk")]
+            {
+                if !opencrabs::rtk::is_rtk_available().await {
+                    return vec![TurnEvent::CommandReply(
+                        opencrabs::rtk::RTK_NOT_INSTALLED_HELP.to_string(),
+                    )];
+                }
+                match tokio::process::Command::new("rtk")
+                    .arg("gain")
+                    .output()
+                    .await
+                {
+                    Ok(output) => vec![TurnEvent::CommandReply(tc::rtk_reply(
+                        output.status.success(),
+                        &String::from_utf8_lossy(&output.stdout),
+                        &String::from_utf8_lossy(&output.stderr),
+                    ))],
+                    Err(e) => vec![TurnEvent::CommandReply(format!("rtk gain: {e}"))],
+                }
+            }
+            #[cfg(not(feature = "rtk"))]
+            {
+                vec![TurnEvent::CommandReply(
+                    "RTK is not compiled into this build.".to_string(),
+                )]
+            }
+        }
+        tc::TextCommand::Approve => {
+            if arg.is_empty() {
+                let policy = opencrabs::config::Config::load()
+                    .map(|cfg| cfg.agent.approval_policy)
+                    .unwrap_or_else(|_| "ask".to_string());
+                vec![TurnEvent::CommandReply(tc::approval_reply(&policy))]
+            } else {
+                match tc::approval_target(arg) {
+                    Some(policy) => match opencrabs::config::Config::write_key(
+                        "agent",
+                        "approval_policy",
+                        policy,
+                    ) {
+                        Ok(_) => {
+                            // Both halves: the file and the live service. A
+                            // written key alone would leave the running window
+                            // gating tools by the policy it started with, which
+                            // is the staleness the terminal had to rebuild for.
+                            if let Some(b) = bridge() {
+                                b.service.set_auto_approve_tools(
+                                    opencrabs::utils::approval::policy_auto_approves(policy),
+                                );
+                            }
+                            vec![TurnEvent::CommandReply(tc::approval_set(policy))]
+                        }
+                        Err(e) => vec![TurnEvent::CommandReply(format!(
+                            "/approve could not write the policy: {e}"
+                        ))],
+                    },
+                    None => vec![TurnEvent::CommandReply(tc::approval_unknown(arg))],
+                }
+            }
+        }
+        tc::TextCommand::Cd => {
+            if arg.is_empty() {
+                // The session's own directory, which falls back to the
+                // service's, so `/cd` never answers with a path the next turn
+                // will not actually run in.
+                let here = bridge()
+                    .map(|b| {
+                        b.service
+                            .get_working_directory_for_session(session_id)
+                            .display()
+                            .to_string()
+                    })
+                    .unwrap_or_else(|| "(unknown)".to_string());
+                return vec![TurnEvent::CommandReply(tc::cd_current(&here))];
+            }
+            let expanded = opencrabs::brain::tools::error::expand_tilde(arg);
+            if !expanded.is_dir() {
+                return vec![TurnEvent::CommandReply(tc::cd_not_a_directory(arg))];
+            }
+            let canonical = expanded.canonicalize().unwrap_or(expanded);
+            match bridge() {
+                Some(bridge) => {
+                    bridge
+                        .service
+                        .set_working_directory_for_session(session_id, canonical.clone());
+                    vec![TurnEvent::CommandReply(tc::cd_reply(
+                        &canonical.display().to_string(),
+                    ))]
+                }
+                None => vec![TurnEvent::CommandReply(format!(
+                    "{} (the agent is offline, so the change was not applied)",
+                    tc::cd_not_a_directory(arg)
+                ))],
+            }
+        }
+        tc::TextCommand::Profiles => {
+            let current = opencrabs::config::profile::current_profile_name();
+            let entries: Vec<(String, Option<String>)> =
+                opencrabs::config::profile::list_profiles()
+                    .map(|rows| {
+                        rows.into_iter()
+                            .map(|row| (row.name, row.description))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+            vec![TurnEvent::CommandReply(tc::profiles_reply(
+                &entries, &current,
+            ))]
+        }
+        tc::TextCommand::Restart => {
+            // Shares the terminal's restart so the session is resumed on the
+            // way back up instead of coming back to an empty chat. Only
+            // returns when the restart could not be started.
+            match opencrabs::brain::SelfUpdater::auto_detect().and_then(|u| u.restart(session_id)) {
+                Ok(()) => Vec::new(),
+                Err(e) => vec![TurnEvent::CommandReply(format!(
+                    "/restart could not cycle the process: {e}"
+                ))],
+            }
+        }
+        tc::TextCommand::Whisper => {
+            // The terminal's own installer and its own binary, launched the
+            // same way: `/whisper` must not grow a second downloader here.
+            match opencrabs::tui::app::ensure_whispercrabs().await {
+                Ok(binary) => {
+                    match std::process::Command::new(&binary)
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn()
+                    {
+                        Ok(_) => vec![TurnEvent::CommandReply(tc::whisper_reply())],
+                        Err(e) => vec![TurnEvent::CommandReply(tc::whisper_failed(&format!(
+                            "Failed to launch WhisperCrabs: {e}"
+                        )))],
+                    }
+                }
+                Err(e) => vec![TurnEvent::CommandReply(tc::whisper_failed(&e.to_string()))],
+            }
+        }
+        // Handled on the UI thread: both compose a turn rather than reading
+        // the engine, so the window dispatches them where `send_message` lives.
+        tc::TextCommand::Compact | tc::TextCommand::Goal | tc::TextCommand::Cowork => {
+            vec![TurnEvent::CommandReply(format!(
+                "{name} is dispatched by the window, not the bridge."
+            ))]
+        }
     }
 }
