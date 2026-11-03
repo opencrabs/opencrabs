@@ -251,19 +251,37 @@ pub const ROWS: &[HelpRow] = &[
         "Scroll history",
     ),
     row(HelpSection::Chat, "at", "@", None, "File picker"),
-    // The split panes are a window feature: `ui_core::split` holds the chord
-    // and the layout rule, the terminal has no panes to put anywhere yet.
-    window_row(
+    // The split panes (#2438, #2471, #2474). The terminal splits from the
+    // sessions screen with a bare glyph and the window splits from anywhere
+    // with the chord, so each row carries both spellings and both help
+    // screens print it from this one table instead of keeping a copy.
+    row(
         HelpSection::Chat,
         "ctrl+shift+|",
-        "ctrl-shift-|",
-        "Split: two sessions side by side",
+        "| (sessions)",
+        Some("ctrl-shift-|"),
+        "Split the chat side by side",
     ),
-    window_row(
+    row(
         HelpSection::Chat,
         "ctrl+shift+_",
-        "ctrl-shift-_",
-        "Split: two sessions stacked",
+        "_ (sessions)",
+        Some("ctrl-shift-_"),
+        "Split the chat stacked",
+    ),
+    row(
+        HelpSection::Chat,
+        "tab",
+        "Tab",
+        Some("tab"),
+        "Switch pane: next gets the caret",
+    ),
+    row(
+        HelpSection::Chat,
+        "ctrl+x",
+        "Ctrl+X",
+        Some("ctrl-x"),
+        "Close the pane holding the caret",
     ),
     // ── INPUT EDITING ──
     row(
@@ -453,6 +471,10 @@ mod tests {
         "Escape (x2)",
         "Page Up/Down",
         "@",
+        "| (sessions)",
+        "_ (sessions)",
+        "Tab",
+        "Ctrl+X",
         "↑ / ↓",
         "← / →",
         "Ctrl/Alt+←→",
