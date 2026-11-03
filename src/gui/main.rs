@@ -46,6 +46,7 @@ mod skills_view;
 mod text_commands;
 mod theme;
 mod themes_view;
+mod topic_icons;
 mod topic_tabs;
 mod transcript;
 mod usage_view;
@@ -3030,15 +3031,18 @@ impl Dashboard {
                     cx.stop_propagation();
                     this.open_session(id, cx);
                 });
-                // A topic with its own icon shows it before the name, and
-                // the name is shortened to the tab's two words (#2414, #2477).
-                // The icon is not a word, so it is added after the shortening
-                // rather than counted as one.
-                let label = match self.sessions.topic_icons.get(&id) {
-                    Some(icon) => format!("{icon} {}", topic_label(&title(id))),
-                    None => topic_label(&title(id)),
+                // The icon sits before the name and is not a word, so the
+                // two-word shortening (#2477) is applied to the name alone.
+                // A stored picture is drawn; a stored emoji stays text (#2478).
+                let stored = self.sessions.topic_icons.get(&id).cloned();
+                let picture = stored.as_deref().and_then(topic_icons::tab_icon);
+                let label = topic_label(&title(id));
+                let label = match (&picture, stored.as_deref()) {
+                    (Some(_), _) => label,
+                    (None, Some(icon)) => format!("{icon} {label}"),
+                    (None, None) => label,
                 };
-                topic_tab(id, label, id == open, move |ev, window, app| {
+                topic_tab(id, label, picture, id == open, move |ev, window, app| {
                     click(ev, window, app)
                 })
                 .into_any_element()
@@ -6496,23 +6500,21 @@ impl Render for Dashboard {
                 .topic_draft_icon
                 .clone()
                 .unwrap_or_else(|| DEFAULT_TOPIC_ICON.to_string());
-            let picks: Vec<Stateful<Div>> = TOPIC_ICONS
+            let picks: Vec<Stateful<Div>> = topic_icons::TOPIC_ICONS
                 .iter()
-                .map(|glyph| {
-                    let glyph: &'static str = glyph;
+                .map(|&(name, bytes)| {
                     let pick = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
-                        this.topic_draft_icon = Some(glyph.to_string());
+                        this.topic_draft_icon = Some(topic_icons::store_name(name));
                         cx.notify();
                     });
                     div()
-                        .id(SharedString::from(format!("topic-icon-{glyph}")))
-                        .px_1()
-                        .py_0p5()
+                        .id(SharedString::from(format!("topic-icon-{name}")))
+                        .p_0p5()
                         .rounded_sm()
                         .cursor_pointer()
                         .hover(|d| d.bg(rgb(palette::current().panel_hi)))
                         .on_click(pick)
-                        .child(SharedString::from(glyph))
+                        .child(topic_icons::picture(bytes, 1.5))
                 })
                 .collect();
             root = root.child(topic_prompt_overlay(label, &draft, &icon, picks, cancel));
@@ -8249,11 +8251,16 @@ fn topic_label(name: &str) -> String {
     label
 }
 
-/// One tab of the topic strip (#2400). The open session is marked by an
-/// accent label and a raised background, the same as the rail's selection.
+/// One tab of the topic strip (#2400). The open session is marked the way
+/// Telegram's topic bar marks it: the icon and the name take the accent
+/// colour and a 2px accent rule sits under the tab (#2478).
+///
+/// The rule is always 2px, transparent while the tab is closed, so switching
+/// topics never changes a tab's height and the row does not jump.
 fn topic_tab(
     id: Uuid,
     label: String,
+    icon: Option<AnyElement>,
     current: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
@@ -8262,8 +8269,17 @@ fn topic_tab(
     } else {
         palette::current().text_muted
     };
+    let rule = if current {
+        palette::current().accent
+    } else {
+        0x00000000
+    };
     div()
         .id(SharedString::from(format!("topic-tab-{id}")))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_1()
         .px_2()
         .py_0p5()
         .rounded_sm()
@@ -8271,9 +8287,12 @@ fn topic_tab(
         .text_sm()
         .text_color(rgb(colour))
         .cursor_pointer()
+        .border_b_2()
+        .border_color(rgba(rule))
         .when(current, |d| d.bg(rgb(palette::current().panel_hi)))
         .hover(|d| d.bg(rgb(palette::current().panel_hi)))
         .on_click(on_click)
+        .children(icon)
         .child(SharedString::from(label))
 }
 
@@ -8655,11 +8674,6 @@ fn split_pick_overlay(layout: Layout, rail_px: gpui::Pixels) -> impl IntoElement
         .child(card)
 }
 
-/// The icons a new topic can carry, as the picker offers them (#2414).
-const TOPIC_ICONS: [&str; 12] = [
-    "💬", "📰", "💡", "⚡", "🎙", "🔥", "🦀", "🧪", "📈", "🛠", "📚", "🎯",
-];
-
 /// The icon a topic gets when none is picked (#2414).
 const DEFAULT_TOPIC_ICON: &str = "💬";
 
@@ -8684,6 +8698,11 @@ fn topic_prompt_overlay(
         .bg(rgb(palette::current().bg))
         .text_color(rgb(palette::current().text))
         .child(SharedString::from(format!("{draft}|")));
+    // The chosen icon, as a picture when it names an embedded one and as the
+    // stored glyph when the row predates the picture set (#2478).
+    let picture = topic_icons::topic_icon(icon)
+        .or_else(|| topic_icons::crab_icon(icon))
+        .map(|bytes| topic_icons::picture(bytes, 1.6).into_any_element());
     let icon_badge = div()
         .flex_none()
         .size(rems(2.4))
@@ -8693,7 +8712,10 @@ fn topic_prompt_overlay(
         .rounded_md()
         .bg(rgb(palette::current().bg))
         .text_size(rems(1.4))
-        .child(SharedString::from(icon.to_string()));
+        .when(picture.is_none(), |d| {
+            d.child(SharedString::from(icon.to_string()))
+        })
+        .children(picture);
     let picker = div().flex().flex_row().flex_wrap().gap_1().children(picks);
     let panel = div()
         .id("topic-prompt-panel")
