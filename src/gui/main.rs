@@ -641,13 +641,19 @@ impl Dashboard {
         })
     }
 
-    /// Open one conversation: select it in the rail, switch the right pane to
-    /// chat, and load its newest window off the UI thread. Every door (rail
-    /// click, launch, ctrl+u return) goes through here, so the screen and the
-    /// session can never disagree.
-    fn open_session(&mut self, id: Uuid, cx: &mut Context<Self>) {
+    /// One door for arriving on a conversation (#2481): every surface that
+    /// belongs to the conversation on screen resets here, so nothing carries
+    /// across. Budget, metrics, queue, composer draft and attachments are
+    /// per-conversation state; a fresh topic must open as a completely
+    /// isolated conversation, and a plain switch must stop carrying a draft.
+    /// The reset keeps the same-session guard the old open_session had:
+    /// re-clicking the chip of the conversation already on screen is not a
+    /// switch, so its queue and draft survive. The create-topic path always
+    /// passes a brand-new id, so the full reset fires there every time.
+    fn begin_conversation(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        let switched = self.transcript.session != Some(id);
         self.sessions.selected = Some(id);
-        if self.transcript.session != Some(id) {
+        if switched {
             // A different conversation has its own budget and its own last
             // prompt size; carrying the previous one over would show a
             // counter for a session the user is not reading.
@@ -658,18 +664,32 @@ impl Dashboard {
             if let Some(b) = agent_bridge::bridge() {
                 self.ctx_max = b.service.context_limit_for_session(id);
             }
+            // The queue belongs to the conversation on screen: a message
+            // typed for one session must never be drained into another
+            // (#2441), and it must not sit waiting on one the user left.
+            self.queued.clear();
+            // The draft and its attachments belong to the conversation they
+            // were typed in (#2481).
+            self.editor.update(cx, |ed, cx| ed.begin_conversation(cx));
         }
         self.transcript.session = Some(id);
         // The next launch opens this conversation. Both surfaces read the same
         // file, so switching here means the terminal comes back to it too, and
         // a restart no longer lands on whatever the rail listed first (#2444).
         remember_open_session(id);
-        // The queue belongs to the conversation on screen: a message typed for
-        // one session must never be drained into another (#2441).
         agent_bridge::set_composer_session(Some(id));
         self.transcript.error = None;
         self.transcript.turns = Vec::new();
         self.transcript.hidden = 0;
+    }
+
+    /// Open one conversation: select it in the rail, switch the right pane to
+    /// chat, and load its newest window off the UI thread. Every door (rail
+    /// click, launch, ctrl+u return, create topic) goes through here, and the
+    /// per-conversation reset lives one layer down in `begin_conversation`,
+    /// so the screen and the session can never disagree.
+    fn open_session(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        self.begin_conversation(id, cx);
         self.screen = Screen::Chat;
         let db_path = self.db_path.clone();
         cx.spawn(async move |this, cx| {

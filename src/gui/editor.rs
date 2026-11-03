@@ -700,6 +700,24 @@ impl Editor {
         cx.notify();
     }
 
+    /// A fresh conversation owns a fresh composer (#2481): no draft carried
+    /// from the conversation just left, no attachments waiting to fly into
+    /// the wrong one, both popups back to rest. The clipboard paste hint is
+    /// derived from the empty field at render time, so it stands down with
+    /// the content; nothing stored to reset there.
+    pub fn begin_conversation(&mut self, cx: &mut Context<Self>) {
+        self.content.clear();
+        self.attachments.clear();
+        self.selected_range = 0..0;
+        self.selection_reversed = false;
+        self.marked_range = None;
+        self.command_index = 0;
+        self.command_dismissed = false;
+        self.emoji_index = 0;
+        self.emoji_dismissed = false;
+        cx.notify();
+    }
+
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         // A screenshot copies no text: the picture lands on a scratch file and
         // attaches through the same `attach_paths` door a Finder drop takes
