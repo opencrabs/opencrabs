@@ -404,15 +404,16 @@ mod tests {
     #[test]
     fn stash_and_adopt_round_trip_keeps_buffers_per_pane() {
         let mut mgr = PaneManager::new();
-        mgr.split(SplitDirection::Horizontal);
 
-        // Type into the first pane, then move focus to the second.
+        // The real `|` sequence: the user typed into the working buffer while
+        // ROOT was focused, then the split handler stashes BEFORE splitting
+        // (split moves focus to the new pane).
         let (mut buf, mut cur, mut hist) = ("alpha".to_string(), 5usize, Some(2usize));
         mgr.stash_input(&mut buf, &mut cur, &mut hist);
-        mgr.focus_next();
+        mgr.split(SplitDirection::Horizontal);
         mgr.adopt_input(&mut buf, &mut cur, &mut hist);
 
-        // The second pane starts empty; the first pane kept what we typed.
+        // The new pane starts empty; ROOT kept what we typed.
         assert_eq!(buf, "");
         assert_eq!(cur, 0);
         assert_eq!(hist, None);
@@ -424,6 +425,7 @@ mod tests {
         mgr.stash_input(&mut buf, &mut cur, &mut hist);
         buf = "beta".to_string();
         cur = 4;
+        hist = Some(1);
         mgr.focus_next(); // wraps to the first pane
         mgr.adopt_input(&mut buf, &mut cur, &mut hist);
         assert_eq!(buf, "alpha");
