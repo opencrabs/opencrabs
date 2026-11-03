@@ -719,6 +719,25 @@ Prefer windows and buttons over the TUI? [MonoCode](https://github.com/hardbeat9
 
 A launch opens the conversation you were last in, on both surfaces, because the GUI and the terminal read and write the same `last_session` pointer. A first run, or a pointer at a conversation that has since been deleted, falls back to the newest session on the rail.
 
+#### Every command answers on the window
+
+The window runs the terminal's whole slash-command surface, not a subset. All 33 commands in the [Chat Mode](#chat-mode) table answer here, and two tests hold the line: `no_command_is_left_without_a_screen` walks every name the terminal offers and fails the build if one lands on "no screen for it", and `support_separates_missing_from_unknown` fails if a name is neither answered nor recognised. A command that owns a screen opens it full width, `esc` goes back to the chat. The rest answer in the transcript through the engine's own entry point, so a plan approved on the window is the same plan object the terminal approves, and `/cd` moves the session's directory rather than the process's.
+
+| Where it answers | Commands | What you get |
+|------------------|----------|--------------|
+| Full-window screen | `/usage` `/themes` `/models` `/sessions` `/skills` `/mission-control` `/onboard` | the screen itself |
+| Setup wizard, opened at its step | `/workspace` `/channels` `/voice` `/image` `/daemon` `/brain` `/doctor` | the same steps and the same writes as the terminal |
+| One line in the transcript | `/compact` `/clear` `/rtk` `/plan` `/show-plan` `/execute` `/discard` `/approve` `/cd` `/goal` `/profiles` `/restart` `/whisper` `/cowork` | what happened, in words; no model turn is spent |
+| Chat control | `/new` `/stop` `/help` `/evolve` `/exit` | a new conversation, an aborted turn, the key list, the update, quit |
+
+`/whisper` installs and launches the same WhisperCrabs binary the terminal uses (the install path is not reimplemented here), and `/cowork` composes the tool turn, so neither one asks the model to guess at a shell command.
+
+`ctrl+k` opens the command palette: every command the window knows, plus every channel, model, session, skill and screen, filtered as you type. `ctrl+g` opens the session files browser. Picking a row and pressing the key land in the same place, because the palette routes through the same toggles.
+
+#### Skills screen
+
+`/skills` (or the palette) lists every skill the terminal can invoke, from the same loader, with its source tag and an amber **review gate** mark on the skills that ask for approval. Typing filters on name or description, the same way the terminal's picker does; `↑`/`↓` move the highlight, `enter` runs the selected skill by sending its prompt body as your next message, and `esc` goes back. A skill started on the window is the same turn the terminal would start.
+
 ### Debug Logging
 
 OpenCrabs writes structured debug logs to files when debug logging is active. Two ways to turn it on:
@@ -4012,6 +4031,8 @@ Any tool on your `$PATH` works. If it runs in your terminal, OpenCrabs can use i
 | `Escape` | Clear input / close overlay |
 
 ### Chat Mode
+
+Every slash command in this table also runs on the built-in GUI window, which opens the screen the command names; see [Built-in GUI](#built-in-gui) for the mapping.
 
 | Shortcut | Action |
 |----------|--------|

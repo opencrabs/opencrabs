@@ -585,12 +585,12 @@ impl SlashCommandTool {
              /evolve   — Upgrade to the latest RELEASE & hot-restart (normal update path)\n\
              /goal     — Set/view/pause/clear session goal\n\
              /profiles — List/switch/create/manage profiles\n\
-             /whisper  — Voice-to-text (TUI only)\n\
-             /onboard  — Setup wizard (TUI only, use config_manager for programmatic changes)\n\
+             /whisper  — Voice-to-text (terminal and desktop window, not in chat)\n\
+             /onboard  — Setup wizard (terminal and desktop window; in chat use config_manager)\n\
              /channels — Channel setup from chat (args: telegram|discord|whatsapp ...)\n\
              /voice    — Voice STT/TTS setup from chat (args: stt|tts ...)\n\
              /image    — Vision + image generation setup from chat\n\
-             /brain /workspace /daemon — TUI only\n\n\
+             /brain /workspace /daemon — Setup screens (terminal and desktop window, not in chat)\n\n\
              You can also use config_manager to read/write any config setting directly."
                 .into(),
         ))
