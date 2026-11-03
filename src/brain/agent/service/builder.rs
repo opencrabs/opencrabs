@@ -1261,6 +1261,39 @@ impl AgentService {
         self.set_working_directory(path);
     }
 
+    /// Apply an explicit operator `/cd` for one session (#2007, #2469).
+    ///
+    /// The ONE place allowed to move the process-global cwd, because an
+    /// operator typed `/cd` and a brand-new foreground session should seed
+    /// from the directory they chose. It sets the session's own handle, moves
+    /// the global, then persists the row so the next process restores it. Both
+    /// surfaces call this: the terminal's `/cd` handler and the window's text
+    /// command. A second copy of that sequence is how the two drifted before.
+    ///
+    /// Returns the canonical directory that was applied.
+    pub async fn apply_operator_cd(
+        &self,
+        session_id: Uuid,
+        dir: &std::path::Path,
+    ) -> std::path::PathBuf {
+        let canonical = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+        self.set_working_directory_for_session(session_id, canonical.clone());
+
+        // The DB row is the source of truth for a resume, so a `/cd` the user
+        // confirmed must survive the process, not just the pane.
+        let sessions = crate::services::SessionService::new(self.context.clone());
+        if let Err(e) = sessions
+            .update_session_working_directory(
+                session_id,
+                Some(canonical.to_string_lossy().to_string()),
+            )
+            .await
+        {
+            tracing::warn!("failed to persist session working directory: {e}");
+        }
+        canonical
+    }
+
     /// True when this session has no cwd handle yet, i.e. the next
     /// `working_dir_handle_for_session` call would seed it from the global
     /// directory. Restore reads this to know whether the persisted

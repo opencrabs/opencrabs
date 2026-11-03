@@ -1183,14 +1183,16 @@ async fn run_text_command(
             if !expanded.is_dir() {
                 return vec![TurnEvent::CommandReply(tc::cd_not_a_directory(arg))];
             }
-            let canonical = expanded.canonicalize().unwrap_or(expanded);
             match bridge() {
                 Some(bridge) => {
-                    bridge
+                    // Same applier the terminal uses: session handle, global
+                    // seed and the persisted row move together (#2469).
+                    let applied = bridge
                         .service
-                        .set_working_directory_for_session(session_id, canonical.clone());
+                        .apply_operator_cd(session_id, &expanded)
+                        .await;
                     vec![TurnEvent::CommandReply(tc::cd_reply(
-                        &canonical.display().to_string(),
+                        &applied.display().to_string(),
                     ))]
                 }
                 None => vec![TurnEvent::CommandReply(format!(
