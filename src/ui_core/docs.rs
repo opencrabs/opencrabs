@@ -74,7 +74,7 @@ pub const PAGES: &[DocPage] = &[
     DocPage {
         title: "Troubleshooting",
         path: "/getting-started/troubleshooting.html",
-        keywords: "error broken fails fix problem logs doctor debug",
+        keywords: "error broken fails fix problem logs doctor debug daemon trouble stuck down restart service not starting",
     },
     DocPage {
         title: "Supported providers",
@@ -149,7 +149,7 @@ pub const PAGES: &[DocPage] = &[
     DocPage {
         title: "Cron jobs",
         path: "/features/cron-jobs.html",
-        keywords: "cron schedule timer job recurring",
+        keywords: "cron schedule timer job recurring automation automate every morning daily reminder routine",
     },
     DocPage {
         title: "Plans",

@@ -1117,6 +1117,146 @@ mod tests {
         );
     }
 
+    /// The owner's command queries, as tests (#2482): the words a person
+    /// types without knowing a command's name still have to arm exactly one
+    /// row, and every channel name has to reach its setup row and its docs
+    /// page at once, because "how do I connect telegram" is both a question
+    /// about the channel and about the docs that explain it.
+    #[test]
+    fn seeker_phrase_reaches_the_commands_the_owner_named() {
+        fn all_items() -> Vec<PaletteItem> {
+            let mut items: Vec<PaletteItem> = crate::ui_core::commands::SLASH_COMMANDS
+                .iter()
+                .map(|cmd| {
+                    PaletteItem::new(
+                        cmd.name,
+                        cmd.description,
+                        PaletteKind::Command,
+                        PaletteAction::RunSlash(cmd.name),
+                    )
+                    .with_keywords(keywords_for(cmd.name))
+                })
+                .collect();
+            items.extend(surface_items());
+            items.extend(crate::ui_core::docs::items());
+            items.extend(channel_items());
+            items
+        }
+
+        fn state_for(query: &str) -> PaletteState {
+            let mut state = PaletteState::new(all_items());
+            for c in query.chars() {
+                state.type_char(c);
+            }
+            state
+        }
+
+        fn armed(query: &str) -> Option<PaletteAction> {
+            state_for(query).selected().map(|row| row.item.action)
+        }
+
+        fn actions(query: &str) -> Vec<PaletteAction> {
+            state_for(query)
+                .visible()
+                .into_iter()
+                .map(|row| row.item.action)
+                .collect()
+        }
+
+        assert_eq!(
+            armed("local voice"),
+            Some(PaletteAction::RunSlash("/whisper")),
+            "the other way of naming the microphone lands on the same row"
+        );
+        assert_eq!(
+            armed("update"),
+            Some(PaletteAction::RunSlash("/evolve")),
+            "update and upgrade are one intent: the updater"
+        );
+        for (name, channel) in [
+            ("telegram", Channel::Telegram),
+            ("discord", Channel::Discord),
+            ("slack", Channel::Slack),
+            ("whatsapp", Channel::WhatsApp),
+        ] {
+            let found = actions(name);
+            assert!(
+                found.contains(&PaletteAction::SetupChannel(channel)),
+                "{name} has to reach its setup row: {found:?}"
+            );
+            assert!(
+                found.contains(&PaletteAction::OpenDocs(channel.doc_path())),
+                "{name} has to reach its docs page next to the setup row: {found:?}"
+            );
+        }
+    }
+
+    /// Every docs row opens the official site, page level (#2482): the Seeker
+    /// carries the 32 pages and links out, so the assertion is the URL, not a
+    /// local file. The daemon query is the one from the bug report screenshot,
+    /// where the site's own search matched a section and the Seeker did not.
+    #[test]
+    fn seeker_docs_open_the_official_pages() {
+        fn armed(query: &str) -> Option<PaletteAction> {
+            let mut items: Vec<PaletteItem> = crate::ui_core::commands::SLASH_COMMANDS
+                .iter()
+                .map(|cmd| {
+                    PaletteItem::new(
+                        cmd.name,
+                        cmd.description,
+                        PaletteKind::Command,
+                        PaletteAction::RunSlash(cmd.name),
+                    )
+                    .with_keywords(keywords_for(cmd.name))
+                })
+                .collect();
+            items.extend(surface_items());
+            items.extend(crate::ui_core::docs::items());
+            items.extend(channel_items());
+            let mut state = PaletteState::new(items);
+            for c in query.chars() {
+                state.type_char(c);
+            }
+            state.selected().map(|row| row.item.action)
+        }
+
+        assert_eq!(
+            armed("daemon trouble"),
+            Some(PaletteAction::OpenDocs(
+                "/getting-started/troubleshooting.html"
+            )),
+            "the short form from the report has to land on troubleshooting"
+        );
+        assert_eq!(
+            armed("automation"),
+            Some(PaletteAction::OpenDocs("/features/cron-jobs.html")),
+            "the single word automation is the cron page"
+        );
+        let official = |path: &str| format!("{}{}", crate::ui_core::docs::DOCS_BASE, path);
+        for path in [
+            "/getting-started/troubleshooting.html",
+            "/features/cron-jobs.html",
+            "/channels/telegram.html",
+            "/channels/discord.html",
+            "/channels/slack.html",
+            "/channels/whatsapp.html",
+        ] {
+            assert_eq!(
+                crate::ui_core::docs::url(path),
+                official(path),
+                "docs rows open the official site: {path}"
+            );
+        }
+        for page in crate::ui_core::docs::pages() {
+            assert_eq!(
+                crate::ui_core::docs::url(page.path),
+                official(page.path),
+                "every carried page is an official URL: {}",
+                page.title
+            );
+        }
+    }
+
     /// The hint is for a channel that is not live: once it is configured the
     /// card goes quiet instead of nagging about work already done.
     #[test]
