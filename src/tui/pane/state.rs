@@ -422,12 +422,14 @@ mod tests {
         assert_eq!(mgr.get(PaneId::ROOT).unwrap().input_history_index, Some(2));
 
         // Type here, cycle back, and the first pane's buffer comes home.
-        mgr.stash_input(&mut buf, &mut cur, &mut hist);
+        // The real Tab handler order: stash the working buffer into the pane
+        // being left, THEN move focus, THEN adopt the destination's buffer.
         buf = "beta".to_string();
         cur = 4;
         hist = Some(1);
+        mgr.stash_input(&mut buf, &mut cur, &mut hist); // pane[1] keeps beta
         mgr.focus_next(); // wraps to the first pane
-        mgr.adopt_input(&mut buf, &mut cur, &mut hist);
+        mgr.adopt_input(&mut buf, &mut cur, &mut hist); // buf = alpha
         assert_eq!(buf, "alpha");
         assert_eq!(cur, 5);
         assert_eq!(hist, Some(2));
