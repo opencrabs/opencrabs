@@ -80,7 +80,7 @@ impl PlanStripState {
                 .flex()
                 .flex_row()
                 .gap_2()
-                .p_2()
+                .p_3()
                 .rounded(px(CARD_RADIUS))
                 .bg(glass_fill(palette::current().panel))
                 .child(
@@ -121,7 +121,7 @@ fn checklist(plan: &PlanDocument) -> Div {
         .flex()
         .flex_col()
         .gap_1()
-        .p_2()
+        .p_3()
         .rounded(px(CARD_RADIUS))
         .bg(glass_fill(palette::current().panel))
         .child(

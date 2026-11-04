@@ -1415,7 +1415,7 @@ impl Render for Editor {
             .border_1()
             .border_color(rgb(palette::current().panel_hi))
             .rounded(px(CARD_RADIUS))
-            .p_2()
+            .p_3()
             .line_height(px(22.))
             .text_size(px(14.))
             .text_color(rgb(palette::current().text))

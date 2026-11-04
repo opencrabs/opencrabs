@@ -1303,7 +1303,7 @@ fn thinking_block(content: &str, full: bool) -> Div {
         .flex()
         .flex_col()
         .gap_0p5()
-        .p_2()
+        .p_3()
         .bg(glass_fill(palette::current().panel))
         .rounded(px(CARD_RADIUS))
         .border_1()
@@ -1334,7 +1334,7 @@ fn tools_block(calls: &[ToolCall]) -> Div {
         .flex()
         .flex_col()
         .gap_0p5()
-        .p_2()
+        .p_3()
         .rounded(px(CARD_RADIUS))
         .bg(glass_fill(palette::current().panel_hi));
     for call in calls {
@@ -1416,8 +1416,8 @@ fn fold_header(turn: &Turn, folded: bool) -> Option<Stateful<Div>> {
         .flex()
         .flex_col()
         .gap_0p5()
-        .px_2()
-        .py_1()
+        .px_3()
+        .py_2()
         .bg(glass_fill(palette::current().panel))
         .rounded(px(CARD_RADIUS))
         .cursor_pointer()

@@ -8542,7 +8542,7 @@ fn queue_strip(queued: &[agent_bridge::PendingMessage]) -> Div {
         .flex()
         .flex_col()
         .gap_1()
-        .p_2()
+        .p_3()
         .rounded(px(CARD_RADIUS))
         .bg(glass_fill(palette::current().panel))
         .child(
@@ -8597,7 +8597,7 @@ fn emoji_popup_view(items: &[(&'static str, &'static str)], selected: usize) -> 
         .flex()
         .flex_col()
         .gap_1()
-        .p_2()
+        .p_3()
         .rounded(px(CARD_RADIUS))
         .border_1()
         .border_color(rgb(palette::current().panel_hi))
