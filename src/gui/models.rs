@@ -51,6 +51,34 @@ pub fn rows(current: Option<(&str, &str)>) -> Vec<Row> {
     out
 }
 
+/// Replace one provider's static section with a successful live fetch. Other
+/// providers keep their rows and order; the selected highlight is resolved
+/// again by the caller because indices may move.
+pub fn replace_provider(
+    rows: &mut Vec<Row>,
+    provider_id: &str,
+    provider_name: &str,
+    fetched: &[String],
+    current: Option<(&str, &str)>,
+) {
+    if provider_id.is_empty() {
+        return;
+    }
+    let insert_at = rows
+        .iter()
+        .position(|row| row.provider == provider_id)
+        .unwrap_or(rows.len());
+    rows.retain(|row| row.provider != provider_id);
+    let live = fetched.iter().map(|model| Row {
+        provider: provider_id.to_string(),
+        provider_name: provider_name.to_string(),
+        current: current
+            .is_some_and(|(provider, active)| provider == provider_id && active == model),
+        model: model.clone(),
+    });
+    rows.splice(insert_at..insert_at, live);
+}
+
 /// The row an argument names: the full pair first, then a bare model id.
 ///
 /// Returns `None` when nothing matches, which the caller turns into the same
@@ -88,6 +116,35 @@ mod tests {
         let live = rows(Some((&first.provider, &first.model)));
         assert_eq!(live.iter().filter(|row| row.current).count(), 1);
         assert!(live[0].current);
+    }
+
+    #[test]
+    fn fetch_models_live_rows_replace_only_their_provider() {
+        let first = Row {
+            provider: "one".into(),
+            provider_name: "One".into(),
+            model: "static".into(),
+            current: false,
+        };
+        let other = Row {
+            provider: "two".into(),
+            provider_name: "Two".into(),
+            model: "untouched".into(),
+            current: false,
+        };
+        let mut rows = vec![first, other];
+        replace_provider(
+            &mut rows,
+            "one",
+            "One",
+            &["live-new".into(), "live-old".into()],
+            Some(("one", "live-new")),
+        );
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].model, "live-new");
+        assert!(rows[0].current);
+        assert_eq!(rows[1].model, "live-old");
+        assert_eq!(rows[2].pair(), "two/untouched");
     }
 
     #[test]

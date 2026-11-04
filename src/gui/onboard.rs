@@ -6,6 +6,7 @@
 //! the two cannot drift. This module only adds what a window needs on top:
 //! which field owns the keyboard, and which rows the rail and the lists show.
 
+use crate::model_fetch::{self, FetchOutcome};
 use opencrabs::tui::onboarding::{
     CHANNEL_NAMES, EXISTING_KEY_SENTINEL, HealthStatus, OnboardingWizard, PROVIDERS, ProviderInfo,
     SttProvider, TtsProvider,
@@ -120,6 +121,9 @@ pub struct Onboard {
     /// Which editable field owns the keyboard on the current step. Reset on
     /// every step change, the same way the terminal resets `focused_field`.
     pub field: usize,
+    /// The live provider-model request, drained by the window's poll tick.
+    model_fetch: Option<std::sync::mpsc::Receiver<FetchOutcome>>,
+    model_fetch_error: Option<String>,
 }
 
 impl Onboard {
@@ -135,7 +139,12 @@ impl Onboard {
         };
         wizard.step = OnboardingStep::ModeSelect;
         wizard.is_first_time = opencrabs::tui::onboarding::is_first_time();
-        Self { wizard, field: 0 }
+        Self {
+            wizard,
+            field: 0,
+            model_fetch: None,
+            model_fetch_error: None,
+        }
     }
 
     /// Open the wizard at one step, for a slash command that names it.
@@ -163,7 +172,12 @@ impl Onboard {
             wizard.start_health_check();
             wizard.tick_health_check();
         }
-        Self { wizard, field: 0 }
+        Self {
+            wizard,
+            field: 0,
+            model_fetch: None,
+            model_fetch_error: None,
+        }
     }
 
     /// Point the provider step at the pair the session is answering with, the
@@ -242,6 +256,11 @@ impl Onboard {
         if index >= PROVIDERS.len() {
             return;
         }
+        // Dropping the receiver invalidates an older provider's request. Its
+        // worker may finish, but there is no route back into this wizard.
+        self.model_fetch = None;
+        self.model_fetch_error = None;
+        self.wizard.ps.models_fetching = false;
         self.wizard.ps.selected_provider = index;
         self.wizard.ps.detect_existing_key();
         self.wizard.ps.reload_config_models();
@@ -249,6 +268,56 @@ impl Onboard {
             self.wizard.ps.load_custom_fields();
         }
         self.field = 0;
+    }
+
+    /// The mouse/keyboard selection path used by the window. Keeping the pure
+    /// `select_provider` above also lets tests walk the catalogue without
+    /// unexpectedly contacting a real provider.
+    pub fn select_provider_and_fetch(&mut self, index: usize) {
+        self.select_provider(index);
+        self.start_model_fetch();
+    }
+
+    /// Start the same live fetch the terminal starts when a provider becomes
+    /// usable. False means the provider is unsupported or still needs a key.
+    pub fn start_model_fetch(&mut self) -> bool {
+        if self.wizard.ps.models_fetching {
+            return true;
+        }
+        let Some(request) = model_fetch::FetchRequest::from_selector(&self.wizard.ps) else {
+            return false;
+        };
+        self.model_fetch_error = None;
+        self.model_fetch = Some(model_fetch::spawn(request));
+        self.wizard.ps.models_fetching = true;
+        true
+    }
+
+    /// Apply a completed request. The provider index is checked as a second
+    /// stale-result guard in addition to dropping the old receiver on select.
+    pub fn poll_model_fetch(&mut self) -> bool {
+        let outcome = self
+            .model_fetch
+            .as_ref()
+            .and_then(|receiver| receiver.try_recv().ok());
+        let Some(outcome) = outcome else {
+            return false;
+        };
+        self.model_fetch = None;
+        self.wizard.ps.models_fetching = false;
+        if outcome.provider_index != self.wizard.ps.selected_provider {
+            return true;
+        }
+        self.model_fetch_error = outcome.error;
+        if !outcome.models.is_empty() {
+            self.wizard.ps.models = outcome.models;
+            self.wizard.ps.resolve_selected_model_index();
+        }
+        true
+    }
+
+    pub fn model_fetch_error(&self) -> Option<&str> {
+        self.model_fetch_error.as_deref()
     }
 
     /// True when this provider takes a pasted key. OpenCrabs mints its own and
@@ -739,6 +808,15 @@ impl Onboard {
     /// The key row, when this provider is one that takes a key.
     pub fn key_field(&self) -> Option<usize> {
         self.key_needed().then_some(2)
+    }
+
+    /// The custom endpoint row. Confirming it is another trigger for the live
+    /// fetch, just as it is in the terminal's provider selector.
+    pub fn custom_base_url_field(&self) -> Option<usize> {
+        self.wizard
+            .ps
+            .is_custom()
+            .then(|| self.custom_field_base() + 1)
     }
 
     /// The string the keyboard edits right now, if the focused row is a text
@@ -1751,6 +1829,61 @@ mod tests {
                 Some(last),
                 "the row the keyboard stands on is painted"
             );
+        });
+    }
+
+    #[test]
+    fn fetch_models_result_applies_and_clears_loading() {
+        let dir = home();
+        with_home_override(dir.path().to_path_buf(), || {
+            let mut onboard = Onboard::open_at(OnboardingStep::ProviderAuth);
+            let provider = PROVIDERS
+                .iter()
+                .position(|info| info.id == "anthropic")
+                .expect("anthropic provider");
+            onboard.select_provider(provider);
+            let (sender, receiver) = std::sync::mpsc::channel();
+            onboard.model_fetch = Some(receiver);
+            onboard.wizard.ps.models_fetching = true;
+            sender
+                .send(FetchOutcome {
+                    provider_index: provider,
+                    provider_id: "anthropic".into(),
+                    provider_name: "Anthropic".into(),
+                    models: vec!["live-model".into()],
+                    error: None,
+                })
+                .expect("test result");
+            assert!(onboard.poll_model_fetch());
+            assert!(!onboard.is_fetching());
+            assert!(onboard.models().iter().any(|model| model == "live-model"));
+            assert_eq!(onboard.model_fetch_error(), None);
+        });
+    }
+
+    #[test]
+    fn fetch_models_stale_provider_result_is_ignored() {
+        let dir = home();
+        with_home_override(dir.path().to_path_buf(), || {
+            let mut onboard = Onboard::open_at(OnboardingStep::ProviderAuth);
+            onboard.select_provider(0);
+            onboard.select_provider(1);
+            let current = onboard.models();
+            let (sender, receiver) = std::sync::mpsc::channel();
+            onboard.model_fetch = Some(receiver);
+            onboard.wizard.ps.models_fetching = true;
+            sender
+                .send(FetchOutcome {
+                    provider_index: 0,
+                    provider_id: "stale".into(),
+                    provider_name: "Stale".into(),
+                    models: vec!["must-not-appear".into()],
+                    error: None,
+                })
+                .expect("test result");
+            assert!(onboard.poll_model_fetch());
+            assert!(!onboard.is_fetching());
+            assert_eq!(onboard.models(), current);
         });
     }
 

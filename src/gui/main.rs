@@ -35,6 +35,7 @@ mod icon;
 mod logging;
 mod markdown;
 mod mission_control;
+mod model_fetch;
 mod models;
 mod onboard;
 mod palette;
@@ -633,6 +634,12 @@ struct Dashboard {
     models_rows: Vec<models::Row>,
     /// The row the arrows stand on.
     models_index: usize,
+    /// The current provider's live catalogue request. Static rows stay
+    /// visible until a successful response replaces that provider's section.
+    models_fetch: Option<std::sync::mpsc::Receiver<model_fetch::FetchOutcome>>,
+    models_provider: Option<usize>,
+    models_fetching: bool,
+    models_fetch_error: Option<String>,
     /// The skills screen's rows, read from the terminal's own loader when the
     /// screen opens so the list can never drift from `/skills` in the TUI,
     /// and the row the arrows stand on.
@@ -1751,11 +1758,82 @@ impl Dashboard {
             .iter()
             .position(|row| row.current)
             .unwrap_or(0);
+        self.models_provider = current
+            .as_ref()
+            .and_then(|(provider, _)| model_fetch::FetchRequest::provider_index(provider));
         self.screen = Screen::Models;
         self.rail_actions = None;
         self.sessions.rail_menu = None;
+        self.start_models_fetch();
         self.refocus_screen();
         cx.notify();
+    }
+
+    /// Fetch only the active provider on `/models`; the other provider
+    /// sections remain the instant static fallback. Opening the screen again
+    /// invalidates the previous request.
+    fn start_models_fetch(&mut self) {
+        self.models_fetch = None;
+        self.models_fetching = false;
+        self.models_fetch_error = None;
+        let Some(index) = self.models_provider else {
+            return;
+        };
+        let Some(request) = model_fetch::FetchRequest::for_provider(index) else {
+            return;
+        };
+        self.models_fetch = Some(model_fetch::spawn(request));
+        self.models_fetching = true;
+    }
+
+    /// Drain both model-fetch consumers. True means a visible state changed
+    /// and the poll tick must repaint even when no agent event arrived.
+    fn poll_model_fetches(&mut self) -> bool {
+        let mut changed = false;
+        if let Some(ob) = self.onboard.as_mut()
+            && ob.poll_model_fetch()
+        {
+            changed = true;
+        }
+        let outcome = self
+            .models_fetch
+            .as_ref()
+            .and_then(|receiver| receiver.try_recv().ok());
+        let Some(outcome) = outcome else {
+            return changed;
+        };
+        self.models_fetch = None;
+        self.models_fetching = false;
+        if self.screen != Screen::Models || self.models_provider != Some(outcome.provider_index) {
+            return changed;
+        }
+        self.models_fetch_error = outcome.error;
+        if !outcome.models.is_empty() {
+            let current = agent_bridge::bridge().map(|bridge| {
+                (
+                    bridge.service.provider_name(),
+                    bridge.service.provider_model(),
+                )
+            });
+            models::replace_provider(
+                &mut self.models_rows,
+                &outcome.provider_id,
+                &outcome.provider_name,
+                &outcome.models,
+                current
+                    .as_ref()
+                    .map(|(provider, model)| (provider.as_str(), model.as_str())),
+            );
+            self.models_index = self
+                .models_rows
+                .iter()
+                .position(|row| row.current)
+                .unwrap_or_else(|| {
+                    self.models_index
+                        .min(self.models_rows.len().saturating_sub(1))
+                });
+        }
+        true
     }
 
     /// `/skills` opens the list the terminal's own dialog shows: every skill
@@ -1824,6 +1902,33 @@ impl Dashboard {
         } else {
             None
         };
+        let (
+            before_provider,
+            before_field,
+            before_key_field,
+            before_endpoint_field,
+            completing_input,
+        ) = {
+            let ob = self.onboard.as_ref().expect("checked above");
+            (
+                ob.wizard.ps.selected_provider,
+                ob.field,
+                ob.key_field(),
+                ob.custom_base_url_field(),
+                key == "enter"
+                    && (ob.key_field() == Some(ob.field)
+                        || ob.custom_base_url_field() == Some(ob.field)),
+            )
+        };
+        if completing_input {
+            // Enter on the key or custom endpoint completes that field, as in
+            // the terminal; it does not skip the list by confirming the step.
+            let ob = self.onboard.as_mut().expect("checked above");
+            ob.field = ob.search_field();
+            ob.start_model_fetch();
+            cx.notify();
+            return;
+        }
         let mut confirm = false;
         {
             let ob = self.onboard.as_mut().expect("checked above");
@@ -1862,6 +1967,13 @@ impl Dashboard {
                     }
                 }
             }
+            let provider_changed = ob.wizard.ps.selected_provider != before_provider;
+            let completed_input_with_tab = key == "tab"
+                && (before_key_field == Some(before_field)
+                    || before_endpoint_field == Some(before_field));
+            if provider_changed || completed_input_with_tab {
+                ob.start_model_fetch();
+            }
         }
         if confirm {
             match self.onboard.as_mut().map(|ob| ob.advance()) {
@@ -1876,7 +1988,14 @@ impl Dashboard {
                     // The reason is on the wizard and the pane draws it above
                     // the footer, so the step stays put and nothing is lost.
                 }
-                _ => {}
+                Some(onboard::Advance::Moved) => {
+                    if let Some(ob) = self.onboard.as_mut()
+                        && ob.step() == onboard::OnboardingStep::ProviderAuth
+                    {
+                        ob.start_model_fetch();
+                    }
+                }
+                None => {}
             }
         }
         cx.notify();
@@ -2035,6 +2154,14 @@ impl Dashboard {
             );
         }
         self.onboard = Some(wizard);
+        if self
+            .onboard
+            .as_ref()
+            .is_some_and(|ob| ob.step() == onboard::OnboardingStep::ProviderAuth)
+            && let Some(ob) = self.onboard.as_mut()
+        {
+            ob.start_model_fetch();
+        }
         self.screen = Screen::Onboard;
         self.rail_actions = None;
         self.sessions.rail_menu = None;
@@ -2729,6 +2856,10 @@ impl Dashboard {
         // window must not stay tinted after the pointer leaves it.
         if self.drag_seen.is_some() && !self.file_drag_active() {
             self.drag_seen = None;
+            cx.notify();
+        }
+        let models_changed = self.poll_model_fetches();
+        if models_changed {
             cx.notify();
         }
         let events = agent_bridge::drain(&self.agent_rx);
@@ -5601,7 +5732,7 @@ impl Render for Dashboard {
                             list = list.child(row.on_click(cx.listener(
                                 move |this, _ev, _window, cx| {
                                     if let Some(ob) = this.onboard.as_mut() {
-                                        ob.select_provider(index);
+                                        ob.select_provider_and_fetch(index);
                                     }
                                     cx.notify();
                                 },
@@ -5830,11 +5961,17 @@ impl Render for Dashboard {
                                 .child(text(
                                     if ob.is_fetching() {
                                         "model \u{b7} fetching the provider catalogue".to_string()
+                                    } else if let Some(error) = ob.model_fetch_error() {
+                                        format!("model \u{b7} {error}")
                                     } else {
                                         format!("model \u{b7} {} available", models.len())
                                     },
                                     Size::Xs,
-                                    shown.text_faint,
+                                    if ob.model_fetch_error().is_some() && !ob.is_fetching() {
+                                        shown.amber
+                                    } else {
+                                        shown.text_faint
+                                    },
                                 ))
                                 .child(
                                     div()
@@ -5878,6 +6015,7 @@ impl Render for Dashboard {
                                             if let Some(ob) = this.onboard.as_mut() {
                                                 let field = ob.search_field();
                                                 ob.field = field;
+                                                ob.start_model_fetch();
                                             }
                                             cx.notify();
                                         })),
@@ -6708,12 +6846,32 @@ impl Render for Dashboard {
                     .items_center()
                     .justify_between()
                     .w_full()
-                    .child(div().text_xs().text_color(rgb(shown.text_muted)).child(
-                        SharedString::from(format!(
-                            "{count} model{}",
-                            if count == 1 { "" } else { "s" }
-                        )),
-                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(div().text_xs().text_color(rgb(shown.text_muted)).child(
+                                SharedString::from(format!(
+                                    "{count} model{}",
+                                    if count == 1 { "" } else { "s" }
+                                )),
+                            ))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(if self.models_fetch_error.is_some() {
+                                        shown.amber
+                                    } else {
+                                        shown.text_muted
+                                    }))
+                                    .child(SharedString::from(if self.models_fetching {
+                                        "fetching the current provider's live models".to_string()
+                                    } else {
+                                        self.models_fetch_error.clone().unwrap_or_default()
+                                    })),
+                            ),
+                    )
                     .child(
                         div()
                             .text_xs()
@@ -7853,6 +8011,10 @@ fn main() {
                         cd_show_hidden: false,
                         models_rows: Vec::new(),
                         models_index: 0,
+                        models_fetch: None,
+                        models_provider: None,
+                        models_fetching: false,
+                        models_fetch_error: None,
                         skills_all: Vec::new(),
                         skills_rows: Vec::new(),
                         skills_query: String::new(),
