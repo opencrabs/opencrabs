@@ -57,6 +57,7 @@ use crate::screen_keys::{
 };
 use crate::theme::{BASE_REM, Size, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP, text};
 use opencrabs::ui_core::channel_status;
+use opencrabs::ui_core::pane_tree::PaneTree;
 use opencrabs::ui_core::rail;
 use opencrabs::ui_core::split::{self, Layout};
 use opencrabs::ui_core::topic_bar;
@@ -84,7 +85,6 @@ use gpui::{
 };
 use opencrabs::brain::agent::ProgressEvent;
 use opencrabs::utils::drop_landing::human_size;
-use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::rc::Rc;
@@ -129,24 +129,30 @@ enum Screen {
     Skills,
 }
 
-/// The second pane of a split: its session, transcript, scroll and layout (#2438).
+/// A divider drag in flight (#2472, #2476): which split, which divider in it,
+/// the axis it moves along, and where the pointer was on the last move.
+#[derive(Clone, Debug)]
+struct DividerDrag {
+    /// The split's path from the root, the way [`PaneTree::at`] addresses it.
+    path: Vec<usize>,
+    /// Which divider of that split: the one between children `divider` and
+    /// `divider + 1`.
+    divider: usize,
+    /// Whether the split stacks its children, which fixes the drag axis.
+    stacked: bool,
+    /// Where the pointer was along that axis on the last move, in px.
+    last: f32,
+}
+
+/// One pane beside the window's own chat: its transcript and scroll (#2438).
+/// Where it sits, how much space it holds and which session it shows all live
+/// in the pane tree, so a pane carries neither a layout nor a session of its
+/// own (#2472).
 struct SplitPane {
-    session: uuid::Uuid,
     /// The session's title as the rail shows it, for the pane header.
     title: String,
     transcript: TranscriptState,
     scroll: ScrollHandle,
-    layout: Layout,
-}
-
-/// Which pane a split gives the caret and the `ctrl+x` (#2474, #2475).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-enum PaneFocus {
-    /// The session the window was already on.
-    #[default]
-    Primary,
-    /// The one picked when the split opened.
-    Secondary,
 }
 
 /// The ledger path, unchanged: `config.database.path`, with the same
@@ -515,22 +521,28 @@ struct Dashboard {
     help_filter: Option<String>,
     /// Drag-to-copy state shared by the chat's rows (#2383).
     copy_drag: Rc<CopyDrag>,
-    /// The second pane of a split, when one is open (#2438).
-    split: Option<SplitPane>,
-    /// Which pane holds the caret and answers `ctrl+x` (#2474).
-    pane_focus: PaneFocus,
-    /// The chat's share of the pane area, moved by dragging the rule between
-    /// the panes and returned to an even split when a new one opens (#2476).
-    split_ratio: f32,
-    /// Where the pane area begins and ends along both axes, in px, written by
-    /// the body itself every frame (#2476). Mapping pointer travel onto the
-    /// share needs the span it travels across, and an element is never told
-    /// its own children's bounds any other way.
-    split_area: Rc<Cell<Option<[f32; 4]>>>,
-    /// A divider drag in flight: where the pointer was along the drag axis in
-    /// px, and the share when it began. The moves land on the window root the
-    /// way the rail splitter's do, so the pointer can leave the handle.
-    split_drag: Option<(f32, f32)>,
+    /// The window's panes as a tree (#2472). One leaf is the unsplit window,
+    /// so the plain chat is the base case rather than a special one, and a
+    /// nested split is just another node. `None` until a conversation opens.
+    panes: Option<PaneTree>,
+    /// The state every pane but the chat keeps, keyed by session (#2472).
+    pane_states: HashMap<Uuid, SplitPane>,
+    /// The session holding the caret and answering `ctrl+x`; `None` is the
+    /// window's own chat (#2474, #2475).
+    pane_focus: Option<Uuid>,
+    /// Where each split begins and ends along both axes, in px, keyed by the
+    /// split's path from the root, written by the body itself every frame
+    /// (#2472, #2476). Mapping pointer travel onto a share needs the span it
+    /// travels across, and an element is never told its own children's bounds
+    /// any other way.
+    split_areas: Rc<std::cell::RefCell<HashMap<Vec<usize>, [f32; 4]>>>,
+    /// A divider drag in flight: the split's path, which divider, where the
+    /// pointer was along the drag axis in px, and the share when it began.
+    /// The moves land on the window root the way the rail splitter's do, so
+    /// the pointer can leave the handle (#2472, #2476).
+    split_drag: Option<DividerDrag>,
+    /// The pane a pending pick splits; the sidebar fills it (#2472).
+    split_target: Option<Uuid>,
     /// The layout a split is waiting on a session for; the sidebar picks it (#2438).
     split_pick: Option<Layout>,
     /// A split's new session is being created, so the created row fills the pane.
@@ -807,7 +819,11 @@ impl Dashboard {
             // were typed in (#2481).
             self.editor.update(cx, |ed, cx| ed.begin_conversation(cx));
         }
+        let previous = self.transcript.session;
         self.transcript.session = Some(id);
+        // The chat is a leaf of the pane tree, so switching conversations
+        // moves that leaf instead of leaving a stale pane behind (#2472).
+        self.adopt_chat_leaf(previous, id);
         // The next launch opens this conversation. Both surfaces read the same
         // file, so switching here means the terminal comes back to it too, and
         // a restart no longer lands on whatever the rail listed first (#2444).
@@ -1280,23 +1296,32 @@ impl Dashboard {
     /// The sessions rail: `/sessions` and ctrl+s share one toggle, so the
     /// command and the chord can never disagree about what showing it means.
     /// A hidden rail has no field to keep listening, so the filter exits.
-    /// Start a split: open the sidebar, focus it, and ask for the second
-    /// session. The chat's own session stays on the left or top (#2438).
+    /// Start a split: open the sidebar, focus it, and ask for the session
+    /// that shares the space with the pane holding the caret. The pane being
+    /// split is the one the caret is on, so a nested split grows from the
+    /// pane being read rather than from the window's first leaf (#2472).
     fn begin_split(&mut self, layout: Layout, cx: &mut Context<Self>) {
-        if self.transcript.session.is_none() {
+        let target = self.pane_focus.or(self.transcript.session);
+        let target = target.filter(|id| self.panes.as_ref().is_some_and(|t| t.contains(*id)));
+        let Some(target) = target else {
             self.live
                 .notices
                 .push("Open a session before splitting it.".to_string());
             cx.notify();
             return;
-        }
+        };
         if !self.rail_open {
             self.toggle_rail(cx);
         }
         self.split_pick = Some(layout);
-        // A fresh split starts with the chat in front, whatever the last one
-        // left behind (#2474).
-        self.pane_focus = PaneFocus::Primary;
+        self.split_target = Some(target);
+        // A fresh split starts with the pane it grows from in front, whatever
+        // the last one left behind (#2474).
+        self.pane_focus = if Some(target) == self.transcript.session {
+            None
+        } else {
+            Some(target)
+        };
         self.rail_focused = true;
         self.sessions.cursor = self.transcript.session;
         // Focus goes to the window, not the composer, so the sidebar keys and the
@@ -1308,48 +1333,76 @@ impl Dashboard {
     /// Esc during the pick: the split is dropped and the chat keeps focus.
     fn cancel_split_pick(&mut self, cx: &mut Context<Self>) {
         self.split_pick = None;
+        self.split_target = None;
         self.rail_focused = false;
         self.refocus_screen();
         cx.notify();
     }
 
-    /// The `ctrl-x` close, and the × on either header: close the pane holding
-    /// the caret (#2474). Closing the second pane ends the split; closing the
-    /// first hands the window to the second, because removing the primary would
-    /// otherwise leave a session the user never asked to see in its place.
-    /// Focus returns to the primary either way, so the next chord lands
-    /// somewhere known.
-    fn close_focused_pane(&mut self, cx: &mut Context<Self>) {
-        let was = self.pane_focus;
-        self.pane_focus = PaneFocus::Primary;
+    /// The session holding the caret: the chat's own session when no pane
+    /// took it (#2474).
+    fn focused_pane(&self) -> Option<Uuid> {
+        self.pane_focus.or(self.transcript.session)
+    }
+
+    /// Close one pane and hand its space to its neighbour (#2438, #2472).
+    /// Closing the chat itself moves the window to the first survivor, whose
+    /// leaf takes the chat's place, so the panes that remain keep the slots
+    /// they were dragged to and the window never shows a session the user
+    /// did not pick.
+    fn close_pane(&mut self, session: Uuid, cx: &mut Context<Self>) {
+        let Some(tree) = self.panes.as_mut() else {
+            return;
+        };
+        if tree.leaves().len() <= 1 {
+            return;
+        }
+        let Some(absorbed) = tree.close(session) else {
+            return;
+        };
+        self.pane_states.remove(&session);
         self.split_drag = None;
-        match (was, self.split.take()) {
-            (PaneFocus::Primary, Some(pane)) => self.open_session(pane.session, cx),
-            _ => {
-                self.refocus_screen();
-                cx.notify();
-            }
+        self.pane_focus = None;
+        if self.transcript.session == Some(session) {
+            self.open_session(absorbed, cx);
+        } else {
+            self.refocus_screen();
+            cx.notify();
         }
     }
 
-    /// The × on the second pane: the same close ctrl+x performs, without
-    /// needing the caret to have been there first (#2474).
-    fn close_secondary_pane(&mut self, cx: &mut Context<Self>) {
-        self.split = None;
-        self.pane_focus = PaneFocus::Primary;
-        self.split_drag = None;
-        self.refocus_screen();
-        cx.notify();
+    /// `ctrl+x` and the × on the focused pane's header: close the pane holding
+    /// the caret (#2474).
+    fn close_focused_pane(&mut self, cx: &mut Context<Self>) {
+        if let Some(session) = self.focused_pane() {
+            self.close_pane(session, cx);
+        }
     }
 
-    /// Tab moves the caret between the two panes (#2475). With no split open
-    /// there is nothing to switch, so the rail keeps the key as it always did.
-    /// The pane holding the caret wears the accent in its header and takes the
-    /// page keys, which is how a read-only transcript holds a caret at all.
+    /// Tab moves the caret between the panes in the order they are drawn, so
+    /// the accent follows the layout the eye reads (#2475, #2472). With one
+    /// pane there is nothing to switch to, so the rail keeps the key as it
+    /// always did. The pane holding the caret wears the accent in its header
+    /// and takes the page keys.
     fn cycle_pane_focus(&mut self, cx: &mut Context<Self>) {
-        self.pane_focus = match self.pane_focus {
-            PaneFocus::Primary => PaneFocus::Secondary,
-            PaneFocus::Secondary => PaneFocus::Primary,
+        let Some(tree) = self.panes.as_ref() else {
+            return;
+        };
+        let leaves = tree.leaves();
+        if leaves.len() < 2 {
+            return;
+        }
+        let at = self
+            .focused_pane()
+            .and_then(|id| leaves.iter().position(|leaf| *leaf == id))
+            .unwrap_or(0);
+        let next = leaves[(at + 1) % leaves.len()];
+        // The chat's own leaf is the pane the caret reaches as `None`, which
+        // is how every other surface already names it.
+        self.pane_focus = if Some(next) == self.transcript.session {
+            None
+        } else {
+            Some(next)
         };
         // A receipt in the daily log, so "Tab did nothing" can be told apart
         // from "Tab moved the caret and the header did not show it".
@@ -1357,28 +1410,44 @@ impl Dashboard {
         cx.notify();
     }
 
-    /// Fill the second pane with `id` and load its newest messages (#2438).
+    /// Fill a new pane with `id`, splitting the pane the pick started from,
+    /// and load its newest messages (#2438, #2472).
     fn choose_split(&mut self, id: Uuid, cx: &mut Context<Self>) {
         let Some(layout) = self.split_pick else {
             return;
         };
-        if self.transcript.session == Some(id) {
+        let Some(target) = self.split_target else {
+            self.split_pick = None;
+            return;
+        };
+        if self.transcript.session == Some(id)
+            || self.panes.as_ref().is_some_and(|tree| tree.contains(id))
+        {
             self.live
                 .notices
-                .push("That session is already in the chat. Pick another.".to_string());
+                .push("That session is already open in a pane. Pick another.".to_string());
             cx.notify();
             return;
         }
         self.split_pick = None;
+        self.split_target = None;
         self.rail_focused = false;
-        // A new pick starts the panes even again: the share a previous split
-        // was dragged to belongs to that split, not to this one (#2476).
-        self.split_ratio = split::EVEN_SHARE;
-        self.split_drag = None;
         // The pane just picked is the one the caret and ctrl+x land on, so a
         // split opens ready to act on what was clicked (#2474).
-        self.pane_focus = PaneFocus::Secondary;
+        self.pane_focus = Some(id);
         self.refocus_screen();
+        let split = self
+            .panes
+            .as_mut()
+            .is_some_and(|tree| tree.split(target, layout, id));
+        if !split {
+            self.pane_focus = None;
+            self.live
+                .notices
+                .push("That pane is no longer open.".to_string());
+            cx.notify();
+            return;
+        }
         let title = self
             .sessions
             .items
@@ -1386,25 +1455,26 @@ impl Dashboard {
             .find(|s| s.id == id)
             .and_then(|s| s.title.clone())
             .unwrap_or_else(|| "(untitled)".to_string());
-        self.split = Some(SplitPane {
-            session: id,
-            title,
-            transcript: TranscriptState {
-                session: Some(id),
-                ..Default::default()
+        self.pane_states.insert(
+            id,
+            SplitPane {
+                title,
+                transcript: TranscriptState {
+                    session: Some(id),
+                    ..Default::default()
+                },
+                scroll: ScrollHandle::new(),
             },
-            scroll: ScrollHandle::new(),
-            layout,
-        });
+        );
         // Paint the pane now, with its header, rather than waiting for the
-        // transcript load to come back: an empty second pane that appears at
-        // once reads as a split, where a silent wait reads as nothing (#2438).
+        // transcript load to come back: an empty pane that appears at once
+        // reads as a split, where a silent wait reads as nothing (#2438).
         cx.notify();
         let db_path = self.db_path.clone();
         cx.spawn(async move |this, cx| {
             let result = transcript::load_recent(db_path, id).await;
             this.update(cx, |this, cx| {
-                if let Some(pane) = this.split.as_mut().filter(|p| p.session == id) {
+                if let Some(pane) = this.pane_states.get_mut(&id) {
                     match result {
                         Ok((rows, total)) => {
                             let (hidden, turns) =
@@ -1421,6 +1491,78 @@ impl Dashboard {
             .ok();
         })
         .detach();
+    }
+
+    /// Keep the chat on a leaf of the tree (#2472). A first open starts the
+    /// tree; a plain switch moves the chat's own leaf to the new session;
+    /// opening a session another pane already shows moves it into the chat and
+    /// closes that pane, so one session never sits in two leaves.
+    fn adopt_chat_leaf(&mut self, previous: Option<Uuid>, id: Uuid) {
+        let Some(tree) = self.panes.as_mut() else {
+            self.panes = Some(PaneTree::leaf(id));
+            return;
+        };
+        if tree.contains(id) {
+            self.pane_states.remove(&id);
+            if let Some(was) = previous
+                && was != id
+                && tree.leaves().len() > 1
+            {
+                tree.close(was);
+            }
+            return;
+        }
+        if let Some(was) = previous
+            && tree.rename_leaf(was, id)
+        {
+            return;
+        }
+        self.panes = Some(PaneTree::leaf(id));
+        self.pane_states.clear();
+    }
+
+    /// Grab the divider between two children of one split (#2472, #2476).
+    /// A double click puts that pair back to even, the quick way out of a
+    /// share dragged somewhere awkward.
+    fn begin_divider_drag(
+        &mut self,
+        path: &[usize],
+        divider: usize,
+        ev: &MouseDownEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let stacked = {
+            let Some(tree) = self.panes.as_mut() else {
+                return;
+            };
+            let Some(PaneTree::Split {
+                layout, children, ..
+            }) = tree.at(path)
+            else {
+                return;
+            };
+            if divider + 1 >= children.len() {
+                return;
+            }
+            if ev.click_count == 2 {
+                tree.even_divider(path, divider);
+                cx.notify();
+                return;
+            }
+            layout.is_stacked()
+        };
+        let axis = if stacked {
+            ev.position.y
+        } else {
+            ev.position.x
+        };
+        self.split_drag = Some(DividerDrag {
+            path: path.to_vec(),
+            divider,
+            stacked,
+            last: f32::from(axis),
+        });
+        cx.notify();
     }
 
     /// The commands that answer in text or compose a turn (#2469).
@@ -3730,7 +3872,10 @@ impl Dashboard {
                 && !ks.modifiers.platform
                 && !ks.modifiers.alt
                 && ks.key == "x"
-                && self.split.is_some()
+                && self
+                    .panes
+                    .as_ref()
+                    .is_some_and(|tree| tree.leaves().len() > 1)
             {
                 self.close_focused_pane(cx);
                 return;
@@ -4119,9 +4264,12 @@ impl Dashboard {
                 // The page keys act on the pane Tab moved the caret to, so a
                 // split scrolls the session the accent is on rather than the
                 // chat underneath it (#2475).
-                let scroll = match (self.split.as_ref(), self.pane_focus) {
-                    (Some(pane), PaneFocus::Secondary) => &pane.scroll,
-                    _ => &self.transcript_scroll,
+                // The page keys act on the pane the caret is on, so a split
+                // scrolls the transcript the accent names rather than the
+                // chat underneath it (#2475, #2472).
+                let scroll = match self.pane_focus.and_then(|id| self.pane_states.get(&id)) {
+                    Some(pane) => &pane.scroll,
+                    None => &self.transcript_scroll,
                 };
                 let offset = scroll.offset();
                 let max = scroll.max_offset().height;
@@ -4157,7 +4305,10 @@ impl Dashboard {
             && !ev.keystroke.modifiers.platform
             && !ev.keystroke.modifiers.alt
             && self.screen == Screen::Chat
-            && self.split.is_some()
+            && self
+                .panes
+                .as_ref()
+                .is_some_and(|tree| tree.leaves().len() > 1)
             && !self.editor.read(cx).list_open()
         {
             self.cycle_pane_focus(cx);
@@ -4397,6 +4548,63 @@ impl Dashboard {
             }
             UsageKeyOutcome::NotConsumed => {}
         }
+    }
+
+    /// The pane body for the chat screen and the themes preview: the chat
+    /// element alone while the tree is one leaf, or the whole tree drawn
+    /// around it (#2472). The chat element is moved into its own leaf, so it
+    /// is built once and never duplicated.
+    fn panes_body(
+        &mut self,
+        chat: AnyElement,
+        content: f32,
+        interactive: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        // Shares are clamped to the pixel floor against the area the last
+        // frame painted into, so a window resize never squeezes a pane below
+        // a usable width (#2472). The clamp is idempotent, so it settles on
+        // the first frame that has a measurement.
+        let root_area = self.split_areas.borrow().get(&Vec::new()).copied();
+        if let Some([x0, y0, x1, y1]) = root_area
+            && let Some(tree) = self.panes.as_mut()
+        {
+            let span = match tree {
+                PaneTree::Split { layout, .. } => {
+                    if layout.is_stacked() {
+                        y1 - y0
+                    } else {
+                        x1 - x0
+                    }
+                }
+                PaneTree::Leaf { .. } => 0.0,
+            };
+            tree.normalize(span);
+        }
+        let Some(tree) = self.panes.as_ref() else {
+            return chat;
+        };
+        if tree.leaves().len() < 2 {
+            return chat;
+        }
+        let title = match self.session_title() {
+            Some(title) => SharedString::from(title.to_string()),
+            None => SharedString::from("Chat"),
+        };
+        let mut ctx = PanesCtx {
+            chat: Some(chat),
+            chat_session: self.transcript.session,
+            chat_title: title,
+            states: &self.pane_states,
+            focus: self.pane_focus,
+            content,
+            areas: &self.split_areas,
+            entity: cx.entity().downgrade(),
+            interactive,
+        };
+        let mut path = Vec::new();
+        let tree = self.panes.as_ref().expect("checked a moment ago");
+        pane_element(tree, &mut ctx, &mut path, 1.0)
     }
 }
 
@@ -4732,11 +4940,20 @@ impl Render for Dashboard {
                 // beside or below it (#2438). Two panes share the content
                 // width, less the gap_2 that separates them, so a row is
                 // never planned wider than the box it is painted into.
-                let primary_width = match &self.split {
-                    Some(pane) => {
-                        split_pane_width(pane_width, pane.layout.is_stacked(), self.split_ratio)
-                    }
-                    None => pane_width,
+                // The chat's share of the pane area comes from the tree: a
+                // leaf under stacked splits spans the full width, and a leaf
+                // beside a sibling takes its share of it (#2472, #2473). A
+                // row is still never planned wider than its box.
+                let chat_share = self
+                    .panes
+                    .as_ref()
+                    .zip(self.transcript.session)
+                    .and_then(|(tree, id)| tree.leaf_width_share(id))
+                    .unwrap_or(1.0);
+                let primary_width = if chat_share < 1.0 {
+                    split_pane_width(pane_width, false, chat_share)
+                } else {
+                    pane_width
                 };
                 let primary = transcript::view(
                     &self.transcript,
@@ -4754,56 +4971,10 @@ impl Render for Dashboard {
                     },
                 )
                 .into_any_element();
-                let body = match &self.split {
-                    None => primary,
-                    Some(pane) => {
-                        let close_primary = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
-                            this.close_focused_pane(cx);
-                        });
-                        let close_secondary = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
-                            this.close_secondary_pane(cx);
-                        });
-                        let primary_title = match self.session_title() {
-                            Some(title) => SharedString::from(title.to_string()),
-                            None => SharedString::from("Chat"),
-                        };
-                        // The rule starts the drag and the root finishes it, so
-                        // the pointer can slide off the 12px strip without the
-                        // panes snapping back (#2476).
-                        let grab_split = cx.listener(|this, ev: &MouseDownEvent, _window, cx| {
-                            let Some(pane) = this.split.as_ref() else {
-                                return;
-                            };
-                            if ev.click_count == 2 {
-                                // Double-clicking the rule puts the panes
-                                // back to even, the quick way out of a
-                                // share dragged somewhere awkward (#2476).
-                                this.split_ratio = split::EVEN_SHARE;
-                                this.split_drag = None;
-                                cx.notify();
-                                return;
-                            }
-                            let axis = if pane.layout.is_stacked() {
-                                ev.position.y
-                            } else {
-                                ev.position.x
-                            };
-                            this.split_drag = Some((f32::from(axis), this.split_ratio));
-                        });
-                        split_body(
-                            primary,
-                            primary_title,
-                            self.pane_focus,
-                            pane,
-                            pane_width,
-                            self.split_ratio,
-                            self.split_area.clone(),
-                            grab_split,
-                            close_primary,
-                            close_secondary,
-                        )
-                    }
-                };
+                // The panes come from the tree (#2472): one leaf is the
+                // window as it was, and each split adds a divider and the
+                // panes its children hold.
+                let body = self.panes_body(primary.into_any_element(), pane_width, true, cx);
                 (
                     div()
                         .flex()
@@ -6483,13 +6654,17 @@ impl Render for Dashboard {
                             .child(SharedString::from(hint)),
                     )
                     .children(update_hint);
-                let primary_width = match &self.split {
-                    Some(pane) => split_pane_width(
-                        pane_width - THEMES_PANEL_WIDTH,
-                        pane.layout.is_stacked(),
-                        self.split_ratio,
-                    ),
-                    None => pane_width - THEMES_PANEL_WIDTH,
+                let preview_width = pane_width - THEMES_PANEL_WIDTH;
+                let chat_share = self
+                    .panes
+                    .as_ref()
+                    .zip(self.transcript.session)
+                    .and_then(|(tree, id)| tree.leaf_width_share(id))
+                    .unwrap_or(1.0);
+                let primary_width = if chat_share < 1.0 {
+                    split_pane_width(preview_width, false, chat_share)
+                } else {
+                    preview_width
                 };
                 // A right press on the conversation opens the same card the
                 // `...` draws (#2480); a left press anywhere in it closes the
@@ -6534,36 +6709,10 @@ impl Render for Dashboard {
                             live_click: Some(live_click.clone()),
                         },
                     ));
-                let body = match &self.split {
-                    None => primary.into_any_element(),
-                    Some(pane) => {
-                        let close_primary = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
-                            this.close_focused_pane(cx);
-                        });
-                        let close_secondary = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
-                            this.close_secondary_pane(cx);
-                        });
-                        let primary_title = match self.session_title() {
-                            Some(title) => SharedString::from(title.to_string()),
-                            None => SharedString::from("Chat"),
-                        };
-                        // The preview draws the split but never resizes it: its
-                        // panes are narrower than the real ones, so it records
-                        // into a throwaway cell and the drag is a no-op.
-                        split_body(
-                            primary.into_any_element(),
-                            primary_title,
-                            self.pane_focus,
-                            pane,
-                            pane_width - THEMES_PANEL_WIDTH,
-                            self.split_ratio,
-                            Rc::new(Cell::new(None)),
-                            |_ev: &MouseDownEvent, _window: &mut Window, _cx: &mut App| {},
-                            close_primary,
-                            close_secondary,
-                        )
-                    }
-                };
+                // The preview draws the same panes, but never resizes them:
+                // its boxes are narrower than the real ones, so the dividers
+                // there do not take the pointer (#2438, #2472).
+                let body = self.panes_body(primary.into_any_element(), preview_width, false, cx);
                 let middle = div()
                     .flex()
                     .flex_row()
@@ -6780,21 +6929,25 @@ impl Render for Dashboard {
                 // The divider drag, mapped onto the pane span recorded at paint
                 // time. The floor lives in split::share_after_drag, so a fast
                 // drag narrows a pane but never shuts it (#2476).
-                if let Some((from_axis, from_share)) = this.split_drag {
-                    let stacked = this
-                        .split
-                        .as_ref()
-                        .is_some_and(|pane| pane.layout.is_stacked());
-                    if let Some([x0, y0, x1, y1]) = this.split_area.get() {
-                        let span = if stacked { y1 - y0 } else { x1 - x0 };
-                        let now = if stacked {
+                if let Some(drag) = this.split_drag.clone() {
+                    let area = this.split_areas.borrow().get(&drag.path).copied();
+                    if let Some([x0, y0, x1, y1]) = area {
+                        let span = if drag.stacked { y1 - y0 } else { x1 - x0 };
+                        let now = if drag.stacked {
                             f32::from(ev.position.y)
                         } else {
                             f32::from(ev.position.x)
                         };
-                        this.split_ratio =
-                            split::share_after_drag(from_share, now - from_axis, span);
-                        cx.notify();
+                        let travelled = now - drag.last;
+                        if travelled != 0.0 {
+                            if let Some(tree) = this.panes.as_mut() {
+                                tree.drag_divider(&drag.path, drag.divider, travelled, span);
+                            }
+                            if let Some(active) = this.split_drag.as_mut() {
+                                active.last = now;
+                            }
+                            cx.notify();
+                        }
                     }
                 }
                 // A rail row slid left far enough: open its actions. The
@@ -7357,11 +7510,12 @@ fn main() {
                         update_available: None,
                         update_prompt: None,
                         help_filter: None,
-                        split: None,
-                        pane_focus: PaneFocus::Primary,
-                        split_ratio: split::EVEN_SHARE,
-                        split_area: Rc::new(Cell::new(None)),
+                        panes: None,
+                        pane_states: HashMap::new(),
+                        pane_focus: None,
+                        split_areas: Rc::new(std::cell::RefCell::new(HashMap::new())),
                         split_drag: None,
+                        split_target: None,
                         copy_drag: Rc::new(CopyDrag::default()),
                         split_pick: None,
                         split_creating: false,
@@ -8969,7 +9123,7 @@ fn update_prompt_overlay(
 /// than a session beside a nameless strip, and the pane holding the caret
 /// wears the accent so Tab's move is visible.
 fn pane_header(
-    id: &'static str,
+    id: SharedString,
     title: SharedString,
     focused: bool,
     close: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -9108,99 +9262,174 @@ fn split_divider(
         )
 }
 
-/// The two panes of a split: the chat first, then the picked session beside it
-/// (side) or below it (stack), each with its own header and × (#2438, #2474).
-/// The chat screen and the themes preview both draw through this, so the second
-/// pane cannot be wired into one of them and forgotten in the other (#2438).
-/// Every argument is a fact the two call sites fill differently: the element,
-/// its title, which pane holds focus, the measured geometry, and the drag and
-/// close handlers. Bundling them only to satisfy the linter would box the
-/// closures and hide which pane owns which handler.
-#[allow(clippy::too_many_arguments)]
-fn split_body(
-    primary: AnyElement,
-    primary_title: SharedString,
-    focus: PaneFocus,
-    pane: &SplitPane,
+/// Everything the pane walk needs to draw one leaf or one split: the chat
+/// element (drawn once, at its own leaf), the state each other pane keeps, the
+/// caret, the tree's measured areas, and the window handle the per-pane
+/// handlers report through (#2472).
+struct PanesCtx<'a> {
+    chat: Option<AnyElement>,
+    chat_session: Option<Uuid>,
+    chat_title: SharedString,
+    states: &'a HashMap<Uuid, SplitPane>,
+    focus: Option<Uuid>,
     content: f32,
-    share: f32,
-    area: Rc<Cell<Option<[f32; 4]>>>,
-    grab: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
-    close_primary: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    close_secondary: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    areas: &'a Rc<std::cell::RefCell<HashMap<Vec<usize>, [f32; 4]>>>,
+    entity: gpui::WeakEntity<Dashboard>,
+    /// Whether the dividers take the pointer. The themes preview draws the
+    /// same panes but never resizes them (#2438).
+    interactive: bool,
+}
+
+/// Draw the pane tree (#2472). A leaf is one pane: its header, its ×, and the
+/// transcript it holds. A split lays its children along its own axis with a
+/// divider between each pair, and every share comes from the tree rather than
+/// from a single window-wide ratio, so a nested split divides only the pane it
+/// grew from. A tree of one leaf draws the chat untouched, which is the
+/// unsplit window the window has always had.
+fn pane_element(
+    tree: &PaneTree,
+    ctx: &mut PanesCtx,
+    path: &mut Vec<usize>,
+    width_share: f32,
 ) -> AnyElement {
-    let stacked = pane.layout.is_stacked();
-    // The chat takes `share` of the pane area and the picked pane the rest. A
-    // clamp here means a stale or nonsensical share can never draw a pane away
-    // before the drag's own floor gets a chance to hold it (#2476).
-    let share = share.clamp(0.1, 0.9);
-    // The chat used to be handed in bare, so it sized to its content and the
-    // split read as a chat with a strip beside it rather than two panes
-    // (#2473).
-    let half = div()
-        .id("split-primary")
-        .flex()
-        .flex_col()
-        .flex_shrink()
-        .flex_basis(gpui::relative(share))
-        .min_w_0()
-        .min_h_0()
-        .child(pane_header(
-            "split-close-primary",
-            primary_title,
-            focus == PaneFocus::Primary,
-            close_primary,
-        ))
-        .child(primary);
-    let secondary = div()
-        .id("split-secondary")
-        .flex()
-        .flex_col()
-        .flex_shrink()
-        .flex_basis(gpui::relative(1.0 - share))
-        .min_w_0()
-        .min_h_0()
-        .child(pane_header(
-            "split-close-secondary",
-            SharedString::from(pane.title.clone()),
-            focus == PaneFocus::Secondary,
-            close_secondary,
-        ))
-        .child(transcript::view(
-            &pane.transcript,
-            &pane.scroll,
-            &LiveTurn::default(),
-            false,
-            split_pane_width(content, stacked, 1.0 - share),
-            HashMap::new(),
-            transcript::ViewHooks::default(),
-        ));
-    div()
-        .flex()
-        .flex_1()
-        .min_w_0()
-        .min_h_0()
-        .gap_2()
-        .when(stacked, |d| d.flex_col())
-        .when(!stacked, |d| d.flex_row())
-        // The span a drag maps onto, read from the two outer panes instead of
-        // assumed from the viewport: the footer, the input and the topic strip
-        // all sit inside the window, so the viewport is not the pane area and a
-        // share measured against it would drift from the pointer (#2476).
-        .on_children_prepainted(move |bounds, _window, _cx| {
-            let (Some(first), Some(last)) = (bounds.first(), bounds.last()) else {
-                return;
+    match tree {
+        PaneTree::Leaf { session, .. } => {
+            let is_chat = Some(*session) == ctx.chat_session;
+            let focused = if is_chat {
+                ctx.focus.is_none()
+            } else {
+                ctx.focus == Some(*session)
             };
-            let start_x = f32::from(first.origin.x);
-            let start_y = f32::from(first.origin.y);
-            let end_x = f32::from(last.origin.x + last.size.width);
-            let end_y = f32::from(last.origin.y + last.size.height);
-            area.set(Some([start_x, start_y, end_x, end_y]));
-        })
-        .child(half)
-        .child(split_divider(stacked, grab))
-        .child(secondary)
-        .into_any_element()
+            let title = if is_chat {
+                ctx.chat_title.clone()
+            } else {
+                match ctx.states.get(session) {
+                    Some(pane) => SharedString::from(pane.title.clone()),
+                    None => SharedString::from("(untitled)"),
+                }
+            };
+            let body: AnyElement = if is_chat {
+                ctx.chat.take().unwrap_or_else(|| div().into_any_element())
+            } else {
+                match ctx.states.get(session) {
+                    Some(pane) => div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w_0()
+                        .min_h_0()
+                        .child(transcript::view(
+                            &pane.transcript,
+                            &pane.scroll,
+                            &LiveTurn::default(),
+                            false,
+                            if width_share < 1.0 {
+                                split_pane_width(ctx.content, false, width_share)
+                            } else {
+                                ctx.content
+                            },
+                            HashMap::new(),
+                            transcript::ViewHooks::default(),
+                        ))
+                        .into_any_element(),
+                    None => div().into_any_element(),
+                }
+            };
+            let weak = ctx.entity.clone();
+            let close_session = *session;
+            let close = move |_ev: &ClickEvent, _window: &mut Window, cx: &mut App| {
+                let _ = weak.update(cx, |this, cx| this.close_pane(close_session, cx));
+            };
+            div()
+                .id(SharedString::from(format!("pane-{session}")))
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .child(pane_header(
+                    SharedString::from(format!("pane-close-{session}")),
+                    title,
+                    focused,
+                    close,
+                ))
+                .child(body)
+                .into_any_element()
+        }
+        PaneTree::Split {
+            layout, children, ..
+        } => {
+            let stacked = layout.is_stacked();
+            let here = path.clone();
+            let areas = ctx.areas.clone();
+            let key = path.clone();
+            let mut row = div()
+                .flex()
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .gap_2()
+                .when(stacked, |d| d.flex_col())
+                .when(!stacked, |d| d.flex_row())
+                // The span a drag maps onto, read from the two outer children
+                // instead of assumed from the viewport: the footer, the input
+                // and the topic strip all sit inside the window, so a share
+                // measured against the viewport would drift from the pointer
+                // (#2476). Each split records its own box, so a nested rule
+                // maps onto the pane it lives in rather than the window.
+                .on_children_prepainted(move |bounds, _window, _cx| {
+                    let (Some(first), Some(last)) = (bounds.first(), bounds.last()) else {
+                        return;
+                    };
+                    let start_x = f32::from(first.origin.x);
+                    let start_y = f32::from(first.origin.y);
+                    let end_x = f32::from(last.origin.x + last.size.width);
+                    let end_y = f32::from(last.origin.y + last.size.height);
+                    areas
+                        .borrow_mut()
+                        .insert(key.clone(), [start_x, start_y, end_x, end_y]);
+                });
+            for (ix, child) in children.iter().enumerate() {
+                path.push(ix);
+                let child_width = if stacked {
+                    width_share
+                } else {
+                    width_share * child.share()
+                };
+                let element = pane_element(child, ctx, path, child_width);
+                path.pop();
+                row = row.child(
+                    div()
+                        .id(SharedString::from(format!("split-slot-{here:?}-{ix}")))
+                        .flex()
+                        .flex_col()
+                        .flex_shrink()
+                        .flex_basis(gpui::relative(child.share()))
+                        .min_w_0()
+                        .min_h_0()
+                        .child(element),
+                );
+                if ix + 1 < children.len() {
+                    // The rule starts the drag and the window root finishes
+                    // it, so the pointer can slide off the 12px strip without
+                    // the panes snapping back (#2476).
+                    let weak = ctx.entity.clone();
+                    let drag_path = here.clone();
+                    let interactive = ctx.interactive;
+                    let grab = move |ev: &MouseDownEvent, _window: &mut Window, cx: &mut App| {
+                        if !interactive {
+                            return;
+                        }
+                        let _ = weak.update(cx, |this, cx| {
+                            this.begin_divider_drag(&drag_path, ix, ev, cx);
+                        });
+                    };
+                    row = row.child(split_divider(stacked, grab));
+                }
+            }
+            row.into_any_element()
+        }
+    }
 }
 
 /// The dim over the chat and the card in its bottom right while a split waits

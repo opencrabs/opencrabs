@@ -213,6 +213,102 @@ impl PaneTree {
         }
     }
 
+    /// The fraction of the window's width a leaf covers, with the splits that
+    /// stack above it contributing nothing to the product: a stacked pane
+    /// spans the full width of the split it sits in (#2472, #2473). `None`
+    /// when no leaf shows that session.
+    pub fn leaf_width_share(&self, session: Uuid) -> Option<f32> {
+        match self {
+            PaneTree::Leaf { session: s, .. } if *s == session => Some(1.0),
+            PaneTree::Leaf { .. } => None,
+            PaneTree::Split {
+                layout, children, ..
+            } => {
+                let mut total = 0.0;
+                for child in children {
+                    let under = match child.leaf_width_share(session) {
+                        Some(fraction) => fraction,
+                        None => continue,
+                    };
+                    total += if layout.is_stacked() {
+                        under
+                    } else {
+                        under * child.share()
+                    };
+                }
+                (total > 0.0).then_some(total)
+            }
+        }
+    }
+
+    /// Point the leaf showing `from` at `to` instead, which is how the chat
+    /// moves to another conversation without the tree losing its shape
+    /// (#2472). `false` when no leaf shows `from`.
+    pub fn rename_leaf(&mut self, from: Uuid, to: Uuid) -> bool {
+        match self {
+            PaneTree::Leaf { session, .. } if *session == from => {
+                *session = to;
+                true
+            }
+            PaneTree::Leaf { .. } => false,
+            PaneTree::Split { children, .. } => {
+                children.iter_mut().any(|child| child.rename_leaf(from, to))
+            }
+        }
+    }
+
+    /// Put the pair around `divider` back to an even share of what they hold
+    /// together, which is what a double click on the rule asks for (#2476).
+    pub fn even_divider(&mut self, path: &[usize], divider: usize) -> bool {
+        let Some(node) = self.at(path) else {
+            return false;
+        };
+        let PaneTree::Split { children, .. } = node else {
+            return false;
+        };
+        if divider + 1 >= children.len() {
+            return false;
+        }
+        let pair = children[divider].share() + children[divider + 1].share();
+        set_share(&mut children[divider], pair / 2.0);
+        set_share(&mut children[divider + 1], pair / 2.0);
+        true
+    }
+
+    /// Move the divider after child `divider` by `travelled` px across the
+    /// split's `span` px along its own axis (#2472, #2476). The two children
+    /// the divider separates keep their combined share, so the rest of the
+    /// split never moves, and [`crate::ui_core::split::share_after_drag`]
+    /// holds the pixel floor on both sides. `false` when the path is not a
+    /// split or the divider has no pair to move.
+    pub fn drag_divider(
+        &mut self,
+        path: &[usize],
+        divider: usize,
+        travelled: f32,
+        span: f32,
+    ) -> bool {
+        let Some(node) = self.at(path) else {
+            return false;
+        };
+        let PaneTree::Split { children, .. } = node else {
+            return false;
+        };
+        if divider + 1 >= children.len() {
+            return false;
+        }
+        let pair = children[divider].share() + children[divider + 1].share();
+        let pair_span = pair * span;
+        if pair <= 0.0 || !pair_span.is_finite() || pair_span <= 0.0 {
+            return false;
+        }
+        let left = children[divider].share();
+        let moved = crate::ui_core::split::share_after_drag(left / pair, travelled, pair_span);
+        set_share(&mut children[divider], moved * pair);
+        set_share(&mut children[divider + 1], (1.0 - moved) * pair);
+        true
+    }
+
     /// The node at a child-index path from this node, for drag addressing.
     pub fn at(&mut self, path: &[usize]) -> Option<&mut PaneTree> {
         let mut node = self;
@@ -401,5 +497,103 @@ mod tests {
             };
         }
         assert_eq!(tree.duplicates(), vec![a()]);
+    }
+
+    /// Dragging the divider moves the pair it separates and nothing else:
+    /// the two children keep their combined share, so a three-pane split
+    /// leaves the third pane exactly where it was (#2472, #2476).
+    #[test]
+    fn dragging_a_divider_moves_only_its_pair() {
+        // Three panes at a quarter, a quarter, a half, so the third pane is
+        // not a divider neighbour of the drag and must not move. The span is
+        // wide enough that the 240px floor does not clip the drag: the pair
+        // holds 1200px of it, so 120px of travel is a tenth of the pair.
+        let mut tree = PaneTree::Split {
+            layout: Layout::Side,
+            share: 1.0,
+            children: vec![
+                PaneTree::Leaf {
+                    session: a(),
+                    share: 0.25,
+                },
+                PaneTree::Leaf {
+                    session: b(),
+                    share: 0.25,
+                },
+                PaneTree::Leaf {
+                    session: c(),
+                    share: 0.5,
+                },
+            ],
+        };
+        assert!(tree.drag_divider(&[], 0, 120.0, 2400.0));
+        let PaneTree::Split { children, .. } = &tree else {
+            panic!("still a split");
+        };
+        assert!((children[0].share() - 0.3).abs() < 1e-4);
+        assert!((children[1].share() - 0.2).abs() < 1e-4);
+        assert!(
+            (children[2].share() - 0.5).abs() < 1e-4,
+            "the third pane stays"
+        );
+    }
+
+    /// The drag holds the floor: a hard pull stops at the minimum pane
+    /// instead of collapsing the neighbour.
+    #[test]
+    fn dragging_a_divider_stops_at_the_pixel_floor() {
+        let mut tree = PaneTree::leaf(a());
+        tree.split(a(), Layout::Side, b());
+        assert!(tree.drag_divider(&[], 0, -5000.0, 1000.0));
+        let PaneTree::Split { children, .. } = &tree else {
+            panic!("still a split");
+        };
+        let floor = crate::ui_core::split::MIN_PANE_PX / 1000.0;
+        assert!((children[0].share() - floor).abs() < 1e-4);
+        assert!((children[1].share() - (1.0 - floor)).abs() < 1e-4);
+    }
+
+    /// A nested split takes its own path, and a divider index past the last
+    /// pair is refused rather than wrapping.
+    #[test]
+    fn dragging_addresses_a_nested_split_by_path() {
+        let mut tree = PaneTree::leaf(a());
+        assert!(tree.split(a(), Layout::Side, b()));
+        assert!(tree.split(b(), Layout::Stack, c()));
+        assert!(
+            !tree.drag_divider(&[], 1, 10.0, 2400.0),
+            "no second divider"
+        );
+        assert!(
+            !tree.drag_divider(&[0], 0, 10.0, 2400.0),
+            "that child is a leaf"
+        );
+        // The nested pair holds half the window, 1200px of a 2400px span, so
+        // 120px of travel is a tenth of the pair and stays above the floor.
+        assert!(tree.drag_divider(&[1], 0, 120.0, 2400.0));
+        let Some(PaneTree::Split { children, .. }) = tree.at(&[1]) else {
+            panic!("the nested split is still there");
+        };
+        let (PaneTree::Leaf { share: top, .. }, PaneTree::Leaf { share: bottom, .. }) =
+            (&children[0], &children[1])
+        else {
+            panic!("the nested children are leaves");
+        };
+        assert!((top - 0.3).abs() < 1e-4, "top got {top}");
+        assert!((bottom - 0.2).abs() < 1e-4, "bottom got {bottom}");
+    }
+
+    /// Width planning reads the shares down the side splits and ignores the
+    /// stacked ones, because a stacked pane spans its split's full width.
+    #[test]
+    fn width_share_multiplies_side_splits_and_skips_stacked_ones() {
+        let mut tree = PaneTree::leaf(a());
+        assert!(tree.split(a(), Layout::Side, b()));
+        assert!(tree.split(b(), Layout::Stack, c()));
+        let a_share = tree.leaf_width_share(a()).expect("a is a leaf");
+        assert!((a_share - 0.5).abs() < 1e-4, "a got {a_share}");
+        let c_share = tree.leaf_width_share(c()).expect("c is a leaf");
+        assert!((c_share - 0.5).abs() < 1e-4, "c got {c_share}");
+        assert!(tree.leaf_width_share(Uuid::nil()).is_none());
     }
 }
