@@ -1267,6 +1267,9 @@ fn attachment_cell(path: &std::path::Path, side: f32) -> Div {
             .child(
                 img(path.to_path_buf())
                     .size_full()
+                    // Clip the pixels as well as the box. GPUI's image paint
+                    // can otherwise cover the outer card's rounded top edge.
+                    .rounded(px(concentric_radius(1.0)))
                     .object_fit(ObjectFit::Cover),
             )
             .into_any_element()
@@ -2148,6 +2151,22 @@ mod tests {
         assert_eq!(heading_size(0), 13.0, "body stays 13px");
         assert_eq!(heading_weight(1), gpui::FontWeight::BOLD);
         assert_eq!(heading_weight(0), gpui::FontWeight::NORMAL);
+    }
+
+    /// #2536: the image needs its own concentric clip. Clipping only the
+    /// outer box still lets the image paint over the card's top corners.
+    #[test]
+    fn attachment_media_clips_inside_the_card_radius() {
+        let src = include_str!("transcript.rs");
+        let cell = src
+            .split("fn attachment_cell(")
+            .nth(1)
+            .and_then(|rest| rest.split("/// The last cell").next())
+            .expect("attachment cell");
+        assert!(cell.contains(".rounded(px(CARD_RADIUS))"));
+        assert!(cell.contains(".rounded(px(concentric_radius(1.0)))"));
+        assert!(cell.contains(".overflow_hidden()"));
+        assert_eq!(concentric_radius(1.0), CARD_RADIUS - 1.0);
     }
 
     /// The stored-rows split with nothing remembered, which is what most
