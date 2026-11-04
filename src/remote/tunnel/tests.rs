@@ -2,6 +2,19 @@ use super::*;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
+/// Test-only liveness probe: kill(pid, 0) — ESRCH = gone, EPERM = alive
+/// (not ours). Clamped to i32::MAX because an out-of-range pid cast
+/// negative would signal -1. Production never needs bare liveness: it
+/// asks [`pid_is_cloudflared`] instead, which subsumes existence.
+#[cfg(unix)]
+fn pid_alive(pid: u32) -> bool {
+    let rc = unsafe { libc::kill(pid.min(i32::MAX as u32) as i32, 0) };
+    if rc == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
 /// A stand-in for cloudflared: honours `--logfile`, optionally writes a
 /// real-shaped URL line, then stays alive as the script process (NOT
 /// `exec sleep` — an exec would swap the pid's identity to `sleep`, and
@@ -207,7 +220,7 @@ fn status_and_stop_refuse_a_recycled_pid_and_clean_state() {
     let dir = tempfile::tempdir().unwrap();
     // An innocent process that is very much alive but is not cloudflared:
     // exactly what a recycled pid looks like after cloudflared dies.
-    let innocent = std::process::Command::new("sleep")
+    let mut innocent = std::process::Command::new("sleep")
         .arg("30")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -231,8 +244,9 @@ fn status_and_stop_refuse_a_recycled_pid_and_clean_state() {
     assert!(!stop(dir.path()).unwrap());
     assert!(pid_alive(innocent.id()), "the innocent process must survive");
 
-    let _ = kill_hard(innocent.id());
-    reap(innocent.id());
+    // Cleanup through the Child handle: properly killed and reaped.
+    let _ = innocent.kill();
+    let _ = innocent.wait();
 }
 
 #[test]

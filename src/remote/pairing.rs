@@ -271,8 +271,12 @@ impl PairingStore {
                     URL_SAFE_NO_PAD.encode(random_bytes::<32>())
                 );
                 let token_hash = sha_b64(&token);
+                // SHA-256 base64url is ASCII-only, so a 12-char prefix can
+                // never split a character — `get` keeps that invariant
+                // provable to the byte-slice ratchet (and to the reader).
+                let id = token_hash.get(..12).unwrap_or_default().to_string();
                 let session = Session {
-                    id: token_hash[..12].to_string(),
+                    id,
                     token_hash,
                     label,
                     scopes: pending.scopes,

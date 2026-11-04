@@ -340,7 +340,7 @@ pub fn parse_trycloudflare_url(text: &str) -> Option<String> {
                 && url.len() >= MIN_LEN)
                 .then(|| url.to_string())
         })
-        .last()
+        .next_back()
 }
 
 fn save_state(state_dir: &Path, state: &TunnelState) -> Result<()> {
@@ -350,17 +350,6 @@ fn save_state(state_dir: &Path, state: &TunnelState) -> Result<()> {
     std::fs::write(&tmp, &json).context("write tunnel.json.tmp")?;
     std::fs::rename(&tmp, &path).context("rename tunnel.json.tmp")?;
     Ok(())
-}
-
-#[cfg(unix)]
-fn pid_alive(pid: u32) -> bool {
-    // kill(pid, 0) probes existence: ESRCH = gone, EPERM = alive (not ours).
-    // Clamp to i32::MAX: an out-of-range pid cast negative would signal -1.
-    let rc = unsafe { libc::kill(pid.min(i32::MAX as u32) as i32, 0) };
-    if rc == 0 {
-        return true;
-    }
-    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 /// Identity guard: liveness only proves *some* process owns the pid. If
@@ -383,19 +372,10 @@ fn pid_is_cloudflared(pid: u32) -> bool {
 }
 
 /// Windows: `tasklist` with a PID filter prints an `INFO:` banner when no
-/// process owns the pid; anything else means one does.
-#[cfg(windows)]
-fn pid_alive(pid: u32) -> bool {
-    let out = std::process::Command::new("tasklist")
-        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output();
-    matches!(out, Ok(o) if !String::from_utf8_lossy(&o.stdout).trim_start().starts_with("INFO:"))
-}
-
-/// Identity guard, Windows arm: the CSV image name must be cloudflared
-/// (see the unix twin for why bare liveness is not enough).
+/// process owns the pid; anything else means one does. (Production reads
+/// identity via [`pid_is_cloudflared`]; the liveness-only probe is
+/// test-only on unix and unnecessary on Windows, where the identity
+/// check subsumes it.)
 #[cfg(windows)]
 fn pid_is_cloudflared(pid: u32) -> bool {
     let out = std::process::Command::new("tasklist")
