@@ -8884,25 +8884,20 @@ fn header_name(name: &str) -> String {
 /// alignment, which is the full width band that read as a button. A row hands
 /// the chip its own content width and nothing else.
 fn session_title_chip(name: &str) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .min_w_0()
-        .child(
-            div()
-                .flex_none()
-                .px_2()
-                .py_1()
-                .rounded(px(CARD_RADIUS))
-                .bg(glass_fill(palette::current().panel))
-                .border_1()
-                .border_color(rgb(palette::current().panel_hi))
-                .text_base()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(rgb(palette::current().text_normal))
-                .child(SharedString::from(header_name(name))),
-        )
+    div().flex().flex_row().items_center().min_w_0().child(
+        div()
+            .flex_none()
+            .px_2()
+            .py_1()
+            .rounded(px(CARD_RADIUS))
+            .bg(glass_fill(palette::current().panel))
+            .border_1()
+            .border_color(rgb(palette::current().panel_hi))
+            .text_base()
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .text_color(rgb(palette::current().text_normal))
+            .child(SharedString::from(header_name(name))),
+    )
 }
 
 /// The chat's `...` button with its items below it while the menu is open
