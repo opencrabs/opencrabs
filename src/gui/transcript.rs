@@ -950,10 +950,30 @@ fn mono_style() -> TextStyle {
     }
 }
 
+/// Heading size ladder (#2521): h1 20px, h2 17px, h3+ 15px, body 13px.
+fn heading_size(level: u8) -> f32 {
+    match level {
+        1 => 20.0,
+        2 => 17.0,
+        3..=6 => 15.0,
+        _ => 13.0,
+    }
+}
+
+/// Headings carry more weight than the 13px regular body text.
+fn heading_weight(level: u8) -> gpui::FontWeight {
+    match level {
+        1..=2 => gpui::FontWeight::BOLD,
+        3..=6 => gpui::FontWeight::MEDIUM,
+        _ => gpui::FontWeight::NORMAL,
+    }
+}
+
 /// One styled markdown line; indent in list/quote depth steps.
 fn md_line(l: &markdown::MdLine) -> Div {
-    let size = if l.heading { 15.0 } else { 13.0 };
-    let style = body_style(size);
+    let size = heading_size(l.heading_level);
+    let mut style = body_style(size);
+    style.font_weight = heading_weight(l.heading_level);
     let text =
         StyledText::new(l.text.clone()).with_default_highlights(&style, l.highlights.clone());
     let base = div().pl(rems(f32::from(l.indent) * 0.9));
@@ -2117,6 +2137,18 @@ pub fn view(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The ladder steps down strictly and the body stays smallest, so a
+    /// heading can never look like prose again (#2521).
+    #[test]
+    fn headings_step_down_from_h1_to_body() {
+        assert!(heading_size(1) > heading_size(2));
+        assert!(heading_size(2) > heading_size(3));
+        assert!(heading_size(3) > heading_size(0), "h3 still beats body");
+        assert_eq!(heading_size(0), 13.0, "body stays 13px");
+        assert_eq!(heading_weight(1), gpui::FontWeight::BOLD);
+        assert_eq!(heading_weight(0), gpui::FontWeight::NORMAL);
+    }
 
     /// The stored-rows split with nothing remembered, which is what most
     /// seats here exercise. Metrics have their own seats.

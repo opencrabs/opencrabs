@@ -29,6 +29,7 @@ pub struct MdLine {
     pub mono: bool,
     pub indent: u8,
     pub heading: bool,
+    pub heading_level: u8,
 }
 
 /// One table cell: its text plus the inline highlight runs into it, byte
@@ -73,6 +74,7 @@ struct Inline {
     strike: bool,
     link: bool,
     heading: bool,
+    heading_level: u8,
 }
 
 impl Inline {
@@ -171,6 +173,7 @@ impl Builder {
         let mono = self.mono;
         let indent = self.indent;
         let heading = self.inline.heading;
+        let heading_level = self.inline.heading_level;
         if text.trim().is_empty() {
             return;
         }
@@ -189,6 +192,7 @@ impl Builder {
             mono,
             indent,
             heading,
+            heading_level,
         }));
     }
 
@@ -200,6 +204,7 @@ impl Builder {
             mono: false,
             indent: self.indent,
             heading: false,
+            heading_level: 0,
         }));
     }
 }
@@ -222,6 +227,19 @@ fn cell_from(text: String, hl: Vec<(Range<usize>, HighlightStyle)>) -> MdCell {
     MdCell {
         text: trimmed.to_string(),
         highlights: moved,
+    }
+}
+
+/// pulldown_cmark's HeadingLevel as a plain 1-6 number (0 = not a heading),
+/// so the renderer can run a size ladder without importing its types (#2521).
+fn heading_level(level: pulldown_cmark::HeadingLevel) -> u8 {
+    match level {
+        pulldown_cmark::HeadingLevel::H1 => 1,
+        pulldown_cmark::HeadingLevel::H2 => 2,
+        pulldown_cmark::HeadingLevel::H3 => 3,
+        pulldown_cmark::HeadingLevel::H4 => 4,
+        pulldown_cmark::HeadingLevel::H5 => 5,
+        pulldown_cmark::HeadingLevel::H6 => 6,
     }
 }
 
@@ -287,9 +305,10 @@ pub fn blocks(src: &str) -> Vec<MdBlock> {
 fn start_tag(b: &mut Builder, tag: Tag) {
     match tag {
         Tag::Paragraph => {}
-        Tag::Heading { .. } => {
+        Tag::Heading { level, .. } => {
             b.flush();
             b.inline.heading = true;
+            b.inline.heading_level = heading_level(level);
         }
         Tag::BlockQuote(_) => {
             b.flush();
@@ -381,6 +400,7 @@ fn end_tag(b: &mut Builder, tag: TagEnd) {
         TagEnd::Heading(_) => {
             b.flush();
             b.inline.heading = false;
+            b.inline.heading_level = 0;
         }
         TagEnd::BlockQuote(_) => {
             b.flush();
