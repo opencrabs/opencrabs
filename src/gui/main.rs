@@ -7868,9 +7868,8 @@ impl Render for Dashboard {
     }
 }
 
-/// The drag handle between the rail and the chat pane. One narrow column with
-/// the resize cursor; the pointer position during the drag comes from the
-/// window, so this element only has to catch the press.
+/// The drag handle between the rail and the chat pane. The hit target stays
+/// wide, but only its centered child paints a hairline.
 fn splitter(
     grab: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> gpui::Stateful<Div> {
@@ -7879,9 +7878,16 @@ fn splitter(
         .w(px(4.0))
         .h_full()
         .flex_none()
+        .flex()
+        .justify_center()
         .cursor_col_resize()
-        .bg(rgb(palette::current().panel_hi))
-        .hover(|d| d.bg(rgb(palette::current().accent)))
+        .child(
+            div()
+                .w(px(1.0))
+                .h_full()
+                .bg(topic_tabs::separator_color())
+                .hover(|d| d.bg(rgb(palette::current().accent))),
+        )
         .on_mouse_down(MouseButton::Left, grab)
 }
 
@@ -10759,6 +10765,23 @@ mod tests {
         assert_eq!(history.len(), THEMES_HISTORY_LEN);
         assert_eq!(history.last().map(String::as_str), Some("f"));
         assert!(!history.iter().any(|seen| seen == "dark"));
+    }
+
+    /// #2543: the rail keeps a four-pixel drag target but paints only the
+    /// same one-pixel theme hairline used below the chat title.
+    #[test]
+    fn rail_splitter_paints_a_hairline_inside_its_drag_target() {
+        let src = include_str!("main.rs");
+        let splitter = src
+            .split("fn splitter(")
+            .nth(1)
+            .and_then(|rest| rest.split("/// The conversation").next())
+            .expect("rail splitter renderer");
+        assert!(splitter.contains(".w(px(4.0))"));
+        assert!(splitter.contains(".w(px(1.0))"));
+        assert!(splitter.contains("topic_tabs::separator_color()"));
+        assert!(splitter.contains(".on_mouse_down(MouseButton::Left, grab)"));
+        assert!(!splitter.contains(".bg(rgb(palette::current().panel_hi))"));
     }
 
     /// The themes screen paints the conversation next to a sidebar, so a
