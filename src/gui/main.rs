@@ -1095,8 +1095,10 @@ impl Dashboard {
                 self.run_finder_pick(cx);
                 return;
             }
-            "up" => state.move_by(-1, find::MAX_ROWS),
-            "down" => state.move_by(1, find::MAX_ROWS),
+            "up" => state.move_by(-1, find::SEEKER_PAGE),
+            "down" => state.move_by(1, find::SEEKER_PAGE),
+            "pageup" => state.move_by(-(find::SEEKER_PAGE as i32), find::SEEKER_PAGE),
+            "pagedown" => state.move_by(find::SEEKER_PAGE as i32, find::SEEKER_PAGE),
             "backspace" => state.backspace(),
             "space" => state.type_char(' '),
             _ => {
@@ -1212,6 +1214,18 @@ impl Dashboard {
     fn set_finder_kind_filter(&mut self, want: Option<PaletteKind>, cx: &mut Context<Self>) {
         if let Some(state) = self.finder.as_mut() {
             state.set_kind_filter(want);
+            cx.notify();
+        }
+    }
+
+    /// The wheel over the results card steps the same engine window the
+    /// arrows walk (#2520), so wheel and keys can never disagree.
+    fn finder_scroll(&mut self, rows: i32, cx: &mut Context<Self>) {
+        if rows == 0 {
+            return;
+        }
+        if let Some(state) = self.finder.as_mut() {
+            state.move_by(rows, find::SEEKER_PAGE);
             cx.notify();
         }
     }
@@ -7192,12 +7206,12 @@ impl Render for Dashboard {
         // the one thing that takes every key while it is up (#2458). One
         // handler per printed row, built here where the context lives.
         if let Some(state) = self.finder.as_ref() {
-            let printed = command_palette::rows(state).len();
+            let (start, printed) = command_palette::window_range(state);
             let handlers: Vec<command_palette::PickHandler> = (0..printed)
                 .map(|ix| -> command_palette::PickHandler {
                     Box::new(
                         cx.listener(move |this: &mut Self, _ev: &ClickEvent, _window, cx| {
-                            this.pick_finder_row(ix, cx);
+                            this.pick_finder_row(start + ix, cx);
                         }),
                     )
                 })
@@ -7207,11 +7221,28 @@ impl Render for Dashboard {
                 Box::new(move |want: Option<PaletteKind>, cx: &mut App| {
                     let _ = entity.update(cx, |this, cx| this.set_finder_kind_filter(want, cx));
                 });
+            let wheel = cx.listener(|this, ev: &ScrollWheelEvent, _window, cx| {
+                let lines = match ev.delta {
+                    ScrollDelta::Lines(lines) => lines.y,
+                    // A pixel delta is a trackpad: a hundredth of a notch
+                    // per pixel keeps a flick from jumping whole pages.
+                    ScrollDelta::Pixels(pixels) => f32::from(pixels.y) / 100.0,
+                };
+                let rows = if lines > 0.0 {
+                    lines.ceil() as i32
+                } else if lines < 0.0 {
+                    lines.floor() as i32
+                } else {
+                    0
+                };
+                this.finder_scroll(rows, cx);
+            });
             let idle_revealed = state.idle_ready(std::time::Instant::now());
             root = root.child(command_palette::overlay(
                 state,
                 handlers,
                 chip,
+                wheel,
                 find::channel_hint(state.query(), &self.finder_channels),
                 idle_revealed,
                 self.finder_caret,

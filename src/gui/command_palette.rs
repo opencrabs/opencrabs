@@ -9,6 +9,7 @@
 //! footer. The content is built by [`rows`], which is pure, so what the card
 //! says can be tested without a window.
 
+use gpui::ScrollWheelEvent;
 use gpui::{
     App, ClickEvent, SharedString, Window, div, linear_color_stop, linear_gradient, prelude::*, px,
     rems, rgb, rgba,
@@ -18,7 +19,7 @@ use std::rc::Rc;
 use crate::palette;
 use opencrabs::ui_core::card::{CARD_RADIUS, concentric_radius};
 use opencrabs::ui_core::commands::{Support, support};
-use opencrabs::ui_core::palette::{PaletteKind, PaletteState, roast};
+use opencrabs::ui_core::palette::{PaletteKind, PaletteState, SEEKER_PAGE, roast};
 
 /// One printed row, decided without gpui. The renderer paints what this says.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -42,14 +43,26 @@ pub struct RowView {
 /// Enter acts on, so the top row carries the marker before the user touches an
 /// arrow. That is the whole "no dead keyboard" rule: the field keeps accepting
 /// characters while a row is armed.
+/// The slice the card prints: (start, len) inside the full filtered list
+/// (#2520). The engine keeps the armed row inside this window, so arrows,
+/// the wheel and the render all walk the same page.
+pub fn window_range(state: &PaletteState) -> (usize, usize) {
+    let len = state.visible().len();
+    let start = state.scroll().min(len.saturating_sub(1));
+    (start, SEEKER_PAGE.min(len.saturating_sub(start)))
+}
+
 pub fn rows(state: &PaletteState) -> Vec<RowView> {
     let visible = state.visible();
     let armed = state.cursor().unwrap_or(0);
+    let (start, page) = window_range(state);
     visible
         .into_iter()
+        .skip(start)
+        .take(page)
         .enumerate()
         .map(|(ix, row)| RowView {
-            marker: if ix == armed { MARKER } else { " " },
+            marker: if ix + start == armed { MARKER } else { " " },
             // Read before the title is moved into the row: same value, and the
             // borrow checker has one order that works.
             missing: row.item.kind == PaletteKind::Command
@@ -57,7 +70,7 @@ pub fn rows(state: &PaletteState) -> Vec<RowView> {
             title: row.item.title,
             subtitle: row.item.subtitle,
             kind: kind_label(row.item.kind),
-            armed: ix == armed,
+            armed: ix + start == armed,
         })
         .collect()
 }
@@ -123,6 +136,7 @@ pub fn overlay(
     state: &PaletteState,
     pick: Vec<PickHandler>,
     chip: ChipHandler,
+    wheel: impl Fn(&ScrollWheelEvent, &mut Window, &mut App) + 'static,
     setup: Option<&'static str>,
     idle_revealed: bool,
     caret_on: bool,
@@ -254,7 +268,13 @@ pub fn overlay(
 
         // The rows: title only, subtitle and enter hint on the armed row,
         // and the one right-edge word that does work, terminal only (#2491).
-        let mut list = div().flex().flex_col().gap_0p5().px_3().pb_2();
+        let mut list = div()
+            .flex()
+            .flex_col()
+            .gap_0p5()
+            .px_3()
+            .pb_2()
+            .on_scroll_wheel(move |ev, window, cx| wheel(ev, window, cx));
         let mut handlers = pick.into_iter();
         for (ix, rowv) in printed.iter().enumerate() {
             let armed = rowv.armed;
@@ -420,6 +440,29 @@ mod tests {
             kind,
             PaletteAction::OpenSurface(Surface::Help),
         )
+    }
+
+    /// The card prints only the page under the scroll offset (#2520), so a
+    /// list longer than the clip stays steppable instead of clipped.
+    #[test]
+    fn rows_print_only_the_page_under_the_cursor() {
+        let mut state = state_with(
+            (0..12)
+                .map(|ix| item(&format!("row{ix:02}"), PaletteKind::Command))
+                .collect(),
+        );
+        for _ in 0..9 {
+            state.move_by(1, SEEKER_PAGE);
+        }
+        let (start, page) = window_range(&state);
+        assert!(page <= SEEKER_PAGE);
+        let printed = rows(&state);
+        assert_eq!(printed.len(), page);
+        assert_eq!(printed[0].title, format!("row{start:02}"));
+        assert!(
+            printed.iter().any(|r| r.armed),
+            "the armed row lands inside the printed window"
+        );
     }
 
     /// The top row is armed before any arrow press, because Enter acts on it:

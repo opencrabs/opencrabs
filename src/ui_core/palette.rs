@@ -710,6 +710,12 @@ pub struct PaletteState {
 /// rendered: the card is a launcher, not a catalogue.
 pub const MAX_ROWS: usize = 60;
 
+/// Rows one Seeker page shows (#2520): the results card clips at 480px,
+/// which fits about seven rows. Arrows, the wheel and PageUp/PageDown all
+/// pass it as the move_by page, and the GUI prints exactly this slice of
+/// the filtered list, so keys, wheel and render walk the same window.
+pub const SEEKER_PAGE: usize = 7;
+
 /// The idle suggestions wait this long after the card opens, so the first
 /// paint is the field and the placeholder alone. Apple shows its shortcuts
 /// only after a beat; we do the same (#2491).
