@@ -6,9 +6,9 @@
 //! binary can link it as-is.
 
 pub mod bang;
-// GUI-only: card.rs builds gpui Backgrounds, and `gpui` is an optional
-// dependency behind the `gui` feature. Gating the module keeps the
-// terminal-neutral default build compiling (#2497 landed it unguarded).
+// `card` is the shared card shape and reads `gpui` types, so it only
+// compiles with the feature that provides them (#2510). Every consumer is
+// in `src/gui/`.
 #[cfg(feature = "gui")]
 pub mod card;
 pub mod channel_status;

@@ -1,7 +1,8 @@
-//! The window draws the split's second pane on the chat screen (#2438). The
-//! window has no headless harness, so these checks read source. Stage one
-//! stored the picked pane and drew it only inside the themes preview, so
-//! choosing a session from the menu changed state and nothing appeared.
+//! The window draws its panes from a tree on the chat screen (#2438, #2472).
+//! The window has no headless harness, so these checks read source. Each rule
+//! below was broken once: a split that drew only inside the themes preview, a
+//! second pane with no header, a divider that could not resize, a caret that
+//! could not move between panes, and a split that could not split again.
 
 const GUI_MAIN: &str = include_str!("../gui/main.rs");
 
@@ -16,11 +17,56 @@ fn chat_arm() -> &'static str {
         .expect("the chat arm comes before the usage arm")
 }
 
+/// The key handler, from its opening to the next method on the window.
+fn on_key() -> &'static str {
+    GUI_MAIN
+        .split("fn on_key(")
+        .nth(1)
+        .expect("on_key is defined")
+        .split("\n    fn ")
+        .next()
+        .expect("the handler has a body")
+}
+
+/// The walk that turns the pane tree into elements (#2472).
+fn pane_element() -> &'static str {
+    GUI_MAIN
+        .split("fn pane_element(")
+        .nth(1)
+        .expect("pane_element is defined")
+        .split("fn split_pick_overlay(")
+        .next()
+        .expect("the walk comes before the pick overlay")
+}
+
+/// The Tab branch that cycles the panes, from its condition to the call.
+fn tab_arm() -> &'static str {
+    GUI_MAIN
+        .split("if ev.keystroke.key == \"tab\"")
+        .nth(1)
+        .expect("the pane Tab branch exists")
+        .split("self.cycle_pane_focus(cx);")
+        .next()
+        .expect("the branch cycles the panes")
+}
+
+/// Source with every run of whitespace folded to one space. A `rustfmt`
+/// reflow then reads the same as the line it wrapped, so these checks pin
+/// behaviour rather than column positions.
+fn flat(src: &str) -> String {
+    src.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 #[test]
-fn the_chat_screen_draws_the_second_pane() {
+fn the_chat_screen_draws_the_panes() {
     assert!(
-        chat_arm().contains("split_body("),
-        "the chat arm must draw the split through split_body, not only the themes preview"
+        chat_arm().contains("self.panes_body("),
+        "the chat arm draws the tree through panes_body, not only the themes preview"
+    );
+    assert_eq!(
+        GUI_MAIN.matches("self.panes_body(").count(),
+        2,
+        "both screens draw the same panes: the chat and the themes preview"
     );
 }
 
@@ -28,62 +74,59 @@ fn the_chat_screen_draws_the_second_pane() {
 fn a_split_widens_nothing_when_it_is_absent() {
     let chat = chat_arm();
     assert!(
-        chat.contains("let primary_width = match &self.split {"),
-        "the chat pane plans its rows against the width it is actually drawn into"
+        chat.contains(".and_then(|(tree, id)| tree.leaf_width_share(id))")
+            && chat.contains(".unwrap_or(1.0);"),
+        "the chat plans its rows against the share the tree gives it, and an untreed window gets all of it"
     );
     assert!(
-        chat.contains("split_pane_width(pane_width, pane.layout.is_stacked(), self.split_ratio)"),
+        chat.contains("split_pane_width(pane_width, false, chat_share)"),
         "two panes share the content width through split_pane_width, which subtracts the gap and the handle"
+    );
+    assert!(
+        GUI_MAIN.contains("if tree.leaves().len() < 2 {\n            return chat;"),
+        "a tree of one leaf hands the chat back untouched, which is the unsplit window"
     );
 }
 
 #[test]
 fn the_second_pane_is_composed_in_one_place() {
-    let helper = GUI_MAIN
-        .split("fn split_body(")
-        .nth(1)
-        .expect("split_body is defined");
-    assert!(
-        helper.contains("\"split-close-secondary\""),
-        "the second pane carries its session header and close button"
-    );
-    assert!(
-        helper.contains("let stacked = pane.layout.is_stacked();")
-            && helper.contains(".when(stacked, |d| d.flex_col())")
-            && helper.contains(".when(!stacked, |d| d.flex_row())"),
-        "Split _ stacks the panes, Split | sets them side by side"
-    );
+    let walk = pane_element();
     assert_eq!(
-        GUI_MAIN.matches("\"split-secondary\"").count(),
+        GUI_MAIN.matches("fn pane_element(").count(),
         1,
-        "the second pane is built in split_body only, so both screens draw the same thing"
+        "one walk draws every pane, so a flat split and a nested one cannot drift"
+    );
+    assert!(
+        flat(walk).contains("PaneTree::Leaf { session, .. } =>")
+            && flat(walk).contains("PaneTree::Split { layout, children, .. } =>"),
+        "the walk answers both shapes of node"
+    );
+    assert!(
+        walk.contains("match ctx.states.get(session) {"),
+        "a pane draws its own transcript from its own state, not the chat's"
+    );
+    assert!(
+        walk.contains("let element = pane_element(child, ctx, path, child_width);"),
+        "a split recurses, which is how a split can split again (#2472)"
     );
 }
 
 #[test]
 fn both_panes_carry_a_header_and_a_close_button() {
-    let helper = GUI_MAIN
-        .split("fn split_body(")
-        .nth(1)
-        .expect("split_body is defined");
+    let walk = pane_element();
     // Only the second pane used to have a header, so one session read as a
     // named session and the other as a nameless strip (#2474).
     assert!(
-        helper.contains("\"split-close-primary\""),
-        "the chat pane carries a header too"
+        walk.contains("pane_header(") && walk.contains("format!(\"pane-close-{session}\")"),
+        "every leaf builds its own header and its own close button"
     );
     assert!(
-        helper.contains("\"split-close-secondary\""),
-        "the picked pane keeps its header"
+        GUI_MAIN.contains("fn pane_header(") && GUI_MAIN.contains("focused: bool,"),
+        "one helper draws every header, so they cannot drift"
     );
     assert!(
-        GUI_MAIN.contains("fn pane_header("),
-        "one helper draws both headers, so the two cannot drift"
-    );
-    assert!(
-        GUI_MAIN.contains("focus == PaneFocus::Primary")
-            && GUI_MAIN.contains("focus == PaneFocus::Secondary"),
-        "the pane holding the caret wears the accent, so the focus is visible"
+        walk.contains("ctx.focus.is_none()") && walk.contains("ctx.focus == Some(*session)"),
+        "the caret sits on the chat when no pane took it, and the accent follows it"
     );
 }
 
@@ -118,42 +161,13 @@ fn the_focused_pane_wears_a_band_under_its_header() {
 }
 
 #[test]
-fn ctrl_x_closes_the_focused_pane() {
-    let keys = GUI_MAIN
-        .split("fn on_key(")
-        .nth(1)
-        .expect("on_key is defined")
-        .split("fn ")
-        .next()
-        .expect("the handler has a body");
-    assert!(
-        keys.contains("&& ks.key == \"x\"")
-            && keys.contains("&& self.split.is_some()")
-            && keys.contains("self.close_focused_pane(cx);"),
-        "ctrl+x closes the focused pane, the chord the terminal answers"
-    );
-    let close = GUI_MAIN
-        .split("fn close_focused_pane(")
-        .nth(1)
-        .expect("close_focused_pane is defined");
-    assert!(
-        close.contains("(PaneFocus::Primary, Some(pane)) => self.open_session(pane.session, cx)"),
-        "closing the chat hands the window to the picked session rather than dropping it"
-    );
-    assert!(
-        close.contains("self.pane_focus = PaneFocus::Primary;"),
-        "focus returns to the chat, so the next chord lands somewhere known"
-    );
-}
-
-#[test]
 fn choosing_a_session_repaints_before_the_transcript_loads() {
     let choose = GUI_MAIN
         .split("fn choose_split(")
         .nth(1)
         .expect("choose_split is defined");
     let stored = choose
-        .find("self.split = Some(SplitPane {")
+        .find("self.pane_states.insert(")
         .expect("the picked pane is stored");
     let tail = choose
         .get(stored..)
@@ -165,29 +179,30 @@ fn choosing_a_session_repaints_before_the_transcript_loads() {
         painted < tail.find("cx.spawn").unwrap_or(painted + 1),
         "the repaint happens before the transcript load is spawned"
     );
+    assert!(
+        choose.contains(".is_some_and(|tree| tree.split(target, layout, id));"),
+        "the pane the pick started from is the one that splits, which is what nests a split"
+    );
 }
 
 #[test]
 fn both_halves_take_their_share_of_the_width() {
-    let body = GUI_MAIN
-        .split("fn split_body(")
-        .nth(1)
-        .expect("split_body is defined");
+    let walk = pane_element();
     // The chat used to be handed in bare, so it sized to its content and the
-    // split read as a chat with a strip beside it (#2473). It now takes a
-    // share that the divider drag moves (#2476).
+    // split read as a chat with a strip beside it (#2473). Each child of a
+    // split now sits in a slot sized by its own share (#2472, #2476).
     assert!(
-        body.contains("let half = div()"),
-        "the primary pane is wrapped so it can take a share of the row"
+        walk.contains(".flex_basis(gpui::relative(child.share()))"),
+        "each pane takes its own share of the row, so a drag can make one bigger"
     );
     assert!(
-        body.contains(".child(half)") && body.contains(".child(secondary)"),
-        "both halves are children of the split row"
+        walk.contains("format!(\"split-slot-{here:?}-{ix}\")"),
+        "every share gets its own slot, so a drag addresses one box and not the window"
     );
     // The rule is what makes the boundary readable on a dark theme.
     assert!(
-        body.contains("split_divider(stacked, grab)"),
-        "a visible rule sits between the panes, and the strip around it takes the drag"
+        walk.contains("split_divider(stacked, grab)"),
+        "a visible rule sits between each pair, and the strip around it takes the drag"
     );
     assert!(
         GUI_MAIN.contains("const SPLIT_DIVIDER_PX: f32 = 2.0;"),
@@ -229,30 +244,30 @@ fn a_stacked_pane_plans_against_the_whole_width() {
     );
 }
 
-/// #2476: the halves are sized by a share the drag moves, not by an even flex,
+/// #2476: each pane is sized by a share the drag moves, not by an even flex,
 /// so resizing is possible at all and the default still splits 50/50.
 #[test]
 fn the_divider_resizes_both_panes() {
-    let body = GUI_MAIN
-        .split("fn split_body(")
-        .nth(1)
-        .expect("split_body is defined");
+    let walk = pane_element();
     assert!(
-        body.contains(".flex_basis(gpui::relative(share))")
-            && body.contains(".flex_basis(gpui::relative(1.0 - share))"),
-        "each half takes its own share, so a drag can make one bigger than the other"
-    );
-    assert!(
-        body.contains("on_children_prepainted"),
+        walk.contains(".on_children_prepainted(move |bounds, _window, _cx| {"),
         "the pane area is recorded at paint time, so the drag maps onto the real boxes"
     );
     assert!(
-        GUI_MAIN.contains("this.split_drag = Some((f32::from(axis), this.split_ratio));"),
-        "pressing the rule starts a drag and remembers where it started"
+        walk.contains(".insert(key.clone(), [start_x, start_y, end_x, end_y]);"),
+        "each split records its own box under its path, so a nested rule maps onto its pane"
     );
     assert!(
-        GUI_MAIN.contains("split::share_after_drag(from_share, now - from_axis, span)"),
-        "the moves are measured against the pane span, with the floor enforced in split"
+        GUI_MAIN.contains("self.split_drag = Some(DividerDrag {"),
+        "pressing the rule starts a drag that remembers its path and its divider"
+    );
+    assert!(
+        GUI_MAIN.contains("tree.drag_divider(&drag.path, drag.divider, travelled, span);"),
+        "the move lands on that split's own pair, measured against its own span"
+    );
+    assert!(
+        GUI_MAIN.contains("tree.even_divider(path, divider);"),
+        "a double click puts the pair back to even"
     );
     assert!(
         GUI_MAIN.contains("const SPLIT_HANDLE_PX: f32 = 12.0;"),
@@ -262,13 +277,7 @@ fn the_divider_resizes_both_panes() {
 
 #[test]
 fn tab_moves_the_caret_between_the_panes() {
-    let keys = GUI_MAIN
-        .split("fn on_key(")
-        .nth(1)
-        .expect("on_key is defined")
-        .split("\n    fn ")
-        .next()
-        .expect("the handler has a body");
+    let keys = on_key();
     // A split opens holding the caret, but until Tab moved it the other pane
     // was only reachable by mouse, so ctrl+x could not target it (#2475).
     let cycle = keys
@@ -279,42 +288,79 @@ fn tab_moves_the_caret_between_the_panes() {
         .expect("Tab still walks to the rail");
     assert!(
         cycle < rail,
-        "the split claims Tab before the rail does, so a live split keeps the key"
+        "the tree claims Tab before the rail does, so a live split keeps the key"
     );
     assert!(
-        keys.contains("&& self.split.is_some()")
-            && keys.contains("&& !self.editor.read(cx).list_open()"),
-        "nothing switches panes when there is no split, and an open picker keeps Tab"
+        flat(tab_arm()).contains(".is_some_and(|tree| tree.leaves().len() > 1)")
+            && flat(tab_arm()).contains("&& !self.editor.read(cx).list_open()"),
+        "nothing cycles panes with no tree, and an open list keeps Tab"
     );
     let cycle_fn = GUI_MAIN
         .split("fn cycle_pane_focus(")
         .nth(1)
         .expect("cycle_pane_focus is defined");
     assert!(
-        cycle_fn.contains("PaneFocus::Primary => PaneFocus::Secondary")
-            && cycle_fn.contains("PaneFocus::Secondary => PaneFocus::Primary"),
-        "the caret goes both ways, so two presses return it"
+        cycle_fn.contains("let next = leaves[(at + 1) % leaves.len()];"),
+        "the caret walks the leaves in the order they are drawn, and two presses return it"
+    );
+    assert!(
+        cycle_fn.contains("self.pane_focus = if Some(next) == self.transcript.session {"),
+        "the chat's own leaf is the pane the caret reaches as None"
     );
 }
 
 #[test]
 fn the_page_keys_scroll_the_pane_holding_the_caret() {
-    let keys = GUI_MAIN
-        .split("fn on_key(")
-        .nth(1)
-        .expect("on_key is defined")
-        .split("\n    fn ")
-        .next()
-        .expect("the handler has a body");
+    let keys = on_key();
     // A read-only transcript holds the caret by taking the page keys. Without
     // this the second pane could be focused and still not scroll (#2475).
     assert!(
-        keys.contains("(Some(pane), PaneFocus::Secondary) => &pane.scroll,"),
-        "the page keys follow the caret into the second pane"
+        keys.contains(
+            "let scroll = match self.pane_focus.and_then(|id| self.pane_states.get(&id)) {"
+        ),
+        "the page keys follow the caret into whichever pane holds it"
     );
     assert!(
-        keys.contains("_ => &self.transcript_scroll,"),
-        "with no split, or the chat focused, the page keys scroll the chat"
+        keys.contains("None => &self.transcript_scroll,"),
+        "with no pane focused the page keys scroll the chat"
+    );
+}
+
+#[test]
+fn ctrl_x_closes_the_pane_holding_the_caret() {
+    let keys = on_key();
+    let arm = flat(
+        keys.split("ctrl+x closes the pane holding the caret")
+            .nth(1)
+            .expect("the chord is handled")
+            .split("return;")
+            .next()
+            .expect("the arm returns"),
+    );
+    assert!(
+        arm.contains("&& ks.key == \"x\"")
+            && arm.contains(".is_some_and(|tree| tree.leaves().len() > 1)")
+            && arm.contains("self.close_focused_pane(cx);"),
+        "ctrl+x closes the pane holding the caret, and only while there are panes to close"
+    );
+    let close = GUI_MAIN
+        .split("fn close_pane(")
+        .nth(1)
+        .expect("close_pane is defined")
+        .split("fn close_focused_pane(")
+        .next()
+        .expect("close_pane comes before its chord wrapper");
+    assert!(
+        close.contains("let Some(absorbed) = tree.close(session) else {"),
+        "the closed pane's share goes to its neighbour through the tree"
+    );
+    assert!(
+        close.contains("self.open_session(absorbed, cx);"),
+        "closing the chat hands the window to the survivor rather than dropping it"
+    );
+    assert!(
+        close.contains("self.pane_focus = None;"),
+        "focus returns to the chat leaf, so the next chord lands somewhere known"
     );
 }
 

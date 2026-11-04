@@ -106,7 +106,13 @@ fn alucard_matches_upstream_spec() {
     assert_eq!(c.purple_soft, rgb(0x644AC9), "purple");
     assert_eq!(c.surface_qr, rgb(0xEFEDDC), "floating");
     assert_eq!(c.selection_bg, rgb(0xDEDCCF), "bg-light");
-    assert_eq!(c.gray_mid, rgb(0xCECCC0), "bg-dark");
+    // `bg-dark` (#CECCC0) is the plate under this canvas, so as a
+    // foreground it measured 1.56:1: the dim tiers drew a background
+    // colour as text. They derive from `bg-dark` toward the ink instead,
+    // which is a deliberate drift from the upstream spec (#2492).
+    assert_eq!(c.gray_dark, rgb(0xCECCC0), "bg-dark, still the plate");
+    assert_eq!(c.gray_mid, rgb(0xA3A097), "bg-dark toward ink, 2.52:1");
+    assert_eq!(c.gray_detail, rgb(0x88867F), "bg-dark toward ink, 3.51:1");
 }
 
 /// tomasr/molokai — classic variant (#272822 bg, NOT Monokai Pro, NOT
@@ -174,7 +180,11 @@ fn catppuccin_latte_matches_upstream_spec() {
     assert_eq!(c.accent, rgb(0xFE640B), "orange");
     assert_eq!(c.error, rgb(0xD20F39), "red");
     assert_eq!(c.success, rgb(0x40A02B), "green");
-    assert_eq!(c.warning, rgb(0xDF8E1D), "yellow");
+    // Yellow is a fill in the upstream palette: #DF8E1D measures 2.31:1 as
+    // text on base, under the 2.5:1 floor every theme role has to clear, so
+    // the shipped value is that hue darkened to 2.70:1 (#2492).
+    assert_eq!(c.warning, rgb(0xC98528), "yellow darkened for text");
+    assert_eq!(c.warning_muted, rgb(0xDF8E1D), "upstream yellow, fill only");
     assert_eq!(c.blue_steel, rgb(0x1E66F5), "blue");
     assert_eq!(c.purple_soft, rgb(0x8839EF), "mauve");
     assert_eq!(c.accent_teal, rgb(0x179299), "teal");

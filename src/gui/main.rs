@@ -57,6 +57,7 @@ use crate::screen_keys::{
 };
 use crate::theme::{BASE_REM, Size, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP, text};
 use opencrabs::ui_core::channel_status;
+use opencrabs::ui_core::pane_tree::PaneTree;
 use opencrabs::ui_core::rail;
 use opencrabs::ui_core::split::{self, Layout};
 use opencrabs::ui_core::topic_bar;
@@ -84,7 +85,6 @@ use gpui::{
 };
 use opencrabs::brain::agent::ProgressEvent;
 use opencrabs::utils::drop_landing::human_size;
-use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::rc::Rc;
@@ -129,38 +129,30 @@ enum Screen {
     Skills,
 }
 
-/// The second pane of a split: its session, transcript, scroll and layout (#2438).
-/// It carries its own composer, plan strip and queue, so each pane answers on
-/// its own session and nothing window-level sits under the panes (#2474).
+/// A divider drag in flight (#2472, #2476): which split, which divider in it,
+/// the axis it moves along, and where the pointer was on the last move.
+#[derive(Clone, Debug)]
+struct DividerDrag {
+    /// The split's path from the root, the way [`PaneTree::at`] addresses it.
+    path: Vec<usize>,
+    /// Which divider of that split: the one between children `divider` and
+    /// `divider + 1`.
+    divider: usize,
+    /// Whether the split stacks its children, which fixes the drag axis.
+    stacked: bool,
+    /// Where the pointer was along that axis on the last move, in px.
+    last: f32,
+}
+
+/// One pane beside the window's own chat: its transcript and scroll (#2438).
+/// Where it sits, how much space it holds and which session it shows all live
+/// in the pane tree, so a pane carries neither a layout nor a session of its
+/// own (#2472).
 struct SplitPane {
-    session: uuid::Uuid,
     /// The session's title as the rail shows it, for the pane header.
     title: String,
     transcript: TranscriptState,
     scroll: ScrollHandle,
-    layout: Layout,
-    /// The pane's own composer: Enter here sends to this pane's session, and
-    /// the subscription binds that session when the split opens, so a later
-    /// window selection can never capture the pane's text.
-    editor: Entity<editor::Editor>,
-    /// The pane's plan strip, the same state the window composer keeps.
-    plan: plan_strip::PlanStripState,
-    /// Which session `plan` was resolved for, so the DB lookup runs once per
-    /// pane rather than once per frame.
-    plan_for: Option<Uuid>,
-    /// Messages typed before the bridge booted. They join the session's
-    /// bridge queue when Ready lands, the window queue's own rule.
-    pending: Vec<agent_bridge::PendingMessage>,
-}
-
-/// Which pane a split gives the caret and the `ctrl+x` (#2474, #2475).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-enum PaneFocus {
-    /// The session the window was already on.
-    #[default]
-    Primary,
-    /// The one picked when the split opened.
-    Secondary,
 }
 
 /// The ledger path, unchanged: `config.database.path`, with the same
@@ -529,22 +521,28 @@ struct Dashboard {
     help_filter: Option<String>,
     /// Drag-to-copy state shared by the chat's rows (#2383).
     copy_drag: Rc<CopyDrag>,
-    /// The second pane of a split, when one is open (#2438).
-    split: Option<SplitPane>,
-    /// Which pane holds the caret and answers `ctrl+x` (#2474).
-    pane_focus: PaneFocus,
-    /// The chat's share of the pane area, moved by dragging the rule between
-    /// the panes and returned to an even split when a new one opens (#2476).
-    split_ratio: f32,
-    /// Where the pane area begins and ends along both axes, in px, written by
-    /// the body itself every frame (#2476). Mapping pointer travel onto the
-    /// share needs the span it travels across, and an element is never told
-    /// its own children's bounds any other way.
-    split_area: Rc<Cell<Option<[f32; 4]>>>,
-    /// A divider drag in flight: where the pointer was along the drag axis in
-    /// px, and the share when it began. The moves land on the window root the
-    /// way the rail splitter's do, so the pointer can leave the handle.
-    split_drag: Option<(f32, f32)>,
+    /// The window's panes as a tree (#2472). One leaf is the unsplit window,
+    /// so the plain chat is the base case rather than a special one, and a
+    /// nested split is just another node. `None` until a conversation opens.
+    panes: Option<PaneTree>,
+    /// The state every pane but the chat keeps, keyed by session (#2472).
+    pane_states: HashMap<Uuid, SplitPane>,
+    /// The session holding the caret and answering `ctrl+x`; `None` is the
+    /// window's own chat (#2474, #2475).
+    pane_focus: Option<Uuid>,
+    /// Where each split begins and ends along both axes, in px, keyed by the
+    /// split's path from the root, written by the body itself every frame
+    /// (#2472, #2476). Mapping pointer travel onto a share needs the span it
+    /// travels across, and an element is never told its own children's bounds
+    /// any other way.
+    split_areas: Rc<std::cell::RefCell<HashMap<Vec<usize>, [f32; 4]>>>,
+    /// A divider drag in flight: the split's path, which divider, where the
+    /// pointer was along the drag axis in px, and the share when it began.
+    /// The moves land on the window root the way the rail splitter's do, so
+    /// the pointer can leave the handle (#2472, #2476).
+    split_drag: Option<DividerDrag>,
+    /// The pane a pending pick splits; the sidebar fills it (#2472).
+    split_target: Option<Uuid>,
     /// The layout a split is waiting on a session for; the sidebar picks it (#2438).
     split_pick: Option<Layout>,
     /// A split's new session is being created, so the created row fills the pane.
@@ -595,8 +593,11 @@ struct Dashboard {
     /// because both facts come from a subprocess and a render that shells out
     /// is a render that stutters.
     preview_video: Option<preview::VideoFacts>,
-    /// The `...` menu over the chat is open (#2303). Its only item is New topic.
-    topic_menu: bool,
+    /// The chat's `...` menu, as the session it acts on (#2480).
+    ///
+    /// It carries the id, never a bare flag: a right press on a topic tab
+    /// opens the same menu for a session that is not the one on screen.
+    topic_menu: Option<uuid::Uuid>,
     /// The topic name being typed, while the name prompt is open (#2303).
     topic_draft: Option<String>,
     /// Which side of the chat the topic row sits on (#2402).
@@ -670,11 +671,6 @@ struct Dashboard {
     /// The running turn's cancellation token, so Esc twice stops it the way
     /// the TUI's second Esc does. `None` when no turn is in flight.
     cancel: Option<tokio_util::sync::CancellationToken>,
-    /// Which conversation the running turn answers: set when a turn spawns,
-    /// taken when it ends. Done and Failed carry no session id, so this is
-    /// what keeps a split pane's turn from reloading the window transcript
-    /// (#2474).
-    turn_session: Option<Uuid>,
     /// When the last Esc landed. A second Esc inside the window cancels the
     /// turn; a lone Esc is ignored, because Esc is also how a user clears a
     /// selection.
@@ -823,7 +819,11 @@ impl Dashboard {
             // were typed in (#2481).
             self.editor.update(cx, |ed, cx| ed.begin_conversation(cx));
         }
+        let previous = self.transcript.session;
         self.transcript.session = Some(id);
+        // The chat is a leaf of the pane tree, so switching conversations
+        // moves that leaf instead of leaving a stale pane behind (#2472).
+        self.adopt_chat_leaf(previous, id);
         // The next launch opens this conversation. Both surfaces read the same
         // file, so switching here means the terminal comes back to it too, and
         // a restart no longer lands on whatever the rail listed first (#2444).
@@ -1296,23 +1296,32 @@ impl Dashboard {
     /// The sessions rail: `/sessions` and ctrl+s share one toggle, so the
     /// command and the chord can never disagree about what showing it means.
     /// A hidden rail has no field to keep listening, so the filter exits.
-    /// Start a split: open the sidebar, focus it, and ask for the second
-    /// session. The chat's own session stays on the left or top (#2438).
+    /// Start a split: open the sidebar, focus it, and ask for the session
+    /// that shares the space with the pane holding the caret. The pane being
+    /// split is the one the caret is on, so a nested split grows from the
+    /// pane being read rather than from the window's first leaf (#2472).
     fn begin_split(&mut self, layout: Layout, cx: &mut Context<Self>) {
-        if self.transcript.session.is_none() {
+        let target = self.pane_focus.or(self.transcript.session);
+        let target = target.filter(|id| self.panes.as_ref().is_some_and(|t| t.contains(*id)));
+        let Some(target) = target else {
             self.live
                 .notices
                 .push("Open a session before splitting it.".to_string());
             cx.notify();
             return;
-        }
+        };
         if !self.rail_open {
             self.toggle_rail(cx);
         }
         self.split_pick = Some(layout);
-        // A fresh split starts with the chat in front, whatever the last one
-        // left behind (#2474).
-        self.pane_focus = PaneFocus::Primary;
+        self.split_target = Some(target);
+        // A fresh split starts with the pane it grows from in front, whatever
+        // the last one left behind (#2474).
+        self.pane_focus = if Some(target) == self.transcript.session {
+            None
+        } else {
+            Some(target)
+        };
         self.rail_focused = true;
         self.sessions.cursor = self.transcript.session;
         // Focus goes to the window, not the composer, so the sidebar keys and the
@@ -1324,80 +1333,121 @@ impl Dashboard {
     /// Esc during the pick: the split is dropped and the chat keeps focus.
     fn cancel_split_pick(&mut self, cx: &mut Context<Self>) {
         self.split_pick = None;
+        self.split_target = None;
         self.rail_focused = false;
         self.refocus_screen();
         cx.notify();
     }
 
-    /// The `ctrl-x` close, and the × on either header: close the pane holding
-    /// the caret (#2474). Closing the second pane ends the split; closing the
-    /// first hands the window to the second, because removing the primary would
-    /// otherwise leave a session the user never asked to see in its place.
-    /// Focus returns to the primary either way, so the next chord lands
-    /// somewhere known.
-    fn close_focused_pane(&mut self, cx: &mut Context<Self>) {
-        let was = self.pane_focus;
-        self.pane_focus = PaneFocus::Primary;
+    /// The session holding the caret: the chat's own session when no pane
+    /// took it (#2474).
+    fn focused_pane(&self) -> Option<Uuid> {
+        self.pane_focus.or(self.transcript.session)
+    }
+
+    /// Close one pane and hand its space to its neighbour (#2438, #2472).
+    /// Closing the chat itself moves the window to the first survivor, whose
+    /// leaf takes the chat's place, so the panes that remain keep the slots
+    /// they were dragged to and the window never shows a session the user
+    /// did not pick.
+    fn close_pane(&mut self, session: Uuid, cx: &mut Context<Self>) {
+        let Some(tree) = self.panes.as_mut() else {
+            return;
+        };
+        if tree.leaves().len() <= 1 {
+            return;
+        }
+        let Some(absorbed) = tree.close(session) else {
+            return;
+        };
+        self.pane_states.remove(&session);
         self.split_drag = None;
-        match (was, self.split.take()) {
-            (PaneFocus::Primary, Some(pane)) => self.open_session(pane.session, cx),
-            _ => {
-                self.refocus_screen();
-                cx.notify();
-            }
+        self.pane_focus = None;
+        if self.transcript.session == Some(session) {
+            self.open_session(absorbed, cx);
+        } else {
+            self.refocus_screen();
+            cx.notify();
         }
     }
 
-    /// The × on the second pane: the same close ctrl+x performs, without
-    /// needing the caret to have been there first (#2474).
-    fn close_secondary_pane(&mut self, cx: &mut Context<Self>) {
-        self.split = None;
-        self.pane_focus = PaneFocus::Primary;
-        self.split_drag = None;
-        self.refocus_screen();
-        cx.notify();
+    /// `ctrl+x` and the × on the focused pane's header: close the pane holding
+    /// the caret (#2474).
+    fn close_focused_pane(&mut self, cx: &mut Context<Self>) {
+        if let Some(session) = self.focused_pane() {
+            self.close_pane(session, cx);
+        }
     }
 
-    /// Tab moves the caret between the two panes (#2475). With no split open
-    /// there is nothing to switch, so the rail keeps the key as it always did.
-    /// The pane holding the caret wears the accent in its header and takes the
-    /// page keys, which is how a read-only transcript holds a caret at all.
+    /// Tab moves the caret between the panes in the order they are drawn, so
+    /// the accent follows the layout the eye reads (#2475, #2472). With one
+    /// pane there is nothing to switch to, so the rail keeps the key as it
+    /// always did. The pane holding the caret wears the accent in its header
+    /// and takes the page keys.
     fn cycle_pane_focus(&mut self, cx: &mut Context<Self>) {
-        self.pane_focus = match self.pane_focus {
-            PaneFocus::Primary => PaneFocus::Secondary,
-            PaneFocus::Secondary => PaneFocus::Primary,
+        let Some(tree) = self.panes.as_ref() else {
+            return;
+        };
+        let leaves = tree.leaves();
+        if leaves.len() < 2 {
+            return;
+        }
+        let at = self
+            .focused_pane()
+            .and_then(|id| leaves.iter().position(|leaf| *leaf == id))
+            .unwrap_or(0);
+        let next = leaves[(at + 1) % leaves.len()];
+        // The chat's own leaf is the pane the caret reaches as `None`, which
+        // is how every other surface already names it.
+        self.pane_focus = if Some(next) == self.transcript.session {
+            None
+        } else {
+            Some(next)
         };
         // A receipt in the daily log, so "Tab did nothing" can be told apart
         // from "Tab moved the caret and the header did not show it".
         logging::debug(&format!("pane focus -> {:?}", self.pane_focus));
-        // The composer follows the pane: the window editor while the primary
-        // holds the caret, the pane editor once the split has it (#2474).
-        self.refocus_screen();
         cx.notify();
     }
 
-    /// Fill the second pane with `id` and load its newest messages (#2438).
+    /// Fill a new pane with `id`, splitting the pane the pick started from,
+    /// and load its newest messages (#2438, #2472).
     fn choose_split(&mut self, id: Uuid, cx: &mut Context<Self>) {
         let Some(layout) = self.split_pick else {
             return;
         };
-        if self.transcript.session == Some(id) {
+        let Some(target) = self.split_target else {
+            self.split_pick = None;
+            return;
+        };
+        if self.transcript.session == Some(id)
+            || self.panes.as_ref().is_some_and(|tree| tree.contains(id))
+        {
             self.live
                 .notices
-                .push("That session is already in the chat. Pick another.".to_string());
+                .push("That session is already open in a pane. Pick another.".to_string());
             cx.notify();
             return;
         }
         self.split_pick = None;
+        self.split_target = None;
         self.rail_focused = false;
-        // A new pick starts the panes even again: the share a previous split
-        // was dragged to belongs to that split, not to this one (#2476).
-        self.split_ratio = split::EVEN_SHARE;
-        self.split_drag = None;
         // The pane just picked is the one the caret and ctrl+x land on, so a
         // split opens ready to act on what was clicked (#2474).
-        self.pane_focus = PaneFocus::Secondary;
+        self.pane_focus = Some(id);
         self.refocus_screen();
+        let split = self
+            .panes
+            .as_mut()
+            .is_some_and(|tree| tree.split(target, layout, id));
+        if !split {
+            self.pane_focus = None;
+            self.live
+                .notices
+                .push("That pane is no longer open.".to_string());
+            cx.notify();
+            return;
+        }
         let title = self
             .sessions
             .items
@@ -1405,43 +1455,26 @@ impl Dashboard {
             .find(|s| s.id == id)
             .and_then(|s| s.title.clone())
             .unwrap_or_else(|| "(untitled)".to_string());
-        // The pane carries its own composer: Enter here is a turn on this
-        // pane's session, and the subscription captures that session at split
-        // time, so a later window selection cannot capture the pane's text
-        // (#2474).
-        let pane_editor = cx.new(editor::Editor::new);
-        cx.subscribe(&pane_editor, move |this, _editor, event, cx| match event {
-            editor::EditorEvent::Sent(text) => {
-                this.send_message_to(Some(id), text.clone(), cx);
-            }
-            editor::EditorEvent::Preview(path) => {
-                this.open_preview(path.clone(), cx);
-            }
-        })
-        .detach();
-        self.split = Some(SplitPane {
-            session: id,
-            title,
-            transcript: TranscriptState {
-                session: Some(id),
-                ..Default::default()
+        self.pane_states.insert(
+            id,
+            SplitPane {
+                title,
+                transcript: TranscriptState {
+                    session: Some(id),
+                    ..Default::default()
+                },
+                scroll: ScrollHandle::new(),
             },
-            scroll: ScrollHandle::new(),
-            layout,
-            editor: pane_editor,
-            plan: plan_strip::PlanStripState::default(),
-            plan_for: Some(id),
-            pending: Vec::new(),
-        });
+        );
         // Paint the pane now, with its header, rather than waiting for the
-        // transcript load to come back: an empty second pane that appears at
-        // once reads as a split, where a silent wait reads as nothing (#2438).
+        // transcript load to come back: an empty pane that appears at once
+        // reads as a split, where a silent wait reads as nothing (#2438).
         cx.notify();
         let db_path = self.db_path.clone();
         cx.spawn(async move |this, cx| {
             let result = transcript::load_recent(db_path, id).await;
             this.update(cx, |this, cx| {
-                if let Some(pane) = this.split.as_mut().filter(|p| p.session == id) {
+                if let Some(pane) = this.pane_states.get_mut(&id) {
                     match result {
                         Ok((rows, total)) => {
                             let (hidden, turns) =
@@ -1458,6 +1491,78 @@ impl Dashboard {
             .ok();
         })
         .detach();
+    }
+
+    /// Keep the chat on a leaf of the tree (#2472). A first open starts the
+    /// tree; a plain switch moves the chat's own leaf to the new session;
+    /// opening a session another pane already shows moves it into the chat and
+    /// closes that pane, so one session never sits in two leaves.
+    fn adopt_chat_leaf(&mut self, previous: Option<Uuid>, id: Uuid) {
+        let Some(tree) = self.panes.as_mut() else {
+            self.panes = Some(PaneTree::leaf(id));
+            return;
+        };
+        if tree.contains(id) {
+            self.pane_states.remove(&id);
+            if let Some(was) = previous
+                && was != id
+                && tree.leaves().len() > 1
+            {
+                tree.close(was);
+            }
+            return;
+        }
+        if let Some(was) = previous
+            && tree.rename_leaf(was, id)
+        {
+            return;
+        }
+        self.panes = Some(PaneTree::leaf(id));
+        self.pane_states.clear();
+    }
+
+    /// Grab the divider between two children of one split (#2472, #2476).
+    /// A double click puts that pair back to even, the quick way out of a
+    /// share dragged somewhere awkward.
+    fn begin_divider_drag(
+        &mut self,
+        path: &[usize],
+        divider: usize,
+        ev: &MouseDownEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let stacked = {
+            let Some(tree) = self.panes.as_mut() else {
+                return;
+            };
+            let Some(PaneTree::Split {
+                layout, children, ..
+            }) = tree.at(path)
+            else {
+                return;
+            };
+            if divider + 1 >= children.len() {
+                return;
+            }
+            if ev.click_count == 2 {
+                tree.even_divider(path, divider);
+                cx.notify();
+                return;
+            }
+            layout.is_stacked()
+        };
+        let axis = if stacked {
+            ev.position.y
+        } else {
+            ev.position.x
+        };
+        self.split_drag = Some(DividerDrag {
+            path: path.to_vec(),
+            divider,
+            stacked,
+            last: f32::from(axis),
+        });
+        cx.notify();
     }
 
     /// The commands that answer in text or compose a turn (#2469).
@@ -2370,18 +2475,9 @@ impl Dashboard {
             .is_some_and(|seen| seen.elapsed() < std::time::Duration::from_millis(400))
     }
 
-    /// Send typed text as an agent turn on the window's open conversation.
-    /// Called from the editor's Sent subscription and the text commands.
+    /// Send typed text as an agent turn (or queue it behind the running
+    /// one). Called from the editor's Sent subscription.
     fn send_message(&mut self, text: String, cx: &mut Context<Self>) {
-        self.send_message_to(self.transcript.session, text, cx);
-    }
-
-    /// Send typed text as an agent turn (or queue it) on `target`. The window
-    /// composer passes the open conversation; a split pane's editor passes
-    /// its own session, captured when the split opened (#2474). The turn
-    /// spawn below reads the target and nothing else, so a send can never
-    /// land on a conversation its sender was not looking at.
-    fn send_message_to(&mut self, target: Option<Uuid>, text: String, cx: &mut Context<Self>) {
         let text = text.trim().to_string();
         if text.is_empty() {
             return;
@@ -2406,7 +2502,11 @@ impl Dashboard {
         // never dropped without a word (#2305). It sits after the parse above
         // because a command is not a turn: `/new` and `/sessions` still work
         // from a closed topic.
-        if target.is_some_and(|id| self.sessions.is_closed(id)) {
+        if self
+            .transcript
+            .session
+            .is_some_and(|id| self.sessions.is_closed(id))
+        {
             self.live
                 .notices
                 .push("This topic is closed. Reopen it to continue.".to_string());
@@ -2422,10 +2522,10 @@ impl Dashboard {
             return;
         }
         if self.busy {
-            // The message joins the target session's queue, which the agent
-            // drains between tool calls, the terminal's own path (#2441).
-            // With no session open it waits in the window's own list.
-            match target {
+            // The message joins the session's queue, which the agent drains
+            // between tool calls, the terminal's own path (#2441). With no
+            // session open it waits in the window's own list.
+            match self.transcript.session {
                 Some(sid) => {
                     agent_bridge::queue_push(sid, agent_bridge::PendingMessage::plain(text))
                 }
@@ -2436,47 +2536,26 @@ impl Dashboard {
         }
         let Some(bridge) = agent_bridge::bridge() else {
             // Still booting: keep the message, it fires on Ready. The queue
-            // strip is where the user sees it. A pane's message parks on the
-            // pane, so Ready cannot drop it into the window's conversation.
-            match target {
-                Some(sid) => {
-                    if let Some(pane) = self.split.as_mut().filter(|p| p.session == sid) {
-                        pane.pending.push(agent_bridge::PendingMessage::plain(text));
-                    } else {
-                        self.queued.push(agent_bridge::PendingMessage::plain(text));
-                    }
-                }
-                None => self.queued.push(agent_bridge::PendingMessage::plain(text)),
-            }
+            // strip is where the user sees it.
+            self.queued.push(agent_bridge::PendingMessage::plain(text));
             cx.notify();
             return;
         };
-        // The turn goes to the target conversation. With none open there is
-        // nothing to write into, so one is created and the text waits in the
-        // queue rather than vanishing into a session nobody is looking at.
-        let Some(sid) = target else {
+        // The turn goes to the conversation on screen. With none open there
+        // is nothing to write into, so one is created and the text waits in
+        // the queue rather than vanishing into a session nobody is looking at.
+        let Some(sid) = self.transcript.session else {
             self.queued.push(agent_bridge::PendingMessage::plain(text));
             self.new_session(cx);
             return;
         };
-        // The live turn, the settle bookkeeping and the transcript's expanded
-        // state belong to the window composer: a pane's turn lands in its own
-        // transcript on the reload, and the window's live view must not
-        // claim it.
-        let on_window = self.transcript.session == Some(sid);
-        if on_window {
-            self.live.begin(text.clone());
-            self.transcript.live_expanded = false;
-            self.settle_retries = 0;
-            // The finished turn must add one to the persisted count before
-            // the live copy may be dropped (see `reload_transcript`).
-            self.settle_expect = Some(self.transcript.turns.len() + 1);
-        }
+        self.live.begin(text.clone());
+        self.transcript.live_expanded = false;
+        self.settle_retries = 0;
+        // The finished turn must add one to the persisted count before the
+        // live copy may be dropped (see `reload_transcript`).
+        self.settle_expect = Some(self.transcript.turns.len() + 1);
         self.busy = true;
-        // Which conversation the running turn answers: Done and Failed carry
-        // no session, so this is how their reload lands on the pane that
-        // asked instead of on the window (#2474).
-        self.turn_session = Some(sid);
         let cancel = tokio_util::sync::CancellationToken::new();
         self.cancel = Some(cancel.clone());
         // Attachments are tracked against the session the same way the TUI
@@ -2512,9 +2591,6 @@ impl Dashboard {
             return;
         }
         let mut reload: Option<Uuid> = None;
-        // A split pane's finished turn reloads the pane's own transcript, so
-        // its rows land in the pane that asked for them (#2474).
-        let mut reload_pane: Option<Uuid> = None;
         for ev in events {
             // Sub-agents run their own sessions: their tool rows, tokens and
             // notices belong to a conversation the user is not reading, so
@@ -2618,23 +2694,9 @@ impl Dashboard {
                 }
                 agent_bridge::TurnEvent::PlanPath { session, path } => {
                     // Stale lookups (user switched conversations while the
-                    // DB read ran) are dropped, not painted. Both composers
-                    // resolve their own session's plan: the window's and the
-                    // split pane's (#2474).
-                    let mut hit = false;
+                    // DB read ran) are dropped, not painted.
                     if self.plan_for == Some(session) {
-                        self.plan.set_path(path.clone());
-                        hit = true;
-                    }
-                    if let Some(pane) = self
-                        .split
-                        .as_mut()
-                        .filter(|pane| pane.plan_for == Some(session))
-                    {
-                        pane.plan.set_path(path);
-                        hit = true;
-                    }
-                    if hit {
+                        self.plan.set_path(path);
                         cx.notify();
                     }
                 }
@@ -2828,20 +2890,6 @@ impl Dashboard {
                     context_tokens,
                     tokens_per_second,
                 } => {
-                    // A split pane's turn ends on the pane: the window's live
-                    // view never began it, so its finalize and settle steps
-                    // must not run, and the reload lands on the pane's own
-                    // transcript instead (#2474).
-                    if let Some(pane_sid) = self
-                        .turn_session
-                        .take()
-                        .filter(|sid| self.transcript.session != Some(*sid))
-                    {
-                        self.busy = false;
-                        self.live.thinking = false;
-                        reload_pane = Some(pane_sid);
-                        continue;
-                    }
                     // The provider's own prompt size for the call that just
                     // answered: the honest number for the ctx footer, not an
                     // estimate of what we think we sent.
@@ -2894,18 +2942,7 @@ impl Dashboard {
                     self.pending_metrics = None;
                     self.busy = false;
                     self.live.thinking = false;
-                    // A pane's failed turn reloads the pane, not the window
-                    // (#2474). The notice itself stays on the window: it is
-                    // the one notice strip both panes read.
-                    if let Some(pane_sid) = self
-                        .turn_session
-                        .take()
-                        .filter(|sid| self.transcript.session != Some(*sid))
-                    {
-                        reload_pane = Some(pane_sid);
-                    } else {
-                        reload = self.transcript.session;
-                    }
+                    reload = self.transcript.session;
                 }
                 agent_bridge::TurnEvent::BackgroundTaskDone {
                     session_id,
@@ -2943,13 +2980,8 @@ impl Dashboard {
         if let Some(sid) = reload {
             self.reload_transcript(sid, cx);
         }
-        if let Some(sid) = reload_pane {
-            self.reload_pane_transcript(sid, cx);
-        }
         // A finished turn is the moment the queue drains: before this it only
         // drained on `Ready`, so a message typed while busy never went out.
-        // The pane's own queue drains through the same call, behind the pane's
-        // own turn (#2474).
         if !self.busy {
             self.cancel = None;
             self.drain_pending(cx);
@@ -3032,147 +3064,44 @@ impl Dashboard {
         out
     }
 
-    /// The window composer's children: plan strip, queue strip, task strip,
-    /// the slash/emoji popups, then the editor itself. The no-split Chat
-    /// column appends these under the transcript, and a split's primary pane
-    /// column appends the same list inside its own box (#2474). One list, so
-    /// the two placements cannot drift.
-    fn composer_children(&self, cx: &Context<Self>) -> Vec<AnyElement> {
-        let mut out: Vec<AnyElement> = Vec::new();
-        if let Some(plan_view) = self.plan.view() {
-            out.push(plan_view.into_any_element());
-        }
-        let waiting = self.queued_for_strip();
-        if !waiting.is_empty() {
-            out.push(queue_strip(&waiting).into_any_element());
-        }
-        // A detached command sits directly above the editor: the same place
-        // the TUI puts it (on the input box's top border), which is where the
-        // eye goes while waiting.
-        if let Some(label) = self.running_tasks_label() {
-            out.push(task_strip(label).into_any_element());
-        }
-        // The slash-command list sits over the input while a name is not
-        // being spelled, the terminal's own placement (#2398).
-        if self.topic_draft.is_none() {
-            let popup = self.editor.read(cx).command_popup();
-            if let Some((names, selected)) = popup {
-                out.push(command_popup_view(&names, selected).into_any_element());
-            } else if let Some((items, selected)) = self.editor.read(cx).emoji_popup() {
-                out.push(emoji_popup_view(&items, selected).into_any_element());
-            }
-        }
-        out.push(self.editor.clone().into_any_element());
-        out
-    }
-
-    /// A split pane's composer children: its own plan strip, its session's
-    /// queue, its popups, its editor (#2474). The session and the editor are
-    /// the pane's own, so a send from here answers on the pane no matter
-    /// which conversation the window shows.
-    fn pane_children(&self, cx: &Context<Self>, pane: &SplitPane) -> Vec<AnyElement> {
-        let mut out: Vec<AnyElement> = Vec::new();
-        if let Some(plan_view) = pane.plan.view() {
-            out.push(plan_view.into_any_element());
-        }
-        let waiting = agent_bridge::queue_snapshot(pane.session);
-        if !waiting.is_empty() {
-            out.push(queue_strip(&waiting).into_any_element());
-        }
-        if self.topic_draft.is_none() {
-            let popup = pane.editor.read(cx).command_popup();
-            if let Some((names, selected)) = popup {
-                out.push(command_popup_view(&names, selected).into_any_element());
-            } else if let Some((items, selected)) = pane.editor.read(cx).emoji_popup() {
-                out.push(emoji_popup_view(&items, selected).into_any_element());
-            }
-        }
-        out.push(pane.editor.clone().into_any_element());
-        out
-    }
-
-    /// Drain everything queued: the window's list behind its own session,
-    /// then the pane's behind its own (#2474). One turn at a time across the
-    /// window: the bridge runs a single turn, so the pane's queue drains on
-    /// the first tick the line is idle.
     fn drain_pending(&mut self, cx: &mut Context<Self>) {
-        if self.busy {
-            return;
-        }
-        let pane_waiting = self.split.as_ref().is_some_and(|pane| {
-            !pane.pending.is_empty() || !agent_bridge::queue_snapshot(pane.session).is_empty()
-        });
-        let window_waiting = !self.queued.is_empty()
-            || self
-                .transcript
-                .session
-                .is_some_and(|sid| !agent_bridge::queue_snapshot(sid).is_empty());
-        if !window_waiting && !pane_waiting {
+        let waiting_in_store = self
+            .transcript
+            .session
+            .is_some_and(|sid| !agent_bridge::queue_snapshot(sid).is_empty());
+        if (self.queued.is_empty() && !waiting_in_store) || self.busy {
             return;
         }
         let Some(bridge) = agent_bridge::bridge() else {
             self.queued.clear();
-            if let Some(pane) = self.split.as_mut() {
-                pane.pending.clear();
-            }
             return;
         };
         // No open conversation: keep the queue and open one. The queue drains
         // again when that session lands (`SessionCreated`).
-        if window_waiting {
-            let Some(sid) = self.transcript.session else {
-                self.new_session(cx);
-                return;
-            };
-            let mut msgs = std::mem::take(&mut self.queued);
-            msgs.extend(agent_bridge::queue_take(sid));
-            if let Some(joined) = agent_bridge::PendingMessage::join(&msgs) {
-                self.live.begin(joined.display_text.clone());
-                self.transcript.live_expanded = false;
-                self.settle_retries = 0;
-                self.settle_expect = Some(self.transcript.turns.len() + 1);
-                self.busy = true;
-                self.turn_session = Some(sid);
-                let cancel = tokio_util::sync::CancellationToken::new();
-                self.cancel = Some(cancel.clone());
-                let attached = editor::marker_paths(&joined.context_text);
-                agent_bridge::spawn_turn(
-                    bridge.service.clone(),
-                    sid,
-                    joined.context_text,
-                    self.sink.clone(),
-                    cancel,
-                );
-                if !attached.is_empty() {
-                    agent_bridge::spawn_track_files(self.db_path.clone(), sid, attached);
-                }
-            }
-        }
-        // The pane's own queue drains behind its own turn, the same rule the
-        // window queue follows (#2474). The pane keeps no live turn: the rows
-        // land on the reload.
-        if !self.busy
-            && let Some(pane) = self.split.as_mut()
-        {
-            let sid = pane.session;
-            let mut msgs = std::mem::take(&mut pane.pending);
-            msgs.extend(agent_bridge::queue_take(sid));
-            if let Some(joined) = agent_bridge::PendingMessage::join(&msgs) {
-                self.busy = true;
-                self.turn_session = Some(sid);
-                let cancel = tokio_util::sync::CancellationToken::new();
-                self.cancel = Some(cancel.clone());
-                let attached = editor::marker_paths(&joined.context_text);
-                agent_bridge::spawn_turn(
-                    bridge.service.clone(),
-                    sid,
-                    joined.context_text,
-                    self.sink.clone(),
-                    cancel,
-                );
-                if !attached.is_empty() {
-                    agent_bridge::spawn_track_files(self.db_path.clone(), sid, attached);
-                }
+        let Some(sid) = self.transcript.session else {
+            self.new_session(cx);
+            return;
+        };
+        let mut msgs = std::mem::take(&mut self.queued);
+        msgs.extend(agent_bridge::queue_take(sid));
+        if let Some(joined) = agent_bridge::PendingMessage::join(&msgs) {
+            self.live.begin(joined.display_text.clone());
+            self.transcript.live_expanded = false;
+            self.settle_retries = 0;
+            self.settle_expect = Some(self.transcript.turns.len() + 1);
+            self.busy = true;
+            let cancel = tokio_util::sync::CancellationToken::new();
+            self.cancel = Some(cancel.clone());
+            let attached = editor::marker_paths(&joined.context_text);
+            agent_bridge::spawn_turn(
+                bridge.service.clone(),
+                sid,
+                joined.context_text,
+                self.sink.clone(),
+                cancel,
+            );
+            if !attached.is_empty() {
+                agent_bridge::spawn_track_files(self.db_path.clone(), sid, attached);
             }
         }
         cx.notify();
@@ -3365,12 +3294,12 @@ impl Dashboard {
         cx.notify();
     }
 
-    /// Open the rename prompt for the open topic, pre-filled with its title
+    /// Open the rename prompt for a topic, pre-filled with its title
     /// (#2304). Enter saves the new name; Esc leaves the title as it was.
-    fn start_rename(&mut self, cx: &mut Context<Self>) {
-        let Some(id) = self.transcript.session else {
-            return;
-        };
+    ///
+    /// The id comes from the caller: the menu acts on the topic its own row
+    /// opened it for, which is not always the one on screen.
+    fn start_rename(&mut self, id: Uuid, cx: &mut Context<Self>) {
         let current = self
             .sessions
             .items
@@ -3378,18 +3307,15 @@ impl Dashboard {
             .find(|s| s.id == id)
             .and_then(|s| s.title.clone())
             .unwrap_or_default();
-        self.topic_menu = false;
+        self.topic_menu = None;
         self.topic_rename = Some(id);
         self.topic_draft = Some(current);
         cx.notify();
     }
 
-    /// Load the info panel for the open session. The panel is read-only: it
-    /// shows the id, the parent, the created time, and the message count.
-    fn open_topic_info(&mut self, cx: &mut Context<Self>) {
-        let Some(id) = self.transcript.session else {
-            return;
-        };
+    /// Load the info panel for a session. The panel is read-only: it shows
+    /// the id, the parent, the created time, and the message count.
+    fn open_topic_info(&mut self, id: Uuid, cx: &mut Context<Self>) {
         let db_path = self.db_path.clone();
         cx.spawn(
             async move |this, cx| match sessions::load_topic_info(db_path, id).await {
@@ -3415,13 +3341,10 @@ impl Dashboard {
         cx.notify();
     }
 
-    /// Close the open topic, or reopen it if it is closed (#2305). The state
-    /// is re-read from the database, so the dimming and the send guard follow
+    /// Close a topic, or reopen it if it is closed (#2305). The state is
+    /// re-read from the database, so the dimming and the send guard follow
     /// what was actually written.
-    fn toggle_closed_topic(&mut self, cx: &mut Context<Self>) {
-        let Some(id) = self.transcript.session else {
-            return;
-        };
+    fn toggle_closed_topic(&mut self, id: Uuid, cx: &mut Context<Self>) {
         let closed = self.sessions.is_closed(id);
         let db_path = self.db_path.clone();
         cx.spawn(async move |this, cx| {
@@ -3466,6 +3389,71 @@ impl Dashboard {
             stored,
             self.sessions.topic_titles.get(&root).map(String::as_str),
         ))
+    }
+
+    /// The chat's `...` menu (#2480): what can be done to the conversation it
+    /// belongs to, in a card under the button that opened it.
+    ///
+    /// The card floats over the chat as a layer. The old menu was a column of
+    /// rows laid *inside* the topic strip, so opening it grew the strip and
+    /// pushed the conversation down; the owner read that as a bare element
+    /// appearing, not a menu (#2480).
+    ///
+    /// A right press on a topic tab opens this same card for that tab's
+    /// session, so the actions follow the row that asked for them.
+    fn chat_menu(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let target = self.topic_menu?;
+        let is_topic = self.sessions.parents.contains_key(&target);
+        let mut items: Vec<Stateful<Div>> = Vec::new();
+        if self.open_chat_topics_on() {
+            let new_topic = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                this.start_topic_draft(cx);
+            });
+            items.push(sessions::menu_item("New topic").on_click(new_topic));
+        }
+        let (view_label, edit_label, delete_label) = if is_topic {
+            ("View topic info", "Edit topic", "Delete topic")
+        } else {
+            ("View info", "Rename", "Delete conversation")
+        };
+        let view = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
+            this.topic_menu = None;
+            this.open_topic_info(target, cx);
+        });
+        items.push(sessions::menu_item(view_label).on_click(view));
+        let edit = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
+            this.topic_menu = None;
+            this.start_rename(target, cx);
+        });
+        items.push(sessions::menu_item(edit_label).on_click(edit));
+        if is_topic {
+            let close_label = if self.sessions.is_closed(target) {
+                "Reopen topic"
+            } else {
+                "Close topic"
+            };
+            let close = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
+                this.topic_menu = None;
+                this.toggle_closed_topic(target, cx);
+            });
+            items.push(sessions::menu_item(close_label).on_click(close));
+        }
+        let delete = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
+            this.topic_menu = None;
+            this.request_delete(target, cx);
+        });
+        items.push(sessions::menu_item(delete_label).on_click(delete));
+        Some(
+            // Anchored to the column, not the header row: the column is the
+            // positioning context that paints last. px_6 on the column puts
+            // the button's right edge one 1.5rem in, so right_6 lines the card
+            // up with it; top_12 clears the header line under pt_3.
+            sessions::menu_card("chat-menu", items)
+                .absolute()
+                .right_6()
+                .top_12()
+                .into_any_element(),
+        )
     }
 
     /// The tab strip for the open chat's topic family (#2400, #2480): `All`
@@ -3518,6 +3506,15 @@ impl Dashboard {
                     cx.stop_propagation();
                     this.open_session(id, cx);
                 });
+                // A right press on a tab opens the same menu the `...` draws,
+                // for the session that tab stands for (#2480). Before this it
+                // opened nothing at all, and the only way to edit a topic was
+                // to open it first and hunt the menu.
+                let open_menu = cx.listener(move |this, _ev: &MouseDownEvent, _window, cx| {
+                    cx.stop_propagation();
+                    this.topic_menu = Some(id);
+                    cx.notify();
+                });
                 // `All` is the whole conversation, so it carries no topic icon.
                 let (label, picture) = match entry {
                     topic_bar::BarEntry::All => ("All".to_string(), None),
@@ -3543,6 +3540,7 @@ impl Dashboard {
                     shape,
                     current,
                     move |ev, window, app| click(ev, window, app),
+                    move |ev, window, app| open_menu(ev, window, app),
                 )
                 .into_any_element()
             })
@@ -3564,7 +3562,7 @@ impl Dashboard {
             return;
         }
         self.topic_draft_icon = None;
-        self.topic_menu = false;
+        self.topic_menu = None;
         self.topic_draft = Some(String::new());
         cx.notify();
     }
@@ -3807,35 +3805,6 @@ impl Dashboard {
         .detach();
     }
 
-    /// Refetch the split pane's transcript from the DB after its own turn
-    /// (#2474). Same guard as the window reload: a stale answer for a closed
-    /// or replaced pane is dropped. The pane keeps no live turn, so the rows
-    /// are the whole rendering once they land.
-    fn reload_pane_transcript(&mut self, sid: Uuid, cx: &mut Context<Self>) {
-        let db_path = self.db_path.clone();
-        cx.spawn(async move |this, cx| {
-            let result = transcript::load_recent(db_path, sid).await;
-            this.update(cx, |this, cx| {
-                let Some(pane) = this.split.as_mut().filter(|pane| pane.session == sid) else {
-                    return;
-                };
-                match result {
-                    Ok((rows, total)) => {
-                        let (hidden, turns) =
-                            transcript::turns_with_metrics(&rows, total, &this.turn_metrics);
-                        pane.transcript.hidden = hidden;
-                        pane.transcript.turns = turns;
-                    }
-                    Err(e) => pane.transcript.error = Some(e.into()),
-                }
-                pane.scroll.scroll_to_bottom();
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
-
     /// Key the just-settled turn's metrics by the anchor its persisted rows
     /// produced, now that they exist. Only called once a reload proves the
     /// turn landed, so the newest turn on screen IS the one that answered;
@@ -3903,7 +3872,10 @@ impl Dashboard {
                 && !ks.modifiers.platform
                 && !ks.modifiers.alt
                 && ks.key == "x"
-                && self.split.is_some()
+                && self
+                    .panes
+                    .as_ref()
+                    .is_some_and(|tree| tree.leaves().len() > 1)
             {
                 self.close_focused_pane(cx);
                 return;
@@ -4292,9 +4264,12 @@ impl Dashboard {
                 // The page keys act on the pane Tab moved the caret to, so a
                 // split scrolls the session the accent is on rather than the
                 // chat underneath it (#2475).
-                let scroll = match (self.split.as_ref(), self.pane_focus) {
-                    (Some(pane), PaneFocus::Secondary) => &pane.scroll,
-                    _ => &self.transcript_scroll,
+                // The page keys act on the pane the caret is on, so a split
+                // scrolls the transcript the accent names rather than the
+                // chat underneath it (#2475, #2472).
+                let scroll = match self.pane_focus.and_then(|id| self.pane_states.get(&id)) {
+                    Some(pane) => &pane.scroll,
+                    None => &self.transcript_scroll,
                 };
                 let offset = scroll.offset();
                 let max = scroll.max_offset().height;
@@ -4330,12 +4305,11 @@ impl Dashboard {
             && !ev.keystroke.modifiers.platform
             && !ev.keystroke.modifiers.alt
             && self.screen == Screen::Chat
-            && self.split.is_some()
-            && !self.editor.read(cx).list_open()
-            && !self
-                .split
+            && self
+                .panes
                 .as_ref()
-                .is_some_and(|pane| pane.editor.read(cx).list_open())
+                .is_some_and(|tree| tree.leaves().len() > 1)
+            && !self.editor.read(cx).list_open()
         {
             self.cycle_pane_focus(cx);
             return;
@@ -4359,17 +4333,10 @@ impl Dashboard {
             cx.notify();
             return;
         }
-        // While an editor holds focus it owns the keyboard: its actions
+        // While the editor holds focus it owns the keyboard: its actions
         // (send, newline, movement) run through the keymap, and raw keys
         // reaching this handler would double-handle Enter and friends.
-        // Either composer counts: the window's, or a split pane's own
-        // editor while the caret sits in that pane (#2474).
-        if self.editor.read(cx).focus_handle.is_focused(window)
-            || self
-                .split
-                .as_ref()
-                .is_some_and(|pane| pane.editor.read(cx).focus_handle.is_focused(window))
-        {
+        if self.editor.read(cx).focus_handle.is_focused(window) {
             return;
         }
         // Rail arrows and enter. This sits after the editor gate, so the
@@ -4582,6 +4549,63 @@ impl Dashboard {
             UsageKeyOutcome::NotConsumed => {}
         }
     }
+
+    /// The pane body for the chat screen and the themes preview: the chat
+    /// element alone while the tree is one leaf, or the whole tree drawn
+    /// around it (#2472). The chat element is moved into its own leaf, so it
+    /// is built once and never duplicated.
+    fn panes_body(
+        &mut self,
+        chat: AnyElement,
+        content: f32,
+        interactive: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        // Shares are clamped to the pixel floor against the area the last
+        // frame painted into, so a window resize never squeezes a pane below
+        // a usable width (#2472). The clamp is idempotent, so it settles on
+        // the first frame that has a measurement.
+        let root_area = self.split_areas.borrow().get(&Vec::new()).copied();
+        if let Some([x0, y0, x1, y1]) = root_area
+            && let Some(tree) = self.panes.as_mut()
+        {
+            let span = match tree {
+                PaneTree::Split { layout, .. } => {
+                    if layout.is_stacked() {
+                        y1 - y0
+                    } else {
+                        x1 - x0
+                    }
+                }
+                PaneTree::Leaf { .. } => 0.0,
+            };
+            tree.normalize(span);
+        }
+        let Some(tree) = self.panes.as_ref() else {
+            return chat;
+        };
+        if tree.leaves().len() < 2 {
+            return chat;
+        }
+        let title = match self.session_title() {
+            Some(title) => SharedString::from(title.to_string()),
+            None => SharedString::from("Chat"),
+        };
+        let mut ctx = PanesCtx {
+            chat: Some(chat),
+            chat_session: self.transcript.session,
+            chat_title: title,
+            states: &self.pane_states,
+            focus: self.pane_focus,
+            content,
+            areas: &self.split_areas,
+            entity: cx.entity().downgrade(),
+            interactive,
+        };
+        let mut path = Vec::new();
+        let tree = self.panes.as_ref().expect("checked a moment ago");
+        pane_element(tree, &mut ctx, &mut path, 1.0)
+    }
 }
 
 impl Render for Dashboard {
@@ -4600,20 +4624,7 @@ impl Render for Dashboard {
         // screen is the frame that can be typed into.
         if let Some(target) = self.refocus.take() {
             match target {
-                // The composer is whichever pane holds the caret: the split's
-                // own editor while the secondary pane has it, the window's
-                // composer otherwise (#2474).
-                FocusTarget::Composer => {
-                    let composer = match self
-                        .split
-                        .as_ref()
-                        .filter(|_| self.pane_focus == PaneFocus::Secondary)
-                    {
-                        Some(pane) => pane.editor.read(cx).focus_handle.clone(),
-                        None => self.editor.read(cx).focus_handle.clone(),
-                    };
-                    window.focus(&composer);
-                }
+                FocusTarget::Composer => window.focus(&self.editor.read(cx).focus_handle),
                 FocusTarget::Root => window.focus(&self.focus),
             }
         }
@@ -4644,22 +4655,6 @@ impl Render for Dashboard {
             }
         }
         self.plan.refresh();
-        // The pane's strip follows its own session the same way: resolve once
-        // per pane, then stat the file per frame (#2474).
-        if let Some(pane) = self.split.as_mut() {
-            if pane.plan_for != Some(pane.session) {
-                pane.plan_for = Some(pane.session);
-                pane.plan.set_path(None);
-                // Same off-inline rule as the window's lookup above: the DB
-                // read runs on the bridge thread, never inside the paint.
-                agent_bridge::spawn_plan_path(
-                    self.db_path.clone(),
-                    pane.session,
-                    self.sink.clone(),
-                );
-            }
-            pane.plan.refresh();
-        }
 
         // The rail's rows: each carries its own click listener, built in its
         // own loop turn so the `&mut cx` borrow stays legal.
@@ -4945,18 +4940,22 @@ impl Render for Dashboard {
                 // beside or below it (#2438). Two panes share the content
                 // width, less the gap_2 that separates them, so a row is
                 // never planned wider than the box it is painted into.
-                let primary_width = match &self.split {
-                    Some(pane) => {
-                        split_pane_width(pane_width, pane.layout.is_stacked(), self.split_ratio)
-                    }
-                    None => pane_width,
+                // The chat's share of the pane area comes from the tree: a
+                // leaf under stacked splits spans the full width, and a leaf
+                // beside a sibling takes its share of it (#2472, #2473). A
+                // row is still never planned wider than its box.
+                let chat_share = self
+                    .panes
+                    .as_ref()
+                    .zip(self.transcript.session)
+                    .and_then(|(tree, id)| tree.leaf_width_share(id))
+                    .unwrap_or(1.0);
+                let primary_width = if chat_share < 1.0 {
+                    split_pane_width(pane_width, false, chat_share)
+                } else {
+                    pane_width
                 };
-                // With a split open the window composer lives INSIDE the
-                // primary pane's column: transcript, then the same strips the
-                // window column drew, then the editor (#2474). No split: the
-                // bare transcript, and the column below the body carries the
-                // composer.
-                let primary_view = transcript::view(
+                let primary = transcript::view(
                     &self.transcript,
                     &self.transcript_scroll,
                     &self.live,
@@ -4970,71 +4969,12 @@ impl Render for Dashboard {
                         ctx_max: self.ctx_max,
                         live_click: Some(live_click.clone()),
                     },
-                );
-                let primary: AnyElement = if self.split.is_some() {
-                    div()
-                        .flex()
-                        .flex_col()
-                        .flex_1()
-                        .min_w_0()
-                        .min_h_0()
-                        .child(primary_view)
-                        .children(self.composer_children(cx))
-                        .into_any_element()
-                } else {
-                    primary_view.into_any_element()
-                };
-                let body = match &self.split {
-                    None => primary,
-                    Some(pane) => {
-                        let close_primary = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
-                            this.close_focused_pane(cx);
-                        });
-                        let close_secondary = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
-                            this.close_secondary_pane(cx);
-                        });
-                        let primary_title = match self.session_title() {
-                            Some(title) => SharedString::from(title.to_string()),
-                            None => SharedString::from("Chat"),
-                        };
-                        // The rule starts the drag and the root finishes it, so
-                        // the pointer can slide off the 12px strip without the
-                        // panes snapping back (#2476).
-                        let grab_split = cx.listener(|this, ev: &MouseDownEvent, _window, cx| {
-                            let Some(pane) = this.split.as_ref() else {
-                                return;
-                            };
-                            if ev.click_count == 2 {
-                                // Double-clicking the rule puts the panes
-                                // back to even, the quick way out of a
-                                // share dragged somewhere awkward (#2476).
-                                this.split_ratio = split::EVEN_SHARE;
-                                this.split_drag = None;
-                                cx.notify();
-                                return;
-                            }
-                            let axis = if pane.layout.is_stacked() {
-                                ev.position.y
-                            } else {
-                                ev.position.x
-                            };
-                            this.split_drag = Some((f32::from(axis), this.split_ratio));
-                        });
-                        split_body(
-                            primary,
-                            primary_title,
-                            self.pane_focus,
-                            pane,
-                            self.pane_children(cx, pane),
-                            pane_width,
-                            self.split_ratio,
-                            self.split_area.clone(),
-                            grab_split,
-                            close_primary,
-                            close_secondary,
-                        )
-                    }
-                };
+                )
+                .into_any_element();
+                // The panes come from the tree (#2472): one leaf is the
+                // window as it was, and each split adds a divider and the
+                // panes its children hold.
+                let body = self.panes_body(primary.into_any_element(), pane_width, true, cx);
                 (
                     div()
                         .flex()
@@ -6714,69 +6654,65 @@ impl Render for Dashboard {
                             .child(SharedString::from(hint)),
                     )
                     .children(update_hint);
-                let primary_width = match &self.split {
-                    Some(pane) => split_pane_width(
-                        pane_width - THEMES_PANEL_WIDTH,
-                        pane.layout.is_stacked(),
-                        self.split_ratio,
-                    ),
-                    None => pane_width - THEMES_PANEL_WIDTH,
+                let preview_width = pane_width - THEMES_PANEL_WIDTH;
+                let chat_share = self
+                    .panes
+                    .as_ref()
+                    .zip(self.transcript.session)
+                    .and_then(|(tree, id)| tree.leaf_width_share(id))
+                    .unwrap_or(1.0);
+                let primary_width = if chat_share < 1.0 {
+                    split_pane_width(preview_width, false, chat_share)
+                } else {
+                    preview_width
                 };
-                let primary =
-                    div()
-                        .flex()
-                        .flex_col()
-                        .flex_1()
-                        .min_w_0()
-                        .min_h_0()
-                        .child(transcript::view(
-                            &self.transcript,
-                            &self.transcript_scroll,
-                            &self.live,
-                            self.busy,
-                            primary_width,
-                            fold_handlers,
-                            transcript::ViewHooks {
-                                attachments: attachment_handlers,
-                                drag: Some(self.copy_drag.clone()),
-                                ctx_used: self.ctx_tokens,
-                                ctx_max: self.ctx_max,
-                                live_click: Some(live_click.clone()),
-                            },
-                        ));
-                let body = match &self.split {
-                    None => primary.into_any_element(),
-                    Some(pane) => {
-                        let close_primary = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
-                            this.close_focused_pane(cx);
-                        });
-                        let close_secondary = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
-                            this.close_secondary_pane(cx);
-                        });
-                        let primary_title = match self.session_title() {
-                            Some(title) => SharedString::from(title.to_string()),
-                            None => SharedString::from("Chat"),
-                        };
-                        // The preview draws the split but never resizes it: its
-                        // panes are narrower than the real ones, so it records
-                        // into a throwaway cell and the drag is a no-op.
-                        split_body(
-                            primary
-                                .children(self.composer_children(cx))
-                                .into_any_element(),
-                            primary_title,
-                            self.pane_focus,
-                            pane,
-                            self.pane_children(cx, pane),
-                            pane_width - THEMES_PANEL_WIDTH,
-                            self.split_ratio,
-                            Rc::new(Cell::new(None)),
-                            |_ev: &MouseDownEvent, _window: &mut Window, _cx: &mut App| {},
-                            close_primary,
-                            close_secondary,
-                        )
+                // A right press on the conversation opens the same card the
+                // `...` draws (#2480); a left press anywhere in it closes the
+                // card, the way clicking off a menu dismisses it.
+                let ask_menu = cx.listener(|this, _ev: &MouseDownEvent, _window, cx| {
+                    cx.stop_propagation();
+                    if this.transcript.session.is_some() {
+                        this.topic_menu = this.transcript.session;
+                        cx.notify();
                     }
-                };
+                });
+                // A left press in the conversation closes the card. The card
+                // is the column's sibling, not this element's child, so its
+                // own clicks never reach this listener and picking an item
+                // still works.
+                let dismiss_menu = cx.listener(|this, _ev: &MouseDownEvent, _window, cx| {
+                    if this.topic_menu.take().is_some() {
+                        cx.notify();
+                    }
+                });
+                let primary = div()
+                    .id("chat-body")
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .on_mouse_down(MouseButton::Right, ask_menu)
+                    .on_mouse_down(MouseButton::Left, dismiss_menu)
+                    .child(transcript::view(
+                        &self.transcript,
+                        &self.transcript_scroll,
+                        &self.live,
+                        self.busy,
+                        primary_width,
+                        fold_handlers,
+                        transcript::ViewHooks {
+                            attachments: attachment_handlers,
+                            drag: Some(self.copy_drag.clone()),
+                            ctx_used: self.ctx_tokens,
+                            ctx_max: self.ctx_max,
+                            live_click: Some(live_click.clone()),
+                        },
+                    ));
+                // The preview draws the same panes, but never resizes them:
+                // its boxes are narrower than the real ones, so the dividers
+                // there do not take the pointer (#2438, #2472).
+                let body = self.panes_body(primary.into_any_element(), preview_width, false, cx);
                 let middle = div()
                     .flex()
                     .flex_row()
@@ -6801,70 +6737,20 @@ impl Render for Dashboard {
             .session
             .is_some_and(|id| self.sessions.parents.contains_key(&id));
         if self.screen == Screen::Chat && (self.open_chat_topics_on() || is_topic) {
-            let toggle = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
-                this.topic_menu = !this.topic_menu;
-                cx.notify();
-            });
-            let mut items: Vec<Stateful<Div>> = Vec::new();
-            if self.open_chat_topics_on() {
-                let new_topic = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
-                    this.start_topic_draft(cx);
-                });
-                items.push(sessions::menu_item("New topic").on_click(new_topic));
-            }
-            let view = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
-                this.topic_menu = false;
-                this.open_topic_info(cx);
-            });
-            items.push(sessions::menu_item("View topic info").on_click(view));
-            if is_topic {
-                let edit = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
-                    this.start_rename(cx);
-                });
-                items.push(sessions::menu_item("Edit topic").on_click(edit));
-                let closed_now = self
-                    .transcript
-                    .session
-                    .is_some_and(|id| self.sessions.is_closed(id));
-                let close_label = if closed_now {
-                    "Reopen topic"
-                } else {
-                    "Close topic"
-                };
-                let close = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
-                    this.topic_menu = false;
-                    this.toggle_closed_topic(cx);
-                });
-                items.push(sessions::menu_item(close_label).on_click(close));
-                let delete = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
-                    this.topic_menu = false;
-                    if let Some(id) = this.transcript.session {
-                        this.request_delete(id, cx);
-                    }
-                });
-                items.push(sessions::menu_item("Delete topic").on_click(delete));
-            }
             // The tabs (#2400): the family's parent, then its topics. The
             // leading button moves the whole row to another side (#2402).
+            // The `...` menu is NOT here any more (#2480): it lives at the
+            // conversation's top right, over the chat it acts on.
             let tabs = self.topic_tabs(cx);
             let toggle_edge = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
                 cx.stop_propagation();
                 this.cycle_topic_edge(cx);
             });
-            let strip = topic_strip(
-                self.topic_edge,
-                toggle_edge,
-                tabs,
-                topic_bar(
-                    self.topic_menu,
-                    toggle,
-                    items,
-                    self.topic_edge.is_vertical(),
-                ),
-            );
+            let strip = topic_strip(self.topic_edge, toggle_edge, tabs);
             topic_row = Some((self.topic_edge, strip.into_any_element()));
         }
         let mut right = div()
+            .relative()
             .flex()
             .flex_col()
             .flex_1()
@@ -6882,11 +6768,51 @@ impl Render for Dashboard {
         // The other screens keep their title above the body.
         if self.screen != Screen::Chat {
             right = right.child(chrome);
-        } else if let Some(name) = self.open_chat_name() {
-            // Bordered chip hugging the name, the owner's Photoshop spec
-            // (#2480): the strip of empty row to its right is header space,
-            // same as the mockup.
-            right = right.child(session_title_chip(&name));
+        } else {
+            // The conversation's name leads the chat as plain header text
+            // (#2480), and the `...` that acts on it sits at the far end of
+            // the same row: top right of the conversation, always. The name
+            // takes the width; nothing draws a card around either of them.
+            let name = self.open_chat_name();
+            let mut header = div()
+                .relative()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_3()
+                .min_w_0()
+                .w_full();
+            header = match name {
+                Some(name) => header.child(session_title(&name)),
+                None => header.child(div().flex_1()),
+            };
+            if self.transcript.session.is_some() {
+                let toggle = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                    cx.stop_propagation();
+                    this.topic_menu = match this.topic_menu {
+                        Some(_) => None,
+                        None => this.transcript.session,
+                    };
+                    cx.notify();
+                });
+                header = header.child(
+                    div()
+                        .id("chat-menu-button")
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .text_color(rgb(palette::current().text_muted))
+                        .hover(|d| d.bg(rgb(palette::current().panel_hi)))
+                        .on_click(toggle)
+                        .child(SharedString::from("...")),
+                );
+            }
+            right = right.child(header);
         }
         // The row takes the side it was saved on: above the transcript,
         // under the input, or beside the chat (#2402).
@@ -6909,15 +6835,33 @@ impl Render for Dashboard {
                 // The running checklist sits between the conversation and the
                 // input, the same place the TUI's plan card holds. The key
                 // hints go back UNDER the input where they were: the owner
-                // called the move above the plan card out. With a split open
-                // the window column carries none of it: each pane renders its
-                // own strips and its own composer inside its column (#2474),
-                // so nothing window-level sits under the two panes.
+                // called the move above the plan card out.
                 let mut col = right;
-                if self.split.is_none() {
-                    let children = self.composer_children(cx);
-                    col = col.children(children);
+                if let Some(plan_view) = self.plan.view() {
+                    col = col.child(plan_view);
                 }
+                let waiting = self.queued_for_strip();
+                if !waiting.is_empty() {
+                    col = col.child(queue_strip(&waiting));
+                }
+                // A detached command sits directly above the editor: the same
+                // place the TUI puts it (on the input box's top border), which
+                // is where the eye goes while waiting.
+                if let Some(label) = self.running_tasks_label() {
+                    col = col.child(task_strip(label));
+                }
+                // The slash-command list sits over the input while a name is
+                // not being spelled, the terminal's own placement. The name
+                // prompt itself is the overlay below (#2398).
+                if self.topic_draft.is_none() {
+                    let popup = self.editor.read(cx).command_popup();
+                    if let Some((names, selected)) = popup {
+                        col = col.child(command_popup_view(&names, selected));
+                    } else if let Some((items, selected)) = self.editor.read(cx).emoji_popup() {
+                        col = col.child(emoji_popup_view(&items, selected));
+                    }
+                }
+                col = col.child(self.editor.clone());
                 if let Some(strip) = topic_bottom {
                     col = col.child(strip);
                 }
@@ -6931,6 +6875,13 @@ impl Render for Dashboard {
             Screen::Onboard => right.child(footer),
             Screen::MissionControl => right.child(footer),
         };
+
+        // The card is the column's LAST child on purpose. Children paint in
+        // order, so a menu drawn inside the header is painted before the
+        // transcript and the conversation covers it.
+        if let Some(menu) = self.chat_menu(cx) {
+            right = right.child(menu);
+        }
 
         let mut root = div()
             .flex()
@@ -6978,21 +6929,25 @@ impl Render for Dashboard {
                 // The divider drag, mapped onto the pane span recorded at paint
                 // time. The floor lives in split::share_after_drag, so a fast
                 // drag narrows a pane but never shuts it (#2476).
-                if let Some((from_axis, from_share)) = this.split_drag {
-                    let stacked = this
-                        .split
-                        .as_ref()
-                        .is_some_and(|pane| pane.layout.is_stacked());
-                    if let Some([x0, y0, x1, y1]) = this.split_area.get() {
-                        let span = if stacked { y1 - y0 } else { x1 - x0 };
-                        let now = if stacked {
+                if let Some(drag) = this.split_drag.clone() {
+                    let area = this.split_areas.borrow().get(&drag.path).copied();
+                    if let Some([x0, y0, x1, y1]) = area {
+                        let span = if drag.stacked { y1 - y0 } else { x1 - x0 };
+                        let now = if drag.stacked {
                             f32::from(ev.position.y)
                         } else {
                             f32::from(ev.position.x)
                         };
-                        this.split_ratio =
-                            split::share_after_drag(from_share, now - from_axis, span);
-                        cx.notify();
+                        let travelled = now - drag.last;
+                        if travelled != 0.0 {
+                            if let Some(tree) = this.panes.as_mut() {
+                                tree.drag_divider(&drag.path, drag.divider, travelled, span);
+                            }
+                            if let Some(active) = this.split_drag.as_mut() {
+                                active.last = now;
+                            }
+                            cx.notify();
+                        }
                     }
                 }
                 // A rail row slid left far enough: open its actions. The
@@ -7368,6 +7323,19 @@ fn main() {
             })
             .into_iter()
             .collect();
+    // Each topic's own icon, read with the rest of the topic state (#2480).
+    // The map used to start empty and only fill after a close or a create, so
+    // every tab drew its name alone until the owner touched a topic: the
+    // "topic icons vanished" bug. The rows are already in the database; they
+    // just were never read on the way in.
+    let topic_icons: std::collections::HashMap<uuid::Uuid, String> =
+        futures::executor::block_on(sessions::load_topic_icons(db_path.clone()))
+            .unwrap_or_else(|e| {
+                logging::error(&format!("topic icons load: {e}"));
+                Vec::new()
+            })
+            .into_iter()
+            .collect();
     let sessions_state = match session_list {
         Ok(items) => sessions::SessionsState {
             items,
@@ -7375,7 +7343,7 @@ fn main() {
             topics: topics.clone(),
             parents: parents.clone(),
             closed: closed.clone(),
-            topic_icons: HashMap::new(),
+            topic_icons: topic_icons.clone(),
             topic_titles: HashMap::new(),
             collapsed: HashSet::new(),
             selected: None,
@@ -7391,7 +7359,7 @@ fn main() {
             topics,
             parents,
             closed,
-            topic_icons: HashMap::new(),
+            topic_icons,
             topic_titles: HashMap::new(),
             collapsed: HashSet::new(),
             selected: None,
@@ -7542,11 +7510,12 @@ fn main() {
                         update_available: None,
                         update_prompt: None,
                         help_filter: None,
-                        split: None,
-                        pane_focus: PaneFocus::Primary,
-                        split_ratio: split::EVEN_SHARE,
-                        split_area: Rc::new(Cell::new(None)),
+                        panes: None,
+                        pane_states: HashMap::new(),
+                        pane_focus: None,
+                        split_areas: Rc::new(std::cell::RefCell::new(HashMap::new())),
                         split_drag: None,
+                        split_target: None,
                         copy_drag: Rc::new(CopyDrag::default()),
                         split_pick: None,
                         split_creating: false,
@@ -7563,7 +7532,7 @@ fn main() {
                         preview_zoom: 1.0,
                         preview_video: None,
                         help_open: false,
-                        topic_menu: false,
+                        topic_menu: None,
                         topic_draft: None,
                         topic_edge: topic_tabs::Edge::from_config(
                             Config::load()
@@ -7601,7 +7570,6 @@ fn main() {
                         settle_retries: 0,
                         busy: false,
                         cancel: None,
-                        turn_session: None,
                         esc_at: None,
                         queued: Vec::new(),
                         agent_error: None,
@@ -8836,28 +8804,13 @@ fn help_rows() -> Vec<(
     out
 }
 
-/// The conversation's name above the topic bar (#2480).
+/// The most characters the header prints before it shortens (#2480).
 ///
-/// Telegram's forum header puts the chat title on top and the topics under it.
-/// The GUI chat screen had no header at all (the comment below used to say the
-/// session name led the footer), so a row of topic chips was the first thing
-/// the eye met and the session it belonged to was nowhere.
-///
-/// Plain header text, flush left, and the two-word rule does not
-/// apply: the name is the full name, and only the chips are shortened.
-///
-/// The chip shape is the owner's Photoshop spec (2026-11-03): a bordered,
-/// tinted, rounded chip that hugs the name, its height roughly 1.7x the cap
-/// height. The first card used py_2, which measured 2.5-3x cap height on the
-/// owner's screen: a fat band with the text swimming in vertical dead space.
-/// py_1 with px_2 is the mockup ratio; the border and tint stay, he asked for
-/// them and rejecting a later regression does not un-ask it.
-/// The most characters the header prints before it shortens (#2480). A name
-/// is a label, not the conversation: the rail and the window title keep the
-/// whole string.
+/// A name is a label, not the conversation: the rail and the window title keep
+/// the whole string.
 const HEADER_NAME_CHARS: usize = 42;
 
-/// The name the header chip prints.
+/// The name the header prints.
 ///
 /// The shortening happens here, in Rust, and never leans on the text engine.
 /// `truncate()` on a stretched column painted a bare `\u{2026}` on the owner's
@@ -8877,76 +8830,44 @@ fn header_name(name: &str) -> String {
     }
 }
 
-/// The conversation name as a chip hugging its text (#2480).
+/// The conversation's name on the header bar (#2480).
 ///
-/// The chip sits inside a row, on purpose. A div laid straight into the
-/// header column is stretched across the whole chat by the default cross axis
-/// alignment, which is the full width band that read as a button. A row hands
-/// the chip its own content width and nothing else.
-fn session_title_chip(name: &str) -> impl IntoElement {
-    div().flex().flex_row().items_center().min_w_0().child(
-        div()
-            .flex_none()
-            .px_2()
-            .py_1()
-            .rounded(px(CARD_RADIUS))
-            .bg(glass_fill(palette::current().panel))
-            .border_1()
-            .border_color(rgb(palette::current().panel_hi))
-            .text_base()
-            .font_weight(gpui::FontWeight::SEMIBOLD)
-            .text_color(rgb(palette::current().text_normal))
-            .child(SharedString::from(header_name(name))),
-    )
-}
-
-/// The chat's `...` button with its items below it while the menu is open
-/// (#2303, #2304). The bar hugs its content: a `w_full` bar inside the strip
-/// squeezed the tabs to nothing across a row and flung the `...` to the
-/// rail's far edge down a column, the detached-dots layout the owner
-/// screenshotted three times (#2480, #2490). Down a rail the stack aligns to
-/// the leading edge like the chips above it; across a row it aligns right so
-/// the menu reads from the row's end.
-fn topic_bar(
-    open: bool,
-    toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    items: Vec<Stateful<Div>>,
-    vertical: bool,
-) -> impl IntoElement {
-    let button = div()
-        .id("topic-menu-button")
-        .px_2()
-        .py_0p5()
-        .rounded_sm()
-        .cursor_pointer()
-        .text_color(rgb(palette::current().text_muted))
-        .hover(|d| d.bg(rgb(palette::current().panel_hi)))
-        .on_click(toggle)
-        .child("...");
-    let mut bar = div()
-        .flex()
-        .flex_col()
-        .flex_none()
-        .when(vertical, |d| d.items_start())
-        .when(!vertical, |d| d.items_end())
-        .child(button);
-    if open {
-        for item in items {
-            bar = bar.child(item);
-        }
-    }
-    bar
+/// Telegram's forum header puts the chat title on top and the topics under it.
+/// The GUI chat screen had no header at all (the comment below used to say the
+/// session name led the footer), so a row of topic chips was the first thing
+/// the eye met and the session it belonged to was nowhere. Plain header text,
+/// flush left, and the two-word rule does not apply: the name is the full
+/// name, and only the chips are shortened.
+///
+/// The card that used to wrap it is retired (owner, 2026-11-04): "still
+/// looking like a fucking useless button instead of taking full width ...
+/// remove its button, leave the clean title in the bar". Three passes of
+/// padding and border tuning never changed the read, because the shape itself
+/// was the problem: a bordered box on a bar looks like a button no matter how
+/// snug it is. What is left is the name, plain, across the whole row: no
+/// border, no fill, no padding, nothing that can read as a control.
+fn session_title(name: &str) -> impl IntoElement {
+    div()
+        .flex_1()
+        .min_w_0()
+        .text_lg()
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(rgb(palette::current().text_normal))
+        .child(SharedString::from(header_name(name)))
 }
 
 /// The name prompt above the input, while a topic is being named (#2303).
-/// The topic row (#2400, #2402): the leading button that moves it, the tabs,
-/// and the `...` menu. Across the top or bottom it is one row; down a side it
-/// is one column.
+/// The topic row (#2400, #2402): the leading button that moves it and the
+/// tabs. Across the top or bottom it is one row; down a side it is one column.
+///
+/// The `...` and its items used to close this row (#2303). They are gone from
+/// here (#2480): the menu belongs to the conversation, so it lives at the
+/// chat's top right and floats over the transcript instead of growing this
+/// strip by five rows when it opens.
 fn topic_strip(
     edge: topic_tabs::Edge,
     toggle_edge: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     tabs: Vec<AnyElement>,
-    bar: impl IntoElement,
 ) -> Div {
     // A square target the size of the rail's action icons, so it is easy to
     // hit and reads as a control rather than a stray glyph (#2414).
@@ -8986,7 +8907,6 @@ fn topic_strip(
                 // them was the wall of colour the owner screenshotted (#2480).
                 div().flex().flex_col().items_start().gap_1().children(tabs),
             )
-            .child(bar)
     } else {
         div()
             .flex()
@@ -9008,7 +8928,6 @@ fn topic_strip(
                     .gap_1()
                     .children(tabs),
             )
-            .child(bar)
     }
 }
 
@@ -9057,6 +8976,7 @@ fn topic_tab(
     shape: topic_bar::ChipShape,
     current: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_right: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
     let colour = if current {
         palette::current().accent
@@ -9097,6 +9017,7 @@ fn topic_tab(
         .when(current, |d| d.bg(rgb(palette::current().panel_hi)))
         .hover(|d| d.bg(rgb(palette::current().panel_hi)))
         .on_click(on_click)
+        .on_mouse_down(MouseButton::Right, on_right)
         .children(icon)
         .child(SharedString::from(label))
 }
@@ -9202,7 +9123,7 @@ fn update_prompt_overlay(
 /// than a session beside a nameless strip, and the pane holding the caret
 /// wears the accent so Tab's move is visible.
 fn pane_header(
-    id: &'static str,
+    id: SharedString,
     title: SharedString,
     focused: bool,
     close: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -9341,104 +9262,174 @@ fn split_divider(
         )
 }
 
-/// The two panes of a split: the chat first, then the picked session beside it
-/// (side) or below it (stack), each with its own header and × (#2438, #2474).
-/// The chat screen and the themes preview both draw through this, so the second
-/// pane cannot be wired into one of them and forgotten in the other (#2438).
-/// Every argument is a fact the two call sites fill differently: the element,
-/// its title, which pane holds focus, the measured geometry, and the drag and
-/// close handlers. Bundling them only to satisfy the linter would box the
-/// closures and hide which pane owns which handler.
-#[allow(clippy::too_many_arguments)]
-fn split_body(
-    primary: AnyElement,
-    primary_title: SharedString,
-    focus: PaneFocus,
-    pane: &SplitPane,
-    secondary_chrome: Vec<AnyElement>,
+/// Everything the pane walk needs to draw one leaf or one split: the chat
+/// element (drawn once, at its own leaf), the state each other pane keeps, the
+/// caret, the tree's measured areas, and the window handle the per-pane
+/// handlers report through (#2472).
+struct PanesCtx<'a> {
+    chat: Option<AnyElement>,
+    chat_session: Option<Uuid>,
+    chat_title: SharedString,
+    states: &'a HashMap<Uuid, SplitPane>,
+    focus: Option<Uuid>,
     content: f32,
-    share: f32,
-    area: Rc<Cell<Option<[f32; 4]>>>,
-    grab: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
-    close_primary: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    close_secondary: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    areas: &'a Rc<std::cell::RefCell<HashMap<Vec<usize>, [f32; 4]>>>,
+    entity: gpui::WeakEntity<Dashboard>,
+    /// Whether the dividers take the pointer. The themes preview draws the
+    /// same panes but never resizes them (#2438).
+    interactive: bool,
+}
+
+/// Draw the pane tree (#2472). A leaf is one pane: its header, its ×, and the
+/// transcript it holds. A split lays its children along its own axis with a
+/// divider between each pair, and every share comes from the tree rather than
+/// from a single window-wide ratio, so a nested split divides only the pane it
+/// grew from. A tree of one leaf draws the chat untouched, which is the
+/// unsplit window the window has always had.
+fn pane_element(
+    tree: &PaneTree,
+    ctx: &mut PanesCtx,
+    path: &mut Vec<usize>,
+    width_share: f32,
 ) -> AnyElement {
-    let stacked = pane.layout.is_stacked();
-    // The chat takes `share` of the pane area and the picked pane the rest. A
-    // clamp here means a stale or nonsensical share can never draw a pane away
-    // before the drag's own floor gets a chance to hold it (#2476).
-    let share = share.clamp(0.1, 0.9);
-    // The chat used to be handed in bare, so it sized to its content and the
-    // split read as a chat with a strip beside it rather than two panes
-    // (#2473).
-    let half = div()
-        .id("split-primary")
-        .flex()
-        .flex_col()
-        .flex_shrink()
-        .flex_basis(gpui::relative(share))
-        .min_w_0()
-        .min_h_0()
-        .child(pane_header(
-            "split-close-primary",
-            primary_title,
-            focus == PaneFocus::Primary,
-            close_primary,
-        ))
-        .child(primary);
-    let secondary = div()
-        .id("split-secondary")
-        .flex()
-        .flex_col()
-        .flex_shrink()
-        .flex_basis(gpui::relative(1.0 - share))
-        .min_w_0()
-        .min_h_0()
-        .child(pane_header(
-            "split-close-secondary",
-            SharedString::from(pane.title.clone()),
-            focus == PaneFocus::Secondary,
-            close_secondary,
-        ))
-        .child(transcript::view(
-            &pane.transcript,
-            &pane.scroll,
-            &LiveTurn::default(),
-            false,
-            split_pane_width(content, stacked, 1.0 - share),
-            HashMap::new(),
-            transcript::ViewHooks::default(),
-        ))
-        // The pane's own plan strip, queue and composer: the strips and the
-        // editor live INSIDE the pane's column, so nothing window-level sits
-        // under the two panes (#2474).
-        .children(secondary_chrome);
-    div()
-        .flex()
-        .flex_1()
-        .min_w_0()
-        .min_h_0()
-        .gap_2()
-        .when(stacked, |d| d.flex_col())
-        .when(!stacked, |d| d.flex_row())
-        // The span a drag maps onto, read from the two outer panes instead of
-        // assumed from the viewport: the footer, the input and the topic strip
-        // all sit inside the window, so the viewport is not the pane area and a
-        // share measured against it would drift from the pointer (#2476).
-        .on_children_prepainted(move |bounds, _window, _cx| {
-            let (Some(first), Some(last)) = (bounds.first(), bounds.last()) else {
-                return;
+    match tree {
+        PaneTree::Leaf { session, .. } => {
+            let is_chat = Some(*session) == ctx.chat_session;
+            let focused = if is_chat {
+                ctx.focus.is_none()
+            } else {
+                ctx.focus == Some(*session)
             };
-            let start_x = f32::from(first.origin.x);
-            let start_y = f32::from(first.origin.y);
-            let end_x = f32::from(last.origin.x + last.size.width);
-            let end_y = f32::from(last.origin.y + last.size.height);
-            area.set(Some([start_x, start_y, end_x, end_y]));
-        })
-        .child(half)
-        .child(split_divider(stacked, grab))
-        .child(secondary)
-        .into_any_element()
+            let title = if is_chat {
+                ctx.chat_title.clone()
+            } else {
+                match ctx.states.get(session) {
+                    Some(pane) => SharedString::from(pane.title.clone()),
+                    None => SharedString::from("(untitled)"),
+                }
+            };
+            let body: AnyElement = if is_chat {
+                ctx.chat.take().unwrap_or_else(|| div().into_any_element())
+            } else {
+                match ctx.states.get(session) {
+                    Some(pane) => div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w_0()
+                        .min_h_0()
+                        .child(transcript::view(
+                            &pane.transcript,
+                            &pane.scroll,
+                            &LiveTurn::default(),
+                            false,
+                            if width_share < 1.0 {
+                                split_pane_width(ctx.content, false, width_share)
+                            } else {
+                                ctx.content
+                            },
+                            HashMap::new(),
+                            transcript::ViewHooks::default(),
+                        ))
+                        .into_any_element(),
+                    None => div().into_any_element(),
+                }
+            };
+            let weak = ctx.entity.clone();
+            let close_session = *session;
+            let close = move |_ev: &ClickEvent, _window: &mut Window, cx: &mut App| {
+                let _ = weak.update(cx, |this, cx| this.close_pane(close_session, cx));
+            };
+            div()
+                .id(SharedString::from(format!("pane-{session}")))
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .child(pane_header(
+                    SharedString::from(format!("pane-close-{session}")),
+                    title,
+                    focused,
+                    close,
+                ))
+                .child(body)
+                .into_any_element()
+        }
+        PaneTree::Split {
+            layout, children, ..
+        } => {
+            let stacked = layout.is_stacked();
+            let here = path.clone();
+            let areas = ctx.areas.clone();
+            let key = path.clone();
+            let mut row = div()
+                .flex()
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .gap_2()
+                .when(stacked, |d| d.flex_col())
+                .when(!stacked, |d| d.flex_row())
+                // The span a drag maps onto, read from the two outer children
+                // instead of assumed from the viewport: the footer, the input
+                // and the topic strip all sit inside the window, so a share
+                // measured against the viewport would drift from the pointer
+                // (#2476). Each split records its own box, so a nested rule
+                // maps onto the pane it lives in rather than the window.
+                .on_children_prepainted(move |bounds, _window, _cx| {
+                    let (Some(first), Some(last)) = (bounds.first(), bounds.last()) else {
+                        return;
+                    };
+                    let start_x = f32::from(first.origin.x);
+                    let start_y = f32::from(first.origin.y);
+                    let end_x = f32::from(last.origin.x + last.size.width);
+                    let end_y = f32::from(last.origin.y + last.size.height);
+                    areas
+                        .borrow_mut()
+                        .insert(key.clone(), [start_x, start_y, end_x, end_y]);
+                });
+            for (ix, child) in children.iter().enumerate() {
+                path.push(ix);
+                let child_width = if stacked {
+                    width_share
+                } else {
+                    width_share * child.share()
+                };
+                let element = pane_element(child, ctx, path, child_width);
+                path.pop();
+                row = row.child(
+                    div()
+                        .id(SharedString::from(format!("split-slot-{here:?}-{ix}")))
+                        .flex()
+                        .flex_col()
+                        .flex_shrink()
+                        .flex_basis(gpui::relative(child.share()))
+                        .min_w_0()
+                        .min_h_0()
+                        .child(element),
+                );
+                if ix + 1 < children.len() {
+                    // The rule starts the drag and the window root finishes
+                    // it, so the pointer can slide off the 12px strip without
+                    // the panes snapping back (#2476).
+                    let weak = ctx.entity.clone();
+                    let drag_path = here.clone();
+                    let interactive = ctx.interactive;
+                    let grab = move |ev: &MouseDownEvent, _window: &mut Window, cx: &mut App| {
+                        if !interactive {
+                            return;
+                        }
+                        let _ = weak.update(cx, |this, cx| {
+                            this.begin_divider_drag(&drag_path, ix, ev, cx);
+                        });
+                    };
+                    row = row.child(split_divider(stacked, grab));
+                }
+            }
+            row.into_any_element()
+        }
+    }
 }
 
 /// The dim over the chat and the card in its bottom right while a split waits
@@ -10419,80 +10410,6 @@ mod tests {
             "fn run_finder_pick",
             "fn finder_items",
             "OverlayId::CommandPalette",
-        ] {
-            assert!(src.contains(needle), "{needle} is part of the wiring");
-        }
-    }
-
-    #[test]
-    fn a_split_pane_editor_sends_to_the_panes_own_session() {
-        // The split's secondary pane owns a composer of its own, and its
-        // send button must address the pane's session, not whichever session
-        // the window transcript happens to show (#2474). A guard in
-        // send_message_to keeps a hand-built target honest: no target, no
-        // turn.
-        let src = include_str!("main.rs");
-        for needle in [
-            "cx.subscribe(&pane_editor",
-            "this.send_message_to(Some(id), text.clone(), cx)",
-            "let Some(sid) = target else {",
-            "agent_bridge::spawn_turn(bridge.service.clone(), sid, text, self.sink.clone(), cancel)",
-        ] {
-            assert!(src.contains(needle), "{needle} is part of the wiring");
-        }
-    }
-
-    #[test]
-    fn a_wrong_session_send_can_never_start_the_other_panes_turn() {
-        // Progress from one session must never paint the other pane's
-        // transcript or start its turn: the window drop-guards filter by
-        // session id, a pane finishing reloads only its own pane, and the
-        // pane reload writes the pane's transcript, never the window's
-        // (#2474).
-        let src = include_str!("main.rs");
-        for needle in [
-            "self.transcript.session != Some(*sid)",
-            "reload_pane = Some(pane_sid)",
-            "fn reload_pane_transcript",
-            "pane.transcript.turns = turns",
-            "this.transcript.session != Some(sid)",
-        ] {
-            assert!(src.contains(needle), "{needle} is part of the wiring");
-        }
-    }
-
-    #[test]
-    fn a_split_moves_the_window_composer_into_the_primary_pane() {
-        // While a split is open the window column stops owning the composer:
-        // the chrome helpers render it inside the primary pane and the split
-        // carries the secondary chrome into its own pane, so neither column
-        // ships a dead strip (#2474).
-        let src = include_str!("main.rs");
-        for needle in [
-            "fn composer_children",
-            "fn pane_children",
-            ".children(self.composer_children(cx))",
-            "secondary_chrome: Vec<AnyElement>",
-            ".children(secondary_chrome)",
-            "if self.split.is_none() {",
-        ] {
-            assert!(src.contains(needle), "{needle} is part of the wiring");
-        }
-    }
-
-    #[test]
-    fn split_panes_carry_their_own_editor_plan_and_queue() {
-        // A pane is a session in miniature: its own editor, its own plan
-        // strip pinned to its session, and its own queued messages, drained
-        // from the pane's snapshot when its turn finishes (#2474).
-        let src = include_str!("main.rs");
-        for needle in [
-            "editor: Entity<editor::Editor>",
-            "plan: plan_strip::PlanStripState",
-            "plan_for: Option<Uuid>",
-            "pending: Vec<agent_bridge::PendingMessage>",
-            "let pane_waiting",
-            "queue_snapshot(pane.session",
         ] {
             assert!(src.contains(needle), "{needle} is part of the wiring");
         }
