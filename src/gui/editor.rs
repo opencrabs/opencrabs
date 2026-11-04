@@ -1366,12 +1366,13 @@ impl Render for Editor {
             div()
                 .flex()
                 .flex_row()
-                .items_end()
+                .items_center()
                 .gap_2()
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
+                        .pl_1()
                         .child(EditorElement { input: cx.entity() }),
                 )
                 .child(paperclip(cx)),
@@ -1553,6 +1554,7 @@ fn paperclip(cx: &mut Context<Editor>) -> impl IntoElement {
         .items_center()
         .justify_center()
         .size(gpui::rems(1.8))
+        .mr_1()
         .rounded_sm()
         .cursor_pointer()
         .text_size(gpui::rems(1.1))
@@ -1869,6 +1871,26 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).expect("scratch dir");
         dir
+    }
+
+    /// The single-line hint sits in the middle of the composer, with the
+    /// same small inset at the text's left edge and the paperclip's right.
+    #[test]
+    fn composer_centres_text_and_insets_the_attachment_control() {
+        let src = include_str!("editor.rs");
+        let render = src
+            .split("impl Render for Editor")
+            .nth(1)
+            .and_then(|rest| rest.split("fn attachment_strip(").next())
+            .expect("editor render");
+        assert!(render.contains(".items_center()"));
+        assert!(render.contains(".pl_1()"));
+        let clip = src
+            .split("fn paperclip(")
+            .nth(1)
+            .and_then(|rest| rest.split("/// The keybindings").next())
+            .expect("paperclip");
+        assert!(clip.contains(".mr_1()"));
     }
 
     /// A chip's thumbnail and its ✕ are two elements with two ids and two
