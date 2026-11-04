@@ -60,9 +60,12 @@ pub fn screen_chord(key: &str, mods: ChordMods, screen: Screen) -> Option<Screen
             Screen::Usage => Some(ScreenAction::LeaveUsage),
             Screen::Files => Some(ScreenAction::LeaveFiles),
             Screen::MissionControl => Some(ScreenAction::LeaveMissionControl),
-            Screen::Chat | Screen::Themes | Screen::Models | Screen::Skills | Screen::Onboard => {
-                None
-            }
+            Screen::Chat
+            | Screen::Themes
+            | Screen::Models
+            | Screen::Skills
+            | Screen::Onboard
+            | Screen::DirectoryPicker => None,
         };
     }
     // ctrl+shift+u, not ctrl+u: plain ctrl+u is delete-to-line-start in the

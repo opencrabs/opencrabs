@@ -127,6 +127,10 @@ enum Screen {
     /// The skills list: every skill the terminal can invoke, from the same
     /// loader, runnable from the window (#2466).
     Skills,
+    /// The /cd directory picker (#2527): the terminal's own dialog, so a
+    /// bare `/cd` opens a screen instead of answering with a text reply
+    /// that also lights the thinking spinner.
+    DirectoryPicker,
 }
 
 /// A divider drag in flight (#2472, #2476): which split, which divider in it,
@@ -617,6 +621,13 @@ struct Dashboard {
     /// how a good preview is found again without hunting the list.
     themes_index: usize,
     themes_history: Vec<String>,
+    /// The /cd picker's browse state (#2527): the directory on screen, its
+    /// subdirectories read at open and on every descend, the row the
+    /// keyboard stands on, and whether dotfile directories are listed.
+    cd_dir: std::path::PathBuf,
+    cd_entries: Vec<std::path::PathBuf>,
+    cd_selected: usize,
+    cd_show_hidden: bool,
     /// The model picker's rows, built when the screen opens so a slow frame
     /// never rebuilds the catalogue.
     models_rows: Vec<models::Row>,
@@ -1628,6 +1639,44 @@ impl Dashboard {
                     self.send_message(opencrabs::brain::goal::goal_command_prompt(&arg), cx);
                 }
             }
+            C::Cd => {
+                // The picker owns bare `/cd` (#2527): a screen, not a text
+                // reply that also lights the thinking spinner. With a path
+                // the change applies locally on the bridge service, the same
+                // applier the terminal uses, with no turn and no spinner.
+                if arg.is_empty() {
+                    self.open_cd_picker(cx);
+                } else {
+                    let Some(session) = self.transcript.session else {
+                        self.live
+                            .notices
+                            .push("No conversation is open. Type /new first.".to_string());
+                        cx.notify();
+                        return;
+                    };
+                    let expanded = opencrabs::brain::tools::error::expand_tilde(&arg);
+                    if !expanded.is_dir() {
+                        self.live
+                            .notices
+                            .push(text_commands::cd_not_a_directory(&arg));
+                        cx.notify();
+                        return;
+                    }
+                    cx.spawn(async move |this, cx| {
+                        let applied = match agent_bridge::bridge() {
+                            Some(b) => b.service.apply_operator_cd(session, &expanded).await,
+                            None => expanded.clone(),
+                        };
+                        let _ = this.update(cx, |this, cx| {
+                            this.live
+                                .notices
+                                .push(text_commands::cd_reply(&applied.display().to_string()));
+                            cx.notify();
+                        });
+                    })
+                    .detach();
+                }
+            }
             other => {
                 let Some(session) = self.transcript.session else {
                     self.live
@@ -2050,6 +2099,9 @@ impl Dashboard {
             // The skills list is a full screen too: ctrl+shift+u leaves it for
             // the ledger, the same as any other screen.
             Screen::Skills => self.screen = Screen::Usage,
+            // The picker is transient: the chord just closes it, the way Esc
+            // does, instead of hopping to the ledger.
+            Screen::DirectoryPicker => self.screen = Screen::Chat,
         }
         self.refocus_screen();
         cx.notify();
@@ -2303,6 +2355,92 @@ impl Dashboard {
         self.themes_history.clear();
         self.screen = Screen::Chat;
         self.refocus_screen();
+        cx.notify();
+    }
+
+    /// `/cd` with no argument: the directory picker screen (#2527). The
+    /// terminal opens its dialog on the session's working directory; the
+    /// window opens the same screen on the same seed, so both surfaces
+    /// answer the same key with the same screen. Needs an open conversation
+    /// like every other session-bound command here.
+    fn open_cd_picker(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.transcript.session else {
+            self.live
+                .notices
+                .push("No conversation is open. Type /new first.".to_string());
+            cx.notify();
+            return;
+        };
+        let here = agent_bridge::bridge()
+            .map(|b| b.service.get_working_directory_for_session(session))
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        self.cd_dir = here;
+        self.cd_show_hidden = false;
+        self.cd_selected = 0;
+        self.cd_entries = cd_entries_for(&self.cd_dir, false);
+        self.rail_actions = None;
+        self.screen = Screen::DirectoryPicker;
+        // The screen takes the keyboard, the same rule as Themes: on this
+        // screen the arrows walk the list, so a stale editor focus would
+        // send a message instead.
+        self.refocus_screen();
+        cx.notify();
+    }
+
+    /// Leave the picker: nothing is applied, the conversation comes back.
+    fn close_cd_picker(&mut self, cx: &mut Context<Self>) {
+        self.screen = Screen::Chat;
+        self.refocus_screen();
+        cx.notify();
+    }
+
+    /// Tab/Space on a row: make it the session's working directory. The
+    /// conversation comes back FIRST and the apply follows in a spawned
+    /// task, the ordering the terminal's picker was just fixed to use
+    /// (#2526): a slow persistence write must never hold the screen open.
+    fn cd_select_here(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.transcript.session else {
+            self.close_cd_picker(cx);
+            return;
+        };
+        let dir = self.cd_dir.clone();
+        self.screen = Screen::Chat;
+        self.refocus_screen();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let applied = match agent_bridge::bridge() {
+                Some(b) => b.service.apply_operator_cd(session, &dir).await,
+                None => dir.clone(),
+            };
+            let _ = this.update(cx, |this, cx| {
+                this.live
+                    .notices
+                    .push(text_commands::cd_reply(&applied.display().to_string()));
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Enter on a row: descend into it. `..` climbs back up one level.
+    /// Reads are synchronous and local, the way the terminal's dialog does
+    /// them, so the row list can never drift from what the screen shows.
+    fn cd_descend(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(next) = self.cd_entries.get(index) else {
+            return;
+        };
+        self.cd_dir = next.clone();
+        self.cd_selected = 0;
+        self.cd_entries = cd_entries_for(&self.cd_dir, self.cd_show_hidden);
+        cx.notify();
+    }
+
+    /// `.` in the picker: show or hide the dotfile directories, the same
+    /// toggle the terminal's dialog binds.
+    fn cd_toggle_hidden(&mut self, cx: &mut Context<Self>) {
+        self.cd_show_hidden = !self.cd_show_hidden;
+        self.cd_selected = 0;
+        self.cd_entries = cd_entries_for(&self.cd_dir, self.cd_show_hidden);
         cx.notify();
     }
 
@@ -4223,6 +4361,12 @@ impl Dashboard {
                 cx.notify();
                 return;
             }
+            // Esc on the /cd picker cancels and changes nothing (#2527). It
+            // sits with the screens above: a running turn must not hold it.
+            if self.screen == Screen::DirectoryPicker {
+                self.close_cd_picker(cx);
+                return;
+            }
             // Esc in the wizard goes back one step, clearing a model search
             // first, and closes the screen on the first step. The terminal's
             // own rule, so one stray key never throws away a half-filled run.
@@ -4500,6 +4644,28 @@ impl Dashboard {
                         self.skills_query.push(ch);
                         self.skills_index = 0;
                         self.refresh_skills();
+                    }
+                }
+            }
+            cx.notify();
+            return;
+        }
+        // The /cd picker owns the keyboard on its screen (#2527), the same
+        // bindings the terminal's dialog uses: arrows walk, Enter descends,
+        // `.` flips hidden directories, Tab and Space select here, Esc
+        // cancels (handled above with the screens).
+        if self.screen == Screen::DirectoryPicker {
+            let last = self.cd_entries.len().saturating_sub(1);
+            match ev.keystroke.key.as_str() {
+                "up" => self.cd_selected = self.cd_selected.saturating_sub(1),
+                "down" => self.cd_selected = (self.cd_selected + 1).min(last),
+                "enter" => self.cd_descend(self.cd_selected.min(last), cx),
+                "tab" | "space" => self.cd_select_here(cx),
+                _ => {
+                    // `.` flips the hidden-directories toggle, as it does in
+                    // the terminal's dialog.
+                    if ev.keystroke.key_char.as_deref() == Some(".") {
+                        self.cd_toggle_hidden(cx);
                     }
                 }
             }
@@ -4884,6 +5050,7 @@ impl Render for Dashboard {
             Screen::Themes => "OpenCrabs \u{b7} themes".to_string(),
             Screen::Models => "OpenCrabs \u{b7} models".to_string(),
             Screen::Skills => "OpenCrabs \u{b7} skills".to_string(),
+            Screen::DirectoryPicker => "OpenCrabs \u{b7} directory".to_string(),
             Screen::Onboard => "OpenCrabs \u{b7} onboarding".to_string(),
             Screen::MissionControl => "OpenCrabs \u{b7} mission control".to_string(),
             Screen::Chat => format!(
@@ -5056,6 +5223,108 @@ impl Render for Dashboard {
                             .into_any_element()
                     },
                 )
+            }
+            Screen::DirectoryPicker => {
+                // The terminal's /cd dialog, as a screen (#2527): the path on
+                // top, the rows under it, one footer line naming the keys.
+                // Flat surfaces, the same styling law the rest of the window
+                // follows (#2528).
+                let shown = palette::current();
+                let last = self.cd_entries.len().saturating_sub(1);
+                let current = self.cd_selected.min(last);
+                let mut list = div().flex().flex_col().gap_1();
+                for (index, path) in self.cd_entries.iter().enumerate() {
+                    let name = if path.ends_with("..") {
+                        "..".to_string()
+                    } else {
+                        path.file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("?")
+                            .to_string()
+                    };
+                    let selected = index == current;
+                    let mut row = div()
+                        .id(SharedString::from(format!("cd-row-{index}")))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .px_2()
+                        .py_1();
+                    if selected {
+                        row = row.bg(rgb(shown.panel_hi));
+                    }
+                    let row = row
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _ev, _window, cx| {
+                            this.cd_selected = index;
+                            this.cd_descend(index, cx);
+                        }))
+                        .child(text(name, Size::Sm, shown.text))
+                        .child(text(
+                            if path.ends_with("..") { "up" } else { "open" },
+                            Size::Xs,
+                            shown.text_muted,
+                        ));
+                    list = list.child(row);
+                }
+                let scroller = div()
+                    .id("cd-body")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(list);
+                let header = div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .w_full()
+                    .child(text(
+                        SharedString::from(self.cd_dir.display().to_string()),
+                        Size::Sm,
+                        shown.text,
+                    ))
+                    .child(text(
+                        if self.cd_show_hidden {
+                            "hidden on"
+                        } else {
+                            "hidden off"
+                        },
+                        Size::Xs,
+                        shown.text_muted,
+                    ));
+                let mut panel = div()
+                    .id("cd-panel")
+                    .w_full()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .p_3()
+                    .rounded(px(CARD_RADIUS))
+                    .border_1()
+                    .border_color(rgb(shown.panel_hi))
+                    .bg(glass_fill(shown.panel))
+                    .child(header)
+                    .child(scroller);
+                if self.cd_entries.is_empty() {
+                    panel = panel.child(text("no subdirectories", Size::Sm, shown.text_muted));
+                }
+                let footer = div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .w_full()
+                    .child(div().text_xs().text_color(rgb(shown.text_muted)).child(
+                        format!("{}/{}", current + 1, self.cd_entries.len()),
+                    ))
+                    .child(div().text_xs().text_color(rgb(shown.text_muted)).child(
+                        "up/down \u{b7} walk \u{b7} enter \u{b7} open \u{b7} . \u{b7} hidden \u{b7} tab/space \u{b7} select here \u{b7} esc \u{b7} back",
+                    ));
+                (panel.into_any_element(), footer.into_any_element())
             }
             Screen::Usage => {
                 let body: Div = if self.dash.cache_detail_open {
@@ -6886,6 +7155,7 @@ impl Render for Dashboard {
             Screen::Themes => right.child(footer),
             Screen::Models => right.child(footer),
             Screen::Skills => right.child(footer),
+            Screen::DirectoryPicker => right.child(footer),
             Screen::Onboard => right.child(footer),
             Screen::MissionControl => right.child(footer),
         };
@@ -7577,6 +7847,10 @@ fn main() {
                         themes_pick: None,
                         themes_index: 0,
                         themes_history: Vec::new(),
+                        cd_dir: std::env::current_dir().unwrap_or_default(),
+                        cd_entries: Vec::new(),
+                        cd_selected: 0,
+                        cd_show_hidden: false,
                         models_rows: Vec::new(),
                         models_index: 0,
                         skills_all: Vec::new(),
@@ -9920,10 +10194,42 @@ fn confirm_delete_overlay(
         )
 }
 
+/// The /cd picker's rows (#2527): the parent entry first when one exists,
+/// then the subdirectories, dotfile directories hidden until toggled, all
+/// sorted by name. A free function so the tests can exercise the real
+/// listing without a live window, the same shape the terminal's dialog
+/// builds in `open_directory_picker`.
+fn cd_entries_for(dir: &std::path::Path, show_hidden: bool) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    if dir.parent().is_some() {
+        files.push(dir.join(".."));
+    }
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let hidden = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with('.'))
+                .unwrap_or(false);
+            if hidden && !show_hidden {
+                continue;
+            }
+            files.push(path);
+        }
+    }
+    files.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+    files
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        THEMES_HISTORY_LEN, pick_initial_session, remember_open_session, remember_preview,
+        THEMES_HISTORY_LEN, cd_entries_for, pick_initial_session, remember_open_session,
+        remember_preview,
     };
 
     /// The zoom chords: they need cmd or ctrl, both spellings of plus zoom in,
@@ -10660,6 +10966,130 @@ mod tests {
         assert!(
             src.contains(&warn),
             "a completion for another session is logged, never dropped"
+        );
+    }
+
+    /// The /cd picker's listing (#2527): the parent entry first, then the
+    /// subdirectories sorted by name, files never listed.
+    #[test]
+    fn cd_entries_list_parent_dirs_only_sorted() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        std::fs::create_dir(root.join("zebra")).expect("zebra");
+        std::fs::create_dir(root.join("alpha")).expect("alpha");
+        std::fs::write(root.join("file.txt"), "x").expect("file");
+
+        let entries = cd_entries_for(root, false);
+        // The parent row is a `..`-terminated path, which Rust's file_name()
+        // reports as None: name it directly instead of unwrapping.
+        let names: Vec<String> = entries
+            .iter()
+            .map(|p| {
+                if p.ends_with("..") {
+                    "..".to_string()
+                } else {
+                    p.file_name().unwrap().to_string_lossy().to_string()
+                }
+            })
+            .collect();
+        // Parent first, then children alphabetical, files skipped.
+        assert_eq!(names.first().map(String::as_str), Some(".."));
+        assert_eq!(
+            names,
+            vec!["..".to_string(), "alpha".to_string(), "zebra".to_string()]
+        );
+    }
+
+    /// Dotfile directories stay hidden until the `.` toggle turns them on,
+    /// the same rule the terminal's dialog uses (#2527).
+    #[test]
+    fn cd_entries_hide_dotfiles_until_toggled() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        std::fs::create_dir(root.join(".secret")).expect("secret");
+        std::fs::create_dir(root.join("plain")).expect("plain");
+
+        let hidden_off = cd_entries_for(root, false);
+        let names_off: Vec<String> = hidden_off
+            .iter()
+            .filter(|p| !p.ends_with(".."))
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert!(
+            !names_off.contains(&".secret".to_string()),
+            "dotfile dirs are hidden by default"
+        );
+        let hidden_on = cd_entries_for(root, true);
+        let names_on: Vec<String> = hidden_on
+            .iter()
+            .filter(|p| !p.ends_with(".."))
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert!(
+            names_on.contains(&".secret".to_string()),
+            "the toggle lists them"
+        );
+    }
+
+    /// The window's /cd wiring (#2527), read off the source because a bare
+    /// `/cd` needs a live window to open the screen: bare `/cd` opens the
+    /// picker (never a spawned text command, so no thinking spinner), the
+    /// keys match the terminal's dialog, and select-here returns to chat
+    /// before the apply task spawns so a slow write cannot hold the screen.
+    #[test]
+    fn bare_cd_opens_the_picker_screen_and_keys_match_the_terminal() {
+        let src = include_str!("main.rs");
+        // Bare `/cd` opens the screen in run_text_command, with no turn
+        // thread in the arm: that thread was the phantom spinner (#2527).
+        let (_, after) = src
+            .split_once(["C::Cd => {", "\n"].concat().as_str())
+            .expect("run_text_command handles Cd");
+        // Bound the arm at its own closing brace: everything to end-of-file
+        // would sweep in later arms that legitimately spawn text commands.
+        let (cd_arm, _) = after.split_once("\n            }").unwrap_or((after, ""));
+        assert!(
+            cd_arm.contains("self.open_cd_picker(cx)"),
+            "bare /cd opens the picker screen"
+        );
+        let (bare, rest) = cd_arm
+            .split_once("self.open_cd_picker(cx)")
+            .expect("the bare arm exists");
+        assert!(
+            !bare.is_empty() && rest.contains("apply_operator_cd"),
+            "with a path the change applies locally on the service"
+        );
+        assert!(
+            !cd_arm.contains("spawn_text_command"),
+            "no text-command thread in the /cd arm, so no spinner"
+        );
+        // The screen owns the keyboard with the terminal's bindings.
+        assert!(
+            src.contains("\"tab\" | \"space\" => self.cd_select_here(cx),"),
+            "Tab and Space select here, as in the terminal"
+        );
+        assert!(
+            src.contains("\"enter\" => self.cd_descend(self.cd_selected.min(last), cx),"),
+            "Enter descends, as in the terminal"
+        );
+        // Esc cancels from the screen, alongside the other screens.
+        assert!(
+            src.contains("if self.screen == Screen::DirectoryPicker {")
+                && src.contains("self.close_cd_picker(cx);"),
+            "Esc cancels the picker"
+        );
+        // Select-here switches to chat FIRST, the ordering #2526 just fixed
+        // on the terminal: a slow apply must never hold the screen open.
+        let (_, after) = src
+            .split_once("fn cd_select_here")
+            .expect("cd_select_here exists");
+        let (body, _) = after.split_once("\n    fn ").unwrap_or((after, ""));
+        let switch = body
+            .find("self.screen = Screen::Chat;")
+            .expect("select switches to chat");
+        let spawn = body.find("cx.spawn").expect("select applies in a task");
+        assert!(
+            switch < spawn,
+            "the conversation returns before the apply task spawns"
         );
     }
 }
