@@ -933,6 +933,41 @@ fn role_color(role: &str) -> u32 {
     }
 }
 
+/// Mix two packed RGB colors without introducing a theme-specific literal.
+/// The panel supplies the base tone and the role accent supplies a small tint.
+fn mix_rgb(base: u32, tint: u32, percent: u32) -> u32 {
+    let percent = percent.min(100);
+    let channel = |shift: u32| {
+        let base = (base >> shift) & 0xff;
+        let tint = (tint >> shift) & 0xff;
+        (base * (100 - percent) + tint * percent) / 100
+    };
+    (channel(16) << 16) | (channel(8) << 8) | channel(0)
+}
+
+fn palette_is_dark(color: u32) -> bool {
+    let r = (color >> 16) & 0xff;
+    let g = (color >> 8) & 0xff;
+    let b = color & 0xff;
+    (r * 299 + g * 587 + b * 114) / 1000 < 128
+}
+
+/// A quiet role tint over the live panel. Dark themes get a little more ink;
+/// light themes stay pale. Both roles follow whichever theme is active.
+fn message_surface_for(palette: &palette::Palette, role: &str) -> u32 {
+    let tint = match role {
+        "user" => palette.blue,
+        "assistant" => palette.green,
+        _ => return palette.panel,
+    };
+    let percent = if palette_is_dark(palette.bg) { 18 } else { 10 };
+    mix_rgb(palette.panel, tint, percent)
+}
+
+fn message_surface(role: &str) -> u32 {
+    message_surface_for(&palette::current(), role)
+}
+
 fn body_style(size: f32) -> TextStyle {
     TextStyle {
         color: rgb(palette::current().text).into(),
@@ -1079,6 +1114,12 @@ const RHYTHM_BLOCK_MARGIN: f32 = 10.0;
 const RHYTHM_CELL_PAD_X: f32 = 16.0;
 const RHYTHM_CELL_PAD_Y: f32 = 6.0;
 
+/// Message text sits inside the rounded surface, never on its curved edge.
+const MESSAGE_PAD_X: f32 = 16.0;
+const MESSAGE_PAD_Y: f32 = 12.0;
+const USER_TEXT_SIZE: f32 = 16.0;
+const PLAIN_TEXT_SIZE: f32 = 13.0;
+
 /// Assistant content as markdown. Consecutive fence lines group under one
 /// padded mono container so a code block reads as one shape, while a table
 /// block keeps its grid instead of being flattened into text rows.
@@ -1130,12 +1171,12 @@ fn md_block(src: &str) -> Div {
 
 /// User/system content stays plain: the TUI renders input verbatim, markdown
 /// styling is an answer-text treatment.
-fn plain_block(content: &str) -> Div {
+fn plain_block(content: &str, size: f32) -> Div {
     let mut lines = div().flex().flex_col().gap_0p5();
     for line in content.split('\n') {
         lines = lines.child(
             div()
-                .text_sm()
+                .text_size(px(size))
                 .text_color(rgb(palette::current().text))
                 .child(SharedString::from(line.to_string())),
         );
@@ -1143,11 +1184,8 @@ fn plain_block(content: &str) -> Div {
     lines
 }
 
-/// One message: its timestamp, then the content. No role label and no panel
-/// background, because both were noise: the TUI tells the two apart by colour
-/// on the marker, and a grey card around every message made the transcript
-/// read as a stack of boxes instead of a conversation. The timestamp stays on
-/// BOTH sides, which is what the user needed to tell when an answer landed.
+/// One message with a quiet role surface. The timestamp and content share the
+/// same padded card so the role stays legible in a long history.
 fn bubble(
     role: &str,
     content: &str,
@@ -1161,7 +1199,17 @@ fn bubble(
     // and `flex_shrink_0` stops the column squeezing a row below the height its
     // tiles reserved. Before #2395 the row had neither, so a tile laid out
     // taller than `TILE` painted over the line above it.
-    let mut col = div().flex().flex_col().gap_1().min_w_0().flex_shrink_0();
+    let attachment_width = (content_width - 2.0 * MESSAGE_PAD_X).max(0.0);
+    let mut col = div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .min_w_0()
+        .flex_shrink_0()
+        .px(px(MESSAGE_PAD_X))
+        .py(px(MESSAGE_PAD_Y))
+        .rounded(px(CARD_RADIUS))
+        .bg(glass_fill(message_surface(role)));
     if !time.is_empty() {
         col = col.child(
             div()
@@ -1174,11 +1222,18 @@ fn bubble(
         col = col.child(if role == "assistant" {
             md_block(&text)
         } else {
-            plain_block(&text)
+            plain_block(
+                &text,
+                if role == "user" {
+                    USER_TEXT_SIZE
+                } else {
+                    PLAIN_TEXT_SIZE
+                },
+            )
         });
     }
     if !paths.is_empty() {
-        col = col.child(history_attachments(&paths, content_width, handlers));
+        col = col.child(history_attachments(&paths, attachment_width, handlers));
     }
     col
 }
@@ -2151,6 +2206,51 @@ mod tests {
         assert_eq!(heading_size(0), 13.0, "body stays 13px");
         assert_eq!(heading_weight(1), gpui::FontWeight::BOLD);
         assert_eq!(heading_weight(0), gpui::FontWeight::NORMAL);
+    }
+
+    /// #2544: role surfaces are tinted from the active palette in both appearances.
+    #[test]
+    fn message_surfaces_follow_theme_and_role() {
+        let dark = palette::DARK;
+        let light = palette::Palette {
+            bg: 0xf5f5f5,
+            panel: 0xffffff,
+            ..dark
+        };
+        let dark_user = message_surface_for(&dark, "user");
+        let dark_assistant = message_surface_for(&dark, "assistant");
+        let light_user = message_surface_for(&light, "user");
+        let light_assistant = message_surface_for(&light, "assistant");
+
+        assert!(palette_is_dark(dark.bg));
+        assert!(!palette_is_dark(light.bg));
+        assert_ne!(dark_user, dark_assistant);
+        assert_ne!(light_user, light_assistant);
+        assert_ne!(dark_user, dark.panel);
+        assert_ne!(light_user, light.panel);
+        assert_eq!(dark_user, mix_rgb(dark.panel, dark.blue, 18));
+        assert_eq!(light_user, mix_rgb(light.panel, light.blue, 10));
+        assert_eq!(message_surface_for(&dark, "system"), dark.panel);
+    }
+
+    /// #2544: the bubble keeps its radius, inner breathing room, readable user
+    /// text, and an attachment budget that excludes the bubble's own padding.
+    #[test]
+    fn message_bubbles_pad_role_surfaces_and_shrink_attachment_budget() {
+        let src = include_str!("transcript.rs");
+        let bubble = src
+            .split("fn bubble(")
+            .nth(1)
+            .and_then(|rest| rest.split("/// The files").next())
+            .expect("message bubble renderer");
+        assert!(bubble.contains(".rounded(px(CARD_RADIUS))"));
+        assert!(bubble.contains(".px(px(MESSAGE_PAD_X))"));
+        assert!(bubble.contains(".py(px(MESSAGE_PAD_Y))"));
+        assert!(bubble.contains("glass_fill(message_surface(role))"));
+        assert!(bubble.contains("content_width - 2.0 * MESSAGE_PAD_X"));
+        assert!(bubble.contains("history_attachments(&paths, attachment_width, handlers)"));
+        assert!(USER_TEXT_SIZE > PLAIN_TEXT_SIZE);
+        assert_eq!(USER_TEXT_SIZE, 16.0);
     }
 
     /// #2536: the image needs its own concentric clip. Clipping only the
