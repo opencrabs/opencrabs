@@ -1045,10 +1045,10 @@ fn md_table(t: &markdown::MdTable) -> Div {
         .flex_row()
         .items_start()
         .w_full()
-        // Top corners concentric with the grid curve (flush, gap 0): the
-        // glass band would otherwise paint square corners over it (#2514).
-        .rounded_tl(px(concentric_radius(0.0)))
-        .rounded_tr(px(concentric_radius(0.0)))
+        // Match the table's own top corners exactly. A smaller inner radius
+        // leaves a visible step between the header band and the card edge.
+        .rounded_tl(px(CARD_RADIUS))
+        .rounded_tr(px(CARD_RADIUS))
         .bg(glass_fill(palette::current().panel_hi));
     for i in 0..cols {
         head = head.child(table_cell(t.header.get(i).unwrap_or(&empty), true));
@@ -1076,7 +1076,7 @@ const RHYTHM_BASE_GAP: f32 = 4.0;
 const RHYTHM_HEADING_ABOVE: f32 = 12.0;
 const RHYTHM_HEADING_BELOW: f32 = 4.0;
 const RHYTHM_BLOCK_MARGIN: f32 = 10.0;
-const RHYTHM_CELL_PAD_X: f32 = 12.0;
+const RHYTHM_CELL_PAD_X: f32 = 16.0;
 const RHYTHM_CELL_PAD_Y: f32 = 6.0;
 
 /// Assistant content as markdown. Consecutive fence lines group under one
@@ -2726,6 +2726,22 @@ mod tests {
         assert_eq!(table.rows.len(), 2);
         assert_eq!(table.header[1].text, "cost");
         assert_eq!(table.rows[1][2].text, "slow");
+    }
+
+    /// #2541: the header band follows the table's default radius, and every
+    /// cell shares enough horizontal inset to keep text off the edges.
+    #[test]
+    fn table_header_matches_card_radius_and_cells_breathe() {
+        let src = include_str!("transcript.rs");
+        let table = src
+            .split("fn md_table(")
+            .nth(1)
+            .and_then(|rest| rest.split("/// Vertical rhythm ladder").next())
+            .expect("markdown table renderer");
+        assert!(table.contains(".rounded_tl(px(CARD_RADIUS))"));
+        assert!(table.contains(".rounded_tr(px(CARD_RADIUS))"));
+        assert!(!table.contains("concentric_radius(0.0)"));
+        assert_eq!(RHYTHM_CELL_PAD_X, 16.0);
     }
 
     /// #2325: reasoning is output, so its time belongs in the denominator the
