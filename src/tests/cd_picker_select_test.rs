@@ -109,7 +109,9 @@ async fn tab_select_returns_to_chat_before_persistence_completes_ordering() {
     let src = include_str!("../tui/app/dialogs.rs");
     let marker = "Tab/Space selects the current directory as working dir.";
     let start = src.find(marker).expect("select-here branch must exist");
-    let body = &src[start..start + 800];
+    let body = src
+        .get(start..start + 800)
+        .expect("select-here branch window");
     let switch = body
         .find("self.switch_mode(AppMode::Chat)")
         .expect("select-here must switch to chat");
