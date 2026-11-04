@@ -5,6 +5,7 @@ use crate::remote::pairing::{
     CODE_ALPHABET, CODE_LEN, MAX_FAIL_STREAK, PairingStore, TOKEN_PREFIX, VerifyError, sha_b64,
 };
 use crate::remote::scopes::{SCOPE_READ, SCOPE_SEND};
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
 fn store() -> (tempfile::TempDir, PairingStore) {
@@ -207,6 +208,7 @@ fn list_sessions_is_safe_and_accurate() {
 }
 
 #[test]
+#[cfg(unix)]
 fn state_file_is_owner_only() {
     let (_d, st) = store();
     st.mint_code(&full_scopes()).unwrap();

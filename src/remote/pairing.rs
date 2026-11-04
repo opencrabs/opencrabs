@@ -11,10 +11,8 @@
 //! Plaintext exists exactly once, at mint/issue time, in the returning
 //! process. Verification hashes the presented secret and compares digests.
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::Write as _;
-use std::os::unix::fs::PermissionsExt;
-use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -25,7 +23,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::{now_secs, scopes::is_known_scope};
-use crate::config::flock::{self, FlockOutcome};
 
 /// Crockford-flavoured 32-char alphabet: no I, L, O, U. Codes get read
 /// aloud from a terminal and typed on a phone.
@@ -341,28 +338,15 @@ impl PairingStore {
             .collect())
     }
 
-    /// Load → mutate → sweep → atomic-save under an exclusive flock.
+    /// Load → mutate → sweep → atomic-save under the exclusive state lock
+    /// (`state_lock`: bounded wait, then a hard error — never a silent
+    /// unlocked write, because the lock guards single-use code consumption).
     fn with_locked_store<T>(&self, f: impl FnOnce(&mut StoreFile) -> Result<T>) -> Result<T> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create {}", parent.display()))?;
         }
-        let lock_path = self.lock_path();
-        let lock_file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(false)
-            .open(&lock_path)
-            .with_context(|| format!("open {}", lock_path.display()))?;
-        match flock::exclusive(lock_file.as_raw_fd(), false) {
-            FlockOutcome::Acquired => {}
-            FlockOutcome::Held => {
-                anyhow::bail!("pairing lock unexpectedly held in non-blocking mode")
-            }
-            FlockOutcome::Failed(e) => {
-                return Err(anyhow::Error::new(e)).context("flock pairing.lock");
-            }
-        }
+        let _lock = super::state_lock::exclusive_wait(&self.lock_path(), super::state_lock::WAIT)?;
 
         let mut store = self.load()?;
         let out = f(&mut store)?;
@@ -392,8 +376,12 @@ impl PairingStore {
             f.write_all(&json)?;
             f.sync_all()?;
         }
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
-            .context("chmod 0600 pairing store")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+                .context("chmod 0600 pairing store")?;
+        }
         std::fs::rename(&tmp, &self.path)
             .with_context(|| format!("rename {} -> {}", tmp.display(), self.path.display()))?;
         Ok(())
