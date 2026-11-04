@@ -3834,6 +3834,7 @@ impl Dashboard {
         // (#2480). Both edges hug their content, so one chip can never fill the
         // rail the way it did before.
         let shape = topic_bar::chip_shape(self.topic_edge.is_vertical());
+        let icon_rems = topic_tabs::style(self.topic_edge.is_vertical()).topic_icon_rems;
         topic_bar::bar_entries(root, &topics)
             .into_iter()
             .map(|entry| {
@@ -3856,14 +3857,19 @@ impl Dashboard {
                 let (label, picture) = match entry {
                     topic_bar::BarEntry::All => (
                         "All".to_string(),
-                        topic_icons::tab_icon(topic_icons::store_name("general").as_str()),
+                        topic_icons::tab_icon(
+                            topic_icons::store_name("general").as_str(),
+                            icon_rems,
+                        ),
                     ),
                     topic_bar::BarEntry::Topic(id) => {
                         // The icon sits before the name and is not a word, so the
                         // two-word shortening (#2477) is applied to the name alone.
                         // A stored picture is drawn; a stored emoji stays text (#2478).
                         let stored = self.sessions.topic_icons.get(&id).cloned();
-                        let picture = stored.as_deref().and_then(topic_icons::tab_icon);
+                        let picture = stored
+                            .as_deref()
+                            .and_then(|stored| topic_icons::tab_icon(stored, icon_rems));
                         let label = topic_label(&title(id));
                         let label = match (&picture, stored.as_deref()) {
                             (Some(_), _) => label,
@@ -7370,7 +7376,14 @@ impl Render for Dashboard {
                 .items_center()
                 .gap_3()
                 .min_w_0()
-                .w_full();
+                // Auto cross-axis stretch lets the negative gutters reach
+                // both edges. A definite full width would stop the right
+                // hairline short; the title and menu keep their inset.
+                .mx(rems(-1.5))
+                .px_6()
+                .pb_2()
+                .border_b_1()
+                .border_color(topic_tabs::separator_color());
             header = match name {
                 Some(name) => header.child(session_title(&name)),
                 None => header.child(div().flex_1()),
@@ -9471,6 +9484,7 @@ fn topic_strip(
 ) -> Div {
     // The orientation control shares the topic cell's generous hit target.
     let control = topic_tabs::style(edge.is_vertical());
+    let separator = topic_tabs::separator_color();
     let leading = div()
         .id("topic-edge-button")
         .flex()
@@ -9479,11 +9493,15 @@ fn topic_strip(
         .size(rems(control.control_rems))
         .flex_none()
         .cursor_pointer()
-        .text_color(rgb(palette::current().text_muted))
-        .text_size(rems(1.75))
+        .rounded(px(12.0))
+        .border_1()
+        .border_color(separator)
         .hover(|d| d.bg(rgb(palette::current().panel_hi)))
         .on_click(toggle_edge)
-        .child(SharedString::from("\u{25EB}"));
+        .child(topic_icons::orientation_icon(
+            control.control_icon_rems,
+            palette::current().text_muted,
+        ));
     if edge.is_vertical() {
         // A compact fixed rail gives every cell the same square geometry.
         div()
@@ -9491,9 +9509,13 @@ fn topic_strip(
             .flex_col()
             .flex_none()
             .w(rems(topic_tabs::CELL_REMS + 1.0))
+            .h_full()
             .items_center()
             .gap_2()
             .p_2()
+            .when(edge == topic_tabs::Edge::Left, |d| d.border_r_1())
+            .when(edge == topic_tabs::Edge::Right, |d| d.border_l_1())
+            .border_color(separator)
             .child(leading)
             .child(
                 div()
@@ -9510,6 +9532,11 @@ fn topic_strip(
             .items_center()
             .gap_2()
             .min_w_0()
+            // Match the title hairline end to end without moving the tabs.
+            .mx(rems(-1.5))
+            .px_6()
+            .border_b_1()
+            .border_color(separator)
             .child(leading)
             // The tabs wrap onto a second line rather than being cut off, so a
             // narrow window never hides a topic (#2414).
@@ -9555,16 +9582,12 @@ fn topic_label(name: &str) -> String {
 }
 
 /// One tab of the topic strip (#2400, #2480). The open session is marked the
-/// way Telegram's topic bar marks it: the icon and the name take the accent
-/// colour, and a 2px accent rule sits under the tab on a horizontal bar or on
-/// its leading edge down a rail.
+/// way Telegram's topic bar marks it: the name takes the accent colour, with
+/// an opaque rule on the cell's leading edge down a rail or bottom edge on a
+/// horizontal bar.
 ///
-/// The mark is always 2px, transparent while the tab is closed, so switching
-/// topics never changes a tab's height and the row does not jump.
-///
-/// A chip is a label, so it hugs its content: `.flex_none()` plus the shape's
-/// own padding. The vertical rail shipped without that and one chip grew to
-/// the column's width, which is the wall of colour the owner reported.
+/// Both marks reserve their space while inactive, so switching topics never
+/// changes the strip's geometry. The cells themselves stay transparent.
 fn topic_tab(
     id: Uuid,
     label: String,
@@ -9579,13 +9602,14 @@ fn topic_tab(
     } else {
         palette::current().text_muted
     };
-    let rule = if current {
-        palette::current().accent
-    } else {
-        0x00000000
-    };
+    let rule = topic_tabs::focus_color(palette::current().accent, current);
     let vertical = shape == topic_bar::ChipShape::IconAbove;
     let style = topic_tabs::style(vertical);
+    let content = div()
+        .when(vertical, |d| {
+            d.w_full().text_center().text_xs().line_clamp(2)
+        })
+        .child(SharedString::from(label));
     div()
         .id(SharedString::from(format!("topic-tab-{id}")))
         .flex()
@@ -9600,28 +9624,22 @@ fn topic_tab(
                 .flex_col()
                 .gap_1()
                 .p_1()
-                .border_l_2()
-                .border_color(rgba(rule))
+                .border_l(px(style.focus_bar_px))
+                .border_color(rule)
         })
         .when(!vertical, |d| {
             d.flex_row()
                 .gap_1()
                 .px_2()
                 .py_0p5()
-                .border_b_2()
-                .border_color(rgba(rule))
+                .border_b(px(style.focus_bar_px))
+                .border_color(rule)
         })
         .hover(|d| d.text_color(rgb(palette::current().accent)))
         .on_click(on_click)
         .on_mouse_down(MouseButton::Right, on_right)
         .children(icon)
-        .child(
-            div()
-                .when(vertical, |d| {
-                    d.w_full().text_center().text_xs().line_clamp(2)
-                })
-                .child(SharedString::from(label)),
-        )
+        .child(content)
 }
 
 /// The update dialog (#2406). The first stage asks whether to update by
