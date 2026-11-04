@@ -3,7 +3,10 @@ use super::*;
 use std::os::unix::fs::PermissionsExt;
 
 /// A stand-in for cloudflared: honours `--logfile`, optionally writes a
-/// real-shaped URL line, then `exec sleep` so SIGTERM hits it directly.
+/// real-shaped URL line, then stays alive as the script process (NOT
+/// `exec sleep` — an exec would swap the pid's identity to `sleep`, and
+/// status()/stop() verify the pid still looks like cloudflared before
+/// acting on it, exactly as they would against the real binary).
 fn stub_script(dir: &Path, writes_url: bool) -> PathBuf {
     stub_script_with_url(
         dir,
@@ -25,7 +28,7 @@ fn stub_script_with_url(dir: &Path, url: Option<&str>) -> PathBuf {
             "echo \"2026-10-30T00:00:00Z INF Your quick Tunnel has been created! Visit it at (it may take some time to be reachable):\" >> \"$LOG\"\necho \"2026-10-30T00:00:00Z INF {host}\" >> \"$LOG\"\n"
         ));
     }
-    body.push_str("exec sleep 30\n");
+    body.push_str("sleep 30\n");
     std::fs::write(&path, body).unwrap();
     #[cfg(unix)]
     {
@@ -197,6 +200,39 @@ fn concurrent_second_start_fails_instead_of_double_spawning() {
     // The first start still ends in its clean timeout, with no state.
     first.join().unwrap().expect_err("first start must time out");
     assert!(status(dir.path()).unwrap().is_none());
+}
+
+#[test]
+fn status_and_stop_refuse_a_recycled_pid_and_clean_state() {
+    let dir = tempfile::tempdir().unwrap();
+    // An innocent process that is very much alive but is not cloudflared:
+    // exactly what a recycled pid looks like after cloudflared dies.
+    let innocent = std::process::Command::new("sleep")
+        .arg("30")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let state = TunnelState {
+        pid: innocent.id(),
+        url: "https://stolen.trycloudflare.com".into(),
+        port: 1,
+        binary: "/nonexistent".into(),
+        started_at: 1,
+    };
+    save_state(dir.path(), &state).unwrap();
+
+    // Alive, yet the identity guard must not be fooled.
+    assert!(pid_alive(innocent.id()), "test rig: innocent process alive");
+    assert!(status(dir.path()).unwrap().is_none());
+    assert!(!state_path(dir.path()).exists(), "stale state removed");
+
+    // stop() finds no tunnel and never signals the innocent process.
+    assert!(!stop(dir.path()).unwrap());
+    assert!(pid_alive(innocent.id()), "the innocent process must survive");
+
+    let _ = kill_hard(innocent.id());
+    reap(innocent.id());
 }
 
 #[test]

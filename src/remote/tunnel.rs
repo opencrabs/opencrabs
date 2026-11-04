@@ -262,8 +262,10 @@ pub fn start(spec: &TunnelSpec) -> Result<TunnelState> {
     }
 }
 
-/// Read the recorded tunnel, verifying the pid is still alive. A dead
-/// tunnel's state file is removed as a side effect.
+/// Read the recorded tunnel, verifying the pid still belongs to
+/// cloudflared (not merely that *some* process owns the number — pids are
+/// recycled). A dead or stolen tunnel's state file is removed as a side
+/// effect.
 pub fn status(state_dir: &Path) -> Result<Option<TunnelState>> {
     let path = state_path(state_dir);
     let bytes = match std::fs::read(&path) {
@@ -273,25 +275,27 @@ pub fn status(state_dir: &Path) -> Result<Option<TunnelState>> {
     };
     let state: TunnelState =
         serde_json::from_slice(&bytes).context("parse tunnel.json (corrupt state file)")?;
-    if !pid_alive(state.pid) {
+    if !pid_is_cloudflared(state.pid) {
         let _ = std::fs::remove_file(&path);
         return Ok(None);
     }
     Ok(Some(state))
 }
 
-/// Stop a recorded tunnel: SIGTERM → grace → SIGKILL. Returns whether a
-/// tunnel was running. Stale state files are removed either way.
+/// Stop a recorded tunnel: SIGTERM → grace → SIGKILL, each rung gated on
+/// the pid still being cloudflared (a recycled pid is never signaled).
+/// Returns whether a tunnel was running. Stale state files are removed
+/// either way.
 pub fn stop(state_dir: &Path) -> Result<bool> {
     let Some(state) = status(state_dir)? else {
         return Ok(false);
     };
     terminate(state.pid);
     let deadline = Instant::now() + STOP_GRACE;
-    while Instant::now() < deadline && pid_alive(state.pid) {
+    while Instant::now() < deadline && pid_is_cloudflared(state.pid) {
         std::thread::sleep(Duration::from_millis(200));
     }
-    if pid_alive(state.pid) {
+    if pid_is_cloudflared(state.pid) {
         kill_hard(state.pid);
     }
     reap(state.pid);
@@ -359,6 +363,25 @@ fn pid_alive(pid: u32) -> bool {
     std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
+/// Identity guard: liveness only proves *some* process owns the pid. If
+/// cloudflared died and the OS recycled the number, a blind `stop` would
+/// signal an innocent process. The guard demands the pid's command line
+/// name cloudflared before any signal or liveness claim.
+///
+/// Full `args`, not `comm`: the repo's test stubs run as
+/// `sh <path>/cloudflared-stub …` where comm is "sh" but args carry the
+/// script path; a real cloudflared's args start with its own path.
+#[cfg(unix)]
+fn pid_is_cloudflared(pid: u32) -> bool {
+    let out = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "args="])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output();
+    matches!(out, Ok(o) if o.status.success()
+        && String::from_utf8_lossy(&o.stdout).to_lowercase().contains("cloudflared"))
+}
+
 /// Windows: `tasklist` with a PID filter prints an `INFO:` banner when no
 /// process owns the pid; anything else means one does.
 #[cfg(windows)]
@@ -369,6 +392,19 @@ fn pid_alive(pid: u32) -> bool {
         .stderr(std::process::Stdio::null())
         .output();
     matches!(out, Ok(o) if !String::from_utf8_lossy(&o.stdout).trim_start().starts_with("INFO:"))
+}
+
+/// Identity guard, Windows arm: the CSV image name must be cloudflared
+/// (see the unix twin for why bare liveness is not enough).
+#[cfg(windows)]
+fn pid_is_cloudflared(pid: u32) -> bool {
+    let out = std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output();
+    matches!(out, Ok(o) if o.status.success()
+        && String::from_utf8_lossy(&o.stdout).to_lowercase().contains("cloudflared"))
 }
 
 #[cfg(unix)]
