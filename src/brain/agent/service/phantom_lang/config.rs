@@ -1,5 +1,13 @@
-//! [`LangConfig`] and the six embedded language tables, parsed once on
+//! [`LangConfig`], the embedded language tables, and the language
+//! registry the rest of the crate resolves its packs from, parsed once on
 //! first use. A TOML syntax error fails the build via `include_str!`.
+//!
+//! [`Lang`] is the one definition of which languages ship and in what
+//! detection-priority order. Every per-language table family resolves from
+//! it through an exhaustive match, so a language added to [`Lang::ALL`] does
+//! not compile until both packs exist. `utils::prompt_analyzer` used to carry
+//! its own copy of the list with its own detection function, kept in step by
+//! hand (#2226).
 
 use serde::Deserialize;
 use std::sync::LazyLock;
@@ -143,6 +151,8 @@ pub struct LangConfig {
 /// Embedded TOML content (compile-time validated).
 const EN_TOML: &str = include_str!("en.toml");
 const RU_TOML: &str = include_str!("ru.toml");
+const AR_TOML: &str = include_str!("ar.toml");
+const ZH_TOML: &str = include_str!("zh.toml");
 const ES_TOML: &str = include_str!("es.toml");
 const PT_TOML: &str = include_str!("pt.toml");
 const FR_TOML: &str = include_str!("fr.toml");
@@ -152,6 +162,10 @@ pub(crate) static LANG_EN: LazyLock<LangConfig> =
     LazyLock::new(|| toml::from_str(EN_TOML).expect("BUG: en.toml failed to parse at runtime"));
 pub(crate) static LANG_RU: LazyLock<LangConfig> =
     LazyLock::new(|| toml::from_str(RU_TOML).expect("BUG: ru.toml failed to parse at runtime"));
+pub(crate) static LANG_AR: LazyLock<LangConfig> =
+    LazyLock::new(|| toml::from_str(AR_TOML).expect("BUG: ar.toml failed to parse at runtime"));
+pub(crate) static LANG_ZH: LazyLock<LangConfig> =
+    LazyLock::new(|| toml::from_str(ZH_TOML).expect("BUG: zh.toml failed to parse at runtime"));
 pub(crate) static LANG_ES: LazyLock<LangConfig> =
     LazyLock::new(|| toml::from_str(ES_TOML).expect("BUG: es.toml failed to parse at runtime"));
 pub(crate) static LANG_PT: LazyLock<LangConfig> =
@@ -160,3 +174,119 @@ pub(crate) static LANG_FR: LazyLock<LangConfig> =
     LazyLock::new(|| toml::from_str(FR_TOML).expect("BUG: fr.toml failed to parse at runtime"));
 pub(crate) static LANG_ID: LazyLock<LangConfig> =
     LazyLock::new(|| toml::from_str(ID_TOML).expect("BUG: id.toml failed to parse at runtime"));
+
+/// A language this build ships.
+///
+/// The single definition of the pack list. Adding a language means one
+/// variant here and its TOML files, and the exhaustive matches refuse to
+/// compile until both table families are wired: `phantom_lang`'s own
+/// [`Lang::pack`] and `utils::prompt_analyzer`'s `analyzer_pack`. A language
+/// registered in one family and not the other is what #2226 was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lang {
+    /// English.
+    En,
+    /// Russian.
+    Ru,
+    /// Arabic.
+    Ar,
+    /// Chinese, Simplified and Traditional.
+    Zh,
+    /// Spanish.
+    Es,
+    /// Portuguese.
+    Pt,
+    /// French.
+    Fr,
+    /// Indonesian.
+    Id,
+}
+
+impl Lang {
+    /// Every shipped language, in detection-priority order.
+    pub const ALL: [Lang; 8] = [
+        Lang::En,
+        Lang::Ru,
+        Lang::Ar,
+        Lang::Zh,
+        Lang::Es,
+        Lang::Pt,
+        Lang::Fr,
+        Lang::Id,
+    ];
+
+    /// The ISO 639-1 code, for logs and diagnostics.
+    pub fn code(self) -> &'static str {
+        match self {
+            Lang::En => "en",
+            Lang::Ru => "ru",
+            Lang::Ar => "ar",
+            Lang::Zh => "zh",
+            Lang::Es => "es",
+            Lang::Pt => "pt",
+            Lang::Fr => "fr",
+            Lang::Id => "id",
+        }
+    }
+
+    /// This language's phantom-detection pack.
+    pub fn pack(self) -> &'static LangConfig {
+        match self {
+            Lang::En => &LANG_EN,
+            Lang::Ru => &LANG_RU,
+            Lang::Ar => &LANG_AR,
+            Lang::Zh => &LANG_ZH,
+            Lang::Es => &LANG_ES,
+            Lang::Pt => &LANG_PT,
+            Lang::Fr => &LANG_FR,
+            Lang::Id => &LANG_ID,
+        }
+    }
+}
+
+/// Every loaded language config, in detection-priority order.
+///
+/// The phantom-intent detectors scan intent phrases across all languages
+/// at once: `detect_lang` only routes Cyrillic, Arabic, CJK and
+/// accented-Latin text reliably, so accent-free non-English narration (e.g.
+/// `"Voy a usar write_file…"`, no ñ/¿) otherwise falls through to English
+/// and slips past. Intent phrases are multi-word and carry
+/// language-distinctive tokens, so cross-language scanning is
+/// collision-free; the short single-word `action_verbs` are not, which is why
+/// they stay gated to the detected language. 2026-06-12.
+pub fn all_langs() -> [&'static LangConfig; 8] {
+    Lang::ALL.map(Lang::pack)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_lang_resolves_to_its_own_pack() {
+        let codes: Vec<&str> = Lang::ALL.iter().map(|lang| lang.code()).collect();
+        let unique: std::collections::HashSet<&&str> = codes.iter().collect();
+        assert_eq!(unique.len(), codes.len(), "two languages share a code");
+
+        let packs: Vec<*const LangConfig> = Lang::ALL
+            .iter()
+            .map(|lang| lang.pack() as *const LangConfig)
+            .collect();
+        let unique_packs: std::collections::HashSet<*const LangConfig> =
+            packs.iter().copied().collect();
+        assert_eq!(
+            unique_packs.len(),
+            packs.len(),
+            "two languages resolve to the same pack"
+        );
+    }
+
+    #[test]
+    fn all_langs_matches_the_registry_order() {
+        let listed = all_langs();
+        assert_eq!(listed.len(), Lang::ALL.len());
+        for (lang, pack) in Lang::ALL.iter().zip(listed) {
+            assert!(std::ptr::eq(pack, lang.pack()));
+        }
+    }
+}

@@ -1,0 +1,61 @@
+name: Feature request
+description: Something OpenCrabs should do and does not.
+title: "feat: "
+labels: ["feature"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Search **open and closed** issues and pull requests before filing. If a
+        closed issue already covered it, reference that issue in your report.
+
+        Feature requests are issues only. Do not open a pull request with stub or
+        placeholder code: a PR with `todo!()`, `unimplemented!()`, or a hardcoded
+        empty return is closed on sight (CONTRIBUTING.md).
+
+        Title shape is `type(scope): what is wanted`, for example
+        `feat(provider): stream tool-call arguments`. The `feat: ` prefix is already
+        in the title field.
+
+  - type: checkboxes
+    id: searched
+    attributes:
+      label: Duplicate check
+      options:
+        - label: I searched open and closed issues and pull requests for this request.
+          required: true
+        - label: I am filing from my own GitHub account, not an agent or bot account.
+          required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve
+      description: Describe the situation where OpenCrabs falls short today. A concrete workflow beats an abstract capability.
+      placeholder: |
+        I run the agent against a repo with CRLF files. Every edit converts the whole
+        file to LF, so the diff shows lines I never touched.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: How it should work from the user's side
+      description: What the user does, what they see, and what changes. Implementation detail is welcome but not required.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you do instead today
+      description: The workaround, if there is one, and why it is not good enough.
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Who else benefits
+      description: Why this matters to OpenCrabs users broadly, not only to your setup. Requests that only serve one workflow are still read, they are just weighed differently.
+    validations:
+      required: true

@@ -30,6 +30,11 @@ pub(crate) struct ToolMsg {
     /// None = running, Some(true) = success, Some(false) = failed
     pub(crate) completed: Option<bool>,
     pub(crate) dirty: bool,
+    /// Detached-task identity (#2147). `Some` when this row was drawn from a
+    /// `DetachedTaskStarted` event, so the matching finish finds it by id and
+    /// edits this row instead of sending a second message. `None` for ordinary
+    /// tool calls, which are keyed by name and position in the turn.
+    pub(crate) task_id: Option<String>,
 }
 
 /// Per-message streaming state shared between the progress callback and the edit loop.
@@ -185,11 +190,13 @@ pub(crate) struct StreamingState {
     pub(crate) subagent_counts: SubagentCounts,
     /// Intermediate texts already sent — used to dedup final response
     pub(crate) sent_intermediates: Vec<String>,
-    /// Message IDs of every intermediate chunk delivered to Telegram, so a
-    /// cancelled in-flight call can clean up after itself. Without this, a
-    /// cancelled old call leaves its intermediate visible and the new call
-    /// re-sends the same text — the exact-match duplicate the user reported.
-    pub(crate) intermediate_msg_ids: Vec<MessageId>,
+    /// Every intermediate bubble delivered to Telegram this turn, as
+    /// (message id, text sent) pairs. The pairing is what makes cleanup
+    /// possible: a cancelled in-flight call deletes these bubbles, and the
+    /// final leg deletes the ones whose text the answer already delivers
+    /// (#2156). The ids alone could not answer "which bubble said this", so
+    /// a prefix duplicate had no address to remove.
+    pub(crate) intermediate_bubbles: Vec<(MessageId, String)>,
     /// Local files the intermediate plane already put in the chat, each
     /// with the id of the bubble that carries it (#1918). The final leg
     /// consumes these paths before shipping its own scan, so a reply that
@@ -200,7 +207,7 @@ pub(crate) struct StreamingState {
     /// Rich intermediates whose media array carried documents, as
     /// (bubble id, text sent) pairs (#1939). The array is the only copy of
     /// those documents in the chat, so these ids stay out of
-    /// `intermediate_msg_ids` (deleting them would destroy the file) and a
+    /// `intermediate_bubbles` (deleting them would destroy the file) and a
     /// body they already carry must not be re-sent by the rich fallback.
     pub(crate) media_intermediates: Vec<(teloxide::types::MessageId, String)>,
     /// Message IDs of every voice note delivered to Telegram via `send_voice`
@@ -228,6 +235,58 @@ pub(crate) struct StreamingState {
     /// so they skip the per-entry cap and show full reasoning; the block-level
     /// 30K freeze still guards a pathological turn (#532 / upstream #531).
     pub(crate) is_cli: bool,
+}
+
+impl StreamingState {
+    /// A turn with nothing on it yet.
+    ///
+    /// Every surface that shows a turn starts from this: the regular Telegram
+    /// path and a guest reply differ in what they do with the state, not in
+    /// what an empty turn holds. Anything a caller has to decide per chat is a
+    /// parameter instead of a field each caller has to remember to set.
+    /// `is_dm` picks the redaction scope (a chat we do not control never shows
+    /// a credential), and `is_cli` the narration cap (#532: a CLI provider
+    /// runs the tools itself, so its whole turn folds into the block, while an
+    /// API provider shows full reasoning).
+    pub(crate) fn new_turn(is_dm: bool, is_cli: bool) -> Self {
+        Self {
+            is_dm,
+            compacting: false,
+            pending_suggestions: None,
+            pending_trailer: None,
+            delivered_files: Vec::new(),
+            media_intermediates: Vec::new(),
+            msg_id: None,
+            thinking: String::new(),
+            tool_msgs: Vec::new(),
+            display_queue: Vec::new(),
+            open_group_msg_id: None,
+            rich_transport_failures: 0,
+            flow_entries: Vec::new(),
+            flow_status: None,
+            flow_rich: false,
+            response: String::new(),
+            final_bubble: None,
+            dirty: false,
+            recreate: false,
+            header_preview: None,
+            sections: Default::default(),
+            retained_goal: None,
+            applied_plan_kb: Default::default(),
+            tool_round_count: 0,
+            tools_started_at: Some(std::time::Instant::now()),
+            turn_started_at: std::time::Instant::now(),
+            flow_outcome: None,
+            bg_indicator: None,
+            bg_count: None,
+            subagent_counts: Default::default(),
+            sent_intermediates: Vec::new(),
+            intermediate_bubbles: Vec::new(),
+            voice_msg_ids: Vec::new(),
+            processing: true,
+            is_cli,
+        }
+    }
 }
 
 /// A resolved line in the processing-log flow, ready to render. Tool lines
@@ -507,6 +566,36 @@ fn flow_body_entries(lines: &[FlowLine], narration_cap: usize) -> (Vec<String>, 
     (out, tool_count)
 }
 
+/// [`flow_body_entries`] in the rich API's markdown dialect: same entries, same
+/// narration cap, `**bold**` / backtick markup instead of `<b>` / `<code>`.
+///
+/// The rich API parses markdown itself, so the same list that renders inside an
+/// HTML `<details>` body renders here, on the plane whose server-side parse
+/// keeps pipe tables native (#679).
+fn flow_body_entries_markdown(lines: &[FlowLine], narration_cap: usize) -> (Vec<String>, usize) {
+    let mut out: Vec<String> = Vec::new();
+    let mut tool_count = 0usize;
+    for line in lines {
+        match line {
+            FlowLine::Tool { label, context, .. } => {
+                tool_count += 1;
+                if context.is_empty() {
+                    out.push(format!("**{label}**"));
+                } else {
+                    out.push(format!("**{label}** `{context}`"));
+                }
+            }
+            FlowLine::Text(text) => {
+                let text = text.trim();
+                if !text.is_empty() {
+                    out.push(cap_narration(text, narration_cap));
+                }
+            }
+        }
+    }
+    (out, tool_count)
+}
+
 /// Classic HTML flow message (ADR 0005): an uncollapsed shell, never one outer
 /// expandable. The always-visible plan chrome (title / progress / goal) leads;
 /// the processing log, when it has entries, sits in its own
@@ -697,13 +786,29 @@ pub(crate) fn render_flow_details_chrome_pref(
 /// so long tool chains fit in a single message without splitting (#393).
 /// Output is markdown — send via `send_rich_markdown` / `edit_rich_markdown`.
 /// Falls back to `render_flow_html` on rich API failure.
-// Channel-unused since the #421 revert (the rich flow path shipped with no
-// collapse); kept because #420 reuses this renderer once RichBlockDetails
-// serialization lands, and its tests pin the markdown contract meanwhile.
+///
+/// The bare header-plus-entries render: no chrome, no footer, no collapse.
+/// Every shipping surface now goes through
+/// [`render_flow_rich_details_chrome_pref`] (via [`render_flow_rich_state`]),
+/// so this stays as the primitive its tests pin.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn render_flow_rich(
     lines: &[FlowLine],
     live_status: Option<&str>,
+    compacting: bool,
+) -> String {
+    render_flow_rich_with(lines, &FlowHeader::Live(live_status), compacting)
+}
+
+/// [`render_flow_rich`] with an explicit header.
+///
+/// The guest path needs the settled header on the markdown plane: a guest
+/// reply is ONE message carrying the block and the answer, and the answer only
+/// renders as a real grid there (#679: the HTML plane flattens tables).
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn render_flow_rich_with(
+    lines: &[FlowLine],
+    header: &FlowHeader,
     compacting: bool,
 ) -> String {
     let mut out: Vec<String> = Vec::new();
@@ -729,38 +834,145 @@ pub(crate) fn render_flow_rich(
     if out.is_empty() {
         // Header-only render: the markdown path allows empty entries too so
         // the three renderers agree on the header-only contract.
-        return flow_header_text(
-            tool_count,
-            &FlowHeader::Live(live_status),
-            None,
-            HeaderMarkup::Markdown,
-        );
+        return flow_header_text(tool_count, header, None, HeaderMarkup::Markdown);
     }
-    if out.len() == 1 && tool_count == 1 {
+    if let FlowHeader::Live(live_status) = header
+        && out.len() == 1
+        && tool_count == 1
+    {
         // Lone tool line stays plain (#296); the live status rides on it so
         // the single surface still shows progress from the first call (#360).
+        // A settled header always renders: its tool count and duration are the
+        // point, so collapsing to the bare line would hide them.
         return match live_status {
             Some(st) => format!("{} • {}", out.remove(0), st),
             None => out.remove(0),
         };
     }
     // Same latest-activity preview as the HTML renderer (#405), leading the
-    // header status-first (#509); this markdown path is always live. Raw text,
-    // no escaping — the markdown dialect keeps narration verbatim. Dedupe
-    // (#29): while the compacting flag is set the newest line is the ⏳ body
-    // entry — suppress it here too so the three renderers never drift.
-    let status_msg = if compacting {
+    // header status-first (#509). Raw text, no escaping: the markdown dialect
+    // keeps narration verbatim. Dedupe (#29): while the compacting flag is set
+    // the newest line is the ⏳ body entry, so suppress it here too and the
+    // three renderers never drift. A settled render drops it, matching the
+    // HTML path.
+    let status_msg = match header {
+        FlowHeader::Live(_) if !compacting => latest_activity_preview(lines),
+        _ => None,
+    };
+    let header_text = flow_header_text(
+        tool_count,
+        header,
+        status_msg.as_deref(),
+        HeaderMarkup::Markdown,
+    );
+    format!("{header_text}\n\n{}", out.join("\n\n"))
+}
+
+/// [`render_flow_details_chrome_pref`] on the MARKDOWN plane.
+///
+/// Same sections, same footer segments, same collapse: only the dialect
+/// changes. The rich API's markdown parser reads `<details>` / `<summary>`
+/// natively (`rich::parse`), so a guest reply keeps the collapsible processing
+/// log AND the markdown answer whose pipe tables render as a real grid (#679).
+/// The HTML renderer cannot be reused for it: its `<p>` / `<hr>` wrappers are
+/// not part of the markdown dialect and would land as literal text.
+#[allow(clippy::too_many_arguments)] // same shape as the HTML chrome-pref
+pub(crate) fn render_flow_rich_details_chrome_pref(
+    lines: &[FlowLine],
+    header: &FlowHeader,
+    fallback_status: Option<&str>,
+    sections: &super::flow_chrome::FlowSections,
+    narration_cap: usize,
+    elapsed_secs: u64,
+    bg: Option<&str>,
+    compacting: bool,
+) -> String {
+    let (out, tool_count) = flow_body_entries_markdown(lines, narration_cap);
+    let has_log = !out.is_empty();
+    // Dedupe (#29): the compacting flag kills the activity segment here too, so
+    // no surface can drift from the others (ADR 0005 Decision 12).
+    let activity = if compacting {
         None
     } else {
         latest_activity_preview(lines)
     };
-    let header = flow_header_text(
-        tool_count,
-        &FlowHeader::Live(live_status),
-        status_msg.as_deref(),
+    let footer = super::flow_chrome::merged_footer(
+        &footer_parts(
+            header,
+            fallback_status,
+            sections,
+            activity.as_deref(),
+            tool_count,
+            has_log,
+            elapsed_secs,
+            bg,
+        ),
         HeaderMarkup::Markdown,
     );
-    format!("{header}\n\n{}", out.join("\n\n"))
+
+    let mut msg = String::new();
+    let chrome = sections.chrome_markdown(matches!(header, FlowHeader::Settled { .. }));
+    if !chrome.is_empty() {
+        msg.push_str(&chrome);
+        msg.push_str("\n\n");
+    }
+    if has_log {
+        // The merged footer is the summary; the body is the full entry list.
+        // Blank lines between entries keep each one its own markdown block.
+        msg.push_str(&format!(
+            "<details><summary><sub>{footer}</sub></summary>\n\n{}\n\n</details>",
+            out.join("\n\n")
+        ));
+    } else {
+        // No log yet: a plain small-text footer line.
+        msg.push_str(&format!("<sub>{footer}</sub>"));
+    }
+    msg
+}
+
+/// Resolve the flow into markdown for the rich API's markdown plane, with the
+/// same live/settled header split as [`render_flow`] and the same chrome and
+/// footer as [`render_flow_details_state`].
+///
+/// This is the guest surface's block: one message carries the block and the
+/// answer, so the block has to be collapsible, carry the ctx / tok-s footer and
+/// the plan chrome exactly like a regular chat's block does, while the answer
+/// stays markdown so tables render. [`render_flow_rich_with`] renders the bare
+/// header plus entries, which is what the older markdown path shipped; that is
+/// why a guest block looked like a stripped-down copy of a real one.
+pub(crate) fn render_flow_rich_state(s: &StreamingState) -> String {
+    let narration_cap = narration_cap_for(s.is_cli);
+    let elapsed = s.turn_started_at.elapsed().as_secs();
+    match s.flow_outcome {
+        Some(outcome) => {
+            let (icon, verb) = settled_icon_verb(s.bg_count, s.subagent_counts, outcome);
+            let duration = humanize_duration(elapsed);
+            render_flow_rich_details_chrome_pref(
+                &flow_lines(s),
+                &FlowHeader::Settled {
+                    icon,
+                    verb: verb.as_str(),
+                    duration: &duration,
+                },
+                None,
+                &s.sections,
+                narration_cap,
+                elapsed,
+                s.bg_indicator.as_deref(),
+                false, // settled renders drop the activity segment regardless
+            )
+        }
+        None => render_flow_rich_details_chrome_pref(
+            &flow_lines(s),
+            &FlowHeader::Live(s.flow_status.as_deref()),
+            s.header_preview.as_deref(),
+            &s.sections,
+            narration_cap,
+            elapsed,
+            s.bg_indicator.as_deref(),
+            s.compacting,
+        ),
+    }
 }
 
 /// Wall-clock duration for the flow-block header (#480): precise seconds under
@@ -994,6 +1206,20 @@ pub(crate) fn tool_status_icon(completed: Option<bool>) -> &'static str {
     }
 }
 
+/// The name a row shows. A detached task says so, and says whether it is
+/// still running, because a background task outlives the turn that started
+/// it: the row is the only place its liveness is visible (#2147).
+///
+/// The wording lives in [`crate::channels::background_work::detached_row_label`]
+/// so every surface renders the same string (#2148-#2150).
+pub(crate) fn row_display_name(
+    name: &str,
+    task_id: Option<&str>,
+    completed: Option<bool>,
+) -> String {
+    crate::channels::background_work::detached_row_label(name, task_id, completed)
+}
+
 /// Resolve the open processing-log flow (tool calls + intermediate text, in
 /// order) into renderable lines.
 pub(crate) fn flow_lines(s: &StreamingState) -> Vec<FlowLine> {
@@ -1001,7 +1227,11 @@ pub(crate) fn flow_lines(s: &StreamingState) -> Vec<FlowLine> {
         .iter()
         .filter_map(|entry| match entry {
             FlowEntry::Tool(idx) => s.tool_msgs.get(*idx).map(|t| FlowLine::Tool {
-                label: format!("{} {}", tool_status_icon(t.completed), t.name),
+                label: format!(
+                    "{} {}",
+                    tool_status_icon(t.completed),
+                    row_display_name(&t.name, t.task_id.as_deref(), t.completed)
+                ),
                 context: t.context.clone(),
                 raw_context: t.raw_context.clone(),
             }),
@@ -1711,6 +1941,42 @@ pub(crate) fn push_or_supersede(entries: &mut Vec<FlowEntry>, text: &str, system
     }
 }
 
+/// Move a turn's queued display items into its flow log.
+///
+/// The regular path folds the same items into the same log in
+/// [`crate::channels::telegram::delivery::drain_remaining_display`], which
+/// also sends a chat message per item on the way. That send is exactly what a
+/// surface with no per-tool messages cannot do: a guest reply is one edited
+/// message and nothing else. The ordering rules are kept identical here (tools
+/// in place, narration supersedable, chrome never reclaimed as an answer), so
+/// the guest block reads like the block a regular chat shows.
+///
+/// `sanitize` runs on narration and chrome before it reaches the log, taking
+/// `(text, is_system_chrome)`. The regular path applies the artifact and
+/// marker passes to model text and only the secret scrub to our own chrome, so
+/// the same split is a parameter here rather than a second copy of the
+/// pipeline.
+pub(crate) fn drain_display_queue<F>(s: &mut StreamingState, sanitize: F)
+where
+    F: Fn(&str, bool) -> String,
+{
+    for item in std::mem::take(&mut s.display_queue) {
+        match item {
+            DisplayItem::NewTool(idx) => s.flow_entries.push(FlowEntry::Tool(idx)),
+            DisplayItem::Intermediate(text) => {
+                let text = sanitize(&text, false);
+                if !text.trim().is_empty() {
+                    push_or_supersede(&mut s.flow_entries, &text, false);
+                }
+            }
+            DisplayItem::System(text) => {
+                let text = sanitize(&text, true);
+                push_or_supersede(&mut s.flow_entries, &text, true);
+            }
+        }
+    }
+}
+
 /// Re-stick the open processing-log block to the bottom of the chat when newer
 /// chatter has buried it (#451). Called only on a new round (tools/intermediate
 /// appended this tick), never on plain status ticks, so an idle chat sees no
@@ -1920,6 +2186,90 @@ pub(crate) async fn take_folded_final(
     (host, trailer)
 }
 
+/// Normalize a body for duplicate comparison (#2156): collapse whitespace so a
+/// streamed run and the delivered answer compare on their words, not on where
+/// the line breaks fell.
+pub(crate) fn normalized_body(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Does `final_text` already deliver EVERY word of `candidate`? True when the
+/// candidate's normalized form is a prefix of the final's, which covers exact
+/// equality and the shape the reported turn hit: a 1962-char narration bubble
+/// sitting above a 3761-char answer that opens with the same words (#2156).
+///
+/// This is deliberately STRICTER than [`folded_duplicates_final`], which treats
+/// prefix overlap in EITHER direction as a duplicate. That symmetric form is
+/// right when the decision is "suppress the final, the text already went out",
+/// but it is unsafe for the two callers here, whose consequence is DELETION:
+/// when the candidate is LONGER than the final and merely starts with it, the
+/// candidate carries words the final never delivers, so removing it would drop
+/// content. Only the one direction that cannot lose anything is allowed.
+///
+/// Also deliberately not containment: a candidate that appears mid-answer is a
+/// separate report the final quotes, not a duplicate of it.
+pub(crate) fn answer_already_delivers(final_text: &str, candidate: &str) -> bool {
+    let cand = normalized_body(candidate);
+    if cand.is_empty() {
+        return false;
+    }
+    let fin = normalized_body(final_text);
+    if fin.is_empty() {
+        return false;
+    }
+    fin.starts_with(&cand)
+}
+
+/// Decide, and apply, the trailing-run reclaim for a NON-empty final (#2156).
+///
+/// Pops the trailing folded run and keeps the pop only when the final answer
+/// already delivers it; otherwise the entries are restored untouched, so
+/// narration the answer never repeats stays in the block. Pure over the entries
+/// so the decision is testable without a bot.
+pub(crate) fn pop_redundant_folded_texts(
+    entries: &mut Vec<FlowEntry>,
+    options_pending: bool,
+    final_text: &str,
+) -> (Option<String>, Option<String>) {
+    let snapshot = entries.clone();
+    let (host, trailer) = pop_trailing_folded_texts(entries, options_pending);
+    let redundant = host
+        .as_deref()
+        .is_some_and(|h| answer_already_delivers(final_text, h));
+    if redundant {
+        (host, trailer)
+    } else {
+        *entries = snapshot;
+        (None, None)
+    }
+}
+
+/// Reclaim the trailing folded run only when the final answer already delivers
+/// it (#2156). A NON-empty final ships as its own bubble, and the old code
+/// reclaimed nothing on that path, so the block kept its own copy of the
+/// answer: the reported turn ended with the resticked block (3651 chars) above
+/// a final bubble (3761) repeating it, and the block later grew to 5503.
+///
+/// The decision is made BEFORE the block is re-rendered: when the trailing run
+/// is narration the final never repeats, the entries are restored untouched and
+/// no edit is issued.
+pub(crate) async fn take_folded_final_if_redundant(
+    bot: &Bot,
+    chat: ChatId,
+    streaming: &Arc<std::sync::Mutex<StreamingState>>,
+    options_pending: bool,
+    final_text: &str,
+) -> (Option<String>, Option<String>) {
+    let kept = {
+        let mut s = streaming.lock().unwrap_or_else(|e| e.into_inner());
+        pop_redundant_folded_texts(&mut s.flow_entries, options_pending, final_text)
+    };
+    if kept.0.is_some() || kept.1.is_some() {
+        refresh_flow(bot, chat, streaming, super::governor::EditClass::Final).await;
+    }
+    kept
+}
+
 /// Pop the trailing folded `Text` runs, split into host and trailer runs
 /// (#478, #31). Mid-turn narration is always followed by more tool calls, so
 /// the trailing text run after the last tool IS the final answer — and
@@ -2054,8 +2404,8 @@ pub(crate) fn last_folded_text(entries: &[FlowEntry]) -> Option<&String> {
 /// short distinct narration line that merely shares an opening is not mistaken
 /// for the answer.
 pub(crate) fn folded_duplicates_final(folded: &str, final_text: &str) -> bool {
-    let norm_folded: String = folded.split_whitespace().collect::<Vec<_>>().join(" ");
-    let norm_final: String = final_text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let norm_folded = normalized_body(folded);
+    let norm_final = normalized_body(final_text);
     if norm_folded.is_empty() || norm_final.is_empty() {
         return false;
     }

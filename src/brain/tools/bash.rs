@@ -399,6 +399,25 @@ impl Tool for BashTool {
     async fn execute(&self, input: Value, context: &ToolExecutionContext) -> Result<ToolResult> {
         let input: BashInput = serde_json::from_value(input)?;
 
+        // #2123: no counter-waiting while this session has a detached task in
+        // flight. Such a task resumes the session by itself on completion, so
+        // a `sleep` only burns time that belongs to other work. Checked here
+        // and not in `validate_input`, because only the execution context can
+        // see the background manager. With nothing detached the command runs
+        // as ordinary shell, which is what `sleep` is normally for.
+        if let Some(mgr) = context.background_manager.as_ref()
+            && mgr.running_for(context.session_id) > 0
+        {
+            let labels: Vec<String> = mgr
+                .running_tasks(context.session_id)
+                .into_iter()
+                .map(|task| task.label)
+                .collect();
+            if let Some(msg) = sleep_refusal(&input.command, &labels) {
+                return Ok(ToolResult::error(msg));
+            }
+        }
+
         // Determine working directory
         let working_dir = if let Some(ref dir) = input.working_dir {
             // Expand a leading `~` before the exists-check: PathBuf::from("~")
@@ -465,7 +484,11 @@ impl Tool for BashTool {
         // Anything else falls through and runs inline exactly as before.
         // #1195: pure workers (allow_nested=false) lose detachment too -
         // their long commands run inline so nothing outlives their verdict.
-        let is_sudo = input.command.trim_start().starts_with("sudo ");
+        // Positional detection, not a prefix test: `cd /tmp && sudo foo` and
+        // `sudo<TAB>foo` are sudo invocations too, and they used to fall
+        // through to the inline path with no password flow at all (#2157).
+        let sudo_invocations = find_sudo_invocations(&input.command);
+        let is_sudo = !sudo_invocations.is_empty();
         let nesting_ok = context
             .subagent_manager
             .as_ref()
@@ -513,12 +536,14 @@ impl Tool for BashTool {
                     context.working_directory.clone(),
                     label.clone(),
                     input.command.clone(),
+                    context.progress_callback.clone(),
                 );
                 return Ok(ToolResult::success(format!(
                     "Started in the background: {label}\n\nThis is a long-running task, so it \
-                     is running detached. I'll continue this session automatically when it \
-                     finishes — no need to poll or wait. Do other independent work meanwhile \
-                     if there is any."
+                     is running detached. You will be told when it finishes: the task row \
+                     settles in place on a surface that draws rows, and the full output is in \
+                     the task status file that tasks_list reads. No need to poll or wait. Do \
+                     other independent work meanwhile if there is any."
                 )));
             }
             None => {
@@ -541,12 +566,14 @@ impl Tool for BashTool {
                                 context.working_directory.clone(),
                                 label.clone(),
                                 input.command.clone(),
+                                context.progress_callback.clone(),
                             );
                             return Ok(ToolResult::success(format!(
                                 "Started in the background: {label}\n\nThis is a long-running task, so it \
-                                 is running detached. I'll continue this session automatically when it \
-                                 finishes — no need to poll or wait. Do other independent work meanwhile \
-                                 if there is any."
+                                 is running detached. You will be told when it finishes: the task row \
+                                 settles in place on a surface that draws rows, and the full output is in \
+                                 the task status file that tasks_list reads. No need to poll or wait. Do \
+                                 other independent work meanwhile if there is any."
                             )));
                         }
                         // Worth a line: the command looks long to a reader, and the
@@ -562,9 +589,17 @@ impl Tool for BashTool {
             }
         }
 
-        // Detect sudo commands and request password via callback
-        let sudo_password = if is_sudo {
-            if let Some(ref callback) = context.sudo_callback {
+        // Request the sudo password only when sudo will really prompt (#2157).
+        // Three things make the dialog pointless, and each one used to open it
+        // anyway: the invocation already carries `-n` (sudo fails instead of
+        // asking), a passwordless rule covers the user, or the credential is
+        // still cached. A dialog over a prompt that never appears leaves the
+        // turn waiting until the surface times out, which is the dead turn in
+        // the report. All three checks are cheap; the wait is not.
+        let sudo_password = if sudo_invocations.iter().any(|i| !i.never_prompts) {
+            if sudo_needs_no_password(context.session_id).await {
+                None
+            } else if let Some(ref callback) = context.sudo_callback {
                 match callback(input.command.clone()).await {
                     Ok(Some(password)) => Some(password),
                     Ok(None) => return Ok(ToolResult::error("Sudo cancelled by user".to_string())),
@@ -583,13 +618,11 @@ impl Tool for BashTool {
         let mut rtk_was_rewritten = false;
 
         let output = if let Some(password) = sudo_password {
-            // Rewrite command to read password from stdin via -S flag
-            // Use -p "" to suppress sudo's own prompt (we handle it in the TUI)
-            let sudo_cmd = if input.command.trim_start().starts_with("sudo -S ") {
-                input.command.clone()
-            } else {
-                input.command.replacen("sudo ", "sudo -S -p \"\" ", 1)
-            };
+            // Ask sudo to read the password from stdin and keep its own prompt
+            // off the screen. The flags go right after the `sudo` word that was
+            // detected, so a heredoc body or a quoted string that merely
+            // contains `sudo ` is left alone (#2157).
+            let sudo_cmd = inject_sudo_password_flags(&input.command, &sudo_invocations);
 
             // Tree-kill anchor: capture the child pid so the timeout arm can
             // taskkill /T the whole tree, not just the shell process (H-02).
@@ -927,6 +960,19 @@ impl Tool for BashTool {
 
         if search_no_match && result_text == "(no output)" {
             result_text = "(no matches found)".to_string();
+        }
+
+        // A surface with no dialog (a channel, the daemon) cannot answer sudo's
+        // prompt, so the command dies on "a password is required" and the turn
+        // ends with nowhere to go. Name the one-time fix in the error instead of
+        // leaving the user to guess (#2157).
+        if is_sudo
+            && !success
+            && context.sudo_callback.is_none()
+            && looks_like_sudo_password_failure(&stderr)
+        {
+            result_text.push_str("\n\n");
+            result_text.push_str(sudo_access_hint_cached());
         }
 
         // Record the outcome so a follow-up call with the exact same
@@ -1407,6 +1453,22 @@ pub(crate) fn record_bash_block(session_id: Uuid, cmd: &str) {
     }
 }
 
+/// Forget the recorded bash outcomes for a session (#2211).
+///
+/// The guard's premise is "same command, unchanged world". Two things break
+/// that premise: a new user turn, and a successful non-bash tool call. When
+/// `write_file` creates the file a previous `cat` could not find, the recorded
+/// error no longer describes what the command would do, and the user's next
+/// explicit request for it has to run. The loop the guard exists to stop is
+/// back-to-back retries inside one turn, and that stays blocked because bash
+/// calls never reach this function.
+pub(crate) fn note_environment_changed(session_id: Uuid) {
+    let Ok(mut state) = recent_bash_state().write() else {
+        return;
+    };
+    state.remove(&session_id);
+}
+
 #[cfg(test)]
 pub(crate) fn recorded_at_of(session_id: Uuid, cmd: &str) -> Option<Instant> {
     let state = recent_bash_state().read().ok()?;
@@ -1505,6 +1567,437 @@ pub(crate) fn split_command_segments(command: &str) -> Vec<String> {
 /// `'git'` commit is still matched.
 fn strip_quotes(s: &str) -> String {
     s.chars().filter(|&c| c != '\'' && c != '"').collect()
+}
+
+/// A `sudo` invocation found where the shell would actually run it (#2157).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SudoInvocation {
+    /// Byte offset just past the `sudo` word, which is where `-S -p ""` belongs.
+    pub insert_at: usize,
+    /// The invocation's own flags already say "never prompt" (`-n` in a short
+    /// cluster, or `--non-interactive`), so no dialog can help it.
+    pub never_prompts: bool,
+}
+
+/// Wrappers a shell allows in front of the real command. A `sudo` behind any of
+/// these still runs as a command, so the dialog has to see it. `timeout` is
+/// handled separately because it also takes a duration operand.
+const SUDO_PREFIX_WRAPPERS: [&str; 5] = ["command", "exec", "env", "nohup", "time"];
+
+/// The flags `sudo` was invoked with, read from the tokens that follow it.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct SudoFlags {
+    /// Every character of every short cluster, in order: `-Hn` yields `Hn`.
+    clusters: String,
+    /// The long `--non-interactive` spelling was passed.
+    non_interactive: bool,
+}
+
+impl SudoFlags {
+    fn never_prompts(&self) -> bool {
+        self.non_interactive || self.clusters.contains('n')
+    }
+}
+
+/// Read the flags that follow the `sudo` word at byte offset `after`.
+///
+/// Stops at the first operand, which is where sudo's own flags end and the
+/// wrapped command begins. A segment delimiter (`;`, `|`, `&`) ends them too:
+/// `sudo -n; echo hi` gives sudo exactly one flag.
+fn sudo_flags(command: &str, after: usize) -> SudoFlags {
+    let mut flags = SudoFlags::default();
+
+    for raw in command[after..].split_whitespace() {
+        let tok = raw.trim_end_matches([';', '|', '&', ')', '}']);
+        let delimited = tok.len() != raw.len();
+        if tok == "--" {
+            break;
+        }
+        if !tok.starts_with('-') || tok == "-" {
+            break;
+        }
+        if let Some(long) = tok.strip_prefix("--") {
+            if long == "non-interactive" {
+                flags.non_interactive = true;
+            }
+        } else {
+            flags.clusters.push_str(&tok[1..]);
+        }
+        if delimited {
+            break;
+        }
+    }
+    flags
+}
+
+/// True when `word` is a `VAR=value` assignment rather than the command word.
+fn is_env_assignment(word: &str) -> bool {
+    let Some((name, _)) = word.split_once('=') else {
+        return false;
+    };
+    !name.is_empty()
+        && name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Every `sudo` the shell would run in `command`, left to right (#2157).
+///
+/// Positional, not a substring test. A `sudo` at the start of a segment counts,
+/// including after `&&`, `;`, `|`, a newline, or a wrapper (`nohup sudo ...`,
+/// `timeout 30 sudo ...`, `FOO=1 sudo ...`). Three shapes that used to be
+/// misread do not count: `sudoku --help` (the word is longer), `echo "sudo rm"`
+/// (quoted), and a heredoc body that merely contains the word.
+///
+/// The old test was `trim_start().starts_with("sudo ")`, which missed a tab
+/// after the word and every chained invocation, so `cd /tmp && sudo foo` ran
+/// with no password path at all and hung on a prompt it could not answer.
+pub(crate) fn find_sudo_invocations(command: &str) -> Vec<SudoInvocation> {
+    let bodies = crate::utils::long_command::heredoc_body_ranges(command);
+    let in_body = |pos: usize| bodies.iter().any(|range| range.contains(&pos));
+
+    let mut found = Vec::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    let mut at_command_start = true;
+    // `timeout 30 sudo x`: the duration is an operand, not the command.
+    let mut skip_operand = false;
+
+    let mut chars = command.char_indices().peekable();
+    while let Some((idx, ch)) = chars.next() {
+        if in_body(idx) {
+            continue;
+        }
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if in_single {
+            if ch == '\'' {
+                in_single = false;
+            }
+            continue;
+        }
+        if in_double {
+            if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_double = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '\\' => escaped = true,
+            '\'' => in_single = true,
+            '"' => in_double = true,
+            ';' | '|' | '&' | '\n' | '(' | '{' | '`' => at_command_start = true,
+            c if c.is_whitespace() => {}
+            _ => {
+                if !at_command_start {
+                    continue;
+                }
+                // Read the whole word, so `sudoku` never reads as `sudo`.
+                let start = idx;
+                let mut end = idx + ch.len_utf8();
+                while let Some(&(next_idx, next_ch)) = chars.peek() {
+                    if next_ch.is_whitespace()
+                        || matches!(next_ch, ';' | '|' | '&' | '(' | ')' | '{' | '}' | '`')
+                    {
+                        break;
+                    }
+                    chars.next();
+                    end = next_idx + next_ch.len_utf8();
+                }
+                let word = &command[start..end];
+
+                if skip_operand {
+                    // The duration `timeout` takes. Flags before it keep us here.
+                    if !word.starts_with('-') {
+                        skip_operand = false;
+                        at_command_start = true;
+                    }
+                    continue;
+                }
+                if word == "timeout" {
+                    skip_operand = true;
+                    at_command_start = true;
+                    continue;
+                }
+                if SUDO_PREFIX_WRAPPERS.contains(&word) || is_env_assignment(word) {
+                    // The command we care about is still ahead of this token.
+                    at_command_start = true;
+                    continue;
+                }
+
+                at_command_start = false;
+                if word == "sudo" {
+                    found.push(SudoInvocation {
+                        insert_at: end,
+                        never_prompts: sudo_flags(command, end).never_prompts(),
+                    });
+                }
+            }
+        }
+    }
+
+    found
+}
+
+/// Add the flags that let sudo read the password from stdin and keep its own
+/// prompt off the screen (#2157).
+///
+/// Inserted right after each `sudo` word, so a heredoc body or a quoted string
+/// that merely contains `sudo ` is never rewritten. The old code called
+/// `replacen("sudo ", ...)`, which hit the first occurrence anywhere in the
+/// string and could rewrite a body line instead of the command.
+pub(crate) fn inject_sudo_password_flags(command: &str, invocations: &[SudoInvocation]) -> String {
+    let mut out = command.to_string();
+
+    // Right to left, so each earlier offset still points at the same word.
+    for invocation in invocations.iter().rev() {
+        let flags = sudo_flags(command, invocation.insert_at);
+        let mut add = String::new();
+        if !flags.clusters.contains('S') {
+            add.push_str(" -S");
+        }
+        if !flags.clusters.contains('p') {
+            add.push_str(" -p \"\"");
+        }
+        if !add.is_empty() {
+            out.insert_str(invocation.insert_at, &add);
+        }
+    }
+    out
+}
+
+/// Which sudo model a hint describes (#2157).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SudoPlatform {
+    /// Linux and macOS: one sudoers drop-in file per rule.
+    Unix,
+    /// Windows: no sudoers file at all, elevation or the Windows sudo setting.
+    Windows,
+}
+
+impl SudoPlatform {
+    /// The platform this process runs on.
+    pub(crate) fn current() -> Self {
+        if cfg!(windows) {
+            Self::Windows
+        } else {
+            Self::Unix
+        }
+    }
+}
+
+/// The account name a sudoers rule has to cover: `USER`, else `USERNAME`, else
+/// the `%sudo` group.
+///
+/// Read from the environment rather than forked from `whoami`: this is a hint
+/// string, and a process spawn to spell a name the shell already exports is a
+/// cost with no answer of its own.
+pub(crate) fn sudo_account_name() -> String {
+    ["USER", "USERNAME"]
+        .iter()
+        .filter_map(|key| std::env::var(key).ok())
+        .map(|value| value.trim().to_string())
+        .find(|value| !value.is_empty())
+        .unwrap_or_else(|| "%sudo".to_string())
+}
+
+/// How to give this account passwordless sudo, so the dialog stops appearing
+/// (#2157).
+///
+/// One copy of the fix, shown wherever a user can hit the wall: inside the
+/// dialog, in the timeout, and in the error a dialog-less surface returns.
+/// `platform` is a parameter, not a `cfg!`, so both texts are testable on any
+/// host.
+pub(crate) fn sudo_access_hint(platform: SudoPlatform, user: &str) -> String {
+    match platform {
+        SudoPlatform::Unix => format!(
+            "To stop this prompt for good, allow {user} passwordless sudo once:\n\
+             echo \"{user} ALL=(ALL) NOPASSWD: ALL\" | sudo tee /etc/sudoers.d/opencrabs\n\
+             sudo chmod 0440 /etc/sudoers.d/opencrabs"
+        ),
+        SudoPlatform::Windows => {
+            "Windows has no sudoers file. Run OpenCrabs from an elevated terminal \
+             (right-click the terminal, Run as administrator), or enable sudo under \
+             Settings > System > For developers, then retry."
+                .to_string()
+        }
+    }
+}
+
+/// The hint for this host, resolved once.
+///
+/// The dialog re-renders on every tick while it waits, and building the string
+/// per frame would allocate for no new answer.
+pub(crate) fn sudo_access_hint_cached() -> &'static str {
+    static HINT: OnceLock<String> = OnceLock::new();
+    HINT.get_or_init(|| sudo_access_hint(SudoPlatform::current(), &sudo_account_name()))
+}
+
+/// True when sudo refused to run because it had no way to ask for a password.
+///
+/// These are the lines sudo prints when nothing can answer its prompt: no
+/// terminal, no askpass helper, no cached credential. Anything else on stderr
+/// (a missing file, a bad command) is a different failure and gets no hint.
+pub(crate) fn looks_like_sudo_password_failure(stderr: &str) -> bool {
+    let lower = stderr.to_lowercase();
+    [
+        "a password is required",
+        "a terminal is required",
+        "no tty present",
+        "no askpass program specified",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+/// Per-session answer to "will sudo ask for anything?" (#2157).
+///
+/// Keyed by session like `recent_bash_state`: the answer depends on the host's
+/// sudoers rules and the credential timestamp, neither of which changes per
+/// turn. `sudo -k` mid-session is the one way to make it stale, and the failure
+/// then is sudo's own "a password is required", which the agent can read.
+pub(crate) fn sudo_passwordless_state() -> &'static RwLock<HashMap<Uuid, bool>> {
+    static STATE: OnceLock<RwLock<HashMap<Uuid, bool>>> = OnceLock::new();
+    STATE.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+/// True when sudo has nothing to ask for, so no dialog is needed.
+///
+/// Probed once per session with `sudo -n -v`, which validates without ever
+/// prompting: exit 0 means the credential is cached or a passwordless rule
+/// applies. Cached because the probe costs a process spawn and its answer
+/// cannot change between turns.
+async fn sudo_needs_no_password(session_id: Uuid) -> bool {
+    if let Ok(state) = sudo_passwordless_state().read()
+        && let Some(known) = state.get(&session_id)
+    {
+        return *known;
+    }
+
+    let answer = probe_sudo_noninteractive().await;
+    if let Ok(mut state) = sudo_passwordless_state().write() {
+        state.insert(session_id, answer);
+    }
+    answer
+}
+
+/// `sudo -n -v` once: validates the credential without prompting. Any failure
+/// to run it (no sudo, a timeout, a non-zero exit) reads as "will prompt",
+/// which is the safe direction: the worst case is a dialog over a prompt that
+/// would have appeared anyway.
+async fn probe_sudo_noninteractive() -> bool {
+    #[cfg(windows)]
+    {
+        false
+    }
+    #[cfg(not(windows))]
+    {
+        use crate::utils::shell::PushShellCommand;
+
+        let (shell, shell_arg) = crate::utils::shell::shell_pair();
+        let mut cmd = Command::new(shell);
+        cmd.kill_on_drop(true);
+        cmd.push_shell_command(shell_arg, "sudo -n -v")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+
+        matches!(
+            timeout(Duration::from_secs(5), cmd.status()).await,
+            Ok(Ok(status)) if status.success()
+        )
+    }
+}
+
+/// The `sleep` invocation in `command`, if it makes one (#2123).
+///
+/// Matches the first word of each command segment, skipping the wrappers a
+/// shell allows in front of it (`sudo`, `command`, `exec`, `nohup`, `env`,
+/// `timeout <duration>`) plus leading `VAR=value` assignments. Deliberately
+/// positional: a substring rule would refuse `grep -rn "sleep" logs/`, which
+/// is a legitimate search for this very rule.
+pub(crate) fn sleeping_segment(command: &str) -> Option<String> {
+    const WRAPPERS: [&str; 5] = ["sudo", "command", "exec", "nohup", "env"];
+
+    for seg in split_command_segments(command) {
+        let toks: Vec<&str> = seg.split_whitespace().collect();
+        let mut i = 0;
+        while i < toks.len() {
+            let raw = toks[i];
+            // `FOO=bar sleep 1`: the assignment is not the command.
+            if !raw.starts_with('-') && raw.contains('=') {
+                i += 1;
+                continue;
+            }
+            let word = strip_quotes(raw).to_lowercase();
+            if WRAPPERS.contains(&word.as_str()) {
+                i += 1;
+                continue;
+            }
+            if word == "timeout" {
+                i += 1;
+                // The wrapper's own flags, e.g. `-s KILL` / `--signal=KILL`.
+                while i < toks.len() && toks[i].starts_with('-') {
+                    let flag = toks[i];
+                    i += 1;
+                    if flag == "-s" || flag == "--signal" {
+                        i += 1;
+                    }
+                }
+                i += 1; // the duration, then the wrapped command
+                continue;
+            }
+            // `do sleep 1` / `then sleep 1` inside a loop or conditional body.
+            if word == "do" || word == "then" {
+                i += 1;
+                continue;
+            }
+            if word == "sleep" {
+                return Some(seg);
+            }
+            break;
+        }
+    }
+    None
+}
+
+/// Why a `sleep` is refused right now, or `None` to let it run (#2123).
+///
+/// Scoped to sessions that actually have a detached task in flight: such a
+/// task resumes the session on its own completion, so waiting on a counter
+/// only burns time that belongs to other work. With nothing detached the
+/// command is ordinary shell and stays available.
+///
+/// `running` carries the labels, not a count, because the refusal has to say
+/// WHAT is being waited on. A bare number leaves the reader unable to tell a
+/// two-second test from a ten-minute build.
+pub(crate) fn sleep_refusal(command: &str, running: &[String]) -> Option<String> {
+    let detail = match running {
+        [] => return None,
+        [only] => format!("`{only}` is still running"),
+        many => {
+            let names: Vec<&str> = many.iter().map(String::as_str).collect();
+            format!(
+                "{} detached tasks are still running ({})",
+                many.len(),
+                names.join(", ")
+            )
+        }
+    };
+    let seg = sleeping_segment(command)?;
+    Some(format!(
+        "Blocked: `{seg}` waits on a counter, but {detail} for this session. \
+         A detached task reports back on its own when it finishes. Do other work, or end the turn and \
+         the completion will start the next one."
+    ))
 }
 
 /// fail *silently*: stdin=/dev/null returns EOF, the program exits with

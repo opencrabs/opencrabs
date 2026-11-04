@@ -5,15 +5,77 @@ use super::onboarding::{OnboardingStep, WizardAction, WizardMode, welcome_messag
 use super::*;
 use crate::brain::provider::{ContentBlock, LLMRequest};
 use anyhow::Result;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 /// Shown after the first Ctrl+C inside the wizard; a second one quits.
 const QUIT_HINT: &str = "Press Ctrl+C again to quit";
 
 impl App {
-    /// Leave the app from inside the wizard. Whatever was typed is saved
-    /// first, like a cancel; an unfinished first run reopens on next launch
-    /// because completion is only recorded on `Complete`.
+    /// Zero-setup first run (#2079).
+    ///
+    /// A fresh install goes straight to chat on the built-in OpenCrabs
+    /// provider: its section is turned on, the proxy issues this install's
+    /// token, the agent is rebuilt onto it, and the agent opens the
+    /// conversation with the welcome prompt. The wizard is never shown here.
+    /// `/onboard` and `--onboard` are the opt-in paths to Quick start and
+    /// Advanced.
+    ///
+    /// Nothing in here blocks the session. An unreachable proxy still lands
+    /// the user in a working chat, with a line saying what happened and where
+    /// to go next; a dead screen would be the one outcome worse than a failed
+    /// fetch.
+    pub(crate) async fn provision_first_run(&mut self) {
+        // Clear the flag first: every path below ends the provisioning, and a
+        // second launch must not re-run it from a stale flag.
+        self.first_run = false;
+
+        // The documented files first. `write_key` below needs the provider
+        // sections the example carries, and a genuinely fresh home has
+        // neither config.toml nor keys.toml on disk.
+        crate::config::seed::ensure_config_seeded();
+        crate::config::seed::ensure_keys_seeded();
+
+        // The example ships every provider disabled, the built-in one
+        // included, so it has to be turned on explicitly. Without this the
+        // section exists but `active_provider_and_model` skips it.
+        if let Err(e) = crate::config::Config::write_key("providers.opencrabs", "enabled", "true") {
+            tracing::warn!("First run: could not enable the built-in provider: {e}");
+        }
+
+        // The token the proxy issues is the only credential this provider
+        // takes. `ensure_install` writes it to keys.toml under
+        // `[providers.opencrabs]`, and it is reused as-is on later launches.
+        if let Err(e) = crate::brain::provider::opencrabs_acquire::ensure_install().await {
+            tracing::warn!("First run: built-in provider token request failed: {e:?}");
+            self.push_system_message(first_run_offline_message(&e));
+            return;
+        }
+
+        // Only now is the install actually set up, so only now is onboarding
+        // recorded as done. A failed fetch above leaves it unrecorded, and the
+        // next launch tries again instead of leaving a chat with no provider.
+        crate::tui::onboarding::state::OnboardingState::mark_completed();
+
+        if let Err(e) = self.rebuild_agent_service().await {
+            tracing::warn!("First run: could not build the built-in provider: {e}");
+            self.push_system_message(format!(
+                "The built-in brain did not come up: {e}\n\
+                 Type /onboard and pick Advanced to choose another provider."
+            ));
+            return;
+        }
+
+        self.sync_session_to_provider().await;
+
+        let (provider, model) = self.welcome_provider_and_model().await;
+        self.push_system_message(format!(
+            "Setup complete! Provider: {provider} | Model: {model}"
+        ));
+        self.send_onboarding_welcome(true, WizardMode::QuickStart)
+            .await;
+    }
+
     /// Send the hidden welcome prompt once the wizard has saved its config.
     /// Runs for every completion, quick or advanced, first run or `/onboard`.
     /// A failed save sends nothing, so the agent never greets an unconfigured
@@ -55,6 +117,9 @@ impl App {
         (provider, model)
     }
 
+    /// Leave the app from inside the wizard. Whatever was typed is saved
+    /// first, like a cancel; an unfinished first run reopens on next launch
+    /// because completion is only recorded on `Complete`.
     fn quit_from_onboarding(&mut self) {
         if let Some(ref wizard) = self.onboarding
             && let Err(e) = wizard.apply_config()
@@ -1032,7 +1097,7 @@ impl App {
                     if parsed[0].is_none() || parsed[0].is_none() || parsed[1].is_none() {
                         tracing::warn!(
                             "Brain gen: couldn't parse response (first 500 chars): {}",
-                            &text[..text.len().min(500)]
+                            crate::utils::string::truncate_str(&text, 500)
                         );
                         Err(
                             "Couldn't parse brain files from AI response — using defaults"
@@ -1408,6 +1473,7 @@ impl App {
             period,
             focused_card: 0,
             data,
+            cache_detail_open: false,
         });
     }
 
@@ -1423,12 +1489,11 @@ impl App {
     }
 }
 
-/// Download WhisperCrabs binary if not cached, return the path to the binary.
 /// Directory for downloaded helper binaries (whispercrabs, …). Deliberately
 /// NOT the brain dir (`~/.opencrabs`), which is for agent state — executables
 /// don't belong there. Uses `~/.local/bin` on Unix (PATH-friendly and
 /// user-writable) and the platform data dir on Windows.
-fn helper_bin_dir() -> PathBuf {
+pub(crate) fn helper_bin_dir() -> PathBuf {
     #[cfg(windows)]
     {
         dirs::data_local_dir()
@@ -1444,111 +1509,399 @@ fn helper_bin_dir() -> PathBuf {
     }
 }
 
+/// File name of the helper binary on this platform.
+pub(crate) const WHISPERCRABS_BIN: &str = if cfg!(windows) {
+    "whispercrabs.exe"
+} else {
+    "whispercrabs"
+};
+
+/// Sidecar recording which release is installed, next to the binary (#2114).
+///
+/// The binary carries no version string of its own (`strings` returns none),
+/// so the installed tag is unrecoverable after the fact without this file. Its
+/// mtime doubles as the last-check time for the re-check TTL.
+const WHISPERCRABS_TAG_FILE: &str = "whispercrabs.version";
+
+/// How long a positive "you are current" answer is trusted before asking
+/// GitHub again.
+///
+/// `/whisper` runs from a dialog, so a network round trip must not sit in
+/// front of every launch (#2114 triage).
+const WHISPERCRABS_RECHECK_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Timeout for the release lookup. A slow or blocked API must not stall the
+/// dialog; the cached binary is used instead.
+const WHISPERCRABS_LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Should the cached binary be replaced? Pure: no network, no filesystem.
+///
+/// `path_ok` is [`helper_binary_is_usable`]'s answer, so a missing, empty or
+/// non-executable file always refreshes even when the tag matches.
+pub(crate) fn helper_needs_refresh(
+    cached_tag: Option<&str>,
+    latest_tag: &str,
+    path_ok: bool,
+) -> bool {
+    if !path_ok {
+        return true;
+    }
+    match cached_tag {
+        // No sidecar means the installed release is unknown, so it cannot be
+        // trusted to be the latest one.
+        None => true,
+        Some(cached) => cached.trim() != latest_tag.trim(),
+    }
+}
+
+/// Is there a usable executable at `path`?
+///
+/// `exists()` is not enough: a killed download leaves a zero-byte file, and a
+/// file without the exec bit fails at `Command::new` with a cryptic error and
+/// no self-heal (#2114).
+pub(crate) fn helper_binary_is_usable(path: &Path) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() || meta.len() == 0 {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if meta.permissions().mode() & 0o111 == 0 {
+            return false;
+        }
+    }
+    true
+}
+
+/// Is a network re-check due? Pure.
+///
+/// `last_check` is the sidecar's mtime: the last time the installed tag was
+/// confirmed against GitHub.
+pub(crate) fn helper_refresh_is_due(
+    last_check: Option<SystemTime>,
+    now: SystemTime,
+    ttl: Duration,
+) -> bool {
+    let Some(last) = last_check else {
+        return true;
+    };
+    match now.duration_since(last) {
+        // A future timestamp (clock skew, a restored backup) is not a reason
+        // to skip the check.
+        Err(_) => true,
+        Ok(age) => age >= ttl,
+    }
+}
+
+/// The tag recorded beside the binary, if any.
+pub(crate) fn read_installed_tag(tag_path: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(tag_path).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// Record the installed tag beside the binary.
+///
+/// Rewriting the same content is also how the re-check TTL is stamped, since
+/// the sidecar's mtime is the last-check time.
+pub(crate) fn write_installed_tag(tag_path: &Path, tag: &str) -> std::io::Result<()> {
+    let tmp = tag_path.with_extension("version.tmp");
+    std::fs::write(&tmp, format!("{}\n", tag.trim()))?;
+    #[cfg(windows)]
+    {
+        // Windows refuses to rename onto an existing path.
+        if tag_path.exists() {
+            let _ = std::fs::remove_file(tag_path);
+        }
+    }
+    std::fs::rename(&tmp, tag_path)
+}
+
+/// Bring a binary left in the brain dir (`~/.opencrabs/bin`) into the install
+/// dir, once (#2114).
+///
+/// The old code returned the legacy path in place, so two install locations
+/// lived forever and neither was versioned. The legacy file is copied, never
+/// deleted: it belongs to the user. The tag is deliberately cleared, because
+/// the legacy file's release is unknown and the next run must re-download.
+pub(crate) fn migrate_legacy_whispercrabs(
+    legacy: &Path,
+    binary_path: &Path,
+    tag_path: &Path,
+) -> Result<()> {
+    if !legacy.exists() || helper_binary_is_usable(binary_path) {
+        return Ok(());
+    }
+    if !helper_binary_is_usable(legacy) {
+        // A zero-byte or non-executable legacy file is not worth migrating.
+        return Ok(());
+    }
+    std::fs::copy(legacy, binary_path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(binary_path, std::fs::Permissions::from_mode(0o755))?;
+    }
+    let _ = std::fs::remove_file(tag_path);
+    tracing::info!(
+        from = %legacy.display(),
+        to = %binary_path.display(),
+        "WhisperCrabs: migrated the legacy helper binary"
+    );
+    Ok(())
+}
+
+/// Extract a downloaded archive into `staging`.
+///
+/// The format comes from the bytes, not the platform, so the decision is
+/// testable without threading the OS through. Everything in the archive lands
+/// in `staging`: the Windows zip ships DLLs beside the exe and moving only the
+/// exe would leave it unable to start.
+///
+/// Windows zips were never extracted at all before #2114; only the tar.gz
+/// branch ran, so a Windows install could never produce a binary.
+pub(crate) fn extract_whispercrabs_archive(bytes: &[u8], staging: &Path) -> Result<()> {
+    std::fs::create_dir_all(staging)?;
+    if bytes.starts_with(b"PK\x03\x04") {
+        extract_zip(bytes, staging)?;
+    } else if bytes.starts_with(&[0x1f, 0x8b]) {
+        extract_tar_gz(bytes, staging)?;
+    } else {
+        anyhow::bail!("download is neither a zip nor a tar.gz archive");
+    }
+    if !staging.join(WHISPERCRABS_BIN).is_file() {
+        anyhow::bail!(
+            "archive did not contain {} at its root, so the release layout changed",
+            WHISPERCRABS_BIN
+        );
+    }
+    Ok(())
+}
+
+fn extract_zip(bytes: &[u8], dest: &Path) -> Result<()> {
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
+        .map_err(|e| anyhow::anyhow!("cannot read zip: {e}"))?;
+    for i in 0..archive.len() {
+        let mut entry = archive
+            .by_index(i)
+            .map_err(|e| anyhow::anyhow!("zip entry {i}: {e}"))?;
+        // The entry name comes from the archive, so it is untrusted: this
+        // rejects absolute paths and `..` escapes.
+        let Some(rel) = entry.enclosed_name() else {
+            continue;
+        };
+        let out = dest.join(rel);
+        if entry.is_dir() {
+            std::fs::create_dir_all(&out)?;
+            continue;
+        }
+        if let Some(parent) = out.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut file = std::fs::File::create(&out)?;
+        std::io::copy(&mut entry, &mut file)?;
+    }
+    Ok(())
+}
+
+fn extract_tar_gz(bytes: &[u8], dest: &Path) -> Result<()> {
+    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(bytes));
+    archive
+        .unpack(dest)
+        .map_err(|e| anyhow::anyhow!("cannot extract tar.gz: {e}"))?;
+    Ok(())
+}
+
+/// Move an extracted staging tree into the install directory.
+///
+/// The binary moves LAST, so an interrupted install can leave new DLLs beside
+/// an old exe (harmless, the next run re-downloads) but never a new exe beside
+/// missing ones.
+pub(crate) fn install_staged_helpers(staging: &Path, bin_dir: &Path) -> Result<()> {
+    let binary = staging.join(WHISPERCRABS_BIN);
+    let mut others = Vec::new();
+    for entry in std::fs::read_dir(staging)? {
+        let path = entry?.path();
+        if path.is_file() && path != binary {
+            others.push(path);
+        }
+    }
+    for src in others {
+        if let Some(name) = src.file_name() {
+            replace_file(&src, &bin_dir.join(name))?;
+        }
+    }
+    replace_file(&binary, &bin_dir.join(WHISPERCRABS_BIN))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            bin_dir.join(WHISPERCRABS_BIN),
+            std::fs::Permissions::from_mode(0o755),
+        )?;
+    }
+    Ok(())
+}
+
+/// Rename over the target, removing it first where the platform refuses to
+/// replace an existing file.
+fn replace_file(src: &Path, dst: &Path) -> Result<()> {
+    #[cfg(windows)]
+    {
+        if dst.exists() {
+            std::fs::remove_file(dst)?;
+        }
+    }
+    std::fs::rename(src, dst)?;
+    Ok(())
+}
+
+/// The OS component of a WhisperCrabs release asset name.
+fn whispercrabs_platform_os() -> Result<&'static str> {
+    match std::env::consts::OS {
+        "linux" => Ok("linux"),
+        "macos" => Ok("macos"),
+        "windows" => Ok("windows"),
+        other => anyhow::bail!("Unsupported OS: {other}"),
+    }
+}
+
+/// Latest WhisperCrabs release, with the dialog-friendly timeout.
+async fn fetch_latest_whispercrabs_release(client: &reqwest::Client) -> Result<serde_json::Value> {
+    let release: serde_json::Value = client
+        .get("https://api.github.com/repos/adolfousier/whispercrabs/releases/latest")
+        .header("User-Agent", "opencrabs")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    Ok(release)
+}
+
+/// Return the path to a current WhisperCrabs binary, downloading it when the
+/// cached copy is missing, unusable or out of date (#2114).
+///
+/// The old version returned on `path.exists()` alone, so a cached binary was
+/// never refreshed: the first release after the one a user installed would
+/// have stranded them forever, with no API call and no message.
 pub(crate) async fn ensure_whispercrabs() -> Result<PathBuf> {
     let bin_dir = helper_bin_dir();
     std::fs::create_dir_all(&bin_dir)?;
 
-    let binary_name = if cfg!(target_os = "windows") {
-        "whispercrabs.exe"
-    } else {
-        "whispercrabs"
-    };
-    let binary_path = bin_dir.join(binary_name);
+    let binary_path = bin_dir.join(WHISPERCRABS_BIN);
+    let tag_path = bin_dir.join(WHISPERCRABS_TAG_FILE);
 
-    if binary_path.exists() {
+    // An older version may have a copy in the brain dir (`~/.opencrabs/bin`).
+    // It is copied in once, so one install location remains.
+    let legacy = crate::config::opencrabs_home()
+        .join("bin")
+        .join(WHISPERCRABS_BIN);
+    migrate_legacy_whispercrabs(&legacy, &binary_path, &tag_path)?;
+
+    let cached_tag = read_installed_tag(&tag_path);
+    let path_ok = helper_binary_is_usable(&binary_path);
+    let last_check = std::fs::metadata(&tag_path).and_then(|m| m.modified()).ok();
+
+    // A recent positive answer is trusted: /whisper must feel local.
+    if path_ok
+        && cached_tag.is_some()
+        && !helper_refresh_is_due(last_check, SystemTime::now(), WHISPERCRABS_RECHECK_AFTER)
+    {
         return Ok(binary_path);
     }
 
-    // An older version may already have a copy in the brain dir
-    // (`~/.opencrabs/bin`). Reuse it in place if present — don't re-download,
-    // and don't touch/move the user's existing files.
-    let legacy = crate::config::opencrabs_home()
-        .join("bin")
-        .join(binary_name);
-    if legacy.exists() {
-        return Ok(legacy);
+    let client = reqwest::Client::builder()
+        .timeout(WHISPERCRABS_LOOKUP_TIMEOUT)
+        .build()?;
+
+    let release = match fetch_latest_whispercrabs_release(&client).await {
+        Ok(release) => release,
+        Err(e) => {
+            // Offline is not an install failure: a usable cache still works.
+            // Only a machine with no working binary has to hear about it.
+            if path_ok {
+                tracing::warn!(
+                    error = %e,
+                    "WhisperCrabs: release API unreachable, using the cached binary"
+                );
+                return Ok(binary_path);
+            }
+            return Err(
+                e.context("WhisperCrabs release lookup failed and no usable binary is cached")
+            );
+        }
+    };
+
+    let latest_tag = release["tag_name"]
+        .as_str()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if latest_tag.is_empty() {
+        anyhow::bail!("WhisperCrabs release API returned no tag name");
     }
 
-    // Detect platform
-    let (os_name, ext) = match std::env::consts::OS {
-        "linux" => ("linux", "tar.gz"),
-        "macos" => ("macos", "tar.gz"),
-        "windows" => ("windows", "zip"),
-        other => anyhow::bail!("Unsupported OS: {}", other),
-    };
-    let arch = std::env::consts::ARCH; // "x86_64" or "aarch64"
+    if !helper_needs_refresh(cached_tag.as_deref(), &latest_tag, path_ok) {
+        // Stamp the check time; the sidecar's mtime is the TTL anchor.
+        let _ = write_installed_tag(&tag_path, &latest_tag);
+        return Ok(binary_path);
+    }
 
-    // Download latest release via GitHub API
-    let client = reqwest::Client::new();
-    let release_url = "https://api.github.com/repos/adolfousier/whispercrabs/releases/latest";
-    let release: serde_json::Value = client
-        .get(release_url)
-        .header("User-Agent", "opencrabs")
-        .send()
-        .await?
-        .json()
-        .await?;
-
-    // Find matching asset
-    let pattern = format!("whispercrabs-{}-{}", os_name, arch);
-    let asset = release["assets"]
+    let os_name = whispercrabs_platform_os()?;
+    let pattern = format!("whispercrabs-{}-{}", os_name, std::env::consts::ARCH);
+    let download_url = release["assets"]
         .as_array()
         .and_then(|assets| {
             assets
                 .iter()
                 .find(|a| a["name"].as_str().is_some_and(|n| n.contains(&pattern)))
         })
-        .ok_or_else(|| anyhow::anyhow!("No release found for {}-{}", os_name, arch))?;
+        .and_then(|a| a["browser_download_url"].as_str())
+        .ok_or_else(|| anyhow::anyhow!("No WhisperCrabs release asset matching '{pattern}'"))?
+        .to_string();
 
-    let download_url = asset["browser_download_url"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("Missing download URL in release asset"))?;
-
-    // Download the archive
     let bytes = client
-        .get(download_url)
+        .get(&download_url)
         .header("User-Agent", "opencrabs")
         .send()
         .await?
+        .error_for_status()?
         .bytes()
         .await?;
 
-    // Extract (tar.gz for Linux/macOS, zip for Windows)
-    let tmp = bin_dir.join("whispercrabs_download");
-    std::fs::write(&tmp, &bytes)?;
-
-    if ext == "tar.gz" {
-        let output = tokio::process::Command::new("tar")
-            .args([
-                "xzf",
-                &tmp.to_string_lossy(),
-                "-C",
-                &bin_dir.to_string_lossy(),
-            ])
-            .output()
-            .await?;
-        if !output.status.success() {
-            let _ = std::fs::remove_file(&tmp);
-            anyhow::bail!("Failed to extract archive");
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&binary_path, std::fs::Permissions::from_mode(0o755))?;
-        }
+    // Staging lives inside `bin_dir` so the final move is a same-filesystem
+    // rename, and a failed extract never touches the working binary.
+    let staging = bin_dir.join(format!(".whispercrabs-staging-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&staging);
+    let extracted = extract_whispercrabs_archive(&bytes, &staging);
+    if let Err(e) = extracted {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(e);
     }
+    let installed = install_staged_helpers(&staging, &bin_dir);
+    let _ = std::fs::remove_dir_all(&staging);
+    installed?;
 
-    // Clean up temp file
-    let _ = std::fs::remove_file(&tmp);
+    write_installed_tag(&tag_path, &latest_tag)?;
 
-    if !binary_path.exists() {
-        anyhow::bail!("Binary not found after extraction — archive may use a different layout");
+    if !helper_binary_is_usable(&binary_path) {
+        anyhow::bail!(
+            "WhisperCrabs was downloaded but {} is not a usable executable",
+            binary_path.display()
+        );
     }
-
+    tracing::info!(tag = %latest_tag, path = %binary_path.display(), "WhisperCrabs: installed");
     Ok(binary_path)
 }
 
-/// Result of a Telegram test connection attempt.
 struct TelegramTestResult {
     /// Auto-detected user ID from getUpdates (set when user_id was empty)
     detected_user_id: Option<String>,
@@ -1890,4 +2243,21 @@ async fn test_trello_connection(api_key: &str, api_token: &str) -> Result<(), St
 #[cfg(not(feature = "trello"))]
 async fn test_trello_connection(_api_key: &str, _api_token: &str) -> Result<(), String> {
     Err("Trello feature not enabled".to_string())
+}
+
+/// What a first run says when the built-in provider could not come online.
+///
+/// The reason is the proxy's own, so the user gets "rate limited" or
+/// "unreachable" instead of a shrug. The second line is the way out: the
+/// wizard is one command away, and the session is alive either way.
+fn first_run_offline_message(
+    err: &crate::brain::provider::opencrabs_install::InstallError,
+) -> String {
+    use crate::brain::provider::opencrabs_install::install_error_message;
+    format!(
+        "Could not bring the built-in brain online: {}\n\
+         No drama, the crab is fine. Type /onboard to pick another provider, or fix \
+         the connection and restart.",
+        install_error_message(err)
+    )
 }

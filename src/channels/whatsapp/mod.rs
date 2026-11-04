@@ -26,6 +26,7 @@ pub(crate) mod history;
 pub(crate) mod identity;
 pub(crate) mod inbound;
 pub(crate) mod interactive;
+pub(crate) mod lid_migration;
 pub(crate) mod media_retry;
 pub(crate) mod newsletter;
 mod onboarding_events;
@@ -41,6 +42,7 @@ mod sessions;
 mod state;
 pub(crate) mod store;
 pub(crate) mod stream;
+pub(crate) mod turns;
 pub(crate) mod voice_note;
 
 pub use agent::WhatsAppAgent;

@@ -6,9 +6,10 @@ of this directory. The mechanical, zero-cost versions of these commands
 (`/architecture`, `/attach`, `/audit`) ship **inside the binary** and need no
 install.
 
-This directory follows the same opt-in tier as `templates/skills/` and
-`templates/cron/`: nothing here is embedded, seeded, or wired into runtime.
-Who wants it, copies it.
+This directory follows the same opt-in tier as `templates/cron/` and
+`templates/optional-skills/`: nothing here is embedded, seeded, or wired into
+runtime. Who wants it, copies it. (`templates/skills/` is the opposite tier:
+those are compiled into the binary and reach every user.)
 
 ## Install
 

@@ -21,17 +21,10 @@ pub async fn sync_provider_for_session(
     session_provider: Option<&str>,
     session_model: Option<&str>,
 ) {
-    let config = match Config::load() {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(
-                "sync_provider_for_session[{}]: Config::load failed: {} — skipping sync",
-                session_id,
-                e
-            );
-            return;
-        }
-    };
+    // The in-memory mirror, not `Config::load()`: this runs on every inbound
+    // channel message (#2184, #2188), and the watcher keeps the mirror current,
+    // so a disk read and TOML parse per message buys nothing.
+    let config = Config::current();
 
     // Try the session's stored provider/model first.
     // [agent] default_provider/default_model is ONLY a fallback when the session's
@@ -42,7 +35,14 @@ pub async fn sync_provider_for_session(
 
     // If the session has an explicit provider, restore it (ignoring global config)
     if let Some(sess_prov) = effective_provider {
-        let agent_provider = agent.provider_name_for_session(session_id);
+        // Compare against the provider the session is CONFIGURED with, not the
+        // entry a sticky fallback happens to be serving (#2184). The live name
+        // reports the promoted fallback, so it can never equal the pinned name:
+        // the fast path was unreachable for any session with a fallback chain,
+        // and every inbound message rebuilt the primary from config (0.6-1.9s),
+        // which also threw away the chain's cooldown record and made the failed
+        // primary get retried and re-promoted on every message.
+        let agent_provider = agent.configured_provider_name_for_session(session_id);
         let agent_model = agent.provider_model_for_session(session_id);
         let sess_prov_norm = normalize_provider_name(sess_prov);
         let agent_prov_norm = normalize_provider_name(&agent_provider);
@@ -158,7 +158,9 @@ pub async fn sync_provider_for_session(
             session_id
         );
         let (cfg_provider, cfg_model) = config.providers.active_provider_and_model();
-        let agent_provider = agent.provider_name_for_session(session_id);
+        // Same configured-vs-live distinction as above: a session riding the
+        // global chain's sticky fallback has not changed provider (#2184).
+        let agent_provider = agent.configured_provider_name_for_session(session_id);
         let agent_model = agent.provider_model_for_session(session_id);
 
         let cfg_provider_norm = normalize_provider_name(&cfg_provider);
@@ -217,6 +219,10 @@ pub enum ChannelCommand {
     Sessions(SessionsResponse),
     /// `/stop` — cancel the running agent task
     Stop,
+    /// `/stop <session-id-or-unique-prefix>` — cancel a DIFFERENT session's
+    /// running turn (#2108). Plain `/stop` can only reach the session the
+    /// message landed in, so a stuck turn in another chat was unstoppable.
+    StopTarget(String),
     /// `/compact` — trigger context compaction via the agent
     Compact,
     /// `/clear` — cut the agent's context here without a summariser call;
@@ -384,6 +390,109 @@ pub(crate) fn strip_command_handle(text: &str) -> String {
         (Some(at), None) => head[..at].to_string(),
         (None, _) => trimmed.to_string(),
     }
+}
+
+/// How a `/stop <target>` argument resolved against a set of session ids.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TargetMatch {
+    /// Exactly one session matched.
+    Unique(Uuid),
+    /// Several sessions matched the prefix; the caller must disambiguate.
+    Ambiguous(Vec<Uuid>),
+    /// Nothing matched.
+    None,
+}
+
+/// Resolve a session id, or a unique id prefix, against `candidates` (#2108).
+///
+/// A prefix has to be at least [`MIN_TARGET_PREFIX`] characters so a stray
+/// short token cannot silently select a session, and it only resolves when
+/// exactly one candidate matches: an ambiguous prefix is reported, never
+/// guessed, because the consequence of guessing wrong is cancelling the wrong
+/// turn.
+pub(crate) fn resolve_session_prefix<'a>(
+    needle: &str,
+    candidates: impl Iterator<Item = &'a Uuid>,
+) -> TargetMatch {
+    let needle = needle.trim().to_ascii_lowercase();
+    if needle.len() < MIN_TARGET_PREFIX {
+        return TargetMatch::None;
+    }
+    let mut hits: Vec<Uuid> = candidates
+        .filter(|id| id.to_string().starts_with(&needle))
+        .copied()
+        .collect();
+    hits.sort();
+    hits.dedup();
+    match hits.len() {
+        0 => TargetMatch::None,
+        1 => TargetMatch::Unique(hits[0]),
+        _ => TargetMatch::Ambiguous(hits),
+    }
+}
+
+/// Shortest session-id prefix `/stop` will act on.
+pub(crate) const MIN_TARGET_PREFIX: usize = 4;
+
+/// The shortest form of `id` that is still unambiguous among `candidates`.
+pub(crate) fn shortest_unique_prefix<'a>(
+    id: Uuid,
+    candidates: impl Iterator<Item = &'a Uuid> + Clone,
+) -> String {
+    let full = id.to_string();
+    for len in MIN_TARGET_PREFIX..=full.len() {
+        let prefix = &full[..len];
+        if candidates
+            .clone()
+            .filter(|other| **other != id)
+            .all(|other| !other.to_string().starts_with(prefix))
+        {
+            return prefix.to_string();
+        }
+    }
+    full
+}
+
+/// Detect a targeted stop typed as prose: an owner message that OPENS with a
+/// stop word and names one of `running`, but is not itself a recognised stop
+/// intent (#2108).
+///
+/// Returns the exact command to send back. This never cancels anything: a
+/// sentence like "stop a1b2c3d4" is ambiguous enough that guessing which
+/// session the sender meant is worse than telling them the one spelling that
+/// works. A plain "stop" is a recognised intent and is handled by the normal
+/// kill switch, so it is not caught here; "stop the docker container" names no
+/// session, so it is not caught either.
+pub(crate) fn targeted_stop_hint(text: &str, running: &[Uuid]) -> Option<String> {
+    use crate::utils::stop_intent::{is_stop_intent, normalize};
+
+    if running.is_empty() || is_stop_intent(text) {
+        return None;
+    }
+    let tokens: Vec<&str> = text.split_whitespace().collect();
+    let (first, rest) = tokens.split_first()?;
+    // The message has to OPEN with a stop word. A bare stop word is a real
+    // intent and was filtered above, so anything still here carries an object.
+    if !is_stop_intent(&normalize(first)) {
+        return None;
+    }
+    for raw in rest {
+        let token: String = raw
+            .chars()
+            .filter(|c| c.is_ascii_hexdigit() || *c == '-')
+            .collect::<String>()
+            .to_ascii_lowercase();
+        if token.len() < MIN_TARGET_PREFIX {
+            continue;
+        }
+        if let TargetMatch::Unique(id) = resolve_session_prefix(&token, running.iter()) {
+            let prefix = shortest_unique_prefix(id, running.iter());
+            return Some(format!(
+                "That reads like a targeted stop. Send `/stop {prefix}` to stop session `{prefix}`."
+            ));
+        }
+    }
+    None
 }
 
 /// Check if a message is a known channel command and return the response.
@@ -570,6 +679,29 @@ pub async fn handle_command(
                 ChannelCommand::UnknownCommand("🔒 Owner-only command.".to_string())
             } else {
                 ChannelCommand::Stop
+            }
+        }
+        cmd if cmd.starts_with("/stop ") || cmd.starts_with("/stop:") => {
+            // #2108: target another session's running turn. Owner-only for the
+            // same reason plain /stop is: cancelling someone else's work is a
+            // destructive action on state the sender cannot see.
+            if !is_owner {
+                ChannelCommand::UnknownCommand("🔒 Owner-only command.".to_string())
+            } else {
+                let target = cmd
+                    .strip_prefix("/stop:")
+                    .or_else(|| cmd.strip_prefix("/stop "))
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                if target.is_empty() {
+                    ChannelCommand::UnknownCommand(
+                        "`/stop <session-id>` needs a target. Run `/sessions` for the ids."
+                            .to_string(),
+                    )
+                } else {
+                    ChannelCommand::StopTarget(target)
+                }
             }
         }
         cmd if cmd == "/usage" || cmd.starts_with("/usage ") => {
@@ -761,6 +893,9 @@ pub async fn handle_command(
         ChannelCommand::Sessions(resp) => Some(resp.text.clone()),
         ChannelCommand::NewSession => Some("New session started.".to_string()),
         ChannelCommand::Stop => Some("Operation stopped.".to_string()),
+        // The receipt names the target and its state, so it is built by the
+        // channel handler that actually holds the state (#2108).
+        ChannelCommand::StopTarget(_) => None,
         ChannelCommand::UserSystem(body) => Some(body.clone()),
         ChannelCommand::Doctor => Some("Running health check...".to_string()),
         ChannelCommand::Architecture(_) => Some("Building directory tree...".to_string()),
@@ -946,7 +1081,10 @@ pub(crate) fn format_help() -> String {
             "/sessions",
             "Switch between sessions (`/sessions:<query>` to filter)",
         ),
-        ("/stop", "Abort current operation"),
+        (
+            "/stop",
+            "Abort current operation (`/stop <id>` targets another session)",
+        ),
         (
             "/architecture",
             "Directory tree of a path (mechanical, no API cost)",
@@ -1108,7 +1246,10 @@ async fn format_usage_breakdown(args: &str, session_svc: &SessionService) -> Str
 
     fn parse_period(tok: &str) -> Option<i64> {
         let now = chrono::Utc::now().timestamp();
-        let (num, unit) = tok.split_at(tok.len().saturating_sub(1));
+        // The unit is the final character, which may be multi-byte. Slicing at
+        // `len - 1` would land inside it and panic.
+        let (last, _) = tok.char_indices().next_back()?;
+        let (num, unit) = tok.split_at(last);
         let n: i64 = num.parse().ok()?;
         match unit {
             "d" => Some(now - n * 86_400),

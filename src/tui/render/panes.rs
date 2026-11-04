@@ -1,6 +1,7 @@
 //! Split pane rendering — draws pane borders, labels, and delegates chat rendering.
 
 use super::theme::{self, Role};
+use super::tools::render_tool_group;
 use super::utils::wrap_line_with_padding;
 use crate::tui::app::{App, DisplayMessage};
 use crate::tui::pane::PaneId;
@@ -84,10 +85,13 @@ pub(super) fn render_inactive_pane(f: &mut Frame, app: &App, pane_id: PaneId, ar
 
     let mut lines: Vec<Line<'static>> = Vec::new();
 
+    // Folded the way the focused pane is by default (#2075), so a tool block
+    // keeps its header and preview when this pane is not focused.
     if let Some(messages) = cached {
-        for msg in messages {
-            render_simple_message(&mut lines, msg, inner.width as usize);
-        }
+        lines.extend(super::chat::folded_pane_lines(
+            messages,
+            inner.width as usize,
+        ));
     }
 
     // Pending-message delta — flushed assistant text, tool-group
@@ -96,9 +100,10 @@ pub(super) fn render_inactive_pane(f: &mut Frame, app: &App, pane_id: PaneId, ar
     // shape as cached messages so the user sees a coherent feed
     // even when the inactive pane has accumulated several rounds.
     if let Some(bg) = live {
-        for msg in &bg.pending_messages {
-            render_simple_message(&mut lines, msg, inner.width as usize);
-        }
+        lines.extend(super::chat::folded_pane_lines(
+            &bg.pending_messages,
+            inner.width as usize,
+        ));
     }
 
     // Live in-flight rows. These show what's happening in this
@@ -107,53 +112,15 @@ pub(super) fn render_inactive_pane(f: &mut Frame, app: &App, pane_id: PaneId, ar
     // whatever was last DB-loaded and the user saw stale state
     // until they tabbed back.
     if let Some(bg) = live {
+        // The in-flight group draws exactly as the focused pane draws it (#2075).
         if let Some(ref group) = bg.active_tool_group {
-            let n = group.calls.len();
-            let all_done = group.calls.iter().all(|c| c.completed);
-            let any_failed = group.calls.iter().any(|c| c.completed && !c.success);
-            let (icon, color) = if !all_done {
-                ("⚙", theme::role(Role::Warning))
-            } else if any_failed {
-                ("●", theme::role(Role::Error))
-            } else {
-                ("●", theme::role(Role::GrayDim))
-            };
-            lines.push(Line::from(Span::styled(
-                format!(
-                    "  {} {} tool call{}",
-                    icon,
-                    n,
-                    if n == 1 { "" } else { "s" }
-                ),
-                Style::default().fg(color),
-            )));
-            // Live tool ROWS, not just the count (#369): the tail of the
-            // group renders under the badge so an unfocused pane shows
-            // which tools are running/finished in real time, mirroring
-            // the focused pane's group. Tail-limited to keep the pane
-            // preview compact during long turns.
-            const TAIL: usize = 4;
-            let start = n.saturating_sub(TAIL);
-            if start > 0 {
-                lines.push(Line::from(Span::styled(
-                    format!("    … {} earlier", start),
-                    Style::default().fg(theme::role(Role::GrayDim)),
-                )));
-            }
-            for call in &group.calls[start..] {
-                let (c_icon, c_color) = if !call.completed {
-                    ("⚙", theme::role(Role::Warning))
-                } else if call.success {
-                    ("✓", theme::role(Role::Success))
-                } else {
-                    ("✗", theme::role(Role::Error))
-                };
-                let desc: String = call.description.chars().take(58).collect();
-                lines.push(Line::from(Span::styled(
-                    format!("    {c_icon} {desc}"),
-                    Style::default().fg(c_color),
-                )));
-            }
+            render_tool_group(
+                &mut lines,
+                group,
+                true,
+                app.animation_frame,
+                inner.width as usize,
+            );
         }
         if bg.streaming_reasoning.is_some() {
             lines.push(Line::from(Span::styled(

@@ -368,9 +368,13 @@ impl ChannelManager {
                     agent_holder.clone(),
                     wa.clone(),
                 );
+                // #2179: follow-ups that arrive mid-turn queue in the WhatsApp
+                // state; the tool loop drains them between rounds through this
+                // callback (Telegram's #302 rail, Discord's #1990 twin).
+                let followup_cb = self.whatsapp_state.followup_queue_callback();
                 let wa_agent_service = self
                     .channel_factory
-                    .create_agent_service_full(None, Some(enqueue_cb))
+                    .create_agent_service_full(Some(followup_cb), Some(enqueue_cb))
                     .await;
                 crate::channels::bg_resume::fill(&agent_holder, &wa_agent_service);
                 // A WhatsApp ban or lock cannot be reported over WhatsApp, so

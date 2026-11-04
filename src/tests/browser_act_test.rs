@@ -102,6 +102,113 @@ fn empty_or_missing_actions_array_is_rejected() {
     assert!(parse_actions(&actions(json!([]))).is_err());
 }
 
+// ---- #2112: the upload action ----
+
+/// A real file on disk: the upload action validates paths at parse time, so a
+/// fixture has to exist.
+fn fixture_file(dir: &tempfile::TempDir, name: &str) -> String {
+    let path = dir.path().join(name);
+    std::fs::write(&path, b"fixture-bytes").unwrap();
+    path.to_string_lossy().into_owned()
+}
+
+#[test]
+fn upload_parses_and_labels_its_file_count() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let a = fixture_file(&dir, "a.mp4");
+    let b = fixture_file(&dir, "b.jpg");
+    let acts = parse_actions(&actions(json!([
+        {"type": "upload", "selector": "input[type=file]", "files": [a, b]},
+    ])))
+    .expect("valid upload parses");
+
+    assert_eq!(
+        acts[0],
+        Act::Upload {
+            selector: "input[type=file]".into(),
+            files: vec![a, b],
+        }
+    );
+    assert_eq!(
+        acts[0].label(),
+        "upload input[type=file] (2 files)",
+        "the label must name the selector and the file count"
+    );
+    // The selector takes part in pre-flight, so a stale input rejects the
+    // batch with zero side effects like any other targeted action.
+    assert_eq!(acts[0].selector(), Some("input[type=file]"));
+}
+
+#[test]
+fn upload_rejects_an_empty_or_missing_files_array() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let a = fixture_file(&dir, "a.mp4");
+
+    let err = parse_actions(&actions(json!([
+        {"type": "upload", "selector": "input[type=file]", "files": []},
+    ])))
+    .unwrap_err();
+    assert!(err.contains("non-empty"), "got: {err}");
+
+    let err = parse_actions(&actions(json!([
+        {"type": "upload", "selector": "input[type=file]"},
+    ])))
+    .unwrap_err();
+    assert!(err.contains("\"files\""), "got: {err}");
+
+    // A non-string entry is not a path.
+    let err = parse_actions(&actions(json!([
+        {"type": "upload", "selector": "input[type=file]", "files": [a, 7]},
+    ])))
+    .unwrap_err();
+    assert!(err.contains("non-empty strings"), "got: {err}");
+}
+
+#[test]
+fn upload_rejects_a_relative_path_before_any_cdp_call() {
+    let err = parse_actions(&actions(json!([
+        {"type": "upload", "selector": "input[type=file]", "files": ["clip.mp4"]},
+    ])))
+    .unwrap_err();
+    assert!(err.contains("not absolute"), "got: {err}");
+}
+
+#[test]
+fn upload_rejects_a_missing_file() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let missing = dir.path().join("nope.mp4");
+    let err = parse_actions(&actions(json!([
+        {"type": "upload", "selector": "input[type=file]", "files": [missing.to_string_lossy()]},
+    ])))
+    .unwrap_err();
+    assert!(err.contains("does not exist"), "got: {err}");
+}
+
+#[test]
+fn upload_rejects_a_directory() {
+    // DOM.setFileInputFiles takes any path the browser can read; a directory
+    // is not a file to attach.
+    let dir = tempfile::TempDir::new().unwrap();
+    let sub = dir.path().join("folder");
+    std::fs::create_dir(&sub).unwrap();
+    let err = parse_actions(&actions(json!([
+        {"type": "upload", "selector": "input[type=file]", "files": [sub.to_string_lossy()]},
+    ])))
+    .unwrap_err();
+    assert!(err.contains("not a regular file"), "got: {err}");
+}
+
+#[test]
+fn the_unknown_type_error_lists_upload() {
+    // The rejection message is how a model learns the vocabulary; leaving
+    // upload out of it hides the action from every caller that guessed wrong.
+    let err = parse_actions(&actions(json!([{"type": "attach", "selector": "#x"}]))).unwrap_err();
+    assert!(
+        err.contains("click/fill/press/select/wait/upload"),
+        "got: {err}"
+    );
+}
+
 #[test]
 fn prefix_report_names_completed_prefix_and_holds_remaining() {
     let failed = Act::Click {

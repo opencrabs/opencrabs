@@ -126,9 +126,13 @@ fn prose_tail(text: &str) -> &str {
 /// `"Migration created."` — sentences that announce an action's done without
 /// having executed any tool. Only used in the zero-tool-call path; loose
 /// matching elsewhere would false-positive on conversational recaps.
-fn has_past_tense_action_claim(lower: &str, action_verbs: &[String]) -> bool {
+pub(crate) fn has_past_tense_action_claim(lower: &str, action_verbs: &[String]) -> bool {
     for raw_sentence in lower.split(['.', '\n', '!']) {
-        let s = raw_sentence.trim();
+        // Models type the curly apostrophe as often as the straight one, and
+        // a contraction spelled `it’s` has to reach the guard spelled the way
+        // the list below holds it. Normalise before the word split.
+        let normalized = raw_sentence.replace('\u{2019}', "'");
+        let s = normalized.trim();
         if s.is_empty() || s.len() > 80 {
             continue;
         }
@@ -143,9 +147,29 @@ fn has_past_tense_action_claim(lower: &str, action_verbs: &[String]) -> bool {
                 // disk") is prose about state, not a completion claim —
                 // only an ACTIVE claim ("Loaded.", "Both loaded properly")
                 // counts. Guard on the auxiliary right before the verb.
+                //
+                // Contractions are auxiliaries too, and leaving them out made
+                // ordinary prose read as a completed action: "everything i'm
+                // tagged in" matched `tagged`, the phantom gate replaced a
+                // real answer with its canned note, and the reply never
+                // reached the chat (#2110). The word trim above only strips
+                // the ENDS of a word, so an internal apostrophe survives and
+                // the literal contractions are what the list needs; the
+                // stripped spellings are listed as well because a model drops
+                // the apostrophe often enough to matter. Negated copulas are
+                // the same shape ("it isn't loaded yet") and are listed for
+                // the same reason.
+                //
+                // The perfect auxiliaries (`i've`, `we've`, `you've`,
+                // `they've`) are deliberately absent: they precede an ACTIVE
+                // claim ("I've pushed it"), which is exactly what this guard
+                // exists to catch.
                 const AUX: &[&str] = &[
-                    "is", "are", "was", "were", "been", "be", "being", "gets", "get", "got",
-                    "está", "están", "foi", "é", "est", "sont",
+                    "is", "are", "was", "were", "been", "be", "being", "gets", "get", "got", "i'm",
+                    "im", "am", "we're", "you're", "they're", "it's", "youre", "theyre", "its",
+                    "he's", "she's", "hes", "shes", "that's", "there's", "what's", "thats",
+                    "theres", "whats", "isn't", "aren't", "wasn't", "weren't", "isnt", "arent",
+                    "wasnt", "werent", "está", "están", "foi", "é", "est", "sont",
                 ];
                 let passive = pos > 0 && AUX.contains(&words[pos - 1]);
                 if !passive {
@@ -198,6 +222,16 @@ pub fn has_forward_intent_post_success(text: &str) -> bool {
     if trimmed.len() < 20 {
         return false;
     }
+    // A reply that ends by asking the user something has handed the turn back:
+    // the agent is waiting for the answer, so 'I'll ask what you do' or 'I'll
+    // walk you through it' is conversation, not a promised action (#2083). An
+    // explicit work announcement in the same reply still counts.
+    if prose_tail(trimmed).contains('?')
+        && !matches_work_announcement(trimmed)
+        && !matches_now_gerund(trimmed)
+    {
+        return false;
+    }
     // Both ends, for the same reason the zero-tool detector reads both: a
     // promise made AFTER the tool results ("...no errors from our changes.
     // Let me run tests and check the diff.") sits in the tail, and a
@@ -227,7 +261,11 @@ pub fn has_forward_intent_post_success(text: &str) -> bool {
 
 /// Remove inline channel directives (`<<react:🔥>>`, `<<IMG:path>>`, …)
 /// so anchored phantom patterns see the narration, not the marker (#464).
-fn strip_inline_directives(text: &str) -> String {
+///
+/// Shared with the announcement guard (#2129): a directive is an instruction
+/// to the channel layer, never prose, so it must not reach a text-similarity
+/// check either.
+pub(crate) fn strip_inline_directives(text: &str) -> String {
     static DIRECTIVE_RE: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"<<[^<>\n]{1,120}>>").expect("directive regex"));
     DIRECTIVE_RE.replace_all(text, "").into_owned()
@@ -1147,9 +1185,13 @@ fn backticks_outside_fences(text: &str) -> usize {
 /// Detect whether `text` ends with a URL.
 fn ends_with_url(text: &str) -> bool {
     let trimmed = text.trim_end();
+    // `rfind` returns the first byte of the separator, so `i + 1` can land
+    // inside it when the separator is multi-byte (U+202F, U+00A0, U+2009,
+    // U+3000). Snapping forward keeps the slice on a char boundary; slicing
+    // at `i + 1` panicked with "not a char boundary" before #2220.
     let boundary = trimmed
         .rfind(|c: char| c.is_whitespace() || matches!(c, '(' | '[' | '{' | '<' | '"' | '\''))
-        .map(|i| i + 1)
+        .map(|i| trimmed.ceil_char_boundary(i + 1))
         .unwrap_or(0);
     let tail = &trimmed[boundary..];
     tail.contains("://")
@@ -1324,6 +1366,7 @@ pub fn unbacked_facts(facts: &[String], known: &str) -> Vec<String> {
 /// `plan_announcement_re`) deliberately stay zero-tool-only. After a real call
 /// "Running fmt, then clippy" is a legitimate recap of work in progress, which
 /// is exactly what the post-success exemption exists to protect (#1506, #1172).
+#[derive(Debug)]
 pub(crate) struct MixedFactViolation {
     /// Branch names for the WARN and telemetry, in detection order.
     pub(crate) branches: Vec<&'static str>,
@@ -1331,6 +1374,10 @@ pub(crate) struct MixedFactViolation {
     pub(crate) uncalled_commands: Vec<String>,
     /// Shas, tallies and diagnostic codes absent from the evidence (#1423, #1693).
     pub(crate) unbacked_facts: Vec<String>,
+    /// Claims about this session's own record that the record contradicts
+    /// (#2122): a command denied but present in the calls, or an identifier
+    /// reported as produced with nothing in the evidence to show for it.
+    pub(crate) unbacked_actions: Vec<String>,
     /// Whether the text is a #1506 structured completion report. Carried on the
     /// verdict so the call site can honour the directive without holding the
     /// iteration text alive until the tool results land.
@@ -1349,11 +1396,33 @@ pub(crate) struct MixedFactViolation {
 /// ran before, not against what is about to run.
 ///
 /// Returns `None` when nothing is asserted that the evidence cannot support.
+///
+/// Test-only: the live loop always calls `_with_history`, since it has the
+/// session's earlier calls at hand. Kept as the plain four-argument form so a
+/// test can state "no history" without spelling an empty slice.
+#[cfg(test)]
 pub(crate) fn mixed_iteration_facts(
     text: &str,
     executed_inputs: &[String],
     tool_outputs: &[String],
     evidence: &str,
+) -> Option<MixedFactViolation> {
+    mixed_iteration_facts_with_history(text, executed_inputs, tool_outputs, evidence, &[])
+}
+
+/// Same check, with the session's earlier calls available to the denial check.
+///
+/// The history is deliberately NOT merged into `executed_inputs`. Those two
+/// questions look alike and are not: "you claimed this ran and it did not" is
+/// about the current turn, and clearing it with a call from an hour ago would
+/// hollow the check out. A denial is the opposite shape, a claim about the whole
+/// session, so it is the one branch that reads history.
+pub(crate) fn mixed_iteration_facts_with_history(
+    text: &str,
+    executed_inputs: &[String],
+    tool_outputs: &[String],
+    evidence: &str,
+    session_inputs: &[String],
 ) -> Option<MixedFactViolation> {
     if text.trim().is_empty() {
         return None;
@@ -1361,6 +1430,20 @@ pub(crate) fn mixed_iteration_facts(
     let uncalled_commands = claims_uncalled_commands(text, executed_inputs);
     let facts = unbacked_facts(&asserted_facts(text), evidence);
     let unbacked_evidence = claims_unbacked_evidence(text, tool_outputs);
+    let denials = asserted_history_denials(text);
+    let mut unbacked_actions = denials_contradicted(&denials, executed_inputs);
+    for contradicted in denials_contradicted(&denials, session_inputs) {
+        if !unbacked_actions.contains(&contradicted) {
+            unbacked_actions.push(contradicted);
+        }
+    }
+    for identifier in asserted_produced_identifiers(text) {
+        if !identifier_is_backed(&identifier, evidence) {
+            unbacked_actions.push(format!(
+                "{identifier} (reported as produced, absent from the evidence)"
+            ));
+        }
+    }
 
     let mut branches = Vec::new();
     if !uncalled_commands.is_empty() {
@@ -1368,6 +1451,9 @@ pub(crate) fn mixed_iteration_facts(
     }
     if !facts.is_empty() {
         branches.push("mixed_unbacked_facts");
+    }
+    if !unbacked_actions.is_empty() {
+        branches.push("mixed_unbacked_actions");
     }
     if unbacked_evidence {
         branches.push("mixed_unbacked_evidence");
@@ -1379,6 +1465,7 @@ pub(crate) fn mixed_iteration_facts(
         branches,
         uncalled_commands,
         unbacked_facts: facts,
+        unbacked_actions,
         structured_report: is_structured_report(text),
     })
 }
@@ -1516,6 +1603,249 @@ fn asserted_diagnostics(text: &str) -> Vec<String> {
     }
     out.truncate(MAX_DIAGNOSTICS);
     out
+}
+
+/// Commands or tools the text denies ever having run (#2122).
+///
+/// The shape a verb list cannot reach: "No `sleep` command was ever in my tool
+/// calls" names no action the agent claims to have taken, it claims the ABSENCE
+/// of one, and the evidence that settles it is the session's own call history.
+/// A denial is decidable exactly, so it costs no false positives, unlike the
+/// past-tense verb list that measured 10.2% wrong on legitimate answers
+/// (`~/.opencrabs/projects/opencrabs/research/2122-measurement.md`).
+///
+/// Two families, both narrow on purpose:
+///
+/// * `no <token> command|call|invocation|tool`
+/// * `never|didn't|did not <ran|run|called|call|invoked|invoke|executed|execute> <token>`
+///
+/// The token has to look like a command or tool name, and pronouns are dropped
+/// because "I never ran it" names nothing checkable.
+pub fn asserted_history_denials(text: &str) -> Vec<String> {
+    /// A pathological iteration denies a handful of things, not dozens.
+    const MAX_DENIALS: usize = 6;
+    static DENIAL_RE: LazyLock<Regex> = LazyLock::new(|| {
+        // One literal string, no line continuation: in a raw string a
+        // trailing backslash is a backslash plus a newline, which the regex
+        // engine reads as an escaped newline and which silently breaks the
+        // alternation.
+        Regex::new(concat!(
+            r"(?i)(?:no\s+`?([a-z0-9_.-]{2,40})`?\s+(?:command|call|invocation|tool)\b)",
+            r"|(?:(?:never|didn'?t|did\s+not)\s+",
+            r"(?:ran|run|called|call|invoked|invoke|executed|execute)\s+",
+            r"`?([a-z0-9_.-]{2,40})`?)",
+        ))
+        .expect("denial regex is valid")
+    });
+    /// Words that name nothing a history check could look up.
+    const PRONOUNS: [&str; 10] = [
+        "it", "that", "this", "anything", "nothing", "them", "those", "these", "one", "any",
+    ];
+    let mut out = Vec::new();
+    for caps in DENIAL_RE.captures_iter(text) {
+        let Some(token) = caps.get(1).or_else(|| caps.get(2)) else {
+            continue;
+        };
+        let token = token
+            .as_str()
+            .to_lowercase()
+            // A sentence-ending period is not part of the command name.
+            .trim_end_matches(['.', '-', '_'])
+            .to_string();
+        if PRONOUNS.contains(&token.as_str()) {
+            continue;
+        }
+        out.push(token);
+    }
+    out.sort();
+    out.dedup();
+    out.truncate(MAX_DENIALS);
+    out
+}
+
+/// Which denials the session's own recorded commands contradict.
+///
+/// The match is on a command segment's first word, not a substring: a
+/// `grep -rn "sleep" logs/` call mentions the word without being one, and
+/// counting it as evidence would clear the very lie this exists to catch. The
+/// segment walk skips the wrapper vocabulary the sleep gate skips, so `timeout
+/// 30 sleep 5` and `cd /tmp && sleep 5` still count as a sleep.
+pub fn denials_contradicted(denials: &[String], executed_inputs: &[String]) -> Vec<String> {
+    // Tool inputs arrive as JSON, so the command has to be pulled out first: in
+    // `{"command":"sleep 5"}` the first word is `{"command":"sleep`, which
+    // matches nothing.
+    let commands: Vec<String> = executed_inputs
+        .iter()
+        .map(|input| extract_command_field(input).unwrap_or_else(|| input.clone()))
+        .collect();
+    denials
+        .iter()
+        .filter(|denial| {
+            commands
+                .iter()
+                .any(|command| command_invokes(command, denial))
+        })
+        .cloned()
+        .collect()
+}
+
+/// Does `command` invoke `token` as the first word of any of its segments?
+fn command_invokes(command: &str, token: &str) -> bool {
+    crate::brain::tools::bash::split_command_segments(command)
+        .iter()
+        .any(|segment| {
+            for raw in segment.split_whitespace() {
+                let word = raw.trim_matches(|c: char| c == '`' || c == '"' || c == '\'');
+                if word.eq_ignore_ascii_case(token) {
+                    return true;
+                }
+                // Prefixes that carry no meaning of their own: a wrapper, a
+                // flag, a bare duration, or an inline environment assignment.
+                let skippable = matches!(
+                    word,
+                    "sudo"
+                        | "command"
+                        | "exec"
+                        | "nohup"
+                        | "env"
+                        | "do"
+                        | "then"
+                        | "timeout"
+                        | "xargs"
+                ) || word.starts_with('-')
+                    || word.contains('=')
+                    || (!word.is_empty() && word.chars().all(|c| c.is_ascii_digit()));
+                if !skippable {
+                    break;
+                }
+            }
+            false
+        })
+}
+
+/// Tool inputs recorded in a session's persisted assistant rows (#2122).
+///
+/// A denial can be about an earlier turn: the 2026-10-18 lie ("no `sleep`
+/// command was ever in my tool calls") sat thirty calls deep in the same
+/// session, so turn scope alone would have missed it. `tool_executions` cannot
+/// answer it either, since it stores no input column; the command text lives in
+/// `messages.content` inside the v2 ledgers, under `i`.
+///
+/// `d` is the display description ("bash: sleep 30") and is used as a fallback
+/// for rows written before `i` existed, so an older session is still checkable.
+pub fn ledger_tool_inputs(contents: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for content in contents {
+        let mut rest = content.as_str();
+        while let Some(ledger) = crate::tui::app::ledger_scan::next_ledger(rest) {
+            if ledger.is_v2
+                && let Ok(entries) = serde_json::from_str::<Vec<serde_json::Value>>(ledger.body)
+            {
+                for entry in entries {
+                    let input = entry.get("i").map(|v| v.to_string()).or_else(|| {
+                        // `d` reads `bash: sleep 30`, so the tool-name prefix
+                        // has to go or the first word is `bash:`.
+                        entry.get("d").and_then(|v| v.as_str()).map(|d| {
+                            d.split_once(": ")
+                                .map(|(_, rest)| rest.to_string())
+                                .unwrap_or_else(|| d.to_string())
+                        })
+                    });
+                    if let Some(input) = input {
+                        out.push(input);
+                    }
+                }
+            }
+            rest = &rest[ledger.end..];
+        }
+    }
+    out
+}
+
+/// Issue and pull request numbers the text claims to have produced (#2122).
+///
+/// A number merely referenced is not a claim. "Check #2098" quotes the user and
+/// answering it must not be punished, so a number is recorded only when a
+/// production verb sits on the same line within a short window of it. The
+/// distinction is the whole point: the defect is a false report of work, not
+/// mentioning an identifier.
+pub fn asserted_produced_identifiers(text: &str) -> Vec<String> {
+    /// A pathological iteration reports a handful of filings.
+    const MAX_IDENTIFIERS: usize = 8;
+    /// How far the number may sit from the verb that produced it.
+    const WINDOW: usize = 80;
+    /// Verbs that assert the agent created or changed the object.
+    const VERBS: [&str; 7] = [
+        "filed",
+        "opened",
+        "closed",
+        "created",
+        "merged",
+        "reopened",
+        "commented on",
+    ];
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let lower = line.to_lowercase();
+        for verb in VERBS {
+            let mut search = 0;
+            while let Some(rel) = lower[search..].find(verb) {
+                let after = search + rel + verb.len();
+                search = after;
+                let window_end = {
+                    // `after + WINDOW` can land mid-character on non-ASCII text,
+                    // and slicing there panics (#2124).
+                    let mut end = (after + WINDOW).min(lower.len());
+                    while end < lower.len() && !lower.is_char_boundary(end) {
+                        end += 1;
+                    }
+                    end
+                };
+                if after >= window_end {
+                    continue;
+                }
+                let window = &lower[after..window_end];
+                let bytes = window.as_bytes();
+                let mut i = 0;
+                while i < bytes.len() {
+                    if bytes[i] != b'#' {
+                        i += 1;
+                        continue;
+                    }
+                    let mut j = i + 1;
+                    while j < bytes.len() && bytes[j].is_ascii_digit() {
+                        j += 1;
+                    }
+                    // `#` alone, or `#` before a non-digit, is not an id.
+                    if j > i + 1 {
+                        out.push(window[i..j].to_string());
+                        i = j;
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out.truncate(MAX_IDENTIFIERS);
+    out
+}
+
+/// Whether the conversation record supports a produced identifier.
+///
+/// The tool output for a filing is a URL (`.../issues/2122`) or a confirmation
+/// line (`Created issue #2122`), so the bare `#2122` match alone would miss the
+/// common shape and flag true work. All four spellings are accepted.
+fn identifier_is_backed(identifier: &str, known: &str) -> bool {
+    let Some(digits) = identifier.strip_prefix('#') else {
+        return known.contains(identifier);
+    };
+    known.contains(identifier)
+        || known.contains(&format!("issues/{digits}"))
+        || known.contains(&format!("pull/{digits}"))
+        || known.contains(&format!("discussions/{digits}"))
 }
 
 /// Completed artifacts the text claims were produced (#482).
@@ -2032,4 +2362,18 @@ pub fn is_fact_check_branch(branch: &str) -> bool {
 /// report exempts them. Fact checks never yield to the exemption (#2039).
 pub fn structured_report_exempts(structured: bool, fired_branches: &[&str]) -> bool {
     structured && !fired_branches.iter().any(|b| is_fact_check_branch(b))
+}
+
+/// Whether a text-only iteration that follows an option-surface halt escapes
+/// the phantom kill (#31). The halt already handed the turn back with the
+/// options rendered, so the trailing text closes the turn: it is a sign-off,
+/// never a promised action. Phrase matchers false-positive on exactly that
+/// prose, and the self-heal retry they triggered posted a second answer to a
+/// channel whose first answer was already delivered (2026-10-17, Discord:
+/// "Research delivered, file written, nothing generated ..." was killed on
+/// `intent_no_tools` after the turn had run 11 tools). Fact checks still kill
+/// it, the same rule structured reports follow (#2039): a sign-off that
+/// states a sha the conversation cannot back is still invented.
+pub fn option_halt_exempts(fired_branches: &[&str]) -> bool {
+    !fired_branches.iter().any(|b| is_fact_check_branch(b))
 }

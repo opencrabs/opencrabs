@@ -4,15 +4,13 @@
 //! for one language. The loader embeds them into the binary via
 //! `include_str!` so any TOML syntax error fails the build.
 //!
-//! Runtime language detection picks the right config based on
-//! character-set heuristics (Cyrillic → ru, etc.).
-//!
-//! [`config`] holds the struct and the embedded tables, [`detect`] the
-//! heuristics. This file is declarations only — no function definitions
-//! live here (CONTRIBUTING.md).
+//! [`config`] holds the struct, the embedded tables, and the [`Lang`]
+//! registry that every pack list resolves from; [`detect`] holds the
+//! character-set heuristic that picks one. This file is declarations only:
+//! no function definitions live here (CONTRIBUTING.md).
 
 pub(crate) mod config;
 mod detect;
 
-pub use config::LangConfig;
-pub use detect::{all_langs, detect_language};
+pub use config::{Lang, LangConfig, all_langs};
+pub use detect::{detect_lang, detect_language};

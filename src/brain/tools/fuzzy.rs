@@ -5,6 +5,7 @@
 //! whitespace and Unicode punctuation differences between the agent's
 //! `old_text` and the actual file content.
 
+use super::line_ops::line_spans;
 use unicode_normalization::UnicodeNormalization;
 
 /// Normalize Unicode punctuation/whitespace to ASCII equivalents so that
@@ -88,7 +89,6 @@ pub fn fuzzy_replace_once(content: &str, old_str: &str, new_str: &str) -> Result
     // Slow path: fuzzy line-sequence match.
     let content_lines: Vec<&str> = content.lines().collect();
     let search_lines: Vec<&str> = old_str.lines().collect();
-    let new_lines: Vec<&str> = new_str.lines().collect();
 
     let indices = seek_sequence(&content_lines, &search_lines, 0);
     if indices.is_empty() {
@@ -107,16 +107,43 @@ pub fn fuzzy_replace_once(content: &str, old_str: &str, new_str: &str) -> Result
     let start = indices[0];
     let end_exclusive = start + search_lines.len();
 
-    let mut result: Vec<&str> =
-        Vec::with_capacity(content_lines.len() - search_lines.len() + new_lines.len());
-    result.extend_from_slice(&content_lines[..start]);
-    result.extend_from_slice(&new_lines);
-    result.extend_from_slice(&content_lines[end_exclusive..]);
+    // Splice the matched bytes out of the original instead of rebuilding the
+    // file from `lines()` (#2212). `lines()` drops each terminator and a
+    // trailing `\r`, so a join can only put back the ending it was told to:
+    // on a CRLF file it silently converted every untouched line to LF, and on
+    // a mixed-ending file it normalised the lot.
+    let spans = line_spans(content);
+    let region_start = spans[start].0;
+    let region_end = spans[end_exclusive - 1].1;
+    let region = &content[region_start..region_end];
 
-    let mut new_content = result.join("\n");
-    if content.ends_with('\n') && !new_content.ends_with('\n') {
-        new_content.push('\n');
+    // The matched region's own ending wins for the replacement lines too.
+    // `read_file` shows the model CR-stripped text, so `new_str` normally
+    // arrives with bare LF even when the file is CRLF. Keying on the region
+    // rather than the whole file also keeps a mixed-ending file mixed.
+    let eol = if region.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+
+    // `lines()` on the caller's text keeps the old semantics for a
+    // replacement of "\n" (one blank line) and for "" (the block is removed),
+    // then re-joins with the file's own ending.
+    let normalized_new = new_str.replace("\r\n", "\n");
+    let new_lines: Vec<&str> = normalized_new.lines().collect();
+    let mut body = new_lines.join(eol);
+    // The region's own terminator belongs to the file, not to the caller's
+    // text: without this, replacing the last line of a block would glue it
+    // to the following one.
+    if !new_lines.is_empty() && region.ends_with('\n') {
+        body.push_str(eol);
     }
+
+    let mut new_content = String::with_capacity(content.len() - region.len() + body.len());
+    new_content.push_str(&content[..region_start]);
+    new_content.push_str(&body);
+    new_content.push_str(&content[region_end..]);
 
     Ok(new_content)
 }

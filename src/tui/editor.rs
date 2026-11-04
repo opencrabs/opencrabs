@@ -6,8 +6,8 @@
 //! raw escape sequences into the chat.
 //!
 //! This module gives the editor the *actual* terminal instead: it hands the
-//! tty over to `vi`/`vim`/`nano`/`emacs`, waits for the child to exit, then
-//! re-establishes TUI ownership. The pure helpers (`handoff_target`,
+//! tty over to an allowlisted editor (or the user's `$EDITOR`/`$VISUAL`),
+//! waits for the child to exit, then re-establishes TUI ownership. The pure helpers (`handoff_target`,
 //! `resolve_editor`, `decode_wait_status`) carry no side effects so they can
 //! be unit-tested without a real terminal.
 
@@ -21,15 +21,44 @@ use super::events::{EventHandler, TuiEvent};
 use super::runner::{self, TuiTerminal};
 
 /// Bang commands whose argv[0] matches one of these are routed to the
-/// terminal-handoff path instead of pipe-capture. Exact argv[0] match only:
-/// `/usr/bin/vi` and `myvi-helper` are NOT handoffs (the latter would exec the
-/// wrong thing if we matched on a substring).
-pub(crate) const EDITOR_ALLOWLIST: &[&str] = &["vi", "vim", "nano", "emacs"];
+/// terminal-handoff path instead of pipe-capture. Matching is on the
+/// *basename*, so `/usr/bin/nvim` hands off while `myvi-helper` still does
+/// not (the comparison stays exact; a substring match would exec the wrong
+/// thing).
+///
+/// The set covers what people actually run (#2173): `nvim` and `emacsclient`
+/// were missing, and `helix`/`hx`/`micro` are the common non-vi editors.
+pub(crate) const EDITOR_ALLOWLIST: &[&str] = &[
+    "vi",
+    "vim",
+    "nvim",
+    "nano",
+    "emacs",
+    "emacsclient",
+    "helix",
+    "hx",
+    "micro",
+];
 
-/// Return the allowlisted editor name if `cmd`'s argv[0] is one, else None.
-pub(crate) fn handoff_target(cmd: &str) -> Option<&'static str> {
-    let argv0 = cmd.split_whitespace().next()?;
-    EDITOR_ALLOWLIST.iter().copied().find(|ed| *ed == argv0)
+/// The last path component of `token`, so `/usr/bin/nvim` and `./vim` compare
+/// equal to `nvim` and `vim`.
+fn basename(token: &str) -> &str {
+    token.rsplit(['/', '\\']).next().unwrap_or(token)
+}
+
+/// Return the editor name if `cmd`'s argv[0] is one, else None.
+///
+/// A command hands off when its basename is in [`EDITOR_ALLOWLIST`], or when
+/// it matches the basename of `env_editor` (`$EDITOR`/`$VISUAL`): the user
+/// chose that program, so honouring it adds no attack surface. The env path
+/// is a name comparison, not a blanket pass, so `!myvi-helper` still pipes.
+pub(crate) fn handoff_target(cmd: &str, env_editor: Option<&str>) -> Option<String> {
+    let argv0 = basename(cmd.split_whitespace().next()?);
+    if let Some(ed) = EDITOR_ALLOWLIST.iter().copied().find(|ed| *ed == argv0) {
+        return Some(ed.to_string());
+    }
+    let env_base = basename(env_editor?.split_whitespace().next()?);
+    (!env_base.is_empty() && env_base == argv0).then(|| env_base.to_string())
 }
 
 /// Split a bang command into `(program, args)`. Intentionally minimal:

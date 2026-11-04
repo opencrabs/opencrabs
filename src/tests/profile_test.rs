@@ -13,9 +13,9 @@ use std::path::PathBuf;
 use crate::config::profile::{
     ProfileEntry, ProfileRegistry, acquire_token_lock, active_profile, base_opencrabs_dir,
     create_profile, delete_profile, export_profile, foreign_lock_owners, hash_token,
-    import_profile, list_profiles, migrate_profile, parse_lock_owner_pid, release_all_locks,
-    release_token_lock, resolve_creation_ticks, resolve_profile_home, set_active_profile,
-    split_pid_ticks, validate_profile_name,
+    import_profile, list_profiles, migrate_profile, parse_lock_owner_pid, process_creation_stamp,
+    release_all_locks, release_token_lock, resolve_creation_ticks, resolve_profile_home,
+    set_active_profile, split_pid_ticks, validate_profile_name,
 };
 use tempfile::tempdir;
 
@@ -1674,17 +1674,16 @@ fn lock_owner_pid_survives_the_windows_ticks_field() {
     assert_eq!(parse_lock_owner_pid("0:123"), None);
 }
 
-/// Round 7, PR #3, restated by round 9: several stamps can name one PID
-/// after a reuse, and they disagree about its creation time. The scan must
-/// resolve them the same way regardless of which entry it sees first. On
-/// Windows the only claim that can win is the kernel's own reading of the
-/// live process -- an exact match, so a wall clock that stepped backward
-/// cannot make a corpse's stamp outrank its living owner. Off Windows no
-/// such reading exists, so the newest recorded claim wins. Either way, no
-/// arrival order can change the answer.
+/// Restated by #2084: the scan decides liveness from the stamp itself, so a
+/// lock file whose recorded creation time disagrees with the live process is
+/// dropped before any claims are resolved. That is the recycled-PID case, and
+/// `profile_lock_stamp_test` pins it. What is left to check here is ordering:
+/// two stamps name one live PID, one carrying its creation time and one a
+/// legacy bare PID, and they must resolve to the same owner and the same
+/// channels whichever order `read_dir` happens to return them in.
 ///
 /// `read_dir` order cannot be forced from here, so this varies the *write*
-/// order instead, across a matched expectation and an unmatched one.
+/// order instead.
 #[test]
 fn foreign_lock_owner_resolves_a_reused_pid_against_the_live_process() {
     use std::process::{Command, Stdio};
@@ -1710,53 +1709,24 @@ fn foreign_lock_owner_resolves_a_reused_pid_against_the_live_process() {
     let mut child = spawned.expect("spawn a helper process to own a live pid");
     let live = child.id();
 
-    // Round 9, PR #3: the fake ticks this test used predates the exact-match
-    // rule and cannot win it on Windows -- no real process is born at tick
-    // 9000 -- so the stamps must be shaped to the rule each platform uses.
-    // On Windows the claims are built from the kernel's own reading of the
-    // live child, with a decoy made *newer* than the real time: under the
-    // old max rule the decoy won and `terminate` then refused the real
-    // owner forever, and only the exact match can still tell them apart.
-    // Off Windows there is no reading to match, so the newest recorded
-    // claim is the correct answer and the old fake ticks express it.
-    #[cfg(windows)]
-    let (low, high, matched, unmatched) = {
-        let real = crate::config::winlock::creation_ticks_of(live)
-            .expect("kernel reports a creation time for a live pid");
-        (real, real.saturating_add(1000), Some(real), None)
-    };
-    #[cfg(not(windows))]
-    let (low, high, matched, unmatched) = (1000_u64, 9000_u64, Some(9000_u64), Some(9000_u64));
-
-    let stale = format!("{profile}:{live}:{low}");
-    let fresh = format!("{profile}:{live}:{high}");
+    // #2084: the scan drops a stamp whose recorded creation time disagrees
+    // with the live process, so a claim built from fake ticks is discarded
+    // before it can be resolved and this test would prove nothing. The claim
+    // here is the kernel's own reading of the live child, which is what a real
+    // owner's lock carries on every platform that can be asked.
+    let recorded = process_creation_stamp(live)
+        .expect("the helper was spawned here, so this platform reads its creation time");
+    let claim = format!("{profile}:{live}:{recorded}");
     let legacy = format!("{profile}:{live}");
-    for (order, expect) in [
-        (
-            [("telegram_aaa.lock", &stale), ("whatsapp_bbb.lock", &fresh)],
-            matched,
-        ),
-        (
-            [("telegram_aaa.lock", &fresh), ("whatsapp_bbb.lock", &stale)],
-            matched,
-        ),
-        // A legacy stamp carries no creation time. On Windows nothing then
-        // agrees with the kernel and the scan must refuse to pick; off
-        // Windows it falls through to the newest recorded claim.
-        (
-            [
-                ("telegram_aaa.lock", &legacy),
-                ("whatsapp_bbb.lock", &fresh),
-            ],
-            unmatched,
-        ),
-        (
-            [
-                ("telegram_aaa.lock", &fresh),
-                ("whatsapp_bbb.lock", &legacy),
-            ],
-            unmatched,
-        ),
+    for order in [
+        [
+            ("telegram_aaa.lock", claim.as_str()),
+            ("whatsapp_bbb.lock", legacy.as_str()),
+        ],
+        [
+            ("telegram_aaa.lock", legacy.as_str()),
+            ("whatsapp_bbb.lock", claim.as_str()),
+        ],
     ] {
         let dir = tempdir().expect("tempdir");
         for (name, contents) in order {
@@ -1767,7 +1737,8 @@ fn foreign_lock_owner_resolves_a_reused_pid_against_the_live_process() {
             panic!("live owner {live} missing for profile {profile:?}");
         };
         assert_eq!(
-            owner.creation_ticks, expect,
+            owner.creation_ticks,
+            Some(recorded),
             "resolution must be order-independent for {order:?}"
         );
         let mut channels = owner.channels.clone();
@@ -1804,8 +1775,10 @@ fn resolve_creation_ticks_matches_the_live_process_not_the_newest_claim() {
     assert_eq!(resolve_creation_ticks(Some(8000), &[None]), None);
 }
 
-/// Without a kernel reading -- every non-Windows platform -- the greatest
-/// claim still wins, and a legacy stamp never displaces a recorded time.
+/// Without a kernel reading -- a platform that cannot be asked, or a refused
+/// handle -- the greatest claim still wins, and a legacy stamp never displaces
+/// a recorded time. Since #2084 every supported platform answers, so this is
+/// the path taken for stamps written by builds that predate the reading.
 #[test]
 fn resolve_creation_ticks_falls_back_to_the_newest_claim() {
     assert_eq!(

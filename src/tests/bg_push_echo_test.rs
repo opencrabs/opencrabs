@@ -205,6 +205,7 @@ fn bubble_md_and_classic_stay_separate() {
 
 fn meta(success: bool, label: &str, secs: f32, tail: &str) -> BgTaskMeta {
     BgTaskMeta {
+        task_id: "t-1".to_string(),
         success,
         label: label.to_string(),
         elapsed_secs: secs,

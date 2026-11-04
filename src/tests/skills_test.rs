@@ -273,6 +273,52 @@ fn every_shipped_skill_template_is_registered_as_a_builtin() {
     }
 }
 
+/// Issue #1991: opt-in skill templates live in `templates/optional-skills/` and
+/// are deliberately NOT compiled in, so the #990 sentinel above does not scan
+/// them and they can rot silently. This is the guard for that tier: every
+/// folder there must parse as a skill, its frontmatter `name` must match its
+/// directory (a user resolves the skill by the folder name they copy it into),
+/// and it must NOT be in `BUILTIN_SKILLS` (a built-in reaches every user, which
+/// is exactly what an opt-in template must not do).
+#[test]
+fn every_optional_skill_template_parses_and_stays_out_of_the_binary() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/docs/reference/templates/optional-skills");
+    let entries = std::fs::read_dir(&dir).expect("templates optional-skills dir reads");
+
+    let builtin_names: Vec<&str> = crate::brain::skills::BUILTIN_SKILLS_FOR_TEST
+        .iter()
+        .map(|(n, _)| *n)
+        .collect();
+
+    let mut seen = 0usize;
+    for entry in entries.flatten() {
+        let skill_md = entry.path().join("SKILL.md");
+        if !entry.path().is_dir() || !skill_md.exists() {
+            continue;
+        }
+        seen += 1;
+        let dir_name = entry.file_name().to_string_lossy().to_string();
+        let raw = std::fs::read_to_string(&skill_md)
+            .unwrap_or_else(|e| panic!("{dir_name}/SKILL.md reads: {e}"));
+        let skill = Skill::parse(&dir_name, &raw, SkillSource::User)
+            .unwrap_or_else(|e| panic!("{dir_name}/SKILL.md does not parse: {e}"));
+        assert_eq!(
+            skill.name, dir_name,
+            "{dir_name}/SKILL.md declares name `{}`, so a user who copies the \
+             folder gets a skill under the wrong name",
+            skill.name
+        );
+        assert!(
+            !builtin_names.contains(&dir_name.as_str()),
+            "{dir_name} sits in the opt-in tier but is also in BUILTIN_SKILLS, \
+             so it ships to every user anyway. BUILTIN_SKILLS: {builtin_names:?}"
+        );
+    }
+
+    assert!(seen > 0, "no optional skill templates found under {dir:?}");
+}
+
 // --- globs frontmatter (issue #150) ---
 
 #[test]

@@ -14,6 +14,7 @@ fn tool(name: &str, status: Option<bool>) -> GroupEntry {
         name: name.to_string(),
         context: String::new(),
         status,
+        task_id: None,
     }
 }
 

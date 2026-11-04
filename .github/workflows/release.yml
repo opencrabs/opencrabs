@@ -17,12 +17,20 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  # CI only runs on PRs (not pushes to main). For release tags, we verify
-  # the commit is on main and skip CI polling entirely. PRs are where CI
-  # gates happen; main is protected by branch protection requiring PR merge.
+  # v0.5.10 was tagged and published six seconds after the CI run on that same
+  # commit started, and that run concluded `failure` (#2078). This job used to
+  # assume CI never runs on main and gate on nothing but the branch, so nothing
+  # stopped a red commit from shipping. ci.yml does run on push to main, so the
+  # tag path now reads that run's conclusion and publishes nothing else.
   wait-for-ci:
     name: Verify main branch
     runs-on: ubuntu-latest
+    # `gh run list` reads Actions data, which `contents: read` alone does not
+    # cover. Without `actions: read` the gate below cannot see the run it is
+    # supposed to check (#2078).
+    permissions:
+      contents: read
+      actions: read
     steps:
       - name: Confirm commit is on main
         env:
@@ -47,11 +55,99 @@ jobs:
               if [ "$SHA" = "$MAIN_SHA" ]; then
                 echo "Commit $SHA is main HEAD"
               else
-                echo "WARNING: Commit $SHA may not be on main (status: $MERGE_BASE). Proceeding anyway."
+                # This used to warn and release anyway. An unverifiable commit
+                # is not a release candidate (#2078).
+                echo "ERROR: Commit $SHA is not on main (status: $MERGE_BASE). Refusing to release."
+                exit 1
               fi
               ;;
           esac
-          echo "Ready to release."
+
+      - name: Require a green CI run on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          SHA="${{ github.sha }}"
+          REPO="${{ github.repository }}"
+
+          # The step above proves the commit is on main, which it was for
+          # v0.5.10. This step is the actual gate: it reads the conclusion of
+          # the commit's own ci.yml run and refuses to publish anything but a
+          # green one (#2078).
+          #
+          # "No run found" and "run in flight" are handled differently on
+          # purpose. Waiting an hour for a run that will never appear is worse
+          # than saying so: ci.yml skips docs-only commits via `paths-ignore`,
+          # so a missing run is reachable, and the message below says what to
+          # do about it. Either way a missing run FAILS, never skips. Deleting
+          # this step is what made #2078 possible, so silence is not an option
+          # here.
+          if [ "${#SHA}" -ne 40 ]; then
+            echo "ERROR: expected a full 40-character commit SHA, got '${SHA}'."
+            exit 1
+          fi
+
+          # `gh run list --commit` matches on the full SHA and silently returns
+          # nothing for an abbreviated one, which is why the check above exists.
+          ci_run() {
+            gh run list --repo "$REPO" --workflow ci.yml --commit "$SHA" \
+              --limit 1 --json status,conclusion,databaseId \
+              --jq '.[0] // empty' 2>/dev/null || echo ""
+          }
+
+          run=$(ci_run)
+          found_deadline=$((SECONDS + 300))
+          while [ -z "$run" ]; do
+            if [ "$SECONDS" -ge "$found_deadline" ]; then
+              echo "ERROR: no ci.yml run found for $SHA after 5 minutes, so this commit is unverified."
+              echo "CI skips docs-only commits (paths-ignore). Either run 'gh workflow run ci.yml --ref main'"
+              echo "against a commit CI will actually pick up, or tag a commit CI has already run on. (#2078)"
+              exit 1
+            fi
+            echo "No ci.yml run for $SHA yet; waiting for it to appear..."
+            sleep 15
+            run=$(ci_run)
+          done
+
+          run_deadline=$((SECONDS + 3600))
+          while :; do
+            status=$(printf '%s' "$run" | jq -r '.status')
+            conclusion=$(printf '%s' "$run" | jq -r '.conclusion')
+            id=$(printf '%s' "$run" | jq -r '.databaseId')
+            echo "ci.yml run $id on $SHA: status=$status conclusion=$conclusion"
+
+            # An unreadable status must fail, not read as "still running". This
+            # loop is the last thing between a red commit and a published
+            # release, so a parse failure has to be loud (#2078).
+            if [ -z "$status" ] || [ "$status" = "null" ]; then
+              echo "ERROR: could not read the status of the ci.yml run for $SHA (got '${status}')."
+              echo "Refusing to publish a commit whose CI cannot be verified (#2078)."
+              exit 1
+            fi
+
+            if [ "$status" = "completed" ]; then
+              if [ "$conclusion" = "success" ]; then
+                echo "CI is green on $SHA. Ready to release."
+                exit 0
+              fi
+              echo "ERROR: ci.yml run $id on $SHA concluded '$conclusion'. Refusing to publish a red commit (#2078)."
+              exit 1
+            fi
+
+            if [ "$SECONDS" -ge "$run_deadline" ]; then
+              echo "ERROR: ci.yml run $id on $SHA is still '$status' after 60 minutes. Refusing to publish unverified (#2078)."
+              exit 1
+            fi
+
+            echo "Waiting for ci.yml run $id to finish (status=$status)..."
+            sleep 30
+            run=$(ci_run)
+            if [ -z "$run" ]; then
+              echo "ERROR: ci.yml run $id for $SHA disappeared while waiting (#2078)."
+              exit 1
+            fi
+          done
 
   publish-crate:
     name: Publish to crates.io
@@ -60,7 +156,7 @@ jobs:
     outputs:
       version: ${{ steps.check.outputs.version }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Check if already published
         id: check
@@ -105,7 +201,9 @@ jobs:
 
       - name: Install Rust
         if: steps.check.outputs.published == 'false'
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.98.1
 
       - name: Install ALSA dev
         if: steps.check.outputs.published == 'false'
@@ -130,7 +228,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # Pinned, never ubuntu-latest. The hosted label rolls forward on its
+          # own schedule: it moved to Ubuntu 26.04 (glibc 2.43) between v0.5.12
+          # and v0.5.13, and the asset built after the roll refuses to start on
+          # Ubuntu 24.04 and every older distribution with "GLIBC_2.43 not
+          # found" (#2206). The arm64 job below is pinned for the same reason;
+          # both stay on the oldest image we intend to support.
+          - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             artifact_name: opencrabs
             asset_suffix: linux-amd64
@@ -173,7 +277,7 @@ jobs:
             asset_suffix: macos-arm64
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Set version
         id: version
@@ -210,8 +314,9 @@ jobs:
           done
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
+          toolchain: 1.98.1
           targets: ${{ matrix.target }}
 
       - name: Install Linux dependencies
@@ -220,13 +325,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libasound2-dev
 
+      # Pinned to a released tag and an explicit tool version: the action
+      # defaults cmakeVersion to "latest" and resolves it at run time.
       - name: Install CMake (Windows)
         if: matrix.os == 'windows-latest'
-        uses: lukka/get-cmake@latest
+        uses: lukka/get-cmake@a89e43e22a96abafcd7a62db652a65ecd33052c9 # v4.4.4
+        with:
+          cmakeVersion: "4.4.4"
 
       - name: Install NASM (Windows)
         if: matrix.os == 'windows-latest'
-        uses: ilammy/setup-nasm@v1
+        uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1
 
       - name: Build
         shell: bash
@@ -308,19 +417,81 @@ jobs:
         if: matrix.os != 'windows-latest'
         run: strip target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
 
+      # The published asset is the only thing users ever run, so the floor gets
+      # checked on that exact file, after strip, before it is archived. A binary
+      # built on an image newer than the floor carries newer symbol versions and
+      # refuses to start on older distributions, which is how v0.5.13 shipped
+      # GLIBC_2.43 and broke every Ubuntu 24.04 install (#2206).
+      #
+      # Running the binary on this runner does not catch that on its own: the
+      # build image always satisfies the requirement its own toolchain baked in.
+      # The version assertion is the real gate; the --version run is there to
+      # catch the plain breakage, like a missing shared library.
+      - name: Check glibc floor (Linux)
+        if: contains(matrix.target, 'linux')
+        shell: bash
+        env:
+          # The oldest glibc we support. This is what ubuntu-24.04 ships and
+          # what v0.5.12 shipped with. Raising it drops every distribution
+          # older than that image, so it is a deliberate decision, never a
+          # side effect of a runner label rolling forward.
+          GLIBC_FLOOR: "2.39"
+        run: |
+          binary="target/${{ matrix.target }}/release/${{ matrix.artifact_name }}"
+          ./scripts/check-glibc-floor.sh "$binary" "$GLIBC_FLOOR"
+          "$binary" --version
+
+      # A Mach-O executable has no icon field, so macOS can only show an icon
+      # for a bundle. Without this step the tarball ships a bare binary and the
+      # system falls back to the generic exec glyph.
+      - name: Bundle macOS app
+        if: contains(matrix.asset_suffix, 'macos')
+        shell: bash
+        run: |
+          ./scripts/package-macos-app.sh \
+            --binary "target/${{ matrix.target }}/release/${{ matrix.artifact_name }}" \
+            --rtk "target/${{ matrix.target }}/release/rtk" \
+            --version "${{ steps.version.outputs.version }}" \
+            --out dist
+
       - name: Create archive
         shell: bash
         run: |
           ASSET_NAME="opencrabs-v${{ steps.version.outputs.version }}-${{ matrix.asset_suffix }}"
-          cd target/${{ matrix.target }}/release
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            cd target/${{ matrix.target }}/release
             7z a ../../../${ASSET_NAME}.zip ${{ matrix.artifact_name }} rtk.exe
+          elif [[ "${{ matrix.asset_suffix }}" == macos-* ]]; then
+            tar czf "${ASSET_NAME}.tar.gz" -C dist OpenCrabs.app
           else
-            tar czf ../../../${ASSET_NAME}.tar.gz ${{ matrix.artifact_name }} rtk
+            # A Linux desktop needs a menu entry and an icon next to the binary,
+            # or a file manager shows the generic exec glyph.
+            cp packaging/linux/opencrabs.desktop packaging/linux/opencrabs.png \
+              target/${{ matrix.target }}/release/
+            cd target/${{ matrix.target }}/release
+            tar czf ../../../${ASSET_NAME}.tar.gz ${{ matrix.artifact_name }} rtk \
+              opencrabs.desktop opencrabs.png
           fi
 
+      # The floor check above reads what the binary asks for. This runs it, on
+      # the distribution that floor names, out of the archive that is about to
+      # be uploaded. v0.5.13 passed every other check in this job and then
+      # refused to start on Ubuntu 24.04 with "GLIBC_2.43 not found" (#2206):
+      # the hosted image rolled underneath the build, and nothing downstream
+      # ever executed the result. A container on the oldest supported release is
+      # the only place that answers "does this start for a user" (#2214).
+      - name: Check the archive starts on the oldest supported Linux
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          # Same floor as the check above; the script maps it to an image.
+          GLIBC_FLOOR: "2.39"
+        run: |
+          archive="opencrabs-v${{ steps.version.outputs.version }}-${{ matrix.asset_suffix }}.tar.gz"
+          ./scripts/check-linux-asset-starts.sh "$archive" "$GLIBC_FLOOR"
+
       - name: Upload artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: opencrabs-v${{ steps.version.outputs.version }}-${{ matrix.asset_suffix }}
           path: |
@@ -339,7 +510,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Extract version from tag
         id: version
@@ -361,7 +532,7 @@ jobs:
           fi
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           path: artifacts
 

@@ -147,20 +147,25 @@ fn both_evolve_branches_arm_the_systemd_restart() {
     );
     let flat = homebrew_flat();
     assert!(
-        flat.contains("build_systemd_restart_command(pid, use_user_units).spawn()"),
-        "the brew branch must spawn the delayed restart, not merely build it"
+        flat.contains("build_systemd_restart_command(pid, targets.user, &targets.units).spawn()"),
+        "the brew branch must spawn the delayed restart, not merely build it, and it must \
+         pass the resolved unit list rather than the discovery glob"
     );
     assert!(
-        flat.contains("select_unit_bus(sid)"),
-        "the branch must pre-flight the unit bus instead of scheduling blind"
+        flat.contains("select_restart_targets(sid)"),
+        "the branch must resolve the bus and the unit list instead of scheduling blind"
     );
     assert!(
-        flat.contains("sweep_stale_evolve_units(use_user_units, sid)"),
+        flat.contains("sweep_stale_evolve_units(targets.user, sid)"),
         "stale transient evolve units must be reset-failed before a fresh one is armed"
     );
     assert!(
         flat.contains("RestartStatus::NoUnitsMatched"),
         "zero matching units must be reported rather than silently scheduled (#136)"
+    );
+    assert!(
+        flat.contains("RestartStatus::Unresolved"),
+        "an unresolvable unit list must be reported rather than scheduled blind (#2081)"
     );
 }
 
@@ -172,15 +177,21 @@ fn the_user_bus_fallback_lives_in_the_shared_preflight() {
     // branches reach, so it cannot drift apart between them.
     let sys = include_str!("../brain/tools/evolve/systemd.rs");
     assert!(
-        sys.contains("count_matching_systemd_units(SYSTEMD_UNIT_PATTERN, true)"),
+        sys.contains("lookup_bus(SYSTEMD_UNIT_PATTERN, true)"),
         "the user bus must be checked before giving up"
     );
     assert!(
-        sys.contains("using {n} user-level units"),
+        sys.contains("using user-level units"),
         "the fallback must be logged so an operator can diagnose a silent restart"
     );
+    // This pin used to require the words "scheduling restart anyway", i.e. an
+    // unreadable unit list fell through to scheduling the glob. That fallback was
+    // the same defect by another route: a pattern reaching `systemctl restart`
+    // expands to the transient evolve unit once systemd-run has created it, so the
+    // restart would stop its own executor (#2081). An unreadable list is now
+    // reported as Unresolved instead.
     assert!(
-        sys.contains("scheduling restart anyway"),
-        "an uncountable bus must not withhold the restart from a user whose daemon exists"
+        sys.contains("RestartPlan::Unresolved"),
+        "an unreadable unit list must be reported, never satisfied with the discovery glob"
     );
 }

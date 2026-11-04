@@ -259,7 +259,19 @@ fn clickable_module_registered_and_launcher_detached() {
         "module registered"
     );
     let src = include_str!("../tui/app/clickable.rs");
-    assert!(src.contains(".spawn()"), "launcher uses spawn, not status");
+    assert!(
+        src.contains("launcher::open_detached"),
+        "clickable must delegate to the detached launcher"
+    );
+    assert!(
+        !src.contains("spawn().map(|_child| ())"),
+        "the spawn-and-forget launcher (#2170) must not come back"
+    );
+    let launcher = include_str!("../tui/launcher.rs");
+    assert!(
+        launcher.contains("spawn()"),
+        "launcher uses spawn, not status"
+    );
 }
 
 /// The launcher must pick the platform's default-handler command. Pinned per
@@ -268,7 +280,7 @@ fn clickable_module_registered_and_launcher_detached() {
 /// `logs open` CLI), not `cmd /C start`.
 #[test]
 fn opener_command_matches_platform() {
-    let cmd = clickable::opener_command();
+    let cmd = crate::tui::launcher::opener_command();
     #[cfg(target_os = "macos")]
     let expected = "open";
     #[cfg(target_os = "linux")]
@@ -300,5 +312,39 @@ fn docs_advertise_click_to_open() {
     assert!(
         help.contains("kv(\"Mouse click\""),
         "/help dialog must list the Mouse click binding"
+    );
+}
+
+/// The session-files launcher must never wait on the viewer (#2172).
+/// `.status()` there blocked the event loop until the user closed
+/// Preview/Finder, which is what froze the whole TUI on Enter.
+#[test]
+fn session_files_launcher_never_blocks_the_loop() {
+    let src = include_str!("../tui/app/input.rs");
+    let start = src
+        .find("pub(crate) async fn handle_session_files_key")
+        .expect("session-files key handler must exist");
+    let body = &src[start..];
+    let end = body
+        .find("/// Handle keys in projects mode")
+        .unwrap_or(body.len());
+    let body = &body[..end];
+    assert!(
+        !body.contains(".status()"),
+        "the session-files launcher must be detached, not blocking on .status()"
+    );
+    assert!(
+        body.contains("launcher::open_detached"),
+        "session files must go through the detached launcher"
+    );
+    // The failure branch used to promise a clipboard fallback in a comment
+    // and copy nothing (#2172). Pin the behaviour, not the comment.
+    assert!(
+        body.contains("copy_to_clipboard"),
+        "the no-launcher branch must actually copy the path, not just name it"
+    );
+    assert!(
+        !body.contains("Fallback: copy path to clipboard"),
+        "the comment promised a fallback the code never ran"
     );
 }

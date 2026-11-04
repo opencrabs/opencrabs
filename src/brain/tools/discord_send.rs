@@ -277,7 +277,18 @@ impl Tool for DiscordSendTool {
                 let channel = ChannelId::new(channel_id);
                 let chunks = crate::channels::discord::handler::split_message(&text, 2000);
                 for chunk in chunks {
-                    if let Err(e) = channel.say(&http, chunk).await {
+                    // #2196: the tool's sends are real messages, so they go
+                    // through the governor's recorded path like every other
+                    // answer. A probe sent this way used to leave no row.
+                    if let Err(e) = crate::channels::discord::governor::say_recorded(
+                        self.discord_state.governor(),
+                        channel,
+                        &http,
+                        crate::channels::discord::governor::Surface::Send,
+                        &chunk,
+                    )
+                    .await
+                    {
                         return Ok(ToolResult::error(format!("Failed to send: {e}")));
                     }
                 }
@@ -298,7 +309,16 @@ impl Tool for DiscordSendTool {
                 let builder = CreateMessage::new()
                     .content(text.as_str())
                     .reference_message(reference);
-                match channel.send_message(&http, builder).await {
+                match crate::channels::discord::governor::send_content_recorded(
+                    self.discord_state.governor(),
+                    channel,
+                    &http,
+                    crate::channels::discord::governor::Surface::Send,
+                    builder,
+                    &text,
+                )
+                .await
+                {
                     Ok(_) => Ok(ToolResult::success(format!(
                         "Reply sent to message {message_id}."
                     ))),
@@ -460,9 +480,18 @@ impl Tool for DiscordSendTool {
                     .description(description.as_str())
                     .color(color);
                 let builder = CreateMessage::new().embed(embed);
-                match ChannelId::new(channel_id)
-                    .send_message(&http, builder)
-                    .await
+                // The embed's own text is what a reader sees, so that is what
+                // the transcript keeps (#2196).
+                let recorded = format!("{title}\n{description}");
+                match crate::channels::discord::governor::send_content_recorded(
+                    self.discord_state.governor(),
+                    ChannelId::new(channel_id),
+                    &http,
+                    crate::channels::discord::governor::Surface::Send,
+                    builder,
+                    &recorded,
+                )
+                .await
                 {
                     Ok(_) => Ok(ToolResult::success(format!(
                         "Embed sent to channel {channel_id}."
@@ -633,11 +662,17 @@ impl Tool for DiscordSendTool {
                     menu = menu.placeholder(ph);
                 }
                 let message = CreateMessage::new()
-                    .content(text)
+                    .content(text.clone())
                     .components(vec![CreateActionRow::SelectMenu(menu)]);
-                match ChannelId::new(channel_id)
-                    .send_message(&http, message)
-                    .await
+                match crate::channels::discord::governor::send_content_recorded(
+                    self.discord_state.governor(),
+                    ChannelId::new(channel_id),
+                    &http,
+                    crate::channels::discord::governor::Surface::Send,
+                    message,
+                    &text,
+                )
+                .await
                 {
                     Ok(_) => {
                         self.discord_state.register_select(select_id, options).await;
@@ -683,9 +718,15 @@ impl Tool for DiscordSendTool {
                 if spec.allow_multiselect {
                     poll = poll.allow_multiselect();
                 }
-                match ChannelId::new(channel_id)
-                    .send_message(&http, CreateMessage::new().poll(poll))
-                    .await
+                match crate::channels::discord::governor::send_content_recorded(
+                    self.discord_state.governor(),
+                    ChannelId::new(channel_id),
+                    &http,
+                    crate::channels::discord::governor::Surface::Send,
+                    CreateMessage::new().poll(poll),
+                    &spec.question,
+                )
+                .await
                 {
                     Ok(_) => {
                         let mut note = format!(
@@ -749,15 +790,21 @@ impl Tool for DiscordSendTool {
                 let form_id = uuid::Uuid::new_v4().to_string();
                 let message =
                     CreateMessage::new()
-                        .content(text)
+                        .content(&text)
                         .components(vec![CreateActionRow::Buttons(vec![
                             CreateButton::new(format!("form:{form_id}"))
                                 .label("📝 Open form")
                                 .style(ButtonStyle::Primary),
                         ])]);
-                match ChannelId::new(channel_id)
-                    .send_message(&http, message)
-                    .await
+                match crate::channels::discord::governor::send_content_recorded(
+                    self.discord_state.governor(),
+                    ChannelId::new(channel_id),
+                    &http,
+                    crate::channels::discord::governor::Surface::Send,
+                    message,
+                    &text,
+                )
+                .await
                 {
                     Ok(_) => {
                         self.discord_state
@@ -802,9 +849,18 @@ impl Tool for DiscordSendTool {
                         let attachment = CreateAttachment::bytes(bytes.as_slice(), fname);
                         let mut msg = CreateMessage::new().add_file(attachment);
                         if !caption.is_empty() {
-                            msg = msg.content(caption);
+                            msg = msg.content(caption.clone());
                         }
-                        match channel.send_message(&http, msg).await {
+                        match crate::channels::discord::governor::send_content_recorded(
+                            self.discord_state.governor(),
+                            channel,
+                            &http,
+                            crate::channels::discord::governor::Surface::Send,
+                            msg,
+                            &caption,
+                        )
+                        .await
+                        {
                             Ok(_) => Ok(ToolResult::success("File sent.".to_string())),
                             Err(e) => Ok(ToolResult::error(format!("Failed to send file: {e}"))),
                         }

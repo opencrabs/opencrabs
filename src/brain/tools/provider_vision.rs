@@ -7,6 +7,7 @@
 
 use super::analyze_image::{AnalyzeImageTool, base64_encode, detect_mime_type};
 use super::r#trait::{Tool, ToolCapability, ToolExecutionContext, ToolResult};
+use crate::brain::provider::factory::VisionCandidate;
 use async_trait::async_trait;
 use serde_json::Value;
 use uuid::Uuid;
@@ -34,7 +35,7 @@ pub struct ProviderVisionTool {
     /// `analyze_video` extracts frames locally and hands them to a vision
     /// backend it has already picked, so it pins that rather than re-deriving
     /// it. `None` is the ordinary case: resolve from config per request.
-    pinned: Option<Vec<(String, String, String)>>,
+    pinned: Option<Vec<VisionCandidate>>,
     /// Gemini fallback, tried only after EVERY candidate fails. Gemini is
     /// never primary while any provider can serve vision (owner contract).
     gemini_fallback: Option<AnalyzeImageTool>,
@@ -55,16 +56,30 @@ impl ProviderVisionTool {
     }
 
     /// Pin an explicit candidate list, skipping config resolution.
+    ///
+    /// The tuple shape carries no per-provider cap, so a pinned candidate
+    /// sends no `max_tokens` and lets the endpoint decide (#2120), which is
+    /// what `analyze_video`'s frame calls want.
     pub fn with_candidates(candidates: Vec<(String, String, String)>) -> Self {
         Self {
-            pinned: Some(candidates),
+            pinned: Some(
+                candidates
+                    .into_iter()
+                    .map(|(api_key, base_url, model)| VisionCandidate {
+                        api_key,
+                        base_url,
+                        model,
+                        max_tokens: None,
+                    })
+                    .collect(),
+            ),
             gemini_fallback: None,
         }
     }
 
     /// Candidates for THIS request: current provider, then the configured
     /// chain, read from config now so an edit needs no restart (#1318).
-    fn candidates_for(session_provider: Option<&str>) -> Vec<(String, String, String)> {
+    fn candidates_for(session_provider: Option<&str>) -> Vec<VisionCandidate> {
         crate::brain::provider::factory::vision_candidates_for(
             &crate::config::Config::current(),
             session_provider,
@@ -229,12 +244,10 @@ impl Tool for ProviderVisionTool {
         if candidates.is_empty() && self.gemini_fallback.is_none() {
             return Ok(ToolResult::error(VISION_SETUP_HINT.to_string()));
         }
-        for (api_key, base_url, vision_model) in &candidates {
+        for candidate in &candidates {
             match try_vision_candidate(
                 &client,
-                api_key,
-                base_url,
-                vision_model,
+                candidate,
                 &question,
                 &image_url,
                 // The conversation id, so a gateway that asks to be told which
@@ -247,11 +260,15 @@ impl Tool for ProviderVisionTool {
                 Ok(text) => return Ok(ToolResult::success(text)),
                 Err(reason) => {
                     tracing::warn!(
-                        "analyze_image: vision candidate model={vision_model} url={base_url} \
-                         failed: {reason}, trying next candidate"
+                        "analyze_image: vision candidate model={} url={} failed: {reason}, \
+                         trying next candidate",
+                        candidate.model,
+                        candidate.base_url
                     );
                     failures.push(format!(
-                        "{vision_model} @ {base_url}: {}",
+                        "{} @ {}: {}",
+                        candidate.model,
+                        candidate.base_url,
                         clip_failure_reason(&reason)
                     ));
                 }
@@ -306,63 +323,130 @@ pub(crate) fn vision_headers(
     headers
 }
 
-/// One OpenAI-compatible vision call. `Err` carries the reason so the
-/// caller can log it and roll to the next candidate.
-async fn try_vision_candidate(
-    client: &reqwest::Client,
-    api_key: &str,
-    base_url: &str,
-    vision_model: &str,
+/// Output cap used when an endpoint REFUSES a request that omits
+/// `max_tokens` (#2120).
+///
+/// Only reachable on that specific refusal: the default request carries no cap
+/// at all, because a reasoning vision model shares the completion budget with
+/// its reasoning tokens and a fixed 1024 left the answer truncated or empty.
+/// Generous on purpose, since this fires only where the endpoint demands a
+/// number and a small one would reproduce the bug.
+pub(crate) const VISION_RETRY_MAX_TOKENS: u32 = 65000;
+
+/// Build the request body for one vision call.
+///
+/// `max_tokens` is OMITTED entirely when no cap is set, rather than sent as
+/// `null`: some gateways reject an explicit null, and the whole point is to
+/// let the endpoint apply its own default (#2120).
+pub(crate) fn vision_request_body(
+    model: &str,
     question: &str,
     image_url: &str,
-    session: Option<Uuid>,
-) -> std::result::Result<String, String> {
-    let body = serde_json::json!({
-        "model": vision_model,
+    max_tokens: Option<u32>,
+) -> Value {
+    let mut body = serde_json::json!({
+        "model": model,
         "messages": [{
             "role": "user",
             "content": [
                 { "type": "text", "text": question },
                 { "type": "image_url", "image_url": { "url": image_url } }
             ]
-        }],
-        "max_tokens": 1024
+        }]
     });
-
-    // Auth plus the gateway's client identification, from one place: an
-    // opencode endpoint answers a request without `X-Opencode-Session` with a
-    // flat 400, which is what made every candidate in the chain look broken
-    // (#1792).
-    let mut request = client.post(base_url);
-    for (key, value) in vision_headers(base_url, api_key, session) {
-        request = request.header(key.as_str(), value.as_str());
+    if let Some(cap) = max_tokens {
+        body["max_tokens"] = Value::from(cap);
     }
-    let response = request
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("Vision request failed: {e}"))?;
+    body
+}
 
-    if !response.status().is_success() {
-        let status = response.status().as_u16();
-        let err_body = response.text().await.unwrap_or_default();
-        return Err(format!("Vision API error {status}: {err_body}"));
-    }
+/// True when the failure names the output cap.
+///
+/// The request carried no cap, so a 400 that mentions `max_tokens` at all is
+/// the endpoint asking for the field. No wording analysis: one substring check,
+/// one retry. A range violation cannot be produced by a request that sent no
+/// value, so there is nothing to disambiguate.
+pub(crate) fn needs_max_tokens(reason: &str) -> bool {
+    let m = reason.to_lowercase();
+    m.contains("max_tokens") || m.contains("max_completion_tokens")
+}
 
-    let json: Value = response
-        .json()
-        .await
-        .map_err(|e| format!("Vision response was not JSON: {e}"))?;
-    let result_text = json["choices"]
-        .as_array()
-        .and_then(|choices| choices.first())
-        .and_then(|choice| choice["message"]["content"].as_str())
-        .unwrap_or("")
-        .to_string();
-    if result_text.is_empty() {
-        return Err("No text response from vision model".to_string());
+/// One [OI]-compatible vision call. `Err` carries the reason so the
+/// caller can log it and roll to the next candidate.
+pub(crate) async fn try_vision_candidate(
+    client: &reqwest::Client,
+    candidate: &VisionCandidate,
+    question: &str,
+    image_url: &str,
+    session: Option<Uuid>,
+) -> std::result::Result<String, String> {
+    let api_key = &candidate.api_key;
+    let base_url = &candidate.base_url;
+    let vision_model = &candidate.model;
+
+    let send = |max_tokens: Option<u32>| {
+        let body = vision_request_body(vision_model, question, image_url, max_tokens);
+        // Auth plus the gateway's client identification, from one place: an
+        // opencode endpoint answers a request without `X-Opencode-Session` with
+        // a flat 400, which is what made every candidate in the chain look
+        // broken (#1792).
+        let mut request = client.post(base_url.as_str());
+        for (key, value) in vision_headers(base_url, api_key, session) {
+            request = request.header(key.as_str(), value.as_str());
+        }
+        async move {
+            let response = request
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| format!("Vision request failed: {e}"))?;
+
+            if !response.status().is_success() {
+                let status = response.status().as_u16();
+                let err_body = response.text().await.unwrap_or_default();
+                return Err(format!("Vision API error {status}: {err_body}"));
+            }
+
+            let json: Value = response
+                .json()
+                .await
+                .map_err(|e| format!("Vision response was not JSON: {e}"))?;
+            let choice = json["choices"]
+                .as_array()
+                .and_then(|choices| choices.first());
+            if choice.and_then(|c| c["finish_reason"].as_str()) == Some("length") {
+                // The answer hit the budget. Worth a log line: this is the
+                // exact symptom #2120 was filed for, and with no cap sent it
+                // means the endpoint's own default is the ceiling.
+                tracing::warn!(
+                    "analyze_image: {vision_model} finished on 'length' (cap {max_tokens:?}); \
+                     the answer may be truncated. Set providers.<name>.vision_max_tokens \
+                     to raise it."
+                );
+            }
+            let result_text = choice
+                .and_then(|choice| choice["message"]["content"].as_str())
+                .unwrap_or("")
+                .to_string();
+            if result_text.is_empty() {
+                return Err("No text response from vision model".to_string());
+            }
+            Ok(result_text)
+        }
+    };
+
+    match send(candidate.max_tokens).await {
+        Ok(text) => Ok(text),
+        Err(reason) if candidate.max_tokens.is_none() && needs_max_tokens(&reason) => {
+            // This endpoint demands an explicit cap. Send one, once.
+            tracing::warn!(
+                "analyze_image: {vision_model} @ {base_url} rejected a request without \
+                 max_tokens ({reason}); retrying once with {VISION_RETRY_MAX_TOKENS}"
+            );
+            send(Some(VISION_RETRY_MAX_TOKENS)).await
+        }
+        Err(reason) => Err(reason),
     }
-    Ok(result_text)
 }
 
 /// Placeholder `analyze_image` registered when no vision backend is configured

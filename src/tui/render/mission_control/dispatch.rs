@@ -27,19 +27,41 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         super::log_viewer::draw(frame, app, area);
         return;
     }
+
+    let focus = app.mc.focused_panel;
     let McLayout {
         inbox,
         analytics,
         activity,
         schedule,
         help_bar,
-    } = layout::compute(area);
+        panels,
+        too_small,
+    } = layout::compute_focused(area, focus);
 
-    let focus = app.mc.focused_panel;
-    inbox_panel::draw(frame, app, inbox, focus == McPanel::Inbox);
-    analytics_panel::draw(frame, app, analytics, focus == McPanel::Analytics);
-    activity_panel::draw(frame, app, activity, focus == McPanel::Activity);
-    schedule_panel::draw(frame, app, schedule, focus == McPanel::Schedule);
+    if too_small {
+        render_too_small(frame, panels);
+        if help_bar.height > 0 {
+            draw_help_bar(frame, app, help_bar);
+        }
+        return;
+    }
+
+    // A zero-height rect means "this panel is not on screen": in narrow
+    // mode only the focused one is, so the rest are skipped rather than
+    // drawn into slivers (#2074).
+    if inbox.width > 0 {
+        inbox_panel::draw(frame, app, inbox, focus == McPanel::Inbox);
+    }
+    if analytics.width > 0 {
+        analytics_panel::draw(frame, app, analytics, focus == McPanel::Analytics);
+    }
+    if activity.width > 0 {
+        activity_panel::draw(frame, app, activity, focus == McPanel::Activity);
+    }
+    if schedule.width > 0 {
+        schedule_panel::draw(frame, app, schedule, focus == McPanel::Schedule);
+    }
 
     if help_bar.height > 0 {
         draw_help_bar(frame, app, help_bar);
@@ -48,6 +70,40 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     if app.mc.detail_open {
         detail_popup::draw(frame, app, area);
     }
+}
+
+/// The floor: one honest line naming the size the screen needs, instead of
+/// panels rendered into slivers.
+fn render_too_small(frame: &mut Frame, area: Rect) {
+    let text = vec![
+        Line::from(Span::styled(
+            "Terminal too small for Mission Control",
+            Style::default()
+                .fg(theme::teal())
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!(
+                "Needs at least {} columns and {} rows.",
+                layout::MIN_WIDTH,
+                layout::MIN_PANEL_ROWS + 2
+            ),
+            Style::default().fg(theme::text_dim()),
+        )),
+    ];
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(text.len() as u16),
+            Constraint::Min(0),
+        ])
+        .split(area);
+    frame.render_widget(
+        Paragraph::new(text).alignment(ratatui::layout::Alignment::Center),
+        rows[1],
+    );
 }
 
 /// Bottom bar (2 rows): the canonical dialog footer from the scoped

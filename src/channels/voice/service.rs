@@ -8,6 +8,7 @@ use reqwest::Client;
 use serde::Deserialize;
 
 use crate::config::{SttMode, TtsMode, VoiceConfig};
+use crate::utils::string::truncate_str;
 
 const GROQ_TRANSCRIPTION_URL: &str = "https://api.groq.com/openai/v1/audio/transcriptions";
 const OPENAI_SPEECH_URL: &str = "https://api.openai.com/v1/audio/speech";
@@ -187,7 +188,14 @@ async fn try_stt(kind: SttProviderKind, audio_bytes: Vec<u8>, cfg: &VoiceConfig)
                 .stt_api_key
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("openai-compatible STT missing api_key"))?;
-            super::openai_stt::transcribe_audio(audio_bytes, key, model, base).await
+            // The built-in endpoint serves transcription on the chat route and
+            // answers no /v1/audio/* path at all; every other [OI]-compatible
+            // endpoint keeps the multipart request it has always used (#2107).
+            if super::openai_stt::serves_audio_on_chat_route(base) {
+                super::openai_stt::transcribe_audio_chat(audio_bytes, key, model, base).await
+            } else {
+                super::openai_stt::transcribe_audio(audio_bytes, key, model, base).await
+            }
         }
         SttProviderKind::Groq => {
             let key = cfg
@@ -317,10 +325,11 @@ pub(crate) async fn transcribe_audio_with_url(
     Ok(result.text)
 }
 
-/// Maximum characters per TTS chunk. Empirically, Voicebox (Kokoro) handles
-/// up to ~3000 chars in ~90s. Using 1500 keeps each chunk well under the
-/// timeout and avoids quality degradation from very long synthesis.
-const MAX_TTS_CHUNK_CHARS: usize = 1500;
+/// Maximum bytes per TTS chunk. Empirically, Voicebox (Kokoro) handles up to
+/// ~3000 characters in ~90s. The budget is in bytes because that is the unit
+/// both the engines and `str` slicing take, so 1500 stays well under the
+/// timeout while avoiding quality degradation from very long synthesis.
+const MAX_TTS_CHUNK_BYTES: usize = 1500;
 
 /// Dispatch TTS synthesis based on config.
 ///
@@ -345,14 +354,14 @@ pub async fn synthesize(text: &str, voice_config: &VoiceConfig) -> Result<Vec<u8
         anyhow::bail!("No speakable text after cleaning markdown");
     }
 
-    let chunks = split_for_tts(&cleaned, MAX_TTS_CHUNK_CHARS);
+    let chunks = split_for_tts(&cleaned, MAX_TTS_CHUNK_BYTES);
 
     if chunks.len() > 1 {
         tracing::info!(
-            "TTS: text split into {} chunks ({} chars total, max {}/chunk)",
+            "TTS: text split into {} chunks ({} bytes total, max {}/chunk)",
             chunks.len(),
             cleaned.len(),
-            MAX_TTS_CHUNK_CHARS,
+            MAX_TTS_CHUNK_BYTES,
         );
     }
 
@@ -439,10 +448,14 @@ async fn try_tts_chunked(
 /// Split text into chunks at sentence boundaries.
 ///
 /// Tries to break at `. `, `! `, `? `, or `\n` to keep sentences intact.
-/// Each chunk is at most `max_chars` characters. Falls back to hard split
-/// at word boundaries if no sentence break is found.
-pub(crate) fn split_for_tts(text: &str, max_chars: usize) -> Vec<String> {
-    if text.len() <= max_chars {
+/// Each chunk is at most `max_bytes` bytes, rounded down to a char boundary.
+/// Falls back to a hard split at word boundaries if no sentence break is found.
+///
+/// The budget is BYTES, and the parameter says so: both the TTS engines and
+/// `str` slicing work in bytes, so a run of 600 emoji is 2400 bytes and splits
+/// into more chunks than 600 ASCII letters would.
+pub(crate) fn split_for_tts(text: &str, max_bytes: usize) -> Vec<String> {
+    if text.len() <= max_bytes {
         return vec![text.to_string()];
     }
 
@@ -450,16 +463,35 @@ pub(crate) fn split_for_tts(text: &str, max_chars: usize) -> Vec<String> {
     let mut remaining = text;
 
     while !remaining.is_empty() {
-        if remaining.len() <= max_chars {
+        if remaining.len() <= max_bytes {
             chunks.push(remaining.to_string());
             break;
         }
 
-        // Find the best split point within max_chars
-        let search_area = &remaining[..max_chars];
-        let split_pos = find_sentence_break(search_area)
+        // The search window has to END on a char boundary. A raw
+        // `&remaining[..max_bytes]` panics the moment the cut falls inside a
+        // multibyte char, and the panic loses the whole TTS output: one
+        // accented letter, an emoji or a `->` past byte 1500 was enough
+        // (#2051, the same class #1919 fixed in the cron scheduler). Round the
+        // budget down with the shared helper instead of cutting blind.
+        let search_area = truncate_str(remaining, max_bytes);
+        let window_end = search_area.len();
+        let mut split_pos = find_sentence_break(search_area)
             .or_else(|| find_word_break(search_area))
-            .unwrap_or(max_chars);
+            .unwrap_or(window_end);
+
+        // Progress guard. When the first char is wider than the budget the
+        // rounded-down window is empty, so every break finder returns 0 and the
+        // loop would push an empty chunk without ever shrinking `remaining`: a
+        // hang, which is worse than the panic it replaces. Emit exactly one
+        // char: the end of the first char is always a valid boundary.
+        if split_pos == 0 {
+            split_pos = remaining
+                .char_indices()
+                .nth(1)
+                .map(|(i, _)| i)
+                .unwrap_or(remaining.len());
+        }
 
         chunks.push(remaining[..split_pos].trim().to_string());
         remaining = remaining[split_pos..].trim_start();
@@ -484,8 +516,16 @@ pub(crate) fn find_sentence_break(text: &str) -> Option<usize> {
 }
 
 /// Find the last word boundary within text.
+///
+/// The index comes from the matched char's own width, not `pos + 1`: whitespace
+/// is not always one byte. U+00A0 (the non-breaking space any paste from a web
+/// page carries) is two bytes and U+3000 is three, so `pos + 1` landed inside
+/// the char and the caller's slice panicked (#2051).
 fn find_word_break(text: &str) -> Option<usize> {
-    text.rfind(char::is_whitespace).map(|pos| pos + 1)
+    text.char_indices()
+        .rev()
+        .find(|(_, c)| c.is_whitespace())
+        .map(|(pos, c)| pos + c.len_utf8())
 }
 
 /// Resolve which TTS provider runs first based on current config flags.

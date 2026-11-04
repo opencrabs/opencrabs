@@ -11,6 +11,7 @@ use uuid::Uuid;
 fn make_tool_group_msg(num_calls: usize) -> DisplayMessage {
     let calls: Vec<ToolCallEntry> = (0..num_calls)
         .map(|i| ToolCallEntry {
+            task_id: None,
             description: format!("Tool call {}", i),
             success: true,
             details: None,

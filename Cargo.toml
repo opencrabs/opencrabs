@@ -1,6 +1,6 @@
 [package]
 name = "opencrabs"
-version = "0.5.5"
+version = "0.5.14"
 edition = "2024"
 rust-version = "1.95"
 authors = ["Adolfo Usier <adolfo@meetneura.ai>"]
@@ -188,7 +188,7 @@ pdf-extract = "0.12"
 # fails to compile on aarch64-linux (where c_char is u8, not i8) and broke the
 # linux-arm64 release build. Bump past 0.9.2 only once that is fixed upstream.
 pdfium-render = { version = "=0.9.1", optional = true }
-zip = "6.0"
+zip = "9"
 quick-xml = "0.41"
 calamine = "0.36"
 # Legacy Word 97-2003 (.doc, OLE/CFB) text extraction (#955). Core only:
@@ -209,7 +209,7 @@ url = "2.5.8"
 unicode-normalization = "0.1.25"
 scraper = "0.27.0"
 htmd = "0.5.4"
-rust_xlsxwriter = "0.96.0"
+rust_xlsxwriter = "0.99"
 docx-rs = "0.4.20"
 printpdf = { version = "0.12.7", features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
 rpassword = { version = "7.5.4", optional = true }

@@ -69,9 +69,10 @@ pub(crate) async fn render_suggestions(
         })
         .collect();
 
-    state.register_select(followup_id, options).await;
-
-    if let Err(e) = super::governor::send_content(
+    // Registered only after the message actually lands (#2193): registering
+    // first left a permanently orphaned entry every time the send failed, and
+    // a button that was never delivered can never be clicked.
+    match super::governor::send_content(
         &state.governor,
         ChannelId::new(channel_id),
         http,
@@ -82,6 +83,7 @@ pub(crate) async fn render_suggestions(
     )
     .await
     {
-        tracing::warn!("Discord suggest_options: send failed: {e}");
+        Ok(_) => state.register_select(followup_id, options).await,
+        Err(e) => tracing::warn!("Discord suggest_options: send failed: {e}"),
     }
 }

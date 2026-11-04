@@ -429,6 +429,14 @@ impl CronScheduler {
                         let active = crate::config::profile::active_profile().unwrap_or("default");
                         let needs_scope = profile.is_some() && profile != Some(active);
 
+                        // #2065: the trigger gate is NOT part of the profile
+                        // split. It used to live inside the `needs_scope` arm,
+                        // so a job whose `profile_name` equalled the active
+                        // profile took the other arm and never evaluated its
+                        // trigger at all: `trigger_cmd` plus `trigger_on` were
+                        // silently dead, and the job ran a full agent turn on
+                        // every tick instead of the 0-token skip. Both arms now
+                        // call the same body; only the home scope differs.
                         let result = if needs_scope {
                             crate::config::profile::with_profile_home_async(profile, async {
                                 tracing::info!(
@@ -436,102 +444,11 @@ impl CronScheduler {
                                     job.name,
                                     crate::config::opencrabs_home()
                                 );
-
-                                // #526 — the fired trigger's payload, already substituted
-                                // into the prompt in the arm that owns the TriggerResult.
-                                // None for every non-firing outcome keeps the turn message
-                                // byte-identical to pre-fix behaviour.
-                                let mut fired_prompt: Option<String> = None;
-
-                                // Pre-flight trigger evaluation
-                                match crate::cron::PipelineExecutor::evaluate_trigger(&job).await {
-                                    crate::cron::TriggerOutcome::Skipped(ref trig_res) => {
-                                        tracing::info!(
-                                            "Cron job '{}' trigger condition not met — skipping execution",
-                                            job.name
-                                        );
-                                        let _ = crate::cron::PipelineExecutor::record_skipped_run(
-                                            &job,
-                                            trig_res,
-                                            &run_repo,
-                                        )
-                                        .await;
-                                        return Ok(());
-                                    }
-                                    crate::cron::TriggerOutcome::Error(err) => {
-                                        tracing::error!(
-                                            "Cron job '{}' trigger execution error: {err}",
-                                            job.name
-                                        );
-                                        let run = CronJobRun::new_running(
-                                            job.id,
-                                            job.name.clone(),
-                                            job.provider.clone(),
-                                            job.model.clone(),
-                                        );
-                                        let run_id = run.id.to_string();
-                                        let _ = run_repo.insert(&run).await;
-                                        let _ = run_repo.complete_error(&run_id, &format!("Trigger error: {err}")).await;
-                                        return Ok(());
-                                    }
-                                    crate::cron::TriggerOutcome::Fired(ref trig_res) => {
-                                        tracing::info!(
-                                            "Cron job '{}' trigger fired (exit={}, output_bytes={})",
-                                            job.name,
-                                            trig_res.exit_code,
-                                            trig_res.combined_output().len()
-                                        );
-                                        // If prompt is empty or explicitly pass-through, execute direct 0-token delivery
-                                        if job.prompt.trim().is_empty() {
-                                            return execute_direct_trigger_job(
-                                                &job,
-                                                &ctx,
-                                                &run_repo,
-                                                trig_res,
-                                            )
-                                            .await;
-                                        }
-                                        // #526 — only the non-empty-prompt half reaches
-                                        // here; the empty-prompt half returned above.
-                                        fired_prompt = Some(crate::cron::interpolate_template(
-                                            &job.prompt,
-                                            trig_res,
-                                        ));
-                                    }
-                                    crate::cron::TriggerOutcome::NoTrigger => {}
-                                }
-
-                                match resolve_or_create_cron_session(&ctx, &job).await {
-                                    Ok(cron_sid) => {
-                                        execute_job(
-                                            &job,
-                                            &factory,
-                                            &ctx,
-                                            cron_sid,
-                                            &run_repo,
-                                            fired_prompt.as_deref(),
-                                        )
-                                        .await
-                                    }
-                                    Err(e) => Err(e),
-                                }
+                                run_cron_job_body(&job, &factory, &ctx, &run_repo).await
                             })
                             .await
                         } else {
-                            match resolve_or_create_cron_session(&ctx, &job).await {
-                                Ok(cron_sid) => {
-                                    execute_job(
-                                        &job,
-                                        &factory,
-                                        &ctx,
-                                        cron_sid,
-                                        &run_repo,
-                                        None, // #526: the unscoped path evaluates no trigger
-                                    )
-                                    .await
-                                }
-                                Err(e) => Err(e),
-                            }
+                            run_cron_job_body(&job, &factory, &ctx, &run_repo).await
                         };
 
                         if let Err(e) = result {
@@ -780,6 +697,10 @@ async fn resolve_job_agent(
     // #129: cron execution is headless — backstop flag on the agent so
     // interactive-only tools hard-error even if re-registered.
     builder = builder.with_headless(true);
+    // A scheduled job is a task already defined by its prompt: there is no
+    // user in the loop to approve a plan, and refusing call 13 would strand
+    // the run mid-job. The mechanical plan requirement does not apply.
+    builder = builder.with_plan_gate_exempt(true);
     Ok((config, Arc::new(builder)))
 }
 
@@ -819,6 +740,87 @@ async fn open_run_boundary(ctx: &ServiceContext, session_id: Uuid) {
         .await
     {
         tracing::warn!("Failed to insert cron compaction marker: {e:#}");
+    }
+}
+
+/// Run one cron job's body: evaluate the trigger gate, then either skip,
+/// error out, deliver directly, or run the agent turn (#2065).
+///
+/// This is the part of a fire that does NOT depend on profile scoping. The
+/// caller wraps it in `with_profile_home_async` when the job belongs to a
+/// foreign profile, so the trigger command still executes against the job's
+/// own home. Keeping the gate out here is the fix: it used to sit inside the
+/// scoped arm, so every job stamped with the active profile (which is all of
+/// them in a single-profile install) skipped evaluation entirely and burned a
+/// full agent turn on every tick.
+pub(crate) async fn run_cron_job_body(
+    job: &CronJob,
+    factory: &ChannelFactory,
+    ctx: &ServiceContext,
+    run_repo: &CronJobRunRepository,
+) -> anyhow::Result<()> {
+    // #526 — the fired trigger's payload, already substituted into the prompt
+    // in the arm that owns the `TriggerResult`. None for every non-firing
+    // outcome keeps the turn message byte-identical to pre-fix behaviour.
+    let mut fired_prompt: Option<String> = None;
+
+    // Pre-flight trigger evaluation
+    match crate::cron::PipelineExecutor::evaluate_trigger(job).await {
+        crate::cron::TriggerOutcome::Skipped(ref trig_res) => {
+            tracing::info!(
+                "Cron job '{}' trigger condition not met — skipping execution",
+                job.name
+            );
+            let _ =
+                crate::cron::PipelineExecutor::record_skipped_run(job, trig_res, run_repo).await;
+            return Ok(());
+        }
+        crate::cron::TriggerOutcome::Error(err) => {
+            tracing::error!("Cron job '{}' trigger execution error: {err}", job.name);
+            let run = CronJobRun::new_running(
+                job.id,
+                job.name.clone(),
+                job.provider.clone(),
+                job.model.clone(),
+            );
+            let run_id = run.id.to_string();
+            let _ = run_repo.insert(&run).await;
+            let _ = run_repo
+                .complete_error(&run_id, &format!("Trigger error: {err}"))
+                .await;
+            return Ok(());
+        }
+        crate::cron::TriggerOutcome::Fired(ref trig_res) => {
+            tracing::info!(
+                "Cron job '{}' trigger fired (exit={}, output_bytes={})",
+                job.name,
+                trig_res.exit_code,
+                trig_res.combined_output().len()
+            );
+            // If prompt is empty or explicitly pass-through, execute direct 0-token delivery
+            if job.prompt.trim().is_empty() {
+                return execute_direct_trigger_job(job, ctx, run_repo, trig_res).await;
+            }
+            // #526 — only the non-empty-prompt half reaches here; the
+            // empty-prompt half returned above.
+            fired_prompt = Some(crate::cron::interpolate_template(&job.prompt, trig_res));
+        }
+        crate::cron::TriggerOutcome::NoTrigger => {}
+    }
+
+    match resolve_or_create_cron_session(ctx, job).await {
+        Ok(cron_sid) => {
+            execute_job(
+                job,
+                factory,
+                ctx,
+                cron_sid,
+                run_repo,
+                fired_prompt.as_deref(),
+            )
+            .await
+        }
+        Err(e) => Err(e),
     }
 }
 
@@ -1704,10 +1706,10 @@ fn read_channel_secret(channel: &str, field: &str) -> Option<String> {
 }
 
 /// Split `text` into `<= max_len` byte chunks, breaking on a newline near the
-/// limit when possible and never inside a multi-byte char. Used for Discord's
-/// 2000-char and Slack's message limits. (Telegram reuses its own chunker so
-/// HTML stays valid across splits.)
-#[cfg(any(feature = "discord", feature = "slack"))]
+/// limit when possible and never inside a multi-byte char. Used for Slack's
+/// message limit. (Discord uses its own fence-aware `split_message`; Telegram
+/// reuses its own chunker so HTML stays valid across splits.)
+#[cfg(feature = "slack")]
 fn split_for_delivery(text: &str, max_len: usize) -> Vec<&str> {
     if text.len() <= max_len {
         return vec![text];
@@ -1732,6 +1734,45 @@ fn split_for_delivery(text: &str, max_len: usize) -> Vec<&str> {
         start = break_at;
     }
     chunks
+}
+
+/// Chunk a cron report for Discord, converting the markdown Discord cannot
+/// render (#2069).
+///
+/// Discord has no table markup, so a pipe table arrives as its own source in a
+/// proportional font where no column lines up. Every interactive path rewrites
+/// the text first; cron delivery was the one outbound path that sent it raw.
+///
+/// The chunker is the Discord chat path's own `split_message`, not the generic
+/// `split_for_delivery`. The grid render wraps a table in a fenced text block,
+/// and only `split_message` closes a fence it has to break and reopens it on
+/// the next chunk (#876). The generic splitter breaks at the nearest newline,
+/// so a grid straddling the limit would arrive cut in half: one chunk holding
+/// an unclosed fence, the next starting mid-table.
+#[cfg(feature = "discord")]
+pub(crate) fn discord_chunks_for_delivery(message: &str) -> Vec<String> {
+    let normalized = crate::channels::discord::table_convert::tables_to_discord(message);
+    crate::channels::discord::handler::split_message(&normalized, 2000)
+}
+
+/// Chunk a cron report for Slack, converting the markdown Slack cannot render
+/// (#2069).
+///
+/// Slack renders neither tables nor headings: a pipe table arrives as its own
+/// source and a `##` heading as two literal hashes. The chat path calls
+/// `structure_to_slack` for both, so cron delivery calls the same function
+/// rather than the table half alone.
+///
+/// The generic splitter is safe here. `structure_to_slack` emits bold labels,
+/// `└` continuations and `---` rules, so it never opens a fence that a break
+/// could cut.
+#[cfg(feature = "slack")]
+pub(crate) fn slack_chunks_for_delivery(message: &str) -> Vec<String> {
+    let normalized = crate::channels::slack::table_convert::structure_to_slack(message);
+    split_for_delivery(&normalized, 3500)
+        .into_iter()
+        .map(str::to_string)
+        .collect()
 }
 
 /// Deliver via the shared Telegram outbox ladder (#1085 P1b R2). The
@@ -1856,8 +1897,9 @@ fn is_forum_chat(chat: &teloxide::types::ChatFullInfo) -> bool {
 }
 
 /// Deliver via Discord Bot API (direct HTTP POST to the channel-messages
-/// endpoint). Discord renders its own markdown natively, so the content is
-/// sent as-is, chunked to the 2000-char message limit.
+/// endpoint). The report is rewritten for Discord first, so a table arrives as
+/// a monospace grid or bold labels instead of its own source (#2069), and then
+/// chunked to the 2000-char message limit.
 #[cfg(feature = "discord")]
 async fn deliver_discord(channel_id: &str, message: &str) {
     let Some(token) = read_channel_secret("discord", "token") else {
@@ -1868,7 +1910,7 @@ async fn deliver_discord(channel_id: &str, message: &str) {
     let url = format!("https://discord.com/api/v10/channels/{channel_id}/messages");
     let client = reqwest::Client::new();
     let mut delivered = 0usize;
-    for chunk in split_for_delivery(message, 2000) {
+    for chunk in discord_chunks_for_delivery(message) {
         let body = serde_json::json!({ "content": chunk });
         match client
             .post(&url)
@@ -1972,8 +2014,8 @@ async fn deliver_discord_forum(forum_id: &str, job_name: &str, message: &str) {
     }
 
     let title = forum_post_title(job_name, Utc::now());
-    let chunks = split_for_delivery(message, 2000);
-    let first = chunks.first().copied().unwrap_or("");
+    let chunks = discord_chunks_for_delivery(message);
+    let first = chunks.first().map(String::as_str).unwrap_or("");
 
     let mut posted = 0usize;
     let thread_id = match client
@@ -2056,7 +2098,7 @@ async fn deliver_slack(channel_id: &str, message: &str) {
     let url = "https://slack.com/api/chat.postMessage";
     let client = reqwest::Client::new();
     let mut delivered = 0usize;
-    for chunk in split_for_delivery(message, 3500) {
+    for chunk in slack_chunks_for_delivery(message) {
         let body = serde_json::json!({ "channel": channel_id, "text": chunk });
         match client
             .post(url)

@@ -186,16 +186,24 @@ fn zero_tool_block(src: &str) -> (usize, usize) {
 fn the_mixed_check_runs_outside_the_zero_tool_block() {
     let src = include_str!("../brain/agent/service/tool_loop.rs");
     let (start, end) = zero_tool_block(src);
+    // The call site is the `_with_history` entry point (#2122), which wraps the
+    // plain one so a denial can also see earlier turns.
     let call = src
-        .find("super::phantom::mixed_iteration_facts(")
+        .find("super::phantom::mixed_iteration_facts_with_history(")
         .expect("the mixed-iteration check is not wired into the loop");
     assert!(
         call > end,
         "the mixed check sits inside the zero-tool block ({start}..{end}), byte {call}"
     );
     // And it is guarded against the empty case, so it does not double-count
-    // with the block above on a zero-tool iteration.
-    let guard_window = &src[call.saturating_sub(900)..call];
+    // with the block above on a zero-tool iteration. Anchor on the binding that
+    // produces the call rather than a fixed byte window: the history read
+    // (#2122) sits between the guard and the call, and a magic window turns
+    // every added line above the call into a fake failure.
+    let binding = src[..call]
+        .rfind("let mixed_fact_verdict")
+        .expect("the mixed check is not bound to a verdict");
+    let guard_window = &src[binding..call];
     assert!(
         guard_window.contains("tool_uses.is_empty()"),
         "the mixed check does not exclude zero-tool iterations"

@@ -50,7 +50,11 @@ pub(super) fn extract_from_zip(data: &[u8], file_name: &str) -> Result<Vec<u8>> 
             .by_index(i)
             .map_err(|e| ToolError::Execution(format!("Failed to read zip entry: {}", e)))?;
 
-        if file.name().ends_with(file_name) {
+        let name = file
+            .name()
+            .map_err(|e| ToolError::Execution(format!("Failed to read zip entry name: {}", e)))?
+            .into_owned();
+        if name.ends_with(file_name) {
             let mut buf = Vec::new();
             file.read_to_end(&mut buf)
                 .map_err(|e| ToolError::Execution(format!("Failed to extract: {}", e)))?;

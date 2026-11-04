@@ -121,3 +121,83 @@ fn the_shipped_config_default_broadcasts_to_nobody() {
         "an unset delay must still pace"
     );
 }
+
+#[test]
+fn a_newsletter_jid_is_gated_by_the_same_allowlist() {
+    // #1827: `post_newsletter` reuses this rail. `normalize` keeps the digits
+    // and drops the `@newsletter` server, so a channel JID is allowlisted by
+    // its own JID and an unlisted channel is refused.
+    let allow = vec!["120363123456789012@newsletter".to_string()];
+    assert!(is_allowed("120363123456789012@newsletter", &allow));
+    assert!(!is_allowed("120363999999999999@newsletter", &allow));
+    assert!(!is_allowed("120363123456789012@newsletter", &[]));
+}
+
+// ── #2176: an inbound status is not a message ────────────────────────
+
+/// A contact's status arrives on `status@broadcast`, and every
+/// `send_message` to that JID is rejected by the server, so the handler has
+/// to drop it before it resolves a session. Without the drop, a status ran a
+/// full agent turn and bound the session's reply target to a JID that cannot
+/// receive anything.
+///
+/// Parsed from real strings rather than a hand-built struct: the predicate
+/// turns on the JID server and user parts, which is exactly what the parse
+/// produces in production.
+#[test]
+fn an_inbound_status_is_not_a_message() {
+    use crate::channels::whatsapp::handler::is_inbound_status;
+    use wacore_binary::jid::Jid;
+
+    let status: Jid = "status@broadcast".parse().expect("status@broadcast parses");
+    assert!(
+        is_inbound_status(&status, false),
+        "a status post must be dropped before session resolution"
+    );
+
+    let dm: Jid = "15551234567@s.whatsapp.net".parse().expect("PN parses");
+    assert!(!is_inbound_status(&dm, false), "a DM must still be handled");
+
+    let group: Jid = "120363000000000000@g.us".parse().expect("group parses");
+    assert!(
+        !is_inbound_status(&group, false),
+        "a group must still be handled"
+    );
+
+    let broadcast_list: Jid = "1234567890@broadcast".parse().expect("broadcast parses");
+    assert!(
+        !is_inbound_status(&broadcast_list, false),
+        "a broadcast LIST is ordinary group traffic, not a status"
+    );
+
+    // Our own echo carries the same chat JID; the guard must not depend on it
+    // alone, or an outbound status echo would be dropped as inbound noise.
+    assert!(
+        !is_inbound_status(&status, true),
+        "the predicate must not claim our own echo"
+    );
+}
+
+/// The predicate above is only half the fix: it has to be CALLED before the
+/// session is resolved, and the computed reply target has to be checked too,
+/// or a future path can still bind a session to a broadcast JID.
+#[test]
+fn the_handler_drops_a_status_before_resolving_a_session() {
+    const SRC: &str = include_str!("../channels/whatsapp/handler.rs");
+
+    let guard = SRC
+        .find("is_inbound_status(&info.source.chat")
+        .expect("the inbound status guard is not wired into the handler");
+    let target = SRC
+        .find("let reply_target")
+        .expect("the reply target is gone from the handler");
+    assert!(
+        guard < target,
+        "the status drop must run before the reply target is computed"
+    );
+
+    assert!(
+        SRC.contains("if reply_target.is_status_broadcast()"),
+        "the computed reply target must be checked for a broadcast JID"
+    );
+}

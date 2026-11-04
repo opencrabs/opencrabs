@@ -1,0 +1,16 @@
+# Issue template chooser. Shows the two forms above the contact links.
+# Security reports never go through an issue: they go to a private advisory,
+# which is why that link is first.
+
+blank_issues_enabled: false
+
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/opencrabs/opencrabs/security/advisories/new
+    about: Report a vulnerability privately. Never open a public issue for one. See SECURITY.md.
+  - name: Setup and usage questions
+    url: https://docs.opencrabs.com
+    about: Installation, configuration, providers, channels, and the TUI are documented here first.
+  - name: Dev factory, CI, and release tooling
+    url: https://github.com/leshchenko1979/opencrabs-dev-factory/issues
+    about: Tooling, CI, and release automation issues belong in the dev factory repo, not here.

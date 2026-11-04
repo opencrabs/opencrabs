@@ -37,6 +37,54 @@ fn followup_tap_branch_delegates_to_the_display_path() {
     );
 }
 
+/// #1990's rule reached every turn entry point: `3f0086081` added the claim
+/// to `handle_message` and the tracked runner but skipped the follow-up tap,
+/// so a tap on a live turn forked a second concurrent tool loop on the same
+/// session. Each entry point must claim the slot before it touches the cancel
+/// token, and the tap must queue its pick instead of dropping it.
+#[test]
+fn every_turn_entry_point_claims_the_slot_before_storing_a_token() {
+    let entry_points = [
+        ("handler.rs", include_str!("../channels/discord/handler.rs")),
+        (
+            "tracked_turn.rs",
+            include_str!("../channels/discord/tracked_turn.rs"),
+        ),
+        (
+            "interactions.rs",
+            include_str!("../channels/discord/interactions.rs"),
+        ),
+    ];
+    for (name, source) in entry_points {
+        let claim = source
+            .find("try_begin_turn(")
+            .unwrap_or_else(|| panic!("{name} must claim the session turn slot (#1990)"));
+        let store = source
+            .find("store_cancel_token(")
+            .unwrap_or_else(|| panic!("{name} stores a cancel token"));
+        assert!(
+            claim < store,
+            "{name}: the slot claim must precede store_cancel_token, otherwise a \
+             turn that lost the race takes over the live turn's cancel token"
+        );
+    }
+
+    let interactions = include_str!("../channels/discord/interactions.rs");
+    let start = interactions
+        .find("pub(crate) async fn route_followup_turn(")
+        .expect("tap-turn helper present");
+    let body = &interactions[start..];
+    assert!(
+        body.contains("enqueue_followup("),
+        "a tap that loses the claim must queue the pick for the live turn, \
+         never drop the user's choice"
+    );
+    assert!(
+        body.contains("crate::brain::agent::PushOrigin::Ingress"),
+        "the queued tap is ingress-born, same origin a typed follow-up carries"
+    );
+}
+
 /// The tap turn itself must ride the tool-loop display path with both
 /// callbacks wired, and the live status must be born BEFORE the turn is
 /// dispatched — that ordering is the whole of #1852.

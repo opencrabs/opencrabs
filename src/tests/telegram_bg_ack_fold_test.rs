@@ -49,7 +49,7 @@ fn base_state(with_card: bool) -> StreamingState {
             awaiting: 0,
         },
         sent_intermediates: Vec::new(),
-        intermediate_msg_ids: Vec::new(),
+        intermediate_bubbles: Vec::new(),
         voice_msg_ids: Vec::new(),
         applied_plan_kb: Default::default(),
         processing: false,
@@ -60,6 +60,7 @@ fn base_state(with_card: bool) -> StreamingState {
 
 fn meta(success: bool, label: &str, tail: &str) -> BgTaskMeta {
     BgTaskMeta {
+        task_id: "t-1".to_string(),
         success,
         label: label.to_string(),
         elapsed_secs: 5.0,

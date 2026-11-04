@@ -651,7 +651,12 @@ pub(crate) fn parse_updated_since(
     if spec.len() < 2 {
         return Err(invalid());
     }
-    let (num, unit) = spec.split_at(spec.len() - 1);
+    // The unit is the final character, which may be multi-byte. Slicing at
+    // `len - 1` would land inside it and panic.
+    let Some((last, _)) = spec.char_indices().next_back() else {
+        return Err(invalid());
+    };
+    let (num, unit) = spec.split_at(last);
     let Ok(n) = num.parse::<i64>() else {
         return Err(invalid());
     };

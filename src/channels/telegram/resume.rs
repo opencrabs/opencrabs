@@ -750,7 +750,7 @@ pub(crate) async fn resume_session_inner(
         bg_count: None,
         subagent_counts: Default::default(),
         sent_intermediates: Vec::new(),
-        intermediate_msg_ids: Vec::new(),
+        intermediate_bubbles: Vec::new(),
         voice_msg_ids: Vec::new(),
         processing: true,
         // Cap folded narration only for CLI providers (#532).
@@ -841,6 +841,7 @@ pub(crate) async fn resume_session_inner(
             ProgressEvent::ToolStarted {
                 tool_name,
                 tool_input,
+                ..
             } => {
                 if let Ok(mut s) = st.lock() {
                     s.thinking.clear();
@@ -857,6 +858,7 @@ pub(crate) async fn resume_session_inner(
                         raw_context: raw_ctx,
                         completed: None,
                         dirty: true,
+                        task_id: None,
                     });
                     s.display_queue.push(DisplayItem::NewTool(idx));
                 }

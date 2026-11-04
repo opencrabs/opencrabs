@@ -3,6 +3,8 @@
 
 use crate::brain::agent::PushOrigin;
 use crate::brain::agent::service::MessageEnqueueCallback;
+use crate::brain::agent::service::ProgressCallback;
+use crate::brain::agent::service::ProgressEvent;
 use crate::brain::agent::service::QueuedUserMessage;
 use crate::brain::agent::service::background_tasks::{
     BackgroundTaskManager, ClaudeTurnTasks, CmdResult, claude_completion_message,
@@ -29,6 +31,7 @@ fn tail_keeps_last_n_lines() {
 #[test]
 fn completion_message_reflects_success_and_failure() {
     let ok = completion_message(
+        "t-ok",
         "cargo test",
         "cargo test --all-features",
         &CmdResult {
@@ -50,6 +53,7 @@ fn completion_message_reflects_success_and_failure() {
     assert_eq!(meta.tail, "test result: ok. 5 passed");
 
     let fail = completion_message(
+        "t-fail",
         "build",
         "cargo build",
         &CmdResult {
@@ -112,6 +116,7 @@ async fn spawn_command_enqueues_on_completion() {
         cwd,
         "echo probe".to_string(),
         "echo BG_DONE_MARKER".to_string(),
+        None,
     );
 
     // Wait (bounded) for the detached command to finish and enqueue.
@@ -168,6 +173,7 @@ async fn spawn_command_with_hook_replaces_generic_delivery() {
         "hook probe".to_string(),
         "echo HOOK_DONE_MARKER".to_string(),
         hook,
+        None,
     );
 
     // Wait (bounded) for the detached command to finish and fire the hook.
@@ -188,6 +194,152 @@ async fn spawn_command_with_hook_replaces_generic_delivery() {
         "a hook replaces generic session delivery"
     );
     // Running count drops back to zero after completion.
+    assert_eq!(mgr.running_for(sid), 0);
+}
+
+// --- #2218: one task, one report ---
+
+/// #2218: a surface that drew the row has already reported the outcome.
+/// Delivering it again sent the same completion as a second message, and
+/// because an idle session resumes on delivery, that message opened a whole
+/// agent turn with tools attached. One `cargo test` produced a row, a
+/// "background task finished" line, and a turn.
+///
+/// This asserts the suppression itself rather than the wording: the session
+/// route must stay silent while the finish reaches the callback that owns the
+/// row.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn a_settled_row_suppresses_the_second_report() {
+    let _guard = restart_recovery::test_guard();
+    #[allow(clippy::type_complexity)]
+    let recorded: Arc<Mutex<Vec<(Uuid, QueuedUserMessage)>>> = Arc::new(Mutex::new(Vec::new()));
+    let rec = recorded.clone();
+    let enqueue: MessageEnqueueCallback = Arc::new(move |sid, msg| {
+        rec.lock().unwrap().push((sid, msg));
+    });
+
+    let mgr = Arc::new(BackgroundTaskManager::new());
+    let sid = Uuid::new_v4();
+    session_routes::register_session_route(sid, enqueue);
+
+    // What a surface that draws rows hands the manager: the turn's progress
+    // callback, kept alive past the turn that spawned the task.
+    #[allow(clippy::type_complexity)]
+    let events: Arc<Mutex<Vec<ProgressEvent>>> = Arc::new(Mutex::new(Vec::new()));
+    let ev = events.clone();
+    let progress: ProgressCallback = Arc::new(move |_sid, event| {
+        ev.lock().unwrap().push(event);
+    });
+
+    mgr.clone().spawn_command(
+        sid,
+        std::env::temp_dir(),
+        "row probe".to_string(),
+        "echo ROW_DONE_MARKER".to_string(),
+        Some(progress),
+    );
+
+    let mut waited = 0;
+    while events.lock().unwrap().len() < 2 && waited < 50 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        waited += 1;
+    }
+
+    let ids = {
+        let seen = events.lock().unwrap();
+        assert_eq!(
+            seen.len(),
+            2,
+            "exactly a start and one finish reach the surface, got {seen:?}"
+        );
+        match (&seen[0], &seen[1]) {
+            (
+                ProgressEvent::DetachedTaskStarted { task_id, .. },
+                ProgressEvent::DetachedTaskFinished {
+                    task_id: finished, ..
+                },
+            ) => (task_id.clone(), finished.clone()),
+            other => panic!("expected a start then a finish, got {other:?}"),
+        }
+    };
+    assert_eq!(
+        ids.0, ids.1,
+        "the finish must settle the row the start drew"
+    );
+
+    // Same window the other delivery tests allow: a push that should not
+    // happen has had ample time to show up here.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(
+        recorded.lock().unwrap().is_empty(),
+        "a completion the row already reported must not be delivered again"
+    );
+    assert_eq!(mgr.running_for(sid), 0);
+}
+
+/// #2218 fallback: the delivery is not gone, it is the fallback. A task whose
+/// row disappeared before the finish (the surface went away, the process
+/// restarted, no callback was ever registered) still has to reach the session,
+/// or the outcome is lost with no report at all. The row is dropped through
+/// the same seam a surface uses when it settles one.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn a_finish_with_no_row_still_delivers() {
+    let _guard = restart_recovery::test_guard();
+    #[allow(clippy::type_complexity)]
+    let recorded: Arc<Mutex<Vec<(Uuid, QueuedUserMessage)>>> = Arc::new(Mutex::new(Vec::new()));
+    let rec = recorded.clone();
+    let enqueue: MessageEnqueueCallback = Arc::new(move |sid, msg| {
+        rec.lock().unwrap().push((sid, msg));
+    });
+
+    let mgr = Arc::new(BackgroundTaskManager::new());
+    let sid = Uuid::new_v4();
+    session_routes::register_session_route(sid, enqueue);
+
+    #[allow(clippy::type_complexity)]
+    let events: Arc<Mutex<Vec<ProgressEvent>>> = Arc::new(Mutex::new(Vec::new()));
+    let ev = events.clone();
+    let progress: ProgressCallback = Arc::new(move |_sid, event| {
+        ev.lock().unwrap().push(event);
+    });
+
+    // Long enough that the row can be dropped before the command exits.
+    mgr.clone().spawn_command(
+        sid,
+        std::env::temp_dir(),
+        "gone probe".to_string(),
+        "sleep 1; echo NO_ROW_MARKER".to_string(),
+        Some(progress),
+    );
+    mgr.mirror_finished(sid, "gone probe");
+
+    let mut waited = 0;
+    while recorded.lock().unwrap().is_empty() && waited < 50 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        waited += 1;
+    }
+
+    let r = recorded.lock().unwrap();
+    assert_eq!(
+        r.len(),
+        1,
+        "a finish with no row must deliver exactly once, got {}",
+        r.len()
+    );
+    assert!(r[0].1.context_text.contains("NO_ROW_MARKER"));
+    drop(r);
+
+    // No finish reached the surface: the row it would have settled was gone.
+    assert!(
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|e| !matches!(e, ProgressEvent::DetachedTaskFinished { .. })),
+        "a dropped row must not receive a finish"
+    );
     assert_eq!(mgr.running_for(sid), 0);
 }
 

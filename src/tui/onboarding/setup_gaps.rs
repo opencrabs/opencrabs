@@ -99,6 +99,20 @@ pub fn render_gaps(gaps: &[SetupGap]) -> String {
         .join(", ")
 }
 
+/// Whether image generation has a route this install can use.
+///
+/// Delegates to the tool's own resolver (#2106). The global
+/// `[image.generation]` block is only ONE leg: a built-in install serves image
+/// generation through the provider chain while that block ships disabled, so
+/// the hand-rolled check told every fresh user a capability they already had
+/// was missing. `plan_candidates` walks the provider chain and then the global
+/// leg, so it is a strict superset of the old test and an install configured
+/// the old way keeps the same answer.
+pub fn image_generation_ready(config: &Config) -> bool {
+    !crate::brain::tools::generate_image::GenerateImageTool::plan_candidates(config, None)
+        .is_empty()
+}
+
 /// Read USER.md and the config from disk and report what is still missing.
 ///
 /// A missing USER.md counts as an empty profile. A config that fails to load
@@ -118,14 +132,11 @@ pub fn read_setup_gaps() -> Vec<SetupGap> {
     let (stt, tts, image) = match Config::load() {
         Ok(config) => {
             let voice = config.voice_config();
-            let image_ready = config.image.generation.enabled
-                && config
-                    .image
-                    .generation
-                    .api_key
-                    .as_deref()
-                    .is_some_and(|key| !key.is_empty());
-            (voice.stt_enabled, voice.tts_enabled, image_ready)
+            (
+                voice.stt_enabled,
+                voice.tts_enabled,
+                image_generation_ready(&config),
+            )
         }
         Err(e) => {
             tracing::warn!(error = %e, "setup gaps: config did not load, treating voice and image as unset");

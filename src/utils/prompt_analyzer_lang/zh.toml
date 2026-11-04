@@ -1,0 +1,56 @@
+# Chinese keyword families for prompt analyzer
+#
+# Covers both script variants: each entry is listed in Simplified and in
+# Traditional. Single-word keywords are gated to the detected language, which
+# is what the CJK branch in phantom_lang's detection provides; multi-word
+# phrases are scanned across every language to catch code-switched input.
+
+plan = [
+    "计划", "計劃", "规划", "規劃", "做个计划", "做個計劃",
+    "制定计划", "制定計劃", "实施计划", "實施計劃", "方案",
+    "行动计划", "行動計劃", "分步骤", "分步驟", "列出步骤", "列出步驟",
+]
+
+read_file = [
+    "读取文件", "讀取文件", "读一下文件", "讀一下文件", "打开文件", "打開文件",
+    "看看文件", "看看這個文件", "看看这个文件", "文件内容", "文件內容",
+    "显示文件", "顯示文件", "查看文件", "文件里有什么", "文件裡有什麼",
+]
+
+search = [
+    "搜索", "搜尋", "查找", "查找一下", "找一下", "在哪", "在哪里", "在哪裡",
+    "定位", "搜代码", "搜代碼", "搜索代码", "搜索代碼", "grep",
+]
+
+write_file = [
+    "写文件", "寫文件", "写一个文件", "寫一個文件", "创建文件", "創建文件",
+    "新建文件", "保存到文件", "保存到檔案", "生成文件", "生成檔案",
+    "写入文件", "寫入文件",
+]
+
+edit_file = [
+    "修改文件", "改文件", "编辑文件", "編輯文件", "更新文件", "修复文件",
+    "修復文件", "改一下文件", "修改这个文件", "修改這個文件", "替换文件",
+    "替換文件", "改代码", "改代碼",
+]
+
+bash = [
+    "运行命令", "運行命令", "执行命令", "執行命令", "跑命令",
+    "终端命令", "終端命令", "shell 命令", "bash 命令",
+    "在终端运行", "在終端運行", "执行一下", "執行一下",
+]
+
+web_search = [
+    "上网搜", "上網搜", "搜索网页", "搜索網頁", "网上搜索", "網上搜索",
+    "搜一下网上", "搜一下網上", "谷歌", "google", "查一下网上", "查一下網上",
+]
+
+# "Stop what you are doing" (#965). See en.toml for the one-word rule.
+stop_intent = [
+  "停", "停下", "停止", "停止吧", "别做了", "別做了", "等一下", "等等",
+  "先别", "先別", "暂停", "暫停", "不要继续", "不要繼續", "别继续", "別繼續",
+  "马上停", "馬上停", "停一下",
+]
+
+# Vocatives stripped from the END before matching stop_intent (#965).
+stop_address = ["螃蟹", "opencrabs", "机器人", "機器人", "兄弟", "请", "請", "现在", "現在", "吧"]

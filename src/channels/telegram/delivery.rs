@@ -69,6 +69,67 @@ fn options_pending(streaming: &Arc<std::sync::Mutex<StreamingState>>) -> bool {
         .is_some()
 }
 
+/// Which intermediate bubbles does the final answer already deliver (#2156)?
+///
+/// Pure over the pairs so a test can assert on ids: the reported turn must
+/// yield the narration bubble and never the final bubble.
+///
+/// `final_id` is excluded from the candidates by construction, not by text
+/// comparison: the final bubble carries the answer verbatim, so a text-only
+/// predicate would flag it as a duplicate of itself and delete the very bubble
+/// the turn exists to deliver.
+pub(crate) fn duplicate_intermediate_ids(
+    final_text: &str,
+    final_id: MessageId,
+    bubbles: &[(MessageId, String)],
+) -> Vec<MessageId> {
+    bubbles
+        .iter()
+        .filter(|(id, _)| *id != final_id)
+        .filter(|(_, text)| super::flow::answer_already_delivers(final_text, text))
+        .map(|(id, _)| *id)
+        .collect()
+}
+
+/// Delete the intermediate bubbles the final answer already delivers (#2156).
+///
+/// The dedup ladder above suppresses the FINAL when an intermediate equals it.
+/// A prefix never matched that comparison, so a 1962-char narration bubble
+/// survived above a 3761-char answer that opened with the same words. The
+/// answer is the complete copy, so the narration bubble is the duplicate and it
+/// is the one that goes.
+///
+/// Media-bearing intermediates are never touched: their bubble is the only copy
+/// of the documents it carries (#1939).
+///
+/// Returns the ids deleted, so a caller (and a test) can assert on addresses
+/// rather than on a count.
+pub(crate) async fn prune_delivered_intermediates(
+    bot: &Bot,
+    chat_id: ChatId,
+    streaming: &Arc<std::sync::Mutex<StreamingState>>,
+    final_text: &str,
+    final_id: MessageId,
+) -> Vec<MessageId> {
+    let doomed: Vec<MessageId> = {
+        let s = streaming.lock().unwrap_or_else(|e| e.into_inner());
+        duplicate_intermediate_ids(final_text, final_id, &s.intermediate_bubbles)
+    };
+    for mid in &doomed {
+        best_effort_delete(bot, chat_id, *mid, "duplicate intermediate").await;
+    }
+    if !doomed.is_empty() {
+        tracing::info!(
+            "Telegram: deleted {} intermediate bubble(s) the final already delivers (#2156)",
+            doomed.len()
+        );
+        let mut s = streaming.lock().unwrap_or_else(|e| e.into_inner());
+        s.intermediate_bubbles
+            .retain(|(id, _)| !doomed.contains(id));
+    }
+    doomed
+}
+
 /// True when a rich-send failure means Telegram could not fetch the embedded
 /// media (the mermaid.ink diagram) — a transient renderer or network window
 /// that a single re-send can sail (#tg-mermaid-delivery-hardening). Our
@@ -267,6 +328,36 @@ pub(crate) async fn deliver_final_response(
                     }
                 }
             } else {
+                // #2156: the final is non-empty, so it ships as its own bubble.
+                // A trailing folded run that the final already delivers must not
+                // stay in the block, or the turn ends with the answer twice: the
+                // resticked block above and the fresh bubble below.
+                let (redundant, trailer) = super::flow::take_folded_final_if_redundant(
+                    bot,
+                    chat_id,
+                    streaming,
+                    options_pending(streaming),
+                    &text_only,
+                )
+                .await;
+                if let Some(t) = trailer {
+                    let trailer_len = t.len();
+                    streaming
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .pending_trailer = Some(t);
+                    tracing::info!(
+                        "Telegram: stashed {trailer_len} trailer chars reclaimed from the \
+                         block before delivery (#2156)"
+                    );
+                }
+                if let Some(r) = redundant {
+                    tracing::info!(
+                        "Telegram: block trailing run ({} chars) is already delivered by \
+                         the final answer, reclaimed from the block (#2156)",
+                        r.len()
+                    );
+                }
                 text_only
             };
 
@@ -583,7 +674,7 @@ pub(crate) async fn deliver_final_response(
             // options_pending itself — same gate as the final-answer site
             // (#45) — or a fully-deduped buttons turn stays plain.
             // #1939: does a media-bearing intermediate already carry this
-            // exact body? Its bubble is not in `intermediate_msg_ids`, so
+            // exact body? Its bubble is not in `intermediate_bubbles`, so
             // the cleanup below cannot replace it: the arm would only
             // re-send the body the reader already has, and the copy's
             // markers would point at a bubble that holds nothing. Skipping
@@ -618,9 +709,9 @@ pub(crate) async fn deliver_final_response(
                 {
                     Ok(rich_msg_id) => {
                         // Delete the HTML intermediates now that rich message succeeded
-                        let intermediate_ids = {
+                        let intermediate_ids: Vec<MessageId> = {
                             let s = streaming.lock().unwrap_or_else(|e| e.into_inner());
-                            s.intermediate_msg_ids.clone()
+                            s.intermediate_bubbles.iter().map(|(id, _)| *id).collect()
                         };
                         for mid in &intermediate_ids {
                             best_effort_delete(bot, chat_id, *mid, "intermediate cleanup").await;
@@ -1103,6 +1194,22 @@ pub(crate) async fn deliver_final_response(
                 best_effort_delete(bot, chat_id, mid, "empty-final placeholder").await;
             }
 
+            // #2156: the answer is in its own bubble now. Remove the
+            // intermediate bubbles whose text the answer already delivers, so
+            // the reader sees one answer instead of a narration bubble
+            // repeating it above. Deleting AFTER a successful send keeps the
+            // narration intact if delivery failed and had to degrade.
+            if let Some(final_mid) = sent_reply_id {
+                prune_delivered_intermediates(
+                    bot,
+                    chat_id,
+                    streaming,
+                    &text_only,
+                    MessageId(final_mid),
+                )
+                .await;
+            }
+
             // Hand the merge candidate to the turn state (#tg-suggest-merge):
             // handler.rs reads it immediately after this returns and passes it
             // into render_suggestions. None (rich / voice / suppressed paths)
@@ -1296,16 +1403,20 @@ pub(crate) fn file_message_link(
 /// that does not exist, and it never disappears: the label is the reader's
 /// anchor either way.
 ///
-/// `text` is the buffer being rewritten, which STARTS as a copy of
-/// `scan.text` and is then run through the artifact strip, the secret
-/// redaction and the dedup ladder, any of which can move a marker. `scan`
-/// therefore travels with the call, and a span is cut only while the bytes
-/// it names still match the ones the scanner wrote there: a rewrite that
-/// moved the text degrades to the plain marker instead of splicing a link
-/// over unrelated words.
+/// `text` is the buffer being rewritten, which STARTS as a copy of `scan.text`.
+/// The artifact strip and the secret redaction have already run by the time the
+/// scan does, so what they left is what the recorded spans index; the rewrites
+/// that can move a marker are the ones AFTER it — `strip_echoed_plan_title`
+/// drops an echoed leading line and shifts every following span left (#837),
+/// `extract_react_marker` cuts a trailing directive, and the dedup ladder and
+/// the folded reclaim each rewrite the text again. The recorded span is
+/// therefore a record of WHAT the scanner wrote, never of WHERE it sits: it is
+/// tried first, and a marker that moved is then found by its own bytes. A
+/// marker that vanished, or that the model also wrote itself (#2001), keeps the
+/// plain form rather than splicing a link over unrelated words.
 ///
-/// Spans are cut from the LAST to the FIRST, so a link's extra bytes can
-/// never invalidate a span that has not been cut yet.
+/// Spans are cut from the LAST to the FIRST, so a link's extra bytes can never
+/// invalidate a span that has not been cut yet.
 pub(crate) fn link_file_markers(
     text: &str,
     scan: &crate::utils::image::LocalFileScan,
@@ -1320,21 +1431,22 @@ pub(crate) fn link_file_markers(
             // Not from a scan: nothing to cut.
             continue;
         };
-        let (start, end) = (span.start, span.end);
-        let Some(marker) = text.get(start..end) else {
+        // The span indexes `scan.text`, the scanner's own output, so it still
+        // names the marker the scanner wrote there. Read the marker FROM it
+        // rather than from `text`, whose bytes have since moved.
+        let Some(marker) = scan.text.get(span.start..span.end) else {
             continue;
         };
-        if scan.text.get(start..end) != Some(marker) {
-            // The text moved under the span: the marker stays plain.
+        let Some(start) = locate_marker(text, marker, Some(span.clone())) else {
             continue;
-        }
+        };
         let Some((_, link)) = links
             .iter()
             .find(|(path, _)| path.as_path() == file.path.as_path())
         else {
             continue;
         };
-        spans.push((start, end, marker, link.as_str()));
+        spans.push((start, start + marker.len(), marker, link.as_str()));
     }
     if spans.is_empty() {
         return text.to_string();
@@ -1343,11 +1455,51 @@ pub(crate) fn link_file_markers(
     // reordered them: cutting back-to-front is what keeps the earlier spans
     // valid, and that needs the order to be known.
     spans.sort_by_key(|(start, _, _, _)| *start);
+    // Two attachments can resolve to the SAME offset. A file named twice leaves
+    // two identical markers; when the text has moved past both recorded spans,
+    // `locate_marker` falls back to the marker's own bytes, which may now exist
+    // only once, and both attachments land on that one occurrence. Cutting the
+    // range twice splices the second link into the first one's bytes and, when
+    // the marker's last character is multi-byte, ends inside it: a
+    // `replace_range` panic (#2125). One occurrence carries one link, so the
+    // first span wins and the second attachment keeps its plain marker.
+    spans.dedup_by_key(|(start, _, _, _)| *start);
     let mut linked = text.to_string();
     for (start, end, marker, link) in spans.iter().rev() {
         linked.replace_range(*start..*end, &format!("[{marker}]({link})"));
     }
     linked
+}
+
+/// Find where `marker` sits in `text`.
+///
+/// The recorded `span` is tried FIRST. It indexes `scan.text`, and when the
+/// bytes it names still equal `marker` at that same offset in `text` the buffer
+/// has not moved, so that is unambiguously the occurrence the scanner wrote —
+/// even when the model wrote the same marker again elsewhere. A file named
+/// twice in one reply produces two attachments, two identical markers and two
+/// valid spans, and each must link at its own offset.
+///
+/// When the span is stale the marker's own bytes are searched for, and the
+/// result is accepted only on EXACTLY one occurrence: two are ambiguous, since
+/// the scanner wrote one and the model may have written the other itself
+/// (#2001), and a stale span no longer says which. Zero means the text was
+/// rewritten beyond recognition. Both fall back to the plain marker.
+fn locate_marker(text: &str, marker: &str, span: Option<std::ops::Range<usize>>) -> Option<usize> {
+    if marker.is_empty() {
+        return None;
+    }
+    if let Some(span) = span {
+        let start = span.start;
+        if text.get(span) == Some(marker) {
+            return Some(start);
+        }
+    }
+    let first = text.find(marker)?;
+    if text[first + marker.len()..].contains(marker) {
+        return None;
+    }
+    Some(first)
 }
 
 /// The filename Telegram should display for a document read from `path`.

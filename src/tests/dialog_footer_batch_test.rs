@@ -169,3 +169,66 @@ fn ssh_password_footer_is_minimal() {
     );
     assert_eq!(keys[2].label, "Esc");
 }
+
+/// The usage dashboard footer follows the state (#2027): Enter is advertised
+/// only while the Cache Efficiency card is focused, because that is the only
+/// card with prices behind it, and with the breakdown open Esc is the whole
+/// keymap.
+#[test]
+fn usage_dashboard_footer_follows_the_focused_card() {
+    use crate::usage::cards;
+    use crate::usage::dashboard::{CACHE_CARD, DashboardState};
+
+    let footer_row = |state: &DashboardState| {
+        let backend = TestBackend::new(80, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                let row = ratatui::layout::Rect::new(area.x, area.y + 1, area.width, 1);
+                cards::render_footer(f, row, state);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        (0..buf.area.width)
+            .map(|x| buf[(x, 1)].symbol().to_string())
+            .collect::<String>()
+    };
+
+    let on_grid = DashboardState {
+        focused_card: 0,
+        ..Default::default()
+    };
+    let row = footer_row(&on_grid);
+    assert!(
+        row.starts_with("Tab: switch"),
+        "canonical first binding: {row:?}"
+    );
+    assert!(
+        !row.contains("Enter"),
+        "Enter does nothing off the cache card, so it must not be advertised: {row:?}"
+    );
+    assert!(row.contains("T/W/M/A: period"), "{row:?}");
+
+    let on_cache = DashboardState {
+        focused_card: CACHE_CARD,
+        ..Default::default()
+    };
+    let row = footer_row(&on_cache);
+    assert!(
+        row.contains("Enter: details"),
+        "Enter opens the prices: {row:?}"
+    );
+
+    let open = DashboardState {
+        focused_card: CACHE_CARD,
+        cache_detail_open: true,
+        ..Default::default()
+    };
+    let row = footer_row(&open);
+    assert_eq!(
+        row.trim_end(),
+        "Esc: close",
+        "the open breakdown has exactly one key: {row:?}"
+    );
+}

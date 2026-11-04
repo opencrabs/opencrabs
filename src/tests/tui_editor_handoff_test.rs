@@ -10,41 +10,58 @@ use crate::tui::editor::{
 };
 
 #[test]
-fn editor_allowlist_is_the_four_named_editors() {
-    assert_eq!(EDITOR_ALLOWLIST, &["vi", "vim", "nano", "emacs"]);
+fn editor_allowlist_covers_the_editors_people_run() {
+    assert_eq!(
+        EDITOR_ALLOWLIST,
+        &[
+            "vi",
+            "vim",
+            "nvim",
+            "nano",
+            "emacs",
+            "emacsclient",
+            "helix",
+            "hx",
+            "micro"
+        ]
+    );
 }
 
 #[test]
 fn handoff_target_matches_bare_editor_names() {
-    assert_eq!(handoff_target("vi"), Some("vi"));
-    assert_eq!(handoff_target("vim"), Some("vim"));
-    assert_eq!(handoff_target("nano"), Some("nano"));
-    assert_eq!(handoff_target("emacs"), Some("emacs"));
+    assert_eq!(handoff_target("vi", None).as_deref(), Some("vi"));
+    assert_eq!(handoff_target("vim", None).as_deref(), Some("vim"));
+    assert_eq!(handoff_target("nano", None).as_deref(), Some("nano"));
+    assert_eq!(handoff_target("emacs", None).as_deref(), Some("emacs"));
 }
 
 #[test]
 fn handoff_target_matches_editors_with_arguments() {
-    assert_eq!(handoff_target("vi notes.md"), Some("vi"));
-    assert_eq!(handoff_target("vim src/main.rs +10"), Some("vim"));
-    assert_eq!(handoff_target("nano TODO"), Some("nano"));
-    assert_eq!(handoff_target("emacs -nw file.txt"), Some("emacs"));
+    assert_eq!(handoff_target("vi notes.md", None).as_deref(), Some("vi"));
+    assert_eq!(
+        handoff_target("vim src/main.rs +10", None).as_deref(),
+        Some("vim")
+    );
+    assert_eq!(handoff_target("nano TODO", None).as_deref(), Some("nano"));
+    assert_eq!(
+        handoff_target("emacs -nw file.txt", None).as_deref(),
+        Some("emacs")
+    );
 }
 
 #[test]
 fn handoff_target_rejects_lookalikes_and_non_editors() {
     // Substring lookalike: exec-ing this would run the wrong thing, and it
     // proves we match argv[0] exactly, not `contains`.
-    assert_eq!(handoff_target("myvi-helper"), None);
-    assert_eq!(handoff_target("vim-tiny notes.md"), None);
-    assert_eq!(handoff_target("echo vi"), None);
-    assert_eq!(handoff_target("ls"), None);
-    // An absolute-path argv[0] is not an allowlisted bare name: it routes to
-    // the pipe path by design (#1744: exact argv[0] match only).
-    assert_eq!(handoff_target("/usr/bin/vi notes.md"), None);
-    assert_eq!(handoff_target("./vi"), None);
+    assert_eq!(handoff_target("myvi-helper", None), None);
+    assert_eq!(handoff_target("vim-tiny notes.md", None), None);
+    assert_eq!(handoff_target("echo vi", None), None);
+    assert_eq!(handoff_target("ls", None), None);
+    // A lookalike whose basename is not an editor still pipes.
+    assert_eq!(handoff_target("./myvi-helper", None), None);
     // Empty/whitespace commands are not handoffs.
-    assert_eq!(handoff_target(""), None);
-    assert_eq!(handoff_target("   "), None);
+    assert_eq!(handoff_target("", None), None);
+    assert_eq!(handoff_target("   ", None), None);
 }
 
 #[test]
@@ -149,9 +166,9 @@ fn non_editor_bangs_stay_on_the_pipe_path() {
     // The routing predicate: only allowlisted argv[0] values park a handoff.
     // Everything else must fall through to the existing piped bang branch —
     // nothing is parked, nothing is aborted.
-    assert!(handoff_target("ls -la").is_none());
-    assert!(handoff_target("git status").is_none());
-    assert!(handoff_target("echo vi > /dev/null").is_none());
+    assert!(handoff_target("ls -la", None).is_none());
+    assert!(handoff_target("git status", None).is_none());
+    assert!(handoff_target("echo vi > /dev/null", None).is_none());
 }
 
 #[test]
@@ -161,7 +178,7 @@ fn bang_branch_routes_allowlist_into_the_parking_field() {
     // performs the handoff, and re-enables mouse capture afterwards.
     let src = include_str!("../tui/app/input.rs");
     assert!(
-        src.contains("if crate::tui::editor::handoff_target(&shell_cmd).is_some()")
+        src.contains("crate::tui::editor::handoff_target(&shell_cmd, env_editor.as_deref())")
             && src.contains("self.pending_editor_handoff = Some((shell_cmd, origin_session));"),
         "bang branch must park handoff_target matches as (cmd, origin_session) for the runner loop"
     );
@@ -220,4 +237,53 @@ fn editor_module_is_unix_gated_at_the_mod_declaration() {
         decl.contains("#[cfg(unix)]\npub mod editor;"),
         "the editor module must stay cfg(unix): its reap path is libc-based (#1755)"
     );
+}
+
+/// #2173: the editors people actually run must hand off, not dump escape
+/// sequences into the chat. `nvim`, `emacsclient`, `helix`, `hx` and `micro`
+/// were all pipe-captured before this.
+#[test]
+fn handoff_target_covers_modern_editors() {
+    assert_eq!(handoff_target("nvim", None).as_deref(), Some("nvim"));
+    assert_eq!(
+        handoff_target("emacsclient -nw x.rs", None).as_deref(),
+        Some("emacsclient")
+    );
+    assert_eq!(
+        handoff_target("helix notes.md", None).as_deref(),
+        Some("helix")
+    );
+    assert_eq!(handoff_target("hx", None).as_deref(), Some("hx"));
+    assert_eq!(
+        handoff_target("micro config.toml", None).as_deref(),
+        Some("micro")
+    );
+}
+
+/// #2173: an absolute or relative path to an allowlisted editor hands off.
+/// The match is on the basename, so `/usr/bin/nvim` and `./vim` work while a
+/// lookalike basename still pipes.
+#[test]
+fn handoff_target_matches_on_the_basename() {
+    assert_eq!(
+        handoff_target("/usr/bin/nvim file.rs", None).as_deref(),
+        Some("nvim")
+    );
+    assert_eq!(handoff_target("./vim", None).as_deref(), Some("vim"));
+    assert_eq!(handoff_target("vimrc-helper", None), None);
+    assert_eq!(handoff_target("./myvi-helper", None), None);
+}
+
+/// #2173: $EDITOR/$VISUAL is honoured by name comparison, so an editor we do
+/// not list still gets the tty when it is the user's own choice. A command
+/// that is NOT the env editor keeps piping.
+#[test]
+fn handoff_target_honours_env_editor() {
+    assert_eq!(handoff_target("kak", Some("kak")).as_deref(), Some("kak"));
+    assert_eq!(
+        handoff_target("/opt/homebrew/bin/kak file", Some("kak -n")).as_deref(),
+        Some("kak")
+    );
+    assert_eq!(handoff_target("myvi-helper", Some("micro")), None);
+    assert_eq!(handoff_target("ls", Some("kak")), None);
 }

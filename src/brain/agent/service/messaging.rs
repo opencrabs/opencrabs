@@ -95,7 +95,8 @@ impl AgentService {
             .await
             .map_err(AgentError::db)?;
 
-        // Update session token usage with the pair that served it (#807).
+        // Update session token usage with the pair that served it (#807). The
+        // cache-read count rides along for the By Model cache share (#2027).
         session_service
             .update_session_usage(
                 session_id,
@@ -103,6 +104,12 @@ impl AgentService {
                 cost,
                 &self.provider_name_for_session(session_id),
                 &self.provider_model_for_session(session_id),
+                if response.usage.cache_read_unreported {
+                    None
+                } else {
+                    Some(response.usage.cache_read_tokens as i64)
+                },
+                Some(billable_input as i64),
             )
             .await
             .map_err(AgentError::db)?;

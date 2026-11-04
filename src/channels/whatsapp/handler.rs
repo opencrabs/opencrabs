@@ -20,9 +20,58 @@ use uuid::Uuid;
 
 use tokio_util::sync::CancellationToken;
 use wacore::types::message::MessageInfo;
+use wacore_binary::jid::JidExt;
 use waproto::whatsapp::Message;
 use whatsapp_rust::SendOptions;
 use whatsapp_rust::client::Client;
+
+/// True when an inbound stanza is a contact's status (story) rather than a
+/// message addressed to us.
+///
+/// Status posts arrive as group traffic on `status@broadcast`, so without this
+/// they look like a DM from the poster: a full agent turn runs on the image,
+/// and the session's reply target becomes a JID that cannot receive
+/// `send_message` (#2176). A status is never a message, so it is dropped
+/// before session resolution rather than filtered later.
+pub(crate) fn is_inbound_status(chat: &wacore_binary::jid::Jid, is_from_me: bool) -> bool {
+    !is_from_me && chat.is_status_broadcast()
+}
+
+/// Composing pings are best-effort, so the retry policy is deliberately
+/// conservative (#2181): the loop used to retry every 5 seconds forever with
+/// no connection check, which during an outage wrote one WARN per 5 seconds
+/// per session for a call that could not succeed (48 lines in 4 minutes).
+pub(crate) const COMPOSING_BASE_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Ceiling for the exponential backoff. The indicator is a nicety, not a
+/// delivery mechanism, so past 30 seconds there is nothing to gain from
+/// pinging more often.
+pub(crate) const COMPOSING_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Give up after this many consecutive failures. The turn's cancel token ends
+/// the loop anyway, so a cap only stops the pointless tail of a dead
+/// connection.
+pub(crate) const COMPOSING_MAX_FAILURES: u32 = 5;
+
+/// Delay before the next composing attempt, or `None` when the loop should
+/// stop. `failures` counts consecutive failures, reset to zero on success.
+///
+/// Pure so the policy is testable without a socket: 5s, 10s, 20s, 30s, then
+/// give up.
+pub(crate) fn composing_retry_delay(failures: u32) -> Option<std::time::Duration> {
+    if failures == 0 {
+        return Some(COMPOSING_BASE_DELAY);
+    }
+    if failures >= COMPOSING_MAX_FAILURES {
+        return None;
+    }
+    let factor = 1u64 << (failures - 1).min(3);
+    let base = COMPOSING_BASE_DELAY.as_millis() as u64;
+    let cap = COMPOSING_MAX_DELAY.as_millis() as u64;
+    Some(std::time::Duration::from_millis(
+        base.saturating_mul(factor).min(cap),
+    ))
+}
 
 /// Header prepended to all outgoing messages so the user knows it's from the agent.
 pub const MSG_HEADER: &str = "\u{1f980} *OpenCrabs*";
@@ -477,6 +526,19 @@ pub(crate) async fn handle_message(
         tracing::info!(
             target: "whatsapp",
             "dropping inbound message from a blocked contact (#1487)"
+        );
+        return;
+    }
+
+    // #2176: a status (story) is not a message. It arrives as group traffic on
+    // `status@broadcast`, which used to run a full agent turn and then poison
+    // the session's reply target with a JID that cannot receive a send. Dropped
+    // here, before any session is resolved, so no reply target can bind to it.
+    if is_inbound_status(&info.source.chat, info.source.is_from_me) {
+        tracing::debug!(
+            target: "whatsapp",
+            "dropping inbound status broadcast from {}",
+            phone
         );
         return;
     }
@@ -1086,6 +1148,18 @@ pub(crate) async fn handle_message(
         }
     };
 
+    // Second line (#2176): the drop above covers the inbound path, and this
+    // covers any future path that computes a target. A broadcast JID rejects
+    // every `send_message`, so binding a session to one costs a full turn and
+    // poisons every later progress event in that session.
+    if reply_target.is_status_broadcast() {
+        tracing::warn!(
+            target: "whatsapp",
+            "refusing to reply into status@broadcast; dropping this stanza"
+        );
+        return;
+    }
+
     // is_owner gates /new archiving and owner-only flows. The self-chat is
     // always the owner even though its LID sender won't match the configured PN.
     //
@@ -1155,12 +1229,9 @@ pub(crate) async fn handle_message(
         .register_session_jid(session_id, reply_target.to_string())
         .await;
 
-    // A new inbound turn never edits the previous turn's message (#1614). The
-    // outbox entry has to outlive its own turn (the final edit and the
-    // completion reaction both run after the agent call), so the turn that
-    // starts is the one that releases it. Skipping this let a follow-up sent
-    // inside the 15-minute edit window overwrite the answer already on screen.
-    wa_state.begin_turn(session_id).await;
+    // The outbox release for this turn happens after the turn slot is claimed
+    // (#2179, see below): a message that loses the claim is queued, and a
+    // queued message must not clear the live turn's entry.
 
     // Claim this session's background-task completions for WhatsApp: a completion
     // must be delivered by the surface that OWNS the session, not by whichever
@@ -1193,11 +1264,11 @@ pub(crate) async fn handle_message(
 
     // Fast-cancel: any recognised stop intent, in any supported language (#965).
     //
-    // Cancellation is scoped to explicit stop requests and genuine follow-up
-    // messages (handled at dispatch by store_cancel_token, which cancels the
-    // prior token before starting new work). Channel commands like /models,
-    // /help, /usage, /new must NEVER abort an in-flight task: switching models
-    // applies to the next run, it does not drop current work (#266).
+    // Cancellation is scoped to explicit stop requests. An ordinary follow-up
+    // no longer cancels anything: it queues behind the live turn through the
+    // turn slot (#2179). Channel commands like /models, /help, /usage, /new
+    // must NEVER abort an in-flight task: switching models applies to the next
+    // run, it does not drop current work (#266).
     if crate::utils::stop_intent::is_stop_command_or_intent(&content) {
         wa_state.cancel_session(session_id).await;
         let reply = waproto::whatsapp::Message {
@@ -1368,6 +1439,21 @@ pub(crate) async fn handle_message(
                 }
                 return;
             }
+            ChannelCommand::StopTarget(_) => {
+                // #2108: targeting another session is Telegram-only for now.
+                // Answer explicitly instead of falling through to the agent,
+                // which would look like the command ran.
+                let reply = waproto::whatsapp::Message {
+                    conversation: Some(
+                        "Targeted stop is Telegram-only. Use /stop here.".to_string(),
+                    ),
+                    ..Default::default()
+                };
+                if let Err(e) = client.send_message(reply_target.clone(), reply).await {
+                    tracing::warn!(error = %e, "failed to send WhatsApp message");
+                }
+                return;
+            }
             ChannelCommand::Compact => {
                 let status = waproto::whatsapp::Message {
                     conversation: Some("⏳ Compacting context...".to_string()),
@@ -1524,12 +1610,49 @@ pub(crate) async fn handle_message(
          the turn must never end on a bare attachment with no closing text after it.]\n{agent_input}"
     );
 
+    // ── Turn slot (#2179) ─────────────────────────────────────────────────
+    // One turn per session, claimed atomically BEFORE the typing setup, the
+    // stream setup and the agent call. A message that loses the claim is
+    // queued for the live turn (injected between tool rounds, flushed at turn
+    // end) instead of forking a second concurrent tool loop on this session.
+    // `store_cancel_token` no longer kills the running turn, so this slot is
+    // the only thing standing between a follow-up and two turns racing on one
+    // transcript.
+    let turn_guard = match wa_state.try_begin_turn(session_id) {
+        Some(guard) => guard,
+        None => {
+            tracing::info!(
+                "WhatsApp: message arrived mid-turn on session {session_id} — queued for \
+                 injection between tool rounds (#2179)"
+            );
+            wa_state.enqueue_turn_message(
+                session_id,
+                crate::brain::agent::QueuedUserMessage {
+                    context_text: agent_input,
+                    display_text,
+                    origin: crate::brain::agent::PushOrigin::Ingress,
+                    bg_meta: None,
+                },
+            );
+            return;
+        }
+    };
+
+    // A new inbound turn never edits the previous turn's message (#1614). The
+    // outbox entry has to outlive its own turn (the final edit and the
+    // completion reaction both run after the agent call), so the turn that
+    // starts is the one that releases it. Skipping this let a follow-up sent
+    // inside the 15-minute edit window overwrite the answer already on screen.
+    // Only a turn that WON the slot reaches this: a queued message must leave
+    // the live turn's entry alone, or its final edit lands as a new message.
+    wa_state.begin_turn(session_id).await;
+
     // Typing indicator — send composing every 5 s while the agent thinks
     let typing_cancel = CancellationToken::new();
     // The agent-call token is created HERE rather than at the call because
-    // the handover tail below must watch it: `/stop` and the next turn's
-    // `store_cancel_token` are the two events that should end this
-    // indicator, and both cancel exactly this token (#1989).
+    // the handover tail below must watch it: `/stop` is the event that should
+    // end this indicator, and it cancels exactly this token (#1989). A
+    // follow-up no longer cancels it: since #2179 it queues behind the turn.
     let cancel_token = CancellationToken::new();
     tokio::spawn({
         let client = client.clone();
@@ -1538,14 +1661,53 @@ pub(crate) async fn handle_message(
         let stop = cancel_token.clone();
         let background = agent.background_manager();
         let agents = agent.subagent_manager();
+        let state = wa_state.clone();
         async move {
+            // #2181: check the connection before every attempt and back off on
+            // failure instead of retrying every 5s forever. The first failure
+            // of an episode is the only one worth a WARN.
+            let mut failures: u32 = 0;
             loop {
-                if let Err(e) = client.chatstate().send_composing(&chat_jid).await {
-                    tracing::warn!(error = %e, "failed to send WhatsApp composing indicator");
-                }
+                let delay = if !state.is_connected().await {
+                    failures = failures.saturating_add(1);
+                    tracing::debug!(
+                        failures,
+                        "WhatsApp not connected; skipping composing indicator"
+                    );
+                    match composing_retry_delay(failures) {
+                        Some(d) => d,
+                        None => break,
+                    }
+                } else {
+                    match client.chatstate().send_composing(&chat_jid).await {
+                        Ok(()) => {
+                            failures = 0;
+                            composing_retry_delay(0).unwrap_or(COMPOSING_BASE_DELAY)
+                        }
+                        Err(e) => {
+                            failures = failures.saturating_add(1);
+                            if failures == 1 {
+                                tracing::warn!(
+                                    error = %e,
+                                    "failed to send WhatsApp composing indicator"
+                                );
+                            } else {
+                                tracing::debug!(
+                                    error = %e,
+                                    failures,
+                                    "composing indicator still failing"
+                                );
+                            }
+                            match composing_retry_delay(failures) {
+                                Some(d) => d,
+                                None => break,
+                            }
+                        }
+                    }
+                };
                 tokio::select! {
                     _ = cancel.cancelled() => break,
-                    _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
+                    _ = tokio::time::sleep(delay) => {}
                 }
             }
             // Keep composing past the end of the turn while this session still
@@ -1566,8 +1728,14 @@ pub(crate) async fn handle_message(
                 // /stop or a new turn, #1989).
                 crate::channels::typing_tick::DEFAULT_TICK_CEILING,
                 || async {
+                    // #2181: the detached tail pings on its own cadence, so it
+                    // needs the same connection check. A dead socket must not
+                    // produce one WARN per tick.
+                    if !state.is_connected().await {
+                        return;
+                    }
                     if let Err(e) = client.chatstate().send_composing(&chat_jid).await {
-                        tracing::warn!(
+                        tracing::debug!(
                             error = %e,
                             "failed to send WhatsApp composing indicator"
                         );
@@ -2187,6 +2355,16 @@ pub(crate) async fn handle_message(
             }
         }
     }
+
+    // Drop the guard before flushing so a message arriving during the flush
+    // takes the slot fresh instead of re-queueing against a finished turn.
+    drop(turn_guard);
+
+    // #2179 safeguard: a follow-up that landed during the FINAL round had no
+    // further between-rounds drain after it. Flush it into a fresh turn so a
+    // mid-turn message is never silently stranded. Empty is the common case
+    // (one lock check); a real inference only fires when something was queued.
+    super::turns::flush_after_turn(wa_state.clone(), agent.clone(), session_id);
 }
 
 /// Send a real agent-generated confirmation greeting into the owner's self-chat

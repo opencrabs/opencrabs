@@ -21,7 +21,9 @@ use whatsapp_rust::client::Client;
 use uuid::Uuid;
 
 use super::WhatsAppState;
-use super::flow_render::{Phase, Step, fold, render, take_trailing_answer};
+use super::flow_render::{
+    FlushAction, Phase, Step, WindowPlan, fold, render, take_trailing_answer,
+};
 use super::followups::send_suggestions;
 use super::rate_limit::GateOutcome;
 use crate::brain::agent::{ProgressCallback, ProgressEvent};
@@ -143,11 +145,11 @@ struct Block {
     started: Instant,
     /// Server id of the posted block, once it exists.
     message_id: Option<String>,
-    /// Text the posted block currently shows, to skip no-op edits.
-    last_text: Option<String>,
-    /// Set when the block can no longer be edited. Running updates stop;
-    /// the settled state gets one fresh post.
-    expired: bool,
+    /// When the block was posted, so the edit window can be checked locally.
+    posted_at: Option<Instant>,
+    /// Edit-window decisions: what the next flush does, and whether editing
+    /// is over for this turn (#2150).
+    plan: WindowPlan,
 }
 
 impl Block {
@@ -157,8 +159,8 @@ impl Block {
             steps: Vec::new(),
             started: Instant::now(),
             message_id: None,
-            last_text: None,
-            expired: false,
+            posted_at: None,
+            plan: WindowPlan::default(),
         }
     }
 
@@ -221,19 +223,22 @@ impl Block {
 
     async fn flush(&mut self, phase: Phase) {
         let settled = phase != Phase::Running;
-        if self.expired && !settled {
-            return;
-        }
         let text = render(&self.steps, phase, self.started.elapsed());
-        if self.last_text.as_deref() == Some(text.as_str()) {
-            return;
-        }
-
-        match self.message_id.clone() {
-            Some(id) if !self.expired => {
+        let action = self.plan.decide(&text, settled, self.edit_window_open());
+        match action {
+            // The turn's visible state did not change, or editing is over and
+            // this is still a running tick (#2150).
+            FlushAction::Skip => {}
+            FlushAction::Edit => {
                 if !settled && !self.gate().await {
                     return;
                 }
+                let Some(id) = self.message_id.clone() else {
+                    // The plan only edits a message it posted, so a missing id
+                    // here means the two drifted. Posting keeps the row alive.
+                    self.post(text, settled).await;
+                    return;
+                };
                 let message = waproto::whatsapp::Message {
                     conversation: Some(text.clone()),
                     ..Default::default()
@@ -244,22 +249,31 @@ impl Block {
                     .edit_message(self.config.jid.clone(), id, message)
                     .await
                 {
-                    Ok(_) => self.last_text = Some(text),
+                    Ok(_) => self.plan.landed(&text),
                     Err(e) => {
                         tracing::warn!(
                             target: "whatsapp",
                             error = %e,
                             "flow block edit rejected; running updates stop for this turn"
                         );
-                        self.expired = true;
+                        self.plan.edit_refused();
                         if settled {
                             self.post(text, settled).await;
                         }
                     }
                 }
             }
-            _ => self.post(text, settled).await,
+            FlushAction::Post => self.post(text, settled).await,
         }
+    }
+
+    /// Whether the posted block is still young enough to edit. A block with
+    /// no recorded post time is treated as editable, so the server stays the
+    /// judge rather than a missing timestamp silently freezing the block.
+    fn edit_window_open(&self) -> bool {
+        self.posted_at
+            .map(|at| super::flow_render::within_edit_window(at.elapsed()))
+            .unwrap_or(true)
     }
 
     /// Post a new block and track it as the one future edits target.
@@ -279,8 +293,8 @@ impl Block {
         {
             Ok(result) => {
                 self.message_id = Some(result.message_id);
-                self.last_text = Some(text);
-                self.expired = false;
+                self.posted_at = Some(Instant::now());
+                self.plan.landed(&text);
             }
             Err(e) => {
                 tracing::warn!(
@@ -288,7 +302,7 @@ impl Block {
                     error = %e,
                     "flow block post failed; the turn continues without a live block"
                 );
-                self.expired = true;
+                self.plan.post_refused();
             }
         }
     }

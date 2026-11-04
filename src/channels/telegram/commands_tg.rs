@@ -364,13 +364,134 @@ pub(crate) async fn handle_channel_command(
                 return Ok(CommandOutcome::Handled);
             }
             ChannelCommand::Stop => {
-                let cancelled = telegram_state.cancel_session(session_id).await;
+                // The message's own session first, then any guest turn the
+                // same caller started elsewhere (#2143). A guest session lives
+                // in a chat the bot is not in, so this lookup could never find
+                // it: the turn kept running with no reachable kill switch.
+                let cancelled = telegram_state.cancel_session(session_id).await
+                    | (telegram_state.cancel_guest_turns_for(user_id).await > 0);
                 let reply = if cancelled {
                     "Operation cancelled."
                 } else {
                     "No operation in progress."
                 };
                 super::ephemeral::send_ack(bot, msg.chat.id, thread_id, ephemeral_rx, reply)
+                    .await?;
+                return Ok(CommandOutcome::Handled);
+            }
+            ChannelCommand::StopTarget(target) => {
+                // #2108: stop a turn that is running in ANOTHER session. The
+                // plain `/stop` above can only reach this message's session, so
+                // a wedged turn elsewhere had no kill switch from chat.
+                //
+                // Resolution order: live sessions first, because that is what
+                // the command is for. Only when nothing live matches do we look
+                // at recent sessions, so a valid-but-idle id gets an honest
+                // "already idle" instead of "no such session".
+                let running = telegram_state.running_session_ids();
+                let resolved = match crate::channels::commands::resolve_session_prefix(
+                    &target,
+                    running.iter(),
+                ) {
+                    crate::channels::commands::TargetMatch::Unique(id) => Some(id),
+                    crate::channels::commands::TargetMatch::Ambiguous(ids) => {
+                        let list = ids
+                            .iter()
+                            .map(|id| {
+                                format!(
+                                    "`{}`",
+                                    crate::channels::commands::shortest_unique_prefix(
+                                        *id,
+                                        running.iter(),
+                                    )
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        super::ephemeral::send_ack(
+                            bot,
+                            msg.chat.id,
+                            thread_id,
+                            ephemeral_rx,
+                            &format!(
+                                "`{target}` matches {n} running sessions: {list}\n\
+                                 Send a longer prefix.",
+                                n = ids.len()
+                            ),
+                        )
+                        .await?;
+                        return Ok(CommandOutcome::Handled);
+                    }
+                    crate::channels::commands::TargetMatch::None => None,
+                };
+                let resolved = match resolved {
+                    Some(id) => Some(id),
+                    None => {
+                        let recent = session_svc
+                            .list_sessions(crate::db::repository::SessionListOptions {
+                                include_archived: false,
+                                limit: Some(50),
+                                offset: 0,
+                                query: None,
+                                include_subagents: false,
+                            })
+                            .await
+                            .unwrap_or_default();
+                        match crate::channels::commands::resolve_session_prefix(
+                            &target,
+                            recent.iter().map(|s| &s.id),
+                        ) {
+                            crate::channels::commands::TargetMatch::Unique(id) => Some(id),
+                            crate::channels::commands::TargetMatch::Ambiguous(ids) => {
+                                super::ephemeral::send_ack(
+                                    bot,
+                                    msg.chat.id,
+                                    thread_id,
+                                    ephemeral_rx,
+                                    &format!(
+                                        "`{target}` matches {} sessions. Send a longer prefix \
+                                         (`/sessions` lists them).",
+                                        ids.len()
+                                    ),
+                                )
+                                .await?;
+                                return Ok(CommandOutcome::Handled);
+                            }
+                            crate::channels::commands::TargetMatch::None => None,
+                        }
+                    }
+                };
+                let Some(target_id) = resolved else {
+                    super::ephemeral::send_ack(
+                        bot,
+                        msg.chat.id,
+                        thread_id,
+                        ephemeral_rx,
+                        &format!("No session matches `{target}`. `/sessions` lists the ids."),
+                    )
+                    .await?;
+                    return Ok(CommandOutcome::Handled);
+                };
+                let short = crate::channels::commands::shortest_unique_prefix(
+                    target_id,
+                    running.iter().chain(std::iter::once(&target_id)),
+                );
+                let outcome = telegram_state.stop_session_target(target_id).await;
+                let reply = match outcome {
+                    super::state::TargetStop::Delivered { queued_dropped: 0 } => {
+                        format!("⏹️ Stopped session `{short}`.")
+                    }
+                    super::state::TargetStop::Delivered { queued_dropped: n } => {
+                        format!("⏹️ Stopped session `{short}` and dropped {n} queued message(s).")
+                    }
+                    super::state::TargetStop::Queued { dropped } => format!(
+                        "Session `{short}` was not running; dropped {dropped} queued message(s)."
+                    ),
+                    super::state::TargetStop::Idle => {
+                        format!("Session `{short}` is already idle.")
+                    }
+                };
+                super::ephemeral::send_ack(bot, msg.chat.id, thread_id, ephemeral_rx, &reply)
                     .await?;
                 return Ok(CommandOutcome::Handled);
             }
@@ -505,7 +626,24 @@ pub(crate) async fn handle_channel_command(
                 text = query;
                 // fall through to agent with the query as the message
             }
-            ChannelCommand::NotACommand => {} // fall through to agent
+            ChannelCommand::NotACommand => {
+                // #2108: "stop a1b2c3d4" typed as prose is a targeted stop that
+                // is not a recognised stop intent, so it would otherwise be
+                // dispatched to the model as ordinary input while the sender
+                // believes they cancelled something. Answer with the exact
+                // command instead. The detector is deliberately narrow: it only
+                // fires on an owner message that OPENS with a stop word AND
+                // names a session that is running right now, so "stop the
+                // docker container" and "wait for the build" are untouched.
+                if is_owner
+                    && let Some(hint) =
+                        commands::targeted_stop_hint(&text, &telegram_state.running_session_ids())
+                {
+                    super::ephemeral::send_ack(bot, msg.chat.id, thread_id, ephemeral_rx, &hint)
+                        .await?;
+                    return Ok(CommandOutcome::Handled);
+                }
+            }
             // Help, Usage, Evolve, Doctor, UserSystem handled by try_execute_text_command above
             _ => {}
         }

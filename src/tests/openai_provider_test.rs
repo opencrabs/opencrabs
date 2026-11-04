@@ -39,6 +39,8 @@ fn context_window_known_models() {
     assert_eq!(provider.context_window("gpt-4.1-mini"), Some(1_047_576));
     assert_eq!(provider.context_window("gpt-5"), Some(1_047_576));
     assert_eq!(provider.context_window("gpt-5-mini"), Some(1_047_576));
+    assert_eq!(provider.context_window("gpt-6"), Some(1_047_576));
+    assert_eq!(provider.context_window("gpt-6-mini"), Some(1_047_576));
     assert_eq!(provider.context_window("o1-mini"), Some(200_000));
     assert_eq!(provider.context_window("o3-mini"), Some(200_000));
     assert_eq!(provider.context_window("o4-mini"), Some(200_000));
@@ -73,6 +75,12 @@ fn gpt41_uses_max_completion_tokens() {
 fn gpt5_uses_max_completion_tokens() {
     assert!(uses_max_completion_tokens("gpt-5-mini"));
     assert!(uses_max_completion_tokens("gpt-5"));
+}
+
+#[test]
+fn gpt6_uses_max_completion_tokens() {
+    assert!(uses_max_completion_tokens("gpt-6"));
+    assert!(uses_max_completion_tokens("gpt-6-mini"));
 }
 
 #[test]

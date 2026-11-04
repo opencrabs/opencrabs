@@ -136,3 +136,45 @@ fn unrelated_slash_commands_never_cancel() {
         );
     }
 }
+
+// ── #2187: the Discord gate must read the post-STT text ──────────────
+
+/// The Discord handler replaces `content` with the STT transcript before the
+/// stop gate runs, but the gate used to test `msg.content`, so a spoken
+/// "stop" was invisible and the turn kept going.
+///
+/// This is a wiring pin rather than a behavioural test: the gate lives in the
+/// middle of a 2600 line handler that needs a live gateway context to call.
+/// It is still a real reproduction, because the defect was exactly the wrong
+/// variable being passed. The second assertion grounds the premise, so the
+/// test cannot pass on a tree where the voice path was removed.
+#[test]
+fn discord_stop_gate_reads_the_transcribed_text() {
+    const SRC: &str = include_str!("../channels/discord/handler.rs");
+
+    let gate_at = SRC
+        .find("is_stop_command_or_intent(")
+        .expect("the Discord stop gate is gone");
+    let gate_end = SRC[gate_at..]
+        .find(')')
+        .map(|i| gate_at + i)
+        .unwrap_or(SRC.len());
+    let gate = &SRC[gate_at..gate_end];
+
+    assert!(
+        gate.contains("&content"),
+        "the stop gate must read the resolved text, got: {gate}"
+    );
+    assert!(
+        !gate.contains("msg.content"),
+        "the stop gate reads the raw message again, so a spoken stop is ignored: {gate}"
+    );
+
+    let voice_at = SRC
+        .find("content = transcript;")
+        .expect("the STT assignment is gone; this pin no longer proves anything");
+    assert!(
+        voice_at < gate_at,
+        "the transcript assignment must precede the stop gate"
+    );
+}

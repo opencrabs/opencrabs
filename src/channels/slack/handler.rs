@@ -1634,6 +1634,23 @@ async fn handle_message(
                 }
                 return;
             }
+            ChannelCommand::StopTarget(_) => {
+                // #2108: targeting another session is Telegram-only for now.
+                // Answer explicitly instead of falling through to the agent,
+                // which would look like the command ran. Reuses the gated
+                // final-text helper, so this arm adds no new write site of
+                // its own and the governor's coverage count stays honest.
+                let token = SlackApiToken::new(SlackApiTokenValue::from(state.current_bot_token()));
+                let session = client.open_session(&token);
+                post_final_text(
+                    &session,
+                    &channel_id,
+                    msg.origin.thread_ts.as_ref(),
+                    "Targeted stop is Telegram-only. Use /stop here.",
+                )
+                .await;
+                return;
+            }
             ChannelCommand::Compact => {
                 let token = SlackApiToken::new(SlackApiTokenValue::from(state.current_bot_token()));
                 let session = client.open_session(&token);
@@ -1925,6 +1942,7 @@ async fn handle_message(
                 ProgressEvent::ToolStarted {
                     tool_name,
                     tool_input,
+                    ..
                 } => {
                     let group_ts = tool_group_ts_cb.clone();
                     let ctx = crate::utils::tool_context_hint(&tool_name, &tool_input);
@@ -1938,6 +1956,7 @@ async fn handle_message(
                                 name: tool_name,
                                 context: ctx,
                                 status: None,
+                                task_id: None,
                             });
                             t.clone()
                         };
@@ -2022,7 +2041,7 @@ async fn handle_message(
                     // tools-v2 wrapper rendered as raw HTML in Slack
                     // because the streaming chunk never hit the final
                     // response cleanup path.
-                    let text = crate::utils::sanitize::strip_llm_artifacts(&text);
+                    let text = crate::utils::sanitize::sanitize_outbound(&text);
                     // Strip <<IMG:path>> markers — the final-response handler
                     // extracts these and uploads via files_upload, but if the
                     // LLM emits the marker mid-stream the intermediate path

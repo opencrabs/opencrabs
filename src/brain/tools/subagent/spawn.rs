@@ -496,6 +496,9 @@ impl Tool for SpawnAgentTool {
                     // #129: a sub-agent is a headless session (owner ruling C)
                     // — backstop flag so interactive-only tools hard-error.
                     .with_headless(true)
+                    // The parent already planned this work; a throwaway child
+                    // plan nobody reviews would be worse than no plan.
+                    .with_plan_gate_exempt(true)
                     .with_plan_session_override(plan_session_override);
 
             if let Some(brain) = system_brain {

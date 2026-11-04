@@ -10,6 +10,25 @@ use ratatui::{
     text::{Line, Span},
 };
 
+/// The state suffix a detached-task row carries (#2146).
+///
+/// The row updates in place, so its state has to live on the row itself:
+/// without it a running task and a settled one read identically, and the user
+/// cannot tell whether the thing they started is still going.
+pub(crate) fn detached_state_suffix(
+    call: &super::super::app::ToolCallEntry,
+) -> Option<&'static str> {
+    call.task_id.as_ref().map(|_| {
+        if !call.completed {
+            " (running)"
+        } else if call.success {
+            " (done)"
+        } else {
+            " (failed)"
+        }
+    })
+}
+
 /// Render a grouped tool call display (● bullet with tree lines)
 pub(super) fn render_tool_group<'a>(
     lines: &mut Vec<Line<'a>>,
@@ -71,13 +90,20 @@ pub(super) fn render_tool_group<'a>(
                     .add_modifier(Modifier::ITALIC)
             };
             {
-                let desc_line = Line::from(vec![
+                let mut desc_spans = vec![
                     Span::styled(
                         format!("    {} ", connector),
                         Style::default().fg(theme::role(Role::GrayDim)),
                     ),
                     Span::styled(call.description.clone(), header_style),
-                ]);
+                ];
+                if let Some(suffix) = detached_state_suffix(call) {
+                    desc_spans.push(Span::styled(
+                        suffix,
+                        Style::default().fg(theme::role(Role::GrayMid)),
+                    ));
+                }
+                let desc_line = Line::from(desc_spans);
                 for wrapped in
                     super::utils::wrap_line_with_padding(desc_line, content_width, "       ")
                 {

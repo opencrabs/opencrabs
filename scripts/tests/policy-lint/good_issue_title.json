@@ -1,0 +1,10 @@
+{
+  "name": "good_issue_title_conventional",
+  "body": "",
+  "subjects": [],
+  "messages": "",
+  "files_count": 0,
+  "title": "fix(acp): the ACP surface registers headless tools, so suggest_options never reaches the client",
+  "title_kind": "issue",
+  "expected_exit": 0
+}

@@ -152,6 +152,26 @@ fn prompt_builder_keeps_subagent_background_contract() {
     );
 }
 
+/// Rot-guard: the LONG TASKS paragraph must keep forbidding hand-rolled
+/// polling of detached tasks (#2101). Only the sub-agent sentence was pinned,
+/// so the anti-polling clauses could be deleted with the suite still green.
+#[test]
+fn prompt_builder_keeps_anti_polling_contract() {
+    let dir = TempDir::new().unwrap();
+    let prompt = crate::brain::prompt_builder::BrainLoader::new(dir.path().to_path_buf())
+        .build_system_brain(None);
+    for clause in [
+        "do NOT sit in a wait loop",
+        "do NOT re-run it to \"check\"",
+        "do NOT hand-roll a poll loop",
+    ] {
+        assert!(
+            prompt.contains(clause),
+            "anti-polling clause missing from system prompt: {clause}"
+        );
+    }
+}
+
 /// #191 regression pin: `execute` reports only the CALLER's sub-agents.
 ///
 /// The manager is process-global (one instance per channel factory), so

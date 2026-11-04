@@ -115,6 +115,27 @@ impl Tool for ToolSearchTool {
             )));
         }
 
+        // Guest scope (#2134): a stranger's turn may only reach the guest
+        // allowlist, so discovery must not advertise what would be refused a
+        // moment later. Filtered before activation as well as before display,
+        // because an activated-but-refused tool would sit in the request as a
+        // dead schema the model keeps retrying.
+        let matches: Vec<_> = if context.is_guest() {
+            matches
+                .into_iter()
+                .filter(|(name, ..)| super::scope::guest_allows(name))
+                .collect()
+        } else {
+            matches
+        };
+        if matches.is_empty() {
+            return Ok(ToolResult::success(format!(
+                "Nothing outside your current tools matches \"{query}\" on this turn. A guest \
+                 turn is scoped to: {}. Answer with those.",
+                super::scope::GUEST_ALLOWED_TOOLS.join(", ")
+            )));
+        }
+
         // Hand back the full schemas as text so the model can call the ONE it
         // needs immediately with correct params.
         let names: std::collections::HashSet<String> =

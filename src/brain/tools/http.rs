@@ -67,6 +67,69 @@ fn parse_method(method_str: &str) -> Result<Method> {
     }
 }
 
+/// Hard cap on a response body, applied to the read AND to the rendered
+/// output, for every content type (#2104). The tool documents one number, so
+/// plain text and JSON both obey it, and a huge or hostile response is never
+/// fully buffered just to be cut afterwards.
+const MAX_BODY_BYTES: usize = 10_000;
+
+/// Bound on the READ itself, one byte above the body cap.
+///
+/// The extra byte is how the read learns the stream had more to give without
+/// trusting `Content-Length`: a body that fills it is longer than the cap, so
+/// it is reported cut. Kept as its own constant because the two bounds answer
+/// different questions. `MAX_BODY_BYTES` is what the model sees; this one is
+/// what the process is ever willing to hold, so a hostile multi-gigabyte body
+/// costs the same memory as a small one.
+const MAX_READ_BYTES: usize = MAX_BODY_BYTES + 1;
+
+/// Read at most [`MAX_READ_BYTES`]. A body longer than the cap is cut here,
+/// before it is buffered, so the bound holds whatever the server declares.
+async fn read_body_capped(response: &mut reqwest::Response) -> Result<(String, bool)> {
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        let chunk = response
+            .chunk()
+            .await
+            .map_err(|e| ToolError::Execution(format!("Failed to read response body: {}", e)))?;
+        let Some(chunk) = chunk else {
+            break;
+        };
+        let room = MAX_READ_BYTES - buf.len();
+        if chunk.len() >= room {
+            buf.extend_from_slice(&chunk[..room]);
+            break;
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    let truncated = buf.len() > MAX_BODY_BYTES;
+    buf.truncate(MAX_BODY_BYTES);
+    Ok((String::from_utf8_lossy(&buf).into_owned(), truncated))
+}
+
+/// Append a body under [`MAX_BODY_BYTES`], with an honest note when anything
+/// was cut. `declared_len` is the server's `Content-Length` when it sent one,
+/// which is the only way to name a total for a body we stopped reading.
+fn push_body_capped(out: &mut String, body: &str, read_truncated: bool, declared_len: Option<u64>) {
+    if body.len() <= MAX_BODY_BYTES {
+        out.push_str(body);
+        if read_truncated {
+            out.push_str(&format!(
+                "\n... (body cut at {MAX_BODY_BYTES} bytes while reading; the response is longer)"
+            ));
+        }
+        return;
+    }
+    let total = declared_len
+        .map(|n| format!("{n} bytes total"))
+        .unwrap_or_else(|| format!("more than {MAX_BODY_BYTES} bytes"));
+    out.push_str(&format!(
+        "{}... (truncated, {})",
+        crate::utils::truncate_str(body, MAX_BODY_BYTES),
+        total
+    ));
+}
+
 #[async_trait]
 impl Tool for HttpClientTool {
     fn name(&self) -> &str {
@@ -235,7 +298,7 @@ impl Tool for HttpClientTool {
         }
 
         // Execute request
-        let response = request.send().await.map_err(|e| {
+        let mut response = request.send().await.map_err(|e| {
             if e.is_timeout() {
                 ToolError::Timeout(input.timeout_secs)
             } else if e.is_connect() {
@@ -258,13 +321,14 @@ impl Tool for HttpClientTool {
             }
         }
 
-        // Get response body
-        let body_text = response
-            .text()
-            .await
-            .map_err(|e| ToolError::Execution(format!("Failed to read response body: {}", e)))?;
+        // Get response body. Bounded at the read (#2104): a huge or hostile
+        // response must never be fully buffered just to be cut afterwards.
+        let declared_len = response.content_length();
+        let (body_text, read_truncated) = read_body_capped(&mut response).await?;
 
-        // Try to parse as JSON, fallback to text
+        // Try to parse as JSON, fallback to text. A truncated body no longer
+        // parses, so it takes the text arm and is rendered cut, which is the
+        // honest result.
         let body_json: Option<Value> = serde_json::from_str(&body_text).ok();
 
         // Build output
@@ -299,23 +363,16 @@ impl Tool for HttpClientTool {
             output.push('\n');
         }
 
-        // Add response body
+        // Add response body. One documented cap for every content type: JSON
+        // used to skip it entirely (#2104).
         output.push_str("Response Body:\n");
         if let Some(json) = body_json {
-            output.push_str(&serde_json::to_string_pretty(&json).unwrap_or(body_text.clone()));
+            let pretty = serde_json::to_string_pretty(&json).unwrap_or(body_text.clone());
+            push_body_capped(&mut output, &pretty, read_truncated, declared_len);
         } else if body_text.is_empty() {
             output.push_str("(empty)");
         } else {
-            // Truncate very long text responses
-            if body_text.len() > 10000 {
-                output.push_str(&format!(
-                    "{}... (truncated, {} bytes total)",
-                    crate::utils::truncate_str(&body_text, 10000),
-                    body_text.len()
-                ));
-            } else {
-                output.push_str(&body_text);
-            }
+            push_body_capped(&mut output, &body_text, read_truncated, declared_len);
         }
 
         // Tool success reflects whether the REQUEST completed, not the HTTP

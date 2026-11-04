@@ -77,6 +77,30 @@ pub(crate) fn waiting_verb(bg_count: Option<usize>, agents: SubagentCounts) -> O
     Some(format!("Waiting for {}", parts.join(" + ")))
 }
 
+/// How a row in a turn's tool block names a detached task (#2145, #2147,
+/// #2148, #2149, #2150). A background task outlives the turn that started
+/// it, so its row is the only place its liveness is visible; a plain tool
+/// row keeps its tool name untouched.
+///
+/// One implementation for every surface. Telegram's flow rows, Discord's
+/// card rows, Slack and WhatsApp all render through this, so the wording
+/// cannot drift channel by channel.
+pub(crate) fn detached_row_label(
+    name: &str,
+    task_id: Option<&str>,
+    completed: Option<bool>,
+) -> String {
+    if task_id.is_none() {
+        return name.to_string();
+    }
+    let state = match completed {
+        None => "running",
+        Some(true) => "finished",
+        Some(false) => "failed",
+    };
+    format!("detached task {state}: {name}")
+}
+
 /// Background-task indicator for the settled flow footer (#1054): the first
 /// task's label when exactly one is running, a count when several, `None`
 /// when nothing is detached or no manager is wired (#722). A settled turn

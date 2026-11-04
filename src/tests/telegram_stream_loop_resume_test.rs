@@ -183,6 +183,7 @@ async fn resume_shape_loop_edits_tools_in_place_and_never_reacts() {
             raw_context: String::new(),
             completed: None,
             dirty: true,
+            task_id: None,
         }],
         display_queue: vec![
             DisplayItem::NewTool(0),
@@ -208,7 +209,7 @@ async fn resume_shape_loop_edits_tools_in_place_and_never_reacts() {
         bg_count: None,
         subagent_counts: Default::default(),
         sent_intermediates: Vec::new(),
-        intermediate_msg_ids: Vec::new(),
+        intermediate_bubbles: Vec::new(),
         voice_msg_ids: Vec::new(),
         applied_plan_kb: Default::default(),
         processing: true,

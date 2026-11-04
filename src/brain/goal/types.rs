@@ -42,7 +42,7 @@ impl JudgeDecision {
                     "Goal judge returned unparseable JSON: {} — \
                      defaulting to CONTINUE (fail-open). Raw: {}",
                     e,
-                    &raw[..raw.len().min(200)]
+                    crate::utils::string::truncate_str(raw, 200)
                 );
                 JudgeDecision {
                     verdict: GoalVerdict::Continue,

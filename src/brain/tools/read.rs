@@ -80,7 +80,9 @@ struct ReadInput {
     #[serde(skip_serializing_if = "Option::is_none")]
     line_count: Option<usize>,
 
-    /// Optional: Output with hashline tags (HASH|content format, where HASH is a 4-char content hash)
+    /// Optional: Output with hashline tags (HASH|content format, where HASH is the
+    /// content hash whose width is `hashline::hash::HASH_LEN`; never write the
+    /// number here, a hardcoded width goes stale the next time the tag widens)
     #[serde(default)]
     hashline: Option<bool>,
 }
@@ -115,7 +117,7 @@ impl Tool for ReadTool {
                 },
                 "hashline": {
                     "type": "boolean",
-                    "description": "Optional: Output lines in HASH|content format (4-char content hash) for use with hashline_edit tool. Default: false."
+                    "description": "Optional: Output lines in HASH|content format, where HASH is the content hash for use with the hashline_edit tool. Use the tag exactly as printed; the tool rejects a wrong width and names the expected length. Default: false."
                 }
             },
             "required": ["path"]
@@ -144,6 +146,23 @@ impl Tool for ReadTool {
             Ok(p) => p,
             Err(msg) => return Ok(ToolResult::error(msg)),
         };
+
+        // Guest scope (#2134): a stranger's read is confined to the session
+        // working directory. The confidential denylist below already covers
+        // keys and .env files; it never covered the rest of the disk, so an
+        // absolute path outside the tree reached the owner's home, their
+        // projects and anything else readable.
+        if context.is_guest() {
+            let root = context.working_dir();
+            if !super::scope::path_stays_inside(&root, &path) {
+                return Ok(ToolResult::error(format!(
+                    "read_file refused: this is a guest turn and {} is outside the working \
+                     directory ({}). Guest reads are confined to it.",
+                    path.display(),
+                    root.display()
+                )));
+            }
+        }
 
         // Confidential-path deny (OC-08): keys.toml, SSH private keys, .env,
         // .pem, /etc/shadow and friends are refused at the harness, not left to

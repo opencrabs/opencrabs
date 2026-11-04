@@ -45,17 +45,28 @@ fn copy_to_clipboard_has_windows_backend_and_gated_unix_arms() {
         "clip.exe payload encoded UTF-16LE, not raw UTF-8"
     );
 
-    // The Unix helpers must sit INSIDE the gated block, i.e. the gate appears
-    // before the first pbcopy spawn. Ungated, they compile on Windows and
+    // The Unix helpers must be unreachable on Windows. Since #2171 they live
+    // in one platform-gated backend list, so the gate is the attribute on
+    // `clipboard_backends` itself: ungated, they compile on Windows and
     // reintroduce the silent fall-through this issue is about.
-    let gate = src.find("#[cfg(not(windows))]").expect("unix arms gated");
-    let pbcopy = src
-        .find("Command::new(\"pbcopy\")")
-        .expect("pbcopy arm present");
-    assert!(
-        gate < pbcopy,
-        "not(windows) gate must precede pbcopy (gate @ {gate}, pbcopy @ {pbcopy})"
-    );
+    let gate = src
+        .find("#[cfg(not(windows))]\npub(crate) fn clipboard_backends")
+        .expect("unix backend list gated behind not(windows)");
+    let fn_start = src
+        .find("pub(crate) fn clipboard_backends")
+        .expect("clipboard_backends present");
+    let fn_end = src[fn_start..]
+        .find("\n}\n")
+        .map(|i| fn_start + i)
+        .expect("clipboard_backends body ends");
+    let body = &src[fn_start..fn_end];
+    assert!(gate < fn_start, "the cfg must sit directly on the function");
+    for backend in ["\"pbcopy\"", "\"wl-copy\"", "\"xclip\"", "\"xsel\""] {
+        assert!(
+            body.contains(backend),
+            "{backend} must live inside the gated backend list, not somewhere ungated"
+        );
+    }
 }
 
 /// Both paste readers must have a Windows arm. Before #1822 the fallback was

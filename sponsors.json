@@ -1,0 +1,219 @@
+{
+  "project": "OpenCrabs",
+  "repository": "opencrabs/opencrabs",
+  "inception": "2026-02-14",
+  "billing_day": 14,
+  "updated": "2026-10-24",
+  "notes": {
+    "currency": "Amounts are never converted. Each currency is totalled on its own, so no exchange rate can go stale in this file.",
+    "credits": "Credit and access grants carry no money amount on purpose. Nobody paid a rate for them, so any figure would be invented. Usage is recorded instead.",
+    "derived": "Code contribution counts are not stored here. Commits, pull requests and issues are re-derivable from GitHub, and a hand-maintained copy would rot.",
+    "privacy": "Every entry carries a public flag. Amounts are shown unless a sponsor asks to stay anonymous.",
+    "payments": "No payment link is published in this repository."
+  },
+  "provider": {
+    "name": null,
+    "disclosed": false,
+    "description": "Built-in provider serving free model access to every OpenCrabs user",
+    "note": "The inference accounts funded below pay for this provider. Its identity is deliberately not disclosed and no link to it is published, so the accounts cannot be scraped or hammered. Do not name it, do not link it."
+  },
+  "kinds": {
+    "money": "Money actually transferred. Summed per currency.",
+    "in-kind": "A recurring subscription paid directly by a sponsor. Summed as rate times billings to date.",
+    "credits": "Granted platform credits and early access. Never summed, usage recorded only."
+  },
+  "sponsors": [
+    {
+      "id": "adolfousier",
+      "name": "Adolfo Usier",
+      "github": "adolfousier",
+      "x": "adolfodev",
+      "role": "Creator, maintainer",
+      "sponsoring_since": "2026-02-14",
+      "code": {
+        "since": "2026-02-14",
+        "source": "github"
+      },
+      "public": true
+    },
+    {
+      "id": "loonix",
+      "name": "Daniel Carneiro",
+      "github": "loonix",
+      "x": "iamloonix",
+      "role": "Core maintainer",
+      "sponsoring_since": "2026-08-12",
+      "code": {
+        "since": "2026-08-27",
+        "source": "github"
+      },
+      "public": true
+    },
+    {
+      "id": "mig4ng",
+      "name": "Miguel Carneiro",
+      "github": null,
+      "x": "mig4ng",
+      "role": "Financial sponsor",
+      "sponsoring_since": "2026-08-12",
+      "code": null,
+      "public": true
+    }
+  ],
+  "contributions": [
+    {
+      "id": "adolfo-zai-pro",
+      "sponsor": "adolfousier",
+      "kind": "in-kind",
+      "category": "subscription",
+      "description": "Z.ai Pro subscription",
+      "start": "2026-02-14",
+      "end": null,
+      "rate": {
+        "amount": 30,
+        "currency": "USD",
+        "period": "month"
+      },
+      "replacement_rate": {
+        "amount": 70,
+        "currency": "USD",
+        "period": "month",
+        "note": "Current list price at time of writing. Recorded for context only, never summed into a total."
+      },
+      "purpose": "Development loop and end-user model access",
+      "public": true
+    },
+    {
+      "id": "adolfo-opencode-go",
+      "sponsor": "adolfousier",
+      "kind": "in-kind",
+      "category": "subscription",
+      "description": "2x OpenCode Go subscription",
+      "start": "2026-02-14",
+      "end": null,
+      "rate": {
+        "amount": 20,
+        "currency": "USD",
+        "period": "month",
+        "note": "Two subscriptions at 10 USD each."
+      },
+      "replacement_rate": null,
+      "purpose": "Development loop and end-user model access",
+      "public": true
+    },
+    {
+      "id": "adolfo-qwen-ambassador",
+      "sponsor": "adolfousier",
+      "kind": "credits",
+      "category": "programme",
+      "description": "Qwen Ambassador programme: Magic Cubes credits and early access",
+      "start": "2026-05",
+      "start_precision": "month",
+      "end": null,
+      "rate": null,
+      "amount": null,
+      "audience": "Shared with the whole community on public channels",
+      "purpose": "Development loop and end-user model access",
+      "usage": {
+        "metric": "tokens",
+        "unit": "tokens",
+        "estimate_low": 8000000000,
+        "estimate_high": 9000000000,
+        "precision": "approximate",
+        "as_of": "2026-10-17"
+      },
+      "public": true
+    },
+    {
+      "id": "adolfo-2026-10-inference-initial",
+      "sponsor": "adolfousier",
+      "kind": "money",
+      "category": "inference",
+      "description": "Initial inference credits, split across three accounts",
+      "date": "2026-10",
+      "date_precision": "month",
+      "amount": 8,
+      "currency": "USD",
+      "purpose": "Free model access for every user, built-in provider",
+      "public": true
+    },
+    {
+      "id": "adolfo-2026-10-inference-topup",
+      "sponsor": "adolfousier",
+      "kind": "money",
+      "category": "inference",
+      "description": "Further top-ups of 10 USD on two accounts",
+      "date": "2026-10",
+      "date_precision": "month",
+      "amount": 20,
+      "currency": "USD",
+      "purpose": "Free model access for every user, built-in provider",
+      "public": true
+    },
+    {
+      "id": "adolfo-2026-10-19-inference",
+      "sponsor": "adolfousier",
+      "kind": "money",
+      "category": "inference",
+      "description": "Inference credits for the built-in provider",
+      "date": "2026-10-19",
+      "date_precision": "day",
+      "amount": 17.117013,
+      "currency": "USD",
+      "purpose": "Free model access for every user, built-in provider",
+      "public": true
+    },
+    {
+      "id": "adolfo-2026-10-24-inference",
+      "sponsor": "adolfousier",
+      "kind": "money",
+      "category": "inference",
+      "description": "Inference credits for the built-in provider",
+      "date": "2026-10-24",
+      "date_precision": "day",
+      "amount": 18.13,
+      "currency": "USD",
+      "purpose": "Free model access for every user, built-in provider",
+      "public": true
+    },
+    {
+      "id": "loonix-2026-08-12",
+      "sponsor": "loonix",
+      "kind": "money",
+      "category": "subscriptions",
+      "description": "Buy Me a Coffee",
+      "date": "2026-08-12",
+      "date_precision": "day",
+      "amount": 20,
+      "currency": "EUR",
+      "purpose": "Subscriptions",
+      "public": true
+    },
+    {
+      "id": "mig4ng-2026-08-12",
+      "sponsor": "mig4ng",
+      "kind": "money",
+      "category": "subscriptions",
+      "description": "Buy Me a Coffee",
+      "date": "2026-08-12",
+      "date_precision": "day",
+      "amount": 10,
+      "currency": "EUR",
+      "purpose": "Subscriptions",
+      "public": true
+    },
+    {
+      "id": "loonix-2026-10-15",
+      "sponsor": "loonix",
+      "kind": "money",
+      "category": "inference",
+      "description": "Top-ups of 10 USD on two of the same accounts",
+      "date": "2026-10-15",
+      "date_precision": "day",
+      "amount": 20,
+      "currency": "USD",
+      "purpose": "Free model access for every user, built-in provider",
+      "public": true
+    }
+  ]
+}

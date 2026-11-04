@@ -7,8 +7,9 @@
 # enabled = true turns on the criteria gate: a task that completes while
 # declaring acceptance criteria whose task type has NO verification command
 # configured is logged Uncertain, not Verified ("silence is not proof",
-# #870). Nothing is rejected outright; only a configured command that exits
-# non-zero can block a completion.
+# #870). The criteria gate itself rejects nothing; only a command that exits
+# non-zero blocks a completion, whether it comes from the per-type table below
+# or from a task's own locked spec check.
 
 [verification]
 enabled = true
@@ -17,6 +18,36 @@ require_all_pass = true
 # strict               = reject the completion outright
 # off                  = criteria stay advisory, no enforcement
 criteria_policy = "downgrade"
+
+# Per-task spec checks (#1904). A task locks one command read out of its own
+# acceptance criteria when it starts, and the gate runs that exact command when
+# the task completes. The lock is the point: the command is hashed at start, so
+# a criterion edited afterwards no longer matches and is not silently trusted.
+#
+# advisory (default) = a failing check logs the completion Uncertain
+# block              = a failing check rejects the completion
+# off                = no per-task checks run; criteria stay advisory
+spec_checks = "advisory"
+
+# Generate a spec check when the criteria name no runnable command (#2063).
+# When a task starts with acceptance criteria that are prose only, the model is
+# asked once for a command that would prove the task, and the answer is locked
+# exactly like a criteria-derived one.
+#
+# Cost: at most one small model call per task, and only for tasks whose criteria
+# carry no runnable command. Tasks that already name their command are never
+# sent to the model.
+#
+# The model may answer none, and none is the expected answer for a task it
+# cannot test. A failed or unparseable call is not a failed start: the task
+# starts as it always did, with no check locked.
+#
+# A generated check is advisory-only until you confirm it. Until then it can
+# never reject a completion, not even under spec_checks = "block": it runs,
+# reports, and the completion is downgraded at most. Confirm it by starting the
+# task again with confirm_spec_check = true, or replace the prose criteria with
+# the command you actually want.
+spec_check_generation = true
 
 # Commands per task type. A type with no entry verifies nothing (policy
 # above decides how that is graded). Add commands that RUN AND PASS in this

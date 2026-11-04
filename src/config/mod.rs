@@ -25,12 +25,14 @@ pub mod update;
 pub mod voice_flag_flips;
 #[cfg(windows)]
 pub(crate) mod winlock;
+pub mod wire_dialect;
 
 pub use provider_registry::{ProviderRegistry, ProviderRegistryConfig};
 pub use registry_client::{Model, Provider, RegistryClient};
 pub use secrets::SecretString;
 pub use types::*;
 pub use update::{ProviderUpdater, UpdateResult};
+pub use wire_dialect::WireDialect;
 
 // `merge_provider_keys` is internal to the crate but must be reachable
 // from the regression tests in `src/tests/merge_provider_keys_test.rs`.

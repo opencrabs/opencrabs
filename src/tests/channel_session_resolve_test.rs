@@ -303,3 +303,124 @@ async fn same_key_serializes_then_releases() {
         "#1228: the gate must be released, not leaked"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #2183: the resolver logged "created new channel session" on every message of
+// a long-lived chat because the chat-keyed insert resolves an existing row.
+// The key is the identity, so it is also the lookup that finds a session whose
+// title was rewritten past the point of carrying its suffix.
+//
+// The bug is the LINE, not the id: HEAD's create path is insert-or-resolve, so
+// the session was always correct and only the log lied. This test therefore
+// captures tracing output and asserts the false line is gone. It uses only the
+// pre-fix API (`insert_or_resolve_channel_session`) so the same test compiles
+// against HEAD and fails there.
+// ---------------------------------------------------------------------------
+
+/// Sink for captured `tracing` output. Thread-local via `set_default`, so it
+/// cannot collide with another test installing a global subscriber.
+#[derive(Clone, Default)]
+struct CaptureBuf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for CaptureBuf {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .expect("capture buffer poisoned")
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::writer::MakeWriter<'a> for CaptureBuf {
+    type Writer = CaptureBuf;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn resolving_a_renamed_session_never_logs_created() {
+    let capture = CaptureBuf::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(capture.clone())
+        .with_max_level(tracing::Level::INFO)
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let svc = fresh_session_service().await;
+    let suffix = chat_id_suffix("wa-+15550001111");
+    let legacy = "WhatsApp: +15550001111".to_string();
+    let title = format!("{legacy} {suffix}");
+
+    // The plain keyed insert (present before the fix) stamps the chat key.
+    let created = svc
+        .insert_or_resolve_channel_session(Some(title.clone()), None, None, None, &suffix)
+        .await
+        .expect("insert");
+
+    // Auto-titling replaced the whole title, suffix included.
+    let mut renamed = created.clone();
+    renamed.title = Some("Trip planning".to_string());
+    svc.update_session(&renamed).await.expect("rename");
+
+    let resolved =
+        resolve_or_create_channel_session(&svc, &suffix, &legacy, &title, None, "WhatsApp")
+            .await
+            .expect("resolve");
+
+    assert_eq!(
+        resolved, created.id,
+        "the chat key must find the session after the title lost its suffix"
+    );
+
+    let logs = String::from_utf8(capture.0.lock().expect("capture buffer poisoned").clone())
+        .expect("captured logs are utf8");
+    assert!(
+        !logs.contains("created new channel session"),
+        "#2183: an existing session must never be reported as created; got: {logs}"
+    );
+}
+
+#[tokio::test]
+async fn the_chat_keyed_insert_reports_resolved_not_created() {
+    let svc = fresh_session_service().await;
+    let suffix = chat_id_suffix("wa-+15550002222");
+
+    let (first, created_first) = svc
+        .insert_or_resolve_channel_session_reported(
+            Some(format!("WhatsApp: +15550002222 {suffix}")),
+            None,
+            None,
+            None,
+            &suffix,
+        )
+        .await
+        .expect("first insert");
+    assert!(created_first, "nothing existed, so this call created it");
+
+    let (second, created_second) = svc
+        .insert_or_resolve_channel_session_reported(
+            Some(format!("WhatsApp: +15550002222 {suffix}")),
+            None,
+            None,
+            None,
+            &suffix,
+        )
+        .await
+        .expect("second insert");
+
+    assert!(
+        !created_second,
+        "the row already existed, so this call resolved it"
+    );
+    assert_eq!(
+        second.id, first.id,
+        "the resolved row is the one the first call created"
+    );
+}

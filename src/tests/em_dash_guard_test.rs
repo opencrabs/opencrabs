@@ -96,9 +96,10 @@ fn trello_outbound_funnels_through_the_boundary() {
         "add_comment_to_card moved or renamed; re-verify the Trello boundary (#1970)"
     );
     assert!(
-        content.contains("strip_llm_artifacts"),
+        content.contains("sanitize_outbound"),
         "Trello client no longer routes outbound comments through \
-         strip_llm_artifacts (#1970 regression)"
+         sanitize_outbound (#1970 regression; #2102 made the boundary \
+         stricter by redacting secrets after stripping artifacts)"
     );
 }
 

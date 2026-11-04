@@ -11,8 +11,9 @@
 //! (#1990).
 //!
 //! The runner claims the session slot FIRST, before `store_cancel_token`:
-//! that call CANCELS the token it finds (`cancel.rs`), so a resume turn that
-//! lost the claim race would otherwise kill the live turn it meant to join.
+//! a resume turn that lost the claim race would otherwise take over the live
+//! turn's cancel slot (and, before the store stopped cancelling, kill the
+//! turn it meant to join).
 //! The dispatch is injectable because the same visible turn is the right
 //! shape for all three producers: the boot-recovery replay, the
 //! background-completion turn (#1986), and the follow-up flush.
@@ -25,6 +26,7 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use super::DiscordState;
+use super::tool_card::entry_matches_completion;
 use super::tool_group::{GroupEntry, GroupState};
 use crate::brain::agent::AgentService;
 use crate::channels::background_work::{FlowOutcome, outcome_for_error};
@@ -107,7 +109,11 @@ pub(crate) fn run_tracked_resume_turn(
             Arc::new(Mutex::new(Vec::new()));
         let intermediate_handles: Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>> =
             Arc::new(std::sync::Mutex::new(Vec::new()));
-        let turn_group_mid: Arc<Mutex<Option<MessageId>>> = Arc::new(Mutex::new(None));
+        // The bubble slot owns the id and the birth claim (#2192): a birth
+        // may sleep in the governor, so it must not hold the id lock that the
+        // settle path needs to stamp the finished bubble.
+        let bubble = Arc::new(super::group_bubble::BubbleSlot::new());
+        let turn_group_mid: Arc<Mutex<Option<MessageId>>> = bubble.mid_handle();
         // The text a suggest_options surface halted on (see options_host.rs).
         let options_host = Arc::new(std::sync::Mutex::new(
             super::options_host::OptionsHost::default(),
@@ -120,6 +126,7 @@ pub(crate) fn run_tracked_resume_turn(
 
             let tools: Arc<Mutex<Vec<GroupEntry>>> = Arc::new(Mutex::new(Vec::new()));
             let group_msg_id = turn_group_mid.clone();
+            let bubble_cb = bubble.clone();
             let group_state_cb = dstate.clone();
             let http = http.clone();
             let sent = sent_intermediates.clone();
@@ -133,12 +140,13 @@ pub(crate) fn run_tracked_resume_turn(
                     ProgressEvent::ToolStarted {
                         tool_name,
                         tool_input,
+                        tool_call_id,
                     } => {
                         if let Ok(mut host) = options_host_cb.lock() {
                             host.on_tool_started(&tool_name);
                         }
                         let ctx_hint = crate::utils::tool_context_hint(&tool_name, &tool_input);
-                        let gmid = group_msg_id.clone();
+                        let bubble = bubble_cb.clone();
                         let dstate = group_state_cb.clone();
                         tokio::spawn(async move {
                             let entries = {
@@ -146,108 +154,105 @@ pub(crate) fn run_tracked_resume_turn(
                                 t.push(GroupEntry {
                                     name: tool_name,
                                     context: ctx_hint,
+                                    call_id: tool_call_id.clone(),
+                                    task_id: None,
                                     status: None,
                                 });
                                 t.clone()
                             };
-                            let mut mid_guard = gmid.lock().await;
-                            match *mid_guard {
-                                Some(mid) => {
-                                    let group = dstate
-                                        .upsert_tool_group(
-                                            mid.get(),
-                                            GroupState {
-                                                entries,
-                                                notes: Vec::new(),
-                                                expanded: false,
-                                                started_at: std::time::Instant::now(),
-                                                settled: None,
-                                            },
+                            // The bubble exists: append without touching the
+                            // birth claim.
+                            if let Some(mid) = bubble.read().await {
+                                super::group_bubble::append_tool_entry(
+                                    &dstate,
+                                    channel,
+                                    &http,
+                                    mid,
+                                    entries,
+                                    "tracked turn",
+                                )
+                                .await;
+                                return;
+                            }
+                            // Birth: one bubble per turn, so births serialise.
+                            // The id lock stays free while `governor::say`
+                            // sleeps, which is what #2192 fixes.
+                            let _birth = bubble.birth_claim().await;
+                            if let Some(mid) = bubble.read().await {
+                                super::group_bubble::append_tool_entry(
+                                    &dstate,
+                                    channel,
+                                    &http,
+                                    mid,
+                                    entries,
+                                    "tracked turn",
+                                )
+                                .await;
+                                return;
+                            }
+                            let group = GroupState {
+                                page: 0,
+                                entries,
+                                notes: Vec::new(),
+                                expanded: false,
+                                started_at: std::time::Instant::now(),
+                                settled: None,
+                            };
+                            let content = super::tool_group::render_content(&group);
+                            match super::governor::say(
+                                &dstate.governor,
+                                channel,
+                                &http,
+                                super::governor::Surface::Send,
+                                &content,
+                            )
+                            .await
+                            {
+                                Ok(sent_msg) => {
+                                    let comps = super::tool_group::render_components(
+                                        &group,
+                                        sent_msg.id.get(),
+                                    );
+                                    if !comps.is_empty()
+                                        && let Some(Err(e)) = super::governor::edit_chrome(
+                                            &dstate.governor,
+                                            channel,
+                                            &http,
+                                            sent_msg.id,
+                                            EditMessage::new()
+                                                .embeds(super::tool_group::render_embeds(&group))
+                                                .components(comps),
                                         )
-                                        .await;
-                                    let edit = EditMessage::new()
-                                        .content(super::tool_group::render_content(&group))
-                                        .components(super::tool_group::render_components(
-                                            &group,
-                                            mid.get(),
-                                        ));
-                                    if let Some(Err(e)) = super::governor::edit_chrome(
-                                        &dstate.governor,
-                                        channel,
-                                        &http,
-                                        mid,
-                                        edit,
-                                    )
-                                    .await
+                                        .await
                                     {
                                         tracing::warn!(
-                                            "Discord: tracked turn tool group edit failed (append): {e}"
+                                            "Discord: tracked turn tool group component fixup failed: {e}"
                                         );
                                     }
+                                    dstate.upsert_tool_group(sent_msg.id.get(), group).await;
+                                    bubble.store(sent_msg.id).await;
                                 }
-                                None => {
-                                    let group = GroupState {
-                                        entries,
-                                        notes: Vec::new(),
-                                        expanded: false,
-                                        started_at: std::time::Instant::now(),
-                                        settled: None,
-                                    };
-                                    let content = super::tool_group::render_content(&group);
-                                    match super::governor::say(
-                                        &dstate.governor,
-                                        channel,
-                                        &http,
-                                        super::governor::Surface::Send,
-                                        &content,
-                                    )
-                                    .await
-                                    {
-                                        Ok(sent_msg) => {
-                                            let comps = super::tool_group::render_components(
-                                                &group,
-                                                sent_msg.id.get(),
-                                            );
-                                            if !comps.is_empty()
-                                                && let Some(Err(e)) = super::governor::edit_chrome(
-                                                    &dstate.governor,
-                                                    channel,
-                                                    &http,
-                                                    sent_msg.id,
-                                                    EditMessage::new().components(comps),
-                                                )
-                                                .await
-                                            {
-                                                tracing::warn!(
-                                                    "Discord: tracked turn tool group component fixup failed: {e}"
-                                                );
-                                            }
-                                            dstate
-                                                .upsert_tool_group(sent_msg.id.get(), group)
-                                                .await;
-                                            *mid_guard = Some(sent_msg.id);
-                                        }
-                                        Err(e) => tracing::warn!(
-                                            "Discord: tracked turn failed to post tool group message: {e}"
-                                        ),
-                                    }
-                                }
+                                Err(e) => tracing::warn!(
+                                    "Discord: tracked turn failed to post tool group message: {e}"
+                                ),
                             }
                         });
                     }
                     ProgressEvent::ToolCompleted {
-                        tool_name, success, ..
+                        tool_name,
+                        success,
+                        tool_call_id,
+                        ..
                     } => {
                         let gmid = group_msg_id.clone();
                         let dstate = group_state_cb.clone();
                         tokio::spawn(async move {
                             let entries = {
                                 let mut t = tools.lock().await;
-                                if let Some(entry) = t
-                                    .iter_mut()
-                                    .rev()
-                                    .find(|e| e.name == tool_name && e.status.is_none())
-                                {
+                                if let Some(entry) = t.iter_mut().rev().find(|e| {
+                                    e.status.is_none()
+                                        && entry_matches_completion(e, &tool_name, &tool_call_id)
+                                }) {
                                     entry.status = Some(success);
                                 }
                                 t.clone()
@@ -257,6 +262,7 @@ pub(crate) fn run_tracked_resume_turn(
                                     .upsert_tool_group(
                                         mid.get(),
                                         GroupState {
+                                            page: 0,
                                             entries,
                                             notes: Vec::new(),
                                             expanded: false,
@@ -267,6 +273,7 @@ pub(crate) fn run_tracked_resume_turn(
                                     .await;
                                 let edit = EditMessage::new()
                                     .content(super::tool_group::render_content(&group))
+                                    .embeds(super::tool_group::render_embeds(&group))
                                     .components(super::tool_group::render_components(
                                         &group,
                                         mid.get(),
@@ -337,6 +344,7 @@ pub(crate) fn run_tracked_resume_turn(
                                 };
                                 let edit = EditMessage::new()
                                     .content(super::tool_group::render_content(&group))
+                                    .embeds(super::tool_group::render_embeds(&group))
                                     .components(super::tool_group::render_components(
                                         &group,
                                         mid.get(),
@@ -373,7 +381,7 @@ pub(crate) fn run_tracked_resume_turn(
                                 prev.push(clean.clone());
                             }
                             for chunk in super::handler::split_message(&clean, 2000) {
-                                if let Err(e) = super::governor::say(
+                                if let Err(e) = super::governor::say_recorded(
                                     &dstate.governor,
                                     channel,
                                     &http,
@@ -474,6 +482,7 @@ pub(crate) fn run_tracked_resume_turn(
         // second zero. On a post failure the mid stays None and bubble creation
         // falls back to the first tool event.
         let turn_shell = GroupState {
+            page: 0,
             entries: Vec::new(),
             notes: Vec::new(),
             expanded: false,
@@ -612,6 +621,7 @@ pub(crate) fn run_tracked_resume_turn(
                 {
                     let edit = serenity::builder::EditMessage::new()
                         .content(super::tool_group::render_content(&group))
+                        .embeds(super::tool_group::render_embeds(&group))
                         .components(super::tool_group::render_components(&group, mid.get()));
                     if let Some(Err(e)) =
                         super::governor::edit_chrome(&dstate.governor, channel, &http, mid, edit)
@@ -651,6 +661,7 @@ pub(crate) fn run_tracked_resume_turn(
                     }
                     let edit = serenity::builder::EditMessage::new()
                         .content(super::tool_group::render_content(&group))
+                        .embeds(super::tool_group::render_embeds(&group))
                         .components(super::tool_group::render_components(&group, mid.get()));
                     if let Err(e) = super::governor::edit_content(
                         &dstate.governor,
@@ -673,7 +684,7 @@ pub(crate) fn run_tracked_resume_turn(
                     // The #1899 cap disease applies here too: chunk through the
                     // fence-aware splitter, never one plain `say`.
                     for chunk in super::resume::resume_delivery_chunks(&text_only) {
-                        if let Err(e) = super::governor::say(
+                        if let Err(e) = super::governor::say_recorded(
                             &dstate.governor,
                             channel,
                             &http,
@@ -697,6 +708,7 @@ pub(crate) fn run_tracked_resume_turn(
                 {
                     let edit = serenity::builder::EditMessage::new()
                         .content(super::tool_group::render_content(&group))
+                        .embeds(super::tool_group::render_embeds(&group))
                         .components(super::tool_group::render_components(&group, mid.get()));
                     if let Err(e) = super::governor::edit_content(
                         &dstate.governor,
@@ -717,7 +729,7 @@ pub(crate) fn run_tracked_resume_turn(
                 tracing::error!("Discord: tracked turn agent error: {e}");
                 let error_msg =
                     format!("❌ Error\n\n{}", crate::brain::agent::format_user_error(&e));
-                if let Err(e) = super::governor::say(
+                if let Err(e) = super::governor::say_recorded(
                     &dstate.governor,
                     channel,
                     &http,
@@ -735,6 +747,7 @@ pub(crate) fn run_tracked_resume_turn(
                 {
                     let edit = serenity::builder::EditMessage::new()
                         .content(super::tool_group::render_content(&group))
+                        .embeds(super::tool_group::render_embeds(&group))
                         .components(super::tool_group::render_components(&group, mid.get()));
                     if let Err(e) = super::governor::edit_content(
                         &dstate.governor,

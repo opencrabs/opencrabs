@@ -9,7 +9,7 @@
 //! a suggestion, not a kill switch.
 //!
 //! Vocabulary lives in the six per-language TOMLs behind
-//! [`crate::utils::prompt_analyzer::all_langs`] and is scanned across ALL of
+//! [`crate::utils::prompt_analyzer::all_packs`] and is scanned across ALL of
 //! them. Users are worldwide and code-switch freely, so a language guess would
 //! silently disarm the kill switch for whoever it guessed wrong about.
 //!
@@ -28,7 +28,7 @@
 //!
 //! Callers are responsible for only acting when a turn is actually in flight.
 
-use crate::utils::prompt_analyzer::all_langs;
+use crate::utils::prompt_analyzer::all_packs;
 
 /// Longest a message can be and still be read as a bare interrupt. Anything
 /// wordier is prose that merely mentions stopping, and a leading multi-word
@@ -73,7 +73,7 @@ fn strip_trailing_address(normalized: &str) -> &str {
         if head.is_empty() {
             return head;
         }
-        for lang in all_langs() {
+        for lang in all_packs() {
             for term in &lang.stop_address {
                 let term = term.trim().to_lowercase();
                 if term.is_empty() {
@@ -111,7 +111,7 @@ pub fn is_stop_intent(text: &str) -> bool {
     }
     let word_count = normalized.split_whitespace().count();
 
-    for lang in all_langs() {
+    for lang in all_packs() {
         for phrase in &lang.stop_intent {
             let phrase = normalize(phrase);
             if phrase.is_empty() {

@@ -153,6 +153,7 @@ impl super::AgentService {
                             ProgressEvent::ToolStarted {
                                 tool_name: tool_name.clone(),
                                 tool_input: tool_input.clone(),
+                                tool_call_id: tool_id.clone(),
                             },
                         );
                     }
@@ -200,6 +201,7 @@ impl super::AgentService {
                                 tool_input: outcome.tool_input.clone(),
                                 success: outcome.success,
                                 summary,
+                                tool_call_id: outcome.tool_id.clone(),
                             },
                         );
                     }

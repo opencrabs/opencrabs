@@ -434,9 +434,10 @@ fn slack_chat_writes_only_leave_through_the_governor() {
     );
     assert_eq!(
         count("session.update_chrome("),
-        4,
-        "exactly four sites re-render state already on screen: the ticker's \
-         clock, the step-group append and the two tool-status edits. More \
-         means a real answer got reclassified as cosmetic"
+        5,
+        "exactly five sites re-render state already on screen: the ticker's \
+         clock, the step-group append, the two tool-status edits and the \
+         detached-task row edit (#2149). More means a real answer got \
+         reclassified as cosmetic"
     );
 }

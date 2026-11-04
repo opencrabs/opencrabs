@@ -12,6 +12,7 @@ fn started(name: &str) -> ProgressEvent {
     ProgressEvent::ToolStarted {
         tool_name: name.to_string(),
         tool_input: json!({}),
+        tool_call_id: String::new(),
     }
 }
 
@@ -21,6 +22,7 @@ fn completed(name: &str, success: bool) -> ProgressEvent {
         tool_input: json!({}),
         success,
         summary: String::new(),
+        tool_call_id: String::new(),
     }
 }
 
@@ -231,9 +233,127 @@ fn tool_arguments_are_scrubbed_before_they_reach_the_chat() {
             tool_input: json!({
                 "command": "curl -H \"Authorization: Bearer sk-abc123\" https://api.example.com"
             }),
+            tool_call_id: String::new(),
         },
     );
     let block = render(&steps, Phase::Running, Duration::from_secs(1));
 
     assert!(!block.contains("sk-abc123"), "secret leaked: {block}");
+}
+
+// ---- Detached background task rows (#2145, #2150) -------------------------
+
+fn task_started(task_id: &str, label: &str) -> ProgressEvent {
+    ProgressEvent::DetachedTaskStarted {
+        task_id: task_id.to_string(),
+        label: label.to_string(),
+    }
+}
+
+fn task_finished(task_id: &str, success: bool) -> ProgressEvent {
+    ProgressEvent::DetachedTaskFinished {
+        task_id: task_id.to_string(),
+        label: String::new(),
+        success,
+        elapsed_secs: 1.5,
+    }
+}
+
+#[test]
+fn a_detached_task_folds_into_one_row_that_settles() {
+    let mut steps = Vec::new();
+    fold(&mut steps, &task_started("t1", "cargo test"));
+
+    assert_eq!(steps.len(), 1, "a detached task is one row");
+    let running = render(&steps, Phase::Running, Duration::from_secs(1));
+    assert!(running.contains("⚙️"), "{running}");
+
+    fold(&mut steps, &task_finished("t1", true));
+
+    assert_eq!(
+        steps.len(),
+        1,
+        "the finish settles the same row, not a new one"
+    );
+    let done = render(&steps, Phase::Running, Duration::from_secs(1));
+    assert!(done.contains("✅"), "{done}");
+}
+
+#[test]
+fn a_failed_detached_task_shows_the_failed_icon() {
+    let mut steps = Vec::new();
+    fold(&mut steps, &task_started("t1", "cargo test"));
+    fold(&mut steps, &task_finished("t1", false));
+
+    let block = render(&steps, Phase::Running, Duration::from_secs(1));
+    assert!(block.contains("❌"), "{block}");
+}
+
+#[test]
+fn a_finish_settles_its_own_row_when_two_tasks_share_a_label() {
+    let mut steps = Vec::new();
+    fold(&mut steps, &task_started("t1", "cargo test"));
+    fold(&mut steps, &task_started("t2", "cargo test"));
+
+    // The first task finishing must not settle the second one, which is still
+    // running: matching on the label would hit whichever row came first.
+    fold(&mut steps, &task_finished("t1", true));
+
+    assert!(matches!(
+        &steps[0],
+        Step::Tool {
+            status: Some(true),
+            task_id: Some(id),
+            ..
+        } if id == "t1"
+    ));
+    assert!(matches!(
+        &steps[1],
+        Step::Tool {
+            status: None,
+            task_id: Some(id),
+            ..
+        } if id == "t2"
+    ));
+}
+
+#[test]
+fn a_finish_for_a_row_this_block_never_saw_changes_nothing() {
+    let mut steps = Vec::new();
+    fold(&mut steps, &task_started("t1", "cargo test"));
+
+    let changed = fold(&mut steps, &task_finished("t9", true));
+
+    assert!(!changed, "an unknown task id must not settle another row");
+    assert!(matches!(&steps[0], Step::Tool { status: None, .. }));
+}
+
+#[test]
+fn a_detached_row_names_itself_in_the_block() {
+    let mut steps = Vec::new();
+    fold(&mut steps, &task_started("t1", "cargo test"));
+
+    let block = render(&steps, Phase::Running, Duration::from_secs(1));
+
+    assert!(block.contains("cargo test"), "{block}");
+}
+
+// ---- The 15-minute edit window (#1408, #2150) -----------------------------
+
+#[test]
+fn the_edit_window_is_open_inside_fifteen_minutes() {
+    use crate::channels::whatsapp::flow_render::within_edit_window;
+
+    assert!(within_edit_window(Duration::from_secs(0)));
+    assert!(within_edit_window(Duration::from_secs(14 * 60)));
+    assert!(within_edit_window(Duration::from_secs(15 * 60 - 1)));
+}
+
+#[test]
+fn the_edit_window_closes_at_fifteen_minutes() {
+    use crate::channels::whatsapp::flow_render::within_edit_window;
+
+    assert!(!within_edit_window(Duration::from_secs(15 * 60)));
+    assert!(!within_edit_window(Duration::from_secs(16 * 60)));
+    assert!(!within_edit_window(Duration::from_secs(60 * 60)));
 }

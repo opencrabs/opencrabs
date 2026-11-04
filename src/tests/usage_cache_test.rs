@@ -187,7 +187,9 @@ fn aggregation_is_caching_capable_only_and_coalesces_nulls() {
 
 #[test]
 fn per_model_query_strips_namespace_and_excludes_non_caching() {
-    use crate::usage::data::{CACHE_CAPABLE_WHERE, CACHE_MODEL_EXPR, CACHE_STATS_SELECT_COLS};
+    use crate::usage::data::{
+        CACHE_CAPABLE_WHERE, CACHE_COST_SELECT_COLS, CACHE_MODEL_EXPR, CACHE_STATS_SELECT_COLS,
+    };
 
     let conn = rusqlite::Connection::open_in_memory().unwrap();
     conn.execute_batch(
@@ -204,17 +206,19 @@ fn per_model_query_strips_namespace_and_excludes_non_caching() {
     .unwrap();
 
     let sql = format!(
-        "SELECT {CACHE_MODEL_EXPR}, {CACHE_STATS_SELECT_COLS} \
+        "SELECT {CACHE_MODEL_EXPR}, {CACHE_STATS_SELECT_COLS}, {CACHE_COST_SELECT_COLS} \
          FROM messages m JOIN sessions s ON m.session_id = s.id \
          WHERE {CACHE_CAPABLE_WHERE} GROUP BY {CACHE_MODEL_EXPR}"
     );
     let mut stmt = conn.prepare(&sql).unwrap();
-    let mut rows: Vec<(String, i64, i64)> = stmt
+    let mut rows: Vec<(String, i64, i64, i64)> = stmt
         .query_map([], |r| {
             Ok((
                 r.get::<_, Option<String>>(0)?.unwrap_or_default(),
                 r.get(1)?,
                 r.get(2)?,
+                // The cache-write sum the #2027 money breakdown prices.
+                r.get(3)?,
             ))
         })
         .unwrap()
@@ -234,6 +238,7 @@ fn per_model_query_strips_namespace_and_excludes_non_caching() {
         "non-caching model must be excluded; got {rows:?}"
     );
     // `vendor/ModelA` is grouped namespace-stripped as `ModelA`, highest first.
-    assert_eq!(rows[0], ("ModelA".to_string(), 90, 100));
-    assert_eq!(rows[1], ("ModelB".to_string(), 50, 100));
+    // Tuple is (model, cached, total_input, cache_creation).
+    assert_eq!(rows[0], ("ModelA".to_string(), 90, 100, 0));
+    assert_eq!(rows[1], ("ModelB".to_string(), 50, 100, 0));
 }

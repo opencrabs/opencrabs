@@ -40,6 +40,21 @@ pub struct WhatsAppState {
     pub(super) pending_followups: Mutex<HashMap<Uuid, Vec<String>>>,
     /// Per-session cancel tokens for aborting in-flight agent tasks via /stop
     pub(super) cancel_tokens: Mutex<HashMap<Uuid, CancellationToken>>,
+    /// Sessions with a turn in flight (#2179). Telegram's `active_turns`
+    /// twin (#501), Discord's by #1990: an inbound message arriving while
+    /// the slot is held queues as a follow-up instead of forking a second
+    /// concurrent tool loop. std Mutex, not tokio's, because the claim must
+    /// be atomic and no await may run under the lock, and because the
+    /// guard's Drop fires synchronously on any unwind.
+    pub(super) active_turns: std::sync::Mutex<std::collections::HashSet<Uuid>>,
+    /// Per-session follow-ups queued while the slot is held (#2179).
+    /// Consumed between tool rounds by the queue callback wired in
+    /// manager.rs, and flushed into a fresh turn by whoever held the slot
+    /// last. Distinct from `pending_followups` above, which holds the
+    /// `suggest_options` labels a numeric reply selects.
+    pub(super) turn_queue: std::sync::Mutex<
+        HashMap<Uuid, std::collections::VecDeque<crate::brain::agent::QueuedUserMessage>>,
+    >,
     /// Broadcast channel for QR codes — onboarding subscribes to this.
     pub(super) qr_tx: tokio::sync::broadcast::Sender<String>,
     /// Broadcast channel for connection events — onboarding subscribes to this.
@@ -129,6 +144,8 @@ impl WhatsAppState {
             pending_approvals: Mutex::new(HashMap::new()),
             pending_followups: Mutex::new(HashMap::new()),
             cancel_tokens: Mutex::new(HashMap::new()),
+            active_turns: std::sync::Mutex::new(std::collections::HashSet::new()),
+            turn_queue: std::sync::Mutex::new(HashMap::new()),
             qr_tx,
             connected_tx,
             error_tx,

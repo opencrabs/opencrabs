@@ -749,12 +749,13 @@ pub fn migrate_profile(from: &str, to: &str, force: bool) -> Result<Vec<String>>
 
 /// Parse the owner PID from the second field of a lock file.
 ///
-/// The field is `pid` for every non-Windows writer and `pid:creation-ticks` on
-/// Windows (see [`owner_stamp`]), so the PID is the *leading* `:`-separated
-/// half. Reading the whole field as a number is not a style question: a live
-/// Windows owner's stamp then fails to parse, the caller reads that as
-/// corruption, and it overwrites a lock that was protecting a running instance
-/// -- exactly the double-start this file exists to prevent.
+/// The field is `pid:creation-time` wherever the platform can read a creation
+/// time (Windows, Linux, macOS) and a bare `pid` where it cannot (see
+/// [`owner_stamp`]), so the PID is the *leading* `:`-separated half. Reading
+/// the whole field as a number is not a style question: a live owner's stamp
+/// then fails to parse, the caller reads that as corruption, and it overwrites
+/// a lock that was protecting a running instance -- exactly the double-start
+/// this file exists to prevent.
 ///
 /// Returns `None` when the field names no live owner: a missing/zero PID, or a
 /// corrupted value (e.g. an external in-place edit concatenated entries, so the
@@ -770,14 +771,15 @@ pub(crate) fn parse_lock_owner_pid(field: &str) -> Option<u32> {
 }
 
 /// Split a stamp's PID field into `(pid, creation_ticks)`, tolerating both the
-/// original `pid` shape and the Windows `pid:ticks` shape.
+/// bare `pid` shape and the `pid:ticks` shape.
 ///
-/// The ticks half is this process's own creation time, written by
-/// [`owner_stamp`] so [`crate::config::winlock::terminate`] can prove
-/// ownership by exact creation time instead of comparing a lock file's mtime
-/// (a coarser clock) against a process creation time. `None` means the stamp
-/// has no creation field -- an older stamp, or a non-Windows writer -- and the
-/// preempt path then refuses the kill rather than trusting a bare PID.
+/// The ticks half is the owner's creation time, written by [`owner_stamp`] and
+/// checked by [`stamp_owner_is_live`]; [`crate::config::winlock::terminate`]
+/// also uses it to prove ownership by exact creation time instead of comparing
+/// a lock file's mtime (a coarser clock) against a process creation time.
+/// `None` means the stamp has no creation field -- an older stamp, or a writer
+/// on a platform that cannot read one -- and the preempt path then refuses the
+/// kill rather than trusting a bare PID.
 pub(crate) fn split_pid_ticks(field: &str) -> Option<(u32, Option<u64>)> {
     let (pid_field, ticks_field) = match field.trim().split_once(':') {
         Some((p, t)) => (p, Some(t)),
@@ -788,19 +790,194 @@ pub(crate) fn split_pid_ticks(field: &str) -> Option<(u32, Option<u64>)> {
     Some((pid, ticks))
 }
 
-/// Body of a lock stamp: this process's PID, plus its creation time on
-/// Windows. See [`split_pid_ticks`] for what the extra field buys. A failed
-/// creation-time query writes the bare PID, which the preempt path reads as
-/// unverifiable and refuses -- fail-closed, never a guess.
-fn owner_stamp() -> String {
+/// Body of a lock stamp: this process's PID, plus its creation time when the
+/// platform can read one. See [`split_pid_ticks`] for what the extra field
+/// buys and [`stamp_owner_is_live`] for what the reader does with it. A
+/// platform that cannot read a creation time writes the bare PID, and the
+/// reader then leans on the boot-epoch check alone.
+pub(crate) fn owner_stamp() -> String {
     let pid = std::process::id();
-    #[cfg(windows)]
+    match own_creation_stamp() {
+        Some(ticks) => format!("{pid}:{ticks}"),
+        None => pid.to_string(),
+    }
+}
+
+/// This process's own creation time, in the unit this platform's stamps
+/// record. `None` means the platform cannot be asked, and [`owner_stamp`]
+/// then writes a bare PID.
+#[cfg(windows)]
+fn own_creation_stamp() -> Option<u64> {
+    crate::config::winlock::own_creation_ticks()
+}
+
+#[cfg(target_os = "linux")]
+fn own_creation_stamp() -> Option<u64> {
+    proc_stat_starttime(std::process::id())
+}
+
+#[cfg(target_os = "macos")]
+fn own_creation_stamp() -> Option<u64> {
+    macos_process_start_epoch(std::process::id())
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+fn own_creation_stamp() -> Option<u64> {
+    None
+}
+
+/// The kernel's own reading for `pid`, in the unit [`own_creation_stamp`]
+/// writes on this platform. `None` means this platform cannot be asked, which
+/// leaves [`stamp_owner_is_live`] with its boot-epoch check alone.
+#[cfg(windows)]
+pub(crate) fn process_creation_stamp(pid: u32) -> Option<u64> {
+    crate::config::winlock::creation_ticks_of(pid)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn process_creation_stamp(pid: u32) -> Option<u64> {
+    proc_stat_starttime(pid)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn process_creation_stamp(pid: u32) -> Option<u64> {
+    macos_process_start_epoch(pid)
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+pub(crate) fn process_creation_stamp(_pid: u32) -> Option<u64> {
+    None
+}
+
+/// Field 22 of `/proc/<pid>/stat`: starttime, in clock ticks since boot.
+///
+/// Field 2 is the command, parenthesised, and may itself contain spaces and
+/// parentheses, so the fields after it line up only once everything up to the
+/// LAST `)` is skipped. Starttime is then the 20th field of the remainder.
+#[cfg(target_os = "linux")]
+fn proc_stat_starttime(pid: u32) -> Option<u64> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let rest = stat.rsplit_once(')')?.1;
+    rest.split_whitespace().nth(19)?.parse::<u64>().ok()
+}
+
+/// A process's start time in epoch seconds, through libproc's `PROC_PIDTBSDINFO`
+/// flavor.
+///
+/// `/proc` does not exist on macOS. #2084 was filed against a Linux host while
+/// this project's dev host and CI runner are both macOS, so a Linux-only reader
+/// would leave the bug in place on the very machines that run our gates.
+/// libproc answers for any PID with no privileges needed, and its epoch-seconds
+/// clock is the same one `kern.boottime` reports below.
+#[cfg(target_os = "macos")]
+fn macos_process_start_epoch(pid: u32) -> Option<u64> {
+    let mut info: libc::proc_bsdinfo = unsafe { core::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    let got = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            std::ptr::addr_of_mut!(info).cast(),
+            size,
+        )
+    };
+    // A short read means the flavor answered nothing (usually: no such PID),
+    // which is a missing reading, not a creation time of zero.
+    (got == size).then_some(info.pbi_start_tvsec)
+}
+
+/// This machine's boot time as a Unix timestamp.
+///
+/// Linux reads `btime` from `/proc/stat`; macOS asks `kern.boottime`. Both feed
+/// one check: a lock file written before the boot epoch cannot name a process
+/// that is alive now, whatever its PID resolves to.
+#[cfg(target_os = "linux")]
+pub(crate) fn boot_epoch() -> Option<i64> {
+    let stat = fs::read_to_string("/proc/stat").ok()?;
+    stat.lines()
+        .find_map(|l| l.strip_prefix("btime "))
+        .and_then(|v| v.trim().parse::<i64>().ok())
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn boot_epoch() -> Option<i64> {
+    let mut mib = [libc::CTL_KERN, libc::KERN_BOOTTIME];
+    let mut tv: libc::timeval = unsafe { core::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::timeval>() as libc::size_t;
+    let rc = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as libc::c_uint,
+            std::ptr::addr_of_mut!(tv).cast(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (rc == 0).then_some(tv.tv_sec as i64)
+}
+
+/// Windows proves ownership by creation time alone and reads no boot epoch, so
+/// there is no second reading to take.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn boot_epoch() -> Option<i64> {
+    None
+}
+
+/// Is the process named by a lock stamp still the one that wrote it?
+///
+/// A PID alone is not proof of ownership. A lock file outlives the machine it
+/// was written on, and the kernel hands a freed PID to whatever starts next, so
+/// after a reboot `is_pid_alive` can report a total stranger as the owner. On
+/// Unix that stranger is usually another user's process, where `kill(pid, 0)`
+/// answers EPERM, which `is_pid_alive` deliberately reads as alive. The stamp
+/// then keeps looking held for as long as the unrelated process lives, and the
+/// cost is silent: every channel behind the lock is disabled while the daemon
+/// still looks healthy, the TUI's preempt path can SIGTERM the stranger, and
+/// `instance_running` can report a daemon that is not there (#2084).
+///
+/// Two checks recover the truth:
+/// 1. Exact creation time. A stamp carrying one (`pid:ticks`) must match the
+///    live process's own reading. A mismatch is a recycled PID, not an owner.
+/// 2. Boot epoch. A stamp written before the machine booted cannot name any
+///    process alive now, whatever its PID resolves to. This is the check that
+///    covers bare-PID stamps written by builds that predate the field above.
+///
+/// Residual, stated rather than hidden: a legacy bare-PID stamp written AFTER
+/// the current boot whose PID was recycled within that same boot is still read
+/// as live. With no recorded creation time and no pre-boot mtime there is
+/// nothing left to disprove it against. The window closes on its own the first
+/// time a build carrying the creation-time field writes the lock.
+///
+/// When neither check can be taken (no `/proc` and no libproc answer, an
+/// unreadable lock file) the answer is `true`: refusing to start is worse than
+/// a duplicate start.
+pub(crate) fn stamp_owner_is_live(pid_field: &str, lock_file: &Path) -> bool {
+    let Some((pid, ticks)) = split_pid_ticks(pid_field) else {
+        return false;
+    };
+    if !is_pid_alive(pid) {
+        return false;
+    }
+    if let Some(recorded) = ticks
+        && let Some(live) = process_creation_stamp(pid)
+        && live != recorded
     {
-        if let Some(ticks) = crate::config::winlock::own_creation_ticks() {
-            return format!("{pid}:{ticks}");
+        return false;
+    }
+    if let Some(boot) = boot_epoch()
+        && let Ok(written) = fs::metadata(lock_file).and_then(|m| m.modified())
+    {
+        let written = written
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(i64::MAX);
+        if written < boot {
+            return false;
         }
     }
-    pid.to_string()
+    true
 }
 
 /// Check and acquire a token lock for a channel credential.
@@ -834,9 +1011,13 @@ pub fn acquire_token_lock(channel: &str, token_hash: &str) -> Result<()> {
                     // fall through to overwrite
                 }
                 Some(locked_pid) => {
+                    // Liveness comes from the stamp, not the bare PID: see
+                    // [`stamp_owner_is_live`] for why a recycled PID must not
+                    // count as a live owner.
+                    let owner_is_live = stamp_owner_is_live(parts[1], &lock_file);
                     if locked_profile == current_profile {
                         // Same profile — only one instance per profile allowed.
-                        if is_pid_alive(locked_pid) && locked_pid != pid {
+                        if owner_is_live && locked_pid != pid {
                             bail!(
                                 "profile '{}' already running (PID {}). Only one instance per profile allowed.",
                                 current_profile,
@@ -844,7 +1025,7 @@ pub fn acquire_token_lock(channel: &str, token_hash: &str) -> Result<()> {
                             );
                         }
                         // Stale lock from same profile — overwrite
-                    } else if is_pid_alive(locked_pid) {
+                    } else if owner_is_live {
                         // Different profile holds it with a live process.
                         bail!(
                             "channel '{}' token is locked by profile '{}' (PID {}). \
@@ -860,8 +1041,9 @@ pub fn acquire_token_lock(channel: &str, token_hash: &str) -> Result<()> {
         }
     }
 
-    // `owner_stamp` rather than the bare PID: on Windows the preempt path
-    // needs the owner's creation time to tell it apart from a recycled PID.
+    // `owner_stamp` rather than the bare PID: the reader needs the owner's
+    // creation time to tell it apart from a recycled PID on every platform
+    // that can record one. See [`stamp_owner_is_live`].
     fs::write(&lock_file, format!("{}:{}", current_profile, owner_stamp()))?;
     Ok(())
 }
@@ -1075,7 +1257,12 @@ pub fn instance_running(profile: &str) -> bool {
 pub(crate) fn instance_running_in(lock_dir: &Path, profile: &str) -> bool {
     let path = lock_dir.join(format!("{profile}.lock"));
     match fs::read_to_string(&path) {
-        Ok(contents) => split_pid_ticks(&contents).is_some_and(|(pid, _)| is_pid_alive(pid)),
+        // The instance stamp is a bare `pid[:ticks]` with no profile prefix,
+        // so the whole file is the PID field. `stamp_owner_is_live` rather
+        // than `is_pid_alive`: a recycled PID would otherwise report a daemon
+        // that is not running, and the multi-profile scheduler would never
+        // adopt this profile's cron jobs (#2084).
+        Ok(contents) => stamp_owner_is_live(contents.trim(), &path),
         Err(_) => false, // missing lock file => no live instance => adoptable
     }
 }
@@ -1198,10 +1385,10 @@ pub struct PreemptedInstance {
 }
 
 /// One foreign lock owner found by [`foreign_lock_owners`]: the channels it
-/// held, and -- on Windows stamps -- the creation time it recorded, which
-/// [`crate::config::winlock::terminate`] needs to tell the real owner from a
-/// process that merely inherited its PID. `pub(crate)`, fields included,
-/// because the sibling test module asserts on what a scan found.
+/// held, and -- on stamps that carry one -- the creation time it recorded,
+/// which [`crate::config::winlock::terminate`] needs to tell the real owner
+/// from a process that merely inherited its PID. `pub(crate)`, fields
+/// included, because the sibling test module asserts on what a scan found.
 #[derive(Default)]
 pub(crate) struct ForeignOwner {
     pub(crate) creation_ticks: Option<u64>,
@@ -1213,26 +1400,11 @@ pub(crate) struct ForeignOwner {
 /// reading: a process that dies holding a PID leaves its stamp behind, and on
 /// a clock that only moves forward whoever inherits that PID is created
 /// strictly later, so the greatest claim is the live owner's. `None` -- a
-/// legacy or non-Windows stamp -- sorts below every real creation time, so it
-/// never wins and never erases a value that was already recorded.
+/// legacy stamp, written before the creation-time field existed -- sorts below
+/// every real creation time, so it never wins and never erases a value that
+/// was already recorded.
 fn newest_ticks(current: Option<u64>, candidate: Option<u64>) -> Option<u64> {
     current.max(candidate)
-}
-
-/// The live process's own creation time, when the OS can be asked for it.
-/// Windows only: it is the one platform whose stamps carry a creation time
-/// and whose handover proves birth before killing, so it is the only one
-/// where picking the wrong claim can matter.
-#[cfg(windows)]
-fn live_creation_ticks(pid: u32) -> Option<u64> {
-    crate::config::winlock::creation_ticks_of(pid)
-}
-
-/// Every other platform writes a bare PID into its stamps, so there is no
-/// recorded time to match against.
-#[cfg(not(windows))]
-fn live_creation_ticks(_pid: u32) -> Option<u64> {
-    None
 }
 
 /// Resolve every creation-time claim recorded for one live PID down to the one
@@ -1245,8 +1417,8 @@ fn live_creation_ticks(_pid: u32) -> Option<u64> {
 /// clock that stepped backward between the two births -- taking the greatest
 /// claim would then hand `terminate` the corpse's creation time, its birth
 /// proof would refuse the real owner, and the handover would never complete.
-/// Without a reading (non-Windows, or a refused handle) the greatest claim
-/// wins, which is order-independent.
+/// Without a reading (a platform that cannot be asked, or a refused handle)
+/// the greatest claim wins, which is order-independent.
 pub(crate) fn resolve_creation_ticks(live: Option<u64>, claims: &[Option<u64>]) -> Option<u64> {
     match live {
         Some(live) => claims.contains(&Some(live)).then_some(live),
@@ -1295,7 +1467,11 @@ pub(crate) fn foreign_lock_owners(
             Some(pair) => pair,
             None => continue,
         };
-        if pid == self_pid || !is_pid_alive(pid) {
+        // The preempt path SIGTERMs whatever this scan returns, so a bare
+        // `is_pid_alive` is not enough here: a stamp naming a recycled PID
+        // would hand an unrelated process to `kill`. Same stamp discipline as
+        // the token lock itself.
+        if pid == self_pid || !stamp_owner_is_live(pid_field, &path) {
             continue;
         }
         // Lock file is `<channel>_<hash>.lock` — channel is everything
@@ -1317,7 +1493,7 @@ pub(crate) fn foreign_lock_owners(
     }
     for (pid, owner) in owners.iter_mut() {
         if let Some(claims) = claims.get(pid) {
-            owner.creation_ticks = resolve_creation_ticks(live_creation_ticks(*pid), claims);
+            owner.creation_ticks = resolve_creation_ticks(process_creation_stamp(*pid), claims);
         }
     }
     owners

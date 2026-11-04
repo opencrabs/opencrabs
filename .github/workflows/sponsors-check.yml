@@ -1,0 +1,35 @@
+name: Sponsors check
+
+# Enforces sponsors.json (the community funding ledger) on pull requests only.
+# Pure python3, milliseconds of work, so it runs on GitHub-hosted ubuntu and
+# never competes with the cargo build on the self-hosted Mac runner. Same shape
+# as policy-lint.yml, and advisory for the same reason: it exists to catch a
+# hand-edited sponsor surface, not to gate a merge.
+on:
+  pull_request:
+
+concurrency:
+  group: sponsors-check-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: 1
+
+jobs:
+  sponsors-check:
+    name: Sponsors check
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      # The script tests its own arithmetic and its privacy rules first, so a
+      # broken check can never report a clean surface.
+      - name: Script proves its own teeth
+        run: python3 scripts/sync-sponsors.py --self-test
+
+      - name: Sponsors surfaces match the ledger
+        run: python3 scripts/sync-sponsors.py --check

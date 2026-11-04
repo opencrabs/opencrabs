@@ -1,10 +1,11 @@
 //! Tests for whatsapp_send helpers and schema.
 
 use crate::brain::tools::whatsapp_send::{
-    build_vcard, delivered_prefix, get_f64, get_str, mime_from_extension, partial_failure_report,
-    resolve_jid, tag_with_header,
+    build_post, build_vcard, delivered_prefix, get_f64, get_str, mime_from_extension,
+    newsletter_jid, partial_failure_report, resolve_jid, tag_with_header,
 };
 use serde_json::json;
+use wacore_binary::JidExt;
 
 // ── get_str ──────────────────────────────────────────────────────────
 
@@ -441,4 +442,101 @@ async fn resolve_jid_normalizes_raw_target_number() {
     let res_jid = resolve_jid(&input_jid, &state, &rx, session_id).await;
     assert!(res_jid.is_ok(), "resolve_jid JID failed: {:?}", res_jid);
     assert_eq!(res_jid.unwrap().1, "6285270679623@s.whatsapp.net");
+}
+
+// ── #1827: newsletter create/post helpers ────────────────────────────
+
+#[test]
+fn newsletter_jid_accepts_a_channel_jid() {
+    let jid = newsletter_jid("120363123456789012@newsletter").expect("parses");
+    assert!(jid.is_newsletter());
+    assert_eq!(jid.to_string(), "120363123456789012@newsletter");
+}
+
+#[test]
+fn newsletter_jid_refuses_a_phone_jid() {
+    // A phone JID would take the encrypted DM path in `send_message`, so it
+    // must be refused here rather than delivered somewhere nobody asked for.
+    let err = newsletter_jid("15551234567@s.whatsapp.net").unwrap_err();
+    assert!(err.contains("not a newsletter JID"), "got: {err}");
+}
+
+#[test]
+fn newsletter_jid_refuses_garbage() {
+    assert!(newsletter_jid("").is_err());
+    assert!(newsletter_jid("not a jid").is_err());
+    assert!(newsletter_jid("https://whatsapp.com/channel/abc123").is_err());
+}
+
+#[test]
+fn build_post_text_is_a_plain_conversation() {
+    let msg = build_post(Some("hello channel"), None).expect("builds");
+    assert_eq!(msg.conversation.as_deref(), Some("hello channel"));
+    assert!(msg.image_message.as_option().is_none());
+}
+
+#[test]
+fn build_post_image_carries_no_caption_by_default() {
+    let img = waproto::whatsapp::message::ImageMessage {
+        mimetype: Some("image/jpeg".to_string()),
+        ..Default::default()
+    };
+    let msg = build_post(None, Some(img)).expect("builds");
+    let img = msg.image_message.as_option().expect("image present");
+    assert_eq!(img.mimetype.as_deref(), Some("image/jpeg"));
+    assert!(img.caption.is_none());
+    assert!(msg.conversation.is_none());
+}
+
+#[test]
+fn build_post_image_caption_lands_on_the_image() {
+    // `message` doubles as the caption when `media_path` is given, the same
+    // shape a status takes.
+    let img = waproto::whatsapp::message::ImageMessage {
+        mimetype: Some("image/png".to_string()),
+        ..Default::default()
+    };
+    let msg = build_post(Some("a caption"), Some(img)).expect("builds");
+    let img = msg.image_message.as_option().expect("image present");
+    assert_eq!(img.caption.as_deref(), Some("a caption"));
+    assert!(msg.conversation.is_none());
+}
+
+#[test]
+fn build_post_with_no_body_is_refused() {
+    let err = build_post(None, None).unwrap_err();
+    assert!(err.contains("Nothing was sent"), "got: {err}");
+}
+
+// ── #2182: the revoke path goes through the send gate ────────────────
+
+/// `delete` revokes a message for everyone, the least reversible action in
+/// the surface, so it has to pass the same per-chat rate limiter and owner
+/// resolution as its 14 neighbours.
+///
+/// This is a wiring test, not a behavioural one, and the reason is
+/// structural: `execute` resolves the WhatsApp client at the top (before the
+/// action match), so with no live socket every action fails there and a
+/// refused-vs-ungated `delete` is indistinguishable. The defect this pins is
+/// itself a missing wire, so asserting the gate exists and precedes the
+/// revoke is the assertion that fails on the unfixed tree.
+#[test]
+fn delete_requires_send_gate() {
+    const SRC: &str = include_str!("../brain/tools/whatsapp_send.rs");
+    let (_, rest) = SRC
+        .split_once("\"delete\" =>")
+        .expect("delete arm not found");
+    let (arm, _) = rest
+        .split_once("\"pin\" | \"unpin\"")
+        .expect("pin arm not found");
+    assert!(
+        arm.contains("gate_send!"),
+        "delete arm revokes without the send gate"
+    );
+    let gate_at = arm.find("gate_send!").expect("gate missing");
+    let revoke_at = arm.find("revoke_message").expect("revoke call missing");
+    assert!(
+        gate_at < revoke_at,
+        "the gate must run before the revoke call, not after it"
+    );
 }

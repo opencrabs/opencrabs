@@ -717,7 +717,7 @@ impl SlashCommandTool {
                 let model = session.model.as_deref().unwrap_or("(unknown)");
                 lines.push(format!("Current Session: {}", name));
                 lines.push(format!("  Model: {}", model));
-                lines.push(format!("  Tokens: {}", session.token_count));
+                lines.push(format!("  Lifetime tokens: {}", session.token_count));
                 lines.push(format!("  Cost: ${:.4}", session.total_cost));
             }
             _ => {

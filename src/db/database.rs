@@ -149,6 +149,13 @@ pub(crate) const MIGRATION_SQL: &[&str] = &[
     // heal pass is needed (same shape as the project_repo_remote note above).
     // Appended last per the list invariant.
     include_str!("../migrations/20261009000001_pending_requests_channel_message_id.sql"),
+    // #2027: the per-row cache-read count behind the By Model cache share.
+    // ALTER TABLE ADD COLUMN, NULL by design on every existing row (there is
+    // no split to backfill), so no heal pass is needed. Appended last per the
+    // list invariant above.
+    include_str!("../migrations/20261015000001_add_usage_ledger_cache_read_tokens.sql"),
+    include_str!("../migrations/20261016000001_add_discord_tool_cards.sql"),
+    include_str!("../migrations/20261019000001_add_usage_ledger_prompt_tokens.sql"),
 ];
 
 pub(crate) fn build_migrations() -> Migrations<'static> {
@@ -312,9 +319,16 @@ impl Database {
             "Connected to database: {} (WAL, pool=16, busy_timeout=30s)",
             path_str
         );
-        // Publish pool globally so components without DI access (e.g. qwen-cli
-        // provider streaming persistence) can still write to the DB. Safe to
-        // ignore the error — only the first connect wins.
+        // Publish the pool process-wide so components without DI access (e.g.
+        // CLI-provider streaming persistence) can still write to the DB. Only
+        // the first connect wins; later sets are ignored.
+        //
+        // Deliberately NOT published in test builds (#2072). `GLOBAL_POOL` is a
+        // `OnceLock` and never resets, so one test opening a file DB would hand
+        // every later test in the binary a pool pointing at a temp file it then
+        // deletes. That made those tests depend on run order; #2071 was the
+        // first symptom.
+        #[cfg(not(test))]
         let _ = GLOBAL_POOL.set(pool.clone());
         Ok(Self {
             pool,

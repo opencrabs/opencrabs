@@ -306,3 +306,55 @@ fn tail_preserving_is_char_boundary_safe() {
     assert!(out.ends_with('🎯'));
     assert!(dropped > 0);
 }
+
+/// The head cut snaps DOWN to a boundary. Byte `max_bytes` may sit inside a
+/// multi-byte character, and the raw `&s[..max_bytes]` panicked there (#2124).
+#[test]
+fn truncate_str_snaps_down_inside_a_multibyte_char() {
+    // "é" is 2 bytes, so byte 1 lands inside it.
+    assert_eq!(truncate_str("é", 1), "");
+    // A 4-byte emoji: budgets 1, 2 and 3 all land inside it.
+    for budget in 1..4 {
+        assert_eq!(truncate_str("🎯tail", budget), "");
+    }
+    assert_eq!(truncate_str("🎯tail", 4), "🎯");
+    // A budget at or past the end is the identity.
+    assert_eq!(truncate_str("abc", 3), "abc");
+    assert_eq!(truncate_str("abc", 99), "abc");
+}
+
+/// The tail cut is the shape that panicked: `&s[len - n..]` with `len - n`
+/// inside a character. It now snaps UP to the next boundary (#2124).
+#[test]
+fn truncate_str_tail_snaps_up_inside_a_multibyte_char() {
+    let body = "Report attached: 📎 Reporté";
+    // A budget the string already fits keeps all of it.
+    assert_eq!(truncate_str_tail(body, 80), body);
+    let tail = truncate_str_tail(body, 8);
+    assert!(body.ends_with(tail), "the result is a suffix: {tail:?}");
+    assert!(!tail.is_empty(), "8 bytes buys at least one character");
+    // No budget can panic, whatever byte it lands on.
+    for n in 0..=body.len() + 2 {
+        let _ = truncate_str_tail(body, n);
+    }
+}
+
+/// Peeking at the final character's punctuation must not slice inside it.
+#[test]
+fn prefix_before_last_char_never_splits_the_final_char() {
+    // "°" is 2 bytes, the shape that broke the period check (#2124).
+    assert_eq!(prefix_before_last_char("5°"), "5");
+    assert_eq!(prefix_before_last_char("ab."), "ab");
+    assert_eq!(prefix_before_last_char("🎯"), "");
+    assert_eq!(prefix_before_last_char(""), "");
+}
+
+/// On ASCII the new helpers are byte-for-byte what the old raw slices did, so
+/// routing ten call sites through them changed no behaviour.
+#[test]
+fn the_boundary_helpers_match_the_old_ascii_slices() {
+    let body = "abcdefghij";
+    assert_eq!(truncate_str_tail(body, 4), "ghij");
+    assert_eq!(prefix_before_last_char(body), "abcdefghi");
+    assert_eq!(truncate_str(body, 4), "abcd");
+}

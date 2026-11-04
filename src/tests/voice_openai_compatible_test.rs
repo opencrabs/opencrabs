@@ -211,4 +211,145 @@ mod tests {
         let err = result.unwrap_err().to_string();
         assert!(err.contains("parse") || err.contains("text") || err.contains("Failed"));
     }
+
+    // ─── STT on the chat route (built-in endpoint) ──────────────────────────
+
+    #[test]
+    fn chat_route_is_chosen_only_for_the_built_in_host() {
+        assert!(openai_stt::serves_audio_on_chat_route(
+            "https://inference.opencrabs.com"
+        ));
+        assert!(openai_stt::serves_audio_on_chat_route(
+            "https://inference.opencrabs.com/v1"
+        ));
+        assert!(!openai_stt::serves_audio_on_chat_route(
+            "https://api.openai.com"
+        ));
+        assert!(!openai_stt::serves_audio_on_chat_route(
+            "https://api.groq.com/openai"
+        ));
+        assert!(!openai_stt::serves_audio_on_chat_route(
+            "http://localhost:11434"
+        ));
+    }
+
+    #[tokio::test]
+    async fn chat_route_falls_back_to_reasoning_content() {
+        let mut server = mockito::Server::new_async().await;
+        let mock_url = server.url();
+
+        // Some models leave content empty and put the answer in reasoning_content.
+        let mock = server
+            .mock("POST", "/v1/chat/completions")
+            .match_header("authorization", "Bearer test-stt-key")
+            .match_body(mockito::Matcher::Regex(
+                r#""input_audio":\{"data":"AAECAw==","format":"ogg"\}"#.to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"choices":[{"message":{"content":"","reasoning_content":"hello from audio"}}]}"#,
+            )
+            .create_async()
+            .await;
+
+        let result = openai_stt::transcribe_audio_chat(
+            vec![0x00, 0x01, 0x02, 0x03],
+            "test-stt-key",
+            "mimo/mimo-v2.6-flash",
+            &mock_url,
+        )
+        .await;
+
+        mock.assert_async().await;
+        assert_eq!(result.unwrap(), "hello from audio");
+    }
+
+    #[tokio::test]
+    async fn chat_route_reads_content() {
+        let mut server = mockito::Server::new_async().await;
+        let mock_url = server.url();
+
+        let _mock = server
+            .mock("POST", "/v1/chat/completions")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"choices":[{"message":{"content":"content transcript","reasoning_content":""}}]}"#,
+            )
+            .create_async()
+            .await;
+
+        let result = openai_stt::transcribe_audio_chat(vec![0x00], "key", "model", &mock_url).await;
+
+        assert_eq!(result.unwrap(), "content transcript");
+    }
+
+    #[tokio::test]
+    async fn chat_route_prefers_content_over_the_thinking_trace() {
+        let mut server = mockito::Server::new_async().await;
+        let mock_url = server.url();
+
+        // Live wire check 2026-10-19: with a spoken note, qwen3.8-omni-flash answers in
+        // content and puts a ~1200 char thinking trace in reasoning_content. Reading
+        // reasoning_content first would hand the user the model's thoughts.
+        let _mock = server
+            .mock("POST", "/v1/chat/completions")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"choices":[{"message":{"content":"the actual transcript","reasoning_content":"Okay, the user wants a transcription. Let me listen to the audio..."}}]}"#,
+            )
+            .create_async()
+            .await;
+
+        let result = openai_stt::transcribe_audio_chat(vec![0x00], "key", "model", &mock_url).await;
+
+        assert_eq!(
+            result.unwrap(),
+            "the actual transcript",
+            "content must win whenever it is non-empty"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_route_errors_when_both_text_fields_are_empty() {
+        let mut server = mockito::Server::new_async().await;
+        let mock_url = server.url();
+
+        let _mock = server
+            .mock("POST", "/v1/chat/completions")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"choices":[{"message":{"content":"","reasoning_content":""}}]}"#)
+            .create_async()
+            .await;
+
+        let result = openai_stt::transcribe_audio_chat(vec![0x00], "key", "model", &mock_url).await;
+
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("no text"),
+            "empty transcript must be an error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_route_propagates_http_error() {
+        let mut server = mockito::Server::new_async().await;
+        let mock_url = server.url();
+
+        let _mock = server
+            .mock("POST", "/v1/chat/completions")
+            .with_status(500)
+            .with_body(r#"{"error": "upstream exploded"}"#)
+            .create_async()
+            .await;
+
+        let result = openai_stt::transcribe_audio_chat(vec![0x00], "key", "model", &mock_url).await;
+
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("500"), "got: {err}");
+        assert!(err.contains("upstream exploded"), "got: {err}");
+    }
 }

@@ -203,7 +203,7 @@ fn image_block_embeds_media_in_docx() {
     let has_media = (0..archive.len()).any(|i| {
         archive
             .by_index(i)
-            .map(|f| f.name().starts_with("word/media/"))
+            .map(|f| f.name().expect("entry name").starts_with("word/media/"))
             .unwrap_or(false)
     });
     assert!(has_media, "embedded media part present");

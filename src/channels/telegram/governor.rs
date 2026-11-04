@@ -1323,15 +1323,24 @@ pub(crate) async fn admit_chat_action(chat: ChatId, thread_id: Option<i32>) -> b
                 return false;
             }
             PaceOutcome::Defer(wait) => {
+                #[cfg(not(test))]
                 let start = gate_now();
                 tokio::time::sleep(wait).await;
                 // Under tokio's paused runtime the sleep above returns
                 // instantly, so the virtual clock has to absorb it or the
                 // hold accounting never moves and this loop cannot reach its
-                // bound. Production reads the same real clock for both.
+                // bound. A test build then credits the scripted delay exactly
+                // instead of measuring the sleep: the sleeper is resumed by a
+                // real worker thread, so a wall-clock difference taken across
+                // it carries host scheduling jitter into a ledger the band
+                // assertions pin to the millisecond (#2076).
                 #[cfg(test)]
                 test_support::advance(wait.as_millis() as u64);
-                waited += gate_now().duration_since(start);
+                #[cfg(test)]
+                let elapsed = wait;
+                #[cfg(not(test))]
+                let elapsed = gate_now().duration_since(start);
+                waited += elapsed;
             }
             // G1 has neither a queue nor a fail-open arm; the policy table says
             // so. Reaching here would mean the table and the gate disagree.
@@ -1833,15 +1842,24 @@ pub(crate) async fn pace_send(chat: ChatId) {
                 return;
             }
             PaceOutcome::Defer(delay) => {
+                #[cfg(not(test))]
                 let start = gate_now();
                 tokio::time::sleep(delay).await;
                 // Under tokio's paused runtime the sleep above returns
                 // instantly, so the virtual clock has to absorb it or the
                 // hold accounting never moves and this loop cannot reach its
-                // bound. Production reads the same real clock for both.
+                // bound. A test build then credits the scripted delay exactly
+                // instead of measuring the sleep: the sleeper is resumed by a
+                // real worker thread, so a wall-clock difference taken across
+                // it carries host scheduling jitter into a ledger the band
+                // assertions pin to the millisecond (#2076).
                 #[cfg(test)]
                 test_support::advance(delay.as_millis() as u64);
-                waited += gate_now().duration_since(start);
+                #[cfg(test)]
+                let elapsed = delay;
+                #[cfg(not(test))]
+                let elapsed = gate_now().duration_since(start);
+                waited += elapsed;
             }
             // G3 is delay-never-drop and has no queue.
             PaceOutcome::Drop(_) | PaceOutcome::Queue => {
@@ -1929,15 +1947,24 @@ pub(crate) async fn pace_rich(chat: ChatId, thread_id: Option<i32>) {
                 return;
             }
             PaceOutcome::Defer(delay) => {
+                #[cfg(not(test))]
                 let start = gate_now();
                 tokio::time::sleep(delay).await;
                 // Under tokio's paused runtime the sleep above returns
                 // instantly, so the virtual clock has to absorb it or the
                 // hold accounting never moves and this loop cannot reach its
-                // bound. Production reads the same real clock for both.
+                // bound. A test build then credits the scripted delay exactly
+                // instead of measuring the sleep: the sleeper is resumed by a
+                // real worker thread, so a wall-clock difference taken across
+                // it carries host scheduling jitter into a ledger the band
+                // assertions pin to the millisecond (#2076).
                 #[cfg(test)]
                 test_support::advance(delay.as_millis() as u64);
-                waited += gate_now().duration_since(start);
+                #[cfg(test)]
+                let elapsed = delay;
+                #[cfg(not(test))]
+                let elapsed = gate_now().duration_since(start);
+                waited += elapsed;
             }
             // G4 is delay-never-drop and has no fail-open cap: none of these
             // arms is reachable from the rich row, so end the call like a wait.

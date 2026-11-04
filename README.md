@@ -29,6 +29,8 @@
 
 ⭐ Star us on [GitHub](https://github.com/opencrabs/opencrabs) if you like what you see!
 
+**Community funded.** No venture capital, no investors, no company behind it. The people who use OpenCrabs pay for the subscriptions, the inference and the credits that keep it running: see [🫶 Sponsors](#-sponsors).
+
 ---
 
 ## Table of Contents
@@ -76,6 +78,7 @@
 - [⚠️ Disclaimers](#-disclaimers)
 - [🤝 Contributing](#-contributing)
 - [📄 License](#-license)
+- [🫶 Sponsors](#-sponsors)
 - [🙏 Acknowledgments](#-acknowledgments)
 - [📞 Support](#-support)
 - [✨ Stay Tuned](#-stay-tuned)
@@ -89,8 +92,8 @@
 The docs and the landing at [opencrabs.com](https://opencrabs.com) are available in six languages: English, Português (PT-PT), Español, Français, Русский and Bahasa Indonesia. Pick one from the language switcher in the menu bar; untranslated paragraphs fall back to English rather than going missing.
 
 ### Getting Started
-- [Installation & Quick Start](src/docs/start/GETTING_STARTED.md)
-- [Onboarding Wizard](src/docs/start/ONBOARDING.md)
+- [Installation & Quick Start](https://docs.opencrabs.com/getting-started/installation.html)
+- [Onboarding Wizard](https://docs.opencrabs.com/getting-started/onboarding.html)
 - [OpenCrabs Overview](src/docs/start/OPENCRABS.md)
 
 ### Reference
@@ -113,6 +116,9 @@ The docs and the landing at [opencrabs.com](https://opencrabs.com) are available
 - [HEARTBEAT.md](src/docs/reference/templates/HEARTBEAT.md) — periodic checklist, read on demand or by a cron job
 
 ### Skills
+
+All of these ship inside the binary, available as `/<name>` in every install, nothing to copy:
+
 - [Security Audit](src/docs/reference/templates/skills/security-audit/SKILL.md)
 - [Cost Estimate](src/docs/reference/templates/skills/cost-estimate/SKILL.md)
 - [Repo Audit](src/docs/reference/templates/skills/repo-audit/SKILL.md)
@@ -120,6 +126,12 @@ The docs and the landing at [opencrabs.com](https://opencrabs.com) are available
 - [Browser CDP](src/docs/reference/templates/skills/browser-cdp/SKILL.md)
 - [A2A Gateway](src/docs/reference/templates/skills/a2a-gateway/SKILL.md)
 - [Dynamic Tools](src/docs/reference/templates/skills/dynamic-tools/SKILL.md)
+
+### Opt-in Skills
+
+Not built in, so they do not reach every user. Copy a folder into `~/.opencrabs/skills/<name>/` and it shows up as `/<name>` for you only:
+
+- [Motion Graphics](src/docs/reference/templates/optional-skills/motion-graphics/SKILL.md): tutorial videos with Remotion (storyboard, drawn UI, voice-over, subtitles). Install with `cp -r src/docs/reference/templates/optional-skills/motion-graphics ~/.opencrabs/skills/motion-graphics`.
 
 ### Cron Templates
 - [Cron Jobs Guide](src/docs/reference/templates/cron/README.md)
@@ -217,7 +229,7 @@ Recall falling is the point: the old rule answered almost everything, which is e
 
 ### Structural code search ([full report](src/eval/results/code-graph-structural-v1.md))
 
-Measured on this repository (1,383 `.rs` files), ground truth locked by grep before any blind search. The symbol graph (`code-graph`, on by default) adds a structural lane beside FTS5+vector:
+Measured on this repository (1,902 `.rs` files), ground truth locked by grep before any blind search. The symbol graph (`code-graph`, on by default) adds a structural lane beside FTS5+vector:
 
 | Query class | Before (FTS5+vector) | After (+ symbol graph) |
 |---|---|---|
@@ -265,10 +277,10 @@ https://github.com/user-attachments/assets/7f45c5f8-acdf-48d5-b6a4-0e4811a9ee23
 | **Per-Provider Timeouts** | `timeout_secs` caps a non-streaming request (one that buffers a whole body); it never caps a stream. `stream_idle_timeout_secs` is the only stream timer; it caps inter-chunk silence before the stream is treated as dropped and retried, so a long turn that keeps delivering is never cut. Defaults when unset: 3600s for CLI and local providers, 120s for every OpenAI-compatible remote provider (z.ai included), 20s for the native Anthropic and Gemini families |
 | **Per-Provider Vision** | Set `vision_model` per provider — the LLM calls `analyze_image` as a tool, which uses the vision model on the same provider API to describe images. The chat model stays the same and gets vision capability via tool call. Gemini vision takes priority when configured. Auto-configured for known providers (e.g. MiniMax) on first run |
 | **Prompt Caching** | Caches the stable context prefix (system prompt, brain files, earlier turns) on every caching-capable provider — Anthropic native (default), OpenAI/OpenRouter (`cache_enabled`), Qwen/Alibaba (zero-config auto), Xiaomi (server-side). Averaging ~87% cache efficiency in real use; watch it live in the Cache Efficiency card of `/usage`. Big reason a larger context window stays affordable |
-| **Context Window & Auto-Compaction** | Per-provider `context_window` override (default 200k, works on every provider); transparent auto-compaction at 65% (soft, background) / 90% (hard) of the window gives effectively unlimited session memory with no manual clearing |
+| **Context Window & Auto-Compaction** | Per-provider `context_window` override (default 200k, works on every provider except the built-in one, whose window is fixed at 200k); transparent auto-compaction at 65% (soft, background) / 90% (hard) of the window gives effectively unlimited session memory with no manual clearing |
 | **Real-time Streaming** | Character-by-character response streaming with animated spinner showing model name and live text |
 | **Local LLM Support** | Run with LM Studio, Ollama, or any OpenAI-compatible endpoint — 100% private, zero-cost |
-| **Usage Dashboard** | Per-message token count and cost displayed in header; `/usage` opens an interactive dashboard with daily activity charts, cost breakdowns by project/provider/model/activity, core tool usage stats, and period filtering (Today/Week/Month/All-Time). Sessions are auto-categorized on startup (Development, Bug Fixes, Features, Refactoring, Testing, Documentation, CI/Deploy, etc.). Estimated costs for historical sessions shown as `~$X.XX` |
+| **Usage Dashboard** | Per-message token count and cost displayed in header; `/usage` opens an interactive dashboard with daily activity charts, cost breakdowns by project/provider/model/activity, core tool usage stats, a `N% cache` column on the per-model rows showing the share of that model's recorded tokens that came from cache, and period filtering (Today/Week/Month/All-Time). Sessions are auto-categorized on startup (Development, Bug Fixes, Features, Refactoring, Testing, Documentation, CI/Deploy, etc.). Estimated costs for historical sessions shown as `~$X.XX` |
 | **Context Awareness** | Live context usage indicator showing actual token counts (e.g. `ctx: 45K/200K (23%)`); auto-compaction at 70% with tool overhead budgeting; accurate tiktoken-based counting calibrated against API actuals |
 | **3-Tier Memory** | (1) **Brain MEMORY.md** — user-curated durable memory, loaded on demand in the main session (see [Brain Files](#brain-files--one-file-one-job)), (2) **Daily Logs** — auto-compaction summaries at `~/.opencrabs/memory/YYYY-MM-DD.md`, (3) **Hybrid Memory Search** — FTS5 keyword search + vector embeddings combined via Reciprocal Rank Fusion. Three modes: **Local** (embeddinggemma-300M, 768-dim, no API key, works offline), **API** (any OpenAI-compatible `/v1/embeddings` endpoint: OpenAI, Ollama, Jina, etc.), or **FTS5-only** (no embeddings, VPS-friendly, ~0 RAM overhead). Auto-detects VPS environments and disables local embeddings |
 | **Dynamic Brain System** | System brain assembled from workspace MD files (SOUL, USER, AGENTS, TOOLS, MEMORY) — all editable live between turns |
@@ -284,10 +296,10 @@ https://github.com/user-attachments/assets/7f45c5f8-acdf-48d5-b6a4-0e4811a9ee23
 | **PDF Support** | Attach PDF files by path — native Anthropic PDF support; for other providers, text is extracted locally via `pdf-extract`. **Scanned / image-only PDFs** (no embedded text) are rendered to page images so vision models can read them — this needs **poppler** (`pdftoppm`) on the system: macOS `brew install poppler`, Debian/Ubuntu `apt install poppler-utils`, Fedora `dnf install poppler-utils`. The one-line installer sets this up automatically; without it, the PDF is still saved and its path handed to the agent (text extraction and the `pdf_to_images` tool can be retried once poppler is present) |
 | **Document Parsing** | Built-in `parse_document` tool extracts text from PDF, DOC, DOCX, XLSX, XLSM, XLSB, XLS, ODS, CSV, HTML, TXT, MD, JSON, XML. All native Rust, zero external services: PDF text via `pdf-extract`, legacy Word 97-2003 `.doc` via `rwml`, DOCX/XML via a `quick-xml` streaming walk, spreadsheets (all five Excel/ODS variants) via `calamine`, CSV via `csv`. Scanned/image-only PDFs fall back to page-image rendering for vision models (see **PDF Support** above). Spreadsheet files are parsed into readable table format with sheet headers. Reading legacy binary `.ppt` is out of scope by design |
 | **Document Generation** | Built-in `generate_document` tool creates XLSX (live Excel formulas), DOCX, and PDF natively in Rust with zero host dependencies, plus PPTX via python-pptx when present. Full styling per format: brand colors, page headers/footers with logos and page numbers, zebra tables, frozen headers, autofilters, number formats, PowerPoint brand templates. Image blocks embed PNG/JPEG inline with optional captions in PDF and DOCX. Generated files are delivered as downloadable attachments on Telegram/WhatsApp/Discord. See [Document Generation](#-document-generation) |
-| **Voice (STT)** | Voice notes transcribed via **Groq Whisper API** (`whisper-large-v3-turbo`), any **OpenAI-compatible STT endpoint** (set `base_url` + `model` under `[providers.stt.openai_compatible]` — works with self-hosted Whisper, Deepgram-compatible proxies, etc.), **Voicebox STT** (self-hosted open-source voice stack — point the `base_url` of `[providers.stt.voicebox]` at your instance; 2s liveness probe runs before each request so a dead voicebox fails fast), or **Local** whisper.cpp via `whisper-rs` (runs on-device, Tiny 75 MB / Base 142 MB / Small 466 MB / Medium 1.5 GB, zero API cost). All dispatched through a single entry point so every channel gets the same provider priority chain — and an optional `[providers.stt].fallback_chain` lets the user codify "if my local voicebox is down, try Groq, then OpenAI" so transient outages auto-route to the next provider with zero user action. The built-in OpenCrabs provider serves it out of the box on fresh installs (`stt_model = "qwen3.8-omni-flash"`), and setting `stt_model` on ANY active provider routes transcription through that provider's own endpoint. Choose mode in `/voice`. Included by default |
-| **Voice (TTS)** | Agent replies to voice notes with audio via **OpenAI TTS API** (`gpt-4o-mini-tts`), any **OpenAI-compatible TTS endpoint** (set `base_url` + `model` + `voice` under `[providers.tts.openai_compatible]` — works with self-hosted Coqui/Bark, ElevenLabs-compatible proxies, etc.), **Voicebox TTS** (async `/generate` → poll `/generate/{id}/status` → fetch audio; set the `base_url` + `profile_id` of `[providers.tts.voicebox]`), or **Local** Piper TTS (runs on-device via Python venv, Ryan / Amy / Lessac / Kristin / Joe / Cori, zero API cost). All outputs normalised to OGG/Opus via `ensure_opus` before delivery — consistent format across every channel regardless of backend. `[providers.tts].fallback_chain` provides the same auto-failover behaviour as the STT side. The built-in OpenCrabs provider serves it out of the box on fresh installs (`tts_model = "qwen3.8-omni-flash"`), and setting `tts_model` on ANY active provider routes speech through that provider's own endpoint. Falls back to text if disabled |
+| **Voice (STT)** | Voice notes transcribed via **Groq Whisper API** (`whisper-large-v3-turbo`), any **OpenAI-compatible STT endpoint** (set `base_url` + `model` under `[providers.stt.openai_compatible]` — works with self-hosted Whisper, Deepgram-compatible proxies, etc.), **Voicebox STT** (self-hosted open-source voice stack — point the `base_url` of `[providers.stt.voicebox]` at your instance; 2s liveness probe runs before each request so a dead voicebox fails fast), or **Local** whisper.cpp via `whisper-rs` (runs on-device, Tiny 75 MB / Base 142 MB / Small 466 MB / Medium 1.5 GB, zero API cost). All dispatched through a single entry point so every channel gets the same provider priority chain — and an optional `[providers.stt].fallback_chain` lets the user codify "if my local voicebox is down, try Groq, then OpenAI" so transient outages auto-route to the next provider with zero user action. Voice notes keep working: transcription runs through whichever STT engine above is configured, and the built-in OpenCrabs provider transcribes out of the box. It answers no `/v1/audio/transcriptions` route, so the audio travels as an `input_audio` part on `/v1/chat/completions` alongside the transcription instruction, and the shipped config sets `stt_model = "qwen3.8-omni-flash"` there. Setting `stt_model` on any other active provider sends transcription through that provider's own endpoint, ahead of `[providers.stt.openai_compatible]`. Choose mode in `/voice`. Included by default |
+| **Voice (TTS)** | Agent replies to voice notes with audio via **OpenAI TTS API** (`gpt-4o-mini-tts`), any **OpenAI-compatible TTS endpoint** (set `base_url` + `model` + `voice` under `[providers.tts.openai_compatible]` — works with self-hosted Coqui/Bark, ElevenLabs-compatible proxies, etc.), **Voicebox TTS** (async `/generate` → poll `/generate/{id}/status` → fetch audio; set the `base_url` + `profile_id` of `[providers.tts.voicebox]`), or **Local** Piper TTS (runs on-device via Python venv, Ryan / Amy / Lessac / Kristin / Joe / Cori, zero API cost). All outputs normalised to OGG/Opus via `ensure_opus` before delivery — consistent format across every channel regardless of backend. `[providers.tts].fallback_chain` provides the same auto-failover behaviour as the STT side. The built-in OpenCrabs provider does not serve synthesis yet: it answers no `/v1/audio/speech` route, so the shipped config leaves `tts_model` unset there. Setting `tts_model` on any active provider that exposes the route sends speech through that provider's own endpoint, ahead of `[providers.tts.openai_compatible]`. A voice note is still transcribed and still answered when no synthesis engine is available: the reply arrives as text. |
 | **Attachment Indicator** | Attached images show as `[IMG1:filename.png]` in the input title bar |
-| **Image Generation** | Agent generates images with the `generate_image` tool. The default route is Google Gemini (`gemini-3.1-flash-image-preview` "Nano Banana"), enabled via `/image`. The built-in OpenCrabs provider serves it out of the box on fresh installs (`gemini-3.1-flash-image`). Returned as native images/attachments in all channels |
+| **Image Generation** | Agent generates images with the `generate_image` tool. The default route is Google Gemini (`gemini-3.1-flash-image-preview` "Nano Banana"), enabled via `/image`. The built-in OpenCrabs provider serves it out of the box on fresh installs (`gemini-2.5-flash-image`). Returned as native images/attachments in all channels |
 
 #### Vision setup — two paths, pick one
 
@@ -348,7 +360,7 @@ context_window = 1000000   # raise the budget; compaction still triggers at 65% 
 context_window = 1000000   # native providers too — Anthropic, Gemini, and the CLI providers
 ```
 
-This override works for **every provider** — OpenAI-compatible (custom, xiaomi, qwen, openrouter, minimax, …) and the native Anthropic, Gemini, and CLI providers. A provider with no override inherits the 200k default.
+This override works for **every provider** — OpenAI-compatible (custom, xiaomi, qwen, openrouter, minimax, …) and the native Anthropic, Gemini, and CLI providers. A provider with no override inherits the 200k default. The one exception is the **built-in OpenCrabs provider**, whose window is fixed at 200k: it is free and serves one model, so `context_window` is ignored there, both under `[providers.opencrabs]` and in any `[providers.custom.*]` section pointed at `inference.opencrabs.com`.
 
 > **Sizing guidance.** 200k is the battle-tested sweet spot for essentially **every cloud model**. Going bigger has two real downsides — **cost** and **context loss**:
 >
@@ -392,7 +404,7 @@ The one user-settable TTL is `cache_ttl` (default 300s, range 1-86400), which se
 | Feature | Description |
 |---------|-------------|
 | **Telegram Bot** | Full-featured Telegram bot — owner DMs share TUI session, groups get isolated per-group sessions (keyed by chat ID). Photo/voice support (STT transcribes incoming voice notes; TTS replies as OGG/Opus voice notes via `send_voice` when input was audio). Allowed user IDs, allowed chat/group IDs, per-group allow lists (`[channels.telegram.groups.<id>]`), `respond_to` filter (`all`/`dm_only`/`mention`/`auto`, global or per-group). Passive group message capture — all messages stored for context even when bot isn't mentioned |
-| **Telegram Userbot (experimental)** | Feature-gated, opt-in, receive-only MTProto companion. Experimental: merged from #1209 without a maintainer-side live login yet; expect rough edges. Local QR/code/2FA login; allowlisted text is passively stored under `telegram-userbot` for explicit retrieval through `channel_search`. Empty `allowed_chats` is dry mode. It does not invoke the agent or send/edit/react as the user. |
+| **Telegram Userbot (experimental)** | Feature-gated, opt-in, receive-only MTProto companion. Experimental: merged from #1209 without a maintainer-side live login yet; expect rough edges. Local QR/code/2FA login; allowlisted text is passively stored under `telegram-userbot` for explicit retrieval through `channel_search`. An operator can also pull a document out on demand with `opencrabs channel userbot-download <peer> <msg_id|latest> [--outdir DIR]` (MTProto streams up to 2 GB where the Bot API caps at 20 MB), `--list` shows recent document messages, and the uploader's filename is reduced to its final component so a download cannot land outside `--outdir`. Empty `allowed_chats` is dry mode. It does not invoke the agent or send/edit/react as the user. |
 | **WhatsApp** | Pair by scanning a QR code from the TUI: first-run onboarding, or `/channels` then select WhatsApp. The QR is shown in the terminal. You run the bot AS whatever account you scan: your own number (talk via "Message Yourself") or any other number you own, including a WhatsApp Business account, to serve that account's incoming DMs. `response_policy` (`auto`/`owner_only`/`allowlist`/`open`) decides who it answers; the paired account's self-chat and `bot_owner` operator are always allowed. Streaming edits ONE living message in place rather than posting a chunk per step, and a finished multi-step turn is acknowledged with a reaction. Inbound: text, image, video, audio, document, sticker, location, contact card, reactions and poll votes (decrypted and resolved back to the option labels). Media whose CDN URL has expired is recovered through a server re-upload rather than reported as a failed download. Outbound audio goes out as a native voice note (`ptt`) with a recording indicator, pairing directly with built-in `local-tts`. Beyond messaging: block / unblock / list blocked contacts, disappearing messages (per message or channel-wide), pin and unpin chats, forward a message the session has seen, set the profile name and status, post status updates, discover followed newsletters, and create and assign labels. Every action that delivers a message is charged to an outbound send budget. Tool-approval prompts can optionally be sent as interactive buttons (`interactive_buttons`, off by default). Follow-up suggestion sets that exceed the native button cap render as a poll instead, and a vote selects the option (#1616). Per-phone sessions, session persists across restarts |
 | **Discord** | Full Discord bot — text + image + voice. Owner DMs share TUI session, guild channels get isolated per-channel sessions. Allowed user IDs, allowed channel IDs, `respond_to` filter. Tool calls render as ONE grouped message per turn, collapsed to a summary with an Expand/Collapse button, edited in place as tools run — Slack parity. Intermediate narration folds into the same bubble as dim subtext lines (`trace_narration`, default true). Reacting to a bot message becomes an agent turn (approval emoji = keep going with a silent react-back, stop emoji = pause and ask), and the agent reacts back via its `<<react:EMOJI>>` marker. Multiple generated files batch into one gallery-style message. Slash commands are native: `commands.toml` is projected onto Discord's command list per guild with argument hints (#1850, needs the `applications.commands` invite scope). Interactive components: select menus (`discord_send` with `action=select_menu`), modal forms (`action=modal`), component TTL with auto-cleanup, role-based access control, forum thread creation. Live reply tracing with auto-threading (tool turns stream into a linked thread; tables render as native Discord markdown tables) and double-post dedup on tool turns (#1603, #1608). Full proactive control via `discord_send` (17 actions): `send`, `reply`, `react`, `unreact`, `edit`, `delete`, `pin`, `unpin`, `create_thread`, `send_embed`, `get_messages`, `list_channels`, `add_role`, `remove_role`, `kick`, `ban`, `send_file`. Generated images sent as native Discord file attachments |
 | **Slack** | Full Slack bot via Socket Mode — owner DMs share TUI session, channels get isolated per-channel sessions. Text + image + voice (STT transcribes incoming audio attachments; TTS replies upload an OGG/Opus audio file via Slack's external upload flow — renders inline with waveform UI — when input was audio and `tts_enabled=true`). Allowed user IDs, allowed channel IDs, `respond_to` filter. Tool calls render as ONE grouped message per turn, collapsed to a summary with an Expand/Collapse button (Block Kit), edited in place as tools run — Telegram parity. Reacting to a bot message becomes an agent turn (approval emoji = keep going with a silent react-back, stop emoji = pause and ask), and the agent reacts back via its `<<react:EMOJI>>` marker. All file uploads (generated docs/images, TTS audio) use Slack's supported external upload flow (`files.getUploadURLExternal` + `completeUploadExternal`) with real MIME types. Full proactive control via `slack_send` (17 actions): `send`, `reply`, `react`, `unreact`, `edit`, `delete`, `pin`, `unpin`, `get_messages`, `get_channel`, `list_channels`, `get_user`, `list_members`, `kick_user`, `set_topic`, `send_blocks`, `send_file`. Generated images sent as native Slack file uploads. Bot token + app token from `api.slack.com/apps` (Socket Mode required). **Required Bot Token Scopes:** `chat:write`, `channels:history`, `groups:history`, `im:history`, `mpim:history`, `users:read`, `files:read`, `files:write`, `reactions:write`, `app_mentions:read` |
@@ -427,9 +439,20 @@ Referenced markdown files (`.md`, `.markdown`) are a special case: they ship as 
 
 **Flow logs** (processing-log messages showing tool calls and intermediate text) also use the rich API when enabled, supporting 32K characters instead of HTML's 4K limit. Long tool chains fit in a single message without splitting. If the rich send fails, flow logs fall back to HTML rendering. The block auto-freezes at 30K characters to stay within limits.
 
+#### Discord tool card
+
+On **Discord**, each turn's tool calls are one message. Collapsed, it shows the summary: the tool count, how many are running or failed, the context budget, tokens per second and the elapsed time. **Expand** opens the card:
+
+- **Five rows per page**, with previous and next buttons. Nothing is dropped: the footer states the page and the call total.
+- **Repeats collapse.** Identical consecutive calls show as one row with `×N`, such as `cargo check ×3`. Non-adjacent repeats stay separate.
+- **A colored bar.** Yellow while a tool runs, red when one failed, green when everything finished clean. The header names the tool that is running.
+- **Log** sends the full list, every call uncollapsed, to you as `tool-calls.md`. Only you see it.
+
+Each completion finishes its own call, matched by the provider's call id, so parallel calls of one tool no longer leave a finished row showing a running icon. Cards are stored in SQLite, so after a restart their buttons still work. Telegram keeps its own tool block.
+
 #### /cowork — workspace creation (Telegram) and channel opening (Discord)
 
-On **Discord**, `/cowork` (owner only, typed in a channel or thread, or picked from the `/` menu) opens that channel or thread to its members. It writes `[channels.discord.channels.<id>]` with `open = true` and the channel's `name`. Members are not registered anywhere: `open` admits them, threads and forum posts included, and DMs and other channels stay locked. Run it in a server channel; in a DM it refuses.
+On **Discord**, `/cowork` (owner only, typed in a channel or thread, or picked from the `/` menu) opens that channel or thread to its members. It writes `[channels.discord.channels.<id>]` with `open = true`, `respond_to = "all"` and the channel's `name`. Members are not registered anywhere: `open` admits them, threads and forum posts included, and DMs and other channels stay locked. Because the owner's `/cowork` and `/respond_to` pass the channel scope, the owner can open or fix a channel from inside it even when it has no entry yet. Run `/cowork` in a server channel; in a DM it refuses.
 
 The Telegram flow below creates a team workspace directly from Telegram. It is **Telegram-only** because it relies on Telegram-specific primitives: group creation via `?startgroup` deep links, invite links, QR codes from `t.me` URLs, and `new_chat_members` service messages for auto-registration. None of these exist in Discord, Slack, or WhatsApp.
 
@@ -465,6 +488,30 @@ allowed_users = ["123456789"]    # Only these users can interact
 respond_to = "mention"           # Bot only responds to @mentions in groups
 silence_group_start = true       # Silently ignore /start from non-allowed users in groups
 ```
+
+#### Telegram guest queries
+
+Telegram's Guest Mode (Bot API 10.0) lets someone tag your bot in a chat it is **not** a member of, and bot API method `answerGuestQuery` posts one reply right there. OpenCrabs supports it, off by default:
+
+```toml
+[channels.telegram]
+guest_queries = true             # default false: guest tags are ignored
+```
+
+A guest reply answers a stranger in a chat you were never invited to, so the gate is deliberately narrow. The caller must be the `bot_owner`, an admin (`allowed_users`), or listed for **that** chat (`[channels.telegram.groups.<chat_id>].allowed_users`), and only when `guest_queries = true`. A group's `open = true` grants nothing here: it opens that group to the bot, it does not authorize answering guest tags from its members. Refused queries are logged with `guest_query_id`, the caller and the chat; nothing is posted.
+
+What the guest turn sees and sends:
+
+- Only the tagged message. No history from the chat, and nothing from the guest turn enters that group's history either.
+- A single reply, posted as soon as the turn starts and then **edited in place** while it runs: the caller watches the same status block a regular chat shows, with the tools the agent is using, the tool count, the context budget and the settled footer. `answerGuestQuery` returns the reply's `inline_message_id` and every later edit goes through `editMessageText` with that id, which is Telegram's own recommendation for this ("reporting its progress back to the chat or group"). Sent with `parse_mode=HTML` so the block keeps its formatting.
+- Clamped to Telegram's 4096-character limit, counted the way Telegram counts it (UTF-16 units, so an emoji is 2). An overlong answer is cut and marked, and if the block would leave too little room for a real answer the answer ships alone.
+- Secrets are scrubbed, always: a guest reply goes to a chat you do not control, so it never takes the DM branch that shows credentials.
+- Channel directives are stripped, so a local file path can never leak into a stranger's chat.
+- No typing indicator is possible (the bot is not a member of the chat, so there is nothing to type in), and no per-tool messages: the API gives one reply per summon.
+- Tools that need approval are denied: approvals are buttons in a chat, and the caller is not the machine's owner.
+- The tool surface is **scoped**, not the owner's. A guest turn may only reach `web_search`, `exa_search`, `brave_search`, `read_file` and `tool_search`; anything else is refused before it runs, and `tool_search` will not advertise it. `read_file` stays inside the session working directory, so an absolute path elsewhere on disk, or a symlink pointing out of it, is refused. The allowlist is default-deny on purpose: a tool added in a later release stays out of a stranger's reach until it is listed.
+
+Guest queries land on the raw `getUpdates` layer (`allowed_updates` includes `guest_message`), the same path `message_reaction` used before teloxide grew a typed variant for it. The pinned `teloxide-core` has no guest variant, so a guest update is never dispatched as a normal message.
 
 #### Bot owner and owner-only commands
 
@@ -556,7 +603,7 @@ respond_to = "all"               # this channel's mode; unset inherits the globa
 open = true                      # any member of THIS channel is allowed, threads and forum posts included
 ```
 
-A thread or forum post takes any setting it does not set from its parent channel, and its own setting wins over the parent's. `open` never admits anyone while the bot has no `allowed_users`, `allowed_roles` or `bot_owner`, and DMs and other channels stay locked. `auto` on Discord currently behaves as `mention`. The owner can run `/respond_to` inside a channel or thread to set that entry; the command reports the mode that applies there.
+A channel with its own entry passes the channel scope without an `allowed_channels` entry. A thread or forum post takes any setting it does not set from its parent channel, and its own setting wins over the parent's. `open` never admits anyone while the bot has no `allowed_users`, `allowed_roles` or `bot_owner`, and DMs and other channels stay locked. `auto` on Discord currently behaves as `mention`. The owner can run `/respond_to` inside a channel or thread to set that entry; the command reports the mode that applies there.
 
 **`/cowork` opens a group.** Running `/cowork` (owner-only) is the explicit, owner-initiated action that sets that group's `open = true` (persisted, until you change it): either by adding the bot to a group via the cowork deep link, or by sending `/cowork` inside a group the bot is already in. Once open, every member (existing and new) is allowed and tracked in the group's `allowed_users` — no per-user `/start` needed — while DM access stays closed. Auto-registration only happens in open groups; a group you never `/cowork` (or set `open = true` on) stays secure by default and admits no one automatically.
 
@@ -590,7 +637,7 @@ This solves the core UX problem in mention-only groups: previously, tagging the 
 | **Syntax Highlighting** | 100+ languages with line numbers via syntect |
 | **Markdown Rendering** | Rich text formatting with code blocks, headings, lists, and inline styles |
 | **Tool Context Persistence** | Tool call groups saved to DB and reconstructed on session reload — no vanishing tool history |
-| **Expand / Collapse Blocks** | Click a tool-call group or a **Thinking** block, or press `Ctrl+O`, to expand it. Reasoning cycles through three states so a long thought never floods the view: **collapsed → capped** (first ~10 lines + a "… N more (click / ctrl+o for full)" hint) **→ full → collapsed**. Tool-call groups toggle expand/collapse. A plain **click** toggles the block under the cursor; a **click-and-drag** selects text to copy (even over a collapsible block) instead of expanding it |
+| **Expand / Collapse Blocks** | Click a tool-call group or a **Thinking** block, or press `Ctrl+O`, to expand it. Reasoning cycles through three states so a long thought never floods the view: **collapsed → capped** (first ~10 lines + a "… N more (click / ctrl+o for full)" hint) **→ full → collapsed**. Tool-call groups toggle expand/collapse (on Discord, the card pages through its rows; see *Discord tool card*). A plain **click** toggles the block under the cursor; a **click-and-drag** selects text to copy (even over a collapsible block) instead of expanding it |
 | **Multi-line Input** | Alt+Enter / Shift+Enter for newlines; Enter to send |
 | **Abort Processing** | Escape×2 within 3 seconds to cancel any in-progress request |
 | **Clipboard Image Paste** | Copy an image from a browser, screenshot tool, or any app and paste it directly into the input. Raw image bytes are read from the OS clipboard (macOS: osascript, Linux: wl-paste/xclip), written to a temp file, and attached through the existing image pipeline. No need to save to disk first. `Ctrl+V` in the chat input reads the clipboard directly and works in every terminal, including a screenshot copied to the clipboard (image data, no text). `Cmd+V` works where the terminal pastes or passes the key through; iTerm2 and Terminal.app swallow `Cmd+V` for an image-only clipboard, so use `Ctrl+V` there. While the chat input is focused on macOS, an unpasted screenshot in the clipboard also shows a vanishing `Image in clipboard - Ctrl+V to paste` hint inside the input area, like the other notices, until you paste or the clipboard changes |
@@ -1321,10 +1368,11 @@ Model list is **fetched live** from the OpenRouter API during onboarding and via
 OpenCrabs ships its own provider, so a new install can chat without creating an account or pasting a key.
 
 **What you get on a fresh install**
-- **Chat model:** `deepseek-v4.1-flash`, 200k context window.
+- **Chat model:** `deepseek-v4.1-flash`, 200k context window. The window is fixed at 200k on this provider: the endpoint is free and serves one model, so `context_window` is not honoured here.
 - **Vision:** `vision_model` is set to the same model, so attached images work on day 0.
-- **Image generation:** on by default for fresh installs through `gemini-3.1-flash-image`, which is image-only and never offered as a chat model. Existing installs set `generation_model` on `[providers.opencrabs]` to get it (see [Image Generation & Vision](#-image-generation--vision)).
-- **Voice (STT + TTS):** on by default for fresh installs through `qwen3.8-omni-flash`, which serves both `/v1/audio/transcriptions` and `/v1/audio/speech`. Voice notes transcribe and replies speak on day 0. Existing installs set `stt_model` and `tts_model` on `[providers.opencrabs]` to get it (see [Core Features](#-core-features)).
+- **Image generation:** on by default for fresh installs through `gemini-2.5-flash-image`, which is image-only and never offered as a chat model. Existing installs set `generation_model` on `[providers.opencrabs]` to get it (see [Image Generation & Vision](#-image-generation--vision)).
+- **Voice (in):** transcription works on day 0. The built-in provider answers no `/v1/audio/*` route, so the shipped config sets `stt_model = "qwen3.8-omni-flash"` and the audio is sent as an `input_audio` part on `/v1/chat/completions` alongside the transcription instruction. An engine you configure yourself (Groq, an [OI]-compatible endpoint, Voicebox, local whisper.cpp) stays available, and the active provider's route is the primary one.
+- **Voice (out):** speech is not served by this provider yet. It answers no `/v1/audio/speech` route, so the shipped config leaves `tts_model` unset there. A spoken reply still works through [OI] TTS, Voicebox, or local Piper once one is configured; with none set the reply arrives as text, and a `tts_model` set here would outrank your chosen engine and pay a failed round trip first (see [Core Features](#-core-features)).
 
 **How the key works.** On first use, the install asks `inference.opencrabs.com` for its own token once and saves it in `keys.toml` under `[providers.opencrabs]`. The binary holds no shared upstream key, and the server keeps only a hash of each token. If `keys.toml` is lost, the install requests a new token automatically.
 
@@ -1339,8 +1387,13 @@ OpenCrabs ships its own provider, so a new install can chat without creating an 
 enabled = false                       # chosen through onboarding, not by hand
 default_model = "deepseek-v4.1-flash"
 models = ["deepseek-v4.1-flash"]
-context_window = 200000
-vision_model = "deepseek-v4.1-flash"
+# context_window is not honoured here: the built-in endpoint is free and fixed
+# at 200k, so any value set in this section is ignored.
+vision_model = "deepseek-v4.1-flash"       # vision on day 0, same endpoint
+generation_model = "gemini-2.5-flash-image"  # image generation on day 0
+stt_model = "qwen3.8-omni-flash"             # transcription on day 0, sent as input_audio on the chat route
+# tts_model is left unset: this endpoint answers no /v1/audio/speech route, so a
+# speech model here would outrank your working engine and pay a failed round trip.
 ```
 
 ### Google Gemini
@@ -1686,6 +1739,29 @@ api_key = "nvapi-..."
 
 **What `enabled = false` actually means:** it only removes the provider from the default-selection scan above. It does NOT disable the provider. By-name usage ignores the flag entirely: per-session provider restoration, `/models` switching, the `[fallback]` chain, and the `[providers.fallback] vision` list can all still reach a provider marked `enabled = false`. Such a provider works perfectly fine when it has an API key, or when its CLI is authenticated and working on the same machine. Think of `enabled = false` as "not the default", not "dead" (#270).
 
+### Wire Dialect (Chat Completions vs Responses)
+
+An OpenAI-compatible endpoint can serve a request two ways: the classic Chat Completions route (`POST {base}/chat/completions`) or the newer Responses route (`POST {base}/responses`). The two are not interchangeable. Each takes a different request body, returns a different response shape and streams a different event vocabulary, so the route is a property of the endpoint, not of the caller. Reasoning models are the usual reason to care: when a model's reasoning tools are only reachable over Responses, sending it to Chat Completions is what makes a tool call come back as plain text.
+
+`wire_dialect` picks the route per provider:
+
+```toml
+[providers.openai]
+enabled = true
+default_model = "gpt-6"
+wire_dialect = "auto"   # "auto", "chat" or "responses"
+```
+
+| Value | Behavior |
+|-------|----------|
+| `auto` | Chat Completions first, switch to Responses when the endpoint refuses the model on the chat route. This is the default for the official OpenAI host. |
+| `chat` | Always `POST {base}/chat/completions`. |
+| `responses` | Always `POST {base}/responses`. |
+
+Leaving the key unset means `auto`, and `auto` resolves by provider kind. The official host (`api.openai.com`) keeps `auto`, so the official endpoint is still probed on Chat first and only moved to Responses when a model is refused there. Every other OpenAI-compatible endpoint is pinned to `chat`, because a third-party gateway almost never implements `/responses` at all and sending one there would only produce a 404.
+
+Set it explicitly when a gateway does implement `/responses` and its reasoning models need it, or when you want to pin the official host to one route and skip the probe. The value is validated at parse time: anything other than `auto`, `chat` or `responses` is a config error naming the valid values, so a typo never silently pins a provider to Chat.
+
 ### Per-Provider Timeouts
 
 Every `[providers.*]` section accepts two independent timeouts, on two different clocks:
@@ -1781,17 +1857,26 @@ Voice follows the same shape. Set `stt_model` and/or `tts_model` on a provider a
 
 ```toml
 [providers.opencrabs]
-stt_model = "qwen3.8-omni-flash"  # /v1/audio/transcriptions
-tts_model = "qwen3.8-omni-flash"  # /v1/audio/speech
+# Transcription works on day 0. A voice note goes out as an audio-carrying chat
+# request, which is the shape the built-in endpoint serves.
+stt_model = "qwen3.8-omni-flash"
+# Speech is not served by the built-in endpoint, so a tts_model here is ignored
+# rather than paying a failed round trip. A spoken reply still works through the
+# built-in local voice, a [providers.tts.*] block, or Voicebox.
+# tts_model = "qwen3.8-omni-flash"
+
+# On any other provider that exposes the [OI] audio routes:
+# stt_model = "whisper-large-v3-turbo"  # /v1/audio/transcriptions
+# tts_model = "gpt-4o-mini-tts"         # /v1/audio/speech
 ```
 
-Works with any [OI]-compatible provider that exposes those two routes, not only the built-in one. The active provider's route is the primary one; `[providers.stt].fallback_chain` / `[providers.tts].fallback_chain` still apply behind it, and the standalone `[providers.stt.openai_compatible]` / `[providers.tts.openai_compatible]` blocks keep working unchanged. A remote endpoint with no stored key is not a candidate — the same gate `vision_model` uses.
+Works with any [OI]-compatible provider that exposes those two routes, not only the built-in one. The wire follows the endpoint: the built-in endpoint takes the audio as an `input_audio` part on `/v1/chat/completions` and answers no `/v1/audio/transcriptions` route at all, while every other provider keeps the multipart request it has always used. The active provider's route is the primary one; `[providers.stt].fallback_chain` / `[providers.tts].fallback_chain` still apply behind it, and the standalone `[providers.stt.openai_compatible]` / `[providers.tts.openai_compatible]` blocks keep working unchanged. A remote endpoint with no stored key is not a candidate — the same gate `vision_model` uses.
 
 ---
 
 ## 🖼️ Image Generation & Vision
 
-OpenCrabs supports image generation and vision analysis via Google Gemini by default, independent of the main chat provider, so you can use Claude for chat and Gemini for images. The built-in OpenCrabs provider also serves `generate_image` out of the box on fresh installs, using `gemini-3.1-flash-image`. The `generate_image` tool can be routed at any OpenAI-compatible images endpoint (OpenAI, OpenRouter, Together, etc.) via the per-provider `generation_model` override; see [Picking a different generation model](#picking-a-different-generation-model) below.
+OpenCrabs supports image generation and vision analysis via Google Gemini by default, independent of the main chat provider, so you can use Claude for chat and Gemini for images. The built-in OpenCrabs provider also serves `generate_image` out of the box on fresh installs, using `gemini-2.5-flash-image`. The `generate_image` tool can be routed at any OpenAI-compatible images endpoint (OpenAI, OpenRouter, Together, etc.) via the per-provider `generation_model` override; see [Picking a different generation model](#picking-a-different-generation-model) below.
 
 ### Setup
 
@@ -2050,23 +2135,62 @@ opencrabs routes clear [<host-id>]
 
 ## 🚀 Quick Start
 
+### Option 0: One-line installer (easiest, and what an agent should use)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/opencrabs/opencrabs/main/src/scripts/install.sh | bash
+```
+
+It picks the right archive for your OS and architecture, verifies the download against the release's `SHA256SUMS` before unpacking, installs the CLI plus `rtk`, and sets up poppler so scanned PDFs can be read. On macOS it handles both archive layouts: releases that ship `OpenCrabs.app` land the bundle in `~/Applications` with the CLI linked onto your PATH, and older ones install the bare binary. If the install directory is not already on your PATH, it adds it to your shell startup file once, and it verifies that `opencrabs` resolves before it reports success.
+
+It is safe to run with nobody watching, which is the point for scripted and agent-driven installs: with no terminal it never prompts for a password, and if the target directory needs root without passwordless sudo it fails immediately and names the fix instead of hanging forever. Run by hand at a terminal it asks for sudo once, like any installer.
+
+| Flag | What it does |
+|---|---|
+| `--dir <path>` | Install the CLI somewhere else, for example `--dir "$HOME/.local/bin"` |
+| `--version <tag>` | Pin a release instead of taking the latest |
+| `--dry-run` | Resolve and print the plan, install nothing |
+| `--no-deps` | Leave the system package manager alone (skips poppler) |
+| `--no-path` | Install without touching your shell startup file, for example when you manage PATH yourself |
+
+```bash
+# Inspect first, then install without touching system packages
+curl -fsSL https://raw.githubusercontent.com/opencrabs/opencrabs/main/src/scripts/install.sh \
+  | bash -s -- --dry-run --no-deps
+```
+
 ### Option 1: Download Binary (just run it)
 
 Grab a pre-built binary from [GitHub Releases](https://github.com/opencrabs/opencrabs/releases) — available for Linux (amd64/arm64), macOS (amd64/arm64), and Windows.
 
 ```bash
-# macOS (Apple Silicon) — downloads latest, installs to /usr/local/bin
-curl -sL "$(curl -s https://api.github.com/repos/opencrabs/opencrabs/releases/latest | sed -n 's/.*"\(https:\/\/[^"]*macos-arm64\.tar\.gz\)".*/\1/p')" | tar xz && chmod +x opencrabs && sudo mv opencrabs /usr/local/bin/
+# macOS (Apple Silicon) — installs OpenCrabs.app (with its icon) and links the CLI
+curl -sL "$(curl -s https://api.github.com/repos/opencrabs/opencrabs/releases/latest | sed -n 's/.*"\(https:\/\/[^"]*macos-arm64\.tar\.gz\)".*/\1/p')" | tar xz && sudo cp -R OpenCrabs.app /Applications/ && sudo mkdir -p /usr/local/bin && sudo ln -sf /Applications/OpenCrabs.app/Contents/MacOS/opencrabs /usr/local/bin/opencrabs && command -v opencrabs
 
 # macOS (Intel)
-curl -sL "$(curl -s https://api.github.com/repos/opencrabs/opencrabs/releases/latest | sed -n 's/.*"\(https:\/\/[^"]*macos-amd64\.tar\.gz\)".*/\1/p')" | tar xz && chmod +x opencrabs && sudo mv opencrabs /usr/local/bin/
+curl -sL "$(curl -s https://api.github.com/repos/opencrabs/opencrabs/releases/latest | sed -n 's/.*"\(https:\/\/[^"]*macos-amd64\.tar\.gz\)".*/\1/p')" | tar xz && sudo cp -R OpenCrabs.app /Applications/ && sudo mkdir -p /usr/local/bin && sudo ln -sf /Applications/OpenCrabs.app/Contents/MacOS/opencrabs /usr/local/bin/opencrabs && command -v opencrabs
+```
 
-# Linux (x86_64)
-curl -sL "$(curl -s https://api.github.com/repos/opencrabs/opencrabs/releases/latest | sed -n 's/.*"\(https:\/\/[^"]*linux-amd64\.tar\.gz\)".*/\1/p')" | tar xz && chmod +x opencrabs && sudo mv opencrabs /usr/local/bin/
+```powershell
+# Windows (PowerShell): installs to %LOCALAPPDATA%\OpenCrabs\bin and adds it to your user PATH
+iwr -useb https://opencrabs.com/install.ps1 | iex
+```
+
+The Windows script installs `opencrabs.exe` and `rtk.exe` into `%LOCALAPPDATA%\OpenCrabs\bin`, adds that directory to your user PATH, and tells already-open programs about the change, so a new terminal picks it up without a restart and `Get-Command opencrabs` resolves. Pass `-NoPathUpdate` to leave PATH untouched, which needs the script block form:
+
+```powershell
+& ([scriptblock]::Create((iwr -useb https://opencrabs.com/install.ps1))) -NoPathUpdate
+```
+
+```bash
+# Linux (x86_64) — binary plus a desktop entry and icon
+curl -sL "$(curl -s https://api.github.com/repos/opencrabs/opencrabs/releases/latest | sed -n 's/.*"\(https:\/\/[^"]*linux-amd64\.tar\.gz\)".*/\1/p')" | tar xz && chmod +x opencrabs && sudo mkdir -p /usr/local/bin && sudo mv opencrabs rtk /usr/local/bin/ && install -Dm644 opencrabs.desktop ~/.local/share/applications/opencrabs.desktop && install -Dm644 opencrabs.png ~/.local/share/icons/hicolor/256x256/apps/opencrabs.png && command -v opencrabs
 
 # Linux (ARM64)
-curl -sL "$(curl -s https://api.github.com/repos/opencrabs/opencrabs/releases/latest | sed -n 's/.*"\(https:\/\/[^"]*linux-arm64\.tar\.gz\)".*/\1/p')" | tar xz && chmod +x opencrabs && sudo mv opencrabs /usr/local/bin/
+curl -sL "$(curl -s https://api.github.com/repos/opencrabs/opencrabs/releases/latest | sed -n 's/.*"\(https:\/\/[^"]*linux-arm64\.tar\.gz\)".*/\1/p')" | tar xz && chmod +x opencrabs && sudo mkdir -p /usr/local/bin && sudo mv opencrabs rtk /usr/local/bin/ && install -Dm644 opencrabs.desktop ~/.local/share/applications/opencrabs.desktop && install -Dm644 opencrabs.png ~/.local/share/icons/hicolor/256x256/apps/opencrabs.png && command -v opencrabs
 ```
+
+The macOS archive ships `OpenCrabs.app`, not a loose binary: macOS reads an app icon only from a bundle, so a bare Mach-O always shows the generic exec glyph. Copying the bundle to `/Applications` gives you the Dock icon and a Launchpad entry, and the symlink keeps `opencrabs` on your PATH. The Linux archive carries `opencrabs.desktop` and `opencrabs.png` for the same reason, so your application menu has an entry with the real icon instead of a nameless terminal.
 
 Then just type `opencrabs` to start. The onboarding wizard handles everything on first run.
 
@@ -2083,13 +2207,13 @@ Then just type `opencrabs` to start. The onboarding wizard handles everything on
 > **Linux runtime dependencies:** The pre-built binary links against system libraries that may not be installed on minimal/VPS images:
 > ```bash
 > # Debian/Ubuntu
-> sudo apt-get install libgomp1 libasound2
+> sudo apt-get install libgomp1 libasound2t64
 > # Fedora/RHEL
 > sudo dnf install libgomp alsa-lib
 > # Arch
 > sudo pacman -S gcc-libs alsa-lib
 > ```
-> `libgomp` (GCC OpenMP) is required by the local embedding engine (`llama-cpp-2`). `libasound` is required for local speech-to-text audio I/O. macOS and Windows binaries have no extra prerequisites.
+> `libgomp1` is required for the binary to start at all: it is a hard link-time dependency of the local embedding engine (`llama-cpp-2`), and without it every command fails with `error while loading shared libraries: libgomp.so.1`. `libasound2` only enables local speech-to-text audio I/O and is loaded at runtime, so the binary starts without it. On Ubuntu 24.04 and newer the audio package is `libasound2t64`: `libasound2` is a virtual package there, so `apt-get install libasound2` aborts the whole command and installs nothing, not even `libgomp1`. macOS and Windows binaries have no extra prerequisites.
 >
 > **Local TTS (Piper) additionally requires Python 3 with the `venv` module:**
 > ```bash
@@ -2111,6 +2235,8 @@ brew install opencrabs
 ```
 
 Installs from homebrew-core, with prebuilt bottles for macOS and Linux maintained by Homebrew. The formula is bumped automatically on every release, and `brew upgrade opencrabs` tracks the latest version.
+
+> **No Dock icon with Homebrew on macOS.** The formula installs a bare binary into the Homebrew prefix, and macOS can only show an app icon for a bundle. Until a cask is accepted upstream, a `brew install` has no Dock, Finder or Launchpad icon. Use the release archive in Option 1 if you want the icon.
 
 ### Option 3: Install via Cargo
 
@@ -2139,7 +2265,7 @@ cargo install opencrabs --no-default-features --features "telegram,whatsapp,disc
 | Feature | Crate | Description |
 |---------|-------|-------------|
 | `telegram` | teloxide | Telegram bot channel |
-| `telegram-userbot` | grammers | Experimental receive-only Telegram MTProto capture |
+| `telegram-userbot` | grammers | Experimental receive-only Telegram MTProto capture, plus an on-demand document download command |
 | `whatsapp` | whatsapp-rust | WhatsApp channel via multi-device API |
 | `discord` | serenity | Discord bot channel |
 | `slack` | slack-morphism | Slack bot channel (Socket Mode) |
@@ -2265,7 +2391,10 @@ cargo run --bin opencrabs -- migrate openclaw --dry-run
 After downloading or building, add the binary to your PATH so you can run `opencrabs` from any project directory:
 
 ```bash
-# Symlink (recommended — always points to latest build)
+# A fresh Mac has no /usr/local/bin, and both commands below fail without it.
+sudo mkdir -p /usr/local/bin
+
+# Symlink (recommended, always points to latest build)
 sudo ln -sf $(pwd)/target/release/opencrabs /usr/local/bin/opencrabs
 
 # Or copy
@@ -2299,7 +2428,7 @@ A 10-step setup wizard covers the rest of the setup. On a fresh install it does 
 
 On a fresh install there is no setup step for the LLM. The session runs on the built-in OpenCrabs provider with `deepseek-v4.1-flash`, and the first screen goes straight to chat.
 
-- The welcome names what is already set (provider, model, vision) and asks only about what is still missing: your profile in `USER.md`, speech to text, text to speech, and image generation. Answer what you want and skip the rest.
+- The welcome names what is already set (provider, model, vision, transcription, image generation) and asks only about what is still missing: your profile in `USER.md` and text to speech. Answer what you want and skip the rest.
 - To use another provider, type `/models`, or run `/onboard` and choose Advanced. On a first run, Advanced preselects OpenCrabs with its key and model already filled in, and you can pick any other provider instead.
 
 ### The 10 Steps
@@ -2954,7 +3083,10 @@ newsletters = []
 # Broadcast rails (#1485). Status updates reach a LIST of people, so they are
 # opt-in per number: an EMPTY allowlist allows nobody, which is the opposite of
 # the usual convention and is deliberate. Sends are paced; `0` or unset means
-# the conservative 5s default rather than "no pacing".
+# the conservative 5s default rather than "no pacing". The same allowlist also
+# gates the newsletter surfaces (#1827): `whatsapp_send` action
+# `create_newsletter` is refused while this list is empty, and `post_newsletter`
+# publishes only to a channel JID listed here.
 [channels.whatsapp.broadcast]
 allowed_targets = []
 min_delay_seconds = 5
@@ -3591,7 +3723,7 @@ OpenCrabs includes 40+ built-in tools. The AI can use these during conversation:
 | `read_file` | Read file contents with syntax awareness. Supports `hashline=true` mode for hash-anchored editing |
 | `write_file` | Create or modify files |
 | `edit_file` | Precise text replacements in files |
-| `hashline_edit` | Hash-anchored file editing — reference lines by 2-char content hashes instead of reproducing text. Eliminates stale-line errors and reduces token usage, especially for weaker models. Use `read_file` with `hashline=true` to get line references |
+| `hashline_edit` | Hash-anchored file editing: reference lines by the content hash `read_file` prints in hashline mode instead of reproducing text. Eliminates stale-line errors and reduces token usage, especially for weaker models. Use `read_file` with `hashline=true` to get line references |
 | `bash` | Execute shell commands — **any CLI tool on your system works** |
 | `ls` | List directory contents |
 | `glob` | Find files matching patterns |
@@ -3626,7 +3758,7 @@ OpenCrabs includes 40+ built-in tools. The AI can use these during conversation:
 | `discord_send` | 17 actions: send, reply, react, edit, delete, pin, threads, embeds, roles, kick, ban, send_file |
 | `slack_send` | 17 actions: send, reply, react, edit, delete, pin, blocks, topics, members, send_file |
 | `trello_send` | 22 actions: cards, comments, checklists, labels, members, attachments, board management, search |
-| `whatsapp_send` | 27 actions: send, reply, delete, react, polls, typing, mark_read, photos, documents, audio/voice notes, video, stickers, location, contacts, pin/unpin, forward, block/unblock/list_blocked, profile name and status, status_update, list_newsletters, create_label, assign_label, send_buttons |
+| `whatsapp_send` | 29 actions: send, reply, delete, react, polls, typing, mark_read, photos, documents, audio/voice notes, video, stickers, location, contacts, pin/unpin, forward, block/unblock/list_blocked, profile name and status, status_update, list_newsletters, create_newsletter, post_newsletter, create_label, assign_label, send_buttons |
 | `channel_search` | Search captured message history across all channels (Telegram, Discord, Slack, WhatsApp) |
 | `telegram_connect` | Connect a Telegram bot from chat — takes a @BotFather token and starts listening |
 | `discord_connect` | Connect a Discord bot from chat — takes a bot token and starts listening |
@@ -3807,7 +3939,7 @@ Auto-detects your default Chromium-based browser and uses its native profile (co
 | `browser_content` | Get page HTML or text-only content, optionally scoped by CSS selector. Selector-scoped extraction resolves inside open shadow roots, and full-page `text_only` spans the composed tree (`body.innerText` alone stops at a shadow boundary); full-page HTML stays light-DOM |
 | `browser_wait` | Wait for a CSS selector to appear, shadow roots included (polls every 200ms, default 10s timeout) |
 | `browser_find` | Find elements by css/xpath/text/aria pattern, or with no pattern inventory ALL visible interactive elements — each returned with a stable unique `data-opencrabs-match` selector + text + tag + visibility, so the follow-up `browser_click` is deterministic (kills the screenshot-discovery loop). `css` / `text` / `aria` and the inventory search inside open shadow roots and mark those hits `[shadow]`; `xpath` is light-DOM only (XPath has no shadow boundary by spec) |
-| `browser_act` | Batched multi-action in one call: ordered `click` / `fill` / `press` / `select` / `wait` array (max 10 actions, 120s budget). All selectors resolved up front — a stale reference rejects the whole batch instead of half-running it; aborts on first failure and reports the completed prefix; one screenshot at the end |
+| `browser_act` | Batched multi-action in one call: ordered `click` / `fill` / `press` / `select` / `wait` / `upload` array (max 10 actions, 120s budget). `upload` attaches local files to a file input without putting their bytes in the context. All selectors resolved up front: a stale reference rejects the whole batch instead of half-running it; aborts on first failure and reports the completed prefix; one screenshot at the end |
 
 > **Why no Firefox?** Browser automation uses Chrome DevTools Protocol (CDP). Firefox dropped CDP support entirely — it now uses WebDriver BiDi, which is a different protocol. All Chromium-based browsers speak CDP natively.
 
@@ -4442,7 +4574,6 @@ After=network.target
 ExecStart=%h/.cargo/bin/opencrabs daemon
 Restart=on-failure
 RestartSec=5
-Environment=OPENCRABS_HOME=%h/.opencrabs
 
 [Install]
 WantedBy=default.target
@@ -5048,7 +5179,7 @@ cargo build --release
 # Small release build
 cargo build --profile release-small
 
-# Run tests (10,366 tests: 1,079 test files under src/tests/, where tests
+# Run tests (11,407 tests: 1,179 test files under src/tests/, where tests
 # belong — zero inline blocks in production files);
 # 38 slower ones are #[ignore]d to keep the default
 # run fast: profile tests that touch ~/.opencrabs, browser end-to-end
@@ -5073,7 +5204,7 @@ cargo clippy -- -D warnings
 | Feature | Description |
 |---------|-------------|
 | `telegram` | Telegram bot integration (default: enabled) |
-| `telegram-userbot` | Receive-only Telegram MTProto capture (experimental) |
+| `telegram-userbot` | Receive-only Telegram MTProto capture, plus an on-demand document download command (experimental) |
 | `whatsapp` | WhatsApp Web integration (default: enabled) |
 | `discord` | Discord bot integration (default: enabled) |
 | `slack` | Slack bot integration (default: enabled) |
@@ -5767,6 +5898,8 @@ Any Rust item may be renamed, moved, or removed in any release, including a patc
 
 Contributions welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
+Not a coder? Funding the subscriptions and the inference is just as useful, and it keeps every feature free for everyone: see [🫶 Sponsors](#-sponsors).
+
 ```bash
 # Setup
 git clone https://github.com/opencrabs/opencrabs.git
@@ -5781,6 +5914,26 @@ cargo test
 ## 📄 License
 
 **MIT License** — See [LICENSE.md](LICENSE.md) for details.
+
+---
+
+## 🫶 Sponsors
+
+<!-- sponsors:start -->
+### Community funded
+
+OpenCrabs has no investors. The people below cover the subscriptions, the inference and the credits, and some of them write the code too. Totals as of October 24, 2026.
+
+| Sponsor | Role | Sponsoring since |
+|---|---|---|
+| Adolfo Usier | Creator, maintainer | February 14, 2026 |
+| Daniel Carneiro | Core maintainer | August 12, 2026 |
+| Miguel Carneiro | Financial sponsor | August 12, 2026 |
+
+To date: **€30** + **$83.25** contributed, **$450** in subscriptions, **8B to 9B tokens** of granted credits.
+
+Full ledger: [SPONSORS.md](SPONSORS.md)
+<!-- sponsors:end -->
 
 ---
 

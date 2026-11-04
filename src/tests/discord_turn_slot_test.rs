@@ -108,6 +108,64 @@ async fn queue_callback_drains_the_session_queue_per_session() {
 }
 
 #[tokio::test]
+async fn storing_a_token_never_cancels_the_previous_one() {
+    let state = DiscordState::new();
+    let sid = uuid::Uuid::new_v4();
+
+    // A completed turn leaves its token behind: it never cancels its own
+    // token and `remove_cancel_token` keeps non-cancelled ones on purpose.
+    let finished = tokio_util::sync::CancellationToken::new();
+    state.store_cancel_token(sid, finished.clone()).await;
+
+    // The next turn stores its own. It must REPLACE the leftover silently:
+    // cancelling it here killed nothing and logged "cancelling previous
+    // in-flight agent call" for a turn that had ended minutes earlier.
+    let live = tokio_util::sync::CancellationToken::new();
+    state.store_cancel_token(sid, live.clone()).await;
+    assert!(
+        !finished.is_cancelled(),
+        "a finished turn's leftover token must never be cancelled by the next turn"
+    );
+
+    // /stop reaches the token the RUNNING turn stored.
+    assert!(
+        state.cancel_session(sid).await,
+        "the running turn's token must be the one cancel_session reaches"
+    );
+    assert!(live.is_cancelled(), "/stop cancels the live token");
+    assert!(
+        !state.cancel_session(sid).await,
+        "cancel_session removes what it cancelled, a repeat finds nothing"
+    );
+}
+
+#[tokio::test]
+async fn remove_cancel_token_keeps_a_live_token_and_reaps_a_cancelled_one() {
+    let state = DiscordState::new();
+    let sid = uuid::Uuid::new_v4();
+
+    // Cleanup from a finishing turn must not strip the live token: /stop
+    // would then find nothing while the call is still running.
+    let live = tokio_util::sync::CancellationToken::new();
+    state.store_cancel_token(sid, live.clone()).await;
+    state.remove_cancel_token(sid).await;
+    assert!(
+        state.cancel_session(sid).await,
+        "the live token survived the cleanup pass"
+    );
+
+    // A cancelled token IS reaped, so /stop leaves no husk behind.
+    let cancelled = tokio_util::sync::CancellationToken::new();
+    state.store_cancel_token(sid, cancelled.clone()).await;
+    cancelled.cancel();
+    state.remove_cancel_token(sid).await;
+    assert!(
+        !state.cancel_session(sid).await,
+        "a cancelled token is reaped by the cleanup pass"
+    );
+}
+
+#[tokio::test]
 async fn concurrent_claims_contend_for_one_slot() {
     let state = Arc::new(DiscordState::new());
     let sid = uuid::Uuid::new_v4();

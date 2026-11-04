@@ -61,7 +61,7 @@ fn is_content_in_live_context_returns_false_for_absent_content() {
 fn format_reply_context_pruned_when_full_in_context_with_quote() {
     let full = "This is a very long message that is already in context paragraph 1 paragraph 2";
     let quote = "paragraph 1";
-    let formatted = format_reply_context_pruned("Alice", full, quote, true);
+    let formatted = format_reply_context_pruned("Alice", full, quote, true, None);
     assert_eq!(
         formatted,
         Some(r#"[Replying to Alice, user highlighted: "paragraph 1"]"#.into())
@@ -74,7 +74,7 @@ fn format_reply_context_pruned_when_full_in_context_without_quote() {
     // nothing — the history block carries no message ids, so the excerpt is
     // the only resolvable key the model has.
     let full = "This is a very long message that is already in context paragraph 1 paragraph 2";
-    let formatted = format_reply_context_pruned("Alice", full, "", true);
+    let formatted = format_reply_context_pruned("Alice", full, "", true, None);
     let text = formatted.expect("must emit a pointer");
     assert!(
         text.starts_with("[Replying to Alice, the message beginning: \""),
@@ -99,7 +99,7 @@ fn reply_excerpt_is_capped_with_ellipsis() {
     // The prune exists to save tokens, so the excerpt must stay bounded.
     let full = "x".repeat(500);
     let formatted =
-        format_reply_context_pruned("Alice", &full, "", true).expect("must emit a pointer");
+        format_reply_context_pruned("Alice", &full, "", true, None).expect("must emit a pointer");
     let excerpt = formatted
         .split("the message beginning: \"")
         .nth(1)
@@ -115,8 +115,8 @@ fn reply_excerpt_is_capped_with_ellipsis() {
 
 #[test]
 fn reply_excerpt_is_not_ellipsised_when_short() {
-    let formatted =
-        format_reply_context_pruned("Alice", "short note", "", true).expect("must emit a pointer");
+    let formatted = format_reply_context_pruned("Alice", "short note", "", true, None)
+        .expect("must emit a pointer");
     assert!(
         formatted.contains("the message beginning: \"short note\""),
         "got: {formatted}"
@@ -131,7 +131,7 @@ fn reply_excerpt_is_not_ellipsised_when_short() {
 fn format_reply_context_pruned_when_not_in_context_preserves_full_message() {
     let full = "Complete body of original message";
     let quote = "original message";
-    let formatted = format_reply_context_pruned("Bob", full, quote, false);
+    let formatted = format_reply_context_pruned("Bob", full, quote, false, None);
     assert_eq!(
         formatted,
         Some(
@@ -144,7 +144,7 @@ Full message: "Complete body of original message"]"#
 
 #[test]
 fn resolve_reply_context_pruned_with_unrecoverable_bot_reply() {
-    let formatted = resolve_reply_context_pruned("assistant", "", "", true, false);
+    let formatted = resolve_reply_context_pruned("assistant", "", "", true, false, None);
     let text = formatted.expect("must emit unrecoverable marker");
     assert!(text.contains("could not be retrieved"));
 }

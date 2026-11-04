@@ -1,0 +1,58 @@
+name: Title lint
+
+# Enforces the title half of governance.toml ([titles]) on issues and pull
+# requests. The convention is CONTRIBUTING.md "Issue Titles": a title is
+# `type(scope): subject`, and a bare area prefix (`TUI:`, `z.ai:`, `voice:`)
+# is not. A plain explanatory title with no colon prefix is allowed, because
+# CONTRIBUTING.md allows one for anything that fits no type.
+#
+# Runs on GitHub-hosted ubuntu: python3 + git, milliseconds of work, so it
+# never competes with the cargo build on the self-hosted Mac runner. Same
+# shape as policy-lint.yml.
+#
+# The title arrives through an env var and lands in a file. It is never
+# interpolated into the shell line, so no title payload can inject into the
+# job (house rule from ci.yml).
+on:
+  issues:
+    types: [opened, edited, reopened]
+  pull_request:
+    types: [opened, edited, reopened]
+
+concurrency:
+  group: title-lint-${{ github.event.issue.number || github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: 1
+
+jobs:
+  title-lint:
+    name: Title lint
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    steps:
+      # For a pull request, lint with the BASE revision of the linter, so a
+      # PR cannot rewrite the checker and then satisfy it. For an issue there
+      # is no base, so the default branch is the trusted copy.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.event.repository.default_branch }}
+          fetch-depth: 1
+
+      - name: Linter proves its own teeth
+        run: python3 scripts/policy-lint.py --self-test
+
+      - name: Check the title
+        env:
+          TITLE: ${{ github.event.issue.title || github.event.pull_request.title }}
+          KIND: ${{ github.event.issue && 'issue' || 'pr' }}
+        run: |
+          mkdir -p /tmp/title-lint
+          printf '%s' "$TITLE" > /tmp/title-lint/title.txt
+          python3 scripts/policy-lint.py \
+            --title-file /tmp/title-lint/title.txt \
+            --title-kind "$KIND"

@@ -193,6 +193,50 @@ impl WhatsAppAgent {
             let channel_msg_repo = self.channel_msg_repo.clone();
             let owner_jid_clone = owner_jid.clone();
 
+            // #2178: fold any session still keyed by a LID into its phone-number
+            // twin. #1533 fixed the key for new messages but left the rows that
+            // already existed, so an install that ran WhatsApp across that change
+            // keeps two live sessions for one human and answers pre-cutover
+            // questions as if the history were gone. The mapping is authoritative
+            // (the Signal store learned it), so this needs no inference, and the
+            // pass is idempotent: after the first boot there is nothing left to
+            // rename or merge.
+            {
+                use wacore::store::traits::ProtocolStore;
+                match backend.get_all_lid_mappings().await {
+                    Ok(entries) if !entries.is_empty() => {
+                        let pairs: Vec<(String, String)> = entries
+                            .into_iter()
+                            .map(|e| (e.lid, e.phone_number))
+                            .collect();
+                        match super::lid_migration::reconcile_lid_sessions(
+                            &session_svc.pool(),
+                            pairs,
+                        )
+                        .await
+                        {
+                            Ok(report) if !report.is_noop() => tracing::info!(
+                                "WhatsApp: reconciled {} LID session(s) into their phone-number \
+                                 key, merged {} with {} message(s) moved (#2178)",
+                                report.renamed,
+                                report.merged,
+                                report.messages_moved
+                            ),
+                            Ok(_) => {}
+                            Err(e) => tracing::warn!(
+                                "WhatsApp: LID session reconciliation failed, sessions left as \
+                                 they were: {e:#} (#2178)"
+                            ),
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(
+                        "WhatsApp: could not read the LID/PN mapping, skipping session \
+                         reconciliation: {e} (#2178)"
+                    ),
+                }
+            }
+
             let bot_result = Bot::builder()
                 .with_backend(backend)
                 .with_transport_factory(TokioWebSocketTransportFactory::new())

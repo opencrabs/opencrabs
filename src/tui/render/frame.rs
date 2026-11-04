@@ -44,6 +44,16 @@ fn paint_canvas(f: &mut Frame) {
     f.render_widget(Block::default().style(Style::default().bg(bg)), f.area());
 }
 
+/// Rows the chat transcript is guaranteed before the plan card takes any.
+///
+/// One number, one owner: the layout below asks for exactly this with
+/// `Constraint::Min`, so the card's budget and the layout's demand can never
+/// disagree. They used to (card reserved 6, layout demanded 10), and on a short
+/// terminal the solver satisfied the fixed card height by starving the
+/// transcript, which slid the live "thinking" row and the turn's answer under
+/// the checklist widget (#2165).
+pub(crate) const CHAT_FLOOR: u16 = 10;
+
 /// Budget the plan card against the real terminal rows (#1750).
 ///
 /// The card used to take `min(tasks + 2, 12)` unconditionally, so on a
@@ -63,14 +73,19 @@ pub(crate) fn plan_card_height(
     input_height: u16,
     queue_height: u16,
 ) -> u16 {
-    const CHAT_FLOOR: u16 = 6;
     const CARD_MIN: u16 = 3; // header + one windowed task row + footer
     const STATUS_BAR: u16 = 1;
     let reserved = STATUS_BAR
         .saturating_add(input_height)
         .saturating_add(queue_height)
         .saturating_add(CHAT_FLOOR);
-    let budget = area_height.saturating_sub(reserved).max(CARD_MIN);
+    // Not even the minimum card fits beside the chat floor: give the transcript
+    // the rows and draw no card. A three-row card on a screen this short buries
+    // the live turn, which is the thing being read.
+    if area_height < reserved.saturating_add(CARD_MIN) {
+        return 0;
+    }
+    let budget = area_height.saturating_sub(reserved);
     desired.min(budget).max(CARD_MIN)
 }
 
@@ -164,7 +179,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(10),              // [0] Chat messages
+            Constraint::Min(CHAT_FLOOR),      // [0] Chat messages
             Constraint::Length(plan_height),  // [1] Plan checklist (0 when no plan)
             Constraint::Length(queue_height), // [2] Queue preview (0 when no queue)
             Constraint::Length(input_height), // [3] Input (dynamic)
@@ -215,16 +230,21 @@ pub fn render(f: &mut Frame, app: &mut App) {
             }
         }
         AppMode::Sessions => {
-            // Clear the full area first to prevent artifacts from split panes
-            f.render_widget(Clear, full_content_area);
-            let (title_area, content_area) = split_title_area(full_content_area);
-            render_app_title(f, title_area);
-            render_sessions(f, app, content_area);
+            // Full-bleed (#2162): no app title row, no border, the whole
+            // terminal is the list. Clearing `f.area()` rather than
+            // `full_content_area` also repaints the bottom row that the
+            // latter excludes and this arm never drew, which used to leave
+            // stale chat pixels under the last session.
+            let area = f.area();
+            f.render_widget(Clear, area);
+            render_sessions(f, app, area);
         }
         AppMode::Help => {
-            let (title_area, content_area) = split_title_area(full_content_area);
-            render_app_title(f, title_area);
-            render_help(f, app, content_area);
+            // Full-bleed (#2162), same as Sessions: the border and the
+            // title row were spending three of the screen's rows.
+            let area = f.area();
+            f.render_widget(Clear, area);
+            render_help(f, app, area);
         }
         AppMode::PlanOverlay => {
             f.render_widget(Clear, full_content_area);
@@ -276,21 +296,12 @@ pub fn render(f: &mut Frame, app: &mut App) {
             render_directory_picker(f, app, full_content_area);
         }
         AppMode::UsageDashboard => {
-            render_chat(f, app, chunks[0]);
-            if plan_height > 0 {
-                render_plan_checklist(f, app, chunks[1]);
-            }
-            if queue_height > 0 {
-                render_queue(f, app, chunks[2]);
-            }
-            app.input_area_x = chunks[3].x;
-            app.input_area_y = chunks[3].y;
-            app.input_area_width = chunks[3].width;
-            app.input_area_height = chunks[3].height;
-            render_input(f, app, chunks[3]);
-            render_status_bar(f, app, chunks[4]);
+            // Full-screen surface, not an overlay on the chat (#2073). The
+            // chat, plan, queue and input underneath are gone, so nothing
+            // stale shows through the gaps between cards.
+            f.render_widget(Clear, full_content_area);
             if let Some(ref ds) = app.dashboard_state {
-                crate::usage::dashboard::render(f, ds, f.area());
+                crate::usage::dashboard::render(f, ds, full_content_area);
             }
         }
         AppMode::RestartPending => {

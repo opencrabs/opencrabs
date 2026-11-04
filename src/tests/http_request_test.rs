@@ -184,3 +184,117 @@ async fn server_error_is_still_a_successful_invocation() {
     );
     assert!(result.output.contains("kaboom"), "body reaches the model");
 }
+
+// ── #2104: one body cap for every content type, bounded at the read ──
+
+#[tokio::test]
+async fn a_large_json_body_is_capped_like_plain_text() {
+    // The 10,000-byte cap used to live in the plain-text arm only, so any body
+    // that parsed as JSON skipped it and reached the model at up to the agent
+    // loop's 50,000-char tool-result cap. JSON now obeys the same number.
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+    let filler = "x".repeat(20_000);
+    let body = format!(r#"{{"items":["{filler}"]}}"#);
+    let _mock = server
+        .mock("GET", "/big-json")
+        .with_header("content-type", "application/json")
+        .with_status(200)
+        .with_body(body)
+        .create_async()
+        .await;
+
+    let tool = HttpClientTool;
+    let input = json!({ "method": "GET", "url": format!("{}/big-json", url) });
+    let result = tool.execute(input, &ctx()).await.expect("tool execute");
+    assert!(result.success);
+    assert!(
+        result.output.contains("cut at 10000 bytes") || result.output.contains("truncated"),
+        "a cut body must say so: {}",
+        result.output
+    );
+    assert!(
+        result.output.len() < 12_000,
+        "a 20 KB JSON body must not reach the model whole, got {} bytes",
+        result.output.len()
+    );
+}
+
+#[tokio::test]
+async fn a_large_plain_text_body_is_capped_and_says_so() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+    let _mock = server
+        .mock("GET", "/big-text")
+        .with_status(200)
+        .with_body("y".repeat(30_000))
+        .create_async()
+        .await;
+
+    let tool = HttpClientTool;
+    let input = json!({ "method": "GET", "url": format!("{}/big-text", url) });
+    let result = tool.execute(input, &ctx()).await.expect("tool execute");
+    assert!(result.success);
+    assert!(
+        result.output.contains("cut at 10000 bytes"),
+        "the read bound must be visible to the model: {}",
+        result.output
+    );
+    assert!(result.output.len() < 12_000);
+}
+
+#[tokio::test]
+async fn a_small_json_body_is_still_pretty_printed() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+    let _mock = server
+        .mock("GET", "/small-json")
+        .with_header("content-type", "application/json")
+        .with_status(200)
+        .with_body(r#"{"alpha":1,"beta":"two"}"#)
+        .create_async()
+        .await;
+
+    let tool = HttpClientTool;
+    let input = json!({ "method": "GET", "url": format!("{}/small-json", url) });
+    let result = tool.execute(input, &ctx()).await.expect("tool execute");
+    assert!(result.success);
+    assert!(
+        result.output.contains("\"alpha\": 1"),
+        "small JSON keeps its pretty rendering: {}",
+        result.output
+    );
+    assert!(!result.output.contains("truncated"));
+}
+
+#[tokio::test]
+async fn a_huge_body_is_cut_at_the_read_not_after_it() {
+    // The read bound is what `truncate_str` cannot do: by the time a rendered
+    // string is cut, the bytes are already in memory. A 2 MB body must reach
+    // the model as a 10 KB answer, which is only possible if the read itself
+    // stopped there (#2104).
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+    let _mock = server
+        .mock("GET", "/huge")
+        .with_header("content-type", "application/json")
+        .with_status(200)
+        .with_body(format!(r#"{{"blob":"{}"}}"#, "z".repeat(2_000_000)))
+        .create_async()
+        .await;
+
+    let tool = HttpClientTool;
+    let input = json!({ "method": "GET", "url": format!("{}/huge", url) });
+    let result = tool.execute(input, &ctx()).await.expect("tool execute");
+    assert!(result.success);
+    assert!(
+        result.output.len() < 12_000,
+        "a 2 MB body must not be buffered and handed over, got {} bytes",
+        result.output.len()
+    );
+    assert!(
+        result.output.contains("cut at 10000 bytes") || result.output.contains("truncated"),
+        "the cut must be visible to the model: {}",
+        result.output
+    );
+}

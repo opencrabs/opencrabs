@@ -49,9 +49,13 @@ pub struct DiscordState {
     /// Per-session cancel tokens for aborting in-flight agent tasks via /stop
     pub(super) cancel_tokens: Mutex<HashMap<Uuid, CancellationToken>>,
     /// Pending select menus: id -> (created, options) (#382). Lazy TTL:
-    /// stale picks answer "expired" (#386).
+    /// stale picks answer "expired" (#386). Bounded at
+    /// [`pending_interactions::PENDING_INTERACTION_CAP`] by a prune on insert
+    /// (#2193): the TTL only runs for an id someone clicks, so it never
+    /// bounded an unclicked map.
     pub(super) pending_selects: Mutex<HashMap<String, (std::time::Instant, Vec<String>)>>,
-    /// Pending modal forms: id -> (created, spec) (#383). Same lazy TTL.
+    /// Pending modal forms: id -> (created, spec) (#383). Same lazy TTL and the
+    /// same cap as the menus.
     pub(super) pending_forms: Mutex<HashMap<String, (std::time::Instant, interactions::FormSpec)>>,
     /// Collapsible tool groups keyed by message id, so the Expand/Collapse
     /// interaction can re-render after the turn ended. Insertion-ordered
@@ -100,6 +104,13 @@ impl Default for DiscordState {
 }
 
 impl DiscordState {
+    /// The outbound write governor (#1910), exposed crate-wide so a tool that
+    /// sends on its own (the `discord_send` tool) still pays the budget and
+    /// records the message (#2196).
+    pub(crate) fn governor(&self) -> &Governor {
+        &self.governor
+    }
+
     pub fn new() -> Self {
         Self {
             http: Mutex::new(None),

@@ -203,6 +203,16 @@ pub struct AgentService {
     /// the other session had saved (2026-04-17 17:01 logs).
     pub(super) session_providers: std::sync::RwLock<HashMap<Uuid, Arc<dyn Provider>>>,
 
+    /// Sessions that serve a stranger (#2134).
+    ///
+    /// `TelegramConfig::guest_allowed` admits a caller; this records that the
+    /// session it produced belongs to that caller and not to the owner, so the
+    /// tool loop can stamp `ToolExecutionContext::guest_scope` on every turn of
+    /// it. In memory only and never removed: a guest session stays a guest
+    /// session for its whole life, and the set is a few ids, one per (caller,
+    /// chat) pair the bot has answered.
+    pub(super) guest_sessions: std::sync::RwLock<std::collections::HashSet<Uuid>>,
+
     /// Per-session model name overrides. `swap_provider_for_session`
     /// installs a fresh provider whose `default_model()` reflects the
     /// global config rather than the model the session actually wants
@@ -471,6 +481,13 @@ pub struct AgentService {
     /// checklist while their own session stays fresh. `None` — the normal
     /// case — resolves against the session's own id.
     pub(super) plan_session_override: Option<Uuid>,
+
+    /// Skip the mechanical plan requirement (`[agent] plan_gate_after_tool_calls`)
+    /// for every tool call this agent makes. Set for sub-agent sessions and
+    /// cron runs: they execute a task someone else already planned, so a
+    /// throwaway child plan nobody sees would be worse than no plan. `false`
+    /// on interactive surfaces, where the gate applies.
+    pub(super) plan_gate_exempt: bool,
 }
 
 impl AgentService {
@@ -483,6 +500,7 @@ impl AgentService {
         Self {
             provider: std::sync::RwLock::new(provider),
             session_providers: std::sync::RwLock::new(HashMap::new()),
+            guest_sessions: std::sync::RwLock::new(std::collections::HashSet::new()),
             session_models: std::sync::RwLock::new(HashMap::new()),
             manual_switch: std::sync::RwLock::new(HashMap::new()),
             plan_mode_swap: std::sync::RwLock::new(HashMap::new()),
@@ -511,6 +529,9 @@ impl AgentService {
                 // Skill glob gate master switch (#150) — resolved from
                 // config once at construction.
                 registry.set_skill_gate_enabled(config.agent.skill_glob_gate);
+                // Mechanical plan requirement: after N calls in a turn with no
+                // plan, further calls are refused until `plan` init runs.
+                registry.set_plan_gate_after_tool_calls(config.agent.plan_gate_after_tool_calls);
                 Arc::new(registry)
             },
             max_tool_iterations: 0, // 0 = unlimited (loop detection is the safety net)
@@ -556,6 +577,7 @@ impl AgentService {
             subagent_manager: None,
             channel_manager: None,
             plan_session_override: None,
+            plan_gate_exempt: false,
         }
     }
 
@@ -1070,6 +1092,22 @@ impl AgentService {
         self.subagent_manager.clone()
     }
 
+    /// Whether this service skips the mechanical plan requirement (#2161).
+    ///
+    /// Readable so a test can prove a factory-built agent carries the
+    /// exemption, and so a surface can explain why no plan card appeared.
+    pub fn plan_gate_exempt(&self) -> bool {
+        self.plan_gate_exempt
+    }
+
+    /// Whether this service is headless (#129).
+    ///
+    /// Readable so a test can prove the factory stamped both flags, rather
+    /// than asserting one and hoping the other followed.
+    pub fn headless(&self) -> bool {
+        self.headless
+    }
+
     /// Point this agent's plan state at another session (#908 option A).
     /// Plan-driven execution passes the parent's session id when spawning a
     /// task worker, so the worker's `plan` tool resolves the parent's
@@ -1077,6 +1115,15 @@ impl AgentService {
     /// default) keeps plan state session-local.
     pub fn with_plan_session_override(mut self, plan_session: Option<Uuid>) -> Self {
         self.plan_session_override = plan_session;
+        self
+    }
+
+    /// Skip the mechanical plan requirement for this agent's tool calls.
+    ///
+    /// Set on surfaces that execute a task someone else already planned:
+    /// spawned sub-agents and cron runs. Interactive surfaces keep the gate.
+    pub fn with_plan_gate_exempt(mut self, exempt: bool) -> Self {
+        self.plan_gate_exempt = exempt;
         self
     }
 
@@ -1388,6 +1435,28 @@ impl AgentService {
             .read()
             .expect("provider lock poisoned")
             .clone()
+    }
+
+    /// Record that `session_id` serves a stranger (#2134).
+    ///
+    /// Called once, by the guest runner, when it creates the session. Every
+    /// turn of that session then stamps `guest_scope` on its tool context, so
+    /// the registry refuses anything outside `scope::GUEST_ALLOWED_TOOLS` and
+    /// `read_file` stays inside the working directory. The channel cannot carry
+    /// this: a guest turn and a normal group turn both say `"telegram"`.
+    pub fn mark_guest_session(&self, session_id: Uuid) {
+        self.guest_sessions
+            .write()
+            .expect("guest session lock poisoned")
+            .insert(session_id);
+    }
+
+    /// True when this session belongs to a guest (#2134).
+    pub fn is_guest_session(&self, session_id: Uuid) -> bool {
+        self.guest_sessions
+            .read()
+            .map(|set| set.contains(&session_id))
+            .unwrap_or(false)
     }
 
     /// Restore a session's saved provider into `session_providers` before a
@@ -1860,6 +1929,19 @@ impl AgentService {
         let p = self.provider_for_session(session_id);
         p.active_subprovider_name()
             .unwrap_or_else(|| p.name().to_string())
+    }
+
+    /// The provider `session_id` is CONFIGURED with, ignoring whichever entry a
+    /// sticky fallback is serving right now (#2184).
+    ///
+    /// [`Self::provider_name_for_session`] answers "who is answering this
+    /// turn" for display, so it reports the promoted fallback while a chain is
+    /// working around a failed primary. That is the wrong question for a
+    /// routing decision: a promoted fallback is a temporary state, not a new
+    /// configuration, and `FallbackProvider::name()` already reports the
+    /// configured primary after a sticky swap.
+    pub fn configured_provider_name_for_session(&self, session_id: Uuid) -> String {
+        self.provider_for_session(session_id).name().to_string()
     }
 
     /// Default model for a specific session, including sticky-fallback

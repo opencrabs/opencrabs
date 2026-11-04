@@ -46,66 +46,71 @@ fn test_hash_line_blank_lines_same_hash() {
 
 #[test]
 fn test_format_hashline() {
-    let formatted = format_hashline(12, "VK", "test code");
-    assert_eq!(formatted, "VK|test code");
+    let formatted = format_hashline(12, "VKQMZP", "test code");
+    assert_eq!(formatted, "VKQMZP|test code");
 }
 
 #[test]
 fn test_hashref_parse_valid() {
-    let href = HashRef::parse("42#RWSN").unwrap();
-    assert_eq!(href.hash, "RWSN");
+    let href = HashRef::parse("42#RWSNZP").unwrap();
+    assert_eq!(href.hash, "RWSNZP");
 }
 
 #[test]
 fn test_hashref_parse_lowercase() {
-    let href = HashRef::parse("10#txjb").unwrap();
-    assert_eq!(href.hash, "TXJB");
+    let href = HashRef::parse("10#txjbzp").unwrap();
+    assert_eq!(href.hash, "TXJBZP");
 }
 
 #[test]
 fn test_hashref_parse_with_content() {
-    let href = HashRef::parse("5#TXJB|some code here").unwrap();
-    assert_eq!(href.hash, "TXJB");
+    let href = HashRef::parse("5#TXJBZP|some code here").unwrap();
+    assert_eq!(href.hash, "TXJBZP");
 }
 
 #[test]
 fn test_hashref_parse_missing_separator() {
     // A line number glued to a hash with no `#` is the wrong length.
-    let result = HashRef::parse("42RWSN");
+    let result = HashRef::parse("42RWSNZP");
     assert!(result.is_err());
 }
 
 #[test]
 fn test_hashref_parse_invalid_line_ignored() {
     // Legacy format: line number is ignored, only hash matters
-    let href = HashRef::parse("abc#RWSN").unwrap();
-    assert_eq!(href.hash, "RWSN");
+    let href = HashRef::parse("abc#RWSNZP").unwrap();
+    assert_eq!(href.hash, "RWSNZP");
 }
 
 #[test]
 fn test_hashref_parse_zero_line_ignored() {
     // Legacy format: line number is ignored, only hash matters
-    let href = HashRef::parse("0#RWSN").unwrap();
-    assert_eq!(href.hash, "RWSN");
+    let href = HashRef::parse("0#RWSNZP").unwrap();
+    assert_eq!(href.hash, "RWSNZP");
 }
 
 #[test]
 fn test_hashref_parse_wrong_hash_length() {
-    assert!(HashRef::parse("5#ABC").is_err());
-    assert!(HashRef::parse("5#RWSNX").is_err());
+    // Built from a real tag and HASH_LEN, so a width change cannot turn one of
+    // these into a valid ref by accident (#2202).
+    let valid = hash_line("some line");
+    let too_short = &valid[..HASH_LEN - 1];
+    assert!(HashRef::parse(&format!("5#{too_short}")).is_err());
+    let too_long = format!("{valid}Z");
+    assert!(HashRef::parse(&format!("5#{too_long}")).is_err());
 }
 
 #[test]
 fn test_hashline_edit_op_deserialize_replace() {
     let json = json!({
         "op": "replace",
-        "pos": "5#VK",
+        "pos": "5#VKQMZP",
         "lines": "new content"
     });
     let op: HashlineEditOp = serde_json::from_value(json).unwrap();
     match op {
         HashlineEditOp::Replace { pos, end, lines } => {
-            assert_eq!(pos, "5#VK");
+            assert_eq!(pos, "5#VKQMZP");
             assert!(end.is_none());
             assert_eq!(lines, "new content");
         }
@@ -117,15 +122,15 @@ fn test_hashline_edit_op_deserialize_replace() {
 fn test_hashline_edit_op_deserialize_replace_range() {
     let json = json!({
         "op": "replace",
-        "pos": "5#VK",
-        "end": "8#MB",
+        "pos": "5#VKQMZP",
+        "end": "8#MBTXJZ",
         "lines": "replacement"
     });
     let op: HashlineEditOp = serde_json::from_value(json).unwrap();
     match op {
         HashlineEditOp::Replace { pos, end, lines } => {
-            assert_eq!(pos, "5#VK");
-            assert_eq!(end, Some("8#MB".to_string()));
+            assert_eq!(pos, "5#VKQMZP");
+            assert_eq!(end, Some("8#MBTXJZ".to_string()));
             assert_eq!(lines, "replacement");
         }
         _ => panic!("Expected Replace"),
@@ -136,13 +141,13 @@ fn test_hashline_edit_op_deserialize_replace_range() {
 fn test_hashline_edit_op_deserialize_append() {
     let json = json!({
         "op": "append",
-        "pos": "10#XY",
+        "pos": "10#XYWQZP",
         "lines": "inserted line"
     });
     let op: HashlineEditOp = serde_json::from_value(json).unwrap();
     match op {
         HashlineEditOp::Append { pos, lines } => {
-            assert_eq!(pos, Some("10#XY".to_string()));
+            assert_eq!(pos, Some("10#XYWQZP".to_string()));
             assert_eq!(lines, "inserted line");
         }
         _ => panic!("Expected Append"),
@@ -170,8 +175,8 @@ fn test_hashline_edit_input_deserialize() {
     let json = json!({
         "path": "test.rs",
         "edits": [
-            {"op": "replace", "pos": "1#AB", "lines": "new"},
-            {"op": "append", "pos": "5#CD", "lines": "added"}
+            {"op": "replace", "pos": "1#ABQWZP", "lines": "new"},
+            {"op": "append", "pos": "5#CDQWZP", "lines": "added"}
         ]
     });
     let input: HashlineEditInput = serde_json::from_value(json).unwrap();
@@ -323,7 +328,7 @@ async fn test_hashline_edit_hash_mismatch() {
         "path": file_path.to_str().unwrap(),
         "edits": [{
             "op": "replace",
-            "pos": "1#ZZZZ",
+            "pos": "1#ZZZZZZ",
             "lines": "new content"
         }]
     });
@@ -672,7 +677,7 @@ async fn test_read_file_hashline_collision_detection() {
     // First line should be marked as COLLISION
     assert!(lines[0].starts_with("COLLISION|same content"));
 
-    // Second line should have normal hash (2-char hash + |content)
+    // Second line should have a normal hash (tag + |content)
     assert!(!lines[1].contains("COLLISION"));
     assert!(lines[1].contains("|different"));
 
@@ -686,4 +691,57 @@ async fn test_read_file_hashline_collision_detection() {
     assert!(lines[4].contains("WARNING"));
     assert!(lines[4].contains("collision"));
     assert!(lines[4].contains("edit_file"));
+}
+
+// --- #2201: the invalid-hash error has to show a real tag ---
+
+#[tokio::test]
+async fn test_invalid_hash_ref_error_shows_real_tags_from_the_file() {
+    let temp_dir = TempDir::new().unwrap();
+    let file_path = temp_dir.path().join("sample.txt");
+    let body = "fn alpha() {\n    let one = 1;\n}\n\nfn beta() {\n    let two = 2;\n}\n";
+    std::fs::write(&file_path, body).unwrap();
+
+    let tool = HashlineEditTool;
+    let context = ToolExecutionContext::new(Uuid::new_v4())
+        .with_working_directory(temp_dir.path().to_path_buf())
+        .with_auto_approve(true);
+
+    // The logged failure shape: a whole source line pasted where a tag belongs.
+    let input = json!({
+        "path": file_path.to_str().unwrap(),
+        "edits": [{
+            "op": "replace",
+            "pos": "fn alpha() {",
+            "lines": "fn alpha() {}"
+        }]
+    });
+
+    let result = tool.execute(input, &context).await.unwrap();
+    assert!(!result.success, "a source line must not parse as a tag");
+
+    // A failed ToolResult carries its message in `error`, not `output`
+    // (ToolResult::error leaves output empty), and that is the string the
+    // model is shown, so assert against it.
+    let out = result
+        .error
+        .clone()
+        .unwrap_or_else(|| result.output.clone());
+    assert!(
+        out.contains("read_file") && out.contains("hashline=true"),
+        "error must name where a tag comes from: {out}"
+    );
+
+    // At least two real tags from this file, in the exact printed form.
+    let mut real_tags = 0;
+    for line in body.lines().filter(|l| !l.trim().is_empty()) {
+        let expected = format!("{}|", hash_line(line));
+        if out.contains(&expected) {
+            real_tags += 1;
+        }
+    }
+    assert!(
+        real_tags >= 2,
+        "error must show at least two real tags from the file, found {real_tags}: {out}"
+    );
 }

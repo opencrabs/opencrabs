@@ -238,7 +238,13 @@ pub(crate) async fn spawn_cron_scheduler_for_profile(profile_name: String) {
             // Each profile has its own config.toml, so it needs its own
             // migration pass — `load()` no longer does this implicitly (#912).
             crate::config::Config::migrate_config_files();
-            let config = crate::config::Config::load()?;
+            let mut config = crate::config::Config::load()?;
+            // #2151: an adopted profile never opened the TUI either, so its
+            // cron jobs hit the same empty-token wall as `run` did. Provision
+            // inside this profile's home scope. The global config mirror is
+            // deliberately left alone: it belongs to the active profile.
+            crate::brain::provider::opencrabs_acquire::provision_builtin_provider(&mut config)
+                .await;
             let db = Database::connect(&config.database.path).await?;
             db.run_migrations().await?;
             let service_context = ServiceContext::new(db.pool().clone());
@@ -263,9 +269,11 @@ pub(crate) async fn spawn_cron_scheduler_for_profile(profile_name: String) {
                 shared_session.clone(),
                 config_rx,
             ));
-            // #129: this factory builds agents ONLY for cron execution —
-            // headless backstop flag on every agent it creates.
-            factory.set_headless(true);
+            // #129 + #2161: this factory builds agents ONLY for cron
+            // execution. Headless backstop AND plan-gate exemption on every
+            // agent it creates, through one helper so the two flags cannot
+            // drift apart again.
+            crate::channels::configure_cron_factory(&factory);
             // Wire the tool registry into the daemon's factory — WITHOUT this the
             // cron agents got an empty registry and every job ran toolless
             // ("Tool not found: bash"). The interactive path sets this via
@@ -389,6 +397,50 @@ async fn acquire_profile_instance(
     );
     eprintln!("Stop it manually, or start this one with a different profile: opencrabs -p <name>");
     std::process::exit(1);
+}
+
+/// Whether a configured A2A gateway that never became ready blocks the cron
+/// scheduler in this start (#196).
+///
+/// The gateway's readiness is decided before the scheduler, and a start that
+/// failed to bind skips the spawn. Kept as a named predicate so the coupling
+/// is testable on its own (#2096).
+pub(crate) fn cron_blocked_by_a2a(a2a_enabled: bool, a2a_ready: bool) -> bool {
+    a2a_enabled && !a2a_ready
+}
+
+/// The scheduler lock this start should hold (#2096).
+///
+/// A start that will not spawn a scheduler takes no lock. The failed daemon in
+/// #2096 held `locks/scheduler/<profile>.lock` for its whole life while polling
+/// no job, so no other process in the same HOME could schedule for that profile
+/// either. `inherited` is the lock a multi-profile daemon already holds for this
+/// profile; `acquire` runs only when it is absent, exactly as `or_else` did.
+pub(crate) fn scheduler_lock_for_start(
+    blocked: bool,
+    inherited: Option<crate::config::profile::SchedulerLock>,
+    acquire: impl FnOnce() -> Option<crate::config::profile::SchedulerLock>,
+) -> Option<crate::config::profile::SchedulerLock> {
+    if blocked {
+        None
+    } else {
+        inherited.or_else(acquire)
+    }
+}
+
+/// The line a headless start prints (#2096).
+///
+/// A start whose configured A2A gateway did not become ready says so and names
+/// what it costs, instead of borrowing the plain success line and letting the
+/// operator believe scheduling works. Nothing else about a degraded start is
+/// hidden: the channels are unaffected and the process stays up on purpose.
+pub(crate) fn daemon_start_line(blocked: bool, bind: &str, port: u16) -> String {
+    if !blocked {
+        return "🦀 OpenCrabs daemon running. Press Ctrl+C to stop.".to_string();
+    }
+    format!(
+        "🦀 OpenCrabs daemon running degraded: the A2A gateway on {bind}:{port} did not start, so the cron scheduler is off. Press Ctrl+C to stop."
+    )
 }
 
 async fn cmd_chat_inner(
@@ -757,6 +809,7 @@ async fn cmd_chat_inner(
                 ProgressEvent::ToolStarted {
                     tool_name,
                     tool_input,
+                    ..
                 } => progress_sender.send(TuiEvent::ToolCallStarted {
                     session_id,
                     tool_name,
@@ -767,12 +820,36 @@ async fn cmd_chat_inner(
                     tool_input,
                     success,
                     summary,
+                    ..
                 } => progress_sender.send(TuiEvent::ToolCallCompleted {
                     session_id,
                     tool_name,
                     tool_input,
                     success,
                     summary,
+                }),
+                // #2145: the core now emits these while the turn is live, so
+                // the TUI can draw a detached task as ONE row in the block
+                // that holds the `bash` call that detached it, then update
+                // that row when the finish arrives (#2146).
+                ProgressEvent::DetachedTaskStarted { task_id, label } => {
+                    progress_sender.send(TuiEvent::DetachedTaskStarted {
+                        session_id,
+                        task_id,
+                        label,
+                    })
+                }
+                ProgressEvent::DetachedTaskFinished {
+                    task_id,
+                    label,
+                    success,
+                    elapsed_secs,
+                } => progress_sender.send(TuiEvent::DetachedTaskFinished {
+                    session_id,
+                    task_id,
+                    label,
+                    success,
+                    elapsed_secs,
                 }),
                 ProgressEvent::IntermediateText { text, reasoning } => {
                     progress_sender.send(TuiEvent::IntermediateText {
@@ -1113,9 +1190,10 @@ async fn cmd_chat_inner(
                 tokio::time::timeout(std::time::Duration::from_secs(120), response_rx.recv())
                     .await
                     .map_err(|_| {
-                        crate::brain::agent::AgentError::Internal(
-                            "Sudo password request timed out (120s)".to_string(),
-                        )
+                        crate::brain::agent::AgentError::Internal(format!(
+                            "Sudo password request timed out (120s). {}",
+                            crate::brain::tools::bash::sudo_access_hint_cached()
+                        ))
                     })?
                     .ok_or_else(|| {
                         crate::brain::agent::AgentError::Internal(
@@ -2098,24 +2176,27 @@ async fn cmd_chat_inner(
     let active_profile = crate::config::profile::active_profile()
         .unwrap_or("default")
         .to_string();
-    let _scheduler_lock =
-        scheduler_lock.or_else(|| crate::config::profile::acquire_scheduler_lock(&active_profile));
-    if _scheduler_lock.is_some() {
-        if config.a2a.enabled && !a2a_ready {
-            tracing::error!("Cron scheduler not spawned: A2A gateway did not become ready (#196)");
-        } else {
-            let cron_repo = crate::db::CronJobRepository::new(db.pool().clone());
-            let cron_run_repo = crate::db::CronJobRunRepository::new(db.pool().clone());
-            let cron_scheduler = crate::cron::CronScheduler::new(
-                cron_repo,
-                cron_run_repo,
-                channel_factory.clone(),
-                service_context.clone(),
-            );
-            // Detached task; the JoinHandle isn't awaited or aborted anywhere.
-            cron_scheduler.spawn();
-            tracing::info!("Cron scheduler spawned");
-        }
+    // A start that will not spawn a scheduler must not hold the lock for it
+    // either (#2096): the failed daemon pinning `locks/scheduler/<profile>.lock`
+    // while polling nothing is what stopped a healthy process from taking over.
+    let a2a_blocked = cron_blocked_by_a2a(config.a2a.enabled, a2a_ready);
+    let _scheduler_lock = scheduler_lock_for_start(a2a_blocked, scheduler_lock, || {
+        crate::config::profile::acquire_scheduler_lock(&active_profile)
+    });
+    if a2a_blocked {
+        tracing::error!("Cron scheduler not spawned: A2A gateway did not become ready (#196)");
+    } else if _scheduler_lock.is_some() {
+        let cron_repo = crate::db::CronJobRepository::new(db.pool().clone());
+        let cron_run_repo = crate::db::CronJobRunRepository::new(db.pool().clone());
+        let cron_scheduler = crate::cron::CronScheduler::new(
+            cron_repo,
+            cron_run_repo,
+            channel_factory.clone(),
+            service_context.clone(),
+        );
+        // Detached task; the JoinHandle isn't awaited or aborted anywhere.
+        cron_scheduler.spawn();
+        tracing::info!("Cron scheduler spawned");
     } else {
         tracing::info!(
             "Cron scheduler for '{active_profile}' already running elsewhere — not spawning a second"
@@ -2141,7 +2222,10 @@ async fn cmd_chat_inner(
         }
 
         tracing::info!("OpenCrabs daemon started — press Ctrl+C to stop");
-        println!("🦀 OpenCrabs daemon running. Press Ctrl+C to stop.");
+        println!(
+            "{}",
+            daemon_start_line(a2a_blocked, &config.a2a.bind, config.a2a.port)
+        );
         tokio::signal::ctrl_c()
             .await
             .context("Failed to listen for ctrl_c")?;

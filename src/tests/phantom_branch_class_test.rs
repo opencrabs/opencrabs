@@ -8,8 +8,8 @@
 //! Fixtures are synthetic and carry no user identifiers.
 
 use crate::brain::agent::service::phantom::{
-    asserted_facts, is_fact_check_branch, is_structured_report, structured_report_exempts,
-    unbacked_facts,
+    asserted_facts, is_fact_check_branch, is_structured_report, option_halt_exempts,
+    structured_report_exempts, unbacked_facts,
 };
 
 const PHRASE_BRANCHES: &[&str] = &[
@@ -106,4 +106,49 @@ fn a_table_report_with_backed_facts_keeps_the_exemption() {
     let unbacked = unbacked_facts(&facts, "git log showed 9f3c2a1e merged");
     assert!(unbacked.is_empty(), "backed shas must not be unbacked");
     assert!(structured_report_exempts(true, &["unbacked_side_effects"]));
+}
+
+/// #31 sign-off gate. A text-only iteration that follows an option-surface
+/// halt is the model closing a turn it already handed back with options
+/// rendered. The phrase matchers read that prose as a promise and the retry
+/// they bought posted a second answer to a channel whose first answer had
+/// already landed (2026-10-17 Discord, `intent_no_tools` on a delivered
+/// research report). Fact checks still kill it, so a sign-off cannot smuggle
+/// an invented sha past the gate.
+#[test]
+fn an_option_halt_signoff_exempts_phrase_matchers_alone() {
+    for branch in PHRASE_BRANCHES {
+        assert!(
+            option_halt_exempts(&[*branch]),
+            "a sign-off after an option halt must exempt {branch}"
+        );
+    }
+    for branch in FACT_BRANCHES {
+        assert!(
+            !option_halt_exempts(&[*branch]),
+            "a fired fact check must still kill the sign-off ({branch})"
+        );
+    }
+    assert!(option_halt_exempts(&[
+        "intent_no_tools",
+        "intent_full_text"
+    ]));
+    assert!(!option_halt_exempts(&["intent_no_tools", "unbacked_facts"]));
+}
+
+/// The gate has to be wired where the kill is decided, or the exemption is a
+/// function nobody calls.
+#[test]
+fn the_kill_site_consults_the_option_halt_gate() {
+    let source = include_str!("../brain/agent/service/tool_loop.rs");
+    let gate = source
+        .find("option_halt_exempts(&fired_branches)")
+        .expect("the phantom kill site must consult the option-halt gate");
+    let kill = source
+        .find("Phantom tool call detected")
+        .expect("the kill WARN is present");
+    assert!(
+        gate < kill,
+        "the option-halt gate must be evaluated before the retry is injected"
+    );
 }

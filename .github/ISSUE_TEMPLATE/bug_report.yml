@@ -1,0 +1,112 @@
+name: Bug report
+description: Something in the binary does not work as documented.
+title: "fix: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before you file: search **open and closed** issues and pull requests for
+        the same defect. A closed hit means reference it, not re-file it.
+
+        ```bash
+        gh search issues --repo opencrabs/opencrabs "<terms>" --state all
+        gh search prs --repo opencrabs/opencrabs "<terms>" --state all
+        ```
+
+        One issue, one defect. Do not bundle several unrelated bugs into one report.
+        Title shape is `type(scope): what is wrong`, for example
+        `fix(tools): edit_file leaves stale version tracking`. The `fix: ` prefix is
+        already in the title field. Replace it with `fix(scope):` if you know the
+        area, and keep the rest a plain description of the defect.
+
+  - type: checkboxes
+    id: searched
+    attributes:
+      label: Duplicate check
+      options:
+        - label: I searched open and closed issues and pull requests for this defect.
+          required: true
+        - label: I am filing from my own GitHub account, not an agent or bot account.
+          required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happens, and what should happen instead
+      description: State the actual behaviour first, then the expected behaviour and why you expect it (docs, tool description, or code comment).
+      placeholder: |
+        Actual: write_file refuses the overwrite with "another agent is working in this directory".
+
+        Expected: the overwrite succeeds. Basis: write_file is documented as
+        "creates the file if it doesn't exist, overwrites if it does".
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Exact prompts, commands, config, and inputs. Someone else must be able to follow this without guessing.
+      placeholder: |
+        1. Empty workspace, supervised mode, default provider.
+        2. Turn 1: "create inventory.txt with these four lines ..."
+        3. Turn 2: "change only the bananas line ..."
+        4. Turn 3: "replace the whole file with these two lines ..."
+        5. The third call is refused.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: build
+    attributes:
+      label: How are you running OpenCrabs
+      options:
+        - Prebuilt release binary
+        - Built from source (cargo run / cargo build --release)
+        - Docker image
+        - Something else (explain below)
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: OpenCrabs version
+      description: Output of `opencrabs --version`. If you built from source, give the commit sha as well.
+      placeholder: v0.5.13 (or cargo run at 739af815d)
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Platform and Rust version
+      description: OS and architecture. Add `rustc --version` if you built from source.
+      placeholder: macOS 15.3 arm64, rustc 1.95.0 / Ubuntu 24.04 x86_64
+    validations:
+      required: true
+
+  - type: input
+    id: model
+    attributes:
+      label: Provider and model
+      description: Which provider and model was active. Behaviour can differ per model, so this matters.
+      placeholder: opencrabs/deepseek-v4.1-flash
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and tool output
+      description: Paste the relevant lines. Redact API keys and tokens before posting. For a visual issue, attach a screenshot.
+      render: text
+
+  - type: textarea
+    id: pointers
+    attributes:
+      label: Source pointers
+      description: Optional but very useful. Files and line numbers you believe are involved, at a named revision. This is a hypothesis, not a required diagnosis.
+      placeholder: |
+        At 739af815d:
+        src/brain/tools/edit.rs:365 (no file_versions::record after atomic_write)
+        src/brain/tools/write.rs:208 (is_stale_write -> refusal)

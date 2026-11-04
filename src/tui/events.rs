@@ -271,6 +271,36 @@ pub enum TuiEvent {
         context_text: String,
         display_text: String,
     },
+
+    /// A detached task started while its turn was still running (#2146).
+    ///
+    /// Carries the id the finish repeats, so the TUI draws ONE row for the task
+    /// inside the turn's tool block and updates that row when the finish lands
+    /// instead of opening a second block.
+    DetachedTaskStarted {
+        session_id: Uuid,
+        task_id: String,
+        label: String,
+    },
+
+    /// A detached task finished (#2146). Same `task_id` as the start, so the
+    /// row is found by identity rather than by label. A finish with no row
+    /// (the turn's block is gone, or the task outlived a restart) is not an
+    /// error. Since #2218 the receipt push is the fallback for a task with no
+    /// progress callback, so a surface that received this event must not
+    /// expect `BackgroundTaskDone` to follow it.
+    DetachedTaskFinished {
+        session_id: Uuid,
+        task_id: String,
+        label: String,
+        success: bool,
+        elapsed_secs: f32,
+    },
+
+    /// A detached launcher exited non-zero after its `spawn` already
+    /// succeeded (#2170, #2172). `spawn` only proves the binary existed, so
+    /// the optimistic "Opened …" line is corrected when this lands.
+    LauncherFailed { target: String, detail: String },
 }
 
 /// Sudo password request from the bash tool

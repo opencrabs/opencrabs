@@ -39,7 +39,7 @@ async fn usage_records_the_serving_pair_not_the_session_row() {
 
     // A different provider actually served the turn.
     service
-        .update_session_usage(session.id, 100, 0.05, "zhipu", "glm-5.1")
+        .update_session_usage(session.id, 100, 0.05, "zhipu", "glm-5.1", None, None)
         .await
         .unwrap();
 
@@ -71,7 +71,7 @@ async fn the_session_row_is_not_rewritten_by_recording_usage() {
     service.update_session(&session).await.unwrap();
 
     service
-        .update_session_usage(session.id, 100, 0.05, "zhipu", "glm-5.1")
+        .update_session_usage(session.id, 100, 0.05, "zhipu", "glm-5.1", None, None)
         .await
         .unwrap();
 
@@ -89,11 +89,11 @@ async fn token_and_cost_totals_still_accumulate() {
         .unwrap();
 
     service
-        .update_session_usage(session.id, 100, 0.05, "xiaomi", "mimo-v2.5-pro")
+        .update_session_usage(session.id, 100, 0.05, "xiaomi", "mimo-v2.5-pro", None, None)
         .await
         .unwrap();
     service
-        .update_session_usage(session.id, 50, 0.025, "xiaomi", "mimo-v2.5-pro")
+        .update_session_usage(session.id, 50, 0.025, "xiaomi", "mimo-v2.5-pro", None, None)
         .await
         .unwrap();
 

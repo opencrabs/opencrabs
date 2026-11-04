@@ -9,6 +9,7 @@ fn tool(name: &str) -> Step {
         name: name.to_string(),
         context: String::new(),
         status: Some(true),
+        task_id: None,
     }
 }
 

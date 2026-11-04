@@ -355,7 +355,14 @@ fn extract_zip_member(data: &[u8], file_name: &str) -> Option<Vec<u8>> {
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(data)).ok()?;
     for i in 0..archive.len() {
         let mut file = archive.by_index(i).ok()?;
-        if file.name().ends_with(file_name) {
+        let name = match file.name() {
+            Ok(name) => name.into_owned(),
+            Err(e) => {
+                tracing::warn!("zip entry {i} has an unreadable name: {e}");
+                continue;
+            }
+        };
+        if name.ends_with(file_name) {
             let mut buf = Vec::new();
             file.read_to_end(&mut buf).ok()?;
             return Some(buf);

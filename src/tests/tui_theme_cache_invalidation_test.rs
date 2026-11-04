@@ -79,6 +79,13 @@ fn app_with_chat(service: Arc<AgentService>, context: ServiceContext) -> App {
     );
     #[cfg(not(feature = "whatsapp"))]
     let mut app = App::new(service, context);
+    // Hermetic layout. `App::new` calls `PaneManager::load_layout()`, which reads
+    // the LIVE `~/.opencrabs/layout.json`. A persisted multi-pane split makes
+    // `render_split_panes` skip every pane that falls under its 3x3 floor, so on
+    // a 60x24 test terminal `render_chat` never runs and neither the cache fill
+    // nor the generation sweep below can happen. CI has no layout file, so the
+    // suite was green there and red on any machine with panes open.
+    app.pane_manager = crate::tui::pane::PaneManager::new();
     app.messages.push(message("user", "a question with `code`"));
     app.messages
         .push(message("assistant", "an answer with **bold** prose"));

@@ -12,7 +12,7 @@ use std::sync::Mutex;
 
 use uuid::Uuid;
 
-use super::types::{BgTaskMeta, PushOrigin, QueuedUserMessage};
+use super::types::{BgTaskMeta, ProgressCallback, ProgressEvent, PushOrigin, QueuedUserMessage};
 
 /// Result of a finished background command.
 #[derive(Debug, Clone)]
@@ -40,12 +40,41 @@ pub type CompletionHook = Box<
 >;
 
 /// One in-flight background command.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RunningTask {
+    /// Stable id for this task (#2145).
+    ///
+    /// Minted once at spawn and carried by both progress events, so a finish
+    /// finds the row its start created. Mirrored external tasks (a claude-cli
+    /// background task) get an id too; nothing emits events for them, but the
+    /// field stays non-optional so consumers never have to special-case it.
+    pub task_id: Uuid,
     /// Short label for the command, e.g. `cargo test`.
     pub label: String,
     /// When it was spawned, for the elapsed time a surface displays.
     pub started: std::time::Instant,
+    /// The turn's progress callback, kept alive past the turn that spawned
+    /// the task (#2145).
+    ///
+    /// The turn ends while the command is still running, and with it the only
+    /// route its events had. Holding the `Arc` here is what lets the finish
+    /// reach the surface that drew the row. `None` for mirrored external
+    /// tasks, which emit no events.
+    pub progress: Option<ProgressCallback>,
+}
+
+impl std::fmt::Debug for RunningTask {
+    /// Manual because the callback is a closure: there is no meaningful
+    /// representation of it, and printing the label plus age is what a
+    /// debugging reader actually wants (#2145).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RunningTask")
+            .field("task_id", &self.task_id)
+            .field("label", &self.label)
+            .field("elapsed", &self.started.elapsed())
+            .field("has_progress", &self.progress.is_some())
+            .finish()
+    }
 }
 
 /// Manages background commands and resumes their sessions on completion.
@@ -85,13 +114,33 @@ impl BackgroundTaskManager {
             .unwrap_or_default()
     }
 
-    fn mark_started(&self, session_id: Uuid, label: &str) {
+    fn mark_started(
+        &self,
+        session_id: Uuid,
+        task_id: Uuid,
+        label: &str,
+        progress: Option<ProgressCallback>,
+    ) {
         if let Ok(mut m) = self.running.lock() {
             m.entry(session_id).or_default().push(RunningTask {
+                task_id,
                 label: label.to_string(),
                 started: std::time::Instant::now(),
+                progress,
             });
         }
+    }
+
+    /// The callback a task's finish must emit through (#2145), cloned out so
+    /// the caller never holds the lock while it fires.
+    fn progress_for(&self, session_id: Uuid, task_id: Uuid) -> Option<ProgressCallback> {
+        self.running
+            .lock()
+            .ok()?
+            .get(&session_id)?
+            .iter()
+            .find(|t| t.task_id == task_id)
+            .and_then(|t| t.progress.clone())
     }
 
     fn mark_finished(&self, session_id: Uuid, label: &str) {
@@ -110,6 +159,22 @@ impl BackgroundTaskManager {
         }
     }
 
+    /// Remove the row for exactly `task_id` (#2145).
+    ///
+    /// The label-based [`Self::mark_finished`] cannot tell two runs of the same
+    /// command apart, which is fine for a count but wrong once a finish has to
+    /// address one specific row.
+    fn mark_finished_by_id(&self, session_id: Uuid, task_id: Uuid) {
+        if let Ok(mut m) = self.running.lock()
+            && let Some(tasks) = m.get_mut(&session_id)
+        {
+            tasks.retain(|t| t.task_id != task_id);
+            if tasks.is_empty() {
+                m.remove(&session_id);
+            }
+        }
+    }
+
     /// Mirror an EXTERNAL task's lifecycle into the tracker (#1776 seam 2):
     /// a claude-cli background task never runs as our spawned process, but
     /// surfaces still need to show it as in-flight work for the session —
@@ -117,8 +182,11 @@ impl BackgroundTaskManager {
     /// the wait looks like a hang (#762 is the same disease, spawned flavor).
     /// `label` is the mirror's identity: [`Self::mirror_finished`] removes
     /// the oldest row carrying it, exactly like [`Self::mark_finished`].
+    ///
+    /// No progress callback: the CLI owns the task and emits no events, so a
+    /// mirrored row is never updated in place (#2145).
     pub fn mirror_started(&self, session_id: Uuid, label: &str) {
-        self.mark_started(session_id, label);
+        self.mark_started(session_id, Uuid::new_v4(), label, None);
     }
 
     /// Remove a mirrored external task row (see [`Self::mirror_started`]).
@@ -132,14 +200,20 @@ impl BackgroundTaskManager {
     /// Spawn `command` (via `sh -c`) in `cwd`, detached; on completion enqueue a
     /// system message into `session_id` summarizing the result. Returns
     /// immediately — the caller's turn is free to end.
+    ///
+    /// `progress` is the CALLING TURN's callback (#2145). It is stored on the
+    /// running row so the finish can still reach the surface after the turn
+    /// that spawned the task has ended, and so the start lands inside that
+    /// turn's own tool block instead of a new one.
     pub fn spawn_command(
         self: std::sync::Arc<Self>,
         session_id: Uuid,
         cwd: PathBuf,
         label: String,
         command: String,
+        progress: Option<ProgressCallback>,
     ) {
-        self.spawn_inner(session_id, cwd, label, command, None);
+        self.spawn_inner(session_id, cwd, label, command, None, progress);
     }
 
     /// Spawn like [`Self::spawn_command`], but hand the outcome to `hook`
@@ -152,8 +226,9 @@ impl BackgroundTaskManager {
         label: String,
         command: String,
         hook: CompletionHook,
+        progress: Option<ProgressCallback>,
     ) {
-        self.spawn_inner(session_id, cwd, label, command, Some(hook));
+        self.spawn_inner(session_id, cwd, label, command, Some(hook), progress);
     }
 
     fn spawn_inner(
@@ -163,10 +238,24 @@ impl BackgroundTaskManager {
         label: String,
         command: String,
         hook: Option<CompletionHook>,
+        progress: Option<ProgressCallback>,
     ) {
-        self.mark_started(session_id, &label);
-        let this = std::sync::Arc::clone(&self);
         let task_id = Uuid::new_v4();
+        self.mark_started(session_id, task_id, &label, progress.clone());
+        // #2145: emit the start NOW, while the caller's turn is still live, so
+        // the surface draws the row in the block that holds the `bash` call
+        // that detached this task. Emitted before the tokio spawn because the
+        // spawn returns immediately and the turn may end before it runs.
+        if let Some(cb) = progress.as_ref() {
+            cb(
+                session_id,
+                ProgressEvent::DetachedTaskStarted {
+                    task_id: task_id.to_string(),
+                    label: label.clone(),
+                },
+            );
+        }
+        let this = std::sync::Arc::clone(&self);
         // Gap 2 (#1160): mid-run visibility. The status file exists from
         // spawn with label/command/session, so tasks_list consumers can see
         // what a detached command IS before it finishes. Best-effort: never
@@ -266,7 +355,37 @@ impl BackgroundTaskManager {
             //
             // Only touches the in-memory map, so moving it earlier cannot
             // affect what gets delivered.
-            this.mark_finished(session_id, &label);
+            //
+            // #2145: emit the finish through the callback stored on the row,
+            // read BEFORE the row is dropped. This is what updates the row the
+            // start created instead of announcing the outcome as a new
+            // message.
+            //
+            // #2218: and that row update IS the report for a surface that is
+            // drawing rows. Emitting it and then delivering anyway is what
+            // made one detached task report three times: the row, a separate
+            // "background task finished" message, and then a full agent turn
+            // because an idle session resumes on delivery. The turn cost a
+            // model call with tools attached, for a completion the user was
+            // already looking at. So the delivery below is now the FALLBACK:
+            // a task whose row is already gone (restart, no callback, a
+            // surface that draws no rows) still delivers, and only that case
+            // does.
+            let rendered = if let Some(cb) = this.progress_for(session_id, task_id) {
+                cb(
+                    session_id,
+                    ProgressEvent::DetachedTaskFinished {
+                        task_id: task_id.to_string(),
+                        label: label.clone(),
+                        success: result.success,
+                        elapsed_secs,
+                    },
+                );
+                true
+            } else {
+                false
+            };
+            this.mark_finished_by_id(session_id, task_id);
             if let Some(hook) = hook {
                 // A hook replaces the generic delivery entirely (#1748): the
                 // rebuild exec-replaces the process on success, so an
@@ -277,6 +396,14 @@ impl BackgroundTaskManager {
                     elapsed_secs,
                 })
                 .await;
+                return;
+            }
+            if rendered {
+                tracing::debug!(
+                    target: "background_task",
+                    "Background task '{label}' for session {session_id} settled on its row; \
+                     not delivering a second report"
+                );
                 return;
             }
             // Deliver through the ONE gated route (fork #19): the same
@@ -291,7 +418,13 @@ impl BackgroundTaskManager {
             // (#940). interrupt=true: a completion is the origin's own
             // awaited work, exactly like a sub-agent's; it must reach it even
             // mid-turn (fork #13).
-            let msg = completion_message(&label, &command, &result, elapsed_secs);
+            let msg = completion_message(
+                &task_id.to_string(),
+                &label,
+                &command,
+                &result,
+                elapsed_secs,
+            );
             let outcome = super::session_routes::deliver_to_session(session_id, msg, true);
             match outcome {
                 super::session_routes::Delivery::Redirected { to } => {
@@ -602,6 +735,7 @@ pub(crate) fn tail_lines(text: &str, n: usize) -> String {
 /// `BgTaskMeta` payload (#15) so the receipt card renders a duration without
 /// parsing the context text.
 pub(crate) fn completion_message(
+    task_id: &str,
     label: &str,
     command: &str,
     result: &CmdResult,
@@ -632,6 +766,10 @@ pub(crate) fn completion_message(
     // #15: typed receipt payload — the echo renders the card from this,
     // never from the `[System: ...]` context text.
     msg.bg_meta = Some(BgTaskMeta {
+        // #2145: the receipt names the task it belongs to, so a surface that
+        // already drew a running row updates THAT row instead of posting the
+        // outcome as a second message.
+        task_id: task_id.to_string(),
         success: result.success,
         label: label.to_string(),
         elapsed_secs,

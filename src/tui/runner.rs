@@ -147,6 +147,10 @@ pub async fn run(mut app: App) -> Result<()> {
     // Live switching via `/theme set <name>` re-enters through `theme::set`
     // below; no need to reload config on every frame.
     {
+        // Build the pack first: `presets::by_name` only sees pack themes once
+        // `themes()` has run, and nothing else runs it before this lookup, so a
+        // saved pack theme such as `orng` was lost on every restart (#2164).
+        let _ = crate::tui::theme_catalog::theme_pack::themes();
         let theme_name = crate::config::Config::current().tui.theme.clone();
         if let Some(n) = theme_name
             .as_deref()

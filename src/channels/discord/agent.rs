@@ -340,21 +340,36 @@ impl EventHandler for Handler {
                     crate::config::RespondTo::DmOnly
                 );
 
-            if !admitted || !channel_ok || !inside_dm_policy {
+            // The owner's /cowork and /respond_to pass the channel scope and the
+            // dm_only policy, so they can open or fix the channel they run in.
+            // DMs never had a channel scope; the interaction path now says so too.
+            let owner_scope = !is_dm
+                && super::commands::owner_scope_text(&format!("/{}", command.data.name), owner);
+            let channel_ok = is_dm
+                || owner_scope
+                || channel_ok
+                || dc.has_channel_block(&channel_str, parent.as_deref());
+            let policy_ok = owner_scope || inside_dm_policy;
+            if !admitted || !channel_ok || !policy_ok {
                 tracing::warn!(
-                    "Discord: refused /{} from user {} (allowed={}, channel={}, dm_only={})",
+                    "Discord: refused /{} from user {} (admitted={}, channel_scope={}, respond_to_policy={})",
                     command.data.name,
                     user,
                     admitted,
                     channel_ok,
-                    inside_dm_policy
+                    policy_ok
                 );
                 let _ = command
                     .create_response(
                         &ctx.http,
                         serenity::builder::CreateInteractionResponse::Message(
                             serenity::builder::CreateInteractionResponseMessage::new()
-                                .content("This bot is not enabled for you or this channel.")
+                                .content(super::commands::refusal_reason(
+                                    admitted,
+                                    channel_ok,
+                                    policy_ok,
+                                    &channel_str,
+                                ))
                                 .ephemeral(true),
                         ),
                     )
@@ -537,6 +552,7 @@ impl EventHandler for Handler {
                             filled.join("\n")
                         ),
                         format!("[System: {user_name} submitted the \"{title}\" form]"),
+                        dstate.clone(),
                     )
                     .await;
                 });
@@ -697,6 +713,7 @@ impl EventHandler for Handler {
                              continue accordingly]"
                         ),
                         format!("[System: {user_name} picked \"{choice}\"]"),
+                        dstate.clone(),
                     )
                     .await;
                 });
@@ -772,6 +789,7 @@ impl EventHandler for Handler {
                         Some(group) => CreateInteractionResponse::UpdateMessage(
                             CreateInteractionResponseMessage::new()
                                 .content(super::tool_group::render_content(&group))
+                                .embeds(super::tool_group::render_embeds(&group))
                                 .components(super::tool_group::render_components(&group, mid)),
                         ),
                         None => {
@@ -799,6 +817,62 @@ impl EventHandler for Handler {
                     if let Err(e2) = comp.create_response(&ctx.http, fallback).await {
                         tracing::warn!("Discord: tool group toggle fallback response failed: {e2}");
                     }
+                }
+                return;
+            }
+
+            // Tool card paging and Log (#1880). Paging edits this message in
+            // place; Log sends the full list to the viewer as a Markdown file.
+            if let Some(rest) = custom_id.strip_prefix("tgpage:") {
+                use serenity::builder::{
+                    CreateInteractionResponse, CreateInteractionResponseMessage,
+                };
+                let parsed = rest.split_once(':').and_then(|(mid, page)| {
+                    Some((mid.parse::<u64>().ok()?, page.parse::<usize>().ok()?))
+                });
+                let resp = match parsed {
+                    Some((mid, page)) => {
+                        match self.discord_state.set_tool_group_page(mid, page).await {
+                            Some(group) => CreateInteractionResponse::UpdateMessage(
+                                CreateInteractionResponseMessage::new()
+                                    .content(super::tool_group::render_content(&group))
+                                    .embeds(super::tool_group::render_embeds(&group))
+                                    .components(super::tool_group::render_components(&group, mid)),
+                            ),
+                            None => super::tool_group::stale_card_reply(),
+                        }
+                    }
+                    None => super::tool_group::stale_card_reply(),
+                };
+                if let Err(e) = comp.create_response(&ctx.http, resp).await {
+                    tracing::warn!("Discord: tool card page response failed: {e}");
+                }
+                return;
+            }
+            if let Some(mid_str) = custom_id.strip_prefix("tglog:") {
+                use serenity::builder::{
+                    CreateAttachment, CreateInteractionResponse, CreateInteractionResponseMessage,
+                };
+                let snapshot = match mid_str.parse::<u64>() {
+                    Ok(mid) => self.discord_state.tool_group_snapshot(mid).await,
+                    Err(_) => None,
+                };
+                let resp = match snapshot {
+                    Some(group) => {
+                        let log = super::tool_card::log_markdown(&group.entries);
+                        CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new()
+                                .ephemeral(true)
+                                .add_file(CreateAttachment::bytes(
+                                    log.into_bytes(),
+                                    "tool-calls.md",
+                                )),
+                        )
+                    }
+                    None => super::tool_group::stale_card_reply(),
+                };
+                if let Err(e) = comp.create_response(&ctx.http, resp).await {
+                    tracing::warn!("Discord: tool card log response failed: {e}");
                 }
                 return;
             }

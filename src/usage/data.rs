@@ -4,6 +4,7 @@
 //! Queries hit the DB pool directly — no dependency on repository structs.
 
 use crate::db::{Pool, interact_err};
+use crate::usage::pricing::{CacheCost, CostOrigin, PricingConfig};
 use anyhow::{Context, Result};
 use rusqlite::params;
 
@@ -98,7 +99,27 @@ pub struct ModelEntry {
     pub cost: f64,
     pub calls: i64,
     pub estimated: bool,
+    /// Cache-read tokens the ledger recorded for this model, or `None` when
+    /// none of its rows carried a split (#2027).
+    pub cache_read_tokens: Option<i64>,
+    /// Token total of the ledger rows that DID record a split. The cache share
+    /// divides by this, so rows written before the cache-read column existed
+    /// cannot drag the percentage toward zero.
+    pub cache_split_tokens: i64,
     pub variants: Vec<ModelVariant>,
+}
+
+impl ModelEntry {
+    /// Share (0-100) of the recorded tokens that were served from cache, or
+    /// `None` when the ledger holds no split for this model. `None` renders
+    /// blank, which is a different statement from a measured 0% (#2027).
+    pub fn cache_read_pct(&self) -> Option<f64> {
+        let cached = self.cache_read_tokens?;
+        if self.cache_split_tokens <= 0 {
+            return None;
+        }
+        Some(cached as f64 / self.cache_split_tokens as f64 * 100.0)
+    }
 }
 
 /// A single quantization variant under a grouped model
@@ -135,16 +156,45 @@ pub struct CacheStats {
     pub cached_tokens: i64,
     /// Total input tokens (cached + non-cached)
     pub total_input_tokens: i64,
-    /// Per-model cache efficiency, highest hit-rate first.
+    /// Per-model cache efficiency and cache money, highest hit-rate first.
     pub per_model: Vec<ModelCacheStat>,
 }
 
-/// Cache efficiency for a single model (caching-capable requests only).
+impl CacheStats {
+    /// Sum the per-model money for the TOTAL line of the cache breakdown
+    /// (#2027). Every row prices the same quantity (that model's cached read
+    /// and write tokens), so the components add up field by field.
+    pub fn cost_totals(&self) -> CacheCost {
+        self.per_model
+            .iter()
+            .fold(CacheCost::default(), |acc, m| CacheCost {
+                read_cost: acc.read_cost + m.cost.read_cost,
+                write_cost: acc.write_cost + m.cost.write_cost,
+                full_rate_cost: acc.full_rate_cost + m.cost.full_rate_cost,
+                saved: acc.saved + m.cost.saved,
+            })
+    }
+}
+
+/// Cache efficiency and cache money for a single model (caching-capable
+/// requests only).
 #[derive(Debug, Clone)]
 pub struct ModelCacheStat {
     pub model: String,
     pub cache_hit_pct: f64,
     pub cached_tokens: i64,
+    /// Cache-WRITE tokens the provider reported for this model.
+    pub cache_creation_tokens: i64,
+    /// What the cached reads cost, what the writes cost, what the reads would
+    /// have cost at the plain input rate, and the difference (#2027).
+    pub cost: CacheCost,
+    /// The model's plain input rate, so the overlay can price the counterfactual.
+    pub input_per_m: f64,
+    /// The model's cache-read rate, shown next to the read tokens.
+    pub cache_read_per_m: f64,
+    /// True when no pricing entry matched, so the money is the conservative
+    /// default estimate rather than a table price (#1717).
+    pub estimated: bool,
 }
 
 /// All dashboard data, fetched once per period change
@@ -548,6 +598,24 @@ pub(crate) fn sql_normalize_model(raw: &str) -> String {
     }
 }
 
+/// One ledger row as the By Model query returns it, before grouping.
+struct RawModelRow {
+    /// The SQL-normalized model name, the grouping key's input.
+    normalized: String,
+    /// The spelling the row was recorded under, kept for display.
+    raw: String,
+    tokens: i64,
+    calls: i64,
+    cost: f64,
+    /// Cache-read tokens this row recorded. `None` when the row predates the
+    /// ledger's cache-read column, i.e. it carries no split at all (#2027).
+    cache_read: Option<i64>,
+    /// This row's tokens, counted only when the row recorded a split. The
+    /// cache share divides by the sum of these, so rows with no split cannot
+    /// drag the percentage toward zero.
+    split_tokens: i64,
+}
+
 async fn fetch_model_entries(pool: &Pool, since: Option<i64>) -> Result<Vec<ModelEntry>> {
     let pricing = crate::usage::pricing::PricingConfig::load().ok();
 
@@ -616,22 +684,31 @@ async fn fetch_model_entries(pool: &Pool, since: Option<i64>) -> Result<Vec<Mode
                m3 AS raw_model, \
                COALESCE(SUM(token_count), 0), \
                COUNT(*), \
-               COALESCE(SUM(cost), 0.0) \
+               COALESCE(SUM(cost), 0.0), \
+               SUM(CASE WHEN prompt_tokens IS NOT NULL THEN cache_read_tokens END), \
+               COALESCE(SUM(CASE WHEN prompt_tokens IS NOT NULL THEN prompt_tokens ELSE 0 END), 0) \
              FROM spaced \
              GROUP BY normalized_model, m3 \
              ORDER BY SUM(token_count) DESC"
         );
         let mut stmt = conn.prepare(&query)?;
-        let map_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<(String, String, i64, i64, f64)> {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, i64>(3)?,
-                row.get::<_, f64>(4)?,
-            ))
+        // `SUM(cache_read_tokens)` is NULL for a model whose rows all predate
+        // the cache-read column, which is the honest answer: no split was
+        // recorded. It is 0 only when a row really recorded zero cache reads.
+        // The last column re-counts the tokens of the rows that DID record a
+        // split, so the share is measured against what was actually reported.
+        let map_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<RawModelRow> {
+            Ok(RawModelRow {
+                normalized: row.get(0)?,
+                raw: row.get(1)?,
+                tokens: row.get(2)?,
+                calls: row.get(3)?,
+                cost: row.get(4)?,
+                cache_read: row.get(5)?,
+                split_tokens: row.get(6)?,
+            })
         };
-        let rows: Vec<(String, String, i64, i64, f64)> = if let Some(s) = since {
+        let rows: Vec<RawModelRow> = if let Some(s) = since {
             stmt.query_map(params![s], map_row)?.collect::<std::result::Result<Vec<_>, _>>()?
         } else {
             stmt.query_map([], map_row)?.collect::<std::result::Result<Vec<_>, _>>()?
@@ -645,16 +722,17 @@ async fn fetch_model_entries(pool: &Pool, since: Option<i64>) -> Result<Vec<Mode
     // Group by base model (normalize away quantization suffixes), keyed on the
     // punctuation-insensitive identity so one model reported with two spellings
     // is one row rather than two smaller ones (#929).
-    let mut groups: std::collections::HashMap<String, Vec<(String, i64, i64, f64)>> =
+    let mut groups: std::collections::HashMap<String, Vec<RawModelRow>> =
         std::collections::HashMap::new();
     // The key is unreadable by design, so each group also remembers the spelling
     // to display: whichever variant carries the most tokens, i.e. the form this
     // model is actually known by rather than the typo that split it.
     let mut display_names: std::collections::HashMap<String, (String, i64)> =
         std::collections::HashMap::new();
-    for (normalized, raw, tokens, calls, cost) in raw {
-        let base = normalize_model_for_grouping(&normalized);
+    for row in raw {
+        let base = normalize_model_for_grouping(&row.normalized);
         let key = canonical_model_key(&base);
+        let tokens = row.tokens;
         display_names
             .entry(key.clone())
             .and_modify(|best| {
@@ -663,10 +741,7 @@ async fn fetch_model_entries(pool: &Pool, since: Option<i64>) -> Result<Vec<Mode
                 }
             })
             .or_insert_with(|| (base.clone(), tokens));
-        groups
-            .entry(key)
-            .or_default()
-            .push((raw, tokens, calls, cost));
+        groups.entry(key).or_default().push(row);
     }
 
     // Build ModelEntry tree, sorted by total tokens descending
@@ -683,10 +758,28 @@ async fn fetch_model_entries(pool: &Pool, since: Option<i64>) -> Result<Vec<Mode
             let mut total_calls: i64 = 0;
             let mut total_cost: f64 = 0.0;
             let mut has_estimate = false;
+            // Cache reads across the group, and the tokens of the rows that
+            // actually recorded a split. `None` until a row records one, so a
+            // model whose rows all predate the column reports no split (#2027).
+            let mut cache_read_tokens: Option<i64> = None;
+            let mut cache_split_tokens: i64 = 0;
             let mut child_rows: Vec<ModelVariant> = Vec::new();
 
-            variants.sort_by_key(|b| std::cmp::Reverse(b.1)); // sort by tokens desc
-            for (full_name, tokens, calls, ledger_cost) in variants {
+            variants.sort_by_key(|b| std::cmp::Reverse(b.tokens)); // sort by tokens desc
+            for v in variants {
+                let RawModelRow {
+                    raw: full_name,
+                    tokens,
+                    calls,
+                    cost: ledger_cost,
+                    cache_read,
+                    split_tokens,
+                    ..
+                } = v;
+                if let Some(cached) = cache_read {
+                    cache_read_tokens = Some(cache_read_tokens.unwrap_or(0) + cached);
+                }
+                cache_split_tokens += split_tokens;
                 // The ledger holds what each call really cost, cache reads
                 // included (#1707), so it is the source of truth. The table
                 // estimate is 80/20 input/output and ignores cache, so it only
@@ -726,6 +819,8 @@ async fn fetch_model_entries(pool: &Pool, since: Option<i64>) -> Result<Vec<Mode
                 cost: total_cost,
                 calls: total_calls,
                 estimated: has_estimate,
+                cache_read_tokens,
+                cache_split_tokens,
                 variants: child_rows,
             }
         })
@@ -870,6 +965,13 @@ async fn fetch_activities(pool: &Pool, since: Option<i64>) -> Result<Vec<Activit
 pub(crate) const CACHE_STATS_SELECT_COLS: &str = "COALESCE(SUM(cache_read_tokens), 0), \
      COALESCE(SUM(COALESCE(input_tokens, 0) + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0)), 0)";
 
+/// Cache-WRITE token sum, appended to [`CACHE_STATS_SELECT_COLS`] for the
+/// per-model query (#2027). The money breakdown prices reads and writes at
+/// different rates, so it needs the write count; the global efficiency number
+/// does not, which is why this stays a separate column rather than a rewrite of
+/// the shared select. Shared with the regression test.
+pub(crate) const CACHE_COST_SELECT_COLS: &str = "COALESCE(SUM(cache_creation_tokens), 0)";
+
 /// Filter to caching-CAPABLE requests only — the ones where the provider
 /// actually reported cache usage (`cache_read`/`cache_creation` present, even if
 /// the value is 0 on a cache miss). Requests on providers with no caching at all
@@ -888,6 +990,10 @@ pub(crate) const CACHE_MODEL_EXPR: &str =
     "CASE WHEN s.model LIKE '%/%' THEN SUBSTR(s.model, INSTR(s.model, '/') + 1) ELSE s.model END";
 
 async fn fetch_cache_stats(pool: &Pool, since: Option<i64>) -> Result<Option<CacheStats>> {
+    // Loaded once per fetch, like the By Model card does, so every row in one
+    // render prices against the same table. A table that fails to parse falls
+    // back to the empty (all-estimated) default rather than dropping the card.
+    let pricing = PricingConfig::load().unwrap_or_default();
     let conn = pool.get().await.context("pool")?;
     let result = conn
         .interact(move |conn| -> rusqlite::Result<Option<CacheStats>> {
@@ -915,27 +1021,28 @@ async fn fetch_cache_stats(pool: &Pool, since: Option<i64>) -> Result<Option<Cac
             }
             let cache_hit_pct = (cached_tokens as f64 / total_input_tokens as f64) * 100.0;
 
-            // ── Per-model efficiency (caching-capable rows only) ─────────────
+            // ── Per-model efficiency + cache money (caching-capable rows) ────
             let per_sql = if since.is_some() {
                 format!(
-                    "SELECT {CACHE_MODEL_EXPR}, {CACHE_STATS_SELECT_COLS} \
+                    "SELECT {CACHE_MODEL_EXPR}, {CACHE_STATS_SELECT_COLS}, {CACHE_COST_SELECT_COLS} \
                      FROM messages m JOIN sessions s ON m.session_id = s.id \
                      WHERE m.created_at >= ?1 AND ({CACHE_CAPABLE_WHERE}) \
                      GROUP BY {CACHE_MODEL_EXPR}"
                 )
             } else {
                 format!(
-                    "SELECT {CACHE_MODEL_EXPR}, {CACHE_STATS_SELECT_COLS} \
+                    "SELECT {CACHE_MODEL_EXPR}, {CACHE_STATS_SELECT_COLS}, {CACHE_COST_SELECT_COLS} \
                      FROM messages m JOIN sessions s ON m.session_id = s.id \
                      WHERE {CACHE_CAPABLE_WHERE} \
                      GROUP BY {CACHE_MODEL_EXPR}"
                 )
             };
-            let map_row = |row: &rusqlite::Row| -> rusqlite::Result<(Option<String>, i64, i64)> {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            };
+            let map_row =
+                |row: &rusqlite::Row| -> rusqlite::Result<(Option<String>, i64, i64, i64)> {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                };
             let mut stmt = conn.prepare(&per_sql)?;
-            let raw: Vec<(Option<String>, i64, i64)> = if let Some(s) = since {
+            let raw: Vec<(Option<String>, i64, i64, i64)> = if let Some(s) = since {
                 stmt.query_map(params![s], map_row)?
                     .collect::<rusqlite::Result<Vec<_>>>()?
             } else {
@@ -944,15 +1051,23 @@ async fn fetch_cache_stats(pool: &Pool, since: Option<i64>) -> Result<Option<Cac
             };
             let mut per_model: Vec<ModelCacheStat> = raw
                 .into_iter()
-                .filter_map(|(model, cached, total)| {
+                .filter_map(|(model, cached, total, cache_creation)| {
                     let model = model.unwrap_or_default();
                     if model.is_empty() || total == 0 {
                         return None;
                     }
+                    // Money for this model's cached tokens at its own rates.
+                    let rates = pricing.rates_for(&model);
+                    let cost = CacheCost::compute(cached, cache_creation, &rates);
                     Some(ModelCacheStat {
                         model,
                         cache_hit_pct: cached as f64 / total as f64 * 100.0,
                         cached_tokens: cached,
+                        cache_creation_tokens: cache_creation,
+                        cost,
+                        input_per_m: rates.input_per_m,
+                        cache_read_per_m: rates.cache_read_per_m,
+                        estimated: rates.origin == CostOrigin::Estimated,
                     })
                 })
                 .collect();

@@ -1,0 +1,10 @@
+{
+  "name": "bad_issue_title_bare_area_prefix",
+  "body": "",
+  "subjects": [],
+  "messages": "",
+  "files_count": 0,
+  "title": "TUI: copy-to-clipboard notice shifts the chat history three rows",
+  "title_kind": "issue",
+  "expected_exit": 1
+}

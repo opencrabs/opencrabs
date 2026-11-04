@@ -31,11 +31,16 @@
 enabled = false
 default_model = "deepseek-v4.1-flash"
 models = ["deepseek-v4.1-flash"]
-context_window = 200000
+# context_window is not honoured here: the built-in endpoint is free and fixed
+# at 200k, so any value set in this section is ignored.
 vision_model = "deepseek-v4.1-flash"  # Multimodal: attached images work on day 0
-generation_model = "gemini-3.1-flash-image"  # Image generation on day 0, served only on /v1/images/*
-stt_model = "qwen3.8-omni-flash"  # Speech-to-text on day 0, served on /v1/audio/transcriptions
-tts_model = "qwen3.8-omni-flash"  # Text-to-speech on day 0, served on /v1/audio/speech
+generation_model = "gemini-2.5-flash-image"  # Image generation on day 0, served only on the image route (/v1/images/generations), never as chat
+stt_model = "qwen3.8-omni-flash"  # Transcription on day 0: a voice note goes out as an audio-carrying chat request, which is the shape this endpoint serves
+# Speech is not served by this provider: it answers no /v1/audio/speech route, so
+# a speech model declared here is ignored rather than paying a failed round trip.
+# A spoken reply still works through the built-in local voice, a [providers.tts.*]
+# block, or Voicebox. Transcription needs nothing set on those: a voice note
+# transcribes on stt_model above and gets a text reply as usual.
 
 # ========================================
 # Xiaomi MiMo
@@ -83,6 +88,8 @@ base_url = "http://localhost:11434/v1/chat/completions"
 # Use this for LM Studio, Ollama, LocalAI, etc.
 # Every custom provider needs a name — the label after "custom." (e.g. lm_studio, nvidia, groq).
 # You can define as many as you need and switch between them via /models.
+# A custom endpoint defaults to the Chat Completions route; set wire_dialect = "responses"
+# if the gateway serves /responses, or "auto" to probe Chat first and fall back on refusal.
 [providers.custom.lm_studio]
 enabled = false
 base_url = "http://localhost:1234/v1/chat/completions"  # LM Studio default
@@ -121,6 +128,7 @@ default_model = "gpt-4o"
 [providers.openai]
 enabled = false
 default_model = "gpt-5-nano"  # Optional: override default model
+# wire_dialect = "auto"  # Optional: "auto" (Chat first, fall back to Responses when the model is refused), "chat" (always /chat/completions) or "responses" (always /responses). This host defaults to "auto".
 # vision_model = "gpt-5-nano"  # Optional: describes images for the chat model when it lacks vision
 # generation_model = "gpt-image-1"  # Optional: routes generate_image to OpenAI /v1/images/generations
 # stt_model = "whisper-1"  # Optional: transcribe voice notes via this provider's /v1/audio/transcriptions
@@ -448,6 +456,16 @@ profile_id = ""
 # body; the identical retry then succeeds. Per-skill opt-out: delete the
 # skill's `globs` key. Set false to disable the gate entirely.
 # skill_glob_gate = true
+
+# Plan gate (default: 12). Once a single turn makes more than this many tool
+# calls with no plan started, further calls are refused with a message telling
+# the agent to call `plan` init and continue. This catches long research,
+# audit, or multi-file turns that never reached for the plan tool. `plan` and
+# `tool_search` always pass so the agent can unblock itself, and an existing
+# plan (checklist or design being drafted) allows everything. Sub-agents,
+# resumed child turns and cron jobs are exempt: nobody is there to approve a
+# plan on those surfaces. Set 0 to disable the gate.
+# plan_gate_after_tool_calls = 12
 
 # Provider/model for Recursive Self-Improvement (RSI) cycles. The model is
 # paired with the provider, same as subagent_provider/subagent_model.

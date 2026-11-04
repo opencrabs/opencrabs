@@ -14,6 +14,10 @@ pub(crate) mod compact_notice;
 pub mod editor;
 pub mod error;
 pub mod events;
+/// Detached process launcher (#2170, #2172): spawns with nulled stdio, reaps
+/// on a background thread and reports a non-zero exit, so the draw loop never
+/// blocks and a failed open is not reported as a success.
+pub(crate) mod launcher;
 pub(crate) mod model_order;
 pub mod onboarding;
 pub mod onboarding_layout;

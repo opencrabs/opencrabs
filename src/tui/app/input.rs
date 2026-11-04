@@ -319,23 +319,25 @@ impl App {
     ///
     /// The message-keyed [`Self::set_expand_anchor`] cannot do this: a header
     /// line maps to no message, so it is absent from `chat_line_to_msg`.
-    fn set_turn_expand_anchor(&mut self, anchor: Uuid) {
+    fn set_turn_expand_anchor(&mut self, anchor: &str) {
         if let Some(line_top) = self
             .chat_line_to_turn
             .iter()
-            .position(|t| *t == Some(anchor))
+            .position(|t| t.as_deref() == Some(anchor))
         {
             let row = line_top.saturating_sub(self.chat_render_scroll) as u16;
-            self.chat_expand_anchor_turn = Some((anchor, row));
+            self.chat_expand_anchor_turn = Some((anchor.to_string(), row));
         }
     }
 
     /// The newest turn's anchor id, if there is one. `ctrl+o` is scoped to this
     /// turn so a long transcript does not reflow under the user.
-    fn newest_turn_anchor(&self) -> Option<Uuid> {
+    fn newest_turn_anchor(&self) -> Option<String> {
         let turns = crate::tui::render::chat::turn_ranges(&self.messages);
         let last = turns.last()?;
-        self.messages.get(last.start).map(|m| m.id)
+        self.messages
+            .get(last.start)
+            .map(crate::tui::render::chat::turn_anchor)
     }
 
     /// `ctrl+o`: open or close the newest turn, working-out and all.
@@ -358,7 +360,7 @@ impl App {
             .next_back();
         let target = !self.turn_expanded.get(&anchor).copied().unwrap_or(false);
 
-        self.set_turn_expand_anchor(anchor);
+        self.set_turn_expand_anchor(&anchor);
         self.turn_expanded.insert(anchor, target);
 
         if let Some(ref mut group) = self.active_tool_group {
@@ -379,10 +381,10 @@ impl App {
     }
 
     /// The turn anchor whose HEADER sits on `row`, if any (#758).
-    fn row_to_turn_anchor(&self, row: u16) -> Option<Uuid> {
+    fn row_to_turn_anchor(&self, row: u16) -> Option<String> {
         let row_in_chat = row.saturating_sub(self.chat_area_y + 1) as usize;
         let line_idx = self.chat_render_scroll + row_in_chat;
-        self.chat_line_to_turn.get(line_idx).copied().flatten()
+        self.chat_line_to_turn.get(line_idx).cloned().flatten()
     }
 
     /// Left-click: select/highlight a message
@@ -398,7 +400,7 @@ impl App {
             // details paths below do. Without it, unfolding inserts the turn's
             // whole working-out above the fixed-from-bottom offset and the
             // view jumps pages away from what was clicked (#728).
-            self.set_turn_expand_anchor(anchor);
+            self.set_turn_expand_anchor(&anchor);
             // Folded is the default, so an unclicked header opens its turn.
             let currently_expanded = self.turn_expanded.get(&anchor).copied().unwrap_or(false);
             self.turn_expanded.insert(anchor, !currently_expanded);
@@ -510,7 +512,7 @@ impl App {
         let Some(target) = super::clickable::target_at(line, col_in_line) else {
             return false;
         };
-        match super::clickable::open(&target) {
+        match super::clickable::open(&target, self.event_sender()) {
             Ok(()) => {
                 self.notification = Some(format!("Opened {}", target.label()));
                 self.notification_shown_at = Some(std::time::Instant::now());
@@ -782,7 +784,9 @@ impl App {
 
     /// Copy text to system clipboard
     fn copy_to_clipboard(text: &str) -> bool {
+        #[cfg(windows)]
         use std::io::Write;
+        #[cfg(windows)]
         use std::process::{Command, Stdio};
 
         // Windows first, and only its own backends. The old arm fell through
@@ -847,54 +851,14 @@ impl App {
             return false;
         }
 
-        // Legacy Unix backends, now gated: on Windows the arm above always
-        // returns, and these spawns can never exist here. Compiling them
-        // un-gated produced unreachable-code warnings in windows builds.
+        // Unix backends, now gated: on Windows the arm above always returns.
+        // Every backend is tried in platform order and a backend that spawns
+        // but fails does not end the search (#2171), so a `true` here means
+        // the text really reached a clipboard owner.
         #[cfg(not(windows))]
         {
-            // Try pbcopy (macOS)
-            if let Ok(mut child) = Command::new("pbcopy")
-                .stdin(Stdio::piped())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-            {
-                if let Some(ref mut stdin) = child.stdin {
-                    let _ = stdin.write_all(text.as_bytes());
-                }
-                return child.wait().is_ok_and(|s| s.success());
-            }
-
-            // Try xclip (Linux)
-            if let Ok(mut child) = Command::new("xclip")
-                .args(["-selection", "clipboard"])
-                .stdin(Stdio::piped())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-            {
-                if let Some(ref mut stdin) = child.stdin {
-                    let _ = stdin.write_all(text.as_bytes());
-                }
-                return child.wait().is_ok_and(|s| s.success());
-            }
-
-            // Try xsel (Linux fallback)
-            if let Ok(mut child) = Command::new("xsel")
-                .args(["--clipboard", "--input"])
-                .stdin(Stdio::piped())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-            {
-                if let Some(ref mut stdin) = child.stdin {
-                    let _ = stdin.write_all(text.as_bytes());
-                }
-                return child.wait().is_ok_and(|s| s.success());
-            }
+            copy_with_backends(clipboard_backends(), text)
         }
-
-        false
     }
 
     /// True if `bytes` start with a known raster-image magic number. Used to
@@ -1435,7 +1399,19 @@ impl App {
         match self.mode {
             AppMode::Help => Some(DialogScope::Help),
             AppMode::Settings => Some(DialogScope::Settings),
-            AppMode::UsageDashboard => Some(DialogScope::UsageDashboard),
+            AppMode::UsageDashboard => Some(
+                if self
+                    .dashboard_state
+                    .as_ref()
+                    .is_some_and(|d| d.cache_detail_open)
+                {
+                    // The price breakdown sits over the grid, so it is the
+                    // surface holding the keyboard (#2027).
+                    DialogScope::UsageCacheBreakdown
+                } else {
+                    DialogScope::UsageDashboard
+                },
+            ),
             AppMode::FilePicker => Some(DialogScope::FilePicker),
             AppMode::DirectoryPicker => Some(DialogScope::DirectoryPicker),
             AppMode::RestartPending => Some(DialogScope::RestartPending),
@@ -1453,14 +1429,15 @@ impl App {
             } else {
                 DialogScope::MissionControl
             }),
-            // Chat has no dialog chrome; Sessions/Projects/SessionFiles are
-            // deliberately outside the #1775 census; Onboarding keeps its
-            // contextual hints.
-            AppMode::Chat
-            | AppMode::Sessions
-            | AppMode::Projects
-            | AppMode::SessionFiles
-            | AppMode::Onboarding => None,
+            // The sessions list is a full-screen surface with its own keys,
+            // so it belongs in the census. Consequence: Ctrl+C inside it
+            // expands the command panel instead of starting the quit flow,
+            // which is what every other full-screen dialog already does;
+            // Esc still returns to chat.
+            AppMode::Sessions => Some(DialogScope::Sessions),
+            // Chat has no dialog chrome; Projects/SessionFiles stay outside
+            // the #1775 census; Onboarding keeps its contextual hints.
+            AppMode::Chat | AppMode::Projects | AppMode::SessionFiles | AppMode::Onboarding => None,
         }
     }
 
@@ -1483,9 +1460,11 @@ impl App {
         if let Some(token) = &self.cancel_token {
             token.cancel();
         }
-        // Hard-abort the agent task as a backstop
-        if let Some(handle) = self.task_abort_handle.take() {
-            handle.abort();
+        // Hard-abort the agent task as a backstop. Only THIS session's task:
+        // the handle used to be app-level, so cancelling one session could
+        // kill a turn still running in another (#2155).
+        if let Some(sid) = self.current_session.as_ref().map(|s| s.id) {
+            self.abort_session_task(sid);
         }
         // Also cancel any stashed session token (e.g. from session switch)
         if let Some(ref session) = self.current_session {
@@ -2164,19 +2143,29 @@ impl App {
                         .as_ref()
                         .map(|s| s.id)
                         .unwrap_or_else(uuid::Uuid::nil);
-                    // Editor handoff (#1744): vi/vim/nano/emacs need the real
-                    // tty — pipe-capturing them dumps escape sequences into
-                    // the chat. Park the request; the runner loop performs
-                    // the terminal handoff before its next draw. Unix only
+                    // Editor handoff (#1744): editors need the real tty.
+                    // Pipe-capturing them dumps escape sequences into the
+                    // chat. Park the request; the runner loop performs the
+                    // terminal handoff before its next draw. Unix only
                     // (#1755): Windows keeps the pipe path below.
+                    // $EDITOR/$VISUAL are honoured too (#2173): the user
+                    // chose that program, so a `!kak` matching their editor
+                    // gets the tty instead of dumping raw control codes.
                     #[cfg(unix)]
-                    if crate::tui::editor::handoff_target(&shell_cmd).is_some() {
-                        self.pending_editor_handoff = Some((shell_cmd, origin_session));
-                        self.input_buffer.clear();
-                        self.cursor_position = 0;
-                        self.slash_suggestions_active = false;
-                        self.dismiss_emoji_picker();
-                        return Ok(());
+                    {
+                        let env_editor = std::env::var("EDITOR")
+                            .ok()
+                            .or_else(|| std::env::var("VISUAL").ok());
+                        if crate::tui::editor::handoff_target(&shell_cmd, env_editor.as_deref())
+                            .is_some()
+                        {
+                            self.pending_editor_handoff = Some((shell_cmd, origin_session));
+                            self.input_buffer.clear();
+                            self.cursor_position = 0;
+                            self.slash_suggestions_active = false;
+                            self.dismiss_emoji_picker();
+                            return Ok(());
+                        }
                     }
                     tokio::spawn(async move {
                         use crate::utils::shell::PushShellCommand;
@@ -2371,7 +2360,7 @@ impl App {
             );
             // Load more history when paging up if hidden messages exist
             if self.hidden_older_messages > 0
-                && self.display_token_count < 300_000
+                && self.messages.len() < Self::MAX_DISPLAYED_MESSAGES
                 && let Err(e) = self.load_more_history().await
             {
                 tracing::warn!(error = %e, "failed to load more history");
@@ -2986,30 +2975,34 @@ impl App {
             // Open file with default app
             if let Some(file) = self.session_files.get(self.selected_file_index) {
                 let path = file.path.clone();
-                let result = {
-                    #[cfg(target_os = "macos")]
-                    {
-                        std::process::Command::new("open").arg(&path).status()
-                    }
-                    #[cfg(target_os = "linux")]
-                    {
-                        std::process::Command::new("xdg-open").arg(&path).status()
-                    }
-                    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-                    {
-                        Err::<std::process::ExitStatus, _>(std::io::Error::new(
-                            std::io::ErrorKind::Unsupported,
-                            "unsupported platform",
-                        ))
-                    }
-                };
+                // Detached (#2172): waiting on the viewer to close froze the
+                // whole event loop, so Enter on a tracked file looked like a
+                // hang until the user quit Preview or Finder. The exit status
+                // now arrives as an event instead of being waited for here.
+                let label = path.display().to_string();
+                let tx = self.event_sender();
+                let result = crate::tui::launcher::open_detached(&path, move |detail| {
+                    let _ = tx.send(crate::tui::events::TuiEvent::LauncherFailed {
+                        target: label,
+                        detail,
+                    });
+                });
                 match result {
-                    Ok(s) if s.success() => {
+                    Ok(()) => {
                         self.notification = Some(format!("Opened {}", path.display()));
                     }
-                    Ok(_) | Err(_) => {
-                        // Fallback: copy path to clipboard
-                        self.notification = Some(format!("Path: {}", path.display()));
+                    Err(_) => {
+                        // No launcher on this box: copy the path so the
+                        // keystroke is not a dead end, and say which of the
+                        // two actually happened. The old comment promised a
+                        // clipboard fallback that never ran (#2172).
+                        let shown = path.display().to_string();
+                        let copied = Self::copy_to_clipboard(&shown);
+                        self.notification = Some(if copied {
+                            format!("Copied {shown} (no launcher available)")
+                        } else {
+                            format!("Could not open {shown}")
+                        });
                     }
                 }
                 self.notification_shown_at = Some(std::time::Instant::now());
@@ -3040,29 +3033,28 @@ impl App {
             if let Some(file) = self.session_files.get(self.selected_file_index)
                 && let Some(parent) = file.path.parent()
             {
-                let result = {
-                    #[cfg(target_os = "macos")]
-                    {
-                        std::process::Command::new("open").arg(parent).status()
-                    }
-                    #[cfg(target_os = "linux")]
-                    {
-                        std::process::Command::new("xdg-open").arg(parent).status()
-                    }
-                    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-                    {
-                        Err::<std::process::ExitStatus, _>(std::io::Error::new(
-                            std::io::ErrorKind::Unsupported,
-                            "unsupported platform",
-                        ))
-                    }
-                };
+                let label = parent.display().to_string();
+                let tx = self.event_sender();
+                let result = crate::tui::launcher::open_detached(parent, move |detail| {
+                    let _ = tx.send(crate::tui::events::TuiEvent::LauncherFailed {
+                        target: label,
+                        detail,
+                    });
+                });
                 match result {
-                    Ok(s) if s.success() => {
+                    Ok(()) => {
                         self.notification = Some(format!("Opened {}", parent.display()));
                     }
-                    Ok(_) | Err(_) => {
-                        self.notification = Some(format!("Folder: {}", parent.display()));
+                    Err(_) => {
+                        // Same fallback as the file itself: copy the folder
+                        // path rather than claiming it opened (#2172).
+                        let shown = parent.display().to_string();
+                        let copied = Self::copy_to_clipboard(&shown);
+                        self.notification = Some(if copied {
+                            format!("Copied {shown} (no launcher available)")
+                        } else {
+                            format!("Could not open {shown}")
+                        });
                     }
                 }
                 self.notification_shown_at = Some(std::time::Instant::now());
@@ -3258,5 +3250,108 @@ impl App {
         }
 
         Ok(())
+    }
+}
+
+/// Clipboard write backends for this platform, in the order they are tried.
+///
+/// Pure and testable so the ordering is pinned: on Linux the Wayland tool
+/// goes first (#2171). The read path already prefers `wl-paste`
+/// (`read_clipboard`), so a Wayland box could paste what it had copied with
+/// a terminal shortcut while `copy_to_clipboard` had written to X11 and
+/// silently lost it. `wl-copy` holds the selection until it is replaced, and
+/// it takes no arguments.
+#[cfg(not(windows))]
+pub(crate) fn clipboard_backends() -> &'static [(&'static str, &'static [&'static str])] {
+    #[cfg(target_os = "macos")]
+    {
+        &[("pbcopy", &[])]
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        &[
+            ("wl-copy", &[]),
+            ("xclip", &["-selection", "clipboard"]),
+            ("xsel", &["--clipboard", "--input"]),
+        ]
+    }
+}
+
+/// Try every backend in order until one actually owns the text.
+///
+/// A backend counts as successful only when it spawned, accepted the whole
+/// payload on stdin and exited 0. Anything less falls through to the next
+/// one, so a missing `wl-copy`, a dead X display or a half-written pipe can
+/// no longer make `copy_to_clipboard` report success it did not have
+/// (#2171).
+#[cfg(not(windows))]
+pub(crate) fn copy_with_backends(backends: &[(&str, &[&str])], text: &str) -> bool {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    for (program, args) in backends {
+        let Ok(mut child) = Command::new(program)
+            .args(*args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        else {
+            continue;
+        };
+        // A write failure means this backend never got the payload, so it
+        // cannot be trusted even if it exits 0.
+        let wrote = match child.stdin.as_mut() {
+            Some(stdin) => stdin.write_all(text.as_bytes()).is_ok(),
+            None => false,
+        };
+        // Close the pipe before waiting: the tools read to EOF, and holding
+        // stdin open makes `wait` hang on the last backend.
+        drop(child.stdin.take());
+        if wrote && child.wait().is_ok_and(|s| s.success()) {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(all(test, not(windows)))]
+mod clipboard_backend_tests {
+    use super::*;
+
+    /// Linux must try Wayland before X11, matching the read path.
+    #[test]
+    fn wayland_comes_first_on_linux() {
+        let backends = clipboard_backends();
+        #[cfg(target_os = "macos")]
+        assert_eq!(backends[0].0, "pbcopy");
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert_eq!(backends[0].0, "wl-copy");
+            assert_eq!(backends[1].0, "xclip");
+            assert_eq!(backends[2].0, "xsel");
+        }
+    }
+
+    /// A backend that spawns and exits non-zero must not end the search.
+    /// Both fakes are `sh`, so no test depends on a clipboard tool existing.
+    #[test]
+    fn a_failing_backend_falls_through_to_the_next() {
+        let backends: &[(&str, &[&str])] =
+            &[("sh", &["-c", "exit 1"]), ("sh", &["-c", "cat >/dev/null"])];
+        assert!(
+            copy_with_backends(backends, "payload"),
+            "the second backend must be tried after the first fails"
+        );
+    }
+
+    /// Every backend failing means false, not a silent success.
+    #[test]
+    fn all_backends_failing_reports_failure() {
+        let backends: &[(&str, &[&str])] = &[
+            ("sh", &["-c", "exit 1"]),
+            ("opencrabs-no-such-clipboard-xyz", &[]),
+        ];
+        assert!(!copy_with_backends(backends, "payload"));
     }
 }
