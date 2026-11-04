@@ -27,9 +27,10 @@ mod purity_tests {
     //! break that silently at compile time for the GUI, never for us.
 
     /// Every source file in `ui_core`, with its contents.
-    fn sources() -> [(&'static str, &'static str); 20] {
+    fn sources() -> [(&'static str, &'static str); 21] {
         [
             ("ui_core/bang.rs", include_str!("bang.rs")),
+            ("ui_core/card.rs", include_str!("card.rs")),
             (
                 "ui_core/channel_status.rs",
                 include_str!("channel_status.rs"),

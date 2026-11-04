@@ -24,6 +24,7 @@ use crate::db::Database;
 use crate::services::ServiceContext;
 use crate::tests::agent_service_mocks::MockProvider;
 use crate::tui::app::{App, DisplayMessage};
+use crate::tui::pane::PaneManager;
 use crate::tui::render::render;
 
 const WIDTH: u16 = 60;
@@ -64,6 +65,10 @@ async fn app_with_chat(messages: usize) -> App {
     );
     #[cfg(not(feature = "whatsapp"))]
     let mut app = App::new(service, context);
+    // Hermetic: `App::new` restores the host's pane layout from disk, and a
+    // split layout draws the notice inside a pane composer instead of the
+    // window input box these tests measure. Start from one single-mode pane.
+    app.pane_manager = PaneManager::new();
     for i in 0..messages {
         let role = if i % 2 == 0 { "user" } else { "assistant" };
         app.messages

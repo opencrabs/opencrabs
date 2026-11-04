@@ -26,6 +26,8 @@ fn the_input_has_a_panel_background_and_a_shadow() {
     let root = EDITOR
         .get(start..start + 400)
         .expect("the editor root is in range");
-    assert!(root.contains(".bg(rgb(palette::current().panel))"));
+    // #2497 converted the input's fill to the shared glass token, so the
+    // panel tone now arrives through `glass_fill` rather than a flat `bg`.
+    assert!(root.contains(".bg(glass_fill(palette::current().panel))"));
     assert!(root.contains(".shadow_sm()"));
 }
