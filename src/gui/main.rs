@@ -77,11 +77,11 @@ use opencrabs::ui_core::docs;
 use futures::channel::oneshot;
 
 use gpui::{
-    AnyElement, App, Application, Bounds, ClickEvent, Context, CursorStyle, Div, DragMoveEvent,
-    Entity, ExternalPaths, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString, Stateful,
-    TitlebarOptions, Window, WindowBounds, WindowOptions, div, prelude::*, px, rems, rgb, rgba,
-    size,
+    AnyElement, App, Application, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, Div,
+    DragMoveEvent, Entity, ExternalPaths, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta, ScrollHandle, ScrollWheelEvent,
+    SharedString, Stateful, TitlebarOptions, Window, WindowBounds, WindowOptions, div, point,
+    prelude::*, px, rems, rgb, rgba, size,
 };
 use opencrabs::brain::agent::ProgressEvent;
 use opencrabs::utils::drop_landing::human_size;
@@ -322,6 +322,12 @@ const RAIL_DEFAULT_REM: f32 = 17.0;
 const RAIL_MIN_REM: f32 = 11.0;
 const RAIL_MAX_REM: f32 = 32.0;
 
+/// How long the Seeker caret keeps blinking after the last keystroke. Past
+/// this the field goes quiet and the caret hides, the way Spotlight's does
+/// once typing stops; the next key brings it back (#2531). The window and the
+/// terminal share one rule, so this aliases the engine's constant.
+const CARET_IDLE_AFTER: std::time::Duration = opencrabs::ui_core::palette::CARET_IDLE_AFTER;
+
 /// The side panel beside a previewing screen (`themes-sidebar`), plus the
 /// `gap_3` between it and the transcript. The transcript is planned against
 /// what is left, so its tiles never run under the panel.
@@ -461,6 +467,14 @@ struct Dashboard {
     /// drawn div, not an input widget, so nothing blinks for it unless a
     /// timer says so (#2491).
     finder_caret: bool,
+    /// When the Seeker field last took a key. The caret blinks for
+    /// [`CARET_IDLE_AFTER`] after that instant and then holds off, the way
+    /// Spotlight drops its caret when typing stops (#2531).
+    finder_activity: std::time::Instant,
+    /// Latest shaped text and bounds for Seeker mouse hit testing (#2534).
+    finder_paint: Entity<command_palette::FinderPaint>,
+    /// A left-button drag is extending the field's selection.
+    finder_selecting: bool,
     /// Monotonic tag on the latest period fetch; only its result is applied,
     /// so a slow fetch landing after a newer one cannot paint stale data.
     pending: u64,
@@ -984,8 +998,11 @@ impl Dashboard {
         }
         self.finder = Some(PaletteState::new(self.finder_items()));
         self.finder_channels = configured_channels();
-        self.finder_caret = true;
+        self.finder_selecting = false;
+        self.finder_activity_reset();
         // The caret blinks on a timer, and the loop dies with the card (#2491).
+        // It only toggles while the field is fresh; past CARET_IDLE_AFTER the
+        // caret stays off until the next key restarts it (#2531).
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
@@ -996,7 +1013,15 @@ impl Dashboard {
                         if view.finder.is_none() {
                             return false;
                         }
-                        view.finder_caret = !view.finder_caret;
+                        if opencrabs::ui_core::palette::caret_blinks(
+                            view.finder_activity,
+                            std::time::Instant::now(),
+                            CARET_IDLE_AFTER,
+                        ) {
+                            view.finder_caret = !view.finder_caret;
+                        } else {
+                            view.finder_caret = false;
+                        }
                         cx.notify();
                         true
                     })
@@ -1012,9 +1037,18 @@ impl Dashboard {
         cx.notify();
     }
 
+    /// A key reached the Seeker field: the caret comes back on and its idle
+    /// clock restarts, so a paused field hides it and typing re-arms it
+    /// (#2531).
+    fn finder_activity_reset(&mut self) {
+        self.finder_activity = std::time::Instant::now();
+        self.finder_caret = true;
+    }
+
     /// Close the card and hand the keyboard back to what was under it.
     fn close_finder(&mut self, cx: &mut Context<Self>) {
         self.finder = None;
+        self.finder_selecting = false;
         self.refocus_screen();
         cx.notify();
     }
@@ -1083,6 +1117,20 @@ impl Dashboard {
     /// the arrows move the armed row and Enter runs it. Nothing falls through
     /// to the composer, which is the whole point of the card (#2458).
     fn finder_key(&mut self, ks: &gpui::Keystroke, cx: &mut Context<Self>) {
+        // Any key is activity: the caret comes back and its idle clock
+        // restarts before the key does its work (#2531).
+        self.finder_activity_reset();
+        if let Some(edit) = find::editing_chord(
+            &ks.key,
+            ks.modifiers.control,
+            ks.modifiers.platform,
+            ks.modifiers.alt,
+            ks.modifiers.shift,
+        ) {
+            self.apply_finder_edit(edit, cx);
+            cx.notify();
+            return;
+        }
         let Some(state) = self.finder.as_mut() else {
             return;
         };
@@ -1099,11 +1147,10 @@ impl Dashboard {
             "down" => state.move_by(1, find::SEEKER_PAGE),
             "pageup" => state.move_by(-(find::SEEKER_PAGE as i32), find::SEEKER_PAGE),
             "pagedown" => state.move_by(find::SEEKER_PAGE as i32, find::SEEKER_PAGE),
-            "backspace" => state.backspace(),
             "space" => state.type_char(' '),
             _ => {
-                // A chord is not a character: ctrl+c still means what it
-                // meant, and it must not type a `c` into the field.
+                // An editing chord returned above. Any other modified key is
+                // still a chord, never text to append to the query.
                 if ks.modifiers.control || ks.modifiers.platform || ks.modifiers.alt {
                     return;
                 }
@@ -1117,6 +1164,115 @@ impl Dashboard {
         cx.notify();
     }
 
+    fn apply_finder_edit(&mut self, edit: find::SeekerEdit, cx: &mut Context<Self>) {
+        let Some(state) = self.finder.as_mut() else {
+            return;
+        };
+        match edit {
+            find::SeekerEdit::Move {
+                delta,
+                word,
+                select,
+            } => match (word, select) {
+                (true, true) => state.select_word_to(delta),
+                (true, false) => state.move_caret_word(delta),
+                (false, true) => {
+                    let len = state.query().chars().count();
+                    let target = if delta < 0 {
+                        state.caret().saturating_sub(delta.unsigned_abs())
+                    } else {
+                        state.caret().saturating_add(delta.unsigned_abs()).min(len)
+                    };
+                    state.select_to(target);
+                }
+                (false, false) => state.move_caret(delta),
+            },
+            find::SeekerEdit::Home { select } => {
+                if select {
+                    state.select_to(0);
+                } else {
+                    state.move_caret_to(0);
+                }
+            }
+            find::SeekerEdit::End { select } => {
+                let end = state.query().chars().count();
+                if select {
+                    state.select_to(end);
+                } else {
+                    state.move_caret_to(end);
+                }
+            }
+            find::SeekerEdit::Backspace { word: true } => state.delete_word_back(),
+            find::SeekerEdit::Backspace { word: false } => state.backspace(),
+            find::SeekerEdit::Delete { word: true } => state.delete_word_forward(),
+            find::SeekerEdit::Delete { word: false } => state.delete_forward(),
+            find::SeekerEdit::SelectAll => state.select_all(),
+            find::SeekerEdit::Copy => {
+                if let Some(text) = state.selected_text() {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
+                }
+            }
+            find::SeekerEdit::Cut => {
+                if let Some(text) = state.take_selected_text() {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                }
+            }
+            find::SeekerEdit::Paste => {
+                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                    state.insert_text(&text);
+                }
+            }
+        }
+    }
+
+    /// Translate a window point to the Seeker's character caret through the
+    /// shaped line captured during paint, exactly as the composer does.
+    fn seeker_index_for_position(&self, position: Point<Pixels>, cx: &App) -> usize {
+        let Some(state) = self.finder.as_ref() else {
+            return 0;
+        };
+        let paint = self.finder_paint.read(cx);
+        let (Some(line), Some(bounds)) = (paint.line.as_ref(), paint.bounds.as_ref()) else {
+            return 0;
+        };
+        let relative = point(position.x - bounds.left(), position.y - bounds.top());
+        let byte = line
+            .closest_index_for_position(relative, paint.line_height)
+            .unwrap_or_else(|index| index)
+            .min(state.query().len());
+        find::byte_to_char(state.query(), byte)
+    }
+
+    fn finder_mouse_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        let index = self.seeker_index_for_position(event.position, cx);
+        self.finder_selecting = true;
+        self.finder_activity_reset();
+        if let Some(state) = self.finder.as_mut() {
+            if event.modifiers.shift {
+                state.select_to(index);
+            } else {
+                state.move_caret_to(index);
+            }
+        }
+        cx.notify();
+    }
+
+    fn finder_mouse_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if !self.finder_selecting {
+            return;
+        }
+        let index = self.seeker_index_for_position(event.position, cx);
+        self.finder_activity_reset();
+        if let Some(state) = self.finder.as_mut() {
+            state.select_to(index);
+        }
+        cx.notify();
+    }
+
+    fn finder_mouse_up(&mut self, _cx: &mut Context<Self>) {
+        self.finder_selecting = false;
+    }
+
     /// Run the row Enter is on, or the best match when no arrow was pressed.
     fn run_finder_pick(&mut self, cx: &mut Context<Self>) {
         let Some(row) = self.finder.as_ref().and_then(|state| state.selected()) else {
@@ -1124,6 +1280,7 @@ impl Dashboard {
             return;
         };
         self.finder = None;
+        self.finder_selecting = false;
         self.refocus_screen();
         match row.item.action {
             PaletteAction::RunSlash(name) => self.send_message(name.to_string(), cx),
@@ -7239,13 +7396,17 @@ impl Render for Dashboard {
             });
             let idle_revealed = state.idle_ready(std::time::Instant::now());
             root = root.child(command_palette::overlay(
-                state,
+                command_palette::FinderOverlayState {
+                    state,
+                    idle_revealed,
+                    caret_on: self.finder_caret,
+                    view: cx.entity().downgrade(),
+                    paint: self.finder_paint.clone(),
+                },
                 handlers,
                 chip,
                 wheel,
                 find::channel_hint(state.query(), &self.finder_channels),
-                idle_revealed,
-                self.finder_caret,
             ));
         }
         root
@@ -7517,6 +7678,9 @@ fn main() {
                         finder: None,
                         finder_channels: Vec::new(),
                         finder_caret: true,
+                        finder_activity: std::time::Instant::now(),
+                        finder_paint: cx.new(|_| command_palette::FinderPaint::default()),
+                        finder_selecting: false,
                         chip_channel_names: chip_names,
                         channel_chip: channel_chip_line(),
                         daemon_starting: false,
