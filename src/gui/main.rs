@@ -581,8 +581,11 @@ struct Dashboard {
     /// because both facts come from a subprocess and a render that shells out
     /// is a render that stutters.
     preview_video: Option<preview::VideoFacts>,
-    /// The `...` menu over the chat is open (#2303). Its only item is New topic.
-    topic_menu: bool,
+    /// The chat's `...` menu, as the session it acts on (#2480).
+    ///
+    /// It carries the id, never a bare flag: a right press on a topic tab
+    /// opens the same menu for a session that is not the one on screen.
+    topic_menu: Option<uuid::Uuid>,
     /// The topic name being typed, while the name prompt is open (#2303).
     topic_draft: Option<String>,
     /// Which side of the chat the topic row sits on (#2402).
@@ -3149,12 +3152,12 @@ impl Dashboard {
         cx.notify();
     }
 
-    /// Open the rename prompt for the open topic, pre-filled with its title
+    /// Open the rename prompt for a topic, pre-filled with its title
     /// (#2304). Enter saves the new name; Esc leaves the title as it was.
-    fn start_rename(&mut self, cx: &mut Context<Self>) {
-        let Some(id) = self.transcript.session else {
-            return;
-        };
+    ///
+    /// The id comes from the caller: the menu acts on the topic its own row
+    /// opened it for, which is not always the one on screen.
+    fn start_rename(&mut self, id: Uuid, cx: &mut Context<Self>) {
         let current = self
             .sessions
             .items
@@ -3162,18 +3165,15 @@ impl Dashboard {
             .find(|s| s.id == id)
             .and_then(|s| s.title.clone())
             .unwrap_or_default();
-        self.topic_menu = false;
+        self.topic_menu = None;
         self.topic_rename = Some(id);
         self.topic_draft = Some(current);
         cx.notify();
     }
 
-    /// Load the info panel for the open session. The panel is read-only: it
-    /// shows the id, the parent, the created time, and the message count.
-    fn open_topic_info(&mut self, cx: &mut Context<Self>) {
-        let Some(id) = self.transcript.session else {
-            return;
-        };
+    /// Load the info panel for a session. The panel is read-only: it shows
+    /// the id, the parent, the created time, and the message count.
+    fn open_topic_info(&mut self, id: Uuid, cx: &mut Context<Self>) {
         let db_path = self.db_path.clone();
         cx.spawn(
             async move |this, cx| match sessions::load_topic_info(db_path, id).await {
@@ -3199,13 +3199,10 @@ impl Dashboard {
         cx.notify();
     }
 
-    /// Close the open topic, or reopen it if it is closed (#2305). The state
-    /// is re-read from the database, so the dimming and the send guard follow
+    /// Close a topic, or reopen it if it is closed (#2305). The state is
+    /// re-read from the database, so the dimming and the send guard follow
     /// what was actually written.
-    fn toggle_closed_topic(&mut self, cx: &mut Context<Self>) {
-        let Some(id) = self.transcript.session else {
-            return;
-        };
+    fn toggle_closed_topic(&mut self, id: Uuid, cx: &mut Context<Self>) {
         let closed = self.sessions.is_closed(id);
         let db_path = self.db_path.clone();
         cx.spawn(async move |this, cx| {
@@ -3250,6 +3247,71 @@ impl Dashboard {
             stored,
             self.sessions.topic_titles.get(&root).map(String::as_str),
         ))
+    }
+
+    /// The chat's `...` menu (#2480): what can be done to the conversation it
+    /// belongs to, in a card under the button that opened it.
+    ///
+    /// The card floats over the chat as a layer. The old menu was a column of
+    /// rows laid *inside* the topic strip, so opening it grew the strip and
+    /// pushed the conversation down; the owner read that as a bare element
+    /// appearing, not a menu (#2480).
+    ///
+    /// A right press on a topic tab opens this same card for that tab's
+    /// session, so the actions follow the row that asked for them.
+    fn chat_menu(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let target = self.topic_menu?;
+        let is_topic = self.sessions.parents.contains_key(&target);
+        let mut items: Vec<Stateful<Div>> = Vec::new();
+        if self.open_chat_topics_on() {
+            let new_topic = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                this.start_topic_draft(cx);
+            });
+            items.push(sessions::menu_item("New topic").on_click(new_topic));
+        }
+        let (view_label, edit_label, delete_label) = if is_topic {
+            ("View topic info", "Edit topic", "Delete topic")
+        } else {
+            ("View info", "Rename", "Delete conversation")
+        };
+        let view = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
+            this.topic_menu = None;
+            this.open_topic_info(target, cx);
+        });
+        items.push(sessions::menu_item(view_label).on_click(view));
+        let edit = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
+            this.topic_menu = None;
+            this.start_rename(target, cx);
+        });
+        items.push(sessions::menu_item(edit_label).on_click(edit));
+        if is_topic {
+            let close_label = if self.sessions.is_closed(target) {
+                "Reopen topic"
+            } else {
+                "Close topic"
+            };
+            let close = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
+                this.topic_menu = None;
+                this.toggle_closed_topic(target, cx);
+            });
+            items.push(sessions::menu_item(close_label).on_click(close));
+        }
+        let delete = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
+            this.topic_menu = None;
+            this.request_delete(target, cx);
+        });
+        items.push(sessions::menu_item(delete_label).on_click(delete));
+        Some(
+            // Anchored to the column, not the header row: the column is the
+            // positioning context that paints last. px_6 on the column puts
+            // the button's right edge one 1.5rem in, so right_6 lines the card
+            // up with it; top_12 clears the header line under pt_3.
+            sessions::menu_card("chat-menu", items)
+                .absolute()
+                .right_6()
+                .top_12()
+                .into_any_element(),
+        )
     }
 
     /// The tab strip for the open chat's topic family (#2400, #2480): `All`
@@ -3302,6 +3364,15 @@ impl Dashboard {
                     cx.stop_propagation();
                     this.open_session(id, cx);
                 });
+                // A right press on a tab opens the same menu the `...` draws,
+                // for the session that tab stands for (#2480). Before this it
+                // opened nothing at all, and the only way to edit a topic was
+                // to open it first and hunt the menu.
+                let open_menu = cx.listener(move |this, _ev: &MouseDownEvent, _window, cx| {
+                    cx.stop_propagation();
+                    this.topic_menu = Some(id);
+                    cx.notify();
+                });
                 // `All` is the whole conversation, so it carries no topic icon.
                 let (label, picture) = match entry {
                     topic_bar::BarEntry::All => ("All".to_string(), None),
@@ -3327,6 +3398,7 @@ impl Dashboard {
                     shape,
                     current,
                     move |ev, window, app| click(ev, window, app),
+                    move |ev, window, app| open_menu(ev, window, app),
                 )
                 .into_any_element()
             })
@@ -3348,7 +3420,7 @@ impl Dashboard {
             return;
         }
         self.topic_draft_icon = None;
-        self.topic_menu = false;
+        self.topic_menu = None;
         self.topic_draft = Some(String::new());
         cx.notify();
     }
@@ -6419,28 +6491,49 @@ impl Render for Dashboard {
                     ),
                     None => pane_width - THEMES_PANEL_WIDTH,
                 };
-                let primary =
-                    div()
-                        .flex()
-                        .flex_col()
-                        .flex_1()
-                        .min_w_0()
-                        .min_h_0()
-                        .child(transcript::view(
-                            &self.transcript,
-                            &self.transcript_scroll,
-                            &self.live,
-                            self.busy,
-                            primary_width,
-                            fold_handlers,
-                            transcript::ViewHooks {
-                                attachments: attachment_handlers,
-                                drag: Some(self.copy_drag.clone()),
-                                ctx_used: self.ctx_tokens,
-                                ctx_max: self.ctx_max,
-                                live_click: Some(live_click.clone()),
-                            },
-                        ));
+                // A right press on the conversation opens the same card the
+                // `...` draws (#2480); a left press anywhere in it closes the
+                // card, the way clicking off a menu dismisses it.
+                let ask_menu = cx.listener(|this, _ev: &MouseDownEvent, _window, cx| {
+                    cx.stop_propagation();
+                    if this.transcript.session.is_some() {
+                        this.topic_menu = this.transcript.session;
+                        cx.notify();
+                    }
+                });
+                // A left press in the conversation closes the card. The card
+                // is the column's sibling, not this element's child, so its
+                // own clicks never reach this listener and picking an item
+                // still works.
+                let dismiss_menu = cx.listener(|this, _ev: &MouseDownEvent, _window, cx| {
+                    if this.topic_menu.take().is_some() {
+                        cx.notify();
+                    }
+                });
+                let primary = div()
+                    .id("chat-body")
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .on_mouse_down(MouseButton::Right, ask_menu)
+                    .on_mouse_down(MouseButton::Left, dismiss_menu)
+                    .child(transcript::view(
+                        &self.transcript,
+                        &self.transcript_scroll,
+                        &self.live,
+                        self.busy,
+                        primary_width,
+                        fold_handlers,
+                        transcript::ViewHooks {
+                            attachments: attachment_handlers,
+                            drag: Some(self.copy_drag.clone()),
+                            ctx_used: self.ctx_tokens,
+                            ctx_max: self.ctx_max,
+                            live_click: Some(live_click.clone()),
+                        },
+                    ));
                 let body = match &self.split {
                     None => primary.into_any_element(),
                     Some(pane) => {
@@ -6495,70 +6588,20 @@ impl Render for Dashboard {
             .session
             .is_some_and(|id| self.sessions.parents.contains_key(&id));
         if self.screen == Screen::Chat && (self.open_chat_topics_on() || is_topic) {
-            let toggle = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
-                this.topic_menu = !this.topic_menu;
-                cx.notify();
-            });
-            let mut items: Vec<Stateful<Div>> = Vec::new();
-            if self.open_chat_topics_on() {
-                let new_topic = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
-                    this.start_topic_draft(cx);
-                });
-                items.push(sessions::menu_item("New topic").on_click(new_topic));
-            }
-            let view = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
-                this.topic_menu = false;
-                this.open_topic_info(cx);
-            });
-            items.push(sessions::menu_item("View topic info").on_click(view));
-            if is_topic {
-                let edit = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
-                    this.start_rename(cx);
-                });
-                items.push(sessions::menu_item("Edit topic").on_click(edit));
-                let closed_now = self
-                    .transcript
-                    .session
-                    .is_some_and(|id| self.sessions.is_closed(id));
-                let close_label = if closed_now {
-                    "Reopen topic"
-                } else {
-                    "Close topic"
-                };
-                let close = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
-                    this.topic_menu = false;
-                    this.toggle_closed_topic(cx);
-                });
-                items.push(sessions::menu_item(close_label).on_click(close));
-                let delete = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
-                    this.topic_menu = false;
-                    if let Some(id) = this.transcript.session {
-                        this.request_delete(id, cx);
-                    }
-                });
-                items.push(sessions::menu_item("Delete topic").on_click(delete));
-            }
             // The tabs (#2400): the family's parent, then its topics. The
             // leading button moves the whole row to another side (#2402).
+            // The `...` menu is NOT here any more (#2480): it lives at the
+            // conversation's top right, over the chat it acts on.
             let tabs = self.topic_tabs(cx);
             let toggle_edge = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
                 cx.stop_propagation();
                 this.cycle_topic_edge(cx);
             });
-            let strip = topic_strip(
-                self.topic_edge,
-                toggle_edge,
-                tabs,
-                topic_bar(
-                    self.topic_menu,
-                    toggle,
-                    items,
-                    self.topic_edge.is_vertical(),
-                ),
-            );
+            let strip = topic_strip(self.topic_edge, toggle_edge, tabs);
             topic_row = Some((self.topic_edge, strip.into_any_element()));
         }
         let mut right = div()
+            .relative()
             .flex()
             .flex_col()
             .flex_1()
@@ -6576,11 +6619,51 @@ impl Render for Dashboard {
         // The other screens keep their title above the body.
         if self.screen != Screen::Chat {
             right = right.child(chrome);
-        } else if let Some(name) = self.open_chat_name() {
-            // Bordered chip hugging the name, the owner's Photoshop spec
-            // (#2480): the strip of empty row to its right is header space,
-            // same as the mockup.
-            right = right.child(session_title_chip(&name));
+        } else {
+            // The conversation's name leads the chat as plain header text
+            // (#2480), and the `...` that acts on it sits at the far end of
+            // the same row: top right of the conversation, always. The name
+            // takes the width; nothing draws a card around either of them.
+            let name = self.open_chat_name();
+            let mut header = div()
+                .relative()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_3()
+                .min_w_0()
+                .w_full();
+            header = match name {
+                Some(name) => header.child(session_title(&name)),
+                None => header.child(div().flex_1()),
+            };
+            if self.transcript.session.is_some() {
+                let toggle = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                    cx.stop_propagation();
+                    this.topic_menu = match this.topic_menu {
+                        Some(_) => None,
+                        None => this.transcript.session,
+                    };
+                    cx.notify();
+                });
+                header = header.child(
+                    div()
+                        .id("chat-menu-button")
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .text_color(rgb(palette::current().text_muted))
+                        .hover(|d| d.bg(rgb(palette::current().panel_hi)))
+                        .on_click(toggle)
+                        .child(SharedString::from("...")),
+                );
+            }
+            right = right.child(header);
         }
         // The row takes the side it was saved on: above the transcript,
         // under the input, or beside the chat (#2402).
@@ -6643,6 +6726,13 @@ impl Render for Dashboard {
             Screen::Onboard => right.child(footer),
             Screen::MissionControl => right.child(footer),
         };
+
+        // The card is the column's LAST child on purpose. Children paint in
+        // order, so a menu drawn inside the header is painted before the
+        // transcript and the conversation covers it.
+        if let Some(menu) = self.chat_menu(cx) {
+            right = right.child(menu);
+        }
 
         let mut root = div()
             .flex()
@@ -7288,7 +7378,7 @@ fn main() {
                         preview_zoom: 1.0,
                         preview_video: None,
                         help_open: false,
-                        topic_menu: false,
+                        topic_menu: None,
                         topic_draft: None,
                         topic_edge: topic_tabs::Edge::from_config(
                             Config::load()
@@ -8560,28 +8650,13 @@ fn help_rows() -> Vec<(
     out
 }
 
-/// The conversation's name above the topic bar (#2480).
+/// The most characters the header prints before it shortens (#2480).
 ///
-/// Telegram's forum header puts the chat title on top and the topics under it.
-/// The GUI chat screen had no header at all (the comment below used to say the
-/// session name led the footer), so a row of topic chips was the first thing
-/// the eye met and the session it belonged to was nowhere.
-///
-/// Plain header text, flush left, and the two-word rule does not
-/// apply: the name is the full name, and only the chips are shortened.
-///
-/// The chip shape is the owner's Photoshop spec (2026-11-03): a bordered,
-/// tinted, rounded chip that hugs the name, its height roughly 1.7x the cap
-/// height. The first card used py_2, which measured 2.5-3x cap height on the
-/// owner's screen: a fat band with the text swimming in vertical dead space.
-/// py_1 with px_2 is the mockup ratio; the border and tint stay, he asked for
-/// them and rejecting a later regression does not un-ask it.
-/// The most characters the header prints before it shortens (#2480). A name
-/// is a label, not the conversation: the rail and the window title keep the
-/// whole string.
+/// A name is a label, not the conversation: the rail and the window title keep
+/// the whole string.
 const HEADER_NAME_CHARS: usize = 42;
 
-/// The name the header chip prints.
+/// The name the header prints.
 ///
 /// The shortening happens here, in Rust, and never leans on the text engine.
 /// `truncate()` on a stretched column painted a bare `\u{2026}` on the owner's
@@ -8601,81 +8676,44 @@ fn header_name(name: &str) -> String {
     }
 }
 
-/// The conversation name as a chip hugging its text (#2480).
+/// The conversation's name on the header bar (#2480).
 ///
-/// The chip sits inside a row, on purpose. A div laid straight into the
-/// header column is stretched across the whole chat by the default cross axis
-/// alignment, which is the full width band that read as a button. A row hands
-/// the chip its own content width and nothing else.
-fn session_title_chip(name: &str) -> impl IntoElement {
+/// Telegram's forum header puts the chat title on top and the topics under it.
+/// The GUI chat screen had no header at all (the comment below used to say the
+/// session name led the footer), so a row of topic chips was the first thing
+/// the eye met and the session it belonged to was nowhere. Plain header text,
+/// flush left, and the two-word rule does not apply: the name is the full
+/// name, and only the chips are shortened.
+///
+/// The card that used to wrap it is retired (owner, 2026-11-04): "still
+/// looking like a fucking useless button instead of taking full width ...
+/// remove its button, leave the clean title in the bar". Three passes of
+/// padding and border tuning never changed the read, because the shape itself
+/// was the problem: a bordered box on a bar looks like a button no matter how
+/// snug it is. What is left is the name, plain, across the whole row: no
+/// border, no fill, no padding, nothing that can read as a control.
+fn session_title(name: &str) -> impl IntoElement {
     div()
-        .flex()
-        .flex_row()
-        .items_center()
+        .flex_1()
         .min_w_0()
-        .child(
-            div()
-                .flex_none()
-                .px_2()
-                .py_1()
-                .rounded(px(CARD_RADIUS))
-                .bg(glass_fill(palette::current().panel))
-                .border_1()
-                .border_color(rgb(palette::current().panel_hi))
-                .text_base()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(rgb(palette::current().text_normal))
-                .child(SharedString::from(header_name(name))),
-        )
-}
-
-/// The chat's `...` button with its items below it while the menu is open
-/// (#2303, #2304). The bar hugs its content: a `w_full` bar inside the strip
-/// squeezed the tabs to nothing across a row and flung the `...` to the
-/// rail's far edge down a column, the detached-dots layout the owner
-/// screenshotted three times (#2480, #2490). Down a rail the stack aligns to
-/// the leading edge like the chips above it; across a row it aligns right so
-/// the menu reads from the row's end.
-fn topic_bar(
-    open: bool,
-    toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    items: Vec<Stateful<Div>>,
-    vertical: bool,
-) -> impl IntoElement {
-    let button = div()
-        .id("topic-menu-button")
-        .px_2()
-        .py_0p5()
-        .rounded_sm()
-        .cursor_pointer()
-        .text_color(rgb(palette::current().text_muted))
-        .hover(|d| d.bg(rgb(palette::current().panel_hi)))
-        .on_click(toggle)
-        .child("...");
-    let mut bar = div()
-        .flex()
-        .flex_col()
-        .flex_none()
-        .when(vertical, |d| d.items_start())
-        .when(!vertical, |d| d.items_end())
-        .child(button);
-    if open {
-        for item in items {
-            bar = bar.child(item);
-        }
-    }
-    bar
+        .text_lg()
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(rgb(palette::current().text_normal))
+        .child(SharedString::from(header_name(name)))
 }
 
 /// The name prompt above the input, while a topic is being named (#2303).
-/// The topic row (#2400, #2402): the leading button that moves it, the tabs,
-/// and the `...` menu. Across the top or bottom it is one row; down a side it
-/// is one column.
+/// The topic row (#2400, #2402): the leading button that moves it and the
+/// tabs. Across the top or bottom it is one row; down a side it is one column.
+///
+/// The `...` and its items used to close this row (#2303). They are gone from
+/// here (#2480): the menu belongs to the conversation, so it lives at the
+/// chat's top right and floats over the transcript instead of growing this
+/// strip by five rows when it opens.
 fn topic_strip(
     edge: topic_tabs::Edge,
     toggle_edge: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     tabs: Vec<AnyElement>,
-    bar: impl IntoElement,
 ) -> Div {
     // A square target the size of the rail's action icons, so it is easy to
     // hit and reads as a control rather than a stray glyph (#2414).
@@ -8715,7 +8753,6 @@ fn topic_strip(
                 // them was the wall of colour the owner screenshotted (#2480).
                 div().flex().flex_col().items_start().gap_1().children(tabs),
             )
-            .child(bar)
     } else {
         div()
             .flex()
@@ -8737,7 +8774,6 @@ fn topic_strip(
                     .gap_1()
                     .children(tabs),
             )
-            .child(bar)
     }
 }
 
@@ -8786,6 +8822,7 @@ fn topic_tab(
     shape: topic_bar::ChipShape,
     current: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_right: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
     let colour = if current {
         palette::current().accent
@@ -8826,6 +8863,7 @@ fn topic_tab(
         .when(current, |d| d.bg(rgb(palette::current().panel_hi)))
         .hover(|d| d.bg(rgb(palette::current().panel_hi)))
         .on_click(on_click)
+        .on_mouse_down(MouseButton::Right, on_right)
         .children(icon)
         .child(SharedString::from(label))
 }
