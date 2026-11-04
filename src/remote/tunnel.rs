@@ -196,6 +196,15 @@ pub fn ensure_binary(state_dir: &Path) -> Result<PathBuf> {
 /// is terminated and no state file is written; the log is kept for
 /// diagnosis.
 pub fn start(spec: &TunnelSpec) -> Result<TunnelState> {
+    // Hold the start lock across check → spawn → record: the URL wait runs
+    // seconds-to-minutes, and without the lock two concurrent `connect`s
+    // both observe "no tunnel" and double-spawn cloudflared.
+    let start_lock = PathBuf::from(format!(
+        "{}.lock",
+        state_path(&spec.state_dir).display()
+    ));
+    let _start_guard = super::state_lock::exclusive_wait(&start_lock, super::state_lock::WAIT)?;
+
     if status(&spec.state_dir)?.is_some() {
         anyhow::bail!(
             "a tunnel is already running ({}); stop it first",
