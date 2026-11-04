@@ -208,6 +208,10 @@ pub fn start(spec: &TunnelSpec) -> Result<TunnelState> {
     };
     std::fs::create_dir_all(&spec.state_dir)?;
     let log = log_path(&spec.state_dir);
+    // `stop` removes tunnel.json but keeps the log, and cloudflared appends
+    // to `--logfile`: without truncation a repeat connect in the same state
+    // dir could adopt the dead tunnel's URL. Fresh log, fresh tunnel.
+    std::fs::File::create(&log).context("truncate stale tunnel.log")?;
 
     let child = std::process::Command::new(&binary)
         .args([
@@ -302,21 +306,28 @@ fn wait_for_url(log: &Path, timeout: Duration) -> Option<String> {
     }
 }
 
-/// Extract the first `https://<id>.trycloudflare.com` URL from cloudflared
-/// log text. Deliberately regex-free: split on whitespace, trim wrapping
+/// Extract the most recent `https://<id>.trycloudflare.com` URL from
+/// cloudflared log text. `start` truncates the log, so normally there is
+/// exactly one; when stale content survives anyway, cloudflared's append
+/// semantics mean the *last* match is the live tunnel's. Deliberately
+/// regex-free: split on whitespace, trim wrapping
 /// punctuation (log banners box the URL in `|`s and prose wraps it in
 /// parens), then require the exact scheme and domain suffix. Lookalikes
 /// (`…trycloudflare.com.evil.io`, `https://evil.com/trycloudflare.com`)
 /// fail the suffix/prefix checks.
 pub fn parse_trycloudflare_url(text: &str) -> Option<String> {
     const MIN_LEN: usize = "https://_.trycloudflare.com".len();
-    text.split_whitespace().find_map(|tok| {
-        let url = tok.trim_matches(|c: char| {
-            !c.is_ascii_alphanumeric() && c != '-' && c != '.' && c != ':' && c != '/'
-        });
-        (url.starts_with("https://") && url.ends_with(".trycloudflare.com") && url.len() >= MIN_LEN)
-            .then(|| url.to_string())
-    })
+    text.split_whitespace()
+        .filter_map(|tok| {
+            let url = tok.trim_matches(|c: char| {
+                !c.is_ascii_alphanumeric() && c != '-' && c != '.' && c != ':' && c != '/'
+            });
+            (url.starts_with("https://")
+                && url.ends_with(".trycloudflare.com")
+                && url.len() >= MIN_LEN)
+                .then(|| url.to_string())
+        })
+        .last()
 }
 
 fn save_state(state_dir: &Path, state: &TunnelState) -> Result<()> {

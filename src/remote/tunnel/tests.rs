@@ -4,6 +4,14 @@ use std::os::unix::fs::PermissionsExt;
 /// A stand-in for cloudflared: honours `--logfile`, optionally writes a
 /// real-shaped URL line, then `exec sleep` so SIGTERM hits it directly.
 fn stub_script(dir: &Path, writes_url: bool) -> PathBuf {
+    stub_script_with_url(
+        dir,
+        writes_url.then_some("https://stub-abc-123.trycloudflare.com"),
+    )
+}
+
+/// `url`: the host the stub announces (`None` = never prints a URL).
+fn stub_script_with_url(dir: &Path, url: Option<&str>) -> PathBuf {
     let path = dir.join("cloudflared-stub");
     let mut body = String::from(
         "#!/bin/sh\nLOG=/dev/null\nwhile [ $# -gt 0 ]; do\ncase \"$1\" in\n--logfile) shift; LOG=\"$1\";;\nesac\nshift\ndone\n",
@@ -11,10 +19,10 @@ fn stub_script(dir: &Path, writes_url: bool) -> PathBuf {
     // Real cloudflared creates the logfile immediately (before any URL
     // line); model that so the "log kept for diagnosis" contract is testable.
     body.push_str("touch \"$LOG\"\n");
-    if writes_url {
-        body.push_str(
-                "echo \"2026-10-30T00:00:00Z INF Your quick Tunnel has been created! Visit it at (it may take some time to be reachable):\" >> \"$LOG\"\necho \"2026-10-30T00:00:00Z INF https://stub-abc-123.trycloudflare.com\" >> \"$LOG\"\n",
-            );
+    if let Some(host) = url {
+        body.push_str(&format!(
+            "echo \"2026-10-30T00:00:00Z INF Your quick Tunnel has been created! Visit it at (it may take some time to be reachable):\" >> \"$LOG\"\necho \"2026-10-30T00:00:00Z INF {host}\" >> \"$LOG\"\n"
+        ));
     }
     body.push_str("exec sleep 30\n");
     std::fs::write(&path, body).unwrap();
@@ -113,6 +121,47 @@ fn start_status_stop_lifecycle_with_stub() {
     assert!(stop(dir.path()).unwrap());
     assert!(status(dir.path()).unwrap().is_none());
     assert!(!stop(dir.path()).unwrap(), "second stop is a no-op");
+}
+
+#[test]
+fn parse_url_takes_latest_when_log_has_stale_entries() {
+    // cloudflared appends to --logfile; leftover content from a previous
+    // tunnel must never win over the live tunnel's URL.
+    let log = "INF https://old-dead-1.trycloudflare.com\nINF https://new-live-2.trycloudflare.com\n";
+    assert_eq!(
+        parse_trycloudflare_url(log).as_deref(),
+        Some("https://new-live-2.trycloudflare.com")
+    );
+}
+
+#[test]
+fn second_start_after_stop_reports_new_tunnel_url() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = stub_script_with_url(dir.path(), Some("https://first-tunnel-1.trycloudflare.com"));
+    let spec = TunnelSpec {
+        port: 18997,
+        state_dir: dir.path().to_path_buf(),
+        binary: Some(first),
+        url_timeout: Duration::from_secs(10),
+    };
+    let state = start(&spec).expect("first start");
+    assert_eq!(state.url, "https://first-tunnel-1.trycloudflare.com");
+    assert!(stop(dir.path()).unwrap());
+    // stop removes tunnel.json but keeps the log: the dead tunnel's URL is
+    // still on disk, exactly like a repeat `connect` in the same state dir.
+    assert!(log_path(dir.path()).exists());
+
+    let second =
+        stub_script_with_url(dir.path(), Some("https://second-tunnel-2.trycloudflare.com"));
+    let spec = TunnelSpec {
+        port: 18997,
+        state_dir: dir.path().to_path_buf(),
+        binary: Some(second),
+        url_timeout: Duration::from_secs(10),
+    };
+    let state = start(&spec).expect("second start must not adopt the dead tunnel's URL");
+    assert_eq!(state.url, "https://second-tunnel-2.trycloudflare.com");
+    assert!(stop(dir.path()).unwrap());
 }
 
 #[test]
