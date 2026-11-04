@@ -4364,6 +4364,14 @@ impl Render for Dashboard {
                 }
                 None => self.plan.set_path(None),
             }
+            // The header's ink is data, not layout: log the string the chip
+            // will print whenever the open conversation changes, so a header
+            // that reads wrong traces to its source without a rebuild. The
+            // bare `\u{2026}` the owner screenshotted had no such trail and cost
+            // two days of guessing at padding (#2480).
+            if let Some(name) = self.open_chat_name() {
+                logging::debug(&format!("header: painting name {name:?}"));
+            }
         }
         self.plan.refresh();
 
@@ -8554,21 +8562,57 @@ fn help_rows() -> Vec<(
 /// owner's screen: a fat band with the text swimming in vertical dead space.
 /// py_1 with px_2 is the mockup ratio; the border and tint stay, he asked for
 /// them and rejecting a later regression does not un-ask it.
+/// The most characters the header prints before it shortens (#2480). A name
+/// is a label, not the conversation: the rail and the window title keep the
+/// whole string.
+const HEADER_NAME_CHARS: usize = 42;
+
+/// The name the header chip prints.
+///
+/// The shortening happens here, in Rust, and never leans on the text engine.
+/// `truncate()` on a stretched column painted a bare `\u{2026}` on the owner's
+/// screen while the stored name was `CrabsDev`: a full width band whose only
+/// ink was three dots. Whatever this function returns is what gets painted.
+fn header_name(name: &str) -> String {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return rail::UNTITLED.to_string();
+    }
+    let mut chars = trimmed.chars();
+    let short: String = chars.by_ref().take(HEADER_NAME_CHARS).collect();
+    if chars.next().is_some() {
+        format!("{short}\u{2026}")
+    } else {
+        short
+    }
+}
+
+/// The conversation name as a chip hugging its text (#2480).
+///
+/// The chip sits inside a row, on purpose. A div laid straight into the
+/// header column is stretched across the whole chat by the default cross axis
+/// alignment, which is the full width band that read as a button. A row hands
+/// the chip its own content width and nothing else.
 fn session_title_chip(name: &str) -> impl IntoElement {
     div()
-        .flex_none()
+        .flex()
+        .flex_row()
+        .items_center()
         .min_w_0()
-        .px_2()
-        .py_1()
-        .rounded_md()
-        .bg(rgb(palette::current().panel))
-        .border_1()
-        .border_color(rgb(palette::current().panel_hi))
-        .text_base()
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .text_color(rgb(palette::current().text_normal))
-        .truncate()
-        .child(SharedString::from(name.to_string()))
+        .child(
+            div()
+                .flex_none()
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .bg(rgb(palette::current().panel))
+                .border_1()
+                .border_color(rgb(palette::current().panel_hi))
+                .text_base()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(rgb(palette::current().text_normal))
+                .child(SharedString::from(header_name(name))),
+        )
 }
 
 /// The chat's `...` button with its items below it while the menu is open
@@ -8636,11 +8680,16 @@ fn topic_strip(
         .on_click(toggle_edge)
         .child(SharedString::from("\u{25EB}"));
     if edge.is_vertical() {
+        // The column hugs its chips. A fixed 12rem width reserved 192px of
+        // empty rail for four narrow chips and pushed the chat ~450px right
+        // on the owner's window: that empty column was the dead space he
+        // reported for two days (#2480). max_w still stops a long topic name
+        // from eating the window.
         div()
             .flex()
             .flex_col()
             .flex_none()
-            .w(rems(12.0))
+            .max_w(rems(12.0))
             .items_start()
             .gap_2()
             .p_2()
