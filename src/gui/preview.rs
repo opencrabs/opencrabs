@@ -18,6 +18,7 @@ use gpui::{
     div, img, px, rgb, rgba,
 };
 
+use crate::attachment_style;
 use crate::attachment_view;
 use crate::logging;
 use crate::palette;
@@ -571,13 +572,17 @@ fn image_body(
     // zoomed past the window is reached by scrolling the card, not by having
     // it paint over the toolbar.
     let (w, h) = (IMAGE_BOX.0 * zoom, IMAGE_BOX.1 * zoom);
+    let theme = palette::current();
     div()
         .id("preview-image")
         .flex()
         .items_center()
         .justify_center()
-        .bg(rgb(palette::current().bg))
+        .bg(rgb(theme.bg))
+        .rounded(px(attachment_style::MEDIA_RADIUS))
         .overflow_hidden()
+        .border_1()
+        .border_color(attachment_style::ring(theme))
         .cursor_pointer()
         .on_scroll_wheel(move |ev, window, cx| wheel(ev, window, cx))
         .child(
@@ -611,6 +616,7 @@ fn video_body(preview: &Preview, poster: Option<&Path>) -> AnyElement {
     if !preview.path.exists() {
         return missing_body(preview);
     }
+    let theme = palette::current();
     let boxed = div()
         .flex()
         .flex_col()
@@ -622,8 +628,11 @@ fn video_body(preview: &Preview, poster: Option<&Path>) -> AnyElement {
         // its row before #2395.
         .w(px(IMAGE_BOX.0))
         .h(px(IMAGE_BOX.1))
-        .bg(rgb(palette::current().bg))
-        .overflow_hidden();
+        .bg(rgb(theme.bg))
+        .rounded(px(attachment_style::MEDIA_RADIUS))
+        .overflow_hidden()
+        .border_1()
+        .border_color(attachment_style::ring(theme));
     match poster {
         Some(frame) => boxed
             .child(
@@ -819,6 +828,7 @@ pub fn overlay(
     let close = std::rc::Rc::new(close);
     let scrim_close = close.clone();
     let button_close = close.clone();
+    let theme = palette::current();
     div()
         .id("preview-scrim")
         // Modal: the dim scrim owns the pointer, so a click meant for the
@@ -847,9 +857,11 @@ pub fn overlay(
                 // over the window: the card is the frame, the picture is what
                 // fits in it.
                 .overflow_hidden()
+                .rounded(px(attachment_style::PREVIEW_RADIUS))
                 .border_1()
-                .border_color(rgb(palette::current().panel_hi))
-                .bg(rgb(palette::current().panel))
+                .border_color(attachment_style::ring(theme))
+                .bg(attachment_style::surface(theme))
+                .shadow_md()
                 // Inert: the click stops here instead of reaching the scrim,
                 // so looking closely at a picture never closes it.
                 .on_click(|_ev, _window, cx| cx.stop_propagation())

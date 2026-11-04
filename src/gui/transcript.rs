@@ -40,6 +40,7 @@ use opencrabs::tui::render::{
     TurnSummary, format_turn_header, format_turn_spinner_meta, is_deliverable_report,
 };
 
+use crate::attachment_style;
 use crate::attachment_view;
 use crate::editor::{Attachment, marker_paths, strip_markers};
 use crate::markdown;
@@ -1247,15 +1248,14 @@ fn history_attachments(
 /// that decides how tall the row is.
 fn attachment_cell(path: &std::path::Path, side: f32) -> Div {
     let attachment = Attachment::for_display(path.to_path_buf());
+    let theme = palette::current();
     let tile: AnyElement = if attachment.is_image() {
         div()
             .w(px(side))
             .h(px(side))
             .flex_shrink_0()
             .overflow_hidden()
-            .bg(rgb(palette::current().panel))
-            .border_1()
-            .border_color(rgb(palette::current().track))
+            .bg(rgb(theme.panel))
             .child(
                 img(path.to_path_buf())
                     .size_full()
@@ -1278,9 +1278,7 @@ fn attachment_cell(path: &std::path::Path, side: f32) -> Div {
             .h(px(side))
             .flex_shrink_0()
             .overflow_hidden()
-            .border_1()
-            .border_color(rgb(palette::current().track))
-            .bg(rgb(palette::current().panel_hi))
+            .bg(attachment_style::surface(theme))
             .text_lg()
             .child(if attachment.is_video {
                 "\u{1f3ac}"
@@ -1293,7 +1291,7 @@ fn attachment_cell(path: &std::path::Path, side: f32) -> Div {
                     .px_1()
                     .truncate()
                     .text_xs()
-                    .text_color(rgb(palette::current().text_muted))
+                    .text_color(rgb(theme.text_muted))
                     .child(SharedString::from(line)),
             );
         }
@@ -1304,19 +1302,40 @@ fn attachment_cell(path: &std::path::Path, side: f32) -> Div {
         .flex_col()
         .flex_shrink_0()
         .w(px(side))
-        .gap_1()
+        .rounded(px(attachment_style::TILE_RADIUS))
+        .overflow_hidden()
+        .border_1()
+        .border_color(attachment_style::ring(theme))
+        .bg(attachment_style::surface(theme))
+        .shadow_sm()
         .child(tile)
+        // The caption is part of the card and still fits the planner's exact
+        // CAPTION budget, including its separator and horizontal inset.
         .child(
             div()
-                .truncate()
-                .text_xs()
-                .text_color(rgb(palette::current().text_muted))
-                .child(SharedString::from(attachment.name)),
+                .flex()
+                .items_center()
+                .w_full()
+                .h(px(attachment_view::CAPTION))
+                .min_w_0()
+                .px_2()
+                .border_t_1()
+                .border_color(attachment_style::ring(theme))
+                .bg(rgb(theme.panel))
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_xs()
+                        .text_color(rgb(theme.text_muted))
+                        .child(SharedString::from(attachment.name)),
+                ),
         )
 }
 
 /// The last cell: how many files the strip did not draw.
 fn fold_cell(folded: usize, side: f32) -> AnyElement {
+    let theme = palette::current();
     div()
         .flex()
         .items_center()
@@ -1324,11 +1343,14 @@ fn fold_cell(folded: usize, side: f32) -> AnyElement {
         .w(px(side))
         .h(px(side))
         .flex_shrink_0()
+        .rounded(px(attachment_style::TILE_RADIUS))
+        .overflow_hidden()
         .border_1()
-        .border_color(rgb(palette::current().track))
-        .bg(rgb(palette::current().panel_hi))
+        .border_color(attachment_style::ring(theme))
+        .bg(attachment_style::surface(theme))
+        .shadow_sm()
         .text_sm()
-        .text_color(rgb(palette::current().text_muted))
+        .text_color(rgb(theme.text_muted))
         .child(SharedString::from(format!("+{folded}")))
         .into_any_element()
 }

@@ -25,6 +25,7 @@
 //! runs one conversation at a time.
 
 mod agent_bridge;
+mod attachment_style;
 mod attachment_view;
 mod bang;
 mod breakdown;

@@ -10,6 +10,7 @@
 //! movement respects grapheme boundaries (`unicode-segmentation`, already a
 //! direct dependency).
 
+use crate::attachment_style;
 use crate::palette;
 use opencrabs::ui_core::commands::completions;
 use std::ops::Range;
@@ -1437,6 +1438,7 @@ fn attachment_strip(attachments: &[Attachment], cx: &mut Context<Editor>) -> Div
         .w_full()
         .min_w_0()
         .gap_2();
+    let theme = palette::current();
     for (index, attachment) in attachments.iter().enumerate() {
         let remove = cx.listener(move |this, _ev: &MouseDownEvent, _window, cx| {
             // The ✕ must not also reach the editor: a click there would move
@@ -1471,6 +1473,7 @@ fn attachment_strip(attachments: &[Attachment], cx: &mut Context<Editor>) -> Div
                 .w(px(34.0))
                 .h(px(34.0))
                 .flex_shrink_0()
+                .rounded(px(attachment_style::MEDIA_RADIUS))
                 .overflow_hidden()
                 .child(
                     img(attachment.path.clone())
@@ -1486,7 +1489,9 @@ fn attachment_strip(attachments: &[Attachment], cx: &mut Context<Editor>) -> Div
                 .w(px(34.0))
                 .h(px(34.0))
                 .flex_shrink_0()
-                .bg(rgb(palette::current().bg))
+                .rounded(px(attachment_style::MEDIA_RADIUS))
+                .overflow_hidden()
+                .bg(rgb(theme.bg))
                 .child(if attachment.is_video { "🎬" } else { "📄" })
                 .into_any_element()
         };
@@ -1509,8 +1514,12 @@ fn attachment_strip(attachments: &[Attachment], cx: &mut Context<Editor>) -> Div
                 .gap_2()
                 .p_1()
                 .min_w_0()
+                .rounded(px(attachment_style::TILE_RADIUS))
                 .overflow_hidden()
-                .bg(rgb(palette::current().panel_hi))
+                .border_1()
+                .border_color(attachment_style::ring(theme))
+                .bg(attachment_style::surface(theme))
+                .shadow_sm()
                 .child(tile)
                 .child(
                     div()
