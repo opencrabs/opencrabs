@@ -71,9 +71,10 @@ pub fn copied_range(texts: &[String], anchor: TextPoint, end: TextPoint) -> Opti
         let text = &texts[start.row];
         let lo = boundary(text, start.offset);
         let hi = boundary(text, end.offset);
-        return (lo < hi)
-            .then(|| text[lo..hi].to_string())
-            .filter(|text| !text.is_empty());
+        return text
+            .get(lo..hi)
+            .filter(|text| !text.is_empty())
+            .map(ToOwned::to_owned);
     }
 
     let mut picked = Vec::with_capacity(end.row - start.row + 1);
@@ -88,7 +89,7 @@ pub fn copied_range(texts: &[String], anchor: TextPoint, end: TextPoint) -> Opti
         } else {
             text.len()
         };
-        picked.push(text[lo..hi].to_string());
+        picked.push(text.get(lo..hi).unwrap_or_default().to_string());
     }
     (!picked.iter().all(String::is_empty)).then(|| picked.join("\n\n"))
 }
