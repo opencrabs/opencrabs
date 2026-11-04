@@ -53,7 +53,7 @@ pub fn glass_fill(base: u32) -> Background {
 /// The concentric rule (#2513): a card nested `edge_inset` px inside a
 /// parent card carries `CARD_RADIUS - edge_inset`, so the curves nest
 /// instead of poking out. Derived here, never hardcoded per site.
-pub fn nested_radius(edge_inset: f32) -> f32 {
+pub fn concentric_radius(edge_inset: f32) -> f32 {
     CARD_RADIUS - edge_inset
 }
 
@@ -106,11 +106,11 @@ mod tests {
     }
 
     #[test]
-    fn the_nested_radius_follows_the_concentric_rule() {
+    fn concentric_radius_subtracts_the_edge_inset() {
         // A theme row inset 12px inside the dialog nests at 12px; a band
         // inset 4px nests at 20px. The derivation lives in one place.
-        assert_eq!(nested_radius(12.0), 12.0);
-        assert_eq!(nested_radius(4.0), 20.0);
-        assert_eq!(nested_radius(0.0), CARD_RADIUS);
+        assert_eq!(concentric_radius(12.0), 12.0);
+        assert_eq!(concentric_radius(4.0), 20.0);
+        assert_eq!(concentric_radius(0.0), CARD_RADIUS);
     }
 }

@@ -17,7 +17,7 @@
 //! truncation everywhere (#2271).
 
 use crate::palette;
-use opencrabs::ui_core::card::{CARD_RADIUS, glass_fill};
+use opencrabs::ui_core::card::{CARD_RADIUS, concentric_radius, glass_fill};
 use opencrabs::ui_core::copy_select::{self, covered_rows};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -1011,6 +1011,10 @@ fn md_table(t: &markdown::MdTable) -> Div {
         .flex_row()
         .items_start()
         .w_full()
+        // Top corners concentric with the grid curve (flush, gap 0): the
+        // glass band would otherwise paint square corners over it (#2514).
+        .rounded_tl(px(concentric_radius(0.0)))
+        .rounded_tr(px(concentric_radius(0.0)))
         .bg(glass_fill(palette::current().panel_hi));
     for i in 0..cols {
         head = head.child(table_cell(t.header.get(i).unwrap_or(&empty), true));
