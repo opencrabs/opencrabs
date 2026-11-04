@@ -6,6 +6,7 @@
 //! binary can link it as-is.
 
 pub mod bang;
+pub mod card;
 pub mod channel_status;
 pub mod commands;
 pub mod copy_select;
