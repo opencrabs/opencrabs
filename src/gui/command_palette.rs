@@ -9,15 +9,17 @@
 //! footer. The content is built by [`rows`], which is pure, so what the card
 //! says can be tested without a window.
 
-use gpui::ScrollWheelEvent;
 use gpui::{
-    App, ClickEvent, SharedString, Window, div, linear_color_stop, linear_gradient, prelude::*, px,
-    rems, rgb, rgba,
+    App, Bounds, ClickEvent, CursorStyle, Element, ElementId, Entity, GlobalElementId,
+    InspectorElementId, LayoutId, MouseButton, Pixels, Point, ScrollWheelEvent, SharedString,
+    Style, TextAlign, TextRun, WeakEntity, Window, WrappedLine, div, fill, linear_color_stop,
+    linear_gradient, point, prelude::*, px, relative, rems, rgb, rgba, size,
 };
+use std::ops::Range;
 use std::rc::Rc;
 
-use crate::palette;
-use opencrabs::ui_core::card::{CARD_RADIUS, concentric_radius};
+use crate::{Dashboard, palette};
+use opencrabs::ui_core::card::{SEEKER_RADIUS, seeker_concentric_radius};
 use opencrabs::ui_core::commands::{Support, support};
 use opencrabs::ui_core::palette::{PaletteKind, PaletteState, SEEKER_PAGE, roast};
 
@@ -132,15 +134,265 @@ const INK: u32 = 0xf2f3f5;
 const INK_MUTED: u32 = 0x9ba0aa;
 const INK_WARM: u32 = 0xe8b96a;
 
-pub fn overlay(
+/// The inactive kind chip's translucent white fill. Filled capsules read as
+/// one Spotlight control; the old transparent, bordered chips read as labels.
+const CHIP_FILL: u32 = 0xffffff14;
+
+/// The invitation the field prints while it is empty.
+const PLACEHOLDER: &str = "Seeker: sessions, feats, skills, docs, debug and more.";
+
+/// The shaped line and bounds from the latest paint. Mouse hit testing reads
+/// this snapshot; the shared palette state never depends on GPUI types.
+pub(super) struct FinderPaint {
+    pub line: Option<WrappedLine>,
+    pub bounds: Option<Bounds<Pixels>>,
+    pub line_height: Pixels,
+}
+
+impl Default for FinderPaint {
+    fn default() -> Self {
+        Self {
+            line: None,
+            bounds: None,
+            line_height: Pixels::ZERO,
+        }
+    }
+}
+
+/// Selection geometry in field-local pixels, derived from the real glyph
+/// positions rather than an estimated character width (#2534).
+fn selection_highlight(
+    line: &WrappedLine,
+    range: &Range<usize>,
+    line_height: Pixels,
+) -> Option<(Point<Pixels>, Point<Pixels>)> {
+    if range.is_empty() {
+        return None;
+    }
+    Some((
+        line.position_for_index(range.start, line_height)?,
+        line.position_for_index(range.end, line_height)?,
+    ))
+}
+
+struct SeekerTextElement {
+    paint: Entity<FinderPaint>,
+    query: String,
+    caret: usize,
+    selection: Option<Range<usize>>,
+    caret_on: bool,
+}
+
+impl IntoElement for SeekerTextElement {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+struct SeekerPrepaint {
+    line: WrappedLine,
+    selection: Option<(Point<Pixels>, Point<Pixels>)>,
+    caret: Option<Point<Pixels>>,
+}
+
+impl Element for SeekerTextElement {
+    type RequestLayoutState = ();
+    type PrepaintState = SeekerPrepaint;
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let mut style = Style::default();
+        style.size.width = relative(1.).into();
+        style.size.height = window.line_height().into();
+        (window.request_layout(style, [], cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        let empty = self.query.is_empty();
+        let display = if empty { PLACEHOLDER } else { &self.query };
+        let style = window.text_style();
+        let font_size = style.font_size.to_pixels(window.rem_size());
+        let run = TextRun {
+            len: display.len(),
+            font: style.font(),
+            color: rgb(if empty { INK_MUTED } else { INK }).into(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let line = window
+            .text_system()
+            .shape_text(
+                SharedString::from(display.to_string()),
+                font_size,
+                &[run],
+                None,
+                None,
+            )
+            .ok()
+            .and_then(|lines| lines.into_iter().next())
+            .unwrap_or_default();
+        let line_height = window.line_height();
+        let selection = self
+            .selection
+            .as_ref()
+            .and_then(|range| selection_highlight(&line, range, line_height));
+        // The caret is a glyph coordinate now. It hugs the actual insertion
+        // point, including the middle of a query, and disappears while a
+        // selection is live (#2531, #2534).
+        let caret = if self.caret_on && self.selection.is_none() {
+            line.position_for_index(self.caret, line_height)
+        } else {
+            None
+        };
+        self.paint.update(cx, |paint, _cx| {
+            paint.line = Some(line.clone());
+            paint.bounds = Some(bounds);
+            paint.line_height = line_height;
+        });
+        SeekerPrepaint {
+            line,
+            selection,
+            caret,
+        }
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let line_height = window.line_height();
+        if let Some((from, to)) = prepaint.selection {
+            window.paint_quad(fill(
+                Bounds::from_corners(
+                    point(bounds.left() + from.x.min(to.x), bounds.top() + from.y),
+                    point(
+                        bounds.left() + from.x.max(to.x),
+                        bounds.top() + from.y.max(to.y) + line_height,
+                    ),
+                ),
+                rgba(0x0a84ff66),
+            ));
+        }
+        prepaint
+            .line
+            .paint(
+                bounds.origin,
+                line_height,
+                TextAlign::Left,
+                Some(bounds),
+                window,
+                cx,
+            )
+            .unwrap();
+        if let Some(caret) = prepaint.caret {
+            window.paint_quad(fill(
+                Bounds::new(
+                    point(bounds.left() + caret.x, bounds.top() + caret.y),
+                    size(px(2.5), line_height),
+                ),
+                rgb(INK),
+            ));
+        }
+    }
+}
+
+/// The query field paints shaped text, selection and caret as one element.
+/// Mouse handlers update the same `PaletteState` the keyboard edits, so a
+/// click, a drag and a chord can never disagree about the insertion point.
+pub(super) fn query_line(
     state: &PaletteState,
+    view: WeakEntity<Dashboard>,
+    paint: Entity<FinderPaint>,
+    caret_on: bool,
+) -> impl IntoElement {
+    let (before, selected, _) = state.render_spans();
+    let selection = (!selected.is_empty()).then(|| before.len()..before.len() + selected.len());
+    let element = SeekerTextElement {
+        paint,
+        query: state.query().to_string(),
+        caret: before.len(),
+        selection,
+        caret_on,
+    };
+    let down = view.clone();
+    let up = view.clone();
+    let up_out = view.clone();
+    let drag = view;
+    div()
+        .id("seeker-query-field")
+        .flex_1()
+        .min_w_0()
+        .text_xl()
+        .cursor(CursorStyle::IBeam)
+        .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
+            let _ = down.update(cx, |this, cx| this.finder_mouse_down(event, cx));
+        })
+        .on_mouse_up(MouseButton::Left, move |_event, _window, cx| {
+            let _ = up.update(cx, |this, cx| this.finder_mouse_up(cx));
+        })
+        .on_mouse_up_out(MouseButton::Left, move |_event, _window, cx| {
+            let _ = up_out.update(cx, |this, cx| this.finder_mouse_up(cx));
+        })
+        .on_mouse_move(move |event, _window, cx| {
+            let _ = drag.update(cx, |this, cx| this.finder_mouse_move(event, cx));
+        })
+        .child(element)
+}
+
+/// Presentation state for one Seeker frame. Grouping the borrowed engine,
+/// reveal flags and paint handles keeps the renderer's callback list readable.
+pub(super) struct FinderOverlayState<'a> {
+    pub state: &'a PaletteState,
+    pub idle_revealed: bool,
+    pub caret_on: bool,
+    pub view: WeakEntity<Dashboard>,
+    pub paint: Entity<FinderPaint>,
+}
+
+pub(super) fn overlay(
+    frame: FinderOverlayState<'_>,
     pick: Vec<PickHandler>,
     chip: ChipHandler,
     wheel: impl Fn(&ScrollWheelEvent, &mut Window, &mut App) + 'static,
     setup: Option<&'static str>,
-    idle_revealed: bool,
-    caret_on: bool,
 ) -> impl IntoElement {
+    let FinderOverlayState {
+        state,
+        idle_revealed,
+        caret_on,
+        view,
+        paint,
+    } = frame;
     let theme = palette::current();
     let printed = rows(state);
     let idle = state.query().trim().is_empty();
@@ -183,20 +435,12 @@ pub fn overlay(
 
     // The field: Spotlight's floating pill, fatter than his, with the
     // invitation wrapping to two grey lines. No icon in the bar; the caret
-    // blinks while the pill owns the keyboard (#2491, #2495).
-    let caret = |on: bool| {
-        div()
-            .w(px(2.5))
-            .h(px(30.0))
-            .rounded(px(2.0))
-            .bg(rgb(if on { INK } else { 0x1b1b25 }))
-    };
-    let empty = state.query().is_empty();
+    // blinks while the pill owns the keyboard, and stops once typing does
+    // (#2491, #2495, #2531).
     let pill = div()
         .flex()
         .flex_row()
         .items_center()
-        .gap_3()
         .px_5()
         .py_4()
         .rounded_full()
@@ -204,26 +448,14 @@ pub fn overlay(
         .border_1()
         .border_color(rgba(0xffffff2e))
         .shadow_md()
-        .when(empty, |d| d.child(caret(caret_on)))
-        .child(
-            div()
-                .text_xl()
-                .when(empty, |d| d.flex_1())
-                .text_color(rgb(if empty { INK_MUTED } else { INK }))
-                .child(SharedString::from(if empty {
-                    "Seeker: sessions, feats, skills, docs, debug and more.".to_string()
-                } else {
-                    state.query().to_string()
-                })),
-        )
-        .when(!empty, |d| d.child(caret(caret_on)).child(div().flex_1()));
+        .child(query_line(state, view, paint, caret_on));
     shell = shell.child(pill);
 
     let mut card = div()
         .flex()
         .flex_col()
         .max_h(px(480.0))
-        .rounded(px(CARD_RADIUS))
+        .rounded(px(SEEKER_RADIUS))
         .border_1()
         .border_color(rgba(0xffffff2e))
         .bg(glass)
@@ -245,17 +477,22 @@ pub fn overlay(
                         .px_2()
                         .py_0p5()
                         .rounded_full()
-                        .border_1()
                         .text_xs()
                         .cursor_pointer()
                         .when(active, |d| {
-                            d.border_color(rgb(theme.accent))
+                            d.bg(rgba((theme.accent << 8) | 0x2e))
                                 .text_color(rgb(theme.accent))
                         })
                         .when(!active, |d| {
-                            d.border_color(rgba(0xffffff14)).text_color(rgb(INK_MUTED))
+                            d.bg(rgba(CHIP_FILL)).text_color(rgb(INK_MUTED))
                         })
-                        .hover(|d| d.border_color(rgb(theme.accent)))
+                        .hover(|d| {
+                            if active {
+                                d.bg(rgba((theme.accent << 8) | 0x42))
+                            } else {
+                                d.bg(rgba(0xffffff28)).text_color(rgb(INK))
+                            }
+                        })
                         .on_click(move |_ev, _window, cx| {
                             cx.stop_propagation();
                             press(kind, cx);
@@ -286,7 +523,7 @@ pub fn overlay(
                 .gap_2()
                 .px_2()
                 .py_1p5()
-                .rounded(px(concentric_radius(12.0)))
+                .rounded(px(seeker_concentric_radius(12.0)))
                 .cursor_pointer()
                 .when(armed, |d| d.bg(armed_bg));
             if armed && !rowv.missing {
@@ -488,6 +725,82 @@ mod tests {
             .find(|r| r.title == "Channels overview")
             .expect("the docs row prints");
         assert_eq!(docs.kind, "docs");
+    }
+
+    /// The caret rides the actual insertion glyph, not a flex gap or an
+    /// estimated character width (#2531, #2534). The shaped line also owns
+    /// selection painting, so moving the caret cannot detach it from the text.
+    #[test]
+    fn seeker_caret_hugs_the_query_in_one_gap_less_row() {
+        let src = include_str!("command_palette.rs");
+        assert!(
+            src.contains("line.position_for_index(self.caret, line_height)"),
+            "the caret is painted at the shaped insertion point"
+        );
+        assert!(
+            src.contains("fn selection_highlight"),
+            "selection geometry comes from that same shaped line"
+        );
+        let line = src
+            .find("fn query_line")
+            .expect("the query line is one function, so no caller can drift");
+        let body = src.get(line..).expect("query_line starts on a glyph");
+        let body_end = body.find("\n}\n").expect("query_line closes");
+        let body = body
+            .get(..body_end)
+            .expect("the closing brace starts on a glyph");
+        assert!(
+            !body.contains("gap_"),
+            "no flex gap can insert phantom space beside the caret"
+        );
+        let pill = src
+            .find("let pill = div()")
+            .expect("the pill is drawn in overlay()");
+        let pill_src = src.get(pill..).expect("the pill starts on a glyph");
+        let pill_end = pill_src
+            .find(".child(query_line(")
+            .expect("the pill draws the line");
+        let pill_src = pill_src
+            .get(..pill_end)
+            .expect("the query line starts on a glyph");
+        assert!(
+            !pill_src.contains("gap_3"),
+            "the pill row itself carries no gap either"
+        );
+    }
+
+    /// The results card uses its dedicated 32px radius, and its rows nest
+    /// on that curve instead of carrying a hardcoded radius (#2532).
+    #[test]
+    fn seeker_card_is_rounder_and_its_rows_nest() {
+        let src = include_str!("command_palette.rs");
+        assert!(
+            src.contains(".rounded(px(SEEKER_RADIUS))"),
+            "the results card is drawn on the dedicated Seeker radius"
+        );
+        assert!(
+            src.contains(".rounded(px(seeker_concentric_radius("),
+            "rows nest on the Seeker curve instead of a hardcoded number"
+        );
+    }
+
+    /// The blink has an idle cutoff. A caret that never stops reads as a
+    /// stuck cell, not a field (#2531).
+    #[test]
+    fn seeker_caret_stops_blinking_once_typing_stops() {
+        let src = include_str!("main.rs");
+        assert!(
+            src.contains("const CARET_IDLE_AFTER"),
+            "the idle window is a named constant"
+        );
+        assert!(
+            src.contains("caret_blinks("),
+            "the blink loop asks the shared rule whether the field is still live"
+        );
+        assert!(
+            src.contains("fn finder_activity_reset"),
+            "a key restarts the window"
+        );
     }
 
     /// The top row is armed before any arrow press, because Enter acts on it:

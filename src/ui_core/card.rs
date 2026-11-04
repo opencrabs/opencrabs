@@ -11,9 +11,13 @@
 use gpui::{Background, Hsla, linear_color_stop, linear_gradient, rgba};
 
 /// The one radius, in px, every chat card surface uses (#2497).
-///
-/// Matches the Seeker results card (#2505).
+/// The Seeker has its own rounder token, so changing its Spotlight shape
+/// cannot resize every chat card with it (#2532).
 pub const CARD_RADIUS: f32 = 24.0;
+
+/// The Seeker results card, in px. Its rows derive their nesting curve from
+/// this token rather than the chat card radius (#2532).
+pub const SEEKER_RADIUS: f32 = 32.0;
 
 /// The glass's top alpha, 0xf2 (about 0.95): nearly solid where the
 /// content starts.
@@ -57,13 +61,20 @@ pub fn concentric_radius(edge_inset: f32) -> f32 {
     CARD_RADIUS - edge_inset
 }
 
+/// The same nesting rule inside the Seeker's dedicated results card (#2532).
+pub fn seeker_concentric_radius(edge_inset: f32) -> f32 {
+    SEEKER_RADIUS - edge_inset
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn the_token_is_the_seeker_card_radius() {
+    fn seeker_radius_is_dedicated_to_the_results_card() {
         assert_eq!(CARD_RADIUS, 24.0);
+        assert_eq!(SEEKER_RADIUS, 32.0);
+        const { assert!(SEEKER_RADIUS > CARD_RADIUS) };
     }
 
     #[test]
@@ -107,10 +118,16 @@ mod tests {
 
     #[test]
     fn concentric_radius_subtracts_the_edge_inset() {
-        // A theme row inset 12px inside the dialog nests at 12px; a band
-        // inset 4px nests at 20px. The derivation lives in one place.
+        // Chat cards keep their established 24px curve (#2497).
         assert_eq!(concentric_radius(12.0), 12.0);
         assert_eq!(concentric_radius(4.0), 20.0);
         assert_eq!(concentric_radius(0.0), CARD_RADIUS);
+    }
+
+    #[test]
+    fn seeker_rows_nest_inside_the_dedicated_radius() {
+        assert_eq!(seeker_concentric_radius(12.0), SEEKER_RADIUS - 12.0);
+        assert_eq!(seeker_concentric_radius(4.0), SEEKER_RADIUS - 4.0);
+        assert_eq!(seeker_concentric_radius(0.0), SEEKER_RADIUS);
     }
 }
