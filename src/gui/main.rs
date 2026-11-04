@@ -7168,7 +7168,11 @@ impl Render for Dashboard {
                     .flex_row()
                     .items_center()
                     .justify_between()
-                    .child(text("themes", Size::Sm, shown.text))
+                    .w_full()
+                    .pb_2()
+                    .border_b_1()
+                    .border_color(rgb(shown.track))
+                    .child(text("Themes", Size::Sm, shown.text))
                     .child(div().text_xs().text_color(rgb(shown.text_muted)).child(
                         SharedString::from(format!("{}/{}", current + 1, names.len())),
                     ));
@@ -7223,14 +7227,14 @@ impl Render for Dashboard {
                         .justify_center()
                         .px_3()
                         .py_1()
-                        .rounded(px(6.0))
+                        .rounded(px(CARD_RADIUS))
                         .bg(rgb(shown.panel_hi))
                         .border_1()
                         .border_color(rgb(shown.accent))
                         .text_color(rgb(shown.text))
                         .cursor_pointer()
                         .on_click(keep)
-                        .child("keep"),
+                        .child("Keep"),
                 );
                 let hint = match &picked {
                     Some(name) => format!(
@@ -10768,6 +10772,15 @@ mod tests {
         assert!(src.contains("themes_view::history_row"));
         assert!(src.contains("\"enter\" => {"));
         assert!(src.contains(".id(\"themes-keep\")"));
+        assert!(src.contains(".child(text(\"Themes\", Size::Sm, shown.text))"));
+        assert!(src.contains(".rounded(px(CARD_RADIUS))"));
+        assert!(src.contains(".child(\"Keep\")"));
+        let header = src
+            .split("let header = div()")
+            .find(|block| block.contains("text(\"Themes\""))
+            .expect("themes header");
+        assert!(header.contains(".border_b_1()"));
+        assert!(header.contains(".border_color(rgb(shown.track))"));
     }
 
     /// One dialog, one delete path. The bridge that erases the row has exactly
