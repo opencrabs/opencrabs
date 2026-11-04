@@ -2163,6 +2163,13 @@ impl App {
 
             self.input_buffer.clear();
             self.cursor_position = 0;
+            // The focused pane's cached copy dies with the send too: the
+            // pane is the source of truth for inactive rendering and the
+            // next stash, and a stale duplicate would resurrect the sent
+            // text on refocus.
+            if let Some(pane) = self.pane_manager.focused_pane_mut() {
+                pane.clear_input();
+            }
             self.attachments.clear();
             self.focused_attachment = None;
             self.slash_suggestions_active = false;
@@ -2802,8 +2809,21 @@ impl App {
                     pane.session_id = Some(sid);
                 }
             }
+            // Stash the working input with the original pane before split
+            // moves focus; the new pane starts empty and awaits its own
+            // session (#2494).
+            self.pane_manager.stash_input(
+                &mut self.input_buffer,
+                &mut self.cursor_position,
+                &mut self.input_history_index,
+            );
             self.pane_manager
                 .split(crate::tui::pane::SplitDirection::Horizontal);
+            self.pane_manager.adopt_input(
+                &mut self.input_buffer,
+                &mut self.cursor_position,
+                &mut self.input_history_index,
+            );
             self.pane_manager.save_layout();
             // Stay on sessions screen — user picks which session goes in the new pane.
             // When they press Enter, load_session assigns it to the focused (new) pane.
@@ -2815,8 +2835,18 @@ impl App {
                     pane.session_id = Some(sid);
                 }
             }
+            self.pane_manager.stash_input(
+                &mut self.input_buffer,
+                &mut self.cursor_position,
+                &mut self.input_history_index,
+            );
             self.pane_manager
                 .split(crate::tui::pane::SplitDirection::Vertical);
+            self.pane_manager.adopt_input(
+                &mut self.input_buffer,
+                &mut self.cursor_position,
+                &mut self.input_history_index,
+            );
             self.pane_manager.save_layout();
             // Stay on sessions screen — user picks which session goes in the new pane.
         } else if event.code == KeyCode::Char('d') || event.code == KeyCode::Char('D') {

@@ -16,7 +16,7 @@ use ratatui::{
 
 /// Render the plan checklist panel.
 pub(super) fn render_plan_checklist(f: &mut Frame, app: &App, area: Rect) {
-    let plan = match app.plan_document.as_ref() {
+    let plan = match app.plan_document() {
         Some(p) => p,
         None => return,
     };

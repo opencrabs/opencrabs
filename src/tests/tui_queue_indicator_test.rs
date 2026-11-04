@@ -44,6 +44,11 @@ async fn app_with_session() -> (App, uuid::Uuid) {
     let session = Session::new(Some("queue indicator".to_string()), None, None);
     let sid = session.id;
     app.current_session = Some(session);
+    // Hermetic against the host: App::new restores ~/.opencrabs/layout.json,
+    // so a fresh App can come up split with unbound panes whose queue strip
+    // never renders. Reset to one pane so the window queue this module pins
+    // is the one that draws.
+    app.pane_manager = crate::tui::pane::PaneManager::new();
     (app, sid)
 }
 

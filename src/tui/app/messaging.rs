@@ -272,6 +272,14 @@ impl App {
         // `load_session` further down this file. Persisting the layout
         // makes the binding survive restarts when the pane is split.
         if let Some(pane) = self.pane_manager.focused_pane_mut() {
+            // A brand-new session must not inherit text typed for the old
+            // one: clear the pane's stashed input on an actual rebind (#2494).
+            if pane.session_id != Some(session.id) {
+                pane.clear_input();
+                self.input_buffer.clear();
+                self.cursor_position = 0;
+                self.input_history_index = None;
+            }
             pane.session_id = Some(session.id);
         }
         if self.pane_manager.is_split() {
@@ -640,6 +648,16 @@ impl App {
 
         // Keep focused pane in sync with loaded session
         if let Some(pane) = self.pane_manager.focused_pane_mut() {
+            // Loading a DIFFERENT session into this pane clears its stashed
+            // input: half-typed text belonged to the previous conversation
+            // and must never fire into the new one (#2494). A same-session
+            // reload (Tab-back, session list refresh) keeps it.
+            if pane.session_id != Some(session_id) {
+                pane.clear_input();
+                self.input_buffer.clear();
+                self.cursor_position = 0;
+                self.input_history_index = None;
+            }
             pane.session_id = Some(session_id);
         }
         // Persist layout so pane-to-session mapping survives restarts
@@ -1308,6 +1326,13 @@ impl App {
                     return true;
                 }
                 let closed = self.pane_manager.close_all_but_focused();
+                // The closed panes' input died with them; adopt whatever the
+                // surviving focused pane had stashed (#2494).
+                self.pane_manager.adopt_input(
+                    &mut self.input_buffer,
+                    &mut self.cursor_position,
+                    &mut self.input_history_index,
+                );
                 self.pane_manager.save_layout();
                 if let Some(sid) = self.pane_manager.focused_pane().and_then(|p| p.session_id)
                     && self.current_session.as_ref().map(|s| s.id) != Some(sid)
@@ -1517,7 +1542,7 @@ impl App {
                     reply = format!("⏹️ Cancelled the running turn. {reply}");
                 }
                 self.push_system_message(reply);
-                self.plan_document = None;
+                self.pane_manager.clear_focused_plan();
                 true
             }
             s if s == "/architecture" || s.starts_with("/architecture ") => {
@@ -3205,6 +3230,18 @@ impl App {
         self.send_message_inner(content, false).await
     }
 
+    /// The session a submit must target: the focused pane's session in
+    /// split mode, the window-level current session in single mode. The
+    /// send path resolves through this so a pane's message can never ride
+    /// a stale window-level bind into another pane's conversation.
+    pub(crate) fn send_target_session_id(&self) -> Option<Uuid> {
+        if self.pane_manager.is_split() {
+            self.pane_manager.focused_pane().and_then(|p| p.session_id)
+        } else {
+            self.current_session.as_ref().map(|s| s.id)
+        }
+    }
+
     /// Send a prompt that came from a slash command, skill, or user-command
     /// expansion. Skips the prompt analyzer: soft-nudge is for natural-language
     /// user chat only, not for prose a command or skill author wrote.
@@ -3213,6 +3250,29 @@ impl App {
     }
 
     async fn send_message_inner(&mut self, content: String, command_sourced: bool) -> Result<()> {
+        // Split mode targets the focused pane's session, never the
+        // window-level bind: async events can rebind current_session while
+        // the user keeps typing in a pane, and the send must follow the pane
+        // the text was typed in. Divergence is repaired with the same load a
+        // focus switch performs, so every downstream use below sees the
+        // pane's session. An unbound focused pane has no honest target:
+        // refuse the send rather than let it fall through to the window bind
+        // and cross wires.
+        if self.pane_manager.is_split() {
+            match self.send_target_session_id() {
+                Some(target) if self.current_session.as_ref().map(|s| s.id) != Some(target) => {
+                    self.load_session(target).await?;
+                }
+                Some(_) => {}
+                None => {
+                    self.push_system_message(
+                        "This pane has no session bound. Open or create a session in it first."
+                            .to_string(),
+                    );
+                    return Ok(());
+                }
+            }
+        }
         // A closed topic refuses new turns, with a notice that says why, so the
         // message is never dropped without a word (#2305).
         if self
@@ -3241,7 +3301,7 @@ impl App {
         // Terminal plans no longer linger on disk — completing archives and
         // discarding deletes — so a vanished file is the only "moved on"
         // signal, and the shared loader resolves legacy terminal statuses.
-        if self.plan_document.is_some() {
+        if self.plan_document().is_some() {
             self.reload_plan();
         }
 
@@ -3905,7 +3965,7 @@ impl App {
         // restore gap) carries an involuntarily-remapped pair that must never
         // overwrite the session's saved choice — that was the silent-switch bug.
         let response_started_on_session_provider = response.started_on_session_provider;
-        let plan_path = self.plan_file_path.clone();
+        let plan_path = self.plan_file_path().cloned();
 
         tokio::spawn(async move {
             // Persist the {provider, model} pair from the response onto the

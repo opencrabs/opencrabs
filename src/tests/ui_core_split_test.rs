@@ -1,6 +1,9 @@
 //! The split-pane chord and layout rule (#2438).
 
-use crate::ui_core::split::{EVEN_SHARE, Layout, MIN_PANE_PX, chord_layout, share_after_drag};
+use crate::ui_core::split::{
+    EVEN_SHARE, Layout, MIN_PANE_PX, PANE_BODY_FLOOR, PANE_CHROME_ROWS, PANE_INPUT_ROWS,
+    PANE_STRIP_MAX, PANE_STRIP_MIN, chord_layout, pane_rows, pane_strip_height, share_after_drag,
+};
 
 #[test]
 fn ctrl_shift_pipe_splits_side_by_side() {
@@ -88,4 +91,68 @@ fn a_pane_area_too_small_for_two_panes_keeps_the_split() {
 #[test]
 fn a_new_split_starts_even() {
     assert_eq!(EVEN_SHARE, 0.5);
+}
+
+#[test]
+fn a_short_pane_gives_the_strip_up_first() {
+    // Eight rows is a stacked pane on a 30-row terminal: after the border
+    // there is room for the input (its real box is three rows) and the
+    // transcript floor and nothing else, so the strip drops to zero rather
+    // than crushing the answer (#2494).
+    let rows = pane_rows(8, 3);
+    assert_eq!(rows.strip, 0);
+    assert_eq!(rows.input, PANE_INPUT_ROWS);
+    assert_eq!(rows.body, PANE_BODY_FLOOR);
+    assert_eq!(rows.inner(), 8 - PANE_CHROME_ROWS);
+}
+
+#[test]
+fn a_normal_pane_gives_its_strip_three_rows() {
+    // Twenty-four rows is a stacked pane on a 40-row terminal, the case that
+    // used to hand the strip a twelve-row card and leave five rows to read.
+    assert_eq!(pane_strip_height(24, 3), PANE_STRIP_MIN);
+    let rows = pane_rows(24, 3);
+    assert_eq!(rows.strip, 3);
+    assert_eq!(rows.body, 24 - PANE_CHROME_ROWS - PANE_INPUT_ROWS - 3);
+}
+
+#[test]
+fn a_strip_never_grows_past_four_rows() {
+    // A ten-task plan asks for twelve rows; the pane caps it at four so the
+    // pane stays a pane. The full checklist lives in the overlay.
+    assert_eq!(pane_strip_height(60, 12), PANE_STRIP_MAX);
+    assert_eq!(pane_strip_height(60, 4), PANE_STRIP_MAX);
+}
+
+#[test]
+fn every_pane_keeps_its_own_budget() {
+    // The reported bug (#2494): one card, drawn from one session, sized
+    // against the window, so panes with no plan lost the same rows and the
+    // focused pane's card crossed the divider. Two panes of the same height
+    // must budget independently: one keeps its strip, the other keeps its
+    // full height, and neither call sees the other.
+    let with_plan = pane_rows(24, 3);
+    let without_plan = pane_rows(24, 0);
+    assert_eq!(with_plan.strip, PANE_STRIP_MIN);
+    assert_eq!(without_plan.strip, 0);
+    assert_eq!(without_plan.body, with_plan.body + PANE_STRIP_MIN);
+    // Recomputed in the other order the numbers do not move, because focus and
+    // the neighbour are not inputs to the math.
+    assert_eq!(pane_rows(24, 3), with_plan);
+    assert_eq!(pane_rows(24, 0), without_plan);
+}
+
+#[test]
+fn the_rows_add_up_to_the_inner_height() {
+    // Every height from 1 to 80: the three slots always account for exactly
+    // the rows inside the border, and the transcript floor is honoured
+    // whenever a strip was handed out at all.
+    for height in 1u16..=80 {
+        let rows = pane_rows(height, 4);
+        assert_eq!(rows.inner(), height.saturating_sub(PANE_CHROME_ROWS));
+        if rows.strip > 0 {
+            assert!(rows.body >= PANE_BODY_FLOOR);
+            assert!((PANE_STRIP_MIN..=PANE_STRIP_MAX).contains(&rows.strip));
+        }
+    }
 }
