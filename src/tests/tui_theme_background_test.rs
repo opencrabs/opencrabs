@@ -107,15 +107,27 @@ fn user_theme_without_background_still_loads_and_declares_none() {
 /// degraded tier on the way through.
 #[test]
 fn user_theme_with_background_declares_it() {
-    let toml = format!(
-        "{}\nbackground = \"#123456\"\n",
-        pack_toml_without_background()
-    );
+    // The canvas is what the contrast floors are measured against, so a
+    // declared background has to be the surface the palette was built for.
+    // This fixture re-declares the theme's own ink, which keeps the test
+    // about the field round-tripping rather than about a colour change.
+    let base = pack_toml_without_background();
+    let ink = base
+        .lines()
+        .find_map(|l| l.strip_prefix("ink = \"#"))
+        .and_then(|v| v.strip_suffix('"'))
+        .expect("fixture declares ink");
+    let toml = format!("{base}\nbackground = \"#{ink}\"\n");
     let theme = build_theme("bgtest-present", &toml).expect("theme with background must load");
-    assert_eq!(theme.colors.background, Some(Color::Rgb(0x12, 0x34, 0x56)));
+    let declared = u32::from_str_radix(ink, 16).expect("ink is hex");
+    assert_eq!(theme.colors.background, Some(rgb(declared)));
     assert_eq!(
         theme.colors.ansi.background,
-        Some(rgb_to_ansi256(0x12, 0x34, 0x56))
+        Some(rgb_to_ansi256(
+            (declared >> 16) as u8,
+            (declared >> 8) as u8,
+            declared as u8
+        ))
     );
 }
 

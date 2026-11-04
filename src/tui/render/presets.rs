@@ -145,10 +145,13 @@ pub static ALUCARD: Theme = Theme {
         text_muted: rgb(0x6C664B),
         text_dim: rgb(0x6C664B),
         gray: rgb(0x6C664B),
-        gray_mid: rgb(0xCECCC0), // spec bg-dark
-        gray_detail: rgb(0xCECCC0),
-        gray_dim: rgb(0xCECCC0),
-        gray_dark: rgb(0xCECCC0),
+        // bg-dark (#CECCC0) is the plate under the canvas, 1.56:1 on it, so
+        // as a foreground it was invisible. The tiers derive from it toward
+        // the ink instead (#2492).
+        gray_mid: rgb(0xA3A097),    // 2.52:1
+        gray_detail: rgb(0x88867F), // 3.51:1
+        gray_dim: rgb(0xA3A097),
+        gray_dark: rgb(0xCECCC0), // spec bg-dark
         gray_base: rgb(0xCECCC0),
         gray_light: rgb(0x1F1F1F),
         gray_soft: rgb(0x6C664B),
@@ -191,9 +194,9 @@ pub static ALUCARD: Theme = Theme {
             text_muted: 59,
             text_dim: 59,
             gray: 59,
-            gray_mid: 187,
-            gray_detail: 187,
-            gray_dim: 187,
+            gray_mid: 247,
+            gray_detail: 102,
+            gray_dim: 247,
             gray_dark: 187,
             gray_base: 187,
             gray_light: 235,
@@ -454,23 +457,31 @@ pub static CATPPUCCIN_LATTE: Theme = Theme {
         text_primary: rgb(0x4C4F69),
         text_secondary: rgb(0x5C5F77), // subtext1
         text_muted: rgb(0x6C6F85),     // subtext0
-        text_dim: rgb(0x9CA0B0),       // overlay0
+        // overlay0 (#9CA0B0) measures 2.30:1 on base; the light floors need
+        // 3.5:1 for a dim tier, so the ladder starts at overlay2 (#7C7E92,
+        // 3.53:1) and darkens from there (#2492).
+        text_dim: rgb(0x7C7E92), // overlay2
         gray: rgb(0x6C6F85),
-        gray_mid: rgb(0xACADE3), // surface2
-        gray_detail: rgb(0xACADE3),
-        gray_dim: rgb(0xBCC0CC),  // surface1
-        gray_dark: rgb(0xCCD0DA), // surface0
-        gray_base: rgb(0xE6E9EF), // mantle
+        // surface2 is a plate, not text: at 1.89:1 on base it vanished as a
+        // foreground (dialogs, command palette). Derived from surface2 toward
+        // the text ink until it clears the 2.5:1 floor.
+        gray_mid: rgb(0x8F91BE),
+        gray_detail: rgb(0x7C7E92), // overlay2, 3.53:1
+        gray_dim: rgb(0x9699A9),    // surface2 -> ink, 2.50:1
+        gray_dark: rgb(0xCCD0DA),   // surface0
+        gray_base: rgb(0xE6E9EF),   // mantle
         gray_light: rgb(0x4C4F69),
-        gray_soft: rgb(0x8C8FA1), // overlay1
-        gray_muted: rgb(0x9CA0B0),
+        gray_soft: rgb(0x6A6D82),  // overlay1 darkened to 4.50:1
+        gray_muted: rgb(0x73758A), // 4.00:1
         success: rgb(0x40A02B),
         analytics_green: rgb(0x40A02B),
         green_check: rgb(0x40A02B),
         error: rgb(0xD20F39),
         error_soft: rgb(0xD20F39),
         error_faded: rgb(0xE64553), // red 30% lightened
-        warning: rgb(0xDF8E1D),
+        // #DF8E1D is a fill colour: 2.31:1 as text on base. Darkened along
+        // the same hue until it clears the 2.5:1 floor, 2.70:1 here (#2492).
+        warning: rgb(0xC98528),
         warning_muted: rgb(0xDF8E1D),
         amber_muted: rgb(0xFE640B),
         teal_vivid: rgb(0x179299),
@@ -500,16 +511,16 @@ pub static CATPPUCCIN_LATTE: Theme = Theme {
             text_primary: 59,
             text_secondary: 60,
             text_muted: 60,
-            text_dim: 145,
+            text_dim: 102,
             gray: 60,
-            gray_mid: 146,
-            gray_detail: 146,
-            gray_dim: 146,
+            gray_mid: 103,
+            gray_detail: 102,
+            gray_dim: 247,
             gray_dark: 188,
             gray_base: 189,
             gray_light: 59,
-            gray_soft: 103,
-            gray_muted: 145,
+            gray_soft: 60,
+            gray_muted: 244,
             success: 70,
             analytics_green: 70,
             green_check: 70,
@@ -605,19 +616,24 @@ pub static SOLARIZED_LIGHT: Theme = Theme {
         accent: rgb(0xCB4B16),      // orange
         accent_teal: rgb(0x2AA198), // cyan
         accent_soft: rgb(0x657B83),
-        text_primary: rgb(0x657B83),   // base00
-        text_secondary: rgb(0x93A1A1), // base1
-        text_muted: rgb(0x93A1A1),
-        text_dim: rgb(0x93A1A1),
+        text_primary: rgb(0x657B83), // base00
+        // base1 (#93A1A1) is a divider tone: 2.48:1 as text on base3. Each
+        // reading tier is base01 mixed toward base1 until it clears its
+        // floor (#2492).
+        text_secondary: rgb(0x60757A), // 4.50:1
+        text_muted: rgb(0x6A7D81),     // 4.00:1
+        text_dim: rgb(0x768689),       // 3.51:1
         gray: rgb(0x93A1A1),
-        gray_mid: rgb(0xEEE8D5), // base2
-        gray_detail: rgb(0xEEE8D5),
-        gray_dim: rgb(0xEEE8D5),
-        gray_dark: rgb(0xEEE8D5),
+        // base2 is the plate, not the text: at 1.14:1 it was invisible as a
+        // foreground.
+        gray_mid: rgb(0x94A09D), // 2.50:1
+        gray_detail: rgb(0x768689),
+        gray_dim: rgb(0x94A09D),
+        gray_dark: rgb(0xEEE8D5), // base2
         gray_base: rgb(0xEEE8D5),
         gray_light: rgb(0x073642), // base02: darkest text on light bg
-        gray_soft: rgb(0x586E75),  // base01
-        gray_muted: rgb(0x586E75),
+        gray_soft: rgb(0x60757A),  // base01, 4.50:1
+        gray_muted: rgb(0x6A7D81), // 4.00:1
         success: rgb(0x859900),
         analytics_green: rgb(0x859900),
         green_check: rgb(0x859900),
@@ -652,18 +668,18 @@ pub static SOLARIZED_LIGHT: Theme = Theme {
             accent_teal: 36,
             accent_soft: 66,
             text_primary: 66,
-            text_secondary: 109,
-            text_muted: 109,
-            text_dim: 109,
+            text_secondary: 242,
+            text_muted: 66,
+            text_dim: 244,
             gray: 109,
-            gray_mid: 224,
-            gray_detail: 224,
-            gray_dim: 224,
+            gray_mid: 247,
+            gray_detail: 244,
+            gray_dim: 247,
             gray_dark: 224,
             gray_base: 224,
             gray_light: 23,
-            gray_soft: 60,
-            gray_muted: 60,
+            gray_soft: 242,
+            gray_muted: 66,
             success: 100,
             analytics_green: 100,
             green_check: 100,
