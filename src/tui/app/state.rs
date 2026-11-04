@@ -3716,7 +3716,10 @@ impl App {
     }
 
     /// Handle keyboard input
-    async fn handle_key_event(&mut self, event: crossterm::event::KeyEvent) -> Result<()> {
+    pub(crate) async fn handle_key_event(
+        &mut self,
+        event: crossterm::event::KeyEvent,
+    ) -> Result<()> {
         use super::events::keys;
         use crossterm::event::{KeyCode, KeyModifiers};
 
@@ -4110,7 +4113,10 @@ impl App {
             }
             return Ok(());
         }
-        if keys::is_focus_next_pane(&event) && self.pane_manager.is_split() {
+        if keys::is_focus_next_pane(&event)
+            && self.pane_manager.is_split()
+            && self.mode == AppMode::Chat
+        {
             // Input belongs to the pane it was typed in: stash it with the
             // pane we're leaving, adopt the target pane's own text (#2494).
             self.pane_manager.stash_input(

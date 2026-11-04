@@ -921,6 +921,7 @@ pub mod tts_fallback_chain_test;
 pub mod voice_openai_compatible_test;
 pub mod voice_voicebox_test;
 // streaming_test deleted in #2103 (never compiled); see test_module_declarations_test.
+pub mod cd_picker_select_test;
 pub mod channel_chat_key_test;
 pub mod drop_landing_test;
 pub mod drop_transfer_test;

@@ -1442,11 +1442,13 @@ impl App {
             self.file_picker_show_hidden = !self.file_picker_show_hidden;
             self.open_directory_picker().await?;
         } else if event.code == KeyCode::Tab || event.code == KeyCode::Char(' ') {
-            // Tab/Space selects the current directory as working dir
+            // Tab/Space selects the current directory as working dir.
+            // Exit to chat FIRST (#2526): the mode switch must never wait
+            // on the persistence await inside apply_working_directory_change,
+            // or a slow write leaves the picker stuck open after the select.
+            self.switch_mode(AppMode::Chat).await?;
             let selected_dir = self.file_picker_current_dir.clone();
             self.apply_working_directory_change(&selected_dir).await;
-
-            self.switch_mode(AppMode::Chat).await?;
         }
 
         Ok(())
