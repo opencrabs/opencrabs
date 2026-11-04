@@ -9,11 +9,12 @@ use std::path::Path;
 
 use axum::Router;
 use axum::body::Body;
+use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
 use crate::a2a::handler;
-use crate::a2a::pairing_http::new_pair_hits;
+use crate::a2a::pairing_http::{PAIR_RATE_LIMIT, new_pair_hits};
 use crate::a2a::server::{A2aState, build_router};
 use crate::remote::pairing::PairingStore;
 use crate::remote::scopes::{SCOPE_READ, SCOPE_SEND};
@@ -116,6 +117,121 @@ async fn pair_bad_body_is_400() {
     let resp = app.oneshot(req).await.unwrap();
     // axum: well-formed JSON of the wrong shape → 422 (400 is syntax errors)
     assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn pair_garbage_bodies_still_consume_the_rate_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state_with(Some("cfg-key"), dir.path()).await;
+    let app = build_router(state, &[]);
+    // Ten syntactically-broken POSTs: 400 rejections that never reach the
+    // handler, but the from_fn layer counts every one (same bucket: same
+    // claimed client IP).
+    for _ in 0..PAIR_RATE_LIMIT {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/a2a/pair")
+            .header("content-type", "application/json")
+            .header("cf-connecting-ip", "3.3.3.3")
+            .body(Body::from("{not json"))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+    // The 11th — a well-formed request — is now rate-limited.
+    let (status, body) = call(
+        app,
+        "/a2a/pair",
+        serde_json::json!({"code": "ANYCODE1", "label": "x"}),
+        None,
+        Some("3.3.3.3"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+}
+
+#[tokio::test]
+async fn forged_xff_cannot_mint_buckets_for_an_off_loopback_peer() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state_with(Some("cfg-key"), dir.path()).await;
+    let app = build_router(state, &[]);
+    let peer: std::net::SocketAddr = "100.64.1.7:5150".parse().unwrap();
+
+    // Malformed bodies: they die at the Json extractor (400) without
+    // touching the store, so the bucket burn is isolated from the
+    // store's own fail-streak lockout.
+    let garbage = |xff: String| {
+        Request::builder()
+            .method("POST")
+            .uri("/a2a/pair")
+            .header("content-type", "application/json")
+            .header("x-forwarded-for", xff)
+            .body(Body::from("{not json"))
+            .unwrap()
+    };
+    let with_peer = |mut req: Request<Body>| {
+        req.extensions_mut().insert(ConnectInfo(peer));
+        req
+    };
+
+    // Ten attempts, each claiming a fresh fake client IP — but the peer
+    // is off-loopback, so the headers are ignored and all ten burn ONE
+    // bucket keyed by the real address.
+    for i in 0..u64::from(PAIR_RATE_LIMIT) {
+        let resp = app
+            .clone()
+            .oneshot(with_peer(garbage(format!("10.9.8.{i}"))))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+    // The 11th is blocked even with yet another brand-new fake IP.
+    let resp = app
+        .oneshot(with_peer(garbage("10.9.8.99".to_string())))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn loopback_peer_still_trusts_forwarded_headers() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state_with(Some("cfg-key"), dir.path()).await;
+    let app = build_router(state, &[]);
+    let peer: std::net::SocketAddr = "127.0.0.1:5150".parse().unwrap();
+
+    let garbage = |xff: String| {
+        Request::builder()
+            .method("POST")
+            .uri("/a2a/pair")
+            .header("content-type", "application/json")
+            .header("x-forwarded-for", xff)
+            .body(Body::from("{not json"))
+            .unwrap()
+    };
+    let with_peer = |mut req: Request<Body>| {
+        req.extensions_mut().insert(ConnectInfo(peer));
+        req
+    };
+
+    // Loopback = the local reverse proxy: each distinct forwarded IP is a
+    // distinct client with its own bucket. Ten rotating fake IPs → ten
+    // separate buckets, none exhausted.
+    for i in 0..u64::from(PAIR_RATE_LIMIT) {
+        let resp = app
+            .clone()
+            .oneshot(with_peer(garbage(format!("10.9.8.{i}"))))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+    // An 11th, with yet another new forwarded IP, sails through: on the
+    // proxy path the header IS the client identity.
+    let resp = app
+        .oneshot(with_peer(garbage("10.7.7.7".to_string())))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
