@@ -21,8 +21,8 @@
 //! an unfolded content leftover is promoted to the trailer).
 
 use crate::channels::telegram::flow::{
-    FlowEntry, MAX_TRAILER_CHARS, pop_trailing_folded_texts, settle_options_reclaim,
-    trailer_promotes_to_answer,
+    FlowEntry, MAX_TRAILER_CHARS, normalized_body, pop_trailing_folded_texts,
+    settle_options_reclaim, trailer_promotes_to_answer,
 };
 
 #[test]
@@ -201,6 +201,35 @@ fn settle_drops_trailer_duplicate_of_host() {
 }
 
 #[test]
+fn settle_drops_trailer_that_repeats_the_answer_as_markdown_links() {
+    // Observed in production on 2026-11-04: `content` had already been through
+    // the file-marker pass (`📎 label`, U+200B hidden inside the label), while
+    // the folded trailer still carried the model's raw
+    // `[label](</abs path>)`. Same answer in two renderings: the old
+    // whitespace-only normalization called them different, so the trailer rode
+    // after the buttons and the whole answer shipped twice in one 6051-char
+    // bubble.
+    let marker_form = "Laporan ada di sini:\n\
+         📎 LAPORAN-021126-1437.\u{200b}md · 📎 BUKTI-021126-1437.\u{200b}md";
+    let link_form = "Laporan ada di sini:\n\
+         [LAPORAN-021126-1437.md](</home/adijr/reports/LAPORAN-021126-1437.md>) · \
+         [BUKTI-021126-1437.md](</home/adijr/reports/BUKTI-021126-1437.md>)";
+    let (text, trailer) =
+        settle_options_reclaim(marker_form.to_string(), None, Some(link_form.to_string()));
+    assert_eq!(text, marker_form);
+    assert_eq!(trailer, None, "the same answer must not ride twice");
+
+    // Same comparison with the host carrying the raw form instead.
+    let (text, trailer) = settle_options_reclaim(
+        "unused".into(),
+        Some(link_form.to_string()),
+        Some(marker_form.to_string()),
+    );
+    assert_eq!(text, link_form);
+    assert_eq!(trailer, None);
+}
+
+#[test]
 fn settle_content_becomes_trailer_when_no_run_folded() {
     // Keep-never-discard: the popper found no trailer run (the ack never
     // folded into the flow) but content carries a non-duplicate leftover —
@@ -331,5 +360,59 @@ fn settle_demoted_host_trips_guard_concatenates_into_answer() {
     assert_eq!(
         trailer, None,
         "trailer slot dies — both texts ride the answer render path"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// normalized_body: file-reference canonicalization (2026-11-04)
+//
+// One answer arrived twice inside a single bubble: the delivered half carried
+// the visible `📎 label` markers the file pass renders, the folded half still
+// carried the model's raw `[label](</abs path>)`. Whitespace-only normalization
+// called those different, so the dedupe checks let both ride.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn normalized_body_unifies_marker_and_local_link_forms() {
+    let marker = "Laporan:\n📎 LAPORAN-021126-1437.\u{200b}md · 📎 BUKTI-021126-1437.\u{200b}md";
+    let link = "Laporan:\n[LAPORAN-021126-1437.md](</home/adijr/reports/LAPORAN-021126-1437.md>) · \
+                [BUKTI-021126-1437.md](</home/adijr/reports/BUKTI-021126-1437.md>)";
+    assert_eq!(
+        normalized_body(marker),
+        normalized_body(link),
+        "the same answer rendered as markers and as markdown links must compare equal"
+    );
+}
+
+#[test]
+fn normalized_body_ignores_zero_width_space_only() {
+    let plain = "LAPORAN-021126-1437.md sudah siap";
+    let zwsp = "LAPORAN-021126-1437.\u{200b}md sudah siap";
+    assert_eq!(
+        normalized_body(plain),
+        normalized_body(zwsp),
+        "an invisible space must not make two renderings differ"
+    );
+}
+
+#[test]
+fn normalized_body_keeps_different_answers_distinct() {
+    let a = "Laporan:\n📎 LAPORAN-021126-1437.md";
+    let b = "Laporan:\n📎 BUKTI-021126-1437.md";
+    assert_ne!(
+        normalized_body(a),
+        normalized_body(b),
+        "different files are different answers; canonicalization must not merge them"
+    );
+}
+
+#[test]
+fn normalized_body_keeps_remote_link_targets_distinct() {
+    let a = "lihat [issue](https://example.com/issues/1)";
+    let b = "lihat [issue](https://example.com/issues/2)";
+    assert_ne!(
+        normalized_body(a),
+        normalized_body(b),
+        "only local file targets are unwrapped; remote destinations still matter"
     );
 }
