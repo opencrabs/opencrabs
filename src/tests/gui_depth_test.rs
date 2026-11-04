@@ -26,6 +26,12 @@ fn the_input_has_a_panel_background_and_a_shadow() {
     let root = EDITOR
         .get(start..start + 400)
         .expect("the editor root is in range");
-    assert!(root.contains(".bg(rgb(palette::current().panel))"));
+    // The panel fill comes from the glass helper since #2497; a plain
+    // `bg(rgb(..))` is the same surface before that change.
+    assert!(
+        root.contains(".bg(glass_fill(palette::current().panel))")
+            || root.contains(".bg(rgb(palette::current().panel))"),
+        "the input sits on the panel surface, however that fill is mixed"
+    );
     assert!(root.contains(".shadow_sm()"));
 }
