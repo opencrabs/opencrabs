@@ -11,6 +11,7 @@
 //! direct dependency).
 
 use crate::palette;
+use opencrabs::ui_core::card::{CARD_RADIUS, glass_fill};
 use opencrabs::ui_core::commands::completions;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -1409,11 +1410,11 @@ impl Render for Editor {
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             // One step above the chat, with a shadow, so the input reads as a
             // surface of its own in both themes.
-            .bg(rgb(palette::current().panel))
+            .bg(glass_fill(palette::current().panel))
             .shadow_sm()
             .border_1()
             .border_color(rgb(palette::current().panel_hi))
-            .rounded_sm()
+            .rounded(px(CARD_RADIUS))
             .p_2()
             .line_height(px(22.))
             .text_size(px(14.))

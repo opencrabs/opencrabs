@@ -66,6 +66,7 @@ use opencrabs::ui_core::commands as slash;
 // The Seeker engine: ranking, keywords and state, shared with the terminal
 // so both clients print the same rows in the same order (#2458). Named `find`
 // because `palette` here is the window's colour table.
+use opencrabs::ui_core::card::{CARD_RADIUS, glass_fill};
 use opencrabs::ui_core::palette::{
     self as find, Channel, PaletteAction, PaletteItem, PaletteKind, PaletteState,
 };
@@ -6930,7 +6931,7 @@ impl Render for Dashboard {
                     .items_center()
                     .justify_center()
                     .gap_2()
-                    .rounded(px(10.0))
+                    .rounded(px(CARD_RADIUS))
                     .border_2()
                     .border_color(rgb(palette::current().accent))
                     .bg(rgba(0x101010dd))
@@ -8003,10 +8004,10 @@ fn mission_control_detail(
         .max_h(px(560.0))
         // A long summary is clipped to the card instead of painting past it.
         .overflow_hidden()
-        .rounded(px(10.0))
+        .rounded(px(CARD_RADIUS))
         .border_1()
         .border_color(rgb(shown.panel_hi))
-        .bg(rgb(shown.panel))
+        .bg(glass_fill(shown.panel))
         // Inert: the click stops here instead of reaching the scrim.
         .on_click(|_ev, _window, cx| cx.stop_propagation())
         .child(
@@ -8285,8 +8286,8 @@ fn queue_strip(queued: &[agent_bridge::PendingMessage]) -> Div {
         .flex_col()
         .gap_1()
         .p_2()
-        .rounded_sm()
-        .bg(rgb(palette::current().panel))
+        .rounded(px(CARD_RADIUS))
+        .bg(glass_fill(palette::current().panel))
         .child(
             div()
                 .text_xs()
@@ -8340,10 +8341,10 @@ fn emoji_popup_view(items: &[(&'static str, &'static str)], selected: usize) -> 
         .flex_col()
         .gap_1()
         .p_2()
-        .rounded_md()
+        .rounded(px(CARD_RADIUS))
         .border_1()
         .border_color(rgb(palette::current().panel_hi))
-        .bg(rgb(palette::current().panel));
+        .bg(glass_fill(palette::current().panel));
     for (index, (glyph, code)) in items.iter().enumerate() {
         let on = index == selected;
         col = col.child(
@@ -8604,8 +8605,8 @@ fn session_title_chip(name: &str) -> impl IntoElement {
                 .flex_none()
                 .px_2()
                 .py_1()
-                .rounded_md()
-                .bg(rgb(palette::current().panel))
+                .rounded(px(CARD_RADIUS))
+                .bg(glass_fill(palette::current().panel))
                 .border_1()
                 .border_color(rgb(palette::current().panel_hi))
                 .text_base()
@@ -8845,10 +8846,10 @@ fn update_prompt_overlay(
         .gap_3()
         .w(rems(26.0))
         .p_4()
-        .rounded(px(10.0))
+        .rounded(px(CARD_RADIUS))
         .border_1()
         .border_color(rgb(palette::current().panel_hi))
-        .bg(rgb(palette::current().panel))
+        .bg(glass_fill(palette::current().panel))
         .child(
             div()
                 .text_sm()
@@ -9163,10 +9164,10 @@ fn split_pick_overlay(layout: Layout, rail_px: gpui::Pixels) -> impl IntoElement
         .flex_col()
         .gap_1()
         .p_3()
-        .rounded(px(10.0))
+        .rounded(px(CARD_RADIUS))
         .border_1()
         .border_color(rgb(palette::current().panel_hi))
-        .bg(rgb(palette::current().panel))
+        .bg(glass_fill(palette::current().panel))
         .child(
             div()
                 .text_sm()
@@ -9212,10 +9213,10 @@ fn topic_prompt_overlay(
         .min_w_0()
         .px_3()
         .py_2()
-        .rounded_md()
+        .rounded(px(CARD_RADIUS))
         .border_1()
         .border_color(rgb(palette::current().accent))
-        .bg(rgb(palette::current().bg))
+        .bg(glass_fill(palette::current().bg))
         .text_color(rgb(palette::current().text))
         .child(SharedString::from(format!("{draft}|")));
     // The chosen icon, as a picture when it names an embedded one and as the
@@ -9229,8 +9230,8 @@ fn topic_prompt_overlay(
         .flex()
         .items_center()
         .justify_center()
-        .rounded_md()
-        .bg(rgb(palette::current().bg))
+        .rounded(px(CARD_RADIUS))
+        .bg(glass_fill(palette::current().bg))
         .text_size(rems(1.4))
         .when(picture.is_none(), |d| {
             d.child(SharedString::from(icon.to_string()))
@@ -9245,10 +9246,10 @@ fn topic_prompt_overlay(
         .gap_3()
         .w(rems(28.0))
         .p_4()
-        .rounded(px(10.0))
+        .rounded(px(CARD_RADIUS))
         .border_1()
         .border_color(rgb(palette::current().panel_hi))
-        .bg(rgb(palette::current().panel))
+        .bg(glass_fill(palette::current().panel))
         .child(
             div()
                 .text_sm()
@@ -9325,10 +9326,10 @@ fn topic_info_overlay(
         .gap_2()
         .w(rems(30.0))
         .p_4()
-        .rounded(px(10.0))
+        .rounded(px(CARD_RADIUS))
         .border_1()
         .border_color(rgb(palette::current().panel_hi))
-        .bg(rgb(palette::current().panel))
+        .bg(glass_fill(palette::current().panel))
         .child(
             div()
                 .text_sm()
@@ -9545,10 +9546,10 @@ fn confirm_delete_overlay(
                 .gap_3()
                 .w(rems(24.0))
                 .p_4()
-                .rounded(px(10.0))
+                .rounded(px(CARD_RADIUS))
                 .border_1()
                 .border_color(rgb(palette::current().panel_hi))
-                .bg(rgb(palette::current().panel))
+                .bg(glass_fill(palette::current().panel))
                 .child(
                     div()
                         .text_sm()
