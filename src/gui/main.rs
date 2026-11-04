@@ -3852,9 +3852,12 @@ impl Dashboard {
                     this.topic_menu = Some(id);
                     cx.notify();
                 });
-                // `All` is the whole conversation, so it carries no topic icon.
+                // `All` has the same icon slot and cell geometry as a topic.
                 let (label, picture) = match entry {
-                    topic_bar::BarEntry::All => ("All".to_string(), None),
+                    topic_bar::BarEntry::All => (
+                        "All".to_string(),
+                        topic_icons::tab_icon(topic_icons::store_name("general").as_str()),
+                    ),
                     topic_bar::BarEntry::Topic(id) => {
                         // The icon sits before the name and is not a word, so the
                         // two-word shortening (#2477) is applied to the name alone.
@@ -9466,42 +9469,39 @@ fn topic_strip(
     toggle_edge: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     tabs: Vec<AnyElement>,
 ) -> Div {
-    // A square target the size of the rail's action icons, so it is easy to
-    // hit and reads as a control rather than a stray glyph (#2414).
+    // The orientation control shares the topic cell's generous hit target.
+    let control = topic_tabs::style(edge.is_vertical());
     let leading = div()
         .id("topic-edge-button")
         .flex()
         .items_center()
         .justify_center()
-        .size(rems(1.9))
+        .size(rems(control.control_rems))
         .flex_none()
         .cursor_pointer()
         .text_color(rgb(palette::current().text_muted))
-        .text_size(rems(1.25))
+        .text_size(rems(1.75))
         .hover(|d| d.bg(rgb(palette::current().panel_hi)))
         .on_click(toggle_edge)
         .child(SharedString::from("\u{25EB}"));
     if edge.is_vertical() {
-        // The column hugs its chips. A fixed 12rem width reserved 192px of
-        // empty rail for four narrow chips and pushed the chat ~450px right
-        // on the owner's window: that empty column was the dead space he
-        // reported for two days (#2480). max_w still stops a long topic name
-        // from eating the window.
+        // A compact fixed rail gives every cell the same square geometry.
         div()
             .flex()
             .flex_col()
             .flex_none()
-            .max_w(rems(12.0))
-            .items_start()
+            .w(rems(topic_tabs::CELL_REMS + 1.0))
+            .items_center()
             .gap_2()
             .p_2()
             .child(leading)
             .child(
-                // Chips sit at their own width on the rail's leading edge, the
-                // way Telegram's forum list reads. Centring them left a small
-                // square control floating in 90% empty column, and stretching
-                // them was the wall of colour the owner screenshotted (#2480).
-                div().flex().flex_col().items_start().gap_1().children(tabs),
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_1()
+                    .children(tabs),
             )
     } else {
         div()
@@ -9585,19 +9585,21 @@ fn topic_tab(
         0x00000000
     };
     let vertical = shape == topic_bar::ChipShape::IconAbove;
+    let style = topic_tabs::style(vertical);
     div()
         .id(SharedString::from(format!("topic-tab-{id}")))
         .flex()
         .flex_none()
         .items_center()
+        .justify_center()
         .text_sm()
         .text_color(rgb(colour))
         .cursor_pointer()
         .when(vertical, |d| {
-            d.flex_col()
+            d.size(rems(style.cell_rems))
+                .flex_col()
                 .gap_1()
-                .px_1p5()
-                .py_1()
+                .p_1()
                 .border_l_2()
                 .border_color(rgba(rule))
         })
@@ -9609,12 +9611,17 @@ fn topic_tab(
                 .border_b_2()
                 .border_color(rgba(rule))
         })
-        .when(current, |d| d.bg(rgb(palette::current().panel_hi)))
-        .hover(|d| d.bg(rgb(palette::current().panel_hi)))
+        .hover(|d| d.text_color(rgb(palette::current().accent)))
         .on_click(on_click)
         .on_mouse_down(MouseButton::Right, on_right)
         .children(icon)
-        .child(SharedString::from(label))
+        .child(
+            div()
+                .when(vertical, |d| {
+                    d.w_full().text_center().text_xs().line_clamp(2)
+                })
+                .child(SharedString::from(label)),
+        )
 }
 
 /// The update dialog (#2406). The first stage asks whether to update by
