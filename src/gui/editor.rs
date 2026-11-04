@@ -735,6 +735,10 @@ impl Editor {
         }
     }
 
+    pub fn has_selection(&self) -> bool {
+        !self.selected_range.is_empty()
+    }
+
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
         if !self.selected_range.is_empty() {
             cx.write_to_clipboard(ClipboardItem::new_string(
@@ -1589,6 +1593,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-a", SelectAll, None),
         KeyBinding::new("cmd-v", Paste, None),
         KeyBinding::new("cmd-c", Copy, None),
+        KeyBinding::new("ctrl-c", Copy, None),
         KeyBinding::new("cmd-x", Cut, None),
         KeyBinding::new("home", Home, None),
         KeyBinding::new("end", End, None),
@@ -1871,6 +1876,18 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).expect("scratch dir");
         dir
+    }
+
+    #[test]
+    fn drag_copy_composer_keeps_cmd_c_and_adds_ctrl_c() {
+        let src = include_str!("editor.rs");
+        let bindings = src
+            .split("pub fn bind_keys(")
+            .nth(1)
+            .and_then(|rest| rest.split("// Line math").next())
+            .expect("editor key bindings");
+        assert!(bindings.contains("KeyBinding::new(\"cmd-c\", Copy, None)"));
+        assert!(bindings.contains("KeyBinding::new(\"ctrl-c\", Copy, None)"));
     }
 
     /// The single-line hint sits in the middle of the composer, with the

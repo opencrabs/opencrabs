@@ -4234,6 +4234,26 @@ impl Dashboard {
             shift: m.shift,
             platform: m.platform,
         };
+        // A transcript selection survives mouse release so the keyboard can
+        // copy it too (#2529). A composer selection keeps its own GPUI copy
+        // action; otherwise this is the transcript's shared cmd/ctrl-C path.
+        let composer_has_copy_selection = self.editor.read(cx).focus_handle.is_focused(window)
+            && self.editor.read(cx).has_selection();
+        if self.screen == Screen::Chat
+            && !composer_has_copy_selection
+            && opencrabs::ui_core::copy_select::is_copy_chord(
+                &ev.keystroke.key,
+                m.control,
+                m.platform,
+            )
+            && self.copy_drag.has_selection()
+        {
+            if let Some(item) = self.copy_drag.clipboard_item() {
+                cx.write_to_clipboard(item);
+            }
+            cx.notify();
+            return;
+        }
         // The line carries the screen and the table's answer, because a report
         // that only says which key arrived cannot tell a keystroke that never
         // reached this handler from one that reached it and matched nothing

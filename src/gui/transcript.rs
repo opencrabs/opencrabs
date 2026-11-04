@@ -18,15 +18,16 @@
 
 use crate::palette;
 use opencrabs::ui_core::card::{CARD_RADIUS, concentric_radius, glass_fill};
-use opencrabs::ui_core::copy_select::{self, covered_rows};
+use opencrabs::ui_core::copy_select::{self, TextPoint};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::rc::Rc;
 
 use gpui::{
-    AbsoluteLength, AnyElement, App, ClickEvent, Div, MouseButton, ObjectFit, ScrollHandle,
-    SharedString, Stateful, Styled, StyledText, TextStyle, Window, div, img, prelude::*, px, rems,
-    rgb, rgba,
+    AbsoluteLength, AnyElement, App, ClickEvent, Div, HighlightStyle, MouseButton, ObjectFit,
+    ScrollHandle, SharedString, Stateful, Styled, StyledText, TextLayout, TextStyle, Window, div,
+    img, prelude::*, px, rems, rgb, rgba,
 };
 
 use opencrabs::db::Database;
@@ -1005,12 +1006,11 @@ fn heading_weight(level: u8) -> gpui::FontWeight {
 }
 
 /// One styled markdown line; indent in list/quote depth steps.
-fn md_line(l: &markdown::MdLine) -> Div {
+fn md_line(l: &markdown::MdLine, selection: Option<&SelectionContext>) -> Div {
     let size = heading_size(l.heading_level);
     let mut style = body_style(size);
     style.font_weight = heading_weight(l.heading_level);
-    let text =
-        StyledText::new(l.text.clone()).with_default_highlights(&style, l.highlights.clone());
+    let text = selectable_styled_text(l.text.clone(), style, l.highlights.clone(), selection);
     let base = div().pl(rems(f32::from(l.indent) * 0.9));
     if l.heading {
         base.mt(px(RHYTHM_HEADING_ABOVE))
@@ -1024,7 +1024,7 @@ fn md_line(l: &markdown::MdLine) -> Div {
 /// One table cell. Every cell is `flex_1` with `min_w_0`, so the grid takes
 /// the width the window actually has and the columns share it: a wide window
 /// gets wide columns, a narrow one wraps the text instead of clipping it.
-fn table_cell(cell: &markdown::MdCell, header: bool) -> Div {
+fn table_cell(cell: &markdown::MdCell, header: bool, selection: Option<&SelectionContext>) -> Div {
     let style = TextStyle {
         color: rgb(if header {
             palette::current().text_strong
@@ -1035,8 +1035,7 @@ fn table_cell(cell: &markdown::MdCell, header: bool) -> Div {
         font_size: AbsoluteLength::Pixels(px(13.0)),
         ..Default::default()
     };
-    let text =
-        StyledText::new(cell.text.clone()).with_default_highlights(&style, cell.highlights.clone());
+    let text = selectable_styled_text(cell.text.clone(), style, cell.highlights.clone(), selection);
     div()
         .flex_1()
         .min_w_0()
@@ -1058,7 +1057,7 @@ fn table_rule() -> Div {
 /// A markdown table as a real grid: header band, a rule under it, then one
 /// flex row per record with the same column count. This is the shape the TUI
 /// draws in box characters; the GUI draws it in panels.
-fn md_table(t: &markdown::MdTable) -> Div {
+fn md_table(t: &markdown::MdTable, selection: Option<&SelectionContext>) -> Div {
     let cols = t.columns().max(1);
     let empty = markdown::MdCell {
         text: String::new(),
@@ -1086,7 +1085,11 @@ fn md_table(t: &markdown::MdTable) -> Div {
         .rounded_tr(px(CARD_RADIUS))
         .bg(glass_fill(palette::current().panel_hi));
     for i in 0..cols {
-        head = head.child(table_cell(t.header.get(i).unwrap_or(&empty), true));
+        head = head.child(table_cell(
+            t.header.get(i).unwrap_or(&empty),
+            true,
+            selection,
+        ));
     }
     grid = grid.child(head).child(table_rule());
 
@@ -1096,7 +1099,7 @@ fn md_table(t: &markdown::MdTable) -> Div {
         }
         let mut line = div().flex().flex_row().items_start().w_full();
         for i in 0..cols {
-            line = line.child(table_cell(row.get(i).unwrap_or(&empty), false));
+            line = line.child(table_cell(row.get(i).unwrap_or(&empty), false, selection));
         }
         grid = grid.child(line);
     }
@@ -1123,14 +1126,14 @@ const PLAIN_TEXT_SIZE: f32 = 13.0;
 /// Assistant content as markdown. Consecutive fence lines group under one
 /// padded mono container so a code block reads as one shape, while a table
 /// block keeps its grid instead of being flattened into text rows.
-fn md_block(src: &str) -> Div {
+fn md_block(src: &str, selection: Option<&SelectionContext>) -> Div {
     let blocks = markdown::blocks(src);
     let mut out = div().flex().flex_col().gap(px(RHYTHM_BASE_GAP));
     let mut i = 0;
     while i < blocks.len() {
         match &blocks[i] {
             markdown::MdBlock::Table(table) => {
-                out = out.child(md_table(table));
+                out = out.child(md_table(table, selection));
                 i += 1;
             }
             markdown::MdBlock::Line(line) if line.mono => {
@@ -1146,13 +1149,12 @@ fn md_block(src: &str) -> Div {
                 while i < blocks.len() {
                     match &blocks[i] {
                         markdown::MdBlock::Line(l) if l.mono => {
-                            let style = mono_style();
-                            code = code.child(
-                                div().child(
-                                    StyledText::new(l.text.clone())
-                                        .with_default_highlights(&style, l.highlights.clone()),
-                                ),
-                            );
+                            code = code.child(selectable_styled_text(
+                                l.text.clone(),
+                                mono_style(),
+                                l.highlights.clone(),
+                                selection,
+                            ));
                             i += 1;
                         }
                         _ => break,
@@ -1161,7 +1163,7 @@ fn md_block(src: &str) -> Div {
                 out = out.child(code);
             }
             markdown::MdBlock::Line(line) => {
-                out = out.child(md_line(line));
+                out = out.child(md_line(line, selection));
                 i += 1;
             }
         }
@@ -1171,15 +1173,15 @@ fn md_block(src: &str) -> Div {
 
 /// User/system content stays plain: the TUI renders input verbatim, markdown
 /// styling is an answer-text treatment.
-fn plain_block(content: &str, size: f32) -> Div {
+fn plain_block(content: &str, size: f32, selection: Option<&SelectionContext>) -> Div {
     let mut lines = div().flex().flex_col().gap_0p5();
     for line in content.split('\n') {
-        lines = lines.child(
-            div()
-                .text_size(px(size))
-                .text_color(rgb(palette::current().text))
-                .child(SharedString::from(line.to_string())),
-        );
+        lines = lines.child(selectable_styled_text(
+            line.to_string(),
+            body_style(size),
+            Vec::new(),
+            selection,
+        ));
     }
     lines
 }
@@ -1192,6 +1194,7 @@ fn bubble(
     time: &str,
     content_width: f32,
     handlers: &HashMap<String, ClickHandler>,
+    selection: Option<&SelectionContext>,
 ) -> Div {
     let paths = marker_paths(content);
     let text = strip_markers(content);
@@ -1220,7 +1223,7 @@ fn bubble(
     }
     if !text.trim().is_empty() {
         col = col.child(if role == "assistant" {
-            md_block(&text)
+            md_block(&text, selection)
         } else {
             plain_block(
                 &text,
@@ -1229,6 +1232,7 @@ fn bubble(
                 } else {
                     PLAIN_TEXT_SIZE
                 },
+                selection,
             )
         });
     }
@@ -1631,7 +1635,7 @@ fn live_card_body(live: &LiveTurn) -> Div {
                         .child(SharedString::from(format!("{mark} {text}"))),
                 );
             }
-            LiveCardLine::Narration(text) => body = body.child(md_block(&text)),
+            LiveCardLine::Narration(text) => body = body.child(md_block(&text, None)),
             LiveCardLine::Reasoning(text) => {
                 body = body.child(
                     div()
@@ -1760,14 +1764,19 @@ fn live_card_footer(live: &LiveTurn, ctx: (Option<u32>, u32)) -> Option<String> 
 
 /// One block, drawn. The fold decides WHETHER a block renders; this decides
 /// only what it looks like.
-fn block_view(block: &Block, content_width: f32, handlers: &HashMap<String, ClickHandler>) -> Div {
+fn block_view(
+    block: &Block,
+    content_width: f32,
+    handlers: &HashMap<String, ClickHandler>,
+    selection: Option<&SelectionContext>,
+) -> Div {
     match block {
         Block::Msg {
             role,
             content,
             time,
             ..
-        } => bubble(role, content, time, content_width, handlers),
+        } => bubble(role, content, time, content_width, handlers, selection),
         Block::Thinking { content } => thinking_block(content, false),
         Block::Tools { calls } => tools_block(calls),
         Block::Marker { hidden } => div()
@@ -1891,6 +1900,7 @@ fn live_view(
             },
             content_width,
             handlers,
+            None,
         ));
     }
     for notice in &live.notices {
@@ -1914,6 +1924,7 @@ fn live_view(
             },
             content_width,
             handlers,
+            None,
         ));
     }
     // ONE card for the whole turn: header, body when open, footer. The three
@@ -1937,6 +1948,7 @@ fn live_view(
             },
             content_width,
             handlers,
+            None,
         ));
     }
     col
@@ -1947,61 +1959,286 @@ fn live_view(
 /// by default, exactly as in the TUI; `busy` keeps the running turn's
 /// in-flight text out of the fold so the answer is never hidden while it is
 /// still being written.
-/// Drag-to-copy over the transcript's rows (#2383). Each drawn row records its
-/// plain text in order; a drag from one row to another selects the rows between
-/// them, and releasing the mouse copies their text. Selection is per row, not
-/// per character.
+/// Selection uses the same blue as the active theme, with enough alpha to
+/// remain visible over both role surfaces. No role-specific colour is pinned.
+fn selection_rgba() -> u32 {
+    (palette::current().blue << 8) | 0x55
+}
+
+/// Drag-to-copy over transcript rows (#2383) and their UTF-8 text ranges
+/// (#2529). Each row records the text its selectable segments render. GPUI's
+/// `TextLayout` turns a pointer into a byte offset; this state orders the two
+/// endpoints and produces one clipboard payload for mouse release and keys.
 #[derive(Default)]
 pub struct CopyDrag {
     texts: RefCell<Vec<String>>,
-    anchor: Cell<Option<usize>>,
-    end: Cell<Option<usize>>,
+    anchor: Cell<Option<TextPoint>>,
+    end: Cell<Option<TextPoint>>,
     dragging: Cell<bool>,
 }
 
 impl CopyDrag {
-    /// The selected rows, first to last, when a drag covered more than one row.
-    fn range(&self) -> Option<(usize, usize)> {
-        covered_rows(self.anchor.get()?, self.end.get()?)
+    fn points(&self) -> Option<(TextPoint, TextPoint)> {
+        copy_select::ordered_points(self.anchor.get()?, self.end.get()?)
     }
 
-    /// The text of the selected rows, joined by blank lines. None without a range.
+    /// The selected rows, including one row when only its character range is
+    /// selected. An unmoved click still has no range.
+    fn range(&self) -> Option<(usize, usize)> {
+        let (start, end) = self.points()?;
+        Some((start.row, end.row))
+    }
+
+    pub fn has_selection(&self) -> bool {
+        self.points().is_some()
+    }
+
+    /// The exact selected text, or None for a click or a stale row range.
     fn copied_text(&self) -> Option<String> {
-        let (lo, hi) = self.range()?;
-        copy_select::copied_text(&self.texts.borrow(), lo, hi)
+        copy_select::copied_range(&self.texts.borrow(), self.anchor.get()?, self.end.get()?)
+    }
+
+    /// One payload path for release, cmd-c and ctrl-c. Tests can inspect the
+    /// item without claiming that a headless test wrote the system clipboard.
+    pub fn clipboard_item(&self) -> Option<gpui::ClipboardItem> {
+        self.copied_text().map(gpui::ClipboardItem::new_string)
+    }
+
+    pub fn write_to_clipboard(&self, app: &mut App) -> bool {
+        let Some(item) = self.clipboard_item() else {
+            return false;
+        };
+        app.write_to_clipboard(item);
+        true
+    }
+
+    /// Intersect the selection with one rendered text segment. The segment's
+    /// offset is in the row's copy text, so markdown and plain rows share the
+    /// same hit-testing and highlighting rule.
+    fn segment_range(&self, row: usize, start: usize, len: usize) -> Option<Range<usize>> {
+        let (selection_start, selection_end) = self.points()?;
+        if row < selection_start.row || row > selection_end.row {
+            return None;
+        }
+        let row_len = self.texts.borrow().get(row)?.len();
+        let selected_start = if row == selection_start.row {
+            selection_start.offset
+        } else {
+            0
+        };
+        let selected_end = if row == selection_end.row {
+            selection_end.offset
+        } else {
+            row_len
+        };
+        let end = start.checked_add(len)?;
+        let lo = start.max(selected_start);
+        let hi = end.min(selected_end);
+        (lo < hi).then_some(lo - start..hi - start)
     }
 }
 
-/// A row that takes part in a drag: its mouse down starts a selection at its
-/// ordinal, moving over it extends the selection, and it is tinted while selected.
+/// Selection state threaded through one message renderer. Every selectable
+/// `StyledText` is one segment; joining segments with newlines gives both the
+/// copy string and a stable coordinate space for endpoint offsets.
+struct SelectionContext<'a> {
+    drag: &'a Rc<CopyDrag>,
+    row: usize,
+    offset: Cell<usize>,
+    segments: Cell<usize>,
+}
+
+impl<'a> SelectionContext<'a> {
+    fn new(drag: &'a Rc<CopyDrag>, row: usize) -> Self {
+        Self {
+            drag,
+            row,
+            offset: Cell::new(0),
+            segments: Cell::new(0),
+        }
+    }
+
+    fn begin_segment(&self, len: usize) -> usize {
+        let start = if self.segments.get() == 0 {
+            0
+        } else {
+            self.offset.get() + 1
+        };
+        self.offset.set(start + len);
+        self.segments.set(self.segments.get() + 1);
+        start
+    }
+}
+
+fn layout_offset(layout: &TextLayout, position: gpui::Point<gpui::Pixels>, len: usize) -> usize {
+    match layout.index_for_position(position) {
+        Ok(index) | Err(index) => index.min(len),
+    }
+}
+
+/// Add a selection background without discarding markdown's existing runs.
+/// Splitting at every run and selection boundary keeps ranges ordered and
+/// non-overlapping, which is what `StyledText::with_default_highlights` wants.
+fn highlights_with_selection(
+    text_len: usize,
+    highlights: Vec<(Range<usize>, HighlightStyle)>,
+    selected: Option<Range<usize>>,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    let Some(selected) = selected else {
+        return highlights;
+    };
+    let mut boundaries = vec![0, text_len, selected.start, selected.end];
+    for (range, _) in &highlights {
+        boundaries.push(range.start);
+        boundaries.push(range.end);
+    }
+    boundaries.retain(|offset| *offset <= text_len);
+    boundaries.sort_unstable();
+    boundaries.dedup();
+
+    let mut out = Vec::new();
+    for pair in boundaries.windows(2) {
+        let [start, end] = pair else { continue };
+        if start == end {
+            continue;
+        }
+        let existing = highlights
+            .iter()
+            .find(|(range, _)| range.start <= *start && range.end >= *end);
+        let in_selection = *start >= selected.start && *end <= selected.end;
+        if existing.is_none() && !in_selection {
+            continue;
+        }
+        let mut style = existing.map(|(_, style)| *style).unwrap_or_default();
+        if in_selection {
+            style.background_color = Some(rgba(selection_rgba()).into());
+        }
+        out.push((*start..*end, style));
+    }
+    out
+}
+
+/// Render one real `StyledText` and retain its layout handle for pointer hit
+/// testing. Text handlers stop propagation so the row-level fallback cannot
+/// overwrite a precise offset with a block endpoint.
+fn selectable_styled_text(
+    text: String,
+    style: TextStyle,
+    highlights: Vec<(Range<usize>, HighlightStyle)>,
+    selection: Option<&SelectionContext>,
+) -> Div {
+    let segment_start = selection.map(|context| context.begin_segment(text.len()));
+    let selected = selection.and_then(|context| {
+        context
+            .drag
+            .segment_range(context.row, segment_start?, text.len())
+    });
+    let highlights = highlights_with_selection(text.len(), highlights, selected);
+    let styled = StyledText::new(text.clone()).with_default_highlights(&style, highlights);
+    let layout = styled.layout().clone();
+    let base = div().child(styled);
+    let Some(context) = selection else {
+        return base;
+    };
+    let row = context.row;
+    let start = segment_start.unwrap_or(0);
+    let len = text.len();
+    let begin = context.drag.clone();
+    let extend = context.drag.clone();
+    let move_layout = layout.clone();
+    base.on_mouse_down(MouseButton::Left, move |event, window, cx| {
+        let offset = start + layout_offset(&layout, event.position, len);
+        begin.anchor.set(Some(TextPoint::new(row, offset)));
+        begin.end.set(Some(TextPoint::new(row, offset)));
+        begin.dragging.set(true);
+        cx.stop_propagation();
+        window.refresh();
+    })
+    .on_mouse_move(move |event, window, cx| {
+        if extend.dragging.get() {
+            let offset = start + layout_offset(&move_layout, event.position, len);
+            extend.end.set(Some(TextPoint::new(row, offset)));
+            cx.stop_propagation();
+            window.refresh();
+        }
+    })
+}
+
+/// A row that takes part in a drag. Text segments provide exact offsets; these
+/// row handlers preserve selection over padding and non-text blocks.
 fn selectable_row(drag: &Rc<CopyDrag>, ordinal: usize, child: Div) -> Stateful<Div> {
     let selected = drag
         .range()
         .is_some_and(|(lo, hi)| (lo..=hi).contains(&ordinal));
+    let text_len = drag.texts.borrow().get(ordinal).map_or(0, String::len);
     let start = drag.clone();
     let extend = drag.clone();
     div()
         .id(SharedString::from(format!("tblock-{ordinal}")))
-        .when(selected, |d| d.bg(rgba(0x3311ff22)))
+        .when(selected, |d| d.bg(rgba(selection_rgba())))
         .on_mouse_down(MouseButton::Left, move |_ev, window, _app| {
-            start.anchor.set(Some(ordinal));
-            start.end.set(Some(ordinal));
+            start.anchor.set(Some(TextPoint::new(ordinal, 0)));
+            start.end.set(Some(TextPoint::new(ordinal, 0)));
             start.dragging.set(true);
             window.refresh();
         })
         .on_mouse_move(move |_ev, window, _app| {
             if extend.dragging.get() {
-                extend.end.set(Some(ordinal));
+                let offset = match extend.anchor.get() {
+                    Some(anchor) if anchor.row > ordinal => 0,
+                    Some(anchor) if anchor.row == ordinal && anchor.offset == text_len => 0,
+                    _ => text_len,
+                };
+                extend.end.set(Some(TextPoint::new(ordinal, offset)));
                 window.refresh();
             }
         })
         .child(child)
 }
 
-/// The plain text a row copies: what the row shows, without markup or folds.
+/// The visible text of a markdown block in exactly the segment order used by
+/// `md_block`: table cells follow their header and rows, and every segment is
+/// separated by one newline in the copy coordinate space.
+fn markdown_copy_text(src: &str) -> String {
+    let mut segments = Vec::new();
+    for block in markdown::blocks(src) {
+        match block {
+            markdown::MdBlock::Line(line) => segments.push(line.text),
+            markdown::MdBlock::Table(table) => {
+                let cols = table.columns().max(1);
+                for i in 0..cols {
+                    segments.push(
+                        table
+                            .header
+                            .get(i)
+                            .map_or("", |cell| cell.text.as_str())
+                            .to_string(),
+                    );
+                }
+                for row in table.rows {
+                    for i in 0..cols {
+                        segments.push(row.get(i).map_or("", |cell| cell.text.as_str()).to_string());
+                    }
+                }
+            }
+        }
+    }
+    segments.join("\n")
+}
+
+/// The plain text a row copies: what the row shows, without markers or folds.
+/// Assistant rows use the same visible markdown segments as the renderer so a
+/// character offset never points at stripped `##` or backtick source bytes.
 fn block_text(block: &Block) -> String {
     match block {
-        Block::Msg { content, .. } => strip_markers(content).trim().to_string(),
+        Block::Msg { role, content, .. } => {
+            let text = strip_markers(content);
+            if role == "assistant" {
+                markdown_copy_text(&text)
+            } else {
+                text
+            }
+        }
         Block::Thinking { content } => content.trim().to_string(),
         Block::Tools { calls } => calls
             .iter()
@@ -2093,6 +2330,7 @@ pub fn view(
             },
             content_width,
             &attachment_handlers,
+            None,
         ));
     }
     let last = state.turns.len().saturating_sub(1);
@@ -2136,19 +2374,31 @@ pub fn view(
             {
                 continue;
             }
-            let child = match block {
-                Block::Thinking { content } => thinking_block(content, full),
-                _ => block_view(block, content_width, &attachment_handlers),
-            };
-            col = match &drag {
-                Some(d) if !block_text(block).is_empty() => {
+            let text = block_text(block);
+            let mut selectable = None;
+            let child = match &drag {
+                Some(d) if !text.trim().is_empty() => {
                     let ordinal = {
                         let mut texts = d.texts.borrow_mut();
-                        texts.push(block_text(block));
+                        texts.push(text);
                         texts.len() - 1
                     };
-                    col.child(selectable_row(d, ordinal, child))
+                    selectable = Some(ordinal);
+                    let selection = SelectionContext::new(d, ordinal);
+                    match block {
+                        Block::Thinking { content } => thinking_block(content, full),
+                        _ => {
+                            block_view(block, content_width, &attachment_handlers, Some(&selection))
+                        }
+                    }
                 }
+                _ => match block {
+                    Block::Thinking { content } => thinking_block(content, full),
+                    _ => block_view(block, content_width, &attachment_handlers, None),
+                },
+            };
+            col = match (&drag, selectable) {
+                (Some(d), Some(ordinal)) => col.child(selectable_row(d, ordinal, child)),
                 _ => col.child(child),
             };
         }
@@ -2174,14 +2424,12 @@ pub fn view(
             &attachment_handlers,
         ));
     }
-    // Releasing the mouse ends the drag and copies the selected rows (#2383). A
-    // click that never moved selects nothing, so it copies nothing.
+    // Releasing the mouse ends the drag and copies the selected range (#2383,
+    // #2529). A click that never moved selects nothing, so it copies nothing.
     if let Some(d) = drag {
         col = col.on_mouse_up(MouseButton::Left, move |_ev, window, app| {
             d.dragging.set(false);
-            if let Some(text) = d.copied_text() {
-                app.write_to_clipboard(gpui::ClipboardItem::new_string(text));
-            }
+            d.write_to_clipboard(app);
             window.refresh();
         });
     }
@@ -2195,6 +2443,53 @@ pub fn view(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drag_copy_within_block_has_a_visible_range_and_clipboard_payload() {
+        let drag = CopyDrag::default();
+        drag.texts.borrow_mut().push("select a small range".into());
+        drag.anchor.set(Some(TextPoint::new(0, 7)));
+        drag.end.set(Some(TextPoint::new(0, 16)));
+        assert_eq!(drag.range(), Some((0, 0)));
+        assert!(drag.has_selection());
+        assert_eq!(drag.copied_text().as_deref(), Some("a small r"));
+        assert_eq!(
+            drag.clipboard_item()
+                .and_then(|item| item.text())
+                .as_deref(),
+            Some("a small r")
+        );
+    }
+
+    #[test]
+    fn drag_copy_across_blocks_preserves_partial_rows_and_blank_lines() {
+        let drag = CopyDrag::default();
+        drag.texts.borrow_mut().extend([
+            "first".to_string(),
+            "second".to_string(),
+            "third".to_string(),
+        ]);
+        drag.anchor.set(Some(TextPoint::new(2, 4)));
+        drag.end.set(Some(TextPoint::new(0, 2)));
+        assert_eq!(drag.copied_text().as_deref(), Some("rst\n\nsecond\n\nthir"));
+    }
+
+    #[test]
+    fn drag_copy_cmd_and_ctrl_chords_are_equivalent() {
+        assert!(copy_select::is_copy_chord("c", true, false));
+        assert!(copy_select::is_copy_chord("c", false, true));
+        assert!(!copy_select::is_copy_chord("c", false, false));
+        assert!(!copy_select::is_copy_chord("x", true, false));
+    }
+
+    #[test]
+    fn drag_copy_markdown_copy_text_matches_visible_segments() {
+        assert_eq!(markdown_copy_text("## Head\n\nbody"), "Head\nbody");
+        assert_eq!(
+            markdown_copy_text("| A | B |\n| --- | --- |\n| 1 | 2 |"),
+            "A\nB\n1\n2"
+        );
+    }
 
     /// The ladder steps down strictly and the body stays smallest, so a
     /// heading can never look like prose again (#2521).
@@ -2249,8 +2544,9 @@ mod tests {
         assert!(bubble.contains("glass_fill(message_surface(role))"));
         assert!(bubble.contains("content_width - 2.0 * MESSAGE_PAD_X"));
         assert!(bubble.contains("history_attachments(&paths, attachment_width, handlers)"));
-        assert!(USER_TEXT_SIZE > PLAIN_TEXT_SIZE);
-        assert_eq!(USER_TEXT_SIZE, 16.0);
+        const {
+            assert!(USER_TEXT_SIZE > PLAIN_TEXT_SIZE);
+        }
     }
 
     /// #2536: the image needs its own concentric clip. Clipping only the
