@@ -161,7 +161,6 @@ impl RouteStore {
     /// Atomic write: temp → 0600 → fsync → rename (same contract as pairing).
     pub fn save(&self, file: &RouteStoreFile) -> Result<()> {
         use std::io::Write as _;
-        use std::os::unix::fs::PermissionsExt;
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -173,33 +172,24 @@ impl RouteStore {
             f.write_all(&json)?;
             f.sync_all()?;
         }
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+        }
         std::fs::rename(&tmp, &self.path)?;
         Ok(())
     }
 
-    /// Read-modify-write under the shared remote flock (same lock file the
-    /// pairing store uses: one writer at a time across ALL remote state).
+    /// Read-modify-write under the store's exclusive state lock (bounded
+    /// wait: a daemon route update racing a CLI write serialises instead
+    /// of hard-failing).
     fn modify(&self, f: impl FnOnce(&mut RouteStoreFile) -> Result<()>) -> Result<()> {
-        use std::os::unix::io::AsRawFd;
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let lock_path = self.path.with_extension("lock");
-        let lock_file = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(false)
-            .open(&lock_path)?;
-        match crate::config::flock::exclusive(lock_file.as_raw_fd(), false) {
-            crate::config::flock::FlockOutcome::Acquired => {}
-            crate::config::flock::FlockOutcome::Held => {
-                anyhow::bail!("remote lock unexpectedly held in non-blocking mode")
-            }
-            crate::config::flock::FlockOutcome::Failed(e) => {
-                return Err(anyhow::Error::new(e)).context("flock routes.lock");
-            }
-        }
+        let lock_path = PathBuf::from(format!("{}.lock", self.path.display()));
+        let _lock = super::state_lock::exclusive_wait(&lock_path, super::state_lock::WAIT)?;
         let mut file = self.load()?;
         f(&mut file)?;
         self.save(&file)

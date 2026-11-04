@@ -235,12 +235,16 @@ fn find_host_by_url_normalizes() {
 
 #[test]
 fn persistence_roundtrip_permissions_and_corruption() {
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     let (_d, st) = store();
     st.upsert_configured("h1", "lab", "http://a", RouteKind::Lan, NOW)
         .unwrap();
-    let mode = std::fs::metadata(st.path()).unwrap().permissions().mode() & 0o777;
-    assert_eq!(mode, 0o600);
+    #[cfg(unix)]
+    {
+        let mode = std::fs::metadata(st.path()).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
     let loaded = st.load().unwrap();
     assert_eq!(loaded.hosts.len(), 1);
     assert_eq!(loaded.hosts["h1"].routes[0].url, "http://a");
