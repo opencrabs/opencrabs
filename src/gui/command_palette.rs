@@ -207,8 +207,8 @@ pub fn overlay(
         .when(empty, |d| d.child(caret(caret_on)))
         .child(
             div()
-                .flex_1()
                 .text_xl()
+                .when(empty, |d| d.flex_1())
                 .text_color(rgb(if empty { INK_MUTED } else { INK }))
                 .child(SharedString::from(if empty {
                     "Seeker: sessions, feats, skills, docs, debug and more.".to_string()
@@ -216,7 +216,7 @@ pub fn overlay(
                     state.query().to_string()
                 })),
         )
-        .when(!empty, |d| d.child(caret(caret_on)));
+        .when(!empty, |d| d.child(caret(caret_on)).child(div().flex_1()));
     shell = shell.child(pill);
 
     let mut card = div()
