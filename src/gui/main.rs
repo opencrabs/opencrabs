@@ -6804,7 +6804,7 @@ impl Render for Dashboard {
                         .justify_center()
                         .px_2()
                         .py_0p5()
-                        .rounded_sm()
+                        .rounded(px(4.0))
                         .cursor_pointer()
                         .text_color(rgb(palette::current().text_muted))
                         .hover(|d| d.bg(rgb(palette::current().panel_hi)))
@@ -7108,7 +7108,7 @@ impl Render for Dashboard {
                     div()
                         .id(SharedString::from(format!("topic-icon-{name}")))
                         .p_0p5()
-                        .rounded_sm()
+                        .rounded(px(4.0))
                         .cursor_pointer()
                         .hover(|d| d.bg(rgb(palette::current().panel_hi)))
                         .on_click(pick)
@@ -7775,7 +7775,7 @@ fn mc_panel(
         let color = if armed { shown.focus } else { row.color() };
         let mut cell = div().w_full().min_w_0().text_color(rgb(color));
         if armed {
-            cell = cell.bg(rgb(shown.selection)).rounded_sm().px_1();
+            cell = cell.bg(rgb(shown.selection)).rounded(px(4.0)).px_1();
         }
         match row {
             McRow::Line(line, _) => cell = cell.text_xs().truncate().child(line),
@@ -7801,12 +7801,12 @@ fn mc_panel(
         .overflow_hidden()
         .gap_1()
         .p_3()
-        .rounded_sm()
+        .rounded(px(CARD_RADIUS))
         .border_1()
         // The focused card wears the ring the rest of the window uses, so the
         // keyboard's target is never a guess.
         .border_color(rgb(if focused { shown.focus } else { shown.panel_hi }))
-        .bg(rgb(shown.panel))
+        .bg(glass_fill(shown.panel))
         .child(text(title, Size::Sm, title_color))
         .child(rows_view)
 }
@@ -8414,10 +8414,10 @@ fn mission_control_logs(
         .p_3()
         .w_full()
         .overflow_hidden()
-        .rounded(px(10.0))
+        .rounded(px(CARD_RADIUS))
         .border_1()
         .border_color(rgb(shown.panel_hi))
-        .bg(rgb(shown.panel))
+        .bg(glass_fill(shown.panel))
         // Inert: a click inside the reader never closes it by accident.
         .on_click(|_ev, _window, cx| cx.stop_propagation())
         .child(
@@ -8611,7 +8611,7 @@ fn emoji_popup_view(items: &[(&'static str, &'static str)], selected: usize) -> 
                 .gap_2()
                 .px_2()
                 .py_0p5()
-                .rounded_sm()
+                .rounded(px(4.0))
                 .text_color(rgb(palette::current().text))
                 // A subtle fill with an accent edge: the focus colour under
                 // muted text was unreadable in the themes (#2421).
@@ -8635,7 +8635,7 @@ fn command_popup_view(names: &[&'static str], selected: usize) -> Div {
         .flex_col()
         .gap_1()
         .p_2()
-        .rounded_sm()
+        .rounded(px(4.0))
         .border_1()
         .border_color(rgb(palette::current().panel_hi))
         .bg(rgb(palette::current().panel));
@@ -8651,7 +8651,7 @@ fn command_popup_view(names: &[&'static str], selected: usize) -> Div {
             .items_center()
             .gap_2()
             .px_1()
-            .rounded_sm();
+            .rounded(px(4.0));
         if picked {
             row = row.bg(rgb(palette::current().panel_hi));
         }
@@ -8877,7 +8877,7 @@ fn topic_strip(
         .items_center()
         .justify_center()
         .size(rems(1.9))
-        .rounded_sm()
+        .rounded(px(4.0))
         .flex_none()
         .cursor_pointer()
         .text_color(rgb(palette::current().text_muted))
@@ -9013,7 +9013,7 @@ fn topic_tab(
                 .border_b_2()
                 .border_color(rgba(rule))
         })
-        .rounded_sm()
+        .rounded(px(4.0))
         .when(current, |d| d.bg(rgb(palette::current().panel_hi)))
         .hover(|d| d.bg(rgb(palette::current().panel_hi)))
         .on_click(on_click)
@@ -9084,7 +9084,7 @@ fn update_prompt_overlay(
                         .id("update-prompt-cancel")
                         .px_3()
                         .py_1()
-                        .rounded_sm()
+                        .rounded(px(4.0))
                         .cursor_pointer()
                         .text_color(rgb(palette::current().text_muted))
                         .hover(|d| d.bg(rgb(palette::current().panel_hi)))
@@ -9096,7 +9096,7 @@ fn update_prompt_overlay(
                         .id("update-prompt-yes")
                         .px_3()
                         .py_1()
-                        .rounded_sm()
+                        .rounded(px(4.0))
                         .cursor_pointer()
                         .text_color(rgb(palette::current().accent))
                         .hover(|d| d.bg(rgb(palette::current().panel_hi)))
@@ -9862,7 +9862,7 @@ fn confirm_delete_overlay(
                                 .id("confirm-delete-cancel")
                                 .px_3()
                                 .py_1()
-                                .rounded_sm()
+                                .rounded(px(4.0))
                                 .text_xs()
                                 .text_color(rgb(palette::current().text_normal))
                                 .cursor_pointer()
@@ -9875,7 +9875,7 @@ fn confirm_delete_overlay(
                                 .id("confirm-delete-yes")
                                 .px_3()
                                 .py_1()
-                                .rounded_sm()
+                                .rounded(px(4.0))
                                 .text_xs()
                                 .text_color(rgb(palette::current().red))
                                 .cursor_pointer()
