@@ -632,6 +632,9 @@ struct Dashboard {
     /// The model picker's rows, built when the screen opens so a slow frame
     /// never rebuilds the catalogue.
     models_rows: Vec<models::Row>,
+    /// The live search text. Selection indexes the filtered rows, never the
+    /// unfiltered catalogue underneath them.
+    models_query: String,
     /// The row the arrows stand on.
     models_index: usize,
     /// The current provider's live catalogue request. Static rows stay
@@ -1751,6 +1754,7 @@ impl Dashboard {
             self.switch_model(arg, cx);
             return;
         }
+        self.models_query.clear();
         // The highlight lands on the live pair, so Enter on the screen is a
         // no-op instead of an accidental switch.
         self.models_index = self
@@ -1824,14 +1828,11 @@ impl Dashboard {
                     .as_ref()
                     .map(|(provider, model)| (provider.as_str(), model.as_str())),
             );
-            self.models_index = self
-                .models_rows
+            let visible = models::filtered_rows(&self.models_rows, &self.models_query);
+            self.models_index = visible
                 .iter()
                 .position(|row| row.current)
-                .unwrap_or_else(|| {
-                    self.models_index
-                        .min(self.models_rows.len().saturating_sub(1))
-                });
+                .unwrap_or_else(|| self.models_index.min(visible.len().saturating_sub(1)));
         }
         true
     }
@@ -4731,20 +4732,49 @@ impl Dashboard {
             cx.notify();
             return;
         }
-        // The model picker is a list: arrows walk it and Enter switches to the
-        // row under the highlight. Esc leaves, handled above with the screens.
+        // The model picker is a live-filtered list: arrows walk the visible
+        // models (never its provider headers) and Enter switches. Esc clears
+        // a filter first, then leaves, as the terminal's picker does.
         if self.screen == Screen::Models {
-            let last = self.models_rows.len().saturating_sub(1);
+            let visible = models::filtered_rows(&self.models_rows, &self.models_query);
+            let last = visible.len().saturating_sub(1);
             match ev.keystroke.key.as_str() {
                 "up" => self.models_index = self.models_index.saturating_sub(1),
                 "down" => self.models_index = (self.models_index + 1).min(last),
                 "enter" => {
-                    if let Some(row) = self.models_rows.get(self.models_index.min(last)) {
+                    if let Some(row) = visible.get(self.models_index.min(last)) {
                         let pair = row.pair();
                         self.switch_model(pair, cx);
                     }
                 }
-                _ => {}
+                "backspace" => {
+                    self.models_query.pop();
+                    self.models_index = 0;
+                }
+                "escape" => {
+                    if self.models_query.is_empty() {
+                        self.screen = Screen::Chat;
+                        self.refocus_screen();
+                    } else {
+                        self.models_query.clear();
+                        self.models_index = 0;
+                    }
+                }
+                _ => {
+                    if !ev.keystroke.modifiers.control
+                        && !ev.keystroke.modifiers.alt
+                        && !ev.keystroke.modifiers.platform
+                        && let Some(ch) = ev
+                            .keystroke
+                            .key_char
+                            .as_ref()
+                            .and_then(|s| s.chars().next())
+                        && !ch.is_control()
+                    {
+                        self.models_query.push(ch);
+                        self.models_index = 0;
+                    }
+                }
             }
             cx.notify();
             return;
@@ -6789,57 +6819,169 @@ impl Render for Dashboard {
                 }
             },
             Screen::Models => {
-                // Every pair the terminal offers, the live one marked. Enter
-                // switches to the row under the highlight and stays, so a user
-                // can compare without reopening; Esc goes back.
+                // The terminal picker's shape: a fixed search field, grouped
+                // provider sections, a selection-centred window, and counts
+                // for everything hidden above or below it (#2523).
                 let shown = palette::current();
-                let last = self.models_rows.len().saturating_sub(1);
-                let current = self.models_index.min(last);
+                let models::Panel {
+                    search,
+                    rows,
+                    matched,
+                    total,
+                    above,
+                    below,
+                } = models::panel(&self.models_rows, &self.models_query, self.models_index, 18);
+                let search_field = div()
+                    .id("models-search-input")
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .px_3()
+                    .py_2()
+                    .rounded(px(6.0))
+                    .bg(rgb(shown.panel))
+                    .border_1()
+                    .border_color(rgb(shown.track))
+                    .child(text(
+                        search,
+                        Size::Sm,
+                        if self.models_query.is_empty() {
+                            shown.text_faint
+                        } else {
+                            shown.text
+                        },
+                    ))
+                    .child(text("\u{258f}", Size::Sm, shown.amber));
+
                 let mut list = div().flex().flex_col().gap_1();
-                for (index, row) in self.models_rows.iter().enumerate() {
-                    let pair = row.pair();
-                    let selected = index == current;
-                    let mut entry = div()
-                        .id(SharedString::from(format!("model-row-{index}")))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap_2()
-                        .px_3()
-                        .py_2()
-                        .rounded(px(6.0))
-                        .child(text(
-                            if row.current { "\u{25cf}" } else { " " },
-                            Size::Sm,
-                            if row.current {
-                                shown.amber
-                            } else {
-                                shown.text_muted
-                            },
-                        ))
-                        .child(text(pair, Size::Sm, shown.text))
-                        .child(text(row.provider_name.clone(), Size::Xs, shown.text_muted));
-                    if selected {
-                        entry = entry.bg(rgb(shown.panel_hi));
-                    }
-                    list =
-                        list.child(entry.on_click(cx.listener(move |this, _ev, _window, cx| {
-                            this.models_index = index;
-                            let pair = this
-                                .models_rows
-                                .get(index)
-                                .map(models::Row::pair)
-                                .unwrap_or_default();
-                            this.switch_model(pair, cx);
-                        })));
+                if above > 0 {
+                    list = list.child(div().px_3().child(text(
+                        format!("\u{2191} {above} more"),
+                        Size::Xs,
+                        shown.text_muted,
+                    )));
                 }
-                let scroller = div()
-                    .id("models-body")
+                for line in rows {
+                    match line {
+                        models::PanelRow::Header {
+                            provider,
+                            name,
+                            count,
+                        } => {
+                            list = list.child(
+                                div()
+                                    .id(SharedString::from(format!("model-provider-{provider}")))
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_2()
+                                    .px_3()
+                                    .pt_3()
+                                    .pb_1()
+                                    .child(
+                                        text(name, Size::Xs, shown.amber)
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate(),
+                                    )
+                                    .child(text(
+                                        format!(
+                                            "{count} model{}",
+                                            if count == 1 { "" } else { "s" }
+                                        ),
+                                        Size::Xs,
+                                        shown.text_muted,
+                                    )),
+                            );
+                        }
+                        models::PanelRow::Model {
+                            row,
+                            index,
+                            selected,
+                        } => {
+                            let pair = row.pair();
+                            let mut entry = div()
+                                .id(SharedString::from(format!("model-row-{index}")))
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap_2()
+                                .px_3()
+                                .py_2()
+                                .rounded(px(6.0))
+                                .child(text(
+                                    if row.current { "\u{25cf}" } else { " " },
+                                    Size::Sm,
+                                    if row.current {
+                                        shown.amber
+                                    } else {
+                                        shown.text_muted
+                                    },
+                                ))
+                                // Two real columns: long model ids truncate in
+                                // the flexible first one, provider labels all
+                                // begin at the same fixed second-column x.
+                                .child(
+                                    text(row.model.clone(), Size::Sm, shown.text)
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate(),
+                                )
+                                .child(
+                                    text(row.provider_name.clone(), Size::Xs, shown.text_muted)
+                                        .w(px(180.0))
+                                        .flex_none()
+                                        .truncate(),
+                                );
+                            if selected {
+                                entry = entry.bg(rgb(shown.panel_hi));
+                            }
+                            list = list.child(entry.on_click(cx.listener(
+                                move |this, _ev, _window, cx| {
+                                    this.models_index = index;
+                                    this.switch_model(pair.clone(), cx);
+                                },
+                            )));
+                        }
+                    }
+                }
+                if matched == 0 {
+                    list = list.child(div().px_3().py_2().child(text(
+                        format!("no models match \"{}\"", self.models_query),
+                        Size::Sm,
+                        shown.text_muted,
+                    )));
+                }
+                if below > 0 {
+                    list = list.child(div().px_3().child(text(
+                        format!("\u{2193} {below} more"),
+                        Size::Xs,
+                        shown.text_muted,
+                    )));
+                }
+                let body = div()
+                    .flex()
+                    .flex_col()
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
-                    .child(list);
-                let count = self.models_rows.len();
+                    .gap_2()
+                    .child(search_field)
+                    .child(
+                        div()
+                            .id("models-body")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .child(list),
+                    );
+                let counted = if matched == total {
+                    format!("{total} model{}", if total == 1 { "" } else { "s" })
+                } else {
+                    format!(
+                        "{matched} of {total} models \u{b7} filter: {}",
+                        self.models_query
+                    )
+                };
                 let footer = div()
                     .flex()
                     .flex_row()
@@ -6851,12 +6993,12 @@ impl Render for Dashboard {
                             .flex()
                             .flex_col()
                             .gap_1()
-                            .child(div().text_xs().text_color(rgb(shown.text_muted)).child(
-                                SharedString::from(format!(
-                                    "{count} model{}",
-                                    if count == 1 { "" } else { "s" }
-                                )),
-                            ))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(shown.text_muted))
+                                    .child(SharedString::from(counted)),
+                            )
                             .child(
                                 div()
                                     .text_xs()
@@ -6872,13 +7014,10 @@ impl Render for Dashboard {
                                     })),
                             ),
                     )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(shown.text_muted))
-                            .child("enter \u{b7} switch \u{b7} esc \u{b7} back"),
-                    );
-                (scroller.into_any_element(), footer.into_any_element())
+                    .child(div().text_xs().text_color(rgb(shown.text_muted)).child(
+                        "type \u{b7} filter \u{b7} enter \u{b7} switch \u{b7} esc \u{b7} back",
+                    ));
+                (body.into_any_element(), footer.into_any_element())
             }
             Screen::Skills => {
                 // The same list `/skills` opens in the terminal, from the same
@@ -8010,6 +8149,7 @@ fn main() {
                         cd_selected: 0,
                         cd_show_hidden: false,
                         models_rows: Vec::new(),
+                        models_query: String::new(),
                         models_index: 0,
                         models_fetch: None,
                         models_provider: None,
