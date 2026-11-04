@@ -116,11 +116,10 @@ fn a_right_press_on_a_tab_and_on_the_chat_opens_the_same_card() {
 #[test]
 fn the_title_is_plain_text_and_not_a_chip() {
     assert!(!GUI_MAIN.contains("fn session_title_chip"));
-    let start = GUI_MAIN
-        .find("fn session_title(name: &str)")
+    let (_, title_fn) = GUI_MAIN
+        .split_once("fn session_title(name: &str)")
         .expect("the title prints");
-    let end = start + GUI_MAIN[start..].find("\n}\n").expect("the title fn ends");
-    let body = &GUI_MAIN[start..end];
+    let (body, _) = title_fn.split_once("\n}\n").expect("the title fn ends");
     assert!(
         body.contains(".flex_1()"),
         "the title takes the row's width instead of hugging its text"
