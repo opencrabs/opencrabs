@@ -956,7 +956,14 @@ fn md_line(l: &markdown::MdLine) -> Div {
     let style = body_style(size);
     let text =
         StyledText::new(l.text.clone()).with_default_highlights(&style, l.highlights.clone());
-    div().pl(rems(f32::from(l.indent) * 0.9)).child(text)
+    let base = div().pl(rems(f32::from(l.indent) * 0.9));
+    if l.heading {
+        base.mt(px(RHYTHM_HEADING_ABOVE))
+            .mb(px(RHYTHM_HEADING_BELOW))
+            .child(text)
+    } else {
+        base.child(text)
+    }
 }
 
 /// One table cell. Every cell is `flex_1` with `min_w_0`, so the grid takes
@@ -975,7 +982,12 @@ fn table_cell(cell: &markdown::MdCell, header: bool) -> Div {
     };
     let text =
         StyledText::new(cell.text.clone()).with_default_highlights(&style, cell.highlights.clone());
-    div().flex_1().min_w_0().px_2().py_1().child(text)
+    div()
+        .flex_1()
+        .min_w_0()
+        .px(px(RHYTHM_CELL_PAD_X))
+        .py(px(RHYTHM_CELL_PAD_Y))
+        .child(text)
 }
 
 /// A rule between two rows, drawn as its own element so no table depends on
@@ -1004,7 +1016,9 @@ fn md_table(t: &markdown::MdTable) -> Div {
         .border_1()
         .border_color(rgb(palette::current().track))
         .rounded(px(CARD_RADIUS))
-        .overflow_hidden();
+        .overflow_hidden()
+        .mt(px(RHYTHM_BLOCK_MARGIN))
+        .mb(px(RHYTHM_BLOCK_MARGIN));
 
     let mut head = div()
         .flex()
@@ -1034,12 +1048,23 @@ fn md_table(t: &markdown::MdTable) -> Div {
     grid
 }
 
+/// Vertical rhythm ladder (#2519): one table for every block gap so the
+/// chat reads as typeset content instead of a text dump. Base gap for
+/// paragraphs and list lines; headings and big blocks (tables, code fences)
+/// carry real margins above and below; table cells breathe inside the grid.
+const RHYTHM_BASE_GAP: f32 = 4.0;
+const RHYTHM_HEADING_ABOVE: f32 = 12.0;
+const RHYTHM_HEADING_BELOW: f32 = 4.0;
+const RHYTHM_BLOCK_MARGIN: f32 = 10.0;
+const RHYTHM_CELL_PAD_X: f32 = 12.0;
+const RHYTHM_CELL_PAD_Y: f32 = 6.0;
+
 /// Assistant content as markdown. Consecutive fence lines group under one
 /// padded mono container so a code block reads as one shape, while a table
 /// block keeps its grid instead of being flattened into text rows.
 fn md_block(src: &str) -> Div {
     let blocks = markdown::blocks(src);
-    let mut out = div().flex().flex_col().gap_1();
+    let mut out = div().flex().flex_col().gap(px(RHYTHM_BASE_GAP));
     let mut i = 0;
     while i < blocks.len() {
         match &blocks[i] {
@@ -1054,6 +1079,8 @@ fn md_block(src: &str) -> Div {
                     .bg(rgb(palette::current().panel_hi))
                     .rounded_sm()
                     .p_2()
+                    .mt(px(RHYTHM_BLOCK_MARGIN))
+                    .mb(px(RHYTHM_BLOCK_MARGIN))
                     .gap_0p5();
                 while i < blocks.len() {
                     match &blocks[i] {
