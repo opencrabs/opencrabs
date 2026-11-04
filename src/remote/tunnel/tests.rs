@@ -1,4 +1,5 @@
 use super::*;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
 /// A stand-in for cloudflared: honours `--logfile`, optionally writes a
@@ -26,7 +27,10 @@ fn stub_script_with_url(dir: &Path, url: Option<&str>) -> PathBuf {
     }
     body.push_str("exec sleep 30\n");
     std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    #[cfg(unix)]
+    {
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
     path
 }
 
@@ -79,7 +83,7 @@ fn parse_url_rejects_noise_and_lookalikes() {
 
 #[test]
 fn managed_path_carries_pinned_version() {
-    let p = managed_binary_path(Path::new("/tmp/x"));
+    let p = managed_binary_path(Path::new("state"));
     assert!(
         p.to_string_lossy()
             .ends_with(&format!("bin/cloudflared-{CLOUDFLARED_VERSION}"))
