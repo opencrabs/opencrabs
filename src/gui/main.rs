@@ -6562,10 +6562,10 @@ impl Render for Dashboard {
                     .flex_col()
                     .gap_2()
                     .p_3()
-                    .rounded(px(8.0))
+                    .rounded(px(CARD_RADIUS))
                     .border_1()
                     .border_color(rgb(shown.panel_hi))
-                    .bg(rgb(shown.panel))
+                    .bg(glass_fill(shown.panel))
                     .child(header)
                     .child(scroller);
                 // The trail of previews this visit, newest first and never

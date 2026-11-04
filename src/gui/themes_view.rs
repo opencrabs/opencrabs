@@ -6,6 +6,7 @@
 
 use gpui::{Div, SharedString, Stateful, div, prelude::*, px, rgb};
 use opencrabs::tui::render::theme_names;
+use opencrabs::ui_core::card::nested_radius;
 
 use crate::palette::{self, Palette};
 use crate::theme::{Size, text};
@@ -64,7 +65,7 @@ pub fn row(name: &str, selected: bool, current: bool) -> Stateful<Div> {
         .gap_2()
         .px_2()
         .py_1()
-        .rounded(px(4.0))
+        .rounded(px(nested_radius(12.0)))
         .border_1()
         .border_color(rgb(border))
         .bg(rgb(fill))
@@ -86,7 +87,7 @@ pub fn history_row(name: &str) -> Stateful<Div> {
         .items_center()
         .px_2()
         .py_1()
-        .rounded(px(4.0))
+        .rounded(px(nested_radius(12.0)))
         .cursor_pointer()
         .hover(|d| d.bg(rgb(shown.panel_hi)))
         .child(text(name.to_string(), Size::Xs, shown.text_muted))
