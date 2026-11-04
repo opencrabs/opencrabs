@@ -12,7 +12,8 @@ use crate::brain::provider::custom_openai_compatible::{
     OpenAIErrorResponse, needs_reasoning_content_for, unwrap_proxy_error,
 };
 use crate::brain::provider::error::{
-    ProviderError, is_html_error_body, is_temporary_unavailable_signal, is_transient_proxy_400,
+    ProviderError, is_capacity_saturation_signal, is_html_error_body,
+    is_temporary_unavailable_signal, is_transient_proxy_400,
 };
 
 // ─── unwrap_proxy_error ─────────────────────────────────────────────
@@ -416,4 +417,66 @@ fn http_404_html_retryable_but_json_not() {
         !json.is_retryable(),
         "404 JSON client error → not retryable"
     );
+}
+
+// ─── capacity saturation on inline stream errors (#2270) ────────────
+
+#[test]
+fn capacity_saturation_inline_error_is_transient_not_rate_limit() {
+    // The exact 2026-10-30 outage body: the proxy answered 200 OK and then
+    // reported a full upstream pool inline. It rotates upstream providers on
+    // every attempt, so this must ride the in-place retry ladder.
+    let msg = "115969 of 116616 providers for this model are out of quota or cooling down until their limits reset; every provider within your price limit is busy or rate-limited right now; retry shortly.";
+    assert!(
+        is_capacity_saturation_signal(msg, Some("capacity_saturated")),
+        "the outage body must classify as capacity saturation, not a hard rate limit"
+    );
+    // The type alone is enough, even with a short body.
+    assert!(is_capacity_saturation_signal(
+        "busy",
+        Some("capacity_saturated")
+    ));
+    // The vocabulary alone is enough when the type is missing.
+    assert!(is_capacity_saturation_signal(
+        "all providers busy, retry shortly",
+        None
+    ));
+
+    // Hard quota phrases stay out: a monthly cap or a dead credit balance does
+    // not lift inside a retry window, so the fallback chain must walk at once
+    // (#952).
+    assert!(!is_capacity_saturation_signal(
+        "You exceeded your current quota. Please check your plan and billing details.",
+        None
+    ));
+    assert!(!is_capacity_saturation_signal(
+        "insufficient_quota: your credit balance is too low",
+        Some("insufficient_quota")
+    ));
+    // Unrelated bodies are untouched.
+    assert!(!is_capacity_saturation_signal("invalid model name", None));
+    assert!(!is_capacity_saturation_signal(
+        "some other stream hiccup",
+        None
+    ));
+
+    // End to end through the classifier's mapping: capacity becomes a
+    // StreamError, which keeps the retry budget, so tool_loop's
+    // MAX_STREAM_RETRIES ladder runs before the fallback walk.
+    let pe = ProviderError::StreamError(format!("upstream overloaded (0): {msg}"));
+    assert!(
+        pe.is_retryable(),
+        "capacity saturation must keep the in-place retry budget"
+    );
+    assert!(
+        !pe.is_quota_exhausted(),
+        "capacity saturation is not a hard quota"
+    );
+
+    // A real hard quota on the same wire keeps its immediate fallback.
+    let hard = ProviderError::RateLimitExceeded(
+        "You exceeded your current quota. Please check your plan and billing details.".to_string(),
+    );
+    assert!(hard.is_quota_exhausted());
+    assert!(!hard.is_retryable());
 }

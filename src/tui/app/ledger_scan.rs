@@ -19,7 +19,7 @@ const CLOSE: &str = "-->";
 /// JSON array for v2, the `a | b` list for v1) and the offset just past
 /// its closing arrow.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Ledger<'a> {
+pub struct Ledger<'a> {
     pub start: usize,
     pub is_v2: bool,
     pub body: &'a str,
@@ -27,7 +27,7 @@ pub(crate) struct Ledger<'a> {
 }
 
 /// The earliest ledger in `s` that both starts a line and parses.
-pub(crate) fn next_ledger(s: &str) -> Option<Ledger<'_>> {
+pub fn next_ledger(s: &str) -> Option<Ledger<'_>> {
     let mut from = 0;
     while from <= s.len() {
         let v2 = find_at_line_start(s, V2_OPEN, from).map(|i| (i, true, V2_OPEN.len()));

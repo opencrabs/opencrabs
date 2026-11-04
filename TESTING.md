@@ -397,7 +397,7 @@ Born from two real incidents (#646, #1178): hard-coded fixture constants broke o
 | Tests — Model Order | 9 | `src/tests/model_order_test.rs` |
 | Tests — Model Refresh | 4 | `src/tests/model_refresh_test.rs` |
 | Tests — Models Picker Dedup | 7 | `src/tests/models_picker_dedup_test.rs` |
-| Tests — Mouse Fragment Filter | 13 | `src/tests/mouse_fragment_filter_test.rs` |
+| Tests — Mouse Frag Gate | 18 | `src/tests/mouse_frag_gate_test.rs` |
 | Tests — Nesting Gate | 4 | `src/tests/nesting_gate_test.rs` |
 | Tests — New Session Pane Binding | 3 | `src/tests/new_session_pane_binding_test.rs` |
 | Tests — No Direct Terminal Writes | 2 | `src/tests/no_direct_terminal_writes_test.rs` |
@@ -803,12 +803,15 @@ Born from two real incidents (#646, #1178): hard-coded fixture constants broke o
 | Tests — TUI Plan | 38 | `src/tests/tui_plan_tests_test.rs` |
 | Tests — TUI Process Commands | 3 | `src/tests/tui_process_commands_test.rs` |
 | Tests — TUI Remote Upload | 12 | `src/tests/tui_remote_upload_test.rs` |
+| Tests — TUI Queue Indicator | 8 | `src/tests/tui_queue_indicator_test.rs` |
+| Tests — TUI Reclaim After Panic | 9 | `src/tests/tui_reclaim_after_panic_test.rs` |
 | Tests — TUI Render Clear | 4 | `src/tests/tui_render_clear_test.rs` |
 | Tests — TUI Render Utils | 12 | `src/tests/tui_render_utils_test.rs` |
 | Tests — TUI Session Switch State | 7 | `src/tests/tui_session_switch_state_test.rs` |
 | Tests — TUI Theme Picker | 10 | `src/tests/tui_theme_picker_test.rs` |
 | Tests — Tui Theme Presets | 15 | `src/tests/tui_theme_presets_test.rs` |
 | Tests — TUI Tool Stack | 10 | `src/tests/tui_tool_stack_test.rs` |
+| Tests — TUI Unconsumed Queue | 5 | `src/tests/tui_unconsumed_queue_test.rs` |
 | Tests — TUI User Themes | 10 | `src/tests/tui_user_themes_test.rs` |
 | Tests — Turn Duration | 6 | `src/tests/turn_duration_test.rs` |
 | Tests — Turn Ranges | 40 | `src/tests/turn_ranges_test.rs` |

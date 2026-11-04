@@ -1429,16 +1429,31 @@ pub(crate) fn tool_start_counter() -> (
     (starts, cb)
 }
 
-/// Truncate a run's output for delivery (channels have message limits).
-/// The cut must land on a UTF-8 char boundary: the raw `&content[..max_len]`
-/// panicked the scheduler when byte 4000 fell inside a multibyte char
-/// (`✅` in a morning recap, #1919).
-pub(crate) fn truncate_for_delivery(content: &str) -> String {
-    const MAX_LEN: usize = 4000;
+/// Bound a run's output before delivery.
+///
+/// Every channel that has a message limit already owns a chunker for it: the
+/// Telegram outbox splits at 4096, Discord at 2000, Slack at 3500, and the
+/// session queue has no limit at all. This function therefore must not squeeze
+/// a report into a single message. The old 4000-byte cut dropped the tail of
+/// every longer report while the chunker below would have shipped it (#2252).
+///
+/// What is left is a runaway guard: a job that dumps hundreds of kilobytes must
+/// not turn into hundreds of API posts and earn a flood ban, so anything past
+/// `MAX_LEN` is cut there. The cut must land on a UTF-8 char boundary: the raw
+/// `&content[..max_len]` panicked the scheduler when byte 4000 fell inside a
+/// multibyte char (`✅` in a morning recap, #1919).
+pub(crate) fn prepare_for_delivery(content: &str) -> String {
+    const MAX_LEN: usize = 100_000;
     if content.len() > MAX_LEN {
+        tracing::warn!(
+            "Cron output is {} bytes, past the {}-byte delivery guard; sending the head only",
+            content.len(),
+            MAX_LEN
+        );
         format!(
-            "{}...\n\n(truncated — full output in session)",
-            truncate_str(content, MAX_LEN)
+            "{}...\n\n(truncated at {} bytes, full output in session)",
+            truncate_str(content, MAX_LEN),
+            MAX_LEN
         )
     } else {
         content.to_string()
@@ -1484,7 +1499,9 @@ pub(crate) async fn deliver_result(
 
     let (channel, target_id) = (parts[0], parts[1]);
 
-    let msg = truncate_for_delivery(content);
+    // Per-channel chunkers own the message limits; this only guards runaway
+    // output (#2252).
+    let msg = prepare_for_delivery(content);
 
     let delivery_msg = format!("⏰ **Cron: {job_name}**\n\n{msg}");
 

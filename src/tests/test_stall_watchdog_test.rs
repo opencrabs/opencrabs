@@ -10,8 +10,8 @@
 #![cfg(unix)]
 
 use std::path::PathBuf;
-use std::process::Command;
-use std::time::Instant;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 fn script() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/test-stall-watchdog.sh")
@@ -110,6 +110,59 @@ fn compile_phase_never_counts_as_a_stall() {
     assert_eq!(run.code, Some(3), "exit code must pass through");
     assert!(run.stdout.contains("Compiling"), "log not cat'd");
     assert!(!run.stdout.contains("STALL DETECTED"));
+}
+
+#[test]
+fn external_sigterm_dumps_the_buffer_instead_of_shredding_it() {
+    // A reaped step (SIGTERM from the runner) used to fire the EXIT trap,
+    // delete the buffer, and die from the signal before the final `cat`
+    // could print it: the job log kept the start line, an empty middle and
+    // exit 143, which is exactly what Test (Linux) showed three times
+    // (2026-10-25 9m19s, 2026-10-27 8m08s, 2026-10-28 7m37s, no test output
+    // at all). The buffered output must survive the signal, and the killed
+    // subtree must not be orphaned holding the stdout pipe open.
+    let child = Command::new("bash")
+        .arg(script())
+        .arg("sh")
+        .arg("-c")
+        .arg(r#"echo "buffered evidence line"; echo "test a ... ok"; sleep 20"#)
+        .env("WATCHDOG_STALL_SECS", "300")
+        .env("WATCHDOG_POLL_SECS", "0.2")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("watchdog spawned");
+
+    // Let the wrapper start the command and buffer its first lines.
+    std::thread::sleep(Duration::from_millis(1500));
+
+    let killed = Command::new("sh")
+        .arg("-c")
+        .arg(format!("kill -TERM {}", child.id()))
+        .status()
+        .expect("kill ran");
+    assert!(killed.success(), "could not SIGTERM the watchdog");
+
+    let out = child.wait_with_output().expect("watchdog output");
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert_eq!(
+        out.status.code(),
+        Some(143),
+        "an externally signalled run must report 143, not a bare signal death: {all}"
+    );
+    assert!(
+        all.contains("buffered evidence line"),
+        "buffered command output was shredded by the EXIT trap on SIGTERM: {all}"
+    );
+    assert!(
+        all.contains("SIGTERM"),
+        "the dump must name the signal that killed the run: {all}"
+    );
 }
 
 #[test]

@@ -454,13 +454,32 @@ jobs:
             --version "${{ steps.version.outputs.version }}" \
             --out dist
 
+      # App-local deployment instead of a static CRT (#2257). `+crt-static`
+      # cannot work here: llama.cpp's CMakeLists ignores
+      # CMAKE_MSVC_RUNTIME_LIBRARY, so its objects stay /MD while Rust goes
+      # /MT and the link dies with 16 unresolved `__imp_*` externals (proven
+      # on PR #2258 run 40721417449). rtk.exe is a third-party prebuilt that
+      # imports VCRUNTIME140.dll and can never be rebuilt with our flags. Four
+      # DLLs beside both exes fix all of it, and Microsoft licenses exactly
+      # this for the VC runtime.
+      - name: Stage the MSVC runtime (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          ./scripts/stage-windows-runtime.sh --self-test
+          ./scripts/stage-windows-runtime.sh "target/${{ matrix.target }}/release"
+
       - name: Create archive
         shell: bash
         run: |
           ASSET_NAME="opencrabs-v${{ steps.version.outputs.version }}-${{ matrix.asset_suffix }}"
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
             cd target/${{ matrix.target }}/release
-            7z a ../../../${ASSET_NAME}.zip ${{ matrix.artifact_name }} rtk.exe
+            # The staged runtime rides next to both exes. The loader checks the
+            # exe's own directory first, so this is what makes the archive
+            # start on a Windows that never installed Visual Studio.
+            7z a ../../../${ASSET_NAME}.zip ${{ matrix.artifact_name }} rtk.exe \
+              msvcp140.dll vcruntime140.dll vcruntime140_1.dll vcomp140.dll
           elif [[ "${{ matrix.asset_suffix }}" == macos-* ]]; then
             tar czf "${ASSET_NAME}.tar.gz" -C dist OpenCrabs.app
           else
@@ -489,6 +508,26 @@ jobs:
         run: |
           archive="opencrabs-v${{ steps.version.outputs.version }}-${{ matrix.asset_suffix }}.tar.gz"
           ./scripts/check-linux-asset-starts.sh "$archive" "$GLIBC_FLOOR"
+
+      # Same lesson as the Linux step above, opposite direction (#2257): the
+      # v0.5.15 Windows exe imported VCRUNTIME140.dll, VCRUNTIME140_1.dll,
+      # MSVCP140.dll and VCOMP140.DLL, so it died before printing a line on any
+      # Windows without the vc_redist, which is most of them. Nothing in this
+      # job could see it: the runner has that redist pre-installed, so the
+      # binary started there and nowhere else. The import table is the signal.
+      #
+      # Closure, not abstinence: the runtime is deployed app-local, so an
+      # import passes when the DLL that satisfies it travels in the archive.
+      # What fails is an import with no DLL beside it, which is the 0.5.15 bug
+      # exactly. rtk.exe is scanned too, because a third-party prebuilt is the
+      # most likely place for a surprise dependency.
+      - name: Check the Windows archive carries every DLL it imports
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          archive="opencrabs-v${{ steps.version.outputs.version }}-${{ matrix.asset_suffix }}.zip"
+          python scripts/check-pe-imports.py --self-test
+          python scripts/check-pe-imports.py "$archive"
 
       - name: Upload artifact
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6

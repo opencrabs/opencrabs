@@ -274,22 +274,19 @@ impl AgentService {
         let tname = tool_name.to_string();
         let enriched = enrich_metadata(tool_name, error_snippet, tool_input);
         let meta = enriched.map(|s| s.chars().take(500).collect::<String>());
-        // Recoverable / environmental failures (stale-hash retry, channel not
-        // connected, user-cancelled prompt) are NOT tool defects. Record them
-        // under a non-`tool_` event so they stay queryable but OUT of the
-        // success-rate denominator — otherwise they drove the RSI to ban
-        // working built-in tools (#236).
-        let recoverable = !success
-            && crate::brain::feedback_policy::is_recoverable_tool_failure(tool_name, error_snippet);
+        // A failed call is not automatically a tool DEFECT. `tool_event_type`
+        // splits it three ways: a gate refusal (plan gate, skill gate, guest
+        // scope, a declined approval prompt) becomes `gate_denied`, an
+        // environmental outcome (stale hash, channel not connected) becomes
+        // `recoverable_failure`, and only a real defect stays `tool_failure`.
+        // The first two carry no `tool_` prefix, so they stay queryable but OUT
+        // of the success-rate denominator. Otherwise they drove the RSI to ban
+        // working built-in tools (#236) and to warn that a healthy channel was
+        // 50% broken (#2251).
+        let event =
+            crate::brain::feedback_policy::tool_event_type(success, tool_name, error_snippet);
         tokio::spawn(async move {
             let repo = crate::db::repository::FeedbackLedgerRepository::new(pool);
-            let event = if success {
-                "tool_success"
-            } else if recoverable {
-                "recoverable_failure"
-            } else {
-                "tool_failure"
-            };
             let val = if success { 1.0 } else { 0.0 };
             if let Err(e) = repo.record(&sid, event, &tname, val, meta.as_deref()).await {
                 tracing::debug!("feedback ledger write failed: {e}");

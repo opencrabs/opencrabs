@@ -8,6 +8,7 @@ pub(crate) mod background_tasks;
 pub(crate) mod boot_report;
 pub(crate) mod builder;
 pub(crate) mod clear;
+pub(crate) mod clear_snapshot;
 pub(crate) mod compaction;
 pub(crate) mod compaction_notice;
 pub(crate) mod compaction_prompts;
@@ -22,6 +23,7 @@ pub(crate) mod fallback_suggest;
 pub(crate) mod feedback;
 pub(crate) mod fenced_command;
 mod gaslighting;
+pub(crate) mod halt_answer;
 pub(crate) mod helpers;
 pub(crate) mod loop_break;
 mod messaging;
@@ -58,6 +60,7 @@ pub use phantom::{
     has_phantom_tool_intent_no_tools, is_analysis_intent, is_bare_completion_only,
     is_delivery_intent, is_stuck_in_intent_loop, looks_truncated_mid_sentence,
 };
+pub use session_routes::register_local_route;
 pub use types::{
     AgentResponse, AgentStreamResponse, ApprovalCallback, BgTaskMeta, ChannelSessionEvent,
     MessageEnqueueCallback, MessageQueueCallback, PendingOrigin, ProgressCallback, ProgressEvent,

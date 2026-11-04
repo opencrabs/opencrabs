@@ -145,11 +145,15 @@ async fn restoring_a_sessions_own_directory_does_not_move_the_global() {
 /// The call-site guard. The bug was not the setter, it was who called it: a pane
 /// switch, a resume and the boot fan-out all passed through the setter that
 /// moves the global. If any of them goes back, the behaviour test above can only
-/// catch the one it simulates. This names every caller outside `src/tests/`.
+/// catch the one it simulates. So the tree is scanned outside `src/tests/`, and
+/// the ONLY raw call site allowed is the shared `/cd` applier
+/// (`apply_operator_cd`), which both surfaces call: the terminal handler and the
+/// window's text command (#2469). A second copy of the sequence is exactly how
+/// the two drifted, so a second call site fails here.
 #[test]
 fn only_the_cd_path_calls_the_global_moving_setter() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut callers = Vec::new();
+    let mut callers: Vec<(String, usize)> = Vec::new();
     let mut stack = vec![root];
     while let Some(dir) = stack.pop() {
         let read = match std::fs::read_dir(&dir) {
@@ -174,17 +178,21 @@ fn only_the_cd_path_calls_the_global_moving_setter() {
             };
             // A call site always reads `.<setter>(`; the definition in
             // builder.rs and its doc mentions do not.
-            if text.contains(".set_working_directory_for_session(") {
-                callers.push(path.file_name().unwrap().to_string_lossy().into_owned());
+            let hits = text.matches(".set_working_directory_for_session(").count();
+            if hits > 0 {
+                callers.push((
+                    path.file_name().unwrap().to_string_lossy().into_owned(),
+                    hits,
+                ));
             }
         }
     }
     callers.sort();
-    callers.dedup();
     assert_eq!(
         callers,
-        vec!["messaging.rs".to_string()],
-        "`set_working_directory_for_session` moves the process-global cwd, so the only \
-         caller allowed is the /cd handler in tui/app/messaging.rs (#2007)"
+        vec![("builder.rs".to_string(), 1)],
+        "`set_working_directory_for_session` moves the process-global cwd. Its one call \
+         site must stay inside `apply_operator_cd` in brain/agent/service/builder.rs, \
+         which both `/cd` surfaces call (#2007, #2469)"
     );
 }

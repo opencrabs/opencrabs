@@ -2199,16 +2199,29 @@ impl TelegramAgent {
                     listener_token.clone(),
                     Some(guest_runner.clone()),
                 );
-                Dispatcher::builder(bot.clone(), tree.clone())
-                    .build()
-                    .dispatch_with_listener(
+                let mut dispatcher = Dispatcher::builder(bot.clone(), tree.clone()).build();
+                // `try_dispatch_with_listener`, never `dispatch_with_listener`
+                // (#2228). The latter is a wrapper that `.expect()`s the startup
+                // `get_me` result, so one timeout panicked this task. A panic
+                // leaves through the task boundary, not this loop, so the
+                // reconnect below never ran and Telegram stayed silent until the
+                // process restarted.
+                let started = dispatcher
+                    .try_dispatch_with_listener(
                         listener,
                         teloxide::error_handlers::LoggingErrorHandler::with_custom_text(
                             "Telegram raw update listener error",
                         ),
                     )
                     .await;
-                tracing::warn!("Telegram: dispatcher exited unexpectedly — reconnecting in 5s");
+                match started {
+                    Ok(()) => tracing::warn!(
+                        "Telegram: dispatcher exited unexpectedly — reconnecting in 5s"
+                    ),
+                    Err(err) => tracing::warn!(
+                        "Telegram: dispatcher could not start ({err}), reconnecting in 5s"
+                    ),
+                }
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             }
         })

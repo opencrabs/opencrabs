@@ -2274,6 +2274,32 @@ pub struct OpenAIProvider {
     thinking_loop_timeout: Option<u64>,
 }
 
+/// Pick the retry config for one request from the facts that decide it.
+///
+/// Split out of the provider's `retry_config` method so the selection rules
+/// can be pinned without widening that method's visibility: the decision is a
+/// pure function of the override, the provider name, whether the host is
+/// OpenRouter, and the model id.
+pub(crate) fn select_retry_config(
+    override_cfg: Option<&crate::utils::retry::RetryConfig>,
+    provider_name: &str,
+    is_openrouter: bool,
+    model: &str,
+) -> crate::utils::retry::RetryConfig {
+    if let Some(ovr) = override_cfg {
+        return ovr.clone();
+    }
+    // Qwen, OpenRouter, and :free models: retry on 429 with backoff.
+    // OpenRouter upstream providers often have tight per-minute windows that
+    // reopen within seconds, so bailing to fallback on the first 429 is
+    // wasteful when a 4-attempt backoff would get through.
+    if provider_name == "qwen" || is_openrouter || model.ends_with(":free") {
+        crate::utils::retry::RetryConfig::qwen_cli_match()
+    } else {
+        crate::utils::retry::RetryConfig::default()
+    }
+}
+
 impl OpenAIProvider {
     /// Returns true if this provider targets OpenRouter (detected by base_url).
     fn is_openrouter(&self) -> bool {
@@ -2296,18 +2322,12 @@ impl OpenAIProvider {
     ///   on the fallback chain.
     /// - All other providers keep the default (bail-to-fallback on 429).
     fn retry_config(&self, model: &str) -> crate::utils::retry::RetryConfig {
-        if let Some(ref ovr) = self.retry_config_override {
-            return ovr.clone();
-        }
-        // Qwen, OpenRouter, and :free models: retry on 429 with backoff.
-        // OpenRouter upstream providers often have tight per-minute windows
-        // that reopen within seconds — bailing to fallback on the first 429
-        // is wasteful when a 3-retry backoff would get through.
-        if self.name == "qwen" || self.is_openrouter() || model.ends_with(":free") {
-            crate::utils::retry::RetryConfig::qwen_cli_match()
-        } else {
-            crate::utils::retry::RetryConfig::default()
-        }
+        select_retry_config(
+            self.retry_config_override.as_ref(),
+            &self.name,
+            self.is_openrouter(),
+            model,
+        )
     }
 
     /// Create a new OpenAI provider with official API
@@ -4558,22 +4578,36 @@ impl Provider for OpenAIProvider {
                                         if c != 0 { c } else { read_status("http_code") }
                                     };
                                     tracing::error!("[STREAM_ERROR] Inline SSE error: type={:?}, code={}, msg={}", err_type, code, message);
+                                    // Capacity saturation (#2270): the proxy answered 200 and then
+                                    // reported a full upstream pool inline ("out of quota or cooling
+                                    // down ...; retry shortly"). It rotates upstream providers on
+                                    // every attempt, so this is transient and must ride the in-place
+                                    // retry ladder instead of walking the fallback chain with zero
+                                    // attempts. Hard quota phrases stay excluded from that matcher
+                                    // and keep falling back immediately.
+                                    let is_capacity_saturated =
+                                        crate::brain::provider::error::is_capacity_saturation_signal(
+                                            &message,
+                                            err_type.as_deref(),
+                                        );
                                     // Map 429/quota-style messages to RateLimitExceeded so the
                                     // fallback chain kicks in immediately instead of retrying.
                                     let msg_lc = message.to_lowercase();
-                                    let is_rate_limit = code == 429
-                                        || err_type.as_deref() == Some("rate_limit_exceeded")
-                                        || msg_lc.contains("rate limit")
-                                        || msg_lc.contains("quota");
+                                    let is_rate_limit = !is_capacity_saturated
+                                        && (code == 429
+                                            || err_type.as_deref() == Some("rate_limit_exceeded")
+                                            || msg_lc.contains("rate limit")
+                                            || msg_lc.contains("quota"));
                                     // Qwen portal (and Cloudflare-fronted upstreams in general)
                                     // emits 529 / `overloaded_error` / 503 when the shared
                                     // cluster is temporarily saturated. It's the exact case
                                     // tool_loop's StreamError retry-then-fallback path exists
-                                    // for: retry 3x with backoff, then swap to a healthy
+                                    // for: retry 5x with backoff, then swap to a healthy
                                     // provider. Mapping to StreamError routes it there —
                                     // mapping to ApiError{500} sent it to the catch-all that
                                     // bubbled straight to the TUI.
-                                    let is_overloaded = code == 529
+                                    let is_overloaded = is_capacity_saturated
+                                        || code == 529
                                         || code == 503
                                         || err_type.as_deref() == Some("overloaded_error")
                                         || msg_lc.contains("overloaded")

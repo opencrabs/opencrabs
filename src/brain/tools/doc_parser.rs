@@ -650,7 +650,7 @@ impl DocParserTool {
 
     /// Parse spreadsheets: XLSX, XLSM (OOXML), XLSB, XLS (BIFF), ODS.
     ///
-    /// calamine 0.36 reads all five natively; the dispatch previously only
+    /// calamine 0.38 reads all five natively; the dispatch previously only
     /// routed xlsx/xls to it (#955). XLSM shares the XLSX reader since both
     /// are zipped OOXML packages.
     ///

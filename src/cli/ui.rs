@@ -173,7 +173,7 @@ pub(crate) async fn cmd_daemon(config: &crate::config::Config) -> Result<()> {
             }
         }
     }
-    cmd_chat_inner(config, None, false, true, active_lock).await
+    cmd_chat_inner(config, None, false, true, active_lock, false).await
 }
 
 /// #1723: adoption candidates from a profile listing, in listing order.
@@ -312,8 +312,9 @@ pub(crate) async fn cmd_chat(
     config: &crate::config::Config,
     session_id: Option<String>,
     force_onboard: bool,
+    start_fresh: bool,
 ) -> Result<()> {
-    cmd_chat_inner(config, session_id, force_onboard, false, None).await
+    cmd_chat_inner(config, session_id, force_onboard, false, None, start_fresh).await
 }
 
 /// Claim this profile, or refuse to boot (#1072).
@@ -449,6 +450,7 @@ async fn cmd_chat_inner(
     force_onboard: bool,
     headless: bool,
     scheduler_lock: Option<crate::config::profile::SchedulerLock>,
+    start_fresh: bool,
 ) -> Result<()> {
     // Single-instance guard (#1072), before the database, the provider, the
     // tool registry or the memory reindex. A second instance of the same
@@ -934,13 +936,24 @@ async fn cmd_chat_inner(
                     reason,
                 } => progress_sender.send(TuiEvent::SystemMessage {
                     session_id,
-                    text: format!("⏳ Retry {}/{} — {}", attempt, max, reason),
+                    text: format!(
+                        "⏳ {} — {}",
+                        crate::utils::retry::send_label(attempt, max),
+                        reason
+                    ),
                 }),
                 ProgressEvent::SuggestedOptions(options) => {
                     progress_sender.send(TuiEvent::SuggestedOptions {
                         session_id,
                         options: options.into_iter().map(|item| item.label).collect(),
                     })
+                }
+                // #2255: a plan just closed. The event carries the fact to
+                // every surface; the chime is opt-in and TUI-only, so no
+                // toast and no desktop notification is raised here.
+                ProgressEvent::PlanCompleted { .. } => {
+                    play_plan_completion_sound_if_enabled();
+                    return;
                 }
             };
             if let Err(e) = result {
@@ -2103,6 +2116,15 @@ async fn cmd_chat_inner(
         app.force_onboard = true;
     }
 
+    // `chat --new`: drop the saved pane layout and open a brand-new session.
+    // Saving the single-pane layout also removes layout.json, so the next
+    // start does not bring the old panes back.
+    if start_fresh {
+        app.pane_manager = crate::tui::pane::PaneManager::new();
+        app.pane_manager.save_layout();
+        app.start_fresh = true;
+    }
+
     // Resume a specific session (e.g. after a restart). Accepts a full
     // UUID or the prefix that `session list` shows, routed through the shared
     // resolver so every CLI session-id entry point resolves identically.
@@ -2302,6 +2324,26 @@ enum BannerKind {
     Exit,
 }
 
+/// Play the plan-finished chime when the operator opted in (#2255).
+///
+/// The fact itself arrives as `ProgressEvent::PlanCompleted` on every
+/// surface; only this TUI arm turns it into audio. The flag is read at the
+/// moment of the event, so flipping `[agent] completion_notification_enabled`
+/// in a live session takes effect without a restart. A build without the
+/// `notification-sound` feature stays silent.
+#[cfg(feature = "notification-sound")]
+fn play_plan_completion_sound_if_enabled() {
+    let enabled = crate::config::Config::load()
+        .map(|c| c.agent.completion_notification_enabled)
+        .unwrap_or(false);
+    if enabled {
+        crate::utils::completion_sound::play_completion_sound();
+    }
+}
+
+#[cfg(not(feature = "notification-sound"))]
+fn play_plan_completion_sound_if_enabled() {}
+
 /// mtime of the running executable as "YYYY-MM-DD HH:MM" local time (#1965).
 /// None when the exe path or metadata is unavailable, so the banner degrades
 /// to the old line instead of guessing.
@@ -2442,7 +2484,7 @@ fn print_terminal_banner(
 
     println!("  {}Tips{}", CYAN, RESET);
     println!(
-        "  {}@ for files  ·  ! for shell  ·  Shift+Enter for newline  ·  Ctrl+O for older messages{}",
+        "  {}@ for files  ·  ! for shell  ·  Shift+Enter for newline  ·  PageUp for older messages{}",
         DIM, RESET
     );
     println!();

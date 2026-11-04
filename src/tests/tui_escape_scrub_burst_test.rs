@@ -72,3 +72,35 @@ fn osc_sequence_stripped_burst_kept() {
     let s = "\x1b]0;title\x07keep[3;4]me";
     assert_eq!(App::strip_terminal_escapes(s), "keep[3;4]me");
 }
+
+/// #2247: an ESC directly before a multi-byte char used to consume one byte of
+/// that char, leaving the walk inside it. `utf8_char_len` then read the
+/// continuation byte, the slice landed mid-character, and the whole process
+/// panicked. Any char after a two-byte escape must survive intact.
+#[test]
+fn esc_directly_before_multibyte_char_does_not_panic() {
+    // two-byte char, three-byte char, four-byte char
+    assert_eq!(App::strip_terminal_escapes("\u{1b}\u{e9}"), "\u{e9}");
+    assert_eq!(App::strip_terminal_escapes("\u{1b}\u{fffd}"), "\u{fffd}");
+    assert_eq!(
+        App::strip_terminal_escapes("\u{1b}\u{1f980}x"),
+        "\u{1f980}x"
+    );
+}
+
+/// The field report's exact offset: ESC at 912, replacement char at 913.
+#[test]
+fn esc_before_multibyte_char_at_the_reported_offset_does_not_panic() {
+    let poisoned = format!("{}\u{1b}\u{fffd}tail", "x".repeat(912));
+    assert_eq!(
+        App::strip_terminal_escapes(&poisoned),
+        format!("{}\u{fffd}tail", "x".repeat(912))
+    );
+}
+
+/// The two-byte escape path still drops itself and a plain ASCII char.
+#[test]
+fn esc_before_ascii_char_is_still_dropped() {
+    assert_eq!(App::strip_terminal_escapes("\u{1b}z"), "");
+    assert_eq!(App::strip_terminal_escapes("a\u{1b}=b"), "ab");
+}

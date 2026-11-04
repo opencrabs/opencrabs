@@ -8,6 +8,7 @@
 pub(crate) mod background;
 pub(crate) mod chat;
 pub(crate) mod chrome;
+mod command_palette;
 mod dialogs;
 mod frame;
 
@@ -54,3 +55,44 @@ pub(crate) use tools::detached_state_suffix;
 pub(crate) use tools::unescape_display_string;
 
 pub use frame::render;
+
+// The turn-header grammar (#759) and the token label are pure formatting the
+// desktop client renders too. Served from here so the gui cannot fork them
+// into a second dialect that drifts the moment one side changes.
+// `format_turn_spinner_meta` is the live head's suffix builder: the gui
+// status line spells its clock and counter exactly as the TUI does.
+pub use chat::{
+    TurnSummary, format_step_count, format_turn_header, format_turn_spinner_meta,
+    is_deliverable_report,
+};
+pub use utils::format_token_count_raw;
+// The GUI's running-task strip is drawn with the TUI's own formatter and label
+// width, so the two surfaces cannot disagree about what a running task looks
+// like (#2322).
+pub use background::{LABEL_CHARS, format_background_tasks};
+// #2237: the wording and width maths for the mid-turn queue row live in
+// `input`, which stays a private module. Re-export just what the tests pin.
+// `#[cfg(test)]` because nothing in the library reads them through this path:
+// `render_queue` calls the helper directly, so an ungated re-export is a dead
+// import for every non-test build and trips `-D warnings`.
+#[cfg(test)]
+pub(crate) use input::queue_line_parts;
+
+pub use theme::Theme;
+
+/// Look up a theme by name for the desktop window: built-in presets first,
+/// then user themes in `~/.opencrabs/themes`. Case-insensitive, like `/theme`.
+pub fn find_theme(name: &str) -> Option<&'static Theme> {
+    presets::by_name(name).or_else(|| user_themes::find(name))
+}
+
+/// Every theme name the desktop window can pick: the built-in presets, then
+/// the user presets. Read on each open of the themes screen, so a new file in
+/// `~/.opencrabs/themes` shows up without a restart.
+pub fn theme_names() -> Vec<&'static str> {
+    presets::built_ins()
+        .iter()
+        .map(|t| t.name)
+        .chain(user_themes::all().into_iter().map(|t| t.name))
+        .collect()
+}

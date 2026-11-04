@@ -9,6 +9,7 @@ use super::onboarding::OnboardingWizard;
 use super::*;
 use anyhow::Result;
 use serde_json::Value;
+use std::collections::HashMap;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -21,6 +22,28 @@ fn utf8_char_len(b: u8) -> usize {
         0xE0..=0xEF => 3,
         0xF0..=0xF7 => 4,
         _ => 1, // continuation byte — shouldn't happen on valid str, advance 1
+    }
+}
+
+/// Text to hand back to the user when a turn ends before the tool loop drained
+/// the mid-turn queue.
+///
+/// Only user-typed entries qualify. A synthetic push (background task,
+/// sub-agent, session notify, recovery) carries `[System: ...]` framing in
+/// `context_text`, so pasting its `display_text` into the input box would put
+/// scaffolding in front of the user as if they had typed it.
+pub(crate) fn unconsumed_user_text(
+    msgs: &[crate::brain::agent::QueuedUserMessage],
+) -> Option<String> {
+    let typed: Vec<&str> = msgs
+        .iter()
+        .filter(|m| m.bg_meta.is_none() && m.context_text == m.display_text)
+        .map(|m| m.display_text.as_str())
+        .collect();
+    if typed.is_empty() {
+        None
+    } else {
+        Some(typed.join("\n"))
     }
 }
 
@@ -183,26 +206,16 @@ impl App {
         // Update App working directory
         self.working_directory = canonical.clone();
 
-        // Update AgentService working directory (runtime). Per-session (#703)
-        // so `/cd` in this pane never moves another session's cwd.
+        // Update AgentService working directory (runtime) and persist the row in
+        // one shared applier, the same one the window's `/cd` calls (#2469), so
+        // the two surfaces cannot drift. Per-session (#703) so `/cd` in this
+        // pane never moves another session's cwd.
         if let Some(ref session) = self.current_session {
             self.agent_service
-                .set_working_directory_for_session(session.id, canonical.clone());
+                .apply_operator_cd(session.id, &canonical)
+                .await;
         } else {
             self.agent_service.set_working_directory(canonical.clone());
-        }
-
-        // Persist to session DB — that's the source of truth for per-session WD.
-        if let Some(ref session) = self.current_session
-            && let Err(e) = self
-                .session_service
-                .update_session_working_directory(
-                    session.id,
-                    Some(canonical.to_string_lossy().to_string()),
-                )
-                .await
-        {
-            tracing::warn!("failed to persist session working directory: {e}");
         }
 
         self.push_system_message(format!(
@@ -259,6 +272,14 @@ impl App {
         // `load_session` further down this file. Persisting the layout
         // makes the binding survive restarts when the pane is split.
         if let Some(pane) = self.pane_manager.focused_pane_mut() {
+            // A brand-new session must not inherit text typed for the old
+            // one: clear the pane's stashed input on an actual rebind (#2494).
+            if pane.session_id != Some(session.id) {
+                pane.clear_input();
+                self.input_buffer.clear();
+                self.cursor_position = 0;
+                self.input_history_index = None;
+            }
             pane.session_id = Some(session.id);
         }
         if self.pane_manager.is_split() {
@@ -307,14 +328,13 @@ impl App {
             .await?
             .ok_or_else(|| anyhow::anyhow!("Session not found"))?;
 
-        let messages = self
-            .message_service
-            .list_messages_for_session(session_id)
-            .await?;
+        // Only the newest display window is read from SQL. Reading the full
+        // history to show its tail cost a 57 MB allocation on a large session
+        // (#2281); PageUp pages older rows in on demand.
+        let (display, hidden) = self.load_display_window(session_id).await?;
 
-        // TUI scrollback shows the FULL session history. The agent applies
-        // its own compaction window when building the LLM prompt — that's
-        // independent of what the human sees. Trimming here was wiping the
+        // The agent applies its own compaction window when building the LLM
+        // prompt — that's independent of what the human sees. Trimming here was wiping the
         // visible chat after every auto-compaction.
 
         // Stash old session's cancel token before switching so background
@@ -397,8 +417,6 @@ impl App {
         // Sync is_processing flag with per-session state
         self.is_processing = self.processing_sessions.contains(&session.id);
 
-        let (display, hidden) =
-            Self::trim_messages_to_display_window(&messages, Self::DISPLAY_MESSAGE_WINDOW);
         self.hidden_older_messages = hidden;
         self.oldest_displayed_sequence = display.first().map(|m| m.sequence).unwrap_or(0);
         self.display_token_count = display
@@ -630,6 +648,16 @@ impl App {
 
         // Keep focused pane in sync with loaded session
         if let Some(pane) = self.pane_manager.focused_pane_mut() {
+            // Loading a DIFFERENT session into this pane clears its stashed
+            // input: half-typed text belonged to the previous conversation
+            // and must never fire into the new one (#2494). A same-session
+            // reload (Tab-back, session list refresh) keeps it.
+            if pane.session_id != Some(session_id) {
+                pane.clear_input();
+                self.input_buffer.clear();
+                self.cursor_position = 0;
+                self.input_history_index = None;
+            }
             pane.session_id = Some(session_id);
         }
         // Persist layout so pane-to-session mapping survives restarts
@@ -641,33 +669,51 @@ impl App {
     }
 
     /// Persist the current session ID to `~/.opencrabs/last_session` so
-    /// the next startup can restore the correct session.
+    /// the next startup can restore the correct session. The file and its
+    /// parsing live in `utils::last_session`, which the GUI boots from too:
+    /// one writer, one reader, so the two surfaces cannot disagree (#2444).
     fn save_last_session_id(session_id: Uuid) {
-        let base = crate::config::opencrabs_home();
-        if let Err(e) = std::fs::write(base.join("last_session"), session_id.to_string()) {
-            tracing::warn!("Failed to persist last_session: {}", e);
-        }
+        crate::utils::last_session::write(session_id);
     }
 
     /// Read the last active session ID from disk.
     pub(crate) fn read_last_session_id() -> Option<Uuid> {
-        let base = crate::config::opencrabs_home();
-        let content = std::fs::read_to_string(base.join("last_session")).ok()?;
-        Uuid::parse_str(content.trim()).ok()
+        crate::utils::last_session::read()
     }
 
     /// Pre-load a session's messages into the pane cache (for restored split panes).
     pub(crate) async fn preload_pane_session(&mut self, session_id: Uuid) {
-        let messages = self
-            .message_service
-            .list_messages_for_session(session_id)
-            .await
-            .unwrap_or_default();
-        let (display, _) =
-            Self::trim_messages_to_display_window(&messages, Self::DISPLAY_MESSAGE_WINDOW);
+        let display = match self.load_display_window(session_id).await {
+            Ok((display, _)) => display,
+            Err(e) => {
+                tracing::warn!(error = %e, %session_id, "failed to preload pane session");
+                Vec::new()
+            }
+        };
         let expanded: Vec<DisplayMessage> =
             display.into_iter().flat_map(Self::expand_message).collect();
         self.pane_message_cache.insert(session_id, expanded);
+    }
+
+    /// The newest `DISPLAY_MESSAGE_WINDOW` rows of a session plus how many
+    /// older rows sit behind them. Reads a count and a LIMIT-bounded tail, so
+    /// the cost is independent of how long the session has grown (#2281).
+    async fn load_display_window(
+        &self,
+        session_id: Uuid,
+    ) -> Result<(Vec<crate::db::models::Message>, usize)> {
+        let total = self
+            .message_service
+            .count_messages_in_session(session_id)
+            .await?;
+        let rows = self
+            .message_service
+            .list_recent_messages_for_session(session_id, Self::DISPLAY_MESSAGE_WINDOW)
+            .await?;
+        let hidden = usize::try_from(total)
+            .unwrap_or(0)
+            .saturating_sub(rows.len());
+        Ok((rows, hidden))
     }
 
     /// How many of the newest database rows a reloaded pane displays.
@@ -680,10 +726,10 @@ impl App {
     /// single row can eat a count window.
     ///
     /// Anything older stays behind the "N older messages hidden" marker and
-    /// remains reachable through Ctrl+O paging.
+    /// remains reachable through PageUp paging.
     pub(crate) const DISPLAY_MESSAGE_WINDOW: usize = 200;
 
-    /// Upper bound on how many rows Ctrl+O paging will load in total. A count
+    /// Upper bound on how many rows PageUp paging will load in total. A count
     /// for the same reason the window is one: the old guard stopped paging
     /// once `display_token_count` passed 300k, and a single tool-ledger row can
     /// pass that on its own, which left every older message unreachable
@@ -691,30 +737,12 @@ impl App {
     /// entirely into memory.
     pub(crate) const MAX_DISPLAYED_MESSAGES: usize = 2_000;
 
-    /// Keep the newest `window` rows of a session, dropping the rest.
-    /// Returns (kept_messages, hidden_count).
-    ///
-    /// The newest row is always kept when the history is non-empty: a window
-    /// of zero would otherwise blank a pane that has messages, and the row the
-    /// user most recently received is the last thing to hide (#1944).
-    pub(crate) fn trim_messages_to_display_window(
-        msgs: &[crate::db::models::Message],
-        window: usize,
-    ) -> (Vec<crate::db::models::Message>, usize) {
-        if msgs.is_empty() {
-            return (Vec::new(), 0);
-        }
-        let keep = window.clamp(1, msgs.len());
-        let hidden = msgs.len() - keep;
-        (msgs[hidden..].to_vec(), hidden)
-    }
-
     /// Build the dim italic history marker shown at the top of the message list.
     fn make_history_marker(count: usize) -> DisplayMessage {
         DisplayMessage {
             id: Uuid::new_v4(),
             role: "history_marker".to_string(),
-            content: format!("↑ {} older messages hidden · Ctrl+O to load more", count),
+            content: format!("↑ {} older messages hidden · PageUp to load more", count),
             timestamp: chrono::Utc::now(),
             token_count: None,
             cost: None,
@@ -729,12 +757,12 @@ impl App {
     }
 
     /// Load one more window of older messages from the DB and prepend them to
-    /// the current display list. Called by Ctrl+O when `hidden_older_messages`
+    /// the current display list. Called by PageUp when `hidden_older_messages`
     /// is above zero.
     ///
     /// A count, matching the display window: a token budget here measured raw
     /// DB rows, and one persisted tool-ledger row could fill it on its own, so
-    /// every Ctrl+O added exactly one row (#2155).
+    /// every PageUp added exactly one row (#2155).
     pub(crate) async fn load_more_history(&mut self) -> Result<()> {
         tracing::debug!(
             "[SCROLL] load_more_history called: hidden={}, display_tokens={}",
@@ -746,23 +774,22 @@ impl App {
             None => return Ok(()),
         };
         let msgs_before = self.messages.len();
-        let all = self
+        // One more window of rows strictly older than the oldest displayed
+        // one, read from SQL with LIMIT (#2281). Rows still hidden after this
+        // page come from the running count, not from a full reload.
+        let to_add = self
             .message_service
-            .list_messages_for_session(session_id)
+            .list_messages_before_sequence(
+                session_id,
+                self.oldest_displayed_sequence,
+                Self::DISPLAY_MESSAGE_WINDOW,
+            )
             .await?;
-        // Messages older than the current oldest displayed
-        let older: Vec<_> = all
-            .into_iter()
-            .filter(|m| m.sequence < self.oldest_displayed_sequence)
-            .collect(); // already ordered ASC by sequence
-
-        let keep = older.len().min(Self::DISPLAY_MESSAGE_WINDOW);
-        let tokens: usize = older[older.len() - keep..]
+        let tokens: usize = to_add
             .iter()
             .map(|m| crate::brain::tokenizer::count_tokens(&m.content))
             .sum();
-        let hidden_still = older.len().saturating_sub(keep);
-        let to_add = &older[older.len() - keep..];
+        let hidden_still = self.hidden_older_messages.saturating_sub(to_add.len());
 
         // Remove existing history_marker at front
         let removed_marker = if self
@@ -826,6 +853,118 @@ impl App {
             })
             .await?;
 
+        // Hydrate the pin set, then float pinned sessions to the top of the
+        // dialog WITHOUT disturbing the recency order inside each group:
+        // `sort_by_key` is stable, so favorites keep their updated_at order
+        // and unpinned sessions keep theirs. The sort lives in this TUI
+        // loader only, so the CLI and channel session lists stay pure
+        // recency.
+        self.session_favorites = self
+            .session_service
+            .session_favorites()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            // The table stores TEXT ids; parse to `Uuid` so every consumer
+            // compares native session ids with zero per-row allocation. A
+            // malformed row simply never matches and is skipped.
+            .filter_map(|id| Uuid::parse_str(&id).ok())
+            .collect();
+        let pins = &self.session_favorites;
+        self.sessions.sort_by_key(|s| !pins.contains(&s.id));
+
+        // Topics follow their parent in the dialog (#2306), and closed topics
+        // are remembered for the dim and the send guard (#2305). A pinned topic
+        // stays at the top level, as in the window. A topic whose parent is not
+        // in the list shows as a top-level row.
+        let topic_repo = crate::db::repository::SessionRepository::new(self.session_service.pool());
+        self.topic_parents = topic_repo
+            .topic_parents()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        self.closed_sessions = topic_repo
+            .closed_ids()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        self.collapsed_sessions = topic_repo
+            .topics_collapsed_ids()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+
+        // The live name of every Telegram topic in this list, in ONE query
+        // (#2490). Telegram owns a topic's name: a rename lands in
+        // `channel_messages` and the rail follows on this load, no restart.
+        // Batched because a per-row lookup here would be a query per row per
+        // reload.
+        self.topic_titles = {
+            use crate::db::repository::channel_message::ChannelMessageRepository;
+            use crate::ui_core::rail;
+
+            let mut pairs = Vec::new();
+            let mut ids = Vec::new();
+            for s in &self.sessions {
+                let Some(title) = s.title.as_deref() else {
+                    continue;
+                };
+                let Some((chat_id, thread_id)) = rail::topic_thread(title) else {
+                    continue;
+                };
+                ids.push((s.id, chat_id.to_string(), thread_id.to_string()));
+                pairs.push((chat_id.to_string(), thread_id.to_string()));
+            }
+            if pairs.is_empty() {
+                HashMap::new()
+            } else {
+                let channel_repo = ChannelMessageRepository::new(self.session_service.pool());
+                match channel_repo.topic_names("telegram", &pairs).await {
+                    Ok(names) => ids
+                        .into_iter()
+                        .filter_map(|(id, chat_id, thread_id)| {
+                            names
+                                .get(&(chat_id, thread_id))
+                                .map(|name| (id, name.clone()))
+                        })
+                        .collect(),
+                    Err(e) => {
+                        tracing::warn!("topic titles: {e:#}");
+                        HashMap::new()
+                    }
+                }
+            }
+        };
+        let in_list: std::collections::HashSet<Uuid> = self.sessions.iter().map(|s| s.id).collect();
+        let parents = &self.topic_parents;
+        let mut by_parent: std::collections::HashMap<Uuid, Vec<crate::db::models::Session>> =
+            std::collections::HashMap::new();
+        let mut tops = Vec::new();
+        for s in std::mem::take(&mut self.sessions) {
+            match parents.get(&s.id) {
+                Some(p) if in_list.contains(p) && !pins.contains(&s.id) => {
+                    by_parent.entry(*p).or_default().push(s)
+                }
+                _ => tops.push(s),
+            }
+        }
+        let mut ordered = Vec::with_capacity(in_list.len());
+        for top in tops {
+            let id = top.id;
+            ordered.push(top);
+            // A folded tree lists nothing beneath its parent (#2427).
+            let folded = self.collapsed_sessions.contains(&id);
+            if let Some(kids) = by_parent.remove(&id)
+                && !folded
+            {
+                ordered.extend(kids);
+            }
+        }
+        self.sessions = ordered;
+
         // Populate project name cache for session list display
         if let Ok(projects) = self.project_service.list_projects().await {
             for p in projects {
@@ -838,6 +977,71 @@ impl App {
         self.usage_ledger_stats = ledger.stats_by_model().await.unwrap_or_default();
 
         Ok(())
+    }
+
+    /// Create the topic named in the prompt under the selected session, then
+    /// reload the list so it appears under its parent (#2306).
+    pub(crate) async fn submit_topic_name(&mut self) -> Result<()> {
+        let name = self.topic_name_buffer.trim().to_string();
+        self.topic_naming = false;
+        self.topic_name_buffer.clear();
+        if name.is_empty() {
+            self.push_system_message("A topic needs a name.".to_string());
+            return Ok(());
+        }
+        let Some(parent) = self.sessions.get(self.selected_session_index).map(|s| s.id) else {
+            return Ok(());
+        };
+        let repo = crate::db::repository::SessionRepository::new(self.session_service.pool());
+        match repo.create_topic(parent, &name).await {
+            Ok(_) => self.load_sessions().await?,
+            Err(e) => self.push_system_message(format!("Could not create the topic: {e}")),
+        }
+        Ok(())
+    }
+
+    /// Close the selected topic, or reopen it if it is closed (#2305). Only a
+    /// topic can be closed; a plain session gets a notice instead.
+    pub(crate) async fn toggle_closed_selected(&mut self) -> Result<()> {
+        let Some(id) = self.sessions.get(self.selected_session_index).map(|s| s.id) else {
+            return Ok(());
+        };
+        if !self.topic_parents.contains_key(&id) {
+            self.push_system_message("Only a topic can be closed.".to_string());
+            return Ok(());
+        }
+        let closed = self.closed_sessions.contains(&id);
+        let repo = crate::db::repository::SessionRepository::new(self.session_service.pool());
+        repo.set_closed(id, !closed).await?;
+        self.push_system_message(if closed {
+            "Topic reopened.".to_string()
+        } else {
+            "Topic closed. It keeps its history and refuses new turns until reopened.".to_string()
+        });
+        self.load_sessions().await
+    }
+
+    /// Fold or unfold the topic tree of the selected session, or of the parent
+    /// of the selected topic. Saved to the ledger, so the window shows the same
+    /// tree (#2427).
+    pub(crate) async fn toggle_fold_selected(&mut self) -> Result<()> {
+        let Some(selected) = self.sessions.get(self.selected_session_index).map(|s| s.id) else {
+            return Ok(());
+        };
+        let parent = self
+            .topic_parents
+            .get(&selected)
+            .copied()
+            .unwrap_or(selected);
+        let has_topics = self.topic_parents.values().any(|p| *p == parent);
+        if !has_topics {
+            self.push_system_message("This session has no topics to fold.".to_string());
+            return Ok(());
+        }
+        let folded = !self.collapsed_sessions.contains(&parent);
+        let repo = crate::db::repository::SessionRepository::new(self.session_service.pool());
+        repo.set_topics_collapsed(parent, folded).await?;
+        self.load_sessions().await
     }
 
     /// Clear all messages from the current session
@@ -857,6 +1061,40 @@ impl App {
             self.error_message_shown_at = None;
         }
 
+        Ok(())
+    }
+
+    /// Open the session-files browser for the conversation in view (#2458).
+    ///
+    /// The view is reached from a bare `f` in the sessions list and from the
+    /// Seeker card; both call this, so the two cannot drift into loading
+    /// different lists for the same session.
+    pub(crate) async fn open_session_files_view(&mut self) -> Result<()> {
+        let Some(session_id) = self
+            .current_session
+            .as_ref()
+            .map(|session| session.id)
+            .or_else(|| {
+                self.sessions
+                    .get(self.selected_session_index)
+                    .map(|session| session.id)
+            })
+        else {
+            self.notification = Some("No conversation to browse files for".to_string());
+            self.notification_shown_at = Some(std::time::Instant::now());
+            return Ok(());
+        };
+        match self.file_service.list_files_for_session(session_id).await {
+            Ok(files) => {
+                self.session_files = files;
+                self.selected_file_index = 0;
+                self.switch_mode(AppMode::SessionFiles).await?;
+            }
+            Err(e) => {
+                self.notification = Some(format!("Failed to load files: {e}"));
+                self.notification_shown_at = Some(std::time::Instant::now());
+            }
+        }
         Ok(())
     }
 
@@ -1055,18 +1293,54 @@ impl App {
                     self.push_system_message(crate::tui::clear_notice::no_session());
                     return true;
                 };
-                match self.agent_service.clear_context(session_id).await {
-                    Ok(receipt) => {
+                match self.agent_service.prepare_clear(session_id).await {
+                    Ok(prepared) => {
                         let base = self.agent_service.base_context_tokens();
                         self.session_input_tokens.insert(session_id, base);
                         self.last_input_tokens = Some(base);
-                        self.push_system_message(crate::tui::clear_notice::cleared(&receipt));
+                        self.push_system_message(crate::tui::clear_notice::cleared(
+                            &prepared.receipt,
+                        ));
+                        // The reply turn persists the marker as its user row
+                        // and tells the agent its context was wiped, so it
+                        // acknowledges the clear and resumes without a prompt.
+                        self.resume_background_turn(
+                            session_id,
+                            prepared.reply_context,
+                            prepared.marker,
+                        )
+                        .await;
                     }
                     Err(e) => {
                         tracing::error!("/clear failed: {e}");
                         self.error_message = Some(crate::tui::clear_notice::failed(&e));
                     }
                 }
+                true
+            }
+            "/panes" => {
+                // `/panes close` empties the layout down to one pane in one go.
+                // Before, each pane needed its own Ctrl+X press.
+                if input.split_whitespace().nth(1) != Some("close") {
+                    self.push_system_message("usage: /panes close".to_string());
+                    return true;
+                }
+                let closed = self.pane_manager.close_all_but_focused();
+                // The closed panes' input died with them; adopt whatever the
+                // surviving focused pane had stashed (#2494).
+                self.pane_manager.adopt_input(
+                    &mut self.input_buffer,
+                    &mut self.cursor_position,
+                    &mut self.input_history_index,
+                );
+                self.pane_manager.save_layout();
+                if let Some(sid) = self.pane_manager.focused_pane().and_then(|p| p.session_id)
+                    && self.current_session.as_ref().map(|s| s.id) != Some(sid)
+                    && let Err(e) = self.load_session(sid).await
+                {
+                    tracing::error!(error = %e, %sid, "failed to load the remaining pane's session");
+                }
+                self.push_system_message(format!("Closed {closed} pane(s)."));
                 true
             }
             "/theme" => {
@@ -1268,7 +1542,7 @@ impl App {
                     reply = format!("⏹️ Cancelled the running turn. {reply}");
                 }
                 self.push_system_message(reply);
-                self.plan_document = None;
+                self.pane_manager.clear_focused_plan();
                 true
             }
             s if s == "/architecture" || s.starts_with("/architecture ") => {
@@ -2248,16 +2522,27 @@ impl App {
                         }
                     }
                     _ => {
-                        // Two-byte escape (e.g. ESC =, ESC >)
-                        i += 1;
+                        // Two-byte escape (e.g. ESC =, ESC >). Only an ASCII
+                        // byte is consumed: a multi-byte char has to stay at
+                        // `i` so the next iteration copies it whole. Stepping
+                        // into the middle of one made the copy below panic
+                        // (#2247).
+                        if bytes[i].is_ascii() {
+                            i += 1;
+                        }
                     }
                 }
             } else {
                 // Normal byte — figure out how many bytes this UTF-8 char is
                 // and copy the whole character to preserve multi-byte (emoji, CJK, etc.)
                 let ch_len = utf8_char_len(bytes[i]);
-                if i + ch_len <= len {
-                    // SAFETY: the input is a valid &str so this slice is a valid char
+                // The boundary check is belt and braces: an escape arm can
+                // leave `i` inside a character, and slicing there panics
+                // (#2247).
+                if i + ch_len <= len
+                    && text.is_char_boundary(i)
+                    && text.is_char_boundary(i + ch_len)
+                {
                     out.push_str(&text[i..i + ch_len]);
                 }
                 i += ch_len;
@@ -2296,7 +2581,10 @@ impl App {
                 continue;
             }
             let ch_len = utf8_char_len(bytes[i]);
-            if i + ch_len <= bytes.len() {
+            if i + ch_len <= bytes.len()
+                && text.is_char_boundary(i)
+                && text.is_char_boundary(i + ch_len)
+            {
                 out.push_str(&text[i..i + ch_len]);
             }
             i += ch_len;
@@ -2896,6 +3184,26 @@ impl App {
 
     /// Push a system message into the chat display
     pub(crate) fn push_system_message(&mut self, content: String) {
+        // A retry replaces the retry line of this turn, wherever it sits, so
+        // the status never stacks under later tool summaries (#2427).
+        if content.starts_with("⏳ Retry") {
+            let in_turn = self
+                .messages
+                .iter_mut()
+                .rev()
+                .take_while(|m| m.role != "user");
+            if let Some(line) = in_turn
+                .into_iter()
+                .find(|m| m.role == "system" && m.content.starts_with("⏳ Retry"))
+            {
+                line.content = content;
+                line.timestamp = chrono::Utc::now();
+                if self.auto_scroll {
+                    self.scroll_offset = 0;
+                }
+                return;
+            }
+        }
         self.messages.push(DisplayMessage {
             id: Uuid::new_v4(),
             role: "system".to_string(),
@@ -2922,6 +3230,18 @@ impl App {
         self.send_message_inner(content, false).await
     }
 
+    /// The session a submit must target: the focused pane's session in
+    /// split mode, the window-level current session in single mode. The
+    /// send path resolves through this so a pane's message can never ride
+    /// a stale window-level bind into another pane's conversation.
+    pub(crate) fn send_target_session_id(&self) -> Option<Uuid> {
+        if self.pane_manager.is_split() {
+            self.pane_manager.focused_pane().and_then(|p| p.session_id)
+        } else {
+            self.current_session.as_ref().map(|s| s.id)
+        }
+    }
+
     /// Send a prompt that came from a slash command, skill, or user-command
     /// expansion. Skips the prompt analyzer: soft-nudge is for natural-language
     /// user chat only, not for prose a command or skill author wrote.
@@ -2930,6 +3250,39 @@ impl App {
     }
 
     async fn send_message_inner(&mut self, content: String, command_sourced: bool) -> Result<()> {
+        // Split mode targets the focused pane's session, never the
+        // window-level bind: async events can rebind current_session while
+        // the user keeps typing in a pane, and the send must follow the pane
+        // the text was typed in. Divergence is repaired with the same load a
+        // focus switch performs, so every downstream use below sees the
+        // pane's session. An unbound focused pane has no honest target:
+        // refuse the send rather than let it fall through to the window bind
+        // and cross wires.
+        if self.pane_manager.is_split() {
+            match self.send_target_session_id() {
+                Some(target) if self.current_session.as_ref().map(|s| s.id) != Some(target) => {
+                    self.load_session(target).await?;
+                }
+                Some(_) => {}
+                None => {
+                    self.push_system_message(
+                        "This pane has no session bound. Open or create a session in it first."
+                            .to_string(),
+                    );
+                    return Ok(());
+                }
+            }
+        }
+        // A closed topic refuses new turns, with a notice that says why, so the
+        // message is never dropped without a word (#2305).
+        if self
+            .current_session
+            .as_ref()
+            .is_some_and(|s| self.closed_sessions.contains(&s.id))
+        {
+            self.push_system_message("This topic is closed. Reopen it to continue.".to_string());
+            return Ok(());
+        }
         // A new turn is starting — drop any follow-up suggestions from the
         // previous turn so they can't reappear on the next empty input (#596).
         self.followup_suggestions.clear();
@@ -2948,7 +3301,7 @@ impl App {
         // Terminal plans no longer linger on disk — completing archives and
         // discarding deletes — so a vanished file is the only "moved on"
         // signal, and the shared loader resolves legacy terminal statuses.
-        if self.plan_document.is_some() {
+        if self.plan_document().is_some() {
             self.reload_plan();
         }
 
@@ -3413,12 +3766,28 @@ impl App {
             });
         }
 
-        // Clear any unconsumed queued message (tool loop may have already drained it)
-        if let Some(sid) = self.current_session.as_ref().map(|s| s.id)
-            && let Ok(mut q) = self.queued_messages.lock()
-            && q.remove(&sid).is_some()
-        {
-            tracing::info!("[TUI] Discarding unconsumed queued message at response complete");
+        // Hand back any queued message the turn ended without consuming. The
+        // tool loop drains the queue at a tool-call boundary; when the model
+        // answers straight after a queue there is no boundary left, and
+        // dropping the entry here lost the message outright: the user watched
+        // it listed as queued, then it never sent and never came back (#2236).
+        // Restore it to the input box the same way Arrow-Up dequeues, so
+        // nothing is auto-sent and the duplicate-submit guard (#798) stays
+        // untouched.
+        let unconsumed = self.current_session.as_ref().map(|s| s.id).and_then(|sid| {
+            self.queued_messages
+                .lock()
+                .ok()
+                .and_then(|mut q| q.remove(&sid))
+        });
+        if let Some(restored) = unconsumed.as_deref().and_then(unconsumed_user_text) {
+            if self.input_buffer.is_empty() {
+                self.input_buffer = restored;
+            } else {
+                self.input_buffer = format!("{restored}\n{}", self.input_buffer);
+            }
+            self.cursor_position = self.input_buffer.len();
+            tracing::info!("[TUI] Restored unconsumed queued message to the input buffer");
         }
 
         // Track context usage from latest response. Write to the
@@ -3596,7 +3965,7 @@ impl App {
         // restore gap) carries an involuntarily-remapped pair that must never
         // overwrite the session's saved choice — that was the silent-switch bug.
         let response_started_on_session_provider = response.started_on_session_provider;
-        let plan_path = self.plan_file_path.clone();
+        let plan_path = self.plan_file_path().cloned();
 
         tokio::spawn(async move {
             // Persist the {provider, model} pair from the response onto the
@@ -3795,7 +4164,7 @@ impl App {
 /// are dropped from that front. Pure so the shift arithmetic is testable: the
 /// earlier version measured the prepended count after `append` had already
 /// drained the source, which reported the whole history and clamped the anchor
-/// past the end, so a cancel after Ctrl+O persisted nothing (#2127).
+/// past the end, so a cancel after PageUp paging persisted nothing (#2127).
 pub(crate) fn shift_turn_start(
     turn_start: usize,
     prepended: usize,

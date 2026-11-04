@@ -15,6 +15,26 @@ use std::sync::{LazyLock, Mutex};
 /// coincidental overlap can't price a model against an unrelated family.
 const MIN_MATCH_OVERLAP: usize = 3;
 
+/// Whole-id aliases for a model whose live id is shorter than
+/// [`MIN_MATCH_OVERLAP`] and so can never reach its own row. Moonshot serves
+/// Kimi K3 as plain `k3`: the overlap it offers against the `kimi-k3` row is
+/// exactly two characters, which the substring tiers reject, so the row exists
+/// but never matches and the model billed at the unknown-model default (#2254).
+///
+/// Each pair is compared against the whole lowercased id, never as a substring,
+/// so `k3` cannot swallow `k3.1-pro` or `k3-256k`: those keep resolving to their
+/// own longer, more specific rows. The right-hand side is a pricing prefix, not
+/// a rate, so the alias inherits whatever card that row carries.
+const MODEL_ALIASES: &[(&str, &str)] = &[("k3", "kimi-k3")];
+
+/// Pricing prefix a whole-id alias points at, if `model` is exactly one.
+fn exact_alias(model: &str) -> Option<&'static str> {
+    MODEL_ALIASES
+        .iter()
+        .find(|(id, _)| *id == model)
+        .map(|(_, target)| *target)
+}
+
 /// Conservative default input rate (USD per 1M tokens) billed when no pricing
 /// entry matches a model (#1717). Sonnet-class mid-tier: an unpriced model's
 /// estimate errs visibly high rather than silently to $0, while a mistaken
@@ -292,8 +312,17 @@ impl PricingConfig {
     /// max-vs-plus apart; then a family-root fallback to that family's flagship
     /// (most expensive) entry. Returns `None` only when no known family shares
     /// the model's root.
+    ///
+    /// Whole-id aliases are checked first, because a live id shorter than
+    /// [`MIN_MATCH_OVERLAP`] can never win a substring tier no matter where its
+    /// row sits (#2254).
     fn resolve_entry(&self, model: &str) -> Option<&PricingEntry> {
         let m = model.to_lowercase();
+        if let Some(target) = exact_alias(&m)
+            && let Some(e) = self.best_substring_match(target, false)
+        {
+            return Some(e);
+        }
         if let Some(e) = self.best_substring_match(&m, false) {
             return Some(e);
         }
@@ -400,7 +429,7 @@ impl PricingConfig {
             Ok(c) => c,
             Err(_) => {
                 // Fall back to embedded example (tests, CI, fresh installs)
-                let example = include_str!("../../usage_pricing.toml.example");
+                let example = include_str!("../../../usage_pricing.toml.example");
                 return Self::parse_content(example, "embedded example");
             }
         };
@@ -408,7 +437,7 @@ impl PricingConfig {
         // Additive merge with embedded baseline. Skip on parse failure
         // of the baseline — we never want a bad bundled example to
         // mask a working user file.
-        let baseline_example = include_str!("../../usage_pricing.toml.example");
+        let baseline_example = include_str!("../../../usage_pricing.toml.example");
         if let Ok(baseline_cfg) = Self::parse_content(baseline_example, "embedded example baseline")
         {
             let added = user_cfg.merge_missing_from(&baseline_cfg);
@@ -569,7 +598,7 @@ impl PricingConfig {
             return; // User owns this file. Never overwrite.
         }
 
-        let example_content = include_str!("../../usage_pricing.toml.example");
+        let example_content = include_str!("../../../usage_pricing.toml.example");
         if let Err(e) = std::fs::write(&path, example_content) {
             tracing::error!("Failed to seed usage_pricing.toml from example: {}", e);
         } else {

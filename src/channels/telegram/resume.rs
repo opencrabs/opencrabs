@@ -918,8 +918,9 @@ pub(crate) async fn resume_session_inner(
             } => {
                 if let Ok(mut s) = st.lock() {
                     s.display_queue.push(DisplayItem::System(format!(
-                        "⏳ Retry {}/{} — {}",
-                        attempt, max, reason
+                        "⏳ {} — {}",
+                        crate::utils::retry::send_label(attempt, max),
+                        reason
                     )));
                 }
             }

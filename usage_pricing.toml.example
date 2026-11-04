@@ -14,9 +14,27 @@
 
 [providers.anthropic]
 entries = [
-  { prefix = "claude-fable",       input_per_m = 10.0,  output_per_m = 50.0  },
+  # Claude Opus 5.5 (2026-09-22): $4/$20, cache write $5, cache read $0.20.
+  # Short forms are the ids claude-cli and our ledger actually record.
+  { prefix = "claude-opus-5-5",    input_per_m = 4.0,   output_per_m = 20.0,  cache_write_per_m = 5.0,   cache_read_per_m = 0.20 },
+  { prefix = "opus-5-5",           input_per_m = 4.0,   output_per_m = 20.0,  cache_write_per_m = 5.0,   cache_read_per_m = 0.20 },
+  { prefix = "opus-5",             input_per_m = 5.0,   output_per_m = 25.0,  cache_write_per_m = 6.25,  cache_read_per_m = 0.50 },
+  { prefix = "opus-4",             input_per_m = 5.0,   output_per_m = 25.0,  cache_write_per_m = 6.25,  cache_read_per_m = 0.50 },
+  # Claude Fable 5.1: $10/$50, 5m cache write $12.50, cache read $0.25 (0.025x input).
+  { prefix = "claude-fable-5-1",   input_per_m = 10.0,  output_per_m = 50.0,  cache_write_per_m = 12.5,  cache_read_per_m = 0.25 },
+  { prefix = "fable-5-1",          input_per_m = 10.0,  output_per_m = 50.0,  cache_write_per_m = 12.5,  cache_read_per_m = 0.25 },
+  # Claude Sonnet 5.5 / Sonnet 5: $2/$10.
+  { prefix = "claude-sonnet-5-5",  input_per_m = 2.0,   output_per_m = 10.0,  cache_read_per_m = 0.10 },
+  { prefix = "claude-sonnet-5",    input_per_m = 2.0,   output_per_m = 10.0,  cache_read_per_m = 0.20 },
+  # Claude Haiku 5.5: $0.10/$0.50 with cache read $0.01 for prompts up to 100K.
+  # A prompt over 100K bills $0.50/$2.50, which no single row can express; the
+  # <=100K card is the one nearly every call lands on.
+  { prefix = "claude-haiku-5-5",   input_per_m = 0.10,  output_per_m = 0.50,  cache_read_per_m = 0.01 },
+  { prefix = "haiku-5-5",          input_per_m = 0.10,  output_per_m = 0.50,  cache_read_per_m = 0.01 },
+  { prefix = "haiku-4-5",          input_per_m = 1.0,   output_per_m = 5.0,   cache_read_per_m = 0.10 },
+  { prefix = "claude-fable",       input_per_m = 10.0,  output_per_m = 50.0,  cache_write_per_m = 12.5,  cache_read_per_m = 0.25 },
   { prefix = "claude-opus-5",      input_per_m = 5.0,   output_per_m = 25.0,  cache_write_per_m = 6.25,  cache_read_per_m = 0.50 },
-  { prefix = "claude-opus-4",      input_per_m = 5.0,   output_per_m = 25.0  },
+  { prefix = "claude-opus-4",      input_per_m = 5.0,   output_per_m = 25.0,  cache_write_per_m = 6.25,  cache_read_per_m = 0.50 },
   { prefix = "claude-3-opus",      input_per_m = 15.0,  output_per_m = 75.0  },
   { prefix = "claude-sonnet-4",    input_per_m = 3.0,   output_per_m = 15.0  },
   { prefix = "claude-3-7-sonnet",  input_per_m = 3.0,   output_per_m = 15.0  },
@@ -67,6 +85,13 @@ entries = [
 
 [providers.deepseek]
 entries = [
+  # DeepSeek V4.1 Flash / V4 Pro, first-party list. DeepSeek bills peak hours
+  # (01:00-04:00 and 06:00-10:00 UTC, Mon-Fri) at double these rates; the
+  # off-peak card is stored because it covers the rest of the week.
+  { prefix = "deepseek-v4.1-flash",  input_per_m = 0.15,  output_per_m = 0.60,  cache_read_per_m = 0.003 },
+  { prefix = "deepseek-4.1-flash",   input_per_m = 0.15,  output_per_m = 0.60,  cache_read_per_m = 0.003 },
+  { prefix = "deepseek-v4-flash",    input_per_m = 0.15,  output_per_m = 0.60,  cache_read_per_m = 0.003 },
+  { prefix = "deepseek-v4-pro",      input_per_m = 0.66,  output_per_m = 1.98,  cache_read_per_m = 0.022 },
   { prefix = "deepseek-r1",        input_per_m = 0.55,  output_per_m = 2.19  },
   { prefix = "deepseek-v3",        input_per_m = 0.27,  output_per_m = 1.10  },
   { prefix = "deepseek",           input_per_m = 0.27,  output_per_m = 1.10  },
@@ -90,6 +115,18 @@ entries = [
 
 [providers.moonshot]
 entries = [
+  # Kimi K3.1 Pro (2026-10-23): $2.00/$10.00, cache read $0.20, 5m cache write $2.00.
+  # Highspeed doubles input/output and cache writes; cached reads stay $0.20.
+  # Its prefix drops the "kimi-" stem so it cannot swallow the pro row: matching
+  # takes the longest overlap and breaks ties to the dearer card, so a prefix
+  # that contains the plain id would price every K3.1 Pro call at the highspeed
+  # rate. A bare "k3.1-pro" still ties and lands there, which over-states rather
+  # than under-bills, and the test pins exactly that.
+  { prefix = "k3.1-pro-highspeed",      input_per_m = 4.0,  output_per_m = 20.0,  cache_write_per_m = 4.0,  cache_read_per_m = 0.20 },
+  { prefix = "kimi-k3.1-pro",           input_per_m = 2.0,  output_per_m = 10.0,  cache_write_per_m = 2.0,  cache_read_per_m = 0.20 },
+  { prefix = "k3.1-pro",                input_per_m = 2.0,  output_per_m = 10.0,  cache_write_per_m = 2.0,  cache_read_per_m = 0.20 },
+  # The 256K-context Kimi K3 variant bills the K3 card.
+  { prefix = "k3-256k",                 input_per_m = 3.0,  output_per_m = 15.0,  cache_read_per_m = 0.30 },
   # Kimi K3 — Moonshot AI (256k context). Live model id is "k3", normalized to "kimi-k3".
   # Cache hit: $0.30/1M, cache miss (input): $3.00/1M, output: $15.00/1M. Cache-write not published.
   { prefix = "kimi-k3",              input_per_m = 3.0,   output_per_m = 15.0,  cache_read_per_m = 0.30 },
@@ -114,6 +151,17 @@ entries = [
 
 [providers.qwen]
 entries = [
+  # Qwen3.8-Flash / Omni-Flash (Alibaba Cloud, international): $0.15/$0.47,
+  # cache write $0.20, cache read $0.016. Dot-forms are the ids the ledger
+  # records; the hyphen forms above stay for older rows.
+  { prefix = "qwen3.8-omni-flash",   input_per_m = 0.15,  output_per_m = 0.47,  cache_write_per_m = 0.20, cache_read_per_m = 0.016 },
+  { prefix = "qwen-3.8-omni-flash",  input_per_m = 0.15,  output_per_m = 0.47,  cache_write_per_m = 0.20, cache_read_per_m = 0.016 },
+  { prefix = "qwen3.8-flash-next",   input_per_m = 0.15,  output_per_m = 0.47,  cache_write_per_m = 0.20, cache_read_per_m = 0.016 },
+  # Qwen3.7-Max / Qwen3.7-Plus (Model Studio, Singapore region list).
+  { prefix = "qwen3.7-max",          input_per_m = 2.50,  output_per_m = 7.50 },
+  { prefix = "qwen-3.7-max",         input_per_m = 2.50,  output_per_m = 7.50 },
+  { prefix = "qwen3.7-plus",         input_per_m = 0.40,  output_per_m = 1.60 },
+  { prefix = "qwen-3.7-plus",        input_per_m = 0.40,  output_per_m = 1.60 },
   # Qwen 3.6 Max Preview — DashScope tiered pricing (≤128k: $1.3/$7.8, 128k-256k: $2/$12)
   # All variants map here: qwen3.6-max-preview, qwen-3.6-max-preview, qwen-3-6-max-preview, etc.
   { prefix = "qwen-3.6-max-preview",  input_per_m = 1.30,  output_per_m = 7.80,  cache_write_per_m = 1.625, cache_read_per_m = 0.13 },
@@ -135,10 +183,10 @@ entries = [
   { prefix = "qwen3-8-max-preview",   input_per_m = 2.00,  output_per_m = 6.00,  cache_write_per_m = 2.50,  cache_read_per_m = 0.25 },
   # Qwen3.8-Flash — commercial ship of the Flash-Next open architecture (262k native ctx).
   # QwenCloud API: $0.16/M input, $0.47/M output. Cache rates not published yet.
-  { prefix = "qwen-3.8-flash-next",   input_per_m = 0.16,  output_per_m = 0.47 },
-  { prefix = "qwen-3.8-flash",        input_per_m = 0.16,  output_per_m = 0.47 },
-  { prefix = "qwen3.8-flash",         input_per_m = 0.16,  output_per_m = 0.47 },
-  { prefix = "qwen-3-8-flash",        input_per_m = 0.16,  output_per_m = 0.47 },
+  { prefix = "qwen-3.8-flash-next",   input_per_m = 0.15,  output_per_m = 0.47,  cache_write_per_m = 0.20, cache_read_per_m = 0.016 },
+  { prefix = "qwen-3.8-flash",        input_per_m = 0.15,  output_per_m = 0.47,  cache_write_per_m = 0.20, cache_read_per_m = 0.016 },
+  { prefix = "qwen3.8-flash",         input_per_m = 0.15,  output_per_m = 0.47,  cache_write_per_m = 0.20, cache_read_per_m = 0.016 },
+  { prefix = "qwen-3-8-flash",        input_per_m = 0.15,  output_per_m = 0.47,  cache_write_per_m = 0.20, cache_read_per_m = 0.016 },
   # Qwen 3.6 Plus (thinking) — DashScope tiered pricing (input ≤256k)
   # Output corrected to $3.0 per DashScope official pricing (was $1.50)
   { prefix = "qwen-3.6-plus",      input_per_m = 0.50,  output_per_m = 3.00,  cache_write_per_m = 0.625, cache_read_per_m = 0.05 },
@@ -148,6 +196,10 @@ entries = [
 
 [providers.zai]
 entries = [
+  # GLM-5.2 and GLM-5.1 (Z.AI list): $1.40/$4.40, cached input $0.26. GLM-5 is $1/$3.20.
+  { prefix = "glm-5.2",            input_per_m = 1.40,  output_per_m = 4.40,  cache_read_per_m = 0.26 },
+  # ox-alpha was the stealth alias of GLM-5.3-Flash, revealed 2026-08-26.
+  { prefix = "ox-alpha",           input_per_m = 0.15,  output_per_m = 0.50,  cache_read_per_m = 0.03 },
   # GLM-5.3-Flash — list prices; a 50% launch promo ($0.075 in / $0.015 cache / $0.25 out)
   # runs until 24:00 2026-09-09 UTC+8. Rows carry list so bills stay right after it expires.
   { prefix = "glm-5.3-flash",      input_per_m = 0.15,  output_per_m = 0.50,  cache_read_per_m = 0.03 },
@@ -167,10 +219,28 @@ entries = [
 
 [providers.opencode]
 entries = [
+  # Xiaomi MiMo V2.6 (overseas USD card): pro $0.435/$0.87, flash $0.14/$0.28,
+  # cache hits at 0.0036 / 0.0028. The retired V2.5 ids fall through to the
+  # versionless tier and resolve on the V2 pro card below, not on V2.6.
+  { prefix = "mimo-v2.6-pro",       input_per_m = 0.435, output_per_m = 0.87,  cache_read_per_m = 0.0036 },
+  { prefix = "mimo-v2.6-flash",     input_per_m = 0.14,  output_per_m = 0.28,  cache_read_per_m = 0.0028 },
   { prefix = "mimo-v2-pro",         input_per_m = 1.0,   output_per_m = 3.0   },
   { prefix = "mimo-v2-omni",        input_per_m = 0.40,  output_per_m = 2.0   },
   { prefix = "nemotron-3-super",    input_per_m = 0.10,  output_per_m = 0.50  },
   { prefix = "big-pickle",          input_per_m = 0.0,   output_per_m = 0.0   },
   { prefix = "opencode-zen",        input_per_m = 0.0,   output_per_m = 0.0   },
   { prefix = "opencode-go",         input_per_m = 0.0,   output_per_m = 0.0   },
+]
+
+[providers.gateway]
+entries = [
+  # "coder-model" is not a model, it is the placeholder id that six providers
+  # (modelscope, zhipu, alibaba-qwen, dialagram, xiaomi) wrote into the ledger in
+  # April 2026, so no vendor card stands behind it and no single real rate can be
+  # read off it. This row bills the conservative unknown-model default on purpose,
+  # the same 3.00/15.00 the estimator uses when nothing matches, so those legacy
+  # rows stop reading as free instead of inventing a vendor price. Only the 34
+  # rows that recorded zero are affected; the 178 that already carry a cost keep
+  # it.
+  { prefix = "coder-model",        input_per_m = 3.00,  output_per_m = 15.00, cache_write_per_m = 3.75, cache_read_per_m = 0.30 },
 ]

@@ -29,17 +29,19 @@ async fn app() -> App {
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let service = Arc::new(AgentService::new_for_test(provider, context.clone()).await);
     #[cfg(feature = "whatsapp")]
-    {
-        App::new(
-            service,
-            context,
-            Arc::new(crate::channels::whatsapp::WhatsAppState::new()),
-        )
-    }
+    let app_value = App::new(
+        service,
+        context,
+        Arc::new(crate::channels::whatsapp::WhatsAppState::new()),
+    );
     #[cfg(not(feature = "whatsapp"))]
-    {
-        App::new(service, context)
-    }
+    let app_value = App::new(service, context);
+    // Hermetic against the host: App::new restores ~/.opencrabs/layout.json,
+    // so a fresh App can come up split with unbound panes, and the split
+    // send path refuses a turn for a pane with no session bound.
+    let mut app = app_value;
+    app.pane_manager = crate::tui::pane::PaneManager::new();
+    app
 }
 
 #[tokio::test]

@@ -272,7 +272,10 @@ jobs:
           # carrier belongs to #1821 and does not exist on this tree yet, so
           # listing it would be a promise this repo cannot keep. Add it in
           # the PR that adds the file.
-          pattern='^(Cargo\.toml|Cargo\.lock|rust-toolchain\.toml|build\.rs|\.github/workflows/ci\.yml|src/utils/(shell|cwd)\.rs|src/brain/tools/(bash|read)\.rs|src/tui/app/input\.rs|src/config/(winlock|profile)\.rs)$'
+          # The two scripts own the Windows-only checks added for #2257. If
+          # either changes and this lane does not fire, the check is edited
+          # without ever running, so they belong in the pattern too.
+          pattern='^(Cargo\.toml|Cargo\.lock|rust-toolchain\.toml|build\.rs|\.github/workflows/ci\.yml|scripts/(check-pe-imports\.py|stage-windows-runtime\.sh)|src/utils/(shell|cwd)\.rs|src/brain/tools/(bash|read)\.rs|src/tui/app/input\.rs|src/config/(winlock|profile)\.rs)$'
           if echo "$files" | grep -qE "$pattern"; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
@@ -357,6 +360,29 @@ jobs:
         # This job uses the release-shaped profile, where the linker
         # doesn't pull the esaxx object — the shape that ships releases.
         run: cargo build --locked --profile ci --target x86_64-pc-windows-msvc --all-features
+
+      # The runtime ships beside the exe, app-local (#2257). The release job
+      # does the same thing into its own output directory; doing it here too
+      # means the gate below judges the same layout users get, and the smoke
+      # step runs the binary the way the zip will.
+      - name: "Stage (windows): MSVC runtime beside the build"
+        shell: bash
+        run: |
+          ./scripts/stage-windows-runtime.sh --self-test
+          ./scripts/stage-windows-runtime.sh target/x86_64-pc-windows-msvc/ci
+
+      # The gate the smoke step below cannot be (#2257). `windows-latest`
+      # ships the vc_redist 14.x pre-installed, so `opencrabs.exe --version`
+      # succeeds on the runner for a binary that dies instantly on a user's
+      # machine, which is exactly how 0.5.15 shipped. This reads the import
+      # table of the artifact instead of trusting the runner's disk, and it
+      # asks for closure: every import is either part of Windows or sitting
+      # next to the exe that asks for it.
+      - name: "Imports (windows): every imported DLL is Windows or shipped here"
+        shell: bash
+        run: |
+          python scripts/check-pe-imports.py --self-test
+          python scripts/check-pe-imports.py target/x86_64-pc-windows-msvc/ci/opencrabs.exe
 
       # No step-level `if:` on either step below, deliberately. This job is
       # gated at job level on needs.windows-filter.outputs.run (#1831) and
@@ -685,16 +711,18 @@ jobs:
         #                      It never had an ignore: audit does not fail on
         #                      yanked, so it had been passing silently.
         #
-        # The ten below are all blocked upstream: either the crate is at its
+        # The eleven below are all blocked upstream: either the crate is at its
         # latest published release (checked against crates.io on 2026-10-21) or
         # the release that would fix it cannot be reached from this tree. A
         # routine `cargo update` will not shift them; only an upstream release
         # or dropping the dependency will.
-        # zip (RUSTSEC-2026-0367/0368/0369, #2091, #2092): fixed in zip 9.0.0
-        #   upstream, but this tree still carries a zip 8.6.0 copy, so the three
-        #   ignores stay until `cargo tree -i zip@8.6.0` prints nothing. Our
-        #   code only reads archives (ZipArchive::new, by_name, by_index) and
-        #   never calls extract(), the path these advisories concern. Our direct
+        # zip (RUSTSEC-2026-0367/0368/0369 and RUSTSEC-2026-0429, #2091,
+        #   #2092): all four are fixed in zip 9.0.0 upstream, but this tree
+        #   still carries a zip 8.6.0 copy, so the ignores stay until
+        #   `cargo tree -i zip@8.6.0` prints nothing. 0429 is the abort on a
+        #   symlink entry in extract(). Our code only reads archives
+        #   (ZipArchive::new, by_name, by_index) and never calls extract(), the
+        #   path all four of these advisories concern. Our direct
         #   zip is 9.0.4; the 8.6.0 copy is pinned by three crates, all at their
         #   newest release: calamine 0.36.1, docx-rs 0.4.22 and rust_xlsxwriter
         #   0.99.1. The third copy, zip 1.1.4, arrives through candle-core 0.8.4
@@ -710,7 +738,7 @@ jobs:
         #   0.26 line entirely, but kalosm-common 0.4.0 (latest) pins hf-hub
         #   ^0.3.0, so that move needs kalosm to release first. Remove this
         #   ignore when `cargo tree -i webpki-roots@0.26.11` prints nothing.
-        run: cargo audit --ignore RUSTSEC-2024-0436 --ignore RUSTSEC-2025-0119 --ignore RUSTSEC-2025-0134 --ignore RUSTSEC-2025-0141 --ignore RUSTSEC-2026-0002 --ignore RUSTSEC-2026-0173 --ignore RUSTSEC-2026-0192 --ignore RUSTSEC-2026-0253 --ignore RUSTSEC-2026-0258 --ignore RUSTSEC-2026-0367 --ignore RUSTSEC-2026-0368 --ignore RUSTSEC-2026-0369 --ignore RUSTSEC-2026-0381
+        run: cargo audit --ignore RUSTSEC-2024-0436 --ignore RUSTSEC-2025-0119 --ignore RUSTSEC-2025-0134 --ignore RUSTSEC-2025-0141 --ignore RUSTSEC-2026-0002 --ignore RUSTSEC-2026-0173 --ignore RUSTSEC-2026-0192 --ignore RUSTSEC-2026-0253 --ignore RUSTSEC-2026-0258 --ignore RUSTSEC-2026-0367 --ignore RUSTSEC-2026-0368 --ignore RUSTSEC-2026-0369 --ignore RUSTSEC-2026-0381 --ignore RUSTSEC-2026-0429
 
   # ── Stage 5: Coverage (on-demand only) ───────────────────────────────────
   # Tarpaulin is the slowest job (~12 min). Running it on every main push

@@ -274,7 +274,7 @@ https://github.com/user-attachments/assets/7f45c5f8-acdf-48d5-b6a4-0e4811a9ee23
 |---------|-------------|
 | **Multi-Provider** | **OpenCrabs** (built in: no account or key to set up), **Xiaomi MiMo**, Anthropic Claude, OpenAI, GitHub Copilot (uses your Copilot subscription), OpenRouter (400+ models), MiniMax, Google Gemini, z.ai GLM (General API + Coding API), Moonshot Kimi (API plan + Coding plan), Claude CLI, OpenCode CLI, Codex CLI (uses your ChatGPT/Codex subscription), Qwen Native (free OAuth with multi-account rotation), Qwen Code CLI (1k free req/day), and any OpenAI-compatible API (Ollama, LM Studio, LocalAI). Model lists fetched live from provider APIs. New models available instantly. Custom provider dialog: paste-by-default for API keys, Enter-to-load live models, typed-not-in-list models accepted and merged. Each session remembers its provider + model and restores it on switch |
 | **Fallback Providers** | Configure a chain of fallback providers — if the primary fails, each fallback is tried in sequence automatically. Any configured provider can be a fallback. Config: `[providers.fallback] providers = ["openrouter", "anthropic"]` |
-| **Per-Provider Timeouts** | `timeout_secs` caps a non-streaming request (one that buffers a whole body); it never caps a stream. `stream_idle_timeout_secs` is the only stream timer; it caps inter-chunk silence before the stream is treated as dropped and retried, so a long turn that keeps delivering is never cut. Defaults when unset: 3600s for CLI and local providers, 120s for every OpenAI-compatible remote provider (z.ai included), 20s for the native Anthropic and Gemini families |
+| **Per-Provider Timeouts** | `timeout_secs` caps a non-streaming request (one that buffers a whole body); it never caps a stream. `stream_idle_timeout_secs` is the only stream timer; it caps inter-chunk silence before the stream is treated as dropped and retried, so a long turn that keeps delivering is never cut. Defaults when unset: 3600s for CLI and local providers, 120s for every OpenAI-compatible remote provider (z.ai included), 20s for the native Anthropic and Gemini families. A separate handshake budget bounds connect + TLS + response headers on each send, and `timeout_secs` cannot move it: 600s for CLI providers, 90s for local servers, 120s for the built-in OpenCrabs endpoint (a proxy in front of upstream models, so a slow upstream is not a dead one), 60s for every other cloud provider. The built-in endpoint rides the same retry ladder as every other provider, so every handshake timeout is retried until the attempts are spent |
 | **Per-Provider Vision** | Set `vision_model` per provider — the LLM calls `analyze_image` as a tool, which uses the vision model on the same provider API to describe images. The chat model stays the same and gets vision capability via tool call. Gemini vision takes priority when configured. Auto-configured for known providers (e.g. MiniMax) on first run |
 | **Prompt Caching** | Caches the stable context prefix (system prompt, brain files, earlier turns) on every caching-capable provider — Anthropic native (default), OpenAI/OpenRouter (`cache_enabled`), Qwen/Alibaba (zero-config auto), Xiaomi (server-side). Averaging ~87% cache efficiency in real use; watch it live in the Cache Efficiency card of `/usage`. Big reason a larger context window stays affordable |
 | **Context Window & Auto-Compaction** | Per-provider `context_window` override (default 200k, works on every provider except the built-in one, whose window is fixed at 200k); transparent auto-compaction at 65% (soft, background) / 90% (hard) of the window gives effectively unlimited session memory with no manual clearing |
@@ -625,7 +625,7 @@ This solves the core UX problem in mention-only groups: previously, tagging the 
 | **Input History** | Persistent command history (`~/.opencrabs/history.txt`), loaded on startup, capped at 500 entries |
 | **Inline Tool Approval** | Claude Code-style `❯ Yes / Always / No` selector with arrow key navigation |
 | **Inline Plan Approval** | Interactive plan review selector (Approve / Reject / Request Changes / View Plan) |
-| **Session Management** | Create, rename, delete sessions with persistent SQLite storage; each session remembers its provider + model — switching sessions auto-restores the provider (no manual `/models` needed); token counts and context % per session. New sessions auto-generate a meaningful title from the first user message (no more "New Chat") |
+| **Session Management** | Create, rename, delete sessions with persistent SQLite storage; each session remembers its provider + model, and switching sessions auto-restores the provider (no manual `/models` needed); token counts and context % per session. New sessions auto-generate a meaningful title from the first user message (no more "New Chat"). `Ctrl+Shift+P` in the sessions list pins the selected session to the top with a ★ marker (the window answers `ctrl-shift-p` too); pins survive restarts, unpinning restores the real recency slot, and the order beneath the pins never changes. `Alt+Space` opens **Seeker** on both surfaces, one field that finds a conversation, a slash command, a screen, a skill, the matching docs.opencrabs.com page or the setup for a messaging channel and runs it on Enter; a channel that is not configured yet prints the steps it takes under the field. Typing `create topic` arms the same session list so the pick names a new topic under it, `favorite` pins the picked session through that list, and a query that matches nothing offers to start a session with your words as the request. The window also opens the same card with `cmd-k`, and `ctrl-f` there narrows the rail instead |
 | **Direct Model Switch** | `/models <provider/model>` switches the current session instantly — no picker — on the TUI and every channel. You can also name it the way you say it: `/models xiaomi mimo v2.5 pro` resolves the same as `/models xiaomi/mimo-v2.5-pro`, with spacing, hyphens, dots and case interchangeable. Matching is programmatic against the provider's own catalogue, so it costs no model call and never invents a model that provider doesn't serve; an ambiguous reference is refused with the candidates listed rather than guessed. Add `all` (`/models minimax/MiniMax-M3 all`) to apply to every non-archived session (Telegram also offers an inline "Apply to all sessions" button). `opencrabs session set-model` does the same from the terminal, and `[providers.<name>] force_default = true` pushes the section's default pair to all sessions on config reload |
 | **Theme Switching** | `/theme` opens an interactive picker — arrow through the roster with **live preview** (the whole UI recolors under the cursor), Enter applies + persists, Esc reverts. 8 hand-built presets (`crab-dark` default, dracula, alucard, monokai, solarized-light, solarized-dark, catppuccin-mocha, catppuccin-latte) plus a 31-theme curated pack converted from the opencode and alacritty-theme catalogs (tokyonight + storm, nord, gruvbox + light, kanagawa, everforest, rosepine + dawn, catppuccin-macchiato/frappe, github, material, palenight, zenburn, aura, ayu, and more — `/theme list` shows the full roster), plus your own presets: drop a TOML in `~/.opencrabs/themes/*.toml` and it hot-loads into the picker, and `cargo run --example theme_pack_gen -- <sources-dir>` (the generator that built the curated pack) converts any alacritty-theme TOML or opencode theme JSON into a ready-to-drop file with a provenance header, including `#RGB`/`#RRGGBBAA` colors, defs refs and dark/light variants; fetch loop and curation notes live in `src/tui/theme_catalog/pack/README.md`. `/theme list`, `/theme set <name>`, `/theme reset` keep the text surface; the active theme persists via the `[tui.theme]` config key and survives restarts. Every widget resolves its colours through the theme engine, with no raw ANSI remaining (a suite-level guard fails on any new raw site), and themes can declare an optional canvas background (#1634). Non-truecolor terminals automatically get an ANSI-mapped fallback tier instead of broken colors |
 | **Split Panes** | Horizontal (`\|` in sessions) and vertical (`_` in sessions) pane splitting — tmux-style. Each pane runs its own session with independent provider, model, and context. Run 10 sessions side by side, all processing in parallel. `Tab` to cycle focus, `Ctrl+X` to close pane |
@@ -713,6 +713,37 @@ Prefer windows and buttons over the TUI? [MonoCode](https://github.com/hardbeat9
 1. **Install OpenCrabs v0.5.2 or newer**: `opencrabs acp` ships the ACP server (#1540)
 2. **Get a MonoCode build carrying the OpenCrabs provider**: the provider adapter is upstream PR [hardbeat920/monocode#343](https://github.com/hardbeat920/monocode/pull/343) (draft, pending merge); builds with it expose OpenCrabs directly in the provider picker
 3. **Pick OpenCrabs and go**: sessions, resume, slash commands, approval gates, plan mode, compaction and model switching all speak native ACP. Sessions born in MonoCode appear in `opencrabs session list` and resume in the TUI as first-class sessions
+
+### Built-in GUI
+
+`cargo build --features gui --bin opencrabs-gui` builds the native desktop client over the same sessions, providers and SQLite store as the TUI. A turn in flight draws the same shape Telegram does: one card with a collapsed header, the tool rows interleaved with the narration as it arrives, and a footer that carries the metrics, the context budget included, once the turn settles. `ctrl+o` or a click on the card folds it, and it folds the live card rather than a settled turn while one is running. Long `bash` commands run as detached tasks instead of blocking the turn: each running task shows as a `⏳` strip above the input with its elapsed seconds, its tool row carries the task id, and the row settles with the total elapsed time when the task ends. A finished task resumes the session with its output, queued as a system message when a turn is still running, so a 20 minute command neither holds the editor hostage nor collapses into a 600s timeout.
+
+A launch opens the conversation you were last in, on both surfaces, because the GUI and the terminal read and write the same `last_session` pointer. A first run, or a pointer at a conversation that has since been deleted, falls back to the newest session on the rail.
+
+#### Every command answers on the window
+
+The window runs the terminal's whole slash-command surface, not a subset. All 33 commands in the [Chat Mode](#chat-mode) table answer here, and two tests hold the line: `no_command_is_left_without_a_screen` walks every name the terminal offers and fails the build if one lands on "no screen for it", and `support_separates_missing_from_unknown` fails if a name is neither answered nor recognised. A command that owns a screen opens it full width, `esc` goes back to the chat. The rest answer in the transcript through the engine's own entry point, so a plan approved on the window is the same plan object the terminal approves, and `/cd` moves this session's directory through the same shared applier the terminal calls, never another session's.
+
+| Where it answers | Commands | What you get |
+|------------------|----------|--------------|
+| Full-window screen | `/usage` `/themes` `/models` `/sessions` `/skills` `/mission-control` `/onboard` | the screen itself |
+| Setup wizard, opened at its step | `/workspace` `/channels` `/voice` `/image` `/daemon` `/brain` `/doctor` | the same steps and the same writes as the terminal |
+| One line in the transcript | `/compact` `/clear` `/rtk` `/plan` `/show-plan` `/execute` `/discard` `/approve` `/cd` `/goal` `/profiles` `/restart` `/whisper` `/cowork` | what happened, in words; no model turn is spent |
+| Chat control | `/new` `/stop` `/help` `/evolve` `/exit` | a new conversation, an aborted turn, the key list, the update, quit |
+
+`/whisper` installs and launches the same WhisperCrabs binary the terminal uses (the install path is not reimplemented here), and `/cowork` composes the tool turn, so neither one asks the model to guess at a shell command.
+
+`ctrl+k` opens the command palette: every command the window knows, plus every channel, session, skill and screen, filtered as you type. `ctrl+g` opens the session files browser. Picking a row and pressing the key land in the same place, because the palette routes through the same toggles.
+
+#### Skills screen
+
+`/skills` (or the palette) lists every skill the terminal can invoke, from the same loader, with its source tag and an amber **review gate** mark on the skills that ask for approval. Typing filters on name or description, the same way the terminal's picker does; `↑`/`↓` move the highlight, `enter` runs the selected skill by sending its prompt body as your next message, and `esc` goes back. A skill started on the window is the same turn the terminal would start.
+
+#### Seeker
+
+`Alt+Space` opens Seeker on both surfaces, and the window opens the same card with `cmd+k`. It is one field in the Spotlight style: type a few words, `enter` runs the row. It finds conversations, slash commands, screens, skills, the setup for a messaging channel, and the matching page on docs.opencrabs.com. `trello` surfaces the `/channels` row plus the channels docs page, `terminal voice` surfaces `/whisper`, `daemon trouble` surfaces the Troubleshooting page, `update` surfaces `/evolve`. A docs row opens the official page in your browser, and a channel that is not configured yet prints the steps it takes under the field before you commit.
+
+Matching anchors on word starts and falls back to a full-token run, so `ção` still finds `Configuração` while stray letters never match a row they do not belong to. Three flows ride the same card: `create topic` arms the session list so the pick names a new topic under it, `favorite` pins the picked session through that same list, and a query that matches nothing offers to start a fresh session with your words as the request.
 
 ### Debug Logging
 
@@ -2176,11 +2207,13 @@ curl -sL "$(curl -s https://api.github.com/repos/opencrabs/opencrabs/releases/la
 iwr -useb https://opencrabs.com/install.ps1 | iex
 ```
 
-The Windows script installs `opencrabs.exe` and `rtk.exe` into `%LOCALAPPDATA%\OpenCrabs\bin`, adds that directory to your user PATH, and tells already-open programs about the change, so a new terminal picks it up without a restart and `Get-Command opencrabs` resolves. Pass `-NoPathUpdate` to leave PATH untouched, which needs the script block form:
+The Windows script installs every file the release archive ships, which is `opencrabs.exe`, `rtk.exe` and the four MSVC runtime DLLs, into `%LOCALAPPDATA%\OpenCrabs\bin`, adds that directory to your user PATH, and tells already-open programs about the change, so a new terminal picks it up without a restart and `Get-Command opencrabs` resolves. Pass `-NoPathUpdate` to leave PATH untouched, which needs the script block form:
 
 ```powershell
 & ([scriptblock]::Create((iwr -useb https://opencrabs.com/install.ps1))) -NoPathUpdate
 ```
+
+> **The Windows zip carries its own MSVC runtime.** `msvcp140.dll`, `vcruntime140.dll`, `vcruntime140_1.dll` and `vcomp140.dll` sit next to `opencrabs.exe` and `rtk.exe`, because Windows loads them from the folder the exe lives in. That is the whole reason the archive starts on a machine that never installed Visual Studio or the vc_redist. The PowerShell one-liner installs every file in the archive, so all four arrive in `%LOCALAPPDATA%\OpenCrabs\bin` with the exes. If you unpack by hand, keep the DLLs beside the exes: an exe copied out on its own fails with `VCRUNTIME140_1.dll was not found`, which is what v0.5.15 did to everyone (#2257).
 
 ```bash
 # Linux (x86_64) — binary plus a desktop entry and icon
@@ -2190,7 +2223,7 @@ curl -sL "$(curl -s https://api.github.com/repos/opencrabs/opencrabs/releases/la
 curl -sL "$(curl -s https://api.github.com/repos/opencrabs/opencrabs/releases/latest | sed -n 's/.*"\(https:\/\/[^"]*linux-arm64\.tar\.gz\)".*/\1/p')" | tar xz && chmod +x opencrabs && sudo mkdir -p /usr/local/bin && sudo mv opencrabs rtk /usr/local/bin/ && install -Dm644 opencrabs.desktop ~/.local/share/applications/opencrabs.desktop && install -Dm644 opencrabs.png ~/.local/share/icons/hicolor/256x256/apps/opencrabs.png && command -v opencrabs
 ```
 
-The macOS archive ships `OpenCrabs.app`, not a loose binary: macOS reads an app icon only from a bundle, so a bare Mach-O always shows the generic exec glyph. Copying the bundle to `/Applications` gives you the Dock icon and a Launchpad entry, and the symlink keeps `opencrabs` on your PATH. The Linux archive carries `opencrabs.desktop` and `opencrabs.png` for the same reason, so your application menu has an entry with the real icon instead of a nameless terminal.
+The macOS archive ships `OpenCrabs.app`, not a loose binary: macOS reads an app icon only from a bundle, so a bare Mach-O shows the generic exec glyph in Finder. Copying the bundle to `/Applications` gives you the Finder and Launchpad entry with the real icon, and the symlink keeps `opencrabs` on your PATH. The TUI also gives its own process a Dock tile holding the crab at startup, so the icon is there whether you launch the bundle or run `opencrabs` straight from a terminal. Set `OPENCRABS_NO_DOCK_ICON=1` if you would rather not have a Dock tile, or point `OPENCRABS_DOCK_ICON` at your own `.icns`. The Linux archive carries `opencrabs.desktop` and `opencrabs.png` for the same reason, so your application menu has an entry with the real icon instead of a nameless terminal.
 
 Then just type `opencrabs` to start. The onboarding wizard handles everything on first run.
 
@@ -2213,7 +2246,7 @@ Then just type `opencrabs` to start. The onboarding wizard handles everything on
 > # Arch
 > sudo pacman -S gcc-libs alsa-lib
 > ```
-> `libgomp1` is required for the binary to start at all: it is a hard link-time dependency of the local embedding engine (`llama-cpp-2`), and without it every command fails with `error while loading shared libraries: libgomp.so.1`. `libasound2` only enables local speech-to-text audio I/O and is loaded at runtime, so the binary starts without it. On Ubuntu 24.04 and newer the audio package is `libasound2t64`: `libasound2` is a virtual package there, so `apt-get install libasound2` aborts the whole command and installs nothing, not even `libgomp1`. macOS and Windows binaries have no extra prerequisites.
+> `libgomp1` is required for the binary to start at all: it is a hard link-time dependency of the local embedding engine (`llama-cpp-2`), and without it every command fails with `error while loading shared libraries: libgomp.so.1`. `libasound2` only enables local speech-to-text audio I/O and is loaded at runtime, so the binary starts without it. On Ubuntu 24.04 and newer the audio package is `libasound2t64`: `libasound2` is a virtual package there, so `apt-get install libasound2` aborts the whole command and installs nothing, not even `libgomp1`. macOS binaries have no extra prerequisites. The Windows zip carries its four MSVC runtime DLLs beside the exes, so it needs no vc_redist install either, provided you keep the archive layout.
 >
 > **Local TTS (Piper) additionally requires Python 3 with the `venv` module:**
 > ```bash
@@ -2259,7 +2292,7 @@ All features are enabled by default. To customize, use `--no-default-features` a
 cargo install opencrabs --no-default-features --features "telegram,discord"
 
 # Everything except browser automation
-cargo install opencrabs --no-default-features --features "telegram,whatsapp,discord,slack,trello,local-stt,local-tts,browser,rtk,code-graph,pdfium"
+cargo install opencrabs --no-default-features --features "telegram,whatsapp,discord,slack,trello,local-stt,local-tts,browser,rtk,code-graph,pdfium,notification-sound"
 ```
 
 | Feature | Crate | Description |
@@ -2276,6 +2309,7 @@ cargo install opencrabs --no-default-features --features "telegram,whatsapp,disc
 | `code-graph` | tree-sitter | Symbol/call-graph index for structural code queries (see [Structural code search](#-benchmarks)) |
 | `rtk` | — | Bash output filtering via RTK, cutting tokens on supported commands |
 | `pdfium` | pdfium-render | PDF page rendering, the primary renderer; falls back to `pdftoppm` when the system Pdfium library is absent |
+| `notification-sound` | rodio | Plan-finished chime: plays the embedded notification WAV when a plan reaches 100% at turn settle. Opt-in via `[agent] completion_notification_enabled` (default false), TUI only, no desktop toast |
 
 ### Option 4: Build from Source (full control)
 
@@ -2989,6 +3023,9 @@ plan_auto_start = false          # default false: completing a plan task NEVER s
 plan_worker_allow_nested = false # default false: isolated plan workers are pure - they cannot spawn further sub-agents
 plan_worker_allow_write = false  # default false: isolated plan workers run READ-ONLY (#1173 grant) - they verify/report; mutations stay with the parent
                                  # or background tasks (their long bash runs attached). true lets them nest.
+completion_notification_enabled = false # default false (#2255): play src/assets/sound/notification.wav when a
+                                 # plan reaches 100% at turn settle. TUI only, no desktop toast. Opt-in, because
+                                 # an agent that chirps unasked is noise.
 subagent_session_ttl_days = 7    # days a spawned sub-agent's session is kept before pruning. Nothing revisits
                                  # them, so they accumulate with their messages, tool rows and plan files. 0 keeps forever
 
@@ -4041,19 +4078,21 @@ Any tool on your `$PATH` works. If it runs in your terminal, OpenCrabs can use i
 |----------|--------|
 | `Ctrl+C` | First press: snaps to bottom if scrolled up, else clears input. Second press (within 3s) quits |
 | `Ctrl+N` | New session |
-| `Ctrl+L` | List/switch sessions |
+| `Ctrl+S` | List/switch sessions (the TUI maps both `Ctrl+S`, which matches the desktop sidebar, and `Ctrl+L`) |
 | `Ctrl+K` | Clear current session |
 | `Page Up/Down` | Scroll chat history |
 | `Mouse Scroll` | Scroll chat history |
-| `Mouse click` | On a URL or an existing file path: open it in the default app (browser, Finder/Explorer, `xdg-open`). Elsewhere: expand/collapse blocks and select messages; click-drag still selects text to copy |
+| `Mouse click` | Inside the input box: move the cursor to the click, on any line, including wrapped lines and a box that has scrolled. On a URL or an existing file path: open it in the default app (browser, Finder/Explorer, `xdg-open`). Elsewhere: expand/collapse blocks and select messages; click-drag still selects text to copy |
 | `F12` | Toggle mouse capture: off gives native terminal drag-select and copy (browser-style), on restores in-app click, right-click, and scroll. Works even inside dialogs |
 | `Escape` | Clear input / close overlay |
 
 ### Chat Mode
 
+Every slash command in this table also runs on the built-in GUI window, which opens the screen the command names; see [Built-in GUI](#built-in-gui) for the mapping.
+
 | Shortcut | Action |
 |----------|--------|
-| `Enter` | Send message |
+| `Enter` | Send when idle; while a turn runs, Enter queues the text and `↑` pulls it back into the box |
 | `Ctrl+J` | New line (vim — also Alt+Enter / Shift+Enter on supported terminals) |
 | `←` / `→` | Move cursor one character |
 | `↑` / `↓` | Navigate lines (multiline), jump to start/end (single-line), then history |
@@ -4456,7 +4495,7 @@ The judge returns one of three verdicts:
 |---------|---------|-------------|
 | Turn budget | 20 | Max autonomous turns before the loop stops |
 | Judge model | Same as session | Uses whatever provider/model the current session is on |
-| Fail-open parsing | 3 attempts | If the judge returns malformed JSON 3 times, the loop gives up gracefully |
+| Fail-open parsing | 2 attempts | If the judge returns malformed JSON twice (the initial call plus one retry), the loop gives up gracefully |
 
 ### Compared to Claude Code
 
@@ -4723,10 +4762,10 @@ flowchart TB
     PROV --> RATELIMIT[Rate Limit Handler]
     RATELIMIT --> WALKCHAIN[Walk fallback chain]
     PROV --> STREAMERR[Stream Error Handler]
-    STREAMERR --> RETRY3[Retry 3x with backoff]
-    RETRY3 --> WALKCHAIN
+    STREAMERR --> RETRY5[Retry 5x with backoff]
+    RETRY5 --> WALKCHAIN
     PROV --> STREAMDROP[Stream Drop Handler]
-    STREAMDROP --> DROPRETRY[Retry 2x then fallback]
+    STREAMDROP --> DROPRETRY[Retry 5x then fallback]
     PROV --> ROTCONT[Rotation Continuation]
     ROTCONT --> INJECTCONT[Inject continuation prompt]
     PROV --> SWAPEVENT[Sticky Fallback Swap]
@@ -4852,9 +4891,9 @@ flowchart TD
     BUILD --> STREAM[Provider stream]
     STREAM --> |success|PARSE[Parse Response]
     STREAM --> |rate limit|RATE[Walk Fallback Chain]
-    STREAM --> |stream error|SRETRY[Retry 3x then Fallback]
+    STREAM --> |stream error|SRETRY[Retry 5x then Fallback]
     STREAM --> |prompt too long|EMERG[Emergency Compaction]
-    STREAM --> |drop|DRETRY[Retry 2x then Fallback]
+    STREAM --> |drop|DRETRY[Retry 5x then Fallback]
     STREAM --> |repetition|CANCEL[Cancel and Retry]
     RATE --> PARSE
     SRETRY --> PARSE
@@ -5179,7 +5218,7 @@ cargo build --release
 # Small release build
 cargo build --profile release-small
 
-# Run tests (11,407 tests: 1,179 test files under src/tests/, where tests
+# Run tests (11,422 tests: 1,186 test files under src/tests/, where tests
 # belong — zero inline blocks in production files);
 # 38 slower ones are #[ignore]d to keep the default
 # run fast: profile tests that touch ~/.opencrabs, browser end-to-end
@@ -5215,6 +5254,7 @@ cargo clippy -- -D warnings
 | `rtk` | Bash output filtering via RTK (default: enabled) |
 | `code-graph` | tree-sitter symbol/call-graph index behind `memory_search`'s structural lane (default: enabled) |
 | `pdfium` | PDF page rendering via the system Pdfium library, ahead of the `pdftoppm` fallback (default: enabled) |
+| `notification-sound` | Plan-finished chime from the embedded notification WAV, behind `[agent] completion_notification_enabled` (default: enabled feature, sound itself off by default) |
 | `profiling` | Enable pprof flamegraph profiling (Unix only) |
 | `eval` | Offline + live evaluation harness. Compiled automatically under `cfg(test)`, and present in release binaries, which are built with `--all-features` |
 

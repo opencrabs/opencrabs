@@ -18,7 +18,7 @@ use super::dialogs::{
 };
 use super::help::{render_help, render_settings};
 use super::input::{
-    render_emoji_picker, render_followup, render_input, render_slash_autocomplete,
+    render_emoji_picker, render_followup, render_input, render_queue, render_slash_autocomplete,
     render_status_bar,
 };
 use super::plan_widget::render_plan_checklist;
@@ -100,8 +100,6 @@ pub fn render(f: &mut Frame, app: &mut App) {
         return;
     }
 
-    use super::input::render_queue;
-
     // Compute queue height (2 rows if current session has queued message)
     let queue_height: u16 = {
         let has_queue = app
@@ -158,8 +156,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     //     input, queue preview, and a chat floor, so chat never gets
     //     crushed into a sliver against the card's edge (#1750).
     let plan_height = app
-        .plan_document
-        .as_ref()
+        .plan_document()
         .filter(|p| p.status == crate::tui::plan::PlanStatus::Active)
         .map(|p| {
             let desired: u16 = if p.tasks.is_empty() {
@@ -175,6 +172,19 @@ pub fn render(f: &mut Frame, app: &mut App) {
             plan_card_height(desired, f.area().height, input_height, queue_height)
         })
         .unwrap_or(0);
+
+    // Split mode: the window-level plan card, queue preview and input box
+    // give their rows to the panes. Each pane renders its own strip, queue
+    // preview and input inside its split, so reserving full-width slots here
+    // only stacked dead rows under the panes (#2494). Min(CHAT_FLOOR) on the
+    // chat chunk absorbs everything, and `full_content_area` (the sum of the
+    // four upper chunks) is unchanged, so the full-screen modes keep their
+    // exact canvas.
+    let (plan_height, queue_height, input_height) = if app.pane_manager.is_split() {
+        (0, 0, 0)
+    } else {
+        (plan_height, queue_height, input_height)
+    };
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -201,32 +211,13 @@ pub fn render(f: &mut Frame, app: &mut App) {
             // Handled by early return above
         }
         AppMode::Chat => {
-            if app.pane_manager.is_split() {
-                render_split_panes(f, app, chunks[0]);
-            } else {
-                render_chat(f, app, chunks[0]);
-            }
-            if plan_height > 0 {
-                render_plan_checklist(f, app, chunks[1]);
-            }
-            // Render queue preview above input
-            if queue_height > 0 {
-                render_queue(f, app, chunks[2]);
-            }
-            // Store input area coordinates for mouse event mapping
-            // chunks[3] is always the input slot (indices are fixed)
-            app.input_area_x = chunks[3].x;
-            app.input_area_y = chunks[3].y;
-            app.input_area_width = chunks[3].width;
-            app.input_area_height = chunks[3].height;
-            render_input(f, app, chunks[3]);
-            render_status_bar(f, app, chunks[4]);
+            let input_rect = render_chat_surface(f, app, &chunks, plan_height, queue_height);
             if app.slash_suggestions_active {
-                render_slash_autocomplete(f, app, chunks[3]);
+                render_slash_autocomplete(f, app, input_rect);
             } else if app.emoji_picker_active {
-                render_emoji_picker(f, app, chunks[3]);
+                render_emoji_picker(f, app, input_rect);
             } else if app.followup_suggestions.len() >= 2 && app.input_buffer.is_empty() {
-                render_followup(f, app, chunks[3]);
+                render_followup(f, app, input_rect);
             }
         }
         AppMode::Sessions => {
@@ -305,40 +296,11 @@ pub fn render(f: &mut Frame, app: &mut App) {
             }
         }
         AppMode::RestartPending => {
-            render_chat(f, app, chunks[0]);
-            if plan_height > 0 {
-                render_plan_checklist(f, app, chunks[1]);
-            }
-            if queue_height > 0 {
-                render_queue(f, app, chunks[2]);
-            }
-            app.input_area_x = chunks[3].x;
-            app.input_area_y = chunks[3].y;
-            app.input_area_width = chunks[3].width;
-            app.input_area_height = chunks[3].height;
-            render_input(f, app, chunks[3]);
-            render_status_bar(f, app, chunks[4]);
+            render_chat_surface(f, app, &chunks, plan_height, queue_height);
             render_restart_dialog(f, f.area());
         }
         AppMode::UpdatePrompt => {
-            // Overlay the update dialog on top of the normal chat UI.
-            if app.pane_manager.is_split() {
-                render_split_panes(f, app, chunks[0]);
-            } else {
-                render_chat(f, app, chunks[0]);
-            }
-            if plan_height > 0 {
-                render_plan_checklist(f, app, chunks[1]);
-            }
-            if queue_height > 0 {
-                render_queue(f, app, chunks[2]);
-            }
-            app.input_area_x = chunks[3].x;
-            app.input_area_y = chunks[3].y;
-            app.input_area_width = chunks[3].width;
-            app.input_area_height = chunks[3].height;
-            render_input(f, app, chunks[3]);
-            render_status_bar(f, app, chunks[4]);
+            render_chat_surface(f, app, &chunks, plan_height, queue_height);
             render_update_dialog(f, app, f.area());
         }
     }
@@ -360,27 +322,98 @@ pub fn render(f: &mut Frame, app: &mut App) {
         let area = f.area();
         crate::tui::render::hints::render_command_panel(f, area, app.dialog_help_scope);
     }
+
+    // Seeker (#2458), topmost: while it is up it owns every key, so nothing
+    // may paint over the card whose field is taking the characters. The app is
+    // drawn first and this dims it, so the frame still reads as the screen the
+    // user was in instead of a blank one.
+    if let Some(state) = &app.command_palette {
+        let area = f.area();
+        crate::tui::render::command_palette::render_command_palette(
+            f,
+            state,
+            area,
+            &app.command_palette_channels,
+        );
+    }
 }
 
-/// Render the chat area as split panes.
-fn render_split_panes(f: &mut Frame, app: &mut App, area: Rect) {
+/// The shared chat+plan+queue+input+status surface, identical across the
+/// Chat, RestartPending and UpdatePrompt modes. In split mode the three
+/// window-level slots are zeroed and the panes render their own strip, queue
+/// preview and input (#2494); the focused pane's input rect comes back so
+/// mouse mapping and the chat overlays stay anchored to the pane that owns
+/// the keyboard.
+fn render_chat_surface(
+    f: &mut Frame,
+    app: &mut App,
+    chunks: &[Rect],
+    plan_height: u16,
+    queue_height: u16,
+) -> Rect {
+    let (input_rect, scroll_y) = if app.pane_manager.is_split() {
+        render_split_panes(f, app, chunks[0])
+    } else {
+        render_chat(f, app, chunks[0]);
+        if plan_height > 0 {
+            render_plan_checklist(f, app, chunks[1]);
+        }
+        if queue_height > 0 {
+            render_queue(f, app, chunks[2]);
+        }
+        (chunks[3], render_input(f, app, chunks[3]))
+    };
+    // Store input area coordinates for mouse event mapping. In split mode
+    // this is the focused pane's own input box, not the zeroed window slot.
+    app.input_area_x = input_rect.x;
+    app.input_area_y = input_rect.y;
+    app.input_area_width = input_rect.width;
+    app.input_area_height = input_rect.height;
+    // The paragraph scrolls once the buffer outgrows the box; store it so
+    // click and drag map the row the user sees, not the row the buffer
+    // starts at.
+    app.input_scroll_y = scroll_y;
+    render_status_bar(f, app, chunks[4]);
+    input_rect
+}
+
+/// Render the chat area as split panes. Returns the focused pane's input
+/// rect and its scroll offset so the frame can keep mouse mapping and the
+/// chat overlays anchored to the pane that owns the keyboard (#2494).
+fn render_split_panes(f: &mut Frame, app: &mut App, area: Rect) -> (Rect, u16) {
     let tree = match &app.pane_manager.root {
         Some(t) => t.clone(),
-        None => return render_chat(f, app, area),
+        // Unreachable while `is_split()` is true, since a split needs a root,
+        // but the fallback keeps the contract honest if that invariant ever
+        // breaks.
+        None => {
+            render_chat(f, app, area);
+            return (Rect::default(), 0);
+        }
     };
 
     let focused_id = app.pane_manager.focused;
     let pane_rects = tree.layout(area);
+    let mut focused_input: Option<(Rect, u16)> = None;
 
     for (pane_id, rect) in pane_rects {
         if rect.width < 3 || rect.height < 3 {
             continue; // too small to render
         }
+        // Budget first: the snapshot reads the pane's own plan and queue,
+        // then the renderers below borrow the app mutably.
+        let rows = panes::pane_rows_for(app, pane_id, rect.height);
         if pane_id == focused_id {
             let inner = panes::focused_pane_border(f, app, rect);
-            render_chat(f, app, inner);
+            let layout = panes::pane_layout(inner, rows);
+            render_chat(f, app, layout.body);
+            panes::render_pane_strips(f, app, pane_id, layout.strip, layout.queue);
+            let scroll_y = render_input(f, app, layout.input);
+            focused_input = Some((layout.input, scroll_y));
         } else {
-            panes::render_inactive_pane(f, app, pane_id, rect);
+            panes::render_inactive_pane(f, app, pane_id, rect, rows);
         }
     }
+
+    focused_input.unwrap_or((Rect::default(), 0))
 }

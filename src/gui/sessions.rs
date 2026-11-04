@@ -1,0 +1,1834 @@
+//! The session rail: every real session from the ledger, most recent first,
+//! click to select. Phase 0's lessons are baked in: the fetch runs on a
+//! dedicated 4 MB thread (gpui's dispatch-queue workers have tiny stacks and
+//! the crash receipt lives in `main.rs`), the DB opens through
+//! `Database::connect`, the same no-migration read-only door the usage
+//! loader uses, and no string is ever sliced by byte index (#2271): the
+//! title truncation walks chars.
+//!
+//! The split between `row` (pure data) and the click attach (the view's
+//! listener) exists because `Context::listener` needs `&mut cx`: the view
+//! builds each row's handler in its own loop turn, then hands the finished
+//! rows to `rail`.
+
+use crate::palette;
+use std::collections::{HashMap, HashSet};
+
+use gpui::{
+    AnyElement, AnyView, App, ClickEvent, Context, Div, InteractiveElement, Render, ScrollHandle,
+    SharedString, Stateful, Styled, Window, deferred, div, prelude::*, rems, rgb,
+};
+
+use opencrabs::db::Database;
+use opencrabs::db::models::Session;
+use opencrabs::db::repository::session::{SessionListOptions, SessionRepository};
+use opencrabs::db::repository::session_favorites::SessionFavoritesRepository;
+
+/// The rail's live state, owned by the window's view.
+#[derive(Default)]
+pub struct SessionsState {
+    /// Most recent first, straight from `SessionRepository::list`.
+    pub items: Vec<Session>,
+    /// The session a click chose; the transcript (task 3) reads it.
+    pub selected: Option<uuid::Uuid>,
+    /// The row the keyboard is on. Distinct from `selected`: that is the
+    /// chat whose transcript is open, this is the row an arrow is pointing
+    /// at, the same split the TUI keeps between its list index and the open
+    /// chat (#2351).
+    pub cursor: Option<uuid::Uuid>,
+    /// The row whose context menu is open. Right-click asked for it; a
+    /// left click anywhere, an esc, or a pick closes it. The menu anchors
+    /// to the row, not the pointer: the row is the stable thing inside a
+    /// scrolling rail, and the slide strip already behaves this way.
+    pub rail_menu: Option<uuid::Uuid>,
+    /// Set when the fetch failed; the rail says why instead of lying empty.
+    pub error: Option<SharedString>,
+    /// ctrl+f's query. A non-empty query narrows the rail to the chats whose
+    /// title (or id prefix) matches; the ledger is untouched, so clearing the
+    /// query shows everything back exactly as it was.
+    pub filter: String,
+    /// Whether the field is taking keystrokes. The bar is only drawn while it
+    /// is, so an unsearched rail looks the way it always did.
+    pub filter_active: bool,
+    /// Pinned sessions, straight from the `session_favorites` sidecar the TUI
+    /// writes (`SessionService::favorite_session`). Same table, same ids, so
+    /// pinning in one surface shows up in the other on its next fetch. A set,
+    /// because every rail row asks "is this one pinned?" once per frame and
+    /// the sidecar is keyed by session id: the same shape it is stored in.
+    pub favorites: HashSet<uuid::Uuid>,
+    /// Sessions with topics turned on (#2302). Kept beside the rows for the
+    /// same reason as favorites: the row model stays as it is.
+    pub topics: HashSet<uuid::Uuid>,
+    /// The icon each topic carries, shown before its name (#2414).
+    pub topic_icons: HashMap<uuid::Uuid, String>,
+    /// The live name each Telegram topic carries, resolved once per refresh
+    /// pass in ONE query (#2490).
+    ///
+    /// Keyed by session id, so a row looks its title up with no allocation and
+    /// no database call inside the paint. Rows that are not topic-bound
+    /// Telegram sessions simply have no entry and keep their stored name.
+    pub topic_titles: HashMap<uuid::Uuid, String>,
+    /// Topic id to its parent session id (#2303). A topic is grouped under
+    /// its parent in the rail; the row model itself is unchanged.
+    pub parents: HashMap<uuid::Uuid, uuid::Uuid>,
+    /// Closed sessions (#2305): drawn dimmed and refuse new turns.
+    pub closed: HashSet<uuid::Uuid>,
+    /// Parents whose topic tree is folded: their topics are not drawn (#2427).
+    pub collapsed: HashSet<uuid::Uuid>,
+}
+
+impl SessionsState {
+    /// The rows the rail shows right now, in ledger order.
+    pub fn visible(&self) -> impl Iterator<Item = &Session> {
+        self.items.iter().filter(|s| matches(s, &self.filter))
+    }
+
+    /// Pinned first, then everything else, each group keeping the ledger's
+    /// order. TUI parity: `SessionService::session_favorites` feeds a stable
+    /// `sort_by_key(|s| !pins.contains(&s.id))`, so a pin moves a chat to the
+    /// top without disturbing the order inside either group.
+    ///
+    /// A topic sits directly under its parent when that parent is in view
+    /// (#2303). A pinned topic is a top-level row, so pins stay above groups.
+    pub fn ordered(&self) -> impl Iterator<Item = &Session> {
+        let visible: Vec<&Session> = self.visible().collect();
+        let in_view = |id: uuid::Uuid| visible.iter().any(|s| s.id == id);
+        let grouped = |s: &Session| {
+            !self.is_favorite(s.id) && self.parents.get(&s.id).is_some_and(|p| in_view(*p))
+        };
+        let (mut pinned, rest): (Vec<&Session>, Vec<&Session>) = visible
+            .iter()
+            .copied()
+            .filter(|s| !grouped(s))
+            .partition(|s| self.is_favorite(s.id));
+        pinned.extend(rest);
+        let mut out: Vec<&Session> = Vec::with_capacity(visible.len());
+        for top in pinned {
+            out.push(top);
+            // A folded tree draws nothing beneath its parent, and the arrow
+            // keys walk this same order, so they skip the folded topics too.
+            if self.collapsed.contains(&top.id) {
+                continue;
+            }
+            out.extend(
+                visible
+                    .iter()
+                    .copied()
+                    .filter(|s| self.parents.get(&s.id) == Some(&top.id) && grouped(s)),
+            );
+        }
+        out.into_iter()
+    }
+
+    /// Whether a row is a topic shown under its parent, so it is indented.
+    pub fn is_closed(&self, id: uuid::Uuid) -> bool {
+        self.closed.contains(&id)
+    }
+
+    pub fn is_indented(&self, id: uuid::Uuid) -> bool {
+        !self.is_favorite(id)
+            && self
+                .parents
+                .get(&id)
+                .is_some_and(|p| self.visible().any(|s| s.id == *p))
+    }
+
+    /// Whether this session is pinned right now.
+    pub fn is_favorite(&self, id: uuid::Uuid) -> bool {
+        self.favorites.contains(&id)
+    }
+
+    pub fn is_topic_enabled(&self, id: uuid::Uuid) -> bool {
+        self.topics.contains(&id)
+    }
+
+    /// Move the cursor one row down (positive delta) or up (negative),
+    /// walking the same pinned-first order the rail paints and clamping at
+    /// both ends. An unarmed cursor starts at the first row either way, so
+    /// the first press always lands on a real row.
+    pub fn cursor_step(&self, current: Option<uuid::Uuid>, delta: isize) -> Option<uuid::Uuid> {
+        let ids: Vec<uuid::Uuid> = self.ordered().map(|s| s.id).collect();
+        let last = ids.len().checked_sub(1)?;
+        let at = current
+            .and_then(|c| ids.iter().position(|&id| id == c))
+            .map(|p| p as isize)
+            .unwrap_or(if delta >= 0 { -1 } else { 0 });
+        let next = (at + delta).clamp(0, last as isize) as usize;
+        Some(ids[next])
+    }
+
+    /// The row's index in the painted order, for the scroll handle's
+    /// scroll_to_item. None when the row is not shown right now.
+    pub fn cursor_index(&self, id: uuid::Uuid) -> Option<usize> {
+        self.ordered().position(|s| s.id == id)
+    }
+
+    /// Whether the cursor points at a row the rail still shows. A deleted,
+    /// filtered-out or refetched-away row must never stay armed.
+    pub fn cursor_visible(&self) -> bool {
+        self.cursor
+            .is_some_and(|c| self.visible().any(|s| s.id == c))
+    }
+
+    /// What a delete chord acts on: the row the keyboard is pointed at, or
+    /// the chat that is open when nothing is armed. Resolving the target is
+    /// all this does. Nothing erases here: the caller asks the dialog, and
+    /// only its confirm button reaches the delete bridge (#2352).
+    pub fn delete_target(&self) -> Option<uuid::Uuid> {
+        self.rail_target()
+    }
+
+    /// The row a rail chord acts on: the cursor row while the keyboard is
+    /// on one, else the chat that is open. Chords share this resolution
+    /// instead of each spelling it out (#2352, #2353).
+    pub fn rail_target(&self) -> Option<uuid::Uuid> {
+        self.cursor.or(self.selected)
+    }
+
+    /// What the pin chord acts on, resolved the same way the delete chord
+    /// resolves its target (#2353).
+    pub fn pin_target(&self) -> Option<uuid::Uuid> {
+        self.rail_target()
+    }
+
+    /// What Enter in the find field opens: the armed row while it still
+    /// matches the query, else the top match. Resolving it here keeps the
+    /// rule out of the window's key handler, so it is tested without one
+    /// (#2454).
+    pub fn find_target(&self) -> Option<uuid::Uuid> {
+        self.cursor
+            .filter(|_| self.cursor_visible())
+            .or_else(|| self.cursor_step(None, 1))
+    }
+
+    /// Dismiss the context menu. Deliberately the only thing it touches:
+    /// a dismissal is an eraser, never an action, so no favorite flips
+    /// and no delete arms on the way out (#2354).
+    pub fn close_rail_menu(&mut self) {
+        self.rail_menu = None;
+    }
+
+    /// How many of the ledger's sessions match the query.
+    pub fn matched(&self) -> usize {
+        self.visible().count()
+    }
+}
+
+/// Case-insensitive title match, plus an id prefix so a pasted id finds its
+/// row. An empty or whitespace query matches everything: an unsearched rail
+/// and a cleared field take the same path.
+pub fn matches(s: &Session, query: &str) -> bool {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return true;
+    }
+    if let Some(title) = s.title.as_deref()
+        && title.to_lowercase().contains(&q)
+    {
+        return true;
+    }
+    s.id.to_string().starts_with(&q)
+}
+
+/// How far left a rail row must be slid before its action strip opens, in
+/// px. Below this a click with an unsteady hand stays a click, and a slide
+/// that comes up short snaps back to where the row was.
+pub const SLIDE_REVEAL_PX: f32 = 36.0;
+
+/// The slide's whole rule, as arithmetic, so it can be tested without a
+/// window: a drag that started at `from_x` and is now at `to_x` has travelled
+/// far enough left when the travel is at least `SLIDE_REVEAL_PX`. Only
+/// leftward travel counts; a drag to the right never opens anything.
+pub fn slide_reveals(from_x: f32, to_x: f32) -> bool {
+    to_x - from_x <= -SLIDE_REVEAL_PX
+}
+
+/// ctrl+f's field, drawn under the rail's header while it holds the keyboard.
+/// The match count rides on the right so a query that found nothing says so
+/// before Enter is pressed on it.
+pub fn filter_bar(state: &SessionsState) -> Stateful<Div> {
+    let empty = state.filter.trim().is_empty();
+    let body = if state.filter.is_empty() {
+        "find a chat\u{2026}".to_string()
+    } else {
+        state.filter.clone()
+    };
+    let count = if empty {
+        String::new()
+    } else {
+        format!("{}/{}", state.matched(), state.items.len())
+    };
+    div()
+        .id("session-filter")
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap_1()
+        .px_2()
+        .py_1()
+        .rounded_sm()
+        .bg(rgb(palette::current().panel_hi))
+        .border_1()
+        .border_color(rgb(palette::current().focus))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_xs()
+                .text_color(rgb(if empty {
+                    palette::current().text_faint
+                } else {
+                    palette::current().text
+                }))
+                .child(SharedString::from(body)),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(palette::current().text_hint))
+                .child(SharedString::from(count)),
+        )
+}
+
+/// The hard cap so a long history cannot make the rail unbounded.
+const RAIL_LIMIT: usize = 200;
+
+/// Fetch the real session list on a thread with a real stack, same shape as
+/// `load_view` in `main.rs`: tokio current-thread runtime on a 4 MB thread,
+/// result over a oneshot. `Database::connect` runs pragmas only, never
+/// migrations, so a read cannot race the daemon that owns the schema.
+pub async fn load_sessions(db_path: std::path::PathBuf) -> Result<Vec<Session>, String> {
+    let (tx, rx) = futures::channel::oneshot::channel::<Result<Vec<Session>, String>>();
+    let spawned = std::thread::Builder::new()
+        .name("sessions-fetch".into())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let result = match runtime {
+                Ok(rt) => rt
+                    .block_on(async {
+                        let db = Database::connect(&db_path).await?;
+                        let repo = SessionRepository::new(db.pool().clone());
+                        repo.list(SessionListOptions {
+                            limit: Some(RAIL_LIMIT),
+                            ..Default::default()
+                        })
+                        .await
+                    })
+                    .map_err(|e| format!("{e:#}")),
+                Err(e) => Err(format!("tokio runtime failed: {e}")),
+            };
+            let _ = tx.send(result);
+        });
+    match spawned {
+        Ok(_) => match rx.await {
+            Ok(result) => result,
+            Err(_) => Err("sessions fetch thread dropped its result".into()),
+        },
+        Err(e) => Err(format!("sessions fetch thread failed to spawn: {e}")),
+    }
+}
+
+/// The pinned set, read through the same 4 MB no-migration door as
+/// [`load_sessions`]. Returns ids: the rail already holds the rows, this only
+/// says which of them go on top.
+pub async fn load_favorites(db_path: std::path::PathBuf) -> Result<Vec<uuid::Uuid>, String> {
+    let (tx, rx) = futures::channel::oneshot::channel::<Result<Vec<uuid::Uuid>, String>>();
+    let spawned = std::thread::Builder::new()
+        .name("favorites-fetch".into())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let result = match runtime {
+                Ok(rt) => rt.block_on(async {
+                    let db = Database::connect(&db_path)
+                        .await
+                        .map_err(|e| format!("db connect: {e}"))?;
+                    let repo = SessionFavoritesRepository::new(db.pool().clone());
+                    let ids = repo
+                        .all()
+                        .await
+                        .map_err(|e| format!("favorites read: {e}"))?;
+                    // The sidecar stores ids as text; a malformed one is a
+                    // foreign key that got past SQLite, so it is skipped
+                    // rather than failing the whole rail.
+                    // Both arms are `String`-errored, so the block's own
+                    // error type is stated rather than inferred: a
+                    // generic `?` target leaves it ambiguous.
+                    Ok::<Vec<uuid::Uuid>, String>(
+                        ids.iter()
+                            .filter_map(|s| uuid::Uuid::parse_str(s).ok())
+                            .collect(),
+                    )
+                }),
+                Err(e) => Err(format!("tokio runtime failed: {e}")),
+            };
+            let _ = tx.send(result);
+        });
+    match spawned {
+        Ok(_) => match rx.await {
+            Ok(result) => result,
+            Err(_) => Err("favorites fetch thread dropped its result".into()),
+        },
+        Err(e) => Err(format!("favorites fetch thread failed to spawn: {e}")),
+    }
+}
+
+/// What the topic info panel shows (#2304). Read once per open, never edited.
+#[derive(Clone)]
+pub struct TopicInfo {
+    pub id: uuid::Uuid,
+    pub parent_title: Option<String>,
+    pub created_at: i64,
+    pub messages: i64,
+}
+
+/// Read one session's info for the panel. A session that is not a topic
+/// reports no parent.
+pub async fn load_topic_info(
+    db_path: std::path::PathBuf,
+    id: uuid::Uuid,
+) -> Result<Option<TopicInfo>, String> {
+    let (tx, rx) = futures::channel::oneshot::channel::<Result<Option<TopicInfo>, String>>();
+    let spawned = std::thread::Builder::new()
+        .name("topic-info-fetch".into())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let result = match runtime {
+                Ok(rt) => rt
+                    .block_on(async {
+                        let db = Database::connect(&db_path).await?;
+                        let repo = SessionRepository::new(db.pool().clone());
+                        let Some((parent, created_at, messages)) = repo.topic_info(id).await?
+                        else {
+                            return Ok(None);
+                        };
+                        let parent_title = match parent {
+                            Some(p) => repo.find_by_id(p).await?.and_then(|s| s.title),
+                            None => None,
+                        };
+                        Ok::<_, anyhow::Error>(Some(TopicInfo {
+                            id,
+                            parent_title,
+                            created_at,
+                            messages,
+                        }))
+                    })
+                    .map_err(|e| format!("{e:#}")),
+                Err(e) => Err(format!("tokio runtime failed: {e}")),
+            };
+            let _ = tx.send(result);
+        });
+    match spawned {
+        Ok(_) => match rx.await {
+            Ok(result) => result,
+            Err(_) => Err("topic info thread dropped its result".into()),
+        },
+        Err(e) => Err(format!("topic info thread failed to spawn: {e}")),
+    }
+}
+
+/// Rename a session or topic. The caller re-reads the rail afterwards.
+pub async fn rename_session(
+    db_path: std::path::PathBuf,
+    id: uuid::Uuid,
+    title: String,
+) -> Result<(), String> {
+    let (tx, rx) = futures::channel::oneshot::channel::<Result<(), String>>();
+    let spawned = std::thread::Builder::new()
+        .name("rename-write".into())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let result = match runtime {
+                Ok(rt) => rt
+                    .block_on(async {
+                        let db = Database::connect(&db_path).await?;
+                        let repo = SessionRepository::new(db.pool().clone());
+                        repo.rename(id, &title).await
+                    })
+                    .map_err(|e| format!("{e:#}")),
+                Err(e) => Err(format!("tokio runtime failed: {e}")),
+            };
+            let _ = tx.send(result);
+        });
+    match spawned {
+        Ok(_) => match rx.await {
+            Ok(result) => result,
+            Err(_) => Err("rename thread dropped its result".into()),
+        },
+        Err(e) => Err(format!("rename thread failed to spawn: {e}")),
+    }
+}
+
+/// Every closed session. A closed topic is dimmed and refuses new turns (#2305).
+pub async fn load_closed(db_path: std::path::PathBuf) -> Result<Vec<uuid::Uuid>, String> {
+    let (tx, rx) = futures::channel::oneshot::channel::<Result<Vec<uuid::Uuid>, String>>();
+    let spawned = std::thread::Builder::new()
+        .name("closed-fetch".into())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let result = match runtime {
+                Ok(rt) => rt
+                    .block_on(async {
+                        let db = Database::connect(&db_path).await?;
+                        let repo = SessionRepository::new(db.pool().clone());
+                        repo.closed_ids().await
+                    })
+                    .map_err(|e| format!("{e:#}")),
+                Err(e) => Err(format!("tokio runtime failed: {e}")),
+            };
+            let _ = tx.send(result);
+        });
+    match spawned {
+        Ok(_) => match rx.await {
+            Ok(result) => result,
+            Err(_) => Err("closed fetch thread dropped its result".into()),
+        },
+        Err(e) => Err(format!("closed fetch thread failed to spawn: {e}")),
+    }
+}
+
+/// Close or reopen one topic. The caller re-reads the closed set afterwards.
+pub async fn set_closed(
+    db_path: std::path::PathBuf,
+    id: uuid::Uuid,
+    closed: bool,
+) -> Result<(), String> {
+    let (tx, rx) = futures::channel::oneshot::channel::<Result<(), String>>();
+    let spawned = std::thread::Builder::new()
+        .name("closed-write".into())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let result = match runtime {
+                Ok(rt) => rt
+                    .block_on(async {
+                        let db = Database::connect(&db_path).await?;
+                        let repo = SessionRepository::new(db.pool().clone());
+                        repo.set_closed(id, closed).await
+                    })
+                    .map_err(|e| format!("{e:#}")),
+                Err(e) => Err(format!("tokio runtime failed: {e}")),
+            };
+            let _ = tx.send(result);
+        });
+    match spawned {
+        Ok(_) => match rx.await {
+            Ok(result) => result,
+            Err(_) => Err("closed write thread dropped its result".into()),
+        },
+        Err(e) => Err(format!("closed write thread failed to spawn: {e}")),
+    }
+}
+
+/// Every (topic, parent) pair. Read separately from the rows, like favorites,
+/// so the grouping does not change the row model (#2303).
+pub async fn load_topic_parents(
+    db_path: std::path::PathBuf,
+) -> Result<Vec<(uuid::Uuid, uuid::Uuid)>, String> {
+    let (tx, rx) =
+        futures::channel::oneshot::channel::<Result<Vec<(uuid::Uuid, uuid::Uuid)>, String>>();
+    let spawned = std::thread::Builder::new()
+        .name("topic-parents-fetch".into())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let result = match runtime {
+                Ok(rt) => rt
+                    .block_on(async {
+                        let db = Database::connect(&db_path).await?;
+                        let repo = SessionRepository::new(db.pool().clone());
+                        repo.topic_parents().await
+                    })
+                    .map_err(|e| format!("{e:#}")),
+                Err(e) => Err(format!("tokio runtime failed: {e}")),
+            };
+            let _ = tx.send(result);
+        });
+    match spawned {
+        Ok(_) => match rx.await {
+            Ok(result) => result,
+            Err(_) => Err("topic parents fetch thread dropped its result".into()),
+        },
+        Err(e) => Err(format!("topic parents fetch thread failed to spawn: {e}")),
+    }
+}
+
+/// Create a topic under a session and return its id. The database refuses a
+/// parent that is already a topic; that refusal comes back as the error.
+pub async fn create_topic(
+    db_path: std::path::PathBuf,
+    parent: uuid::Uuid,
+    title: String,
+) -> Result<uuid::Uuid, String> {
+    let (tx, rx) = futures::channel::oneshot::channel::<Result<uuid::Uuid, String>>();
+    let spawned = std::thread::Builder::new()
+        .name("topic-create".into())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let result = match runtime {
+                Ok(rt) => rt
+                    .block_on(async {
+                        let db = Database::connect(&db_path).await?;
+                        let repo = SessionRepository::new(db.pool().clone());
+                        repo.create_topic(parent, &title).await
+                    })
+                    .map_err(|e| format!("{e:#}")),
+                Err(e) => Err(format!("tokio runtime failed: {e}")),
+            };
+            let _ = tx.send(result);
+        });
+    match spawned {
+        Ok(_) => match rx.await {
+            Ok(result) => result,
+            Err(_) => Err("topic create thread dropped its result".into()),
+        },
+        Err(e) => Err(format!("topic create thread failed to spawn: {e}")),
+    }
+}
+
+/// Every session with topics turned on. Read separately from the rows, the
+/// same way favorites are, so the row model does not carry the flag.
+pub async fn load_topics(db_path: std::path::PathBuf) -> Result<Vec<uuid::Uuid>, String> {
+    let (tx, rx) = futures::channel::oneshot::channel::<Result<Vec<uuid::Uuid>, String>>();
+    let spawned = std::thread::Builder::new()
+        .name("topics-fetch".into())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let result = match runtime {
+                Ok(rt) => rt
+                    .block_on(async {
+                        let db = Database::connect(&db_path).await?;
+                        let repo = SessionRepository::new(db.pool().clone());
+                        repo.topic_enabled_ids().await
+                    })
+                    .map_err(|e| format!("{e:#}")),
+                Err(e) => Err(format!("tokio runtime failed: {e}")),
+            };
+            let _ = tx.send(result);
+        });
+    match spawned {
+        Ok(_) => match rx.await {
+            Ok(result) => result,
+            Err(_) => Err("topics fetch thread dropped its result".into()),
+        },
+        Err(e) => Err(format!("topics fetch thread failed to spawn: {e}")),
+    }
+}
+
+/// Every session whose topic tree is folded (#2427).
+pub async fn load_collapsed(db_path: std::path::PathBuf) -> Result<Vec<uuid::Uuid>, String> {
+    let (tx, rx) = futures::channel::oneshot::channel::<Result<Vec<uuid::Uuid>, String>>();
+    let spawned = std::thread::Builder::new()
+        .name("topics-collapsed-fetch".into())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let result = match runtime {
+                Ok(rt) => rt
+                    .block_on(async {
+                        let db = Database::connect(&db_path).await?;
+                        let repo = SessionRepository::new(db.pool().clone());
+                        repo.topics_collapsed_ids().await
+                    })
+                    .map_err(|e| format!("{e:#}")),
+                Err(e) => Err(format!("tokio runtime failed: {e}")),
+            };
+            if tx.send(result).is_err() {
+                crate::logging::error("collapsed topics result dropped: the window closed first");
+            }
+        });
+    match spawned {
+        Ok(_) => match rx.await {
+            Ok(result) => result,
+            Err(_) => Err("collapsed topics fetch thread dropped its result".into()),
+        },
+        Err(e) => Err(format!(
+            "collapsed topics fetch thread failed to spawn: {e}"
+        )),
+    }
+}
+
+/// Fold or unfold one session's topic tree and save it (#2427).
+pub async fn set_collapsed(
+    db_path: std::path::PathBuf,
+    id: uuid::Uuid,
+    collapsed: bool,
+) -> Result<(), String> {
+    let (tx, rx) = futures::channel::oneshot::channel::<Result<(), String>>();
+    let spawned = std::thread::Builder::new()
+        .name("topics-collapsed-write".into())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let result = match runtime {
+                Ok(rt) => rt
+                    .block_on(async {
+                        let db = Database::connect(&db_path).await?;
+                        let repo = SessionRepository::new(db.pool().clone());
+                        repo.set_topics_collapsed(id, collapsed).await
+                    })
+                    .map_err(|e| format!("{e:#}")),
+                Err(e) => Err(format!("tokio runtime failed: {e}")),
+            };
+            if tx.send(result).is_err() {
+                crate::logging::error("fold write result dropped: the window closed first");
+            }
+        });
+    match spawned {
+        Ok(_) => match rx.await {
+            Ok(result) => result,
+            Err(_) => Err("fold write thread dropped its result".into()),
+        },
+        Err(e) => Err(format!("fold write thread failed to spawn: {e}")),
+    }
+}
+
+/// Every topic's own icon. Read with the topic state, the same way the flag is.
+pub async fn load_topic_icons(
+    db_path: std::path::PathBuf,
+) -> Result<Vec<(uuid::Uuid, String)>, String> {
+    let (tx, rx) =
+        futures::channel::oneshot::channel::<Result<Vec<(uuid::Uuid, String)>, String>>();
+    let spawned = std::thread::Builder::new()
+        .name("topic-icons-fetch".into())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let result = match runtime {
+                Ok(rt) => rt
+                    .block_on(async {
+                        let db = Database::connect(&db_path).await?;
+                        let repo = SessionRepository::new(db.pool().clone());
+                        repo.topic_icons().await
+                    })
+                    .map_err(|e| format!("{e:#}")),
+                Err(e) => Err(format!("tokio runtime failed: {e}")),
+            };
+            if tx.send(result).is_err() {
+                crate::logging::error("topic icons result dropped: the window closed first");
+            }
+        });
+    match spawned {
+        Ok(_) => match rx.await {
+            Ok(result) => result,
+            Err(_) => Err("topic icons fetch thread dropped its result".into()),
+        },
+        Err(e) => Err(format!("topic icons fetch thread failed to spawn: {e}")),
+    }
+}
+
+/// The live name of every Telegram topic session in `items`, in ONE query
+/// (#2490).
+///
+/// The row a rail draws is a snapshot: a session keeps the name it was created
+/// with. Telegram is the truth, and a rename lands in `channel_messages`
+/// (`#143`). Resolving per refresh means the rail follows a rename on its next
+/// pass with no restart, and batching the pairs into one query means a list of
+/// two hundred rows still costs one lookup per pass, not two hundred.
+pub async fn load_telegram_topic_titles(
+    db_path: std::path::PathBuf,
+    items: &[Session],
+) -> Result<HashMap<uuid::Uuid, String>, String> {
+    use opencrabs::db::repository::channel_message::ChannelMessageRepository;
+    use opencrabs::ui_core::rail;
+
+    let mut wanted: Vec<(uuid::Uuid, String, String)> = Vec::new();
+    for session in items {
+        let Some(title) = session.title.as_deref() else {
+            continue;
+        };
+        let Some((chat_id, thread_id)) = rail::topic_thread(title) else {
+            continue;
+        };
+        wanted.push((session.id, chat_id.to_string(), thread_id.to_string()));
+    }
+    if wanted.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let (tx, rx) =
+        futures::channel::oneshot::channel::<Result<HashMap<uuid::Uuid, String>, String>>();
+    let spawned = std::thread::Builder::new()
+        .name("topic-titles-fetch".into())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let result = match runtime {
+                Ok(rt) => rt
+                    .block_on(async {
+                        let db = Database::connect(&db_path).await?;
+                        let repo = ChannelMessageRepository::new(db.pool().clone());
+                        let pairs: Vec<(String, String)> = wanted
+                            .iter()
+                            .map(|(_, chat, thread)| (chat.clone(), thread.clone()))
+                            .collect();
+                        let names = repo.topic_names("telegram", &pairs).await?;
+                        let mut out = HashMap::with_capacity(wanted.len());
+                        for (id, chat, thread) in wanted {
+                            if let Some(name) = names.get(&(chat, thread)) {
+                                out.insert(id, name.clone());
+                            }
+                        }
+                        Ok(out)
+                    })
+                    .map_err(|e: anyhow::Error| format!("{e:#}")),
+                Err(e) => Err(format!("tokio runtime failed: {e}")),
+            };
+            if tx.send(result).is_err() {
+                crate::logging::error("topic titles result dropped: the window closed first");
+            }
+        });
+    match spawned {
+        Ok(_) => match rx.await {
+            Ok(result) => result,
+            Err(_) => Err("topic titles fetch thread dropped its result".into()),
+        },
+        Err(e) => Err(format!("topic titles fetch thread failed to spawn: {e}")),
+    }
+}
+
+/// Give one topic an icon, or clear it with None. The caller re-reads afterwards.
+pub async fn set_topic_icon(
+    db_path: std::path::PathBuf,
+    id: uuid::Uuid,
+    icon: Option<String>,
+) -> Result<(), String> {
+    let (tx, rx) = futures::channel::oneshot::channel::<Result<(), String>>();
+    let spawned = std::thread::Builder::new()
+        .name("topic-icon-write".into())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let result = match runtime {
+                Ok(rt) => rt
+                    .block_on(async {
+                        let db = Database::connect(&db_path).await?;
+                        let repo = SessionRepository::new(db.pool().clone());
+                        repo.set_topic_icon(id, icon.as_deref()).await
+                    })
+                    .map_err(|e| format!("{e:#}")),
+                Err(e) => Err(format!("tokio runtime failed: {e}")),
+            };
+            if tx.send(result).is_err() {
+                crate::logging::error("topic icon result dropped: the window closed first");
+            }
+        });
+    match spawned {
+        Ok(_) => match rx.await {
+            Ok(result) => result,
+            Err(_) => Err("topic icon write thread dropped its result".into()),
+        },
+        Err(e) => Err(format!("topic icon write thread failed to spawn: {e}")),
+    }
+}
+
+/// Turn topics on or off for one session. The caller re-reads afterwards.
+pub async fn set_topics(
+    db_path: std::path::PathBuf,
+    id: uuid::Uuid,
+    enabled: bool,
+) -> Result<(), String> {
+    let (tx, rx) = futures::channel::oneshot::channel::<Result<(), String>>();
+    let spawned = std::thread::Builder::new()
+        .name("topics-write".into())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let result = match runtime {
+                Ok(rt) => rt
+                    .block_on(async {
+                        let db = Database::connect(&db_path).await?;
+                        let repo = SessionRepository::new(db.pool().clone());
+                        repo.set_topics_enabled(id, enabled).await
+                    })
+                    .map_err(|e| format!("{e:#}")),
+                Err(e) => Err(format!("tokio runtime failed: {e}")),
+            };
+            let _ = tx.send(result);
+        });
+    match spawned {
+        Ok(_) => match rx.await {
+            Ok(result) => result,
+            Err(_) => Err("topics write thread dropped its result".into()),
+        },
+        Err(e) => Err(format!("topics write thread failed to spawn: {e}")),
+    }
+}
+
+/// Pin or unpin one session in the shared sidecar table. The caller refetches
+/// afterwards instead of patching its own list, so the rail can never show a
+/// pin the ledger does not have.
+pub async fn set_favorite(
+    db_path: std::path::PathBuf,
+    id: uuid::Uuid,
+    pinned: bool,
+) -> Result<(), String> {
+    let (tx, rx) = futures::channel::oneshot::channel::<Result<(), String>>();
+    let spawned = std::thread::Builder::new()
+        .name("favorite-write".into())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let result = match runtime {
+                Ok(rt) => rt
+                    .block_on(async {
+                        let db = Database::connect(&db_path).await?;
+                        let repo = SessionFavoritesRepository::new(db.pool().clone());
+                        let sid = id.to_string();
+                        if pinned {
+                            repo.add(&sid).await
+                        } else {
+                            repo.remove(&sid).await
+                        }
+                    })
+                    .map_err(|e| format!("{e:#}")),
+                Err(e) => Err(format!("tokio runtime failed: {e}")),
+            };
+            let _ = tx.send(result);
+        });
+    match spawned {
+        Ok(_) => match rx.await {
+            Ok(result) => result,
+            Err(_) => Err("favorite write thread dropped its result".into()),
+        },
+        Err(e) => Err(format!("favorite write thread failed to spawn: {e}")),
+    }
+}
+
+/// Char-safe truncation: walk chars, never slice bytes (#2271's whole class).
+fn fit(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max_chars.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+/// One session row: title and cost on the left, the caller's action strip on
+/// the right. Pure data plus one slot for behaviour, so the view owns every
+/// listener it puts on screen. A pinned row carries the star the owner asked
+/// for, in the accent colour, so "why is this one on top" is answered by the
+/// row itself.
+/// The pin mark a row carries: the filled star once pinned, an outline
+/// before first use. Without the outline a first-time user saw no star, no
+/// button and no hint, so pinning looked like it did not exist (#2353).
+/// The colour rides along: accent when the pin is on, muted while the
+/// outline is only an invitation.
+pub fn pin_mark(favorited: bool) -> (&'static str, u32) {
+    if favorited {
+        ("\u{2605}", palette::current().accent)
+    } else {
+        ("\u{2606}", palette::current().text_muted)
+    }
+}
+
+/// Which row action a context-menu item performs.
+pub enum MenuKind {
+    Pin,
+    Delete,
+    EnableTopics,
+    NewTopic,
+    SplitSide,
+    SplitStack,
+}
+
+/// One item of the rail's context menu. The labels are the interface:
+/// Pin flips to Unpin on a pinned row, Delete never changes.
+pub struct MenuEntry {
+    pub kind: MenuKind,
+    pub label: &'static str,
+}
+
+/// The menu's contents, resolved from the row's pin state. Pure, so the
+/// labels are pinned by test and the render only draws what this returns
+/// (#2354).
+pub fn rail_menu_entries(favorited: bool, topics_enabled: bool) -> Vec<MenuEntry> {
+    let mut entries = vec![MenuEntry {
+        kind: MenuKind::Pin,
+        label: if favorited { "Unpin" } else { "Pin" },
+    }];
+    // Topics are opt-in per session (#2302): the item is offered only while
+    // they are off, so it cannot be flipped twice by accident. Once they are
+    // on, the same slot offers a new topic under the row (#2397).
+    if topics_enabled {
+        entries.push(MenuEntry {
+            kind: MenuKind::NewTopic,
+            label: "New topic",
+        });
+    } else {
+        entries.push(MenuEntry {
+            kind: MenuKind::EnableTopics,
+            label: "Enable topics",
+        });
+    }
+    // Split | and Split _ start a split from this row (#2438).
+    entries.push(MenuEntry {
+        kind: MenuKind::SplitSide,
+        label: "Split |",
+    });
+    entries.push(MenuEntry {
+        kind: MenuKind::SplitStack,
+        label: "Split _",
+    });
+    entries.push(MenuEntry {
+        kind: MenuKind::Delete,
+        label: "Delete",
+    });
+    entries
+}
+
+/// One row of the context menu: a label and a full-height hit target.
+pub fn menu_item(label: &'static str) -> Stateful<Div> {
+    div()
+        .id(SharedString::from(format!("rail-menu-{label}")))
+        .px_2()
+        .py_1()
+        .rounded_sm()
+        .cursor_pointer()
+        .text_sm()
+        .text_color(rgb(palette::current().text))
+        .hover(|d| d.bg(rgb(palette::current().selection)))
+        .child(SharedString::from(label))
+}
+
+/// A menu's card: the bordered, shadowed column every context menu is drawn
+/// on (#2384, #2480).
+///
+/// The caller owns the id and the placement, because two menus live on
+/// different anchors: the rail's card pins itself to the row that opened it,
+/// and the chat's pins itself under the conversation's `...`.
+pub fn menu_card(id: &'static str, items: Vec<Stateful<Div>>) -> Stateful<Div> {
+    // A solid card over the rows: it occludes so nothing beneath it paints
+    // through or takes a click, with a border and shadow so it reads as a
+    // layer above the list rather than another row in it.
+    let mut menu = div()
+        .id(id)
+        .occlude()
+        .min_w(rems(9.0))
+        .flex()
+        .flex_col()
+        .gap_0p5()
+        .p_1()
+        .rounded_sm()
+        .border_1()
+        .border_color(rgb(palette::current().panel_hi))
+        .bg(rgb(palette::current().panel))
+        .shadow_md();
+    for item in items {
+        menu = menu.child(item);
+    }
+    menu
+}
+
+/// The rail row's context menu: [`menu_card`] absolute inside the row, which
+/// is relative, so it tracks the row through rail scrolls without
+/// window-coordinate math.
+pub fn menu_popover(items: Vec<Stateful<Div>>) -> Stateful<Div> {
+    menu_card("rail-context-menu", items)
+        .absolute()
+        .right_1()
+        .top_1()
+}
+
+/// What a rail row shows about its session right now. Grouped so the row
+/// keeps a short argument list as the rail gains states.
+#[derive(Clone, Copy, Default)]
+pub struct RowFlags {
+    pub selected: bool,
+    pub cursored: bool,
+    pub favorited: bool,
+    pub indented: bool,
+    pub closed: bool,
+}
+
+pub fn row(
+    s: &Session,
+    flags: RowFlags,
+    action: Option<Stateful<Div>>,
+    menu: Option<Stateful<Div>>,
+    fold: Option<Stateful<Div>>,
+) -> Stateful<Div> {
+    let RowFlags {
+        selected,
+        cursored,
+        favorited,
+        indented,
+        closed,
+    } = flags;
+    let title = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .min_w_0()
+        .children(fold)
+        .child({
+            let (mark, colour) = pin_mark(favorited);
+            div()
+                .flex_none()
+                .text_xs()
+                .text_color(rgb(colour))
+                .child(SharedString::from(mark))
+        })
+        .child(
+            div()
+                .text_sm()
+                // A closed topic reads dimmed: still there, no longer taking work.
+                .text_color(rgb(if closed {
+                    palette::current().text_faint
+                } else {
+                    palette::current().text
+                }))
+                .truncate()
+                .child(SharedString::from(fit(
+                    s.title.as_deref().unwrap_or("(untitled)"),
+                    42,
+                ))),
+        );
+    // A topic is indented under its session, so the grouping reads at a glance.
+    let body = div()
+        .flex()
+        .flex_col()
+        .gap_0p5()
+        .min_w_0()
+        .when(indented, |d| d.pl_4())
+        .child(title)
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(palette::current().text_muted))
+                .child(SharedString::from(format!(
+                    "{} · ${:.2}",
+                    s.updated_at
+                        .with_timezone(&chrono::Local)
+                        .format("%m-%d %H:%M"),
+                    s.total_cost
+                ))),
+        );
+    let mut row = div()
+        .id(SharedString::from(s.id.to_string()))
+        .relative()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap_1()
+        .p_2()
+        .rounded_sm()
+        .cursor_pointer()
+        .when(selected, |d| d.bg(rgb(palette::current().selection)))
+        // The keyboard's row reads as an accent bar on the left edge,
+        // distinct from the filled block that marks the open conversation:
+        // two different states, two different paints (#2351).
+        .when(cursored, |d| {
+            d.border_l_2().border_color(rgb(palette::current().accent))
+        })
+        // The hover tint is for rows that are not selected. On the selected row
+        // it would paint over the selection and hide which conversation is open.
+        .when(!selected, |d| d.hover(|d| d.bg(rgb(palette::current().bg))))
+        .child(body);
+    if let Some(action) = action {
+        row = row.child(action);
+    }
+    // Deferred, so the menu paints above the rows below it: a plain child is
+    // covered by the later rows' text (#2386).
+    if let Some(menu) = menu {
+        row = row.child(deferred(menu).with_priority(1));
+    }
+    row
+}
+
+/// The click behaviour for a row, typed the way `cx.listener` produces it.
+pub fn on_click(
+    row: Stateful<Div>,
+    handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    row.on_click(handler)
+}
+
+/// One icon in a row's slide-out strip. Icons only, so the strip stays small
+/// next to the title: the title keeps its room, and the glyph carries the
+/// action (#2384).
+/// The hover label of a slide icon: a small card naming the action (#2392).
+struct IconTip(SharedString);
+
+impl Render for IconTip {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .border_1()
+            .border_color(rgb(palette::current().panel_hi))
+            .bg(rgb(palette::current().panel))
+            .text_xs()
+            .text_color(rgb(palette::current().text))
+            .child(self.0.clone())
+    }
+}
+
+fn action_icon(
+    id: &'static str,
+    glyph: &'static str,
+    color: u32,
+    label: &'static str,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .tooltip(move |_window, cx| -> AnyView {
+            cx.new(|_| IconTip(SharedString::from(label))).into()
+        })
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .size(rems(1.6))
+        .rounded_sm()
+        .text_sm()
+        .text_color(rgb(color))
+        .cursor_pointer()
+        .hover(|d| d.bg(rgb(palette::current().focus)))
+        .child(SharedString::from(glyph))
+}
+
+/// The pin icon of a row's slide-out strip. A hollow star pins, a filled one
+/// unpins.
+pub fn pin_button(favorited: bool) -> Stateful<Div> {
+    if favorited {
+        action_icon(
+            "session-unpin",
+            "\u{26B2}",
+            palette::current().accent,
+            "Favorite",
+        )
+    } else {
+        action_icon(
+            "session-pin",
+            "\u{26B2}",
+            palette::current().text_muted,
+            "Favorite",
+        )
+    }
+}
+
+/// The topic icon of a row's slide-out strip. With topics off it turns them
+/// on; with topics on it opens a new topic under the session (#2302, #2303).
+/// The chevron that folds a session's topic tree (#2427). A click folds or
+/// unfolds it; the view does the write, so this stays a plain control.
+pub fn fold_button(id: uuid::Uuid, collapsed: bool) -> Stateful<Div> {
+    let glyph = if collapsed { "\u{25B8}" } else { "\u{25BE}" };
+    div()
+        .id(SharedString::from(format!("topic-fold-{id}")))
+        .flex_none()
+        .w(rems(1.0))
+        .cursor_pointer()
+        .text_xs()
+        .text_color(rgb(palette::current().text_muted))
+        .hover(|d| d.text_color(rgb(palette::current().accent)))
+        .child(SharedString::from(glyph))
+}
+
+pub fn topic_button(topics_on: bool) -> Stateful<Div> {
+    let color = if topics_on {
+        palette::current().accent
+    } else {
+        palette::current().text_muted
+    };
+    action_icon("session-topic", "\u{2442}", color, "Topic")
+}
+
+/// The delete icon of a row's slide-out strip. It never deletes on its own:
+/// the view routes every delete path through one confirmation dialog, so a
+/// mis-swipe cannot cost a conversation.
+pub fn delete_button() -> Stateful<Div> {
+    action_icon(
+        "session-delete",
+        "\u{2715}",
+        palette::current().red,
+        "Delete",
+    )
+}
+
+/// The rail column: header and error slot from the state, then the caller's
+/// prebuilt rows (each already carrying its click handler). Stateful, because
+/// the scroll container needs an element id.
+pub fn rail(
+    state: &SessionsState,
+    rows: Vec<Stateful<Div>>,
+    width_rem: f32,
+    scroll: &ScrollHandle,
+    footer: Option<AnyElement>,
+) -> Stateful<Div> {
+    let mut col = div()
+        .id("session-rail")
+        .flex()
+        .flex_col()
+        .overflow_y_scroll()
+        .track_scroll(scroll)
+        .flex_none()
+        .w(rems(width_rem))
+        .h_full()
+        .bg(rgb(palette::current().panel))
+        .p_2()
+        .gap_1();
+
+    col = col.child(
+        div()
+            .text_xs()
+            .text_color(rgb(palette::current().text_title))
+            .child(SharedString::from(format!(
+                "SESSIONS · {}",
+                state.items.len()
+            ))),
+    );
+
+    if state.filter_active {
+        col = col.child(filter_bar(state));
+    }
+
+    if let Some(err) = &state.error {
+        col = col.child(
+            div()
+                .text_xs()
+                .text_color(rgb(palette::current().text_muted))
+                .child(err.clone()),
+        );
+        return col;
+    }
+
+    if rows.is_empty() && !state.filter.trim().is_empty() {
+        col = col.child(
+            div()
+                .text_xs()
+                .text_color(rgb(palette::current().text_muted))
+                .child("no chat matches"),
+        );
+        return col;
+    }
+
+    for row in rows {
+        col = col.child(row);
+    }
+    // The channel chip (#2452) sits at the end of the rail: with a short
+    // list it pins to the bottom edge, with a full list it waits at the
+    // end of the scroll like any other row.
+    if let Some(footer) = footer {
+        col = col.child(footer);
+    }
+    col
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        Database, MenuKind, SessionsState, fit, load_sessions, palette, pin_mark, rail_menu_entries,
+    };
+    use opencrabs::db::models::Session;
+
+    /// #2303: a topic sits directly under its parent, a favorited topic stays
+    /// pinned at the top level, and an indent is only drawn for a grouped row.
+    #[test]
+    fn topics_group_under_their_parent_and_favorites_stay_pinned() {
+        let a = Session::new(Some("A".into()), None, None);
+        let b = Session::new(Some("B".into()), None, None);
+        let a1 = Session::new(Some("A topic".into()), None, None);
+        let c = Session::new(Some("C".into()), None, None);
+        let (a_id, b_id, a1_id, c_id) = (a.id, b.id, a1.id, c.id);
+        let mut state = SessionsState {
+            items: vec![a, b, a1, c],
+            ..Default::default()
+        };
+        state.parents.insert(a1_id, a_id);
+
+        let order: Vec<_> = state.ordered().map(|s| s.id).collect();
+        assert_eq!(
+            order,
+            vec![a_id, a1_id, b_id, c_id],
+            "the topic follows its parent"
+        );
+        assert!(state.is_indented(a1_id));
+        assert!(!state.is_indented(a_id));
+
+        state.favorites.insert(a1_id);
+        let order: Vec<_> = state.ordered().map(|s| s.id).collect();
+        assert_eq!(order[0], a1_id, "a pinned topic stays above the groups");
+        assert!(!state.is_indented(a1_id));
+    }
+
+    /// #2271's whole class, seated: truncation walks chars, never bytes. Any
+    /// return to byte-index slicing panics here on a multibyte boundary, and
+    /// the sweep hits every max so no length dodges.
+    #[test]
+    fn fit_never_slices_bytes_on_multibyte_content() {
+        let titles = [
+            "🦀aé日🎉…b",
+            "日本語のセッション",
+            "emoji 🦀🦀🦀 tail",
+            "plain ascii title",
+            "",
+            "café",
+        ];
+        for title in titles {
+            let chars = title.chars().count();
+            for max in 0..=chars + 2 {
+                let out = fit(title, max);
+                // Never wider than the budget, always valid to keep using
+                // (a String already is; this documents the contract).
+                assert!(
+                    out.chars().count() <= max.max(1) || out == title,
+                    "fit({title:?}, {max}) -> {out:?} overflows"
+                );
+                if chars > max {
+                    assert!(
+                        out.ends_with('…'),
+                        "truncated fit({title:?}, {max}) lost the ellipsis"
+                    );
+                    assert!(
+                        out.chars().count() <= max.max(1),
+                        "fit({title:?}, {max}) -> {out:?} still overflows"
+                    );
+                } else {
+                    assert_eq!(
+                        out, title,
+                        "untruncated fit({title:?}, {max}) changed the text"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The 4 MB thread pattern, seated. The phase-0 crash: DB work running on
+    /// a tiny stack (gpui's dispatch-queue workers) dies with SIGILL. If
+    /// `load_sessions` ever regresses to doing its work on the calling
+    /// thread, this 64 KB caller dies with it; with the pattern, the deep
+    /// stack is the loader's business and a 64 KB caller passes.
+    #[test]
+    fn load_sessions_runs_on_a_tiny_caller_stack() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("rail-seat.db");
+        let setup_path = db_path.clone();
+
+        // Build the schema on the test's own (default) stack first: the seat
+        // is about the fetch's stack discipline, not about migrations.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let db = Database::connect(&setup_path)
+                .await
+                .expect("connect temp db");
+            db.run_migrations().await.expect("migrate temp db");
+        });
+        drop(rt);
+
+        let handle = std::thread::Builder::new()
+            .name("tiny-caller-seat".into())
+            .stack_size(64 * 1024)
+            .spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("runtime");
+                rt.block_on(load_sessions(db_path))
+            })
+            .expect("spawn tiny caller");
+        let result = handle.join().expect("tiny caller must survive");
+        let sessions = result.unwrap_or_else(|e| panic!("fetch against a fresh db failed: {e}"));
+        assert!(sessions.is_empty(), "fresh db must list zero sessions");
+    }
+
+    /// One row of the ledger, built in memory: the ordering rule is about
+    /// what the rail does with rows, never about how they were fetched.
+    fn session(id: u128, title: &str) -> Session {
+        let stamp = chrono::DateTime::from_timestamp(1_700_000_000 + id as i64, 0)
+            .expect("a fixed stamp is valid");
+        Session {
+            id: uuid::Uuid::from_u128(id),
+            title: Some(title.to_string()),
+            model: None,
+            provider_name: None,
+            created_at: stamp,
+            updated_at: stamp,
+            archived_at: None,
+            token_count: 0,
+            total_cost: 0.0,
+            working_directory: None,
+            auto_title_attempted: false,
+            project_id: None,
+            channel_chat_key: None,
+        }
+    }
+
+    /// TUI parity: pins go on top through a stable partition, so a pin moves
+    /// that one chat and leaves every other row where the ledger put it.
+    /// Sorting by title or id instead would reshuffle the rail under the
+    /// cursor, which is why the rule is "pinned first, ledger order inside
+    /// each group" and not "sort".
+    #[test]
+    fn favorites_pin_to_the_top_and_leave_the_rest_in_ledger_order() {
+        let mut state = SessionsState {
+            items: vec![
+                session(3, "newest"),
+                session(2, "pinned one"),
+                session(1, "oldest"),
+            ],
+            ..Default::default()
+        };
+        state.favorites.insert(uuid::Uuid::from_u128(2));
+
+        let order: Vec<&str> = state
+            .ordered()
+            .map(|s| s.title.as_deref().unwrap_or(""))
+            .collect();
+        assert_eq!(order, ["pinned one", "newest", "oldest"]);
+    }
+
+    /// A pin never resurrects a row the find field hid: the query narrows
+    /// first, the pins only sort what survives it.
+    #[test]
+    fn a_pin_does_not_escape_the_rail_filter() {
+        let mut state = SessionsState {
+            items: vec![session(3, "newest"), session(2, "pinned one")],
+            ..Default::default()
+        };
+        state.favorites.insert(uuid::Uuid::from_u128(2));
+        state.filter = "newest".to_string();
+
+        let order: Vec<&str> = state
+            .ordered()
+            .map(|s| s.title.as_deref().unwrap_or(""))
+            .collect();
+        assert_eq!(order, ["newest"]);
+        assert_eq!(state.matched(), 1);
+    }
+
+    /// A slide that comes up short is a click with an unsteady hand: the
+    /// row snaps back and its strip stays shut.
+    #[test]
+    fn a_short_slide_snaps_back() {
+        assert!(!super::slide_reveals(500.0, 500.0));
+        assert!(!super::slide_reveals(
+            500.0,
+            500.0 - super::SLIDE_REVEAL_PX + 1.0
+        ));
+    }
+
+    /// Past the threshold the strip is earned, and the threshold itself
+    /// counts: the rule is "at least this far", not "further than".
+    #[test]
+    fn a_slide_past_the_threshold_opens_the_strip() {
+        assert!(super::slide_reveals(500.0, 500.0 - super::SLIDE_REVEAL_PX));
+        assert!(super::slide_reveals(
+            500.0,
+            500.0 - super::SLIDE_REVEAL_PX - 40.0
+        ));
+    }
+
+    /// Rightward travel is not a slide, however far it goes.
+    #[test]
+    fn a_rightward_slide_never_opens_the_strip() {
+        assert!(!super::slide_reveals(500.0, 520.0));
+        assert!(!super::slide_reveals(500.0, 900.0));
+    }
+
+    /// The pin set is the sidecar's set: membership answers per row, and a
+    /// session that was never pinned is not in it.
+    #[test]
+    fn the_pinned_set_answers_membership_by_id() {
+        let mut state = SessionsState::default();
+        state.favorites.insert(uuid::Uuid::from_u128(7));
+
+        assert!(state.is_favorite(uuid::Uuid::from_u128(7)));
+        assert!(!state.is_favorite(uuid::Uuid::from_u128(8)));
+    }
+
+    /// #2351's main path: Down walks the painted order, pinned rows first,
+    /// and an unarmed cursor starts at the top so the first press lands on
+    /// a real row.
+    #[test]
+    fn cursor_moves_through_the_ordered_rows() {
+        let mut state = SessionsState {
+            items: vec![session(1, "a"), session(2, "b"), session(3, "c")],
+            ..Default::default()
+        };
+        // Pinning the last ledger row must not confuse the walk: the rail
+        // paints it first, so the first Down lands on it.
+        state.favorites.insert(uuid::Uuid::from_u128(3));
+
+        let first = state.cursor_step(None, 1).expect("rows exist");
+        assert_eq!(
+            first,
+            uuid::Uuid::from_u128(3),
+            "pinned row is painted first"
+        );
+
+        let second = state.cursor_step(Some(first), 1).expect("rows exist");
+        assert_eq!(second, uuid::Uuid::from_u128(1));
+
+        let third = state.cursor_step(Some(second), 1).expect("rows exist");
+        assert_eq!(third, uuid::Uuid::from_u128(2));
+
+        // Up walks the same order backwards from an unarmed start.
+        let up_first = state.cursor_step(None, -1).expect("rows exist");
+        assert_eq!(up_first, uuid::Uuid::from_u128(3));
+        assert_eq!(
+            state.cursor_step(Some(up_first), -1),
+            Some(uuid::Uuid::from_u128(3)),
+            "up from the top row clamps, it does not wrap"
+        );
+    }
+
+    /// Both ends stop, they never wrap into the opposite end: a wrap reads
+    /// as a jump to a row the user cannot see.
+    #[test]
+    fn cursor_clamps_at_both_ends() {
+        let state = SessionsState {
+            items: vec![session(1, "a"), session(2, "b")],
+            ..Default::default()
+        };
+        let first = uuid::Uuid::from_u128(1);
+        let last = uuid::Uuid::from_u128(2);
+
+        assert_eq!(state.cursor_step(Some(first), -1), Some(first));
+        assert_eq!(state.cursor_step(Some(last), 1), Some(last));
+    }
+
+    /// A cursor on a row that is gone (deleted, filtered out) disarms
+    /// instead of arming a ghost; a cursor on a surviving row stays put.
+    #[test]
+    fn cursor_survives_a_row_disappearing() {
+        let mut state = SessionsState {
+            items: vec![session(1, "a"), session(2, "b")],
+            ..Default::default()
+        };
+        let first = uuid::Uuid::from_u128(1);
+        let second = uuid::Uuid::from_u128(2);
+
+        state.cursor = Some(second);
+        state.items = vec![session(1, "a")];
+        assert!(
+            !state.cursor_visible(),
+            "the cursor points at a removed row"
+        );
+
+        state.cursor = Some(first);
+        state.items = vec![session(1, "a"), session(3, "c")];
+        assert!(
+            state.cursor_visible(),
+            "a refetch that keeps the row keeps the cursor"
+        );
+    }
+
+    #[test]
+    fn pin_mark_is_filled_only_when_favorited() {
+        let (mark, colour) = pin_mark(true);
+        assert_eq!(mark, "\u{2605}", "a pinned row carries the filled star");
+        assert_eq!(
+            colour,
+            palette::current().accent,
+            "the pin borrows the accent so the row says why it is on top"
+        );
+        assert_ne!(
+            pin_mark(false).0,
+            mark,
+            "an unpinned row must never look pinned"
+        );
+    }
+
+    #[test]
+    fn hover_mark_is_the_outline() {
+        // Before the first pin there was no star, no button and no hint, so
+        // the row itself has to carry the invitation: the outline star in
+        // the quiet colour, which turns filled the moment it is used.
+        let (mark, colour) = pin_mark(false);
+        assert_eq!(mark, "\u{2606}", "an unpinned row shows the outline star");
+        assert_eq!(
+            colour,
+            palette::current().text_muted,
+            "the invitation stays quieter than the pin"
+        );
+    }
+
+    #[test]
+    fn the_pin_chord_follows_the_cursor_row() {
+        let mut state = SessionsState::default();
+        let open_chat = uuid::Uuid::from_u128(7);
+        let cursored = uuid::Uuid::from_u128(8);
+
+        state.selected = Some(open_chat);
+        assert_eq!(
+            state.pin_target(),
+            Some(open_chat),
+            "with nothing armed the chord pins the open chat"
+        );
+
+        state.cursor = Some(cursored);
+        assert_eq!(
+            state.pin_target(),
+            Some(cursored),
+            "the row the keyboard is on wins over the open chat"
+        );
+    }
+
+    /// The menu offers the row actions (#2354): pin (unpin on a pinned row)
+    /// and delete, delete never renamed. Topics off adds Enable topics; topics
+    /// on adds New topic in the same slot (#2397).
+    #[test]
+    fn rail_menu_offers_pin_and_delete() {
+        let off = rail_menu_entries(false, false);
+        assert_eq!(off.len(), 5, "pin, enable topics, two splits and delete");
+        assert_eq!(off[0].label, "Pin");
+        assert!(matches!(off[0].kind, MenuKind::Pin));
+        assert_eq!(off[4].label, "Delete");
+        assert!(matches!(off[4].kind, MenuKind::Delete));
+
+        let on = rail_menu_entries(false, true);
+        assert_eq!(on.len(), 5, "pin, new topic, two splits and delete");
+        assert_eq!(on[1].label, "New topic");
+        assert!(matches!(on[1].kind, MenuKind::NewTopic));
+        assert_eq!(on[4].label, "Delete");
+
+        let pinned = rail_menu_entries(true, true);
+        assert_eq!(pinned[0].label, "Unpin", "a pinned row offers the way out");
+        assert!(matches!(pinned[0].kind, MenuKind::Pin));
+        assert_eq!(pinned[4].label, "Delete");
+    }
+
+    /// Split | and Split _ sit before Delete on every row, so a split starts
+    /// from the row that was clicked (#2438).
+    #[test]
+    fn rail_menu_offers_both_splits_before_delete() {
+        let menu = rail_menu_entries(false, true);
+        let labels: Vec<&str> = menu.iter().map(|e| e.label).collect();
+        let split = labels
+            .iter()
+            .position(|l| *l == "Split |")
+            .expect("Split |");
+        assert_eq!(labels[split + 1], "Split _");
+        assert_eq!(labels.last().copied(), Some("Delete"));
+        assert!(matches!(menu[split].kind, MenuKind::SplitSide));
+        assert!(matches!(menu[split + 1].kind, MenuKind::SplitStack));
+    }
+
+    /// Enable topics is offered only on a session with topics off, between
+    /// pin and delete (#2302).
+    #[test]
+    fn rail_menu_offers_enable_topics_only_while_topics_are_off() {
+        let off = rail_menu_entries(false, false);
+        assert_eq!(off.len(), 5);
+        assert_eq!(off[1].label, "Enable topics");
+        assert!(matches!(off[1].kind, MenuKind::EnableTopics));
+
+        let on = rail_menu_entries(false, true);
+        assert!(
+            on.iter().all(|e| e.label != "Enable topics"),
+            "a session with topics on cannot be flipped twice"
+        );
+    }
+
+    /// Dismissing the menu writes nothing: no favorite flips, no delete
+    /// arms, no cursor or selection moves. A close is an eraser (#2354).
+    #[test]
+    fn rail_menu_closes_without_writing() {
+        let mut state = SessionsState::default();
+        let pinned = uuid::Uuid::from_u128(2);
+        state.items = vec![session(1, "a"), session(2, "pinned")];
+        state.favorites.insert(pinned);
+        state.cursor = Some(uuid::Uuid::from_u128(1));
+        state.selected = Some(uuid::Uuid::from_u128(1));
+        state.rail_menu = Some(pinned);
+
+        state.close_rail_menu();
+
+        assert!(state.rail_menu.is_none(), "the menu closed");
+        assert!(
+            state.is_favorite(pinned),
+            "a dismissal must not unpin the row"
+        );
+        assert_eq!(
+            state.cursor,
+            Some(uuid::Uuid::from_u128(1)),
+            "a dismissal must not move the cursor"
+        );
+        assert_eq!(
+            state.selected,
+            Some(uuid::Uuid::from_u128(1)),
+            "a dismissal must not change the open chat"
+        );
+    }
+
+    /// #2454: Enter in the find field opens what the field found. The armed
+    /// row wins while it still matches; a row the query filtered out can
+    /// never be opened behind the field.
+    #[test]
+    fn rail_find_enter_opens_the_armed_row() {
+        let state = SessionsState {
+            items: vec![session(1, "alpha"), session(2, "beta"), session(3, "gamma")],
+            filter: "ga".to_string(),
+            filter_active: true,
+            cursor: Some(uuid::Uuid::from_u128(3)),
+            ..Default::default()
+        };
+        assert_eq!(state.find_target(), Some(uuid::Uuid::from_u128(3)));
+    }
+
+    #[test]
+    fn rail_find_enter_falls_back_to_the_top_match() {
+        let mut state = SessionsState {
+            items: vec![session(1, "alpha"), session(2, "beta"), session(3, "gamma")],
+            filter: "ga".to_string(),
+            filter_active: true,
+            // Armed on a row the query no longer shows: the top match is the
+            // only honest target.
+            cursor: Some(uuid::Uuid::from_u128(2)),
+            ..Default::default()
+        };
+        assert_eq!(state.find_target(), Some(uuid::Uuid::from_u128(3)));
+
+        // Nothing matches: Enter opens nothing rather than the open chat.
+        state.filter = "zzz".to_string();
+        assert_eq!(state.find_target(), None);
+    }
+}

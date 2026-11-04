@@ -9,9 +9,85 @@
 //! `hashline_edit` to a "blanket DO NOT USE" over recoverable stale-hash
 //! errors (#236).
 //!
-//! This module is the single place that decides whether a failed call is
-//! *recoverable* (recorded, but kept OUT of the `tool_` success-rate
-//! denominator) or a genuine failure.
+//! A third class exists on top of those two: calls the HARNESS refused before
+//! the tool ever ran (plan gate, skill gate, guest scope, a declined approval
+//! prompt). The tool was never executed, so the tool cannot be at fault, yet
+//! the denial used to land in its denominator like a real failure. That is how
+//! `telegram_send` reached a 50% health warning with five plan-gate denials
+//! and zero Telegram errors (#2251).
+//!
+//! This module is the single place that decides which of the three a failed
+//! call belongs to.
+
+/// How a failed tool call should be classified for the feedback ledger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureClass {
+    /// A real defect in the tool or in the way the model called it. Counted in
+    /// the tool's success rate.
+    Defect,
+    /// An expected, environmental or user-driven outcome. Recorded, but kept
+    /// out of the success-rate denominator.
+    Recoverable,
+    /// The harness refused the call before execution. Recorded, but kept out
+    /// of the success-rate denominator: the tool never ran.
+    GateRefusal,
+}
+
+/// Reasons emitted by a gate that refuses a call BEFORE the tool executes.
+/// Each is produced by a gate in `src/brain/tools/`, so the tool is never
+/// entered and has no part in the outcome.
+///
+/// Matched lowercase against the failure text, which is why they are written
+/// in lowercase here.
+const GATE_REFUSAL_MARKERS: &[&str] = &[
+    // plan_gate::check_plan_gate (write freeze while Editing) and
+    // plan_gate::check_plan_requirement (no plan after N calls in a turn).
+    "plan gate:",
+    // skill_gate::check block: the full skill body is returned instead of
+    // running the call, and the identical retry is armed.
+    "[skill gate]",
+    // scope::guest_refusal: a non-owner turn reaching for an owner-only tool.
+    "is not available to a guest turn",
+    // tool_loop approval callback: the user said no to the prompt.
+    "user_denied_approval",
+];
+
+/// The ledger event type for a tool call outcome.
+///
+/// Gate refusals get their own event (`gate_denied`) rather than riding on
+/// `recoverable_failure`, so "the harness said no" stays distinguishable from
+/// "the environment was not ready". Neither is a `tool_` prefixed event, so
+/// neither reaches `stats_by_dimension("tool_")`.
+pub fn tool_event_type(success: bool, tool_name: &str, error: Option<&str>) -> &'static str {
+    if success {
+        return "tool_success";
+    }
+    match classify_tool_failure(tool_name, error) {
+        FailureClass::GateRefusal => "gate_denied",
+        FailureClass::Recoverable => "recoverable_failure",
+        FailureClass::Defect => "tool_failure",
+    }
+}
+
+/// Classify a failed call into defect, recoverable, or harness refusal.
+///
+/// The gate check runs first: a refusal reason is authored by the harness and
+/// must never be re-read as an environmental arm just because the tool it
+/// blocked happens to be `bash` or a channel sender.
+pub fn classify_tool_failure(tool_name: &str, error: Option<&str>) -> FailureClass {
+    let Some(error) = error else {
+        return FailureClass::Defect;
+    };
+    let e = error.to_ascii_lowercase();
+    if GATE_REFUSAL_MARKERS.iter().any(|marker| e.contains(marker)) {
+        return FailureClass::GateRefusal;
+    }
+    if is_recoverable_tool_failure(tool_name, Some(error)) {
+        FailureClass::Recoverable
+    } else {
+        FailureClass::Defect
+    }
+}
 
 /// Whether a failed tool call is a recoverable / environmental / user-driven
 /// outcome rather than a tool defect.

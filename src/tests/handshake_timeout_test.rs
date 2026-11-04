@@ -75,6 +75,39 @@ fn cloud_http_gets_sixty_seconds() {
 }
 
 #[test]
+fn opencrabs_endpoint_gets_two_minutes() {
+    // #2232: the built-in endpoint is a proxy in front of upstream models,
+    // so a cold upstream can legitimately need longer than the 60s cloud
+    // budget to produce response headers. A handshake that lands at 70s or
+    // 100s is slow, not broken.
+    assert_eq!(
+        handshake_timeout_for(false, Some("https://inference.opencrabs.com/v1")),
+        Duration::from_secs(120),
+    );
+    // The neighbours in the class table must not move: another cloud host
+    // keeps 60s, a local server keeps 90s.
+    assert_eq!(
+        handshake_timeout_for(false, Some("https://api.openai.com/v1/chat/completions")),
+        Duration::from_secs(60),
+    );
+    assert_eq!(
+        handshake_timeout_for(false, Some("http://127.0.0.1:8080/v1/chat/completions")),
+        Duration::from_secs(90),
+    );
+    // CLI still wins over the endpoint class: a subprocess has no send to
+    // bound, so its startup wall stays at 10 min.
+    assert_eq!(
+        handshake_timeout_for(true, Some("https://inference.opencrabs.com/v1")),
+        Duration::from_secs(600),
+    );
+    // The per-send budget each HTTP provider applies follows the same class.
+    assert_eq!(
+        send_handshake_timeout_for(false, Some("https://inference.opencrabs.com/v1")),
+        Some(Duration::from_secs(120)),
+    );
+}
+
+#[test]
 fn missing_base_url_defaults_to_cloud_timeout() {
     // Providers without a base_url (built-in Anthropic/Gemini that
     // hardcode their endpoints internally) are always cloud — they
@@ -169,4 +202,29 @@ fn send_and_caller_walls_never_both_apply() {
             );
         }
     }
+}
+
+/// A URL that merely carries the built-in host keeps the 60s cloud budget.
+///
+/// The endpoint class is a host check (#2234). Before the host comparison was
+/// fixed, a substring match handed any such URL the 120s endpoint budget.
+#[test]
+fn a_lookalike_url_does_not_get_the_endpoint_budget() {
+    for url in [
+        "https://evil.example/?x=inference.opencrabs.com",
+        "https://proxy.example/inference.opencrabs.com/v1",
+        "https://inference.opencrabs.com.attacker.example/v1",
+        "https://notinference.opencrabs.com/v1",
+    ] {
+        assert_eq!(
+            handshake_timeout_for(false, Some(url)),
+            Duration::from_secs(60),
+            "{url} must keep the 60s cloud budget"
+        );
+    }
+    // The real host still gets the endpoint budget.
+    assert_eq!(
+        handshake_timeout_for(false, Some("https://inference.opencrabs.com/v1")),
+        Duration::from_secs(120),
+    );
 }

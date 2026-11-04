@@ -3,8 +3,11 @@
 use super::theme::{self, Role};
 use super::tools::render_tool_group;
 use super::utils::wrap_line_with_padding;
+use crate::brain::agent::QueuedUserMessage;
 use crate::tui::app::{App, DisplayMessage};
 use crate::tui::pane::PaneId;
+use crate::tui::plan::{PlanDocument, PlanStatus, TaskStatus};
+use crate::ui_core::split::{PANE_STRIP_MIN, PaneRows, pane_rows_with};
 use ratatui::{
     Frame,
     layout::Rect,
@@ -14,8 +17,16 @@ use ratatui::{
 };
 
 /// Render a single inactive (non-focused) pane.
-/// Shows the session's cached messages as a read-only chat view.
-pub(super) fn render_inactive_pane(f: &mut Frame, app: &App, pane_id: PaneId, area: Rect) {
+/// Shows the session's cached messages as a read-only chat view, plus the
+/// pane's own plan strip, queued preview and stashed input rendered into
+/// the slot rects the shared row budget carved out (#2494).
+pub(super) fn render_inactive_pane(
+    f: &mut Frame,
+    app: &App,
+    pane_id: PaneId,
+    area: Rect,
+    rows: PaneRows,
+) {
     let pane = match app.pane_manager.get(pane_id) {
         Some(p) => p,
         None => return,
@@ -78,6 +89,10 @@ pub(super) fn render_inactive_pane(f: &mut Frame, app: &App, pane_id: PaneId, ar
         return;
     }
 
+    // Carve the pane's inner rows bottom-up: transcript body, plan strip,
+    // queued preview, its own input box (#2494).
+    let layout = pane_layout(inner, rows);
+
     // Render cached messages if available
     let cached = pane
         .session_id
@@ -90,7 +105,7 @@ pub(super) fn render_inactive_pane(f: &mut Frame, app: &App, pane_id: PaneId, ar
     if let Some(messages) = cached {
         lines.extend(super::chat::folded_pane_lines(
             messages,
-            inner.width as usize,
+            layout.body.width as usize,
         ));
     }
 
@@ -102,7 +117,7 @@ pub(super) fn render_inactive_pane(f: &mut Frame, app: &App, pane_id: PaneId, ar
     if let Some(bg) = live {
         lines.extend(super::chat::folded_pane_lines(
             &bg.pending_messages,
-            inner.width as usize,
+            layout.body.width as usize,
         ));
     }
 
@@ -119,7 +134,7 @@ pub(super) fn render_inactive_pane(f: &mut Frame, app: &App, pane_id: PaneId, ar
                 group,
                 true,
                 app.animation_frame,
-                inner.width as usize,
+                layout.body.width as usize,
             );
         }
         if bg.streaming_reasoning.is_some() {
@@ -161,11 +176,16 @@ pub(super) fn render_inactive_pane(f: &mut Frame, app: &App, pane_id: PaneId, ar
     }
 
     // Show last N lines that fit — no wrapping, so 1 Line = 1 row (guaranteed).
-    let visible = inner.height as usize;
+    let visible = layout.body.height as usize;
     let skip = lines.len().saturating_sub(visible);
     let visible_lines: Vec<Line> = lines.into_iter().skip(skip).collect();
     let para = Paragraph::new(visible_lines);
-    f.render_widget(para, inner);
+    f.render_widget(para, layout.body);
+
+    // The pane's own chrome: its plan strip and queued preview in the slots
+    // the budget carved, its stashed input read-only at the bottom (#2494).
+    render_pane_strips(f, app, pane_id, layout.strip, layout.queue);
+    render_pane_input_readonly(f, &pane.input_buffer, layout.input);
 }
 
 /// Render a single message in simplified form for inactive panes.
@@ -311,4 +331,345 @@ pub(super) fn focused_pane_border(f: &mut Frame, app: &App, area: Rect) -> Rect 
     let inner = block.inner(area);
     f.render_widget(block, area);
     inner
+}
+
+/// How a pane divides its inner area bottom-up: transcript body on top, then
+/// the plan strip and queued preview, its input box at the bottom (#2494).
+/// Slots the row budget could not afford come back `None` and are not drawn.
+pub(super) struct PaneLayout {
+    /// Transcript rows.
+    pub body: Rect,
+    /// Plan strip slot, `None` when the pane has no plan or no room.
+    pub strip: Option<Rect>,
+    /// Queued-preview slot, `None` when nothing is queued or no room.
+    pub queue: Option<Rect>,
+    /// Input rows at the bottom.
+    pub input: Rect,
+}
+
+/// Slice a pane's inner area into body / strip / queue / input using the
+/// shared budget [`PaneRows`] (#2494). Placement is bottom-up: input at the
+/// bottom edge, then queue, then strip, with the body taking everything
+/// above, so the input box always sits where the window input used to.
+pub(super) fn pane_layout(inner: Rect, rows: PaneRows) -> PaneLayout {
+    let mut bottom = inner.bottom();
+
+    let input_h = rows.input.min(bottom.saturating_sub(inner.y));
+    bottom = bottom.saturating_sub(input_h);
+    let input = Rect {
+        x: inner.x,
+        y: bottom,
+        width: inner.width,
+        height: input_h,
+    };
+
+    let queue = if rows.queue > 0 {
+        let h = rows.queue.min(bottom.saturating_sub(inner.y));
+        bottom = bottom.saturating_sub(h);
+        Some(Rect {
+            x: inner.x,
+            y: bottom,
+            width: inner.width,
+            height: h,
+        })
+    } else {
+        None
+    };
+
+    let strip = if rows.strip > 0 {
+        let h = rows.strip.min(bottom.saturating_sub(inner.y));
+        bottom = bottom.saturating_sub(h);
+        Some(Rect {
+            x: inner.x,
+            y: bottom,
+            width: inner.width,
+            height: h,
+        })
+    } else {
+        None
+    };
+
+    let body = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: bottom.saturating_sub(inner.y),
+    };
+    PaneLayout {
+        body,
+        strip,
+        queue,
+        input,
+    }
+}
+
+/// The three strip lines a pane shows for its live checklist: the title with
+/// done/total, the bar with the percent, and the running task (or its
+/// absence) (#2494). An Active plan whose checklist was never seeded gets a
+/// single warning line instead of a zero division dressed up as progress.
+fn pane_strip_lines(plan: &PlanDocument) -> Vec<Line<'static>> {
+    let done = plan
+        .tasks
+        .iter()
+        .filter(|t| matches!(t.status, TaskStatus::Completed | TaskStatus::Skipped))
+        .count();
+    let total = plan.tasks.len();
+    if total == 0 {
+        return vec![Line::from(Span::styled(
+            format!("📋 {} · checklist not seeded", plan.title),
+            Style::default().fg(theme::role(Role::Warning)),
+        ))];
+    }
+
+    let pct = done * 100 / total;
+    let filled = done * 10 / total;
+    let bar = format!("{}{}", "█".repeat(filled), "░".repeat(10 - filled));
+    let running = match plan
+        .tasks
+        .iter()
+        .find(|t| t.status == TaskStatus::InProgress)
+    {
+        Some(t) => format!("▸ {}", t.title),
+        None if done == total => "✓ complete".to_string(),
+        None => "▸ waiting".to_string(),
+    };
+
+    vec![
+        Line::from(Span::styled(
+            format!("📋 {} · {}/{}", plan.title, done, total),
+            Style::default().fg(theme::role(Role::AccentTeal)),
+        )),
+        Line::from(Span::styled(
+            format!("{} {}%", bar, pct),
+            Style::default().fg(theme::role(Role::Success)),
+        )),
+        Line::from(Span::styled(
+            running,
+            Style::default().fg(theme::role(Role::TextPrimary)),
+        )),
+    ]
+}
+
+/// One-line queued-message preview for a pane's queue slot (#2494): how many
+/// are waiting and the head of the oldest one.
+fn pane_queue_line(msgs: &[QueuedUserMessage]) -> Line<'static> {
+    let first = msgs
+        .first()
+        .map(|m| m.display_text.replace('\n', " "))
+        .unwrap_or_default();
+    Line::from(Span::styled(
+        format!("⏳ {} queued: {}", msgs.len(), first),
+        Style::default().fg(theme::role(Role::Warning)),
+    ))
+}
+
+/// Draw a pane's own plan strip and queued preview into the slots the shared
+/// budget carved out (#2494). Shared by the focused and the inactive pane so
+/// both read exactly the same.
+pub(super) fn render_pane_strips(
+    f: &mut Frame,
+    app: &App,
+    pane_id: PaneId,
+    strip: Option<Rect>,
+    queue: Option<Rect>,
+) {
+    let Some(pane) = app.pane_manager.get(pane_id) else {
+        return;
+    };
+
+    if let Some(area) = strip
+        && let Some(plan) = pane
+            .plan_document
+            .clone()
+            .filter(|p| p.status == PlanStatus::Active)
+    {
+        f.render_widget(Paragraph::new(pane_strip_lines(&plan)), area);
+    }
+
+    if let Some(area) = queue
+        && let Some(sid) = pane.session_id
+    {
+        let msgs = app
+            .queued_messages
+            .lock()
+            .ok()
+            .and_then(|q| q.get(&sid).cloned())
+            .unwrap_or_default();
+        if !msgs.is_empty() {
+            f.render_widget(Paragraph::new(pane_queue_line(&msgs)), area);
+        }
+    }
+}
+
+/// A pane's stashed input, read-only: a dim box showing the tail lines that
+/// fit, so tabbing to a pane shows what was about to be sent there without
+/// implying the buffer is editable from a pane that is not focused (#2494).
+fn render_pane_input_readonly(f: &mut Frame, buffer: &str, area: Rect) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    let inner_h = area.height.saturating_sub(2) as usize;
+    let all: Vec<&str> = buffer.lines().collect();
+    let start = all.len().saturating_sub(inner_h);
+    let lines: Vec<Line> = all[start..]
+        .iter()
+        .map(|l| {
+            Line::from(Span::styled(
+                l.to_string(),
+                Style::default().fg(theme::role(Role::TextPrimary)),
+            ))
+        })
+        .collect();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::role(Role::GrayDim)));
+    f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+/// The row budget for one pane: its live plan (the pane's own document, only
+/// while Active) and whether that pane's session has queued messages, fed
+/// through the shared [`pane_rows_with`](crate::ui_core::split::pane_rows_with)
+/// budget (#2494). The snapshot happens here so the borrow of the pane ends
+/// before the renderers' mutable borrows begin.
+pub(super) fn pane_rows_for(app: &App, pane_id: PaneId, pane_height: u16) -> PaneRows {
+    let pane = match app.pane_manager.get(pane_id) {
+        Some(p) => p,
+        None => return pane_rows_with(pane_height, 0, 0),
+    };
+    let desired_strip = if pane
+        .plan_document
+        .as_ref()
+        .is_some_and(|p| p.status == PlanStatus::Active)
+    {
+        PANE_STRIP_MIN
+    } else {
+        0
+    };
+    let desired_queue = pane
+        .session_id
+        .map(|sid| {
+            app.queued_messages
+                .lock()
+                .ok()
+                .is_some_and(|q| q.get(&sid).is_some_and(|v| !v.is_empty()))
+        })
+        .unwrap_or(false);
+    pane_rows_with(pane_height, desired_strip, u16::from(desired_queue))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::brain::agent::QueuedUserMessage;
+    use crate::tui::plan::{PlanStatus, PlanTask, TaskStatus, TaskType};
+    use uuid::Uuid;
+
+    fn rect(x: u16, y: u16, w: u16, h: u16) -> Rect {
+        Rect::new(x, y, w, h)
+    }
+
+    fn plan_with(tasks: impl FnOnce(&mut PlanDocument)) -> PlanDocument {
+        let mut plan = PlanDocument::new(Uuid::new_v4(), "Landing".to_string());
+        plan.status = PlanStatus::Active;
+        tasks(&mut plan);
+        plan
+    }
+
+    #[test]
+    fn split_pane_layout_slices_bottom_up() {
+        let inner = rect(0, 0, 40, 30);
+        let rows = PaneRows {
+            body: 20,
+            strip: 5,
+            queue: 2,
+            input: 3,
+        };
+        let l = pane_layout(inner, rows);
+        assert_eq!(l.input, rect(0, 27, 40, 3));
+        assert_eq!(l.queue, Some(rect(0, 25, 40, 2)));
+        assert_eq!(l.strip, Some(rect(0, 20, 40, 5)));
+        assert_eq!(l.body, rect(0, 0, 40, 20));
+    }
+
+    #[test]
+    fn split_pane_layout_zero_strip_and_queue_fill_the_body() {
+        let inner = rect(0, 0, 40, 30);
+        let rows = PaneRows {
+            body: 27,
+            strip: 0,
+            queue: 0,
+            input: 3,
+        };
+        let l = pane_layout(inner, rows);
+        assert_eq!(l.strip, None);
+        assert_eq!(l.queue, None);
+        assert_eq!(l.body, rect(0, 0, 40, 27));
+    }
+
+    #[test]
+    fn split_pane_strip_shows_three_of_eight_progress() {
+        let plan = plan_with(|p| {
+            for i in 0..8 {
+                let mut t =
+                    PlanTask::new(i + 1, format!("task {i}"), String::new(), TaskType::Edit);
+                if i < 3 {
+                    t.status = TaskStatus::Completed;
+                }
+                p.add_task(t);
+            }
+        });
+        let lines = pane_strip_lines(&plan);
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].spans[0].content.contains("📋 Landing · 3/8"));
+        assert_eq!(lines[1].spans[0].content, "███░░░░░░░ 37%");
+        assert_eq!(lines[2].spans[0].content, "▸ waiting");
+    }
+
+    #[test]
+    fn split_pane_strip_seed_line_when_checklist_not_seeded() {
+        let plan = plan_with(|_| {});
+        let lines = pane_strip_lines(&plan);
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].spans[0]
+                .content
+                .contains("📋 Landing · checklist not seeded")
+        );
+    }
+
+    #[test]
+    fn split_pane_strip_running_task_and_complete_lines() {
+        let mut running = plan_with(|p| {
+            for i in 0..8 {
+                let mut t =
+                    PlanTask::new(i + 1, format!("task {i}"), String::new(), TaskType::Edit);
+                if i < 3 {
+                    t.status = TaskStatus::Completed;
+                }
+                if i == 4 {
+                    t.status = TaskStatus::InProgress;
+                }
+                p.add_task(t);
+            }
+        });
+        let lines = pane_strip_lines(&running);
+        assert_eq!(lines[2].spans[0].content, "▸ task 4");
+
+        running
+            .tasks
+            .iter_mut()
+            .for_each(|t| t.status = TaskStatus::Completed);
+        let lines = pane_strip_lines(&running);
+        assert_eq!(lines[2].spans[0].content, "✓ complete");
+    }
+
+    #[test]
+    fn split_pane_queue_line_previews_the_first_message() {
+        let msgs = vec![
+            QueuedUserMessage::plain("first".to_string()),
+            QueuedUserMessage::plain("second".to_string()),
+        ];
+        let line = pane_queue_line(&msgs);
+        assert_eq!(line.spans[0].content, "⏳ 2 queued: first");
+    }
 }

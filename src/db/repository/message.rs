@@ -90,6 +90,38 @@ impl MessageRepository {
         Ok(messages)
     }
 
+    /// Find up to `limit` messages strictly older than `before_sequence`,
+    /// oldest-first. The PageUp counterpart of [`find_recent_by_session`]:
+    /// paging back costs `limit` rows per step, never the whole history.
+    pub async fn find_recent_before_sequence(
+        &self,
+        session_id: Uuid,
+        before_sequence: i32,
+        limit: usize,
+    ) -> Result<Vec<Message>> {
+        let sid = session_id.to_string();
+        let limit = limit as i64;
+        let mut messages = self
+            .pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                let mut stmt = conn.prepare_cached(
+                    "SELECT * FROM messages WHERE session_id = ?1 AND sequence < ?2 \
+                     ORDER BY sequence DESC LIMIT ?3",
+                )?;
+                let rows =
+                    stmt.query_map(params![sid, before_sequence, limit], Message::from_row)?;
+                rows.collect::<std::result::Result<Vec<_>, _>>()
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to find messages before sequence")?;
+        messages.reverse();
+        Ok(messages)
+    }
+
     /// Create a new message
     pub async fn create(&self, message: &Message) -> Result<()> {
         let m = message.clone();

@@ -126,150 +126,10 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-/// Slash command definition
-#[derive(Debug, Clone)]
-pub struct SlashCommand {
-    pub name: &'static str,
-    pub description: &'static str,
-}
-
-/// Available slash commands for autocomplete
-pub const SLASH_COMMANDS: &[SlashCommand] = &[
-    SlashCommand {
-        name: "/new",
-        description: "Start a new session",
-    },
-    SlashCommand {
-        name: "/cd",
-        description: "Change working directory",
-    },
-    SlashCommand {
-        name: "/sessions",
-        description: "List all sessions",
-    },
-    SlashCommand {
-        name: "/compact",
-        description: "Compact context now",
-    },
-    SlashCommand {
-        name: "/clear",
-        description: "Clear context here at no cost; history and title stay",
-    },
-    SlashCommand {
-        name: "/theme",
-        description: "List / set / reset the TUI color theme (/theme set dracula)",
-    },
-    SlashCommand {
-        name: "/stop",
-        description: "Abort the running turn (same as Esc x2)",
-    },
-    SlashCommand {
-        name: "/plan",
-        description: "Enter Plan mode (design a plan for approval)",
-    },
-    SlashCommand {
-        name: "/show-plan",
-        description: "Show the current plan state",
-    },
-    SlashCommand {
-        name: "/execute",
-        description: "Approve the design plan / retry the checklist seed",
-    },
-    SlashCommand {
-        name: "/discard",
-        description: "Discard the live plan",
-    },
-    SlashCommand {
-        name: "/help",
-        description: "Show available commands",
-    },
-    SlashCommand {
-        name: "/models",
-        description: "Switch model",
-    },
-    SlashCommand {
-        name: "/usage",
-        description: "Session usage stats",
-    },
-    SlashCommand {
-        name: "/mission-control",
-        description: "Mission control: analytics, activity, inbox & schedule",
-    },
-    SlashCommand {
-        name: "/onboard",
-        description: "Run setup wizard",
-    },
-    // Single-step setup (#1981). The legacy `/onboard:<step>` spellings
-    // still resolve but are deliberately not offered here.
-    SlashCommand {
-        name: "/workspace",
-        description: "Workspace settings",
-    },
-    SlashCommand {
-        name: "/channels",
-        description: "Setup Telegram, Slack, Discord, WhatsApp, Trello",
-    },
-    SlashCommand {
-        name: "/voice",
-        description: "Voice STT/TTS setup",
-    },
-    SlashCommand {
-        name: "/image",
-        description: "Image handling setup (vision + generation)",
-    },
-    SlashCommand {
-        name: "/daemon",
-        description: "Background service (always-on) setup",
-    },
-    SlashCommand {
-        name: "/brain",
-        description: "Brain/persona setup",
-    },
-    SlashCommand {
-        name: "/doctor",
-        description: "Run connection health check",
-    },
-    SlashCommand {
-        name: "/cowork",
-        description: "Create a Telegram cowork workspace (QR + deep link)",
-    },
-    SlashCommand {
-        name: "/approve",
-        description: "Tool approval policy",
-    },
-    SlashCommand {
-        name: "/evolve",
-        description: "Download latest release & restart",
-    },
-    SlashCommand {
-        name: "/restart",
-        description: "Restart OpenCrabs (resumes this session)",
-    },
-    SlashCommand {
-        name: "/exit",
-        description: "Exit OpenCrabs",
-    },
-    SlashCommand {
-        name: "/whisper",
-        description: "Speak anywhere, paste to clipboard",
-    },
-    SlashCommand {
-        name: "/skills",
-        description: "Browse and run loaded skills",
-    },
-    SlashCommand {
-        name: "/rtk",
-        description: "Show RTK token savings statistics",
-    },
-    SlashCommand {
-        name: "/goal",
-        description: "Set/track an autonomous goal (/goal <text>, status, pause, resume, clear)",
-    },
-    SlashCommand {
-        name: "/profiles",
-        description: "Manage OpenCrabs profiles (list, create, switch, migrate)",
-    },
-];
+/// Slash commands live in `ui_core::commands`, which the desktop window
+/// reads too: one table, so the two front ends cannot disagree about what a
+/// command is called. Re-exported under the names this module always used.
+pub use crate::ui_core::commands::{SLASH_COMMANDS, SlashCommand};
 
 /// Commands handled only by the chat channels (Telegram / Discord / Slack), not
 /// by the TUI slash dispatcher. They are documented in the `/help` dialog under
@@ -599,6 +459,26 @@ pub struct App {
     /// background-task resume) and whenever a session is (re)loaded.
     pub(crate) turn_start_len: usize,
     pub sessions: Vec<Session>,
+    /// Pinned session ids behind the sessions dialog's favorite feature
+    /// (migration `20261031000001_add_session_favorites.sql`). Hydrated at
+    /// `load_sessions` and mutated by the `Ctrl+F`/`Cmd+F` handler in the
+    /// sessions dialog; ordering applies favorite-first WITHOUT reordering
+    /// the recency order the favorites keep between themselves.
+    pub(crate) session_favorites: HashSet<Uuid>,
+    /// Topic id to parent session id (#2306). The sessions dialog lists a
+    /// topic directly under its parent and indents it.
+    pub(crate) topic_parents: std::collections::HashMap<Uuid, Uuid>,
+    /// The live name each Telegram topic carries (#2490), resolved in ONE
+    /// batched query per list load. A row that is not a topic-bound Telegram
+    /// session has no entry and keeps its stored name.
+    pub(crate) topic_titles: HashMap<Uuid, String>,
+    /// Closed sessions (#2305): dimmed in the dialog, refuse new turns.
+    pub(crate) closed_sessions: HashSet<Uuid>,
+    /// Sessions whose topic tree is folded: their topics are not listed (#2427).
+    pub(crate) collapsed_sessions: HashSet<Uuid>,
+    /// The name prompt for a new topic in the sessions dialog (#2306).
+    pub(crate) topic_naming: bool,
+    pub(crate) topic_name_buffer: String,
     /// All-time usage stats from the ledger (survives session deletes)
     pub usage_ledger_stats: Vec<crate::db::repository::usage_ledger::ModelUsageStats>,
     /// Usage dashboard state (populated when /usage is opened)
@@ -629,6 +509,14 @@ pub struct App {
     /// Interactive theme picker (#1371). `Some` = dialog open; all keys are
     /// intercepted and routed through the picker's pure state machine.
     pub theme_picker: Option<crate::tui::render::theme_picker::ThemePickerState>,
+    /// Seeker (#2458). `Some` = the card is open and owns every key, the
+    /// same engine the window runs, so both clients rank and print the same
+    /// rows in the same order.
+    pub command_palette: Option<crate::ui_core::palette::PaletteState>,
+    /// The channels the config says are live, read when the card opens so the
+    /// hint can tell an unconfigured channel from a working one without
+    /// touching the disk on every keystroke (#2462).
+    pub command_palette_channels: Vec<crate::ui_core::palette::Channel>,
     pub selected_session_index: usize,
     pub should_quit: bool,
     /// Pending resize dimensions — runner pre-resizes buffers to avoid blink
@@ -911,6 +799,8 @@ pub struct App {
 
     /// Session to resume after restart (set via --session CLI arg)
     pub resume_session_id: Option<Uuid>,
+    /// Start in a brand-new session instead of the last one (`chat --new`)
+    pub start_fresh: bool,
 
     /// Cache of rendered lines per message to avoid re-parsing markdown every frame.
     /// Key: (message_id, content_width). Invalidated on terminal resize, and on
@@ -966,6 +856,13 @@ pub struct App {
     /// the message-keyed anchor above can never resolve it and folding a turn
     /// would jump the viewport by however many rows it hid.
     pub chat_expand_anchor_turn: Option<(String, u16)>,
+    /// Set whenever a click or ctrl+o toggles a block, even when the header sits
+    /// above the viewport and there is no row to pin (#2241). Growth
+    /// compensation is suppressed for that frame: the block's new lines land
+    /// where the user is looking, not appended below the viewport, so
+    /// compensating would shift the transcript by the number of lines it
+    /// gained. Consumed (cleared) on the render that applies it.
+    pub chat_expand_growth_pending: bool,
 
     /// Drag selection: anchor point in terminal-screen coords (col, row), set on first drag event.
     pub drag_anchor: Option<(u16, u16)>,
@@ -977,6 +874,10 @@ pub struct App {
     pub input_area_y: u16,
     pub input_area_width: u16,
     pub input_area_height: u16,
+    /// Vertical scroll the input paragraph applied on the last frame. The box
+    /// scrolls once the buffer is taller than the visible rows, so click to
+    /// place the caret and drag to copy have to add it to the screen row.
+    pub input_scroll_y: u16,
     /// Input drag selection state
     pub input_drag_anchor: Option<(u16, u16)>,
     pub input_drag_current: Option<(u16, u16)>,
@@ -996,12 +897,6 @@ pub struct App {
     pub ssh_pending: Option<SshPasswordRequest>,
     /// Raw SSH password text being typed (never displayed, only dots)
     pub ssh_input: String,
-
-    /// Active plan document for the current session (loaded from disk)
-    pub plan_document: Option<crate::tui::plan::PlanDocument>,
-
-    /// Path to the plan JSON file for the current session
-    pub plan_file_path: Option<std::path::PathBuf>,
 
     /// Split pane manager — tracks pane layout, focus, and per-pane state
     pub pane_manager: PaneManager,
@@ -1074,6 +969,13 @@ impl App {
             messages: Vec::new(),
             turn_start_len: 0,
             sessions: Vec::new(),
+            session_favorites: HashSet::new(),
+            topic_parents: std::collections::HashMap::new(),
+            topic_titles: HashMap::new(),
+            closed_sessions: HashSet::new(),
+            collapsed_sessions: HashSet::new(),
+            topic_naming: false,
+            topic_name_buffer: String::new(),
             usage_ledger_stats: Vec::new(),
             dashboard_state: None,
             mode: AppMode::Chat,
@@ -1086,6 +988,8 @@ impl App {
             auto_scroll: true,
             mouse_capture_enabled: true,
             theme_picker: None,
+            command_palette: None,
+            command_palette_channels: Vec::new(),
             selected_session_index: 0,
             should_quit: false,
             pending_resize: None,
@@ -1185,6 +1089,7 @@ impl App {
             active_tool_group: None,
             update_available_version: None,
             resume_session_id: None,
+            start_fresh: false,
             render_cache: HashMap::new(),
             render_cache_theme_gen: crate::tui::render::theme::generation(),
             chat_line_to_msg: Vec::new(),
@@ -1192,6 +1097,7 @@ impl App {
             turn_expanded: std::collections::HashMap::new(),
             chat_expand_anchor: None,
             chat_expand_anchor_turn: None,
+            chat_expand_growth_pending: false,
             chat_render_scroll: 0,
             chat_area_y: 0,
             chat_area_x: 0,
@@ -1204,6 +1110,7 @@ impl App {
             input_area_y: 0,
             input_area_width: 0,
             input_area_height: 0,
+            input_scroll_y: 0,
             input_drag_anchor: None,
             input_drag_current: None,
             input_drag_selecting: false,
@@ -1214,8 +1121,6 @@ impl App {
             sudo_input: String::new(),
             ssh_pending: None,
             ssh_input: String::new(),
-            plan_document: None,
-            plan_file_path: None,
             pane_manager: PaneManager::load_layout(),
             pane_message_cache: HashMap::new(),
             background_sessions: HashMap::new(),
@@ -1440,13 +1345,24 @@ impl App {
         true
     }
 
+    /// The focused pane's cached plan document (render-time read).
+    pub fn plan_document(&self) -> Option<&crate::tui::plan::PlanDocument> {
+        self.pane_manager.focused_plan()
+    }
+
+    /// The focused pane's resolved plan JSON path.
+    pub fn plan_file_path(&self) -> Option<&std::path::PathBuf> {
+        self.pane_manager.focused_plan_path()
+    }
+
     /// Set the plan file path for a session and attempt to load it.
     pub(crate) async fn set_plan_file_for_session(&mut self, session_id: Uuid) {
         // Resolve through the shared store so the path is project/profile-aware
         // (and falls back to the legacy flat dir) instead of hardcoding
         // `agents/session/` under a raw `$HOME` that ignores the active profile.
-        self.plan_file_path = Some(crate::utils::plan_files::plan_json_read_path(session_id).await);
-        self.reload_plan();
+        let path = crate::utils::plan_files::plan_json_read_path(session_id).await;
+        let doc = crate::utils::plan_files::load_plan_from_path(&path);
+        self.pane_manager.set_focused_plan(Some(path), doc);
     }
 
     /// Reload the plan document from disk through the shared plan store.
@@ -1457,10 +1373,11 @@ impl App {
     /// a seed-failed empty-task one awaiting retry) and an Editing design
     /// doc both survive reloads and restarts by design.
     pub(crate) fn reload_plan(&mut self) {
-        self.plan_document = self
-            .plan_file_path
+        let path = self.pane_manager.focused_plan_path().cloned();
+        let doc = path
             .as_ref()
             .and_then(|path| crate::utils::plan_files::load_plan_from_path(path));
+        self.pane_manager.set_focused_plan(path, doc);
     }
 
     /// Get the shared session ID handle (for channels like Telegram/WhatsApp)
@@ -1569,6 +1486,9 @@ impl App {
                     }
                 }
             });
+        } else if self.start_fresh {
+            // `chat --new`: a brand-new session, never the last one.
+            self.create_new_session().await?;
         } else if let Some(last_id) = Self::read_last_session_id()
             && self.session_service.get_session(last_id).await?.is_some()
         {
@@ -2048,25 +1968,32 @@ impl App {
                     }
                 }
             }
-            TuiEvent::MouseClick(_col, row) => {
+            TuiEvent::MouseClick(col, row) => {
                 if self.mode == AppMode::Chat {
-                    // Clear input drag selection if clicking outside input
-                    if row < self.input_area_y || row >= self.input_area_y + self.input_area_height
-                    {
-                        self.input_drag_selecting = false;
-                        self.input_drag_anchor = None;
-                        self.input_drag_current = None;
+                    // A click inside the input box puts the caret under the
+                    // pointer. It owns the whole press, including the drag
+                    // anchor, and returns false when the click landed outside
+                    // the box so the chat gesture handling still runs.
+                    if !self.handle_input_mouse_click(col, row) {
+                        // Clear input drag selection if clicking outside input
+                        if row < self.input_area_y
+                            || row >= self.input_area_y + self.input_area_height
+                        {
+                            self.input_drag_selecting = false;
+                            self.input_drag_anchor = None;
+                            self.input_drag_current = None;
+                        }
+                        // Mouse-DOWN only STARTS a gesture (#726). Do NOT toggle
+                        // expand/select here: that fired the expand before a drag
+                        // could begin, so a click-drag over a collapsible block
+                        // expanded it instead of selecting text to copy. The
+                        // click-vs-drag decision happens on mouse-up: handle_mouse_up
+                        // click-selects (expand) when no drag occurred and
+                        // extracts+copies when a drag did. Reset the drag anchor so
+                        // this gesture starts clean.
+                        self.drag_anchor = None;
+                        self.drag_current = None;
                     }
-                    // Mouse-DOWN only STARTS a gesture (#726). Do NOT toggle
-                    // expand/select here — that fired the expand before a drag
-                    // could begin, so a click-drag over a collapsible block
-                    // expanded it instead of selecting text to copy. The
-                    // click-vs-drag decision happens on mouse-up: handle_mouse_up
-                    // click-selects (expand) when no drag occurred and
-                    // extracts+copies when a drag did. Reset the drag anchor so
-                    // this gesture starts clean.
-                    self.drag_anchor = None;
-                    self.drag_current = None;
                 }
             }
             TuiEvent::MouseRightClick(_col, row) => {
@@ -3540,6 +3467,254 @@ impl App {
         Ok(())
     }
 
+    /// Open the Seeker card, or close it when it is already up, so the
+    /// chord is a toggle like every other one in the terminal (#2458).
+    fn open_command_palette(&mut self) {
+        if self.command_palette.is_some() {
+            self.command_palette = None;
+            return;
+        }
+        self.command_palette_channels = live_channels();
+        self.command_palette = Some(crate::ui_core::palette::PaletteState::new(
+            self.palette_items(),
+        ));
+    }
+
+    /// The rows the card can find: the shared command table, the destinations
+    /// it can open, the saved skills and the conversation ledger. Built from
+    /// what the terminal already holds, so opening the card never fetches.
+    fn palette_items(&self) -> Vec<crate::ui_core::palette::PaletteItem> {
+        use crate::ui_core::palette::{self, PaletteAction, PaletteItem, PaletteKind};
+        let mut items: Vec<PaletteItem> = crate::ui_core::commands::SLASH_COMMANDS
+            .iter()
+            // A destination prints its own command row: listing both would
+            // show `/usage` twice (#2491).
+            .filter(|cmd| !palette::is_surface_command(cmd.name))
+            .map(|cmd| {
+                PaletteItem::new(
+                    cmd.name,
+                    cmd.description,
+                    PaletteKind::Command,
+                    PaletteAction::RunSlash(cmd.name),
+                )
+                .with_keywords(palette::keywords_for(cmd.name))
+            })
+            .collect();
+        items.extend(palette::surface_items());
+        // The docs pages: a query that is not a command or a conversation is
+        // usually a question the documentation answers (#2461).
+        items.extend(crate::ui_core::docs::items());
+        // The channel setup rows: the word that names a channel has to find the
+        // row that starts its setup, not only the page that describes it (#2462).
+        items.extend(palette::channel_items());
+        // The create-topic row: one shared definition, the same words on the
+        // window and here (#2482).
+        items.push(palette::new_topic_item());
+        // The favorite row: same picker, the pick pins the conversation (#2487).
+        items.push(palette::favorite_item());
+        for skill in &self.skills {
+            items.push(
+                PaletteItem::new(
+                    skill.slash_name.clone(),
+                    skill.description.clone(),
+                    PaletteKind::Skill,
+                    PaletteAction::RunSkill(skill.slash_name.clone()),
+                )
+                // The skill's own description carries the words a user types
+                // when they do not know its slash name: `telegram` has to find
+                // the channels skill, not only the docs page (#2462).
+                .with_keywords(&format!("skill workflow recipe {}", skill.description)),
+            );
+        }
+        for session in &self.sessions {
+            let title = session
+                .title
+                .clone()
+                .unwrap_or_else(|| "Untitled conversation".to_string());
+            items.push(PaletteItem::new(
+                title,
+                session.updated_at.format("%Y-%m-%d %H:%M").to_string(),
+                PaletteKind::Session,
+                PaletteAction::OpenSession(session.id.as_u128()),
+            ));
+        }
+        items
+    }
+
+    /// Every key while the card is up belongs to it (#2458).
+    async fn command_palette_key(&mut self, event: &crossterm::event::KeyEvent) -> Result<()> {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        if event.code == KeyCode::Esc {
+            self.command_palette = None;
+            return Ok(());
+        }
+        let mut run = None;
+        if let Some(state) = self.command_palette.as_mut() {
+            match event.code {
+                KeyCode::Enter => run = state.selected().map(|row| row.item.action),
+                KeyCode::Up => state.move_by(-1, crate::ui_core::palette::MAX_ROWS),
+                KeyCode::Down => state.move_by(1, crate::ui_core::palette::MAX_ROWS),
+                KeyCode::Backspace => state.backspace(),
+                KeyCode::Char(c)
+                    if !event.modifiers.contains(KeyModifiers::CONTROL)
+                        && !event.modifiers.contains(KeyModifiers::SUPER) =>
+                {
+                    state.type_char(c);
+                }
+                _ => {}
+            }
+        }
+        if let Some(action) = run {
+            self.command_palette = None;
+            self.apply_palette_action(action).await?;
+        }
+        Ok(())
+    }
+
+    /// Run what the picked row names. Commands go through the same dispatcher
+    /// the composer uses, so a pick and a typed command land in one place.
+    async fn apply_palette_action(
+        &mut self,
+        action: crate::ui_core::palette::PaletteAction,
+    ) -> Result<()> {
+        use crate::ui_core::palette::{PaletteAction, Surface};
+        match action {
+            PaletteAction::RunSlash(name) => {
+                let _ = self.handle_slash_command(name).await;
+            }
+            PaletteAction::OpenSurface(surface) => match surface.command() {
+                Some(command) => {
+                    let _ = self.handle_slash_command(command).await;
+                }
+                // The session-files view has no slash command; it is a view
+                // the terminal opens on its own key, so the row opens the
+                // same view rather than a command that would fail.
+                None => {
+                    debug_assert_eq!(surface, Surface::Files);
+                    self.open_session_files_view().await?;
+                }
+            },
+            PaletteAction::OpenSession(id) => {
+                self.load_session(Uuid::from_u128(id)).await?;
+                self.mode = AppMode::Chat;
+            }
+            PaletteAction::SwitchModel { provider, model } => {
+                let _ = self
+                    .handle_slash_command(&format!("/models {provider}/{model}"))
+                    .await;
+            }
+            PaletteAction::RunSkill(name) | PaletteAction::RunUserCommand(name) => {
+                let _ = self.handle_slash_command(&name).await;
+            }
+            PaletteAction::SetupChannel(channel) => {
+                // The setup runs as a normal turn, so the config write goes
+                // through the same gate a typed request would (#2462).
+                let prompt = format!(
+                    "Set up {} as a channel: walk me through each step and make the config change with me.",
+                    channel.name()
+                );
+                let sender = self.event_sender();
+                let _ = sender.send(crate::tui::events::TuiEvent::CommandSubmitted(prompt));
+                self.mode = AppMode::Chat;
+            }
+            PaletteAction::Ask(text) => {
+                // The miss row starts a fresh session with the typed text as
+                // its first request, through the same submit seam a typed
+                // line uses, so no second session path exists (#2482).
+                let sender = self.event_sender();
+                let _ = sender.send(crate::tui::events::TuiEvent::CommandSubmitted(text));
+                self.mode = AppMode::Chat;
+            }
+            PaletteAction::NewTopic => {
+                // The same card re-armed: field empty, conversations only,
+                // so a few letters pick the session (#2482).
+                self.command_palette_channels = live_channels();
+                self.command_palette = Some(crate::ui_core::palette::PaletteState::picking(
+                    crate::ui_core::palette::PickFor::NewTopic,
+                    self.palette_items(),
+                ));
+            }
+            PaletteAction::Favorite => {
+                // Same card, same picker, different purpose: the pick pins
+                // the conversation (#2487).
+                self.command_palette_channels = live_channels();
+                self.command_palette = Some(crate::ui_core::palette::PaletteState::picking(
+                    crate::ui_core::palette::PickFor::Favorite,
+                    self.palette_items(),
+                ));
+            }
+            PaletteAction::NewTopicOn(id) => {
+                // The exact path the list's own `t` key walks: point the
+                // dialog at the picked conversation, then ask for the name
+                // (#2482).
+                let uuid = Uuid::from_u128(id);
+                if let Some(pos) = self.sessions.iter().position(|s| s.id == uuid) {
+                    self.selected_session_index = pos;
+                }
+                self.switch_mode(AppMode::Sessions).await?;
+                self.topic_naming = true;
+                self.topic_name_buffer.clear();
+            }
+            PaletteAction::FavoriteToggle(id) => {
+                // The exact toggle the rail's pin button walks, reached by
+                // id instead of the dialog's cursor (#2487).
+                let uuid = Uuid::from_u128(id);
+                // Pulled out before `load_sessions` below: the row borrows
+                // `self.sessions`, and the reload needs `&mut self`.
+                let title = self
+                    .sessions
+                    .iter()
+                    .find(|s| s.id == uuid)
+                    .and_then(|s| s.title.clone())
+                    .unwrap_or_else(|| "Untitled".to_string());
+                let pinned = self.session_favorites.contains(&uuid);
+                if pinned {
+                    self.session_service
+                        .unfavorite_session(&uuid.to_string())
+                        .await?;
+                } else {
+                    self.session_service
+                        .favorite_session(&uuid.to_string())
+                        .await?;
+                }
+                self.load_sessions().await?;
+                // The reload re-sorted the list, so follow the toggled
+                // session to its new row, the same way the pin key does.
+                if let Some(pos) = self.sessions.iter().position(|s| s.id == uuid) {
+                    self.selected_session_index = pos;
+                }
+                self.notification = Some(if pinned {
+                    format!("Unpinned: {title}")
+                } else {
+                    format!("Pinned to top: {title}")
+                });
+                self.notification_shown_at = Some(std::time::Instant::now());
+            }
+            PaletteAction::OpenDocs(path) => {
+                // Detached, exactly like a previewed file: waiting on the
+                // browser would freeze the event loop. A launcher that exits
+                // non-zero reports back through the same event the file
+                // opener uses (#2170).
+                let url = crate::ui_core::docs::url(path);
+                let label = url.clone();
+                let tx = self.event_sender();
+                let opened = crate::tui::launcher::open_url(&url, move |detail| {
+                    let _ = tx.send(crate::tui::events::TuiEvent::LauncherFailed {
+                        target: label,
+                        detail,
+                    });
+                });
+                self.notification = Some(match opened {
+                    Ok(()) => format!("Opening {url}"),
+                    Err(err) => format!("Could not open {url}: {err}"),
+                });
+                self.notification_shown_at = Some(std::time::Instant::now());
+            }
+        }
+        Ok(())
+    }
+
     /// Handle keyboard input
     async fn handle_key_event(&mut self, event: crossterm::event::KeyEvent) -> Result<()> {
         use super::events::keys;
@@ -3555,6 +3730,28 @@ impl App {
         if self.mouse_frag_gate.absorb(&event.code) {
             tracing::debug!("[MOUSEFRAG] dropped fragment {:?} at dispatch", event.code);
             return Ok(());
+        }
+
+        // Seeker (#2458): the chord opens one card that finds a
+        // conversation, a command or a surface, and while it is up it owns
+        // every key. It is checked before every dialog so no field underneath
+        // can eat a character meant for the card.
+        if self.command_palette.is_some() {
+            self.command_palette_key(&event).await?;
+            return Ok(());
+        }
+        if let KeyCode::Char(key) = event.code {
+            let key = key.to_string();
+            // Alt arrives as the ESC prefix, reported as the ALT modifier
+            // on the space event, so `alt+space` opens the card intact; the
+            // ctrl byte hack of #2463 is retired (#2491).
+            if crate::ui_core::palette::opens_in_terminal(
+                event.modifiers.contains(KeyModifiers::ALT),
+                &key,
+            ) {
+                self.open_command_palette();
+                return Ok(());
+            }
         }
 
         // Ctrl+C expanded command panel (#1775). Modal: while open, every
@@ -3853,6 +4050,13 @@ impl App {
             return Ok(());
         }
 
+        // Alt+T opens the theme picker from anywhere, the way `/theme` does.
+        // An open picker keeps its own keys, so a second press is ignored.
+        if keys::is_themes(&event) && self.theme_picker.is_none() {
+            self.theme_picker = Some(crate::tui::render::theme_picker::ThemePickerState::open());
+            return Ok(());
+        }
+
         if keys::is_list_sessions(&event) {
             self.switch_mode(AppMode::Sessions).await?;
             return Ok(());
@@ -3866,11 +4070,23 @@ impl App {
         // Split pane focus & close (global — work from Chat mode)
         if keys::is_close_pane(&event) && self.pane_manager.is_split() {
             self.pane_manager.close_focused();
+            // The closed pane's input dies with it; adopt whatever the
+            // pane that gained focus had stashed (#2494).
+            self.pane_manager.adopt_input(
+                &mut self.input_buffer,
+                &mut self.cursor_position,
+                &mut self.input_history_index,
+            );
             self.pane_manager.save_layout();
             if let Some(pane) = self.pane_manager.focused_pane()
                 && let Some(session_id) = pane.session_id
             {
-                self.load_session(session_id).await?;
+                // A pane whose session fails to load is logged and left as it
+                // is. Returning the error here stopped the key handler, so a
+                // bad pane could leave the rest of the layout unclosable.
+                if let Err(e) = self.load_session(session_id).await {
+                    tracing::error!(error = %e, %session_id, "failed to load the focused pane's session");
+                }
                 // Ensure the session's provider entry exists in the HashMap
                 // after load. load_session skips swap if saved == current,
                 // but current may be from global fallback (closed pane's
@@ -3895,7 +4111,19 @@ impl App {
             return Ok(());
         }
         if keys::is_focus_next_pane(&event) && self.pane_manager.is_split() {
+            // Input belongs to the pane it was typed in: stash it with the
+            // pane we're leaving, adopt the target pane's own text (#2494).
+            self.pane_manager.stash_input(
+                &mut self.input_buffer,
+                &mut self.cursor_position,
+                &mut self.input_history_index,
+            );
             self.pane_manager.focus_next();
+            self.pane_manager.adopt_input(
+                &mut self.input_buffer,
+                &mut self.cursor_position,
+                &mut self.input_history_index,
+            );
             if let Some(pane) = self.pane_manager.focused_pane()
                 && let Some(session_id) = pane.session_id
             {
@@ -4637,4 +4865,37 @@ pub(crate) fn plan_launch(force_onboard: bool, is_first_time: bool) -> LaunchPla
             first_run: is_first_time,
         }
     }
+}
+
+/// The messaging channels the config says are live: enabled and carrying the
+/// credential each one needs. WhatsApp pairs by QR, so being enabled is its
+/// whole credential (#2462).
+fn live_channels() -> Vec<crate::ui_core::palette::Channel> {
+    use crate::ui_core::palette::Channel;
+    let Ok(config) = crate::config::Config::load() else {
+        return Vec::new();
+    };
+    let channels = &config.channels;
+    let filled = |value: &Option<String>| value.as_deref().is_some_and(|text| !text.is_empty());
+    let mut live = Vec::new();
+    if channels.telegram.enabled && filled(&channels.telegram.token) {
+        live.push(Channel::Telegram);
+    }
+    if channels.discord.enabled && filled(&channels.discord.token) {
+        live.push(Channel::Discord);
+    }
+    if channels.slack.enabled && filled(&channels.slack.token) && filled(&channels.slack.app_token)
+    {
+        live.push(Channel::Slack);
+    }
+    if channels.whatsapp.enabled {
+        live.push(Channel::WhatsApp);
+    }
+    if channels.trello.enabled
+        && filled(&channels.trello.app_token)
+        && filled(&channels.trello.token)
+    {
+        live.push(Channel::Trello);
+    }
+    live
 }

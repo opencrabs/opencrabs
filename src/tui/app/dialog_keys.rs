@@ -108,6 +108,11 @@ const fn k(code: KeyCode) -> (KeyCode, KeyModifiers) {
     (code, KeyModifiers::NONE)
 }
 
+/// Like [`k`], but carrying modifiers, for bindings such as Ctrl+F.
+const fn kc(code: KeyCode, modifiers: KeyModifiers) -> (KeyCode, KeyModifiers) {
+    (code, modifiers)
+}
+
 /// The scoped keymap for `scope`, in footer display order.
 ///
 /// Order is part of the contract: the footer renders exactly this order,
@@ -651,6 +656,14 @@ const TABLE_19: &[DialogKey] = &[
         verb: "projects",
     },
     DialogKey {
+        events: &[kc(
+            KeyCode::Char('p'),
+            KeyModifiers::CONTROL.union(KeyModifiers::SHIFT),
+        )],
+        label: "^⇧P",
+        verb: "pin",
+    },
+    DialogKey {
         events: &[k(KeyCode::Char('|'))],
         label: "|",
         verb: "split h",
@@ -873,7 +886,8 @@ mod tests {
     /// it advertises must actually close the breakdown.
     #[test]
     fn cache_breakdown_footer_key_closes_the_breakdown() {
-        use crate::usage::dashboard::{CACHE_CARD, DashboardState, UsageKeyOutcome, decide};
+        use crate::ui_core::usage::input::CACHE_CARD;
+        use crate::usage::dashboard::{DashboardState, UsageKeyOutcome, decide};
 
         for key in dialog_keys(DialogScope::UsageCacheBreakdown) {
             for (code, mods) in key.events {

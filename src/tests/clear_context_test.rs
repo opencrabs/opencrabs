@@ -201,12 +201,19 @@ fn every_surface_handles_clear_without_an_agent_turn() {
         );
     }
     let tui = TUI.find("\"/clear\" => {").expect("TUI command");
-    let window = &TUI[tui..tui + 1200];
+    // `get` returns None instead of panicking on a non-boundary index, so the
+    // window never needs a byte-index slice (the ratchet counts those).
+    let rest = TUI.get(tui..).expect("TUI command starts at a boundary");
+    let window = rest.get(..2000).unwrap_or(rest);
     assert!(
         window.contains("is_processing"),
         "refused while a turn runs"
     );
-    assert!(window.contains("clear_context(session_id)"));
+    assert!(window.contains("prepare_clear(session_id)"));
+    assert!(
+        window.contains("resume_background_turn("),
+        "the reply turn starts right after the clear"
+    );
     assert!(
         window.contains("base_context_tokens()"),
         "footer reset to baseline"

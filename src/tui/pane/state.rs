@@ -23,6 +23,20 @@ pub struct Pane {
     pub scroll_offset: usize,
     /// Auto-scroll to bottom on new content.
     pub auto_scroll: bool,
+    /// Half-typed input owned by this pane. Stashed here when focus moves
+    /// away and adopted back when focus returns, so what you were typing
+    /// stays with the pane you typed it into (#2494).
+    pub input_buffer: String,
+    /// Cursor byte offset within `input_buffer`, stashed alongside it.
+    pub cursor_position: usize,
+    /// Input-history navigation position, stashed alongside the buffer.
+    pub input_history_index: Option<usize>,
+    /// Plan document cached for this pane's session. Inactive panes keep
+    /// theirs, so a split layout can render each pane's own plan without
+    /// a disk read per frame (#2494).
+    pub plan_document: Option<crate::tui::plan::PlanDocument>,
+    /// Resolved plan JSON path for this pane's session, cached with the doc.
+    pub plan_file_path: Option<std::path::PathBuf>,
 }
 
 impl Pane {
@@ -32,7 +46,19 @@ impl Pane {
             session_id,
             scroll_offset: 0,
             auto_scroll: true,
+            input_buffer: String::new(),
+            cursor_position: 0,
+            input_history_index: None,
+            plan_document: None,
+            plan_file_path: None,
         }
+    }
+
+    /// Drop the pane's stashed input state.
+    pub fn clear_input(&mut self) {
+        self.input_buffer.clear();
+        self.cursor_position = 0;
+        self.input_history_index = None;
     }
 }
 
@@ -114,6 +140,67 @@ impl PaneManager {
         self.panes.len() > 1
     }
 
+    /// Stash the app's working input into the currently focused pane,
+    /// leaving the working fields empty. Call BEFORE moving focus.
+    pub fn stash_input(
+        &mut self,
+        buffer: &mut String,
+        cursor: &mut usize,
+        history: &mut Option<usize>,
+    ) {
+        if let Some(pane) = self.focused_pane_mut() {
+            pane.input_buffer = std::mem::take(buffer);
+            pane.cursor_position = *cursor;
+            *cursor = 0;
+            pane.input_history_index = history.take();
+        }
+    }
+
+    /// Adopt the focused pane's stashed input into the app's working
+    /// fields. Call AFTER moving focus.
+    pub fn adopt_input(
+        &mut self,
+        buffer: &mut String,
+        cursor: &mut usize,
+        history: &mut Option<usize>,
+    ) {
+        if let Some(pane) = self.focused_pane() {
+            *buffer = pane.input_buffer.clone();
+            *cursor = pane.cursor_position;
+            *history = pane.input_history_index;
+        }
+    }
+
+    /// Replace the focused pane's cached plan with a freshly loaded pair.
+    pub fn set_focused_plan(
+        &mut self,
+        path: Option<std::path::PathBuf>,
+        doc: Option<crate::tui::plan::PlanDocument>,
+    ) {
+        if let Some(pane) = self.focused_pane_mut() {
+            pane.plan_file_path = path;
+            pane.plan_document = doc;
+        }
+    }
+
+    /// Null the focused pane's cached plan document, keeping the resolved
+    /// path so a later reload still knows where to look.
+    pub fn clear_focused_plan(&mut self) {
+        if let Some(pane) = self.focused_pane_mut() {
+            pane.plan_document = None;
+        }
+    }
+
+    /// The focused pane's cached plan document.
+    pub fn focused_plan(&self) -> Option<&crate::tui::plan::PlanDocument> {
+        self.focused_pane().and_then(|p| p.plan_document.as_ref())
+    }
+
+    /// The focused pane's resolved plan JSON path.
+    pub fn focused_plan_path(&self) -> Option<&std::path::PathBuf> {
+        self.focused_pane().and_then(|p| p.plan_file_path.as_ref())
+    }
+
     /// Number of active panes.
     pub fn pane_count(&self) -> usize {
         self.panes.len()
@@ -180,6 +267,17 @@ impl PaneManager {
         }
 
         true
+    }
+
+    /// Close panes until one is left. Returns how many were closed. The pane
+    /// that remains is the one the closing leaves focused, and the caller
+    /// loads its session.
+    pub fn close_all_but_focused(&mut self) -> usize {
+        let mut closed = 0;
+        while self.close_focused() {
+            closed += 1;
+        }
+        closed
     }
 
     /// Cycle focus to the next pane in the given direction.
@@ -289,5 +387,124 @@ impl PaneManager {
             focused: snapshot.focused,
             next_id: snapshot.next_id,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::pane::layout::SplitDirection;
+    use crate::tui::plan::PlanDocument;
+
+    fn doc(title: &str) -> PlanDocument {
+        serde_json::from_str(&format!(r#"{{"tasks":[],"title":"{title}"}}"#))
+            .expect("minimal plan document parses")
+    }
+
+    #[test]
+    fn stash_and_adopt_round_trip_keeps_buffers_per_pane() {
+        let mut mgr = PaneManager::new();
+
+        // The real `|` sequence: the user typed into the working buffer while
+        // ROOT was focused, then the split handler stashes BEFORE splitting
+        // (split moves focus to the new pane).
+        let (mut buf, mut cur, mut hist) = ("alpha".to_string(), 5usize, Some(2usize));
+        mgr.stash_input(&mut buf, &mut cur, &mut hist);
+        mgr.split(SplitDirection::Horizontal);
+        mgr.adopt_input(&mut buf, &mut cur, &mut hist);
+
+        // The new pane starts empty; ROOT kept what we typed.
+        assert_eq!(buf, "");
+        assert_eq!(cur, 0);
+        assert_eq!(hist, None);
+        assert_eq!(mgr.get(PaneId::ROOT).unwrap().input_buffer, "alpha");
+        assert_eq!(mgr.get(PaneId::ROOT).unwrap().cursor_position, 5);
+        assert_eq!(mgr.get(PaneId::ROOT).unwrap().input_history_index, Some(2));
+
+        // Type here, cycle back, and the first pane's buffer comes home.
+        // The real Tab handler order: stash the working buffer into the pane
+        // being left, THEN move focus, THEN adopt the destination's buffer.
+        buf = "beta".to_string();
+        cur = 4;
+        hist = Some(1);
+        mgr.stash_input(&mut buf, &mut cur, &mut hist); // pane[1] keeps beta
+        mgr.focus_next(); // wraps to the first pane
+        mgr.adopt_input(&mut buf, &mut cur, &mut hist); // buf = alpha
+        assert_eq!(buf, "alpha");
+        assert_eq!(cur, 5);
+        assert_eq!(hist, Some(2));
+        assert_eq!(mgr.get(mgr.focused).unwrap().input_buffer, "alpha");
+        // And the second pane still holds its own text.
+        assert_eq!(mgr.get(mgr.panes[1].id).unwrap().input_buffer, "beta");
+    }
+
+    #[test]
+    fn inactive_pane_keeps_its_plan_after_focus_moves() {
+        let mut mgr = PaneManager::new();
+        mgr.set_focused_plan(
+            Some(std::path::PathBuf::from("plans/a.json")),
+            Some(doc("first")),
+        );
+        mgr.split(SplitDirection::Horizontal);
+        mgr.set_focused_plan(
+            Some(std::path::PathBuf::from("plans/b.json")),
+            Some(doc("second")),
+        );
+
+        // The focused (new) pane reads the fresh pair...
+        assert_eq!(mgr.focused_plan().map(|d| d.title.as_str()), Some("second"));
+        assert_eq!(
+            mgr.focused_plan_path().map(|p| p.display().to_string()),
+            Some("plans/b.json".to_string())
+        );
+        // ...while the inactive pane still owns its own plan, so a split
+        // render can show it without a reload (#2494).
+        assert_eq!(
+            mgr.get(PaneId::ROOT)
+                .unwrap()
+                .plan_document
+                .as_ref()
+                .map(|d| d.title.as_str()),
+            Some("first")
+        );
+    }
+
+    #[test]
+    fn clear_focused_plan_keeps_the_resolved_path() {
+        let mut mgr = PaneManager::new();
+        mgr.set_focused_plan(
+            Some(std::path::PathBuf::from("plans/a.json")),
+            Some(doc("first")),
+        );
+        mgr.clear_focused_plan();
+        assert!(mgr.focused_plan().is_none());
+        assert_eq!(
+            mgr.focused_plan_path().map(|p| p.display().to_string()),
+            Some("plans/a.json".to_string())
+        );
+    }
+
+    #[test]
+    fn clear_input_resets_buffer_cursor_and_history() {
+        let mut pane = Pane::new(PaneId::ROOT, None);
+        pane.input_buffer = "half typed".to_string();
+        pane.cursor_position = 10;
+        pane.input_history_index = Some(1);
+        pane.clear_input();
+        assert!(pane.input_buffer.is_empty());
+        assert_eq!(pane.cursor_position, 0);
+        assert_eq!(pane.input_history_index, None);
+    }
+
+    #[test]
+    fn single_pane_stash_adopt_round_trip_preserves_input() {
+        let mut mgr = PaneManager::new();
+        let (mut buf, mut cur, mut hist) = ("solo".to_string(), 4usize, None);
+        mgr.stash_input(&mut buf, &mut cur, &mut hist);
+        assert_eq!(mgr.get(PaneId::ROOT).unwrap().input_buffer, "solo");
+        mgr.adopt_input(&mut buf, &mut cur, &mut hist);
+        assert_eq!(buf, "solo");
+        assert_eq!(cur, 4);
+        assert_eq!(hist, None);
     }
 }

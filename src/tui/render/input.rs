@@ -5,6 +5,7 @@
 use super::super::app::App;
 use super::theme::{self, Role};
 use super::utils::format_token_count_raw;
+use crate::tui::input_layout;
 use ratatui::{
     Frame,
     layout::{Alignment, Rect},
@@ -76,6 +77,78 @@ fn spans_with_selection(
     Line::from(spans)
 }
 
+/// Pieces of the queue preview row, split out so the truncation maths can be
+/// unit-tested without a frame.
+pub(crate) struct QueueLineParts {
+    /// `⏳ queued (2): ` when a preview fits, otherwise just the count.
+    pub label: String,
+    /// The last queued message, flattened and cut to the room that is left.
+    pub preview: String,
+    /// What the queue does and which key edits it, chosen by available width.
+    pub hint: &'static str,
+}
+
+/// Build the queue preview row (#2237).
+///
+/// The row has to carry three facts on one line: how many messages are
+/// waiting, what is waiting, and that Enter did not send them. The hint
+/// degrades with the terminal width and the preview is what gets cut, so the
+/// explanation is never dropped before the key that acts on it.
+pub(crate) fn queue_line_parts(
+    msgs_count: usize,
+    last_msg: &str,
+    content_width: usize,
+) -> QueueLineParts {
+    let count = if msgs_count > 1 {
+        format!("⏳ queued ({msgs_count})")
+    } else {
+        "⏳ queued".to_string()
+    };
+
+    // The hint degrades by what is LEFT after the count and a usable preview,
+    // not by absolute width: the full sentence plus the count already spends
+    // most of an 80 column row.
+    const MIN_PREVIEW: usize = 24;
+    let count_width = unicode_width::UnicodeWidthStr::width(count.as_str());
+    let room_for_hint = content_width.saturating_sub(count_width + MIN_PREVIEW + 3);
+    let hint: &'static str = if room_for_hint >= 58 {
+        " · sends at the next tool call, or back to this box · ↑ edit"
+    } else if room_for_hint >= 36 {
+        " · sends at the next tool call · ↑ edit"
+    } else if room_for_hint >= 26 {
+        " · next tool call · ↑ edit"
+    } else {
+        " · ↑ edit"
+    };
+
+    // ": " after the count, plus a column of slack before the hint.
+    let reserved = count_width + unicode_width::UnicodeWidthStr::width(hint) + 3;
+    let budget = content_width.saturating_sub(reserved);
+
+    if budget < 8 {
+        return QueueLineParts {
+            label: count,
+            preview: String::new(),
+            hint,
+        };
+    }
+
+    let flat = last_msg.replace('\n', " ");
+    let preview = if unicode_width::UnicodeWidthStr::width(flat.as_str()) > budget {
+        let mut truncated: String = flat.chars().take(budget.saturating_sub(3)).collect();
+        truncated.push_str("...");
+        truncated
+    } else {
+        flat
+    };
+
+    QueueLineParts {
+        label: format!("{count}: "),
+        preview,
+        hint,
+    }
+}
+
 /// Render queued messages above the input area.
 /// Returns the height consumed (0 if no queue).
 pub(super) fn render_queue(f: &mut Frame, app: &App, area: Rect) -> u16 {
@@ -105,31 +178,39 @@ pub(super) fn render_queue(f: &mut Frame, app: &App, area: Rect) -> u16 {
         )
     };
 
-    let dim_style = Style::default().fg(theme::role(Role::GrayMid));
-    // Show the last queued message as preview
-    let flat = last_msg.replace('\n', " ");
     let content_width = area.width.saturating_sub(2) as usize; // borders
-    let max_preview = content_width.saturating_sub(30);
-    let preview: String = if flat.chars().count() > max_preview {
-        let truncated: String = flat.chars().take(max_preview).collect();
-        format!("{}...", truncated)
-    } else {
-        flat
-    };
+    let parts = queue_line_parts(msgs_count, &last_msg, content_width);
 
-    let count_label = if msgs_count > 1 {
-        format!("⏳ queued ({}): ", msgs_count)
-    } else {
-        "⏳ queued: ".to_string()
-    };
-
+    // Quiet by design (#2244). The row has to read as its own row and no
+    // more: it sits directly above the input box, so anything loud pulls the
+    // eye away from the answer being written. #2237 raised every part of the
+    // row above the chrome around it to separate it from the status line, and
+    // the side effect was that the label went amber and bold and the preview
+    // went to the body colour, so a queued message read like a message instead
+    // of like chrome.
+    //
+    // Nothing here is amber, because a queued message is a state and not a
+    // warning, and the preview is deliberately not the body colour. On the
+    // default palette: label GraySoft 170, preview TextSecondary 141, hint
+    // GrayMid 100, border GrayDim 80. Presets remap these roles, so those
+    // numbers describe the default theme rather than a fixed contract. The
+    // border and the step between the parts are what separate the row now.
+    //
+    // Honest note for the next reader: the thinking line this row sits near is
+    // GrayDim (80), so the row is still brighter than that line. The amber and
+    // the body-coloured preview were what made it shout, not the step itself.
     let line = Line::from(vec![
-        Span::styled(count_label, dim_style),
-        Span::styled(preview, dim_style.add_modifier(Modifier::ITALIC)),
         Span::styled(
-            "  (Up to edit)",
-            Style::default().fg(theme::role(Role::GrayDark)),
+            parts.label,
+            Style::default().fg(theme::role(Role::GraySoft)),
         ),
+        Span::styled(
+            parts.preview,
+            Style::default()
+                .fg(theme::role(Role::TextSecondary))
+                .add_modifier(Modifier::ITALIC),
+        ),
+        Span::styled(parts.hint, Style::default().fg(theme::role(Role::GrayMid))),
     ]);
 
     let queue_height = 2u16;
@@ -149,9 +230,14 @@ pub(super) fn render_queue(f: &mut Frame, app: &App, area: Rect) -> u16 {
     queue_height
 }
 
-/// Render the input box
-pub(super) fn render_input(f: &mut Frame, app: &App, area: Rect) {
-    let input_content_width = area.width.saturating_sub(2) as usize; // borders
+/// Render the input box.
+///
+/// Returns the vertical scroll it applied to the paragraph, which the caller
+/// stores on `App` so click to place the caret and drag to copy can map a
+/// screen row to the visual row the user is actually looking at.
+pub(super) fn render_input(f: &mut Frame, app: &App, area: Rect) -> u16 {
+    // No side borders, but each row spends two columns on its prefix.
+    let input_content_width = input_layout::content_width(area.width);
     let mut input_lines: Vec<Line> = Vec::new();
     let mut cursor_row: usize = 0;
 
@@ -174,87 +260,22 @@ pub(super) fn render_input(f: &mut Frame, app: &App, area: Rect) {
         .bg(theme::role(Role::SelectionBg))
         .fg(theme::role(Role::AccentSoft));
 
-    // Compute selection byte range from drag coordinates
+    // Selection byte range from the drag coordinates, computed by the same
+    // helper the drag-to-copy path and click-to-caret use. Adding the stored
+    // scroll offset here is what keeps the highlight on the text the user
+    // actually sees once the box scrolls past its visible rows.
     let sel_from_to: Option<(usize, usize)> = if app.input_drag_selecting {
         let a = app.input_drag_anchor.unwrap_or((0, 0));
         let b = app.input_drag_current.unwrap_or(a);
-        let (start, end) = if (a.1, a.0) <= (b.1, b.0) {
-            (a, b)
-        } else {
-            (b, a)
-        };
-
-        let input_top = app.input_area_y;
-        let input_content_width = area.width.saturating_sub(2) as usize;
-        let content_left = app.input_area_x + 2;
-
-        if input_content_width == 0 || app.input_buffer.is_empty() {
-            None
-        } else {
-            let start_visual = start.1.saturating_sub(input_top + 1) as usize;
-            let end_visual = end.1.saturating_sub(input_top + 1) as usize;
-
-            // Build a list of visual rows: each entry is (global_byte_start, global_byte_end)
-            let mut visual_rows: Vec<(usize, usize)> = Vec::new();
-            let buf = &app.input_buffer;
-            let blen = buf.len();
-            let mut ls = 0usize;
-            while ls <= blen {
-                let le = buf[ls..].find('\n').map(|i| ls + i).unwrap_or(blen);
-                let line = &buf[ls..le];
-                let lw = unicode_width::UnicodeWidthStr::width(line);
-                let rows = if lw == 0 {
-                    1
-                } else {
-                    lw.div_ceil(input_content_width)
-                };
-                for r in 0..rows {
-                    let chunk_start = r * input_content_width;
-                    let mut display_w = 0;
-                    let mut char_start = 0;
-                    let mut char_end = line.len();
-                    let mut found_start = false;
-                    for (idx, ch) in line.char_indices() {
-                        let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-                        if r > 0 && !found_start && display_w >= chunk_start {
-                            char_start = idx;
-                            found_start = true;
-                        }
-                        if display_w + ch_w > chunk_start + input_content_width {
-                            char_end = idx;
-                            break;
-                        }
-                        display_w += ch_w;
-                    }
-                    visual_rows.push((ls + char_start, ls + char_end));
-                }
-                if le == blen {
-                    break;
-                }
-                ls = le + 1;
-            }
-
-            let map_vr_to_byte = |vr: usize, col: u16| -> usize {
-                if vr >= visual_rows.len() {
-                    return blen;
-                }
-                let (rs, re) = visual_rows[vr];
-                let line_text = &buf[rs..re];
-                let target_disp = col.saturating_sub(content_left) as usize;
-                let mut w = 0;
-                for (idx, ch) in line_text.char_indices() {
-                    if w >= target_disp {
-                        return rs + idx;
-                    }
-                    w += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-                }
-                re
-            };
-
-            let from = map_vr_to_byte(start_visual, start.0);
-            let to = map_vr_to_byte(end_visual, end.0);
-            Some((from.min(to), from.max(to)))
-        }
+        input_layout::selection_range(
+            &app.input_buffer,
+            input_layout::content_width(area.width),
+            app.input_area_x,
+            app.input_area_y,
+            app.input_scroll_y,
+            a,
+            b,
+        )
     } else {
         None
     };
@@ -319,42 +340,17 @@ pub(super) fn render_input(f: &mut Frame, app: &App, area: Rect) {
                 Span::raw("  ")
             };
 
-            // Build wrapped visual rows for this logical line
-            let lw = unicode_width::UnicodeWidthStr::width(line);
-            let num_visual_rows = if lw == 0 {
-                1
-            } else {
-                lw.div_ceil(input_content_width)
-            };
+            // Where each visual row of this logical line starts and ends is
+            // decided by the shared helper, the same one click to place the
+            // caret and drag to copy use. The inline copy this replaced began
+            // every soft wrapped row one character early, so the character on
+            // the wrap boundary was drawn twice.
+            let line_rows = input_layout::visual_rows(line, input_content_width);
+            let num_visual_rows = line_rows.len();
 
             let (sel_from, sel_to) = sel_from_to.unwrap_or((usize::MAX, usize::MAX));
 
-            for vr in 0..num_visual_rows {
-                let chunk_start_display = vr * input_content_width;
-                let chunk_end_display = chunk_start_display + input_content_width;
-
-                // Find the byte range within `line` that fits this visual row
-                let mut disp_w = 0;
-                let mut char_start = 0;
-                let mut char_end = line.len();
-                for (idx, ch) in line.char_indices() {
-                    let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-                    if vr == 0 && disp_w + cw > chunk_end_display {
-                        char_end = idx;
-                        break;
-                    }
-                    if vr > 0 {
-                        if disp_w < chunk_start_display {
-                            char_start = idx;
-                        }
-                        if disp_w + cw > chunk_end_display {
-                            char_end = idx;
-                            break;
-                        }
-                    }
-                    disp_w += cw;
-                }
-
+            for (vr, &(char_start, char_end)) in line_rows.iter().enumerate() {
                 let chunk_text = &line[char_start..char_end];
                 let global_chunk_start = line_start + char_start;
                 let global_chunk_end = line_start + char_end;
@@ -595,6 +591,8 @@ pub(super) fn render_input(f: &mut Frame, app: &App, area: Rect) {
         .block(block);
 
     f.render_widget(input, area);
+
+    scroll_y
 }
 
 /// Sizing math for the slash-autocomplete dropdown.
@@ -1001,13 +999,11 @@ pub(super) fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
         .to_string();
 
     // --- Provider / model ---
-    // Read from the authoritative source: agent_service.session_providers.
-    // DB records (current_session.provider_name/model) can lag behind
-    // after sticky fallbacks or /models swaps. session_providers is always
-    // live and per-session isolated.
+    // One coherent pair (#2264): name and model must come from the same
+    // source. Reading them from the two separate getters mixes the chain's
+    // active fallback with the primary's stale pick after a sticky fallback.
     let (provider_str, model_str) = if let Some(ref session) = app.current_session {
-        let prov = app.agent_service.provider_name_for_session(session.id);
-        let model = app.agent_service.provider_model_for_session(session.id);
+        let (prov, model) = app.agent_service.provider_pair_for_session(session.id);
         let prefix = format!("{}/", prov);
         let stripped = model.strip_prefix(&prefix).unwrap_or(&model);
         (

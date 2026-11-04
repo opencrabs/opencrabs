@@ -41,7 +41,7 @@ fn accent_gold() -> Color {
 ///
 /// A list shorter than `max` returns the whole range, so short lists render
 /// exactly as they did before any windowing existed.
-pub(crate) fn visible_window(total: usize, selected: usize, max: usize) -> (usize, usize) {
+pub fn visible_window(total: usize, selected: usize, max: usize) -> (usize, usize) {
     if max == 0 || total <= max {
         return (0, total);
     }
@@ -623,17 +623,56 @@ fn render_more_below(f: &mut Frame, col_area: Rect, hidden: usize) {
     );
 }
 
-/// Render the WhatsApp QR code as a centered full-screen popup with white
-/// background and black foreground so the code is always scannable.
+/// Least terminal size that shows the whole pairing popup: the widest content
+/// line (instruction, QR row, or footer) inside two border columns, and the QR
+/// rows plus instruction, spacing and footer inside two border rows.
+pub(crate) fn whatsapp_qr_popup_size(qr_w: u16, qr_h: u16) -> (u16, u16) {
+    use unicode_width::UnicodeWidthStr;
+    const HINT: &str = " Open WhatsApp › Linked Devices › Link a Device ";
+    const FOOTER: &str = " Waiting for scan... ";
+    let content_w = qr_w
+        .saturating_add(4)
+        .max(HINT.width() as u16)
+        .max(FOOTER.width() as u16);
+    // instruction + blank + qr rows + blank + footer
+    let content_h = qr_h.saturating_add(4);
+    (content_w.saturating_add(2), content_h.saturating_add(2))
+}
+
+/// Render the WhatsApp QR code as a centered popup. The modules are drawn in
+/// the accent colour on the theme's `SurfaceQr`, which inverts a dark theme
+/// (light modules on dark) and stays standard on a light one.
 fn render_whatsapp_qr_popup(f: &mut Frame, qr_text: &str, area: Rect) {
     use unicode_width::UnicodeWidthStr;
     let qr_lines: Vec<&str> = qr_text.lines().collect();
     let qr_w = qr_lines.iter().map(|l| l.width()).max().unwrap_or(0) as u16;
     let qr_h = qr_lines.len() as u16;
 
-    // popup = QR + 2 border + 2 header rows (instruction + blank) + 1 footer
-    let popup_w = (qr_w + 4).min(area.width);
-    let popup_h = (qr_h + 5).min(area.height);
+    // The popup needs its border plus every content line. Below this, ratatui
+    // clips silently and the code becomes unscannable with no hint why, so the
+    // small terminal gets an honest message instead (#2246).
+    let (need_w, need_h) = whatsapp_qr_popup_size(qr_w, qr_h);
+    if area.width < need_w || area.height < need_h {
+        f.render_widget(ratatui::widgets::Clear, area);
+        let message = vec![
+            Line::from(Span::styled(
+                "Terminal too small for the WhatsApp QR code",
+                Style::default()
+                    .fg(theme::role(Role::AccentSoft))
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                format!("Needs at least {need_w} columns and {need_h} rows."),
+                Style::default().fg(theme::role(Role::Gray)),
+            )),
+        ];
+        f.render_widget(Paragraph::new(message).alignment(Alignment::Center), area);
+        return;
+    }
+
+    let popup_w = need_w;
+    let popup_h = need_h;
 
     let x = area.x + area.width.saturating_sub(popup_w) / 2;
     let y = area.y + area.height.saturating_sub(popup_h) / 2;
@@ -644,7 +683,8 @@ fn render_whatsapp_qr_popup(f: &mut Frame, qr_text: &str, area: Rect) {
         height: popup_h,
     };
 
-    // Build content lines — white block chars on dark bg (inverted QR, scannable by phone)
+    // Content lines. Modules are accent-on-SurfaceQr, so a dark theme renders
+    // them light-on-dark (inverted) and a light theme dark-on-light (standard).
     let qr_style = Style::default()
         .fg(theme::role(Role::AccentSoft))
         .bg(theme::role(Role::SurfaceQr));

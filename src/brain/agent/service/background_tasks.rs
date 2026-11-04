@@ -361,17 +361,16 @@ impl BackgroundTaskManager {
             // start created instead of announcing the outcome as a new
             // message.
             //
-            // #2218: and that row update IS the report for a surface that is
-            // drawing rows. Emitting it and then delivering anyway is what
-            // made one detached task report three times: the row, a separate
-            // "background task finished" message, and then a full agent turn
-            // because an idle session resumes on delivery. The turn cost a
-            // model call with tools attached, for a completion the user was
-            // already looking at. So the delivery below is now the FALLBACK:
-            // a task whose row is already gone (restart, no callback, a
-            // surface that draws no rows) still delivers, and only that case
-            // does.
-            let rendered = if let Some(cb) = this.progress_for(session_id, task_id) {
+            // #2266: the row update is cosmetic, the receipt is functional.
+            // #2218 made the delivery below a fallback that is skipped
+            // whenever a row callback exists, but every interactive surface
+            // registers one for as long as the turn's row lives, so the
+            // receipt became dead code in practice: the agent never learned
+            // the task finished, and the user became the polling layer. The
+            // row settles here AND the completion is delivered below, both
+            // every time. The turn that reports the outcome is the contract,
+            // not a duplicate.
+            if let Some(cb) = this.progress_for(session_id, task_id) {
                 cb(
                     session_id,
                     ProgressEvent::DetachedTaskFinished {
@@ -381,10 +380,7 @@ impl BackgroundTaskManager {
                         elapsed_secs,
                     },
                 );
-                true
-            } else {
-                false
-            };
+            }
             this.mark_finished_by_id(session_id, task_id);
             if let Some(hook) = hook {
                 // A hook replaces the generic delivery entirely (#1748): the
@@ -396,14 +392,6 @@ impl BackgroundTaskManager {
                     elapsed_secs,
                 })
                 .await;
-                return;
-            }
-            if rendered {
-                tracing::debug!(
-                    target: "background_task",
-                    "Background task '{label}' for session {session_id} settled on its row; \
-                     not delivering a second report"
-                );
                 return;
             }
             // Deliver through the ONE gated route (fork #19): the same

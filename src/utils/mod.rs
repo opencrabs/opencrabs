@@ -2,10 +2,12 @@
 
 pub mod approval;
 pub mod command_label;
+pub mod completion_sound;
 pub(crate) mod config_reload_reason;
 pub mod config_watcher;
 pub mod cwd;
 pub mod directives;
+pub mod dock_icon;
 pub mod drop_agent;
 pub mod drop_landing;
 pub mod drop_transfer;
@@ -15,6 +17,7 @@ pub mod file_extract;
 pub mod git_branch;
 pub mod image;
 pub mod install;
+pub mod last_session;
 pub mod long_command;
 pub mod model_match;
 pub mod pdf_vision;

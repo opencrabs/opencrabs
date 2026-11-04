@@ -1070,6 +1070,9 @@ pub(crate) fn compiled_features() -> Vec<&'static str> {
     if cfg!(feature = "local-tts") {
         out.push("local-tts");
     }
+    if cfg!(feature = "notification-sound") {
+        out.push("notification-sound");
+    }
     if cfg!(feature = "browser") {
         out.push("browser");
     }
@@ -1087,6 +1090,9 @@ pub(crate) fn compiled_features() -> Vec<&'static str> {
     }
     if cfg!(feature = "eval") {
         out.push("eval");
+    }
+    if cfg!(feature = "gui") {
+        out.push("gui");
     }
     out
 }

@@ -10,6 +10,7 @@
 //! not a hand-built fixture, so a table edit that drops a cache rate fails here
 //! instead of silently inventing one at runtime.
 
+use crate::ui_core::usage::view_model::UsageViewModel;
 use crate::usage::cards;
 use crate::usage::data::{CacheStats, ModelCacheStat};
 use crate::usage::pricing::{
@@ -290,15 +291,27 @@ fn render_text(width: u16, height: u16, draw: impl FnOnce(&mut ratatui::Frame, R
         .collect()
 }
 
+/// Wrap raw cache data in a `DashboardData` and build the shared view
+/// model, the way `dashboard::render` does before drawing.
+fn view_with_cache(cache: Option<CacheStats>) -> crate::ui_core::usage::view_model::UsageViewModel {
+    UsageViewModel::build(
+        &crate::usage::data::DashboardData {
+            cache,
+            ..Default::default()
+        },
+        crate::usage::data::Period::AllTime,
+    )
+}
+
 /// The overlay shows the cached token volume and the money the cache saved,
 /// per model, under a TOTAL row. The money columns come from
 /// [`CacheCost::compute`] (pinned by the tests above): read $0.423, full-rate
 /// $2.12, saved $1.69.
 #[test]
 fn breakdown_overlay_shows_cached_tokens_and_saved_money() {
-    let cache = Some(breakdown_cache());
+    let view = view_with_cache(Some(breakdown_cache()));
     let text = render_text(100, 30, |f, area| {
-        cards::render_cache_breakdown(f, &cache, area)
+        cards::render_cache_breakdown(f, view.cache.as_ref(), area)
     });
 
     assert!(text.contains("Cache Efficiency: prices"), "title:\n{text}");
@@ -316,9 +329,9 @@ fn breakdown_overlay_shows_cached_tokens_and_saved_money() {
 /// Without cache data the overlay says so instead of drawing an empty table.
 #[test]
 fn breakdown_overlay_says_so_when_there_is_no_cache_data() {
-    let empty = Some(CacheStats::default());
+    let view = view_with_cache(Some(CacheStats::default()));
     let text = render_text(100, 30, |f, area| {
-        cards::render_cache_breakdown(f, &empty, area)
+        cards::render_cache_breakdown(f, view.cache.as_ref(), area)
     });
     assert!(text.contains("No cache data"), "empty overlay:\n{text}");
 }
@@ -327,7 +340,8 @@ fn breakdown_overlay_says_so_when_there_is_no_cache_data() {
 /// leaves the user on the dashboard.
 #[test]
 fn enter_opens_the_prices_and_esc_closes_them() {
-    use crate::usage::dashboard::{CACHE_CARD, DashboardState, UsageKeyOutcome, decide};
+    use crate::ui_core::usage::input::CACHE_CARD;
+    use crate::usage::dashboard::{DashboardState, UsageKeyOutcome, decide};
 
     let press = |code| KeyEvent::new(code, KeyModifiers::NONE);
     let mut state = DashboardState {
@@ -353,7 +367,7 @@ fn enter_opens_the_prices_and_esc_closes_them() {
 #[test]
 fn dashboard_draws_the_breakdown_over_the_grid_and_footer_stays() {
     let mut state = crate::usage::dashboard::DashboardState {
-        focused_card: crate::usage::dashboard::CACHE_CARD,
+        focused_card: crate::ui_core::usage::input::CACHE_CARD,
         cache_detail_open: true,
         ..crate::usage::dashboard::DashboardState::default()
     };

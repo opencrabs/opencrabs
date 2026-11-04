@@ -180,6 +180,20 @@ pub enum ProgressEvent {
     /// option as ghost text in the input (Tab fills it) and several as a
     /// pick-list; accepting fills the input as editable text, never submits.
     SuggestedOptions(Vec<crate::brain::tools::suggest_options::SuggestionItem>),
+    /// A live plan reached 100% at turn settle (#2255).
+    ///
+    /// Emitted by the surface-agnostic settle hook immediately before the
+    /// plan archives, so every surface learns the fact at the same moment
+    /// instead of the fact being TUI-only knowledge. `tasks` is the number
+    /// of resolved tasks the plan closed with, `title` names what finished.
+    /// The TUI plays the opt-in completion sound on it; no other surface
+    /// has to react.
+    PlanCompleted {
+        /// Plan title, empty when the plan never carried one.
+        title: String,
+        /// Number of resolved tasks at completion.
+        tasks: usize,
+    },
 }
 
 /// Callback for reporting progress during agent execution.

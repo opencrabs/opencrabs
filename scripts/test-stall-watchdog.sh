@@ -73,6 +73,34 @@ kill_tree() {
 log="$(mktemp "${TMPDIR:-/tmp}/stall-watchdog.XXXXXX")"
 trap 'rm -f "$log"' EXIT
 
+# A killed run must not take its own evidence with it. When a job is
+# reclaimed or cancelled, the runner sends SIGTERM to the step; bash then
+# fires the EXIT trap above, deletes the buffer, and dies from the signal
+# before the `cat "$log"` at the bottom can print anything. The job log is
+# left holding the start line, an empty middle, and exit 143, so the killer
+# can never be identified from the evidence (2026-10-25 9m19s, 2026-10-27
+# 8m08s, 2026-10-28 7m37s, all on Test (Linux), zero test output each time).
+# Dump whatever the command produced so far, then take its subtree with us
+# instead of leaving an orphaned compile behind.
+on_signal() {
+  local sig="$1" code="$2"
+  echo "::error::test-stall-watchdog: received SIG${sig} from outside; dumping the buffered command output before exit."
+  echo "test-stall-watchdog: SIG${sig} received for '${cmd_pid:-no command yet}', partial output follows."
+  if [ -s "$log" ]; then
+    echo "----- buffered output so far (partial, SIG${sig}) -----"
+    cat "$log"
+    echo "----- end buffered output (partial, SIG${sig}) -----"
+  else
+    echo "----- buffer was empty when SIG${sig} arrived -----"
+  fi
+  if [ -n "${cmd_pid:-}" ]; then
+    kill_tree "$cmd_pid"
+  fi
+  exit "$code"
+}
+trap 'on_signal TERM 143' TERM
+trap 'on_signal INT 130' INT
+
 count_lines() { wc -l < "$log" | tr -d '[:space:]'; }
 # A result line is a completed test; libtest prints one per test even with
 # output captured. It is the only progress signal that proves the threadpool

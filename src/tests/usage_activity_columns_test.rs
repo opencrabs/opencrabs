@@ -9,16 +9,27 @@
 //! The fix: each column width is `max(header_label, widest_data)` so
 //! the line fits regardless of which side is wider.
 
+use crate::ui_core::usage::view_model::{ActivityRow, UsageViewModel};
 use crate::usage::cards::{ActivityColumnWidths, activity_column_widths};
-use crate::usage::data::ActivityStats;
+use crate::usage::data::{ActivityStats, DashboardData, Period};
 
-fn act(category: &str, cost: f64, turns: i64, one_shot_pct: f64) -> ActivityStats {
-    ActivityStats {
-        category: category.to_string(),
-        cost,
-        turns,
-        one_shot_pct,
-    }
+/// One fixture row, built through the real view-model pipeline so the
+/// width math is exercised on exactly what the renderer will draw.
+fn act(category: &str, cost: f64, turns: i64, one_shot_pct: f64) -> ActivityRow {
+    UsageViewModel::build(
+        &DashboardData {
+            activities: vec![ActivityStats {
+                category: category.to_string(),
+                cost,
+                turns,
+                one_shot_pct,
+            }],
+            ..Default::default()
+        },
+        Period::AllTime,
+    )
+    .activities
+    .remove(0)
 }
 
 #[test]

@@ -65,10 +65,10 @@ flowchart TB
     PROV --> RATELIMIT[Rate Limit Handler]
     RATELIMIT --> WALKCHAIN[Walk fallback chain]
     PROV --> STREAMERR[Stream Error Handler]
-    STREAMERR --> RETRY3[Retry 3x with backoff]
-    RETRY3 --> WALKCHAIN
+    STREAMERR --> RETRY5[Retry 5x with backoff]
+    RETRY5 --> WALKCHAIN
     PROV --> STREAMDROP[Stream Drop Handler]
-    STREAMDROP --> DROPRETRY[Retry 2x then fallback]
+    STREAMDROP --> DROPRETRY[Retry 5x then fallback]
     PROV --> ROTCONT[Rotation Continuation]
     ROTCONT --> INJECTCONT[Inject continuation prompt]
     PROV --> SWAPEVENT[Sticky Fallback Swap]
@@ -193,9 +193,9 @@ flowchart TD
     BUILD --> STREAM[Provider stream]
     STREAM --> |success|PARSE[Parse Response]
     STREAM --> |rate limit|RATE[Walk Fallback Chain]
-    STREAM --> |stream error|SRETRY[Retry 3x then Fallback]
+    STREAM --> |stream error|SRETRY[Retry 5x then Fallback]
     STREAM --> |prompt too long|EMERG[Emergency Compaction]
-    STREAM --> |drop|DRETRY[Retry 2x then Fallback]
+    STREAM --> |drop|DRETRY[Retry 5x then Fallback]
     STREAM --> |repetition|CANCEL[Cancel and Retry]
     RATE --> PARSE
     SRETRY --> PARSE

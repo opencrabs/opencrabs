@@ -47,6 +47,10 @@ pub struct Config {
     #[serde(default)]
     pub debug: DebugConfig,
 
+    /// Desktop window settings (`[gui]`), separate from the TUI's own theme
+    #[serde(default)]
+    pub gui: GuiConfig,
+
     /// LLM provider configurations
     #[serde(default)]
     pub providers: ProviderConfigs,
@@ -1667,6 +1671,14 @@ pub struct AgentConfig {
     #[serde(default)]
     pub plan_worker_allow_write: bool,
 
+    /// Play a short notification sound when a plan reaches 100% at turn
+    /// settle (#2255). Default FALSE: an agent that chirps unasked is
+    /// noise, so this is opt-in. Only the WAV at
+    /// `src/assets/sound/notification.wav` is used, only the TUI plays
+    /// it, and no desktop notification or toast is ever raised.
+    #[serde(default)]
+    pub completion_notification_enabled: bool,
+
     /// Auto-install new releases on startup without prompting (default: true).
     /// When false, the user is shown an update prompt dialog instead.
     #[serde(default = "default_auto_update")]
@@ -2074,6 +2086,7 @@ impl Default for AgentConfig {
             plan_require_approval: default_plan_require_approval(),
             plan_worker_allow_nested: false,
             plan_worker_allow_write: false,
+            completion_notification_enabled: false,
             auto_update: default_auto_update(),
             evolve_allow_root: default_evolve_allow_root(),
             session_notify_enabled: false,
@@ -2532,6 +2545,25 @@ impl MemoryConfig {
     }
 }
 
+/// Desktop window options (`[gui]`). Each key names a theme, built-in or user.
+/// Unset keys use the window's own defaults: the built-in dark palette and
+/// Alucard for light.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct GuiConfig {
+    /// Theme while the system is dark. Unset means the built-in dark palette.
+    #[serde(default)]
+    pub dark_theme: Option<String>,
+
+    /// Theme while the system is light. Unset means Alucard.
+    #[serde(default)]
+    pub light_theme: Option<String>,
+
+    /// Where the topic tab row sits: `top`, `left`, `bottom` or `right`.
+    /// Unset or unknown means top.
+    #[serde(default)]
+    pub topic_tabs: Option<String>,
+}
+
 /// Debug configuration options
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DebugConfig {
@@ -2542,6 +2574,12 @@ pub struct DebugConfig {
     /// Enable profiling
     #[serde(default)]
     pub profiling: bool,
+
+    /// Write per-keystroke detail to the desktop window's log
+    /// (`~/.opencrabs/logs/opencrabs-gui.log`). The `OPENCRABS_GUI_DEBUG`
+    /// environment variable forces it on regardless of this value.
+    #[serde(default)]
+    pub gui_debug_logs: bool,
 }
 
 /// LLM Provider configurations
@@ -3435,6 +3473,7 @@ impl Default for Config {
                 file: None,
             },
             debug: DebugConfig::default(),
+            gui: GuiConfig::default(),
             tui: TuiConfig::default(),
             providers: ProviderConfigs::default(),
             channels: ChannelsConfig::default(),

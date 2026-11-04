@@ -13,7 +13,9 @@ use ratatui::style::Color;
 
 use super::{SourcePalette, mix};
 use crate::tui::render::theme::Role;
-use crate::tui::render::user_themes::{CONTRAST_FLOOR, CONTRAST_PAIRS, build_theme, contrast};
+use crate::tui::render::user_themes::{
+    CONTRAST_FLOOR, build_theme, contrast, contrast_pairs_for, is_light_canvas,
+};
 
 /// Convert an alacritty-theme TOML document into OpenCrabs user-theme TOML.
 /// `provenance` is embedded as a `# source:` comment header (free-form,
@@ -43,7 +45,7 @@ pub fn convert_opencode_json(
 /// Shared tail of both conversions.
 fn convert(name: &str, pal: &SourcePalette, provenance: &str) -> Result<String, String> {
     let mut roles = map_roles(pal);
-    repair_contrast(&mut roles)?;
+    repair_contrast(&mut roles, pal.bg)?;
     let text = emit(provenance, &roles, pal.bg);
     // Certify under a shadow stem: once the pack ships as built-ins,
     // `build_theme(name, ...)` would reject the pack's own names as
@@ -56,35 +58,123 @@ fn convert(name: &str, pal: &SourcePalette, provenance: &str) -> Result<String, 
     Ok(text)
 }
 
+/// The colour on the `bg -> fg` ramp that just clears `target`:1, found by
+/// bisecting the blend. A fixed fraction of the foreground is what a dark
+/// palette can afford; on a light canvas the same fraction is mud (15% of a
+/// dark foreground is a mid grey, not a readable tier), so the reading tiers
+/// of a light source are solved for their floor instead (#2492). Returns
+/// `fg` when the palette holds nothing stronger, and the repair step below
+/// reports that rather than hiding it.
+fn tier_at_contrast(bg: Color, fg: Color, target: f64) -> Color {
+    if contrast(fg, bg) <= target {
+        return fg;
+    }
+    let (mut lo, mut hi) = (0.0_f64, 1.0_f64);
+    for _ in 0..24 {
+        let mid = (lo + hi) / 2.0;
+        if contrast(mix(bg, fg, mid), bg) < target {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    // `mix` rounds to 8-bit, so the bisection point can land a hundredth
+    // under the floor. Walk forward until the emitted colour clears it.
+    let mut t = hi;
+    while t < 1.0 && contrast(mix(bg, fg, t), bg) < target {
+        t = (t + 0.002_f64).min(1.0);
+    }
+    mix(bg, fg, t)
+}
+
+/// The nearest colour to `from`, walking toward `target`, that clears
+/// `floor` against `bg`. `tier_at_contrast` answers a different question:
+/// it starts at the canvas and returns the palest value that still reads,
+/// which is right for deriving a dim tier and wrong for repairing a colour
+/// the palette already chose. Repairing `accent` that way turned a saturated
+/// orange into a pale grey (#2492). This keeps the hue and moves it only as
+/// far as the floor demands, returning `target` when the palette cannot.
+fn push_clear(bg: Color, from: Color, target: Color, floor: f64) -> Color {
+    if contrast(from, bg) >= floor {
+        return from;
+    }
+    let (mut lo, mut hi) = (0.0_f64, 1.0_f64);
+    for _ in 0..24 {
+        let mid = (lo + hi) / 2.0;
+        if contrast(mix(from, target, mid), bg) < floor {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    let mut t = hi;
+    while t < 1.0 && contrast(mix(from, target, t), bg) < floor {
+        t = (t + 0.002_f64).min(1.0);
+    }
+    mix(from, target, t)
+}
+
 /// The fixed mapping, in canonical emission order (the field order of the
 /// `UserThemeFile` schema). `mix(a, b, t)` blends toward `b`, so the gray
 /// ladder is bg(0.0) -> fg(1.0) and dimmed texts are fg -> bg. Semantic
 /// tokens from richer sources (opencode) win over ANSI-slot fallbacks.
+///
+/// A dark canvas keeps every fraction below byte for byte. A light canvas
+/// solves the reading tiers for their floor instead: the fractions that read
+/// as quiet on a dark background vanish on a light one, and the resulting
+/// theme has to certify against the light floors anyway.
 fn map_roles(p: &SourcePalette) -> [(Role, Color); 43] {
     use Role::*;
+    let light = is_light_canvas(p.bg);
+    let tier = |floor: f64| -> Option<Color> { light.then(|| tier_at_contrast(p.bg, p.fg, floor)) };
+    // `accent_soft` is drawn as text (onboarding, selection foreground) but
+    // maps from `bright_white`, which on a light source is a near-white
+    // plate. Re-derive it from the accent when the accent can carry body
+    // text contrast, otherwise from the primary ink.
+    let accent_soft = if light && contrast(p.bright_white, p.bg) < CONTRAST_FLOOR {
+        let tint = p
+            .accent
+            .filter(|a| contrast(*a, p.bg) >= 3.5)
+            .unwrap_or(p.fg);
+        tier_at_contrast(p.bg, tint, 4.5)
+    } else {
+        p.bright_white
+    };
     [
         (Accent, p.accent.unwrap_or(p.bright_yellow)),
         (AccentTeal, p.cyan),
-        (AccentSoft, p.bright_white),
+        (AccentSoft, accent_soft),
         (TextPrimary, p.fg),
         (
             TextSecondary,
-            p.muted.unwrap_or_else(|| mix(p.fg, p.bg, 0.85)),
+            tier(4.5).unwrap_or_else(|| p.muted.unwrap_or_else(|| mix(p.fg, p.bg, 0.85))),
         ),
-        (TextMuted, mix(p.fg, p.bg, 0.62)),
-        (TextDim, mix(p.fg, p.bg, 0.42)),
+        (
+            TextMuted,
+            tier(4.0).unwrap_or_else(|| mix(p.fg, p.bg, 0.62)),
+        ),
+        (TextDim, tier(3.5).unwrap_or_else(|| mix(p.fg, p.bg, 0.42))),
         (Gray, p.border.unwrap_or_else(|| mix(p.bg, p.fg, 0.75))),
         (GrayMid, mix(p.bg, p.fg, 0.58)),
-        (GrayDetail, mix(p.bg, p.fg, 0.52)),
-        (GrayDim, mix(p.bg, p.fg, 0.42)),
+        (
+            GrayDetail,
+            tier(3.5).unwrap_or_else(|| mix(p.bg, p.fg, 0.52)),
+        ),
+        (
+            GrayDim,
+            tier(CONTRAST_FLOOR).unwrap_or_else(|| mix(p.bg, p.fg, 0.42)),
+        ),
         (GrayDark, mix(p.bg, p.fg, 0.32)),
         (
             GrayBase,
             p.border_subtle.unwrap_or_else(|| mix(p.bg, p.fg, 0.22)),
         ),
         (GrayLight, mix(p.bg, p.fg, 0.85)),
-        (GraySoft, mix(p.bg, p.fg, 0.68)),
-        (GrayMuted, mix(p.bg, p.fg, 0.50)),
+        (GraySoft, tier(4.5).unwrap_or_else(|| mix(p.bg, p.fg, 0.68))),
+        (
+            GrayMuted,
+            tier(4.0).unwrap_or_else(|| mix(p.bg, p.fg, 0.50)),
+        ),
         (Success, p.green),
         (AnalyticsGreen, p.bright_green),
         (GreenCheck, p.bright_green),
@@ -126,36 +216,47 @@ fn map_roles(p: &SourcePalette) -> [(Role, Color); 43] {
     ]
 }
 
-/// Enforce the validator's contrast floor up front: for each of the 8
-/// [`CONTRAST_PAIRS`], nudge the foreground role toward whichever extreme
+/// Enforce the validator's floors up front, pair by pair. A dark canvas uses
+/// the historical ladder: nudge the foreground toward whichever extreme
 /// (white or black) contrasts better against its pair background, in 10%
-/// steps, capped at 24 (asymptotic: reaches ~92% of the way to the
-/// extreme). Because white-vs-black is 21:1, at least one extreme always
-/// clears the 2.5:1 floor against any background, so the error path is a
-/// belt-and-braces invariant guard rather than a reachable failure for
-/// real sources. Each fg role appears in exactly one pair, and no role is
-/// both an fg and a bg across pairs, so sequential repair cannot undo an
-/// earlier pair.
-fn repair_contrast(roles: &mut [(Role, Color); 43]) -> Result<(), String> {
+/// steps, capped at 24 (asymptotic: reaches ~92% of the way to the extreme).
+/// Because white-vs-black is 21:1, at least one extreme always clears the
+/// 2.5:1 floor against any background, so the error path is a belt-and-braces
+/// invariant guard rather than a reachable failure for real sources.
+///
+/// A light canvas repairs the same way but solves for the pair's own floor
+/// instead of stepping: those floors run 2.5:1 to 4.5:1 and a 10% ladder
+/// would need dozens of passes to crawl there. Each fg role appears in
+/// exactly one pair, and no role is both an fg and a bg across pairs, so
+/// sequential repair cannot undo an earlier pair.
+fn repair_contrast(roles: &mut [(Role, Color); 43], canvas: Color) -> Result<(), String> {
     const WHITE: Color = Color::Rgb(255, 255, 255);
     const BLACK: Color = Color::Rgb(0, 0, 0);
-    for &(fg_role, bg_role) in CONTRAST_PAIRS.iter() {
+    let light = is_light_canvas(canvas);
+    for (fg_role, bg_role, floor) in contrast_pairs_for(canvas) {
         let bg = lookup(roles, bg_role);
-        let mut steps = 0;
-        while contrast(lookup(roles, fg_role), bg) < CONTRAST_FLOOR && steps < 24 {
+        let target = if contrast(WHITE, bg) >= contrast(BLACK, bg) {
+            WHITE
+        } else {
+            BLACK
+        };
+        if light {
             let cur = lookup(roles, fg_role);
-            let target = if contrast(WHITE, bg) >= contrast(BLACK, bg) {
-                WHITE
-            } else {
-                BLACK
-            };
-            set(roles, fg_role, mix(cur, target, 0.10));
-            steps += 1;
+            if contrast(cur, bg) < floor {
+                set(roles, fg_role, push_clear(bg, cur, target, floor));
+            }
+        } else {
+            let mut steps = 0;
+            while contrast(lookup(roles, fg_role), bg) < floor && steps < 24 {
+                let cur = lookup(roles, fg_role);
+                set(roles, fg_role, mix(cur, target, 0.10));
+                steps += 1;
+            }
         }
         let ratio = contrast(lookup(roles, fg_role), bg);
-        if ratio < CONTRAST_FLOOR {
+        if ratio < floor {
             return Err(format!(
-                "contrast repair failed for {} on {} ({ratio:.2}:1 < {CONTRAST_FLOOR:.1}:1)",
+                "contrast repair failed for {} on {} ({ratio:.2}:1 < {floor:.1}:1)",
                 key_of(fg_role),
                 key_of(bg_role),
             ));

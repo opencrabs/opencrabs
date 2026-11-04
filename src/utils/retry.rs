@@ -50,6 +50,26 @@ impl Default for RetryConfig {
     }
 }
 
+/// In-place attempts a provider call gets before its caller walks the fallback
+/// chain: the initial send plus `max_attempts` retries of the default ladder
+/// (5 sends today).
+///
+/// User-facing retry counts derive from this instead of hardcoding a number: an
+/// alert claimed "retried 3x in-place" long after the budget had moved on, and on
+/// a path that retried zero times (#2270).
+pub fn in_place_attempt_budget() -> u32 {
+    RetryConfig::default().max_attempts + 1
+}
+
+/// The retry notice's label for one upcoming send: `Retry attempt N of M`,
+/// counting the initial send, so it matches the send budget and not the retry
+/// count (#2284). It keeps the `Retry ` prefix: Telegram keys its in-place
+/// replacement of retry lines on that prefix. `retry` is the 1-based retry the
+/// notice reports, `max_retries` the retry ceiling it carries.
+pub fn send_label(retry: u32, max_retries: u32) -> String {
+    format!("Retry attempt {} of {}", retry + 1, max_retries + 1)
+}
+
 impl RetryConfig {
     /// Create database-optimized config (high frequency, low latency, deterministic)
     pub fn database() -> Self {

@@ -39,6 +39,18 @@ pub(crate) type TuiTerminal = Terminal<CrosstermBackend<CaptureWriter<io::Stdout
 /// first frame under `opencrabs::tui::` so the caller widget is named.
 static LAST_PANIC_LOCATION: LazyLock<Mutex<Option<PanicInfo>>> = LazyLock::new(|| Mutex::new(None));
 
+/// Set whenever something hands the terminal back to the shell, and cleared
+/// once the loop has taken it back (#2238).
+///
+/// `force_restore_terminal` is called from the process-wide panic hook, so it
+/// fires for panics that do NOT end the process: a render panic swallowed by
+/// `catch_unwind`, and any panic inside a `tokio::spawn`ed task (tokio catches
+/// those and the loop keeps running). In both cases the terminal is left in
+/// canonical mode while the TUI keeps drawing, which is what makes typed text
+/// echo into the status bar row with only Enter reaching the app. The flag is
+/// how the loop notices and reclaims before the next frame.
+static TERMINAL_RELEASED: AtomicBool = AtomicBool::new(false);
+
 #[derive(Clone)]
 struct PanicInfo {
     file: String,
@@ -92,7 +104,12 @@ fn first_opencrabs_frame(bt: &std::backtrace::Backtrace) -> Option<String> {
 }
 
 /// Force-restore terminal state. Safe to call from signal handlers and panic hooks.
+///
+/// Also arms [`TERMINAL_RELEASED`], because most callers do not end the
+/// process: the panic hook runs for caught panics and for panics inside
+/// spawned tasks, and the loop must reclaim the terminal afterwards (#2238).
 pub(crate) fn force_restore_terminal() {
+    TERMINAL_RELEASED.store(true, Ordering::SeqCst);
     let _ = disable_raw_mode();
     let _ = restore_to(&mut io::stdout());
 }
@@ -113,12 +130,20 @@ pub(crate) fn restore_to<W: std::io::Write>(w: &mut W) -> std::io::Result<()> {
     execute!(w, crossterm::cursor::Show)
 }
 
-/// Re-establish TUI terminal ownership after an editor handoff (#1744) gave
-/// the real tty to a full-screen child. Mirrors the `run()` startup sequence:
-/// raw mode, alternate screen, paste/focus/mouse capture, kitty flags — then
-/// drains leftover keystrokes so editor escape bytes don't leak into the
-/// input buffer, and clears for a full repaint.
-pub(crate) fn reinit_terminal_for_editor(terminal: &mut TuiTerminal) -> Result<()> {
+/// Take terminal ownership back from whatever released it: raw mode, alternate
+/// screen, paste/focus/mouse capture, kitty flags, then drain stale events and
+/// clear for a full repaint.
+///
+/// Two callers, one sequence, because both are recovering a terminal that was
+/// handed back mid-session and neither may drift from the other:
+///
+/// - the editor handoff (#1744), where a full-screen child took the real tty;
+/// - the caught render-panic arm (#2238), where the panic hook's
+///   `force_restore_terminal()` runs *before* `catch_unwind` delivers the panic,
+///   so the loop resumes with raw mode off and only re-entering here puts it
+///   back. Without it, the terminal echoes keystrokes into the status bar and
+///   delivers nothing but whole lines.
+pub(crate) fn reclaim_terminal(terminal: &mut TuiTerminal) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(
@@ -136,11 +161,26 @@ pub(crate) fn reinit_terminal_for_editor(terminal: &mut TuiTerminal) -> Result<(
         let _ = crossterm::event::read();
     }
     terminal.clear()?;
+    // Ownership is back: the loop must not reclaim again for this release.
+    TERMINAL_RELEASED.store(false, Ordering::SeqCst);
     Ok(())
+}
+
+/// Re-establish TUI terminal ownership after an editor handoff (#1744) gave
+/// the real tty to a full-screen child. Mirrors the `run()` startup sequence;
+/// the drain step is what keeps editor escape bytes out of the input buffer.
+pub(crate) fn reinit_terminal_for_editor(terminal: &mut TuiTerminal) -> Result<()> {
+    reclaim_terminal(terminal)
 }
 
 /// Run the TUI application
 pub async fn run(mut app: App) -> Result<()> {
+    // Give the process a Dock tile holding the crab (#2280). A TUI run as
+    // a bare binary has no bundle for macOS to read an icon from, so the
+    // icon was missing from the Dock entirely. No-op off macOS, and
+    // skippable with OPENCRABS_NO_DOCK_ICON=1.
+    crate::utils::dock_icon::install();
+
     // Boot-time theme apply (#1364 commit D): read the active config and
     // activate the named preset before the first render. `None` / empty /
     // unknown name falls through to CRAB_DARK (byte-identical default).
@@ -295,6 +335,11 @@ pub async fn run(mut app: App) -> Result<()> {
         let _ = crossterm::event::read();
     }
 
+    // Startup ran `force_restore_terminal()` (#1964) to clear a predecessor's
+    // DECSET modes, which arms TERMINAL_RELEASED. The terminal is ours again
+    // from here, so disarm it before the loop starts checking (#2238).
+    TERMINAL_RELEASED.store(false, Ordering::SeqCst);
+
     // Fast sync init: decide mode and arm the header card. If we're going
     // to Chat, draw a first frame immediately so the user sees the header
     // card + empty chat + input *before* the blocking session load runs.
@@ -344,6 +389,26 @@ async fn run_loop(
         // but this catches the race where the flag is set before exit)
         if sigint_flag.load(Ordering::SeqCst) {
             break;
+        }
+
+        // #2238: take the terminal back if anything released it under us.
+        // The panic hook is process-wide, so a panic inside a spawned task
+        // (tokio catches those, the loop keeps running) restores the terminal
+        // exactly like a real crash would: raw mode off, out of the alternate
+        // screen, cursor wherever the restore left it. Without this the
+        // session stays in canonical mode and every keystroke is echoed by the
+        // line discipline into the status bar row instead of the input box.
+        if TERMINAL_RELEASED.load(Ordering::SeqCst) {
+            tracing::warn!("[TUI] terminal was released mid-session (panic hook); reclaiming");
+            match reclaim_terminal(terminal) {
+                Ok(()) => {
+                    // The reclaim re-enables mouse capture unconditionally.
+                    mouse_capture_applied = true;
+                }
+                Err(e) => {
+                    tracing::error!("[TUI] terminal reclaim failed: {}", e);
+                }
+            }
         }
 
         // Sync mouse-capture state if the user toggled it via F12.
@@ -457,8 +522,21 @@ async fn run_loop(
                 // corruption source.
                 super::capture::dump_tail_to_log("before caught render panic");
                 app.error_message = Some(format!("render panic{}{}: {}", loc, caller, msg));
-                // Try to recover the terminal state for the next frame.
-                let _ = terminal.clear();
+                // #2238: the panic hook already ran `force_restore_terminal()`
+                // before `catch_unwind` handed us the payload, so the terminal
+                // is back to canonical mode and out of the alternate screen.
+                // Surviving the panic means the loop keeps drawing, so the
+                // terminal has to be reclaimed here. A bare `clear()` used to
+                // stand in for this and recovered nothing: keystrokes were then
+                // echoed by the line discipline into the status bar row and only
+                // whole lines reached the app.
+                if let Err(e) = reclaim_terminal(terminal) {
+                    tracing::error!("[TUI] terminal reclaim after render panic failed: {}", e);
+                }
+                // The reclaim re-enables mouse capture unconditionally, so the
+                // sync block at the top of the loop must know the applied state
+                // is "on" and toggle it back if the user disabled it with F12.
+                mouse_capture_applied = true;
             }
         }
 

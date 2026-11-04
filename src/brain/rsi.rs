@@ -212,9 +212,10 @@ pub async fn write_startup_digest(pool: crate::db::Pool) {
                  (filter: >=5 events, <80% success rate, sentinel dimensions excluded)\n\n"
             ));
             out.push_str(
-                "_Note: `recoverable_failure` and `discovery_miss` are classified separately \
-                 and excluded from the success-rate denominator by design (#236). The raw count \
-                 above is the total, not the filtered opportunity surface._\n\n",
+                "_Note: `recoverable_failure`, `gate_denied` and `discovery_miss` are \
+                 classified separately and excluded from the success-rate denominator by \
+                 design (#236, #2251). The raw count above is the total, not the filtered \
+                 opportunity surface._\n\n",
             );
         }
     }

@@ -8,6 +8,14 @@
 //! not compile until both packs exist. `utils::prompt_analyzer` used to carry
 //! its own copy of the list with its own detection function, kept in step by
 //! hand (#2226).
+//!
+//! Test builds carry a traversal counter ([`scan_counters`]) so the phantom
+//! detectors can assert their work shape: the scan cost must scale with the
+//! number of packs, never with the length of the narration. A wall-clock
+//! assertion cannot do that job here, because the CI runner is the same Mac
+//! that hosts interactive sessions and any millisecond budget flakes under
+//! that contention. Counting pack traversals is deterministic and catches the
+//! change that actually matters, an input-proportional scan.
 
 use serde::Deserialize;
 use std::sync::LazyLock;
@@ -255,7 +263,46 @@ impl Lang {
 /// collision-free; the short single-word `action_verbs` are not, which is why
 /// they stay gated to the detected language. 2026-06-12.
 pub fn all_langs() -> [&'static LangConfig; 8] {
+    #[cfg(test)]
+    scan_counters::bump();
     Lang::ALL.map(Lang::pack)
+}
+
+/// Test-only instrumentation for the phantom scan work shape (#2245).
+///
+/// Every phantom detector reads its tables across all packs, so one scan of a
+/// narration costs one traversal of this list per pack. The work is therefore
+/// proportional to the pack count and must stay independent of how long the
+/// narration is. `phantom_scan_shape_test` asserts exactly that by resetting
+/// this counter, running the same detector over inputs of growing length, and
+/// requiring an identical traversal count.
+///
+/// Thread-local rather than global: `cargo test` runs tests in parallel on the
+/// same binary, and a shared counter would let one test observe another's
+/// traversals. The whole module is behind `#[cfg(test)]`, so a release build
+/// carries no counter and no atomic.
+#[cfg(test)]
+pub(crate) mod scan_counters {
+    use std::cell::Cell;
+
+    thread_local! {
+        static PACK_TRAVERSALS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Zero the counter for the current test thread.
+    pub(crate) fn reset() {
+        PACK_TRAVERSALS.with(|count| count.set(0));
+    }
+
+    /// Pack traversals recorded on this thread since the last [`reset`].
+    pub(crate) fn traversals() -> usize {
+        PACK_TRAVERSALS.with(Cell::get)
+    }
+
+    /// Record one traversal of the pack list.
+    pub(crate) fn bump() {
+        PACK_TRAVERSALS.with(|count| count.set(count.get() + 1));
+    }
 }
 
 #[cfg(test)]

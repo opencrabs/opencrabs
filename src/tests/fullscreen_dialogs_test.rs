@@ -572,6 +572,7 @@ struct SessionsProbe {
     renaming: bool,
     searching: bool,
     panes: usize,
+    favorites: usize,
 }
 
 fn probe(app: &App) -> SessionsProbe {
@@ -582,6 +583,7 @@ fn probe(app: &App) -> SessionsProbe {
         renaming: app.session_renaming,
         searching: app.session_search_active,
         panes: app.pane_manager.panes.len(),
+        favorites: app.session_favorites.len(),
     }
 }
 

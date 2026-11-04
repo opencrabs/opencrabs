@@ -8,22 +8,22 @@ use crate::brain::agent::service::clear::ClearReceipt;
 /// `/clear` typed while a turn is running. The running turn would persist
 /// its answer after the marker and the cut would land mid-work, so the
 /// user is asked to cancel first.
-pub(crate) fn busy() -> String {
+pub fn busy() -> String {
     "A turn is running. Cancel it first (Esc twice or /stop), then run /clear.".to_string()
 }
 
 /// No session to clear.
-pub(crate) fn no_session() -> String {
+pub fn no_session() -> String {
     "No active session to clear.".to_string()
 }
 
 /// The marker is in; the footer has been reset to the baseline.
-pub(crate) fn cleared(receipt: &ClearReceipt) -> String {
+pub fn cleared(receipt: &ClearReceipt) -> String {
     receipt.user_line()
 }
 
 /// The marker could not be written. Never silent: the user typed a command
 /// and must learn that the context is unchanged.
-pub(crate) fn failed(err: &dyn std::fmt::Display) -> String {
+pub fn failed(err: &dyn std::fmt::Display) -> String {
     format!("/clear did nothing, the context is unchanged: {err}")
 }

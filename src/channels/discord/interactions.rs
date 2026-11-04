@@ -531,7 +531,11 @@ pub(crate) async fn route_followup_turn(
                     let http = http.clone();
                     let dstate = group_state_cb.clone();
                     tokio::spawn(async move {
-                        let text = format!("⏳ Retry {}/{} — {}", attempt, max, reason);
+                        let text = format!(
+                            "⏳ {} — {}",
+                            crate::utils::retry::send_label(attempt, max),
+                            reason
+                        );
                         if let Err(e) = super::governor::say(
                             &dstate.governor,
                             channel,

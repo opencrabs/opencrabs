@@ -52,32 +52,31 @@ pub(super) fn render_help(f: &mut Frame, app: &mut App, area: Rect) {
         kv("Version", &version_line, cyan),
         kv("Provider", &provider_name, cyan),
         kv("Model", &model_name, cyan),
-        Line::from(""),
-        section_header("GLOBAL"),
-        kv("Ctrl+C", "Snap bottom / clear, quit (2x)", cyan),
-        kv("Ctrl+N", "New session", cyan),
-        kv("Ctrl+L", "List sessions", cyan),
-        kv("Ctrl+K", "Clear session", cyan),
-        kv("Mouse click", "Open URL/path under click", cyan),
-        Line::from(""),
-        section_header("CHAT"),
-        kv("Enter", "Send message", cyan),
-        kv("Shift+Enter", "New line", cyan),
-        kv("Ctrl+J", "New line (alt)", cyan),
-        kv("Escape (x2)", "Cancel / abort immediately", cyan),
-        kv("Page Up/Down", "Scroll history", cyan),
-        kv("@", "File picker", cyan),
-        Line::from(""),
-        section_header("INPUT EDITING"),
-        kv("↑ / ↓", "Line nav / start-end / history", cyan),
-        kv("← / →", "Move cursor", cyan),
-        kv("Ctrl/Alt+←→", "Jump word", cyan),
-        kv("Home / End", "Start / end of line", cyan),
-        kv("Ctrl+W", "Delete word (vim)", cyan),
-        kv("Ctrl+U", "Delete to line start (vim)", cyan),
-        Line::from(""),
-        section_header("SLASH COMMANDS"),
     ];
+
+    // The chord blocks come from the shared table in `ui_core::help_keys`, the
+    // same one the desktop window renders (#2320). Two hand-written lists would
+    // drift, and then the two surfaces would disagree about the same key.
+    for section in crate::ui_core::help_keys::HelpSection::ALL {
+        // SESSIONS prints in the right column, above the mode references it
+        // belongs with. Printing it here too would list the same keys twice
+        // (#2463).
+        if section == crate::ui_core::help_keys::HelpSection::Sessions {
+            continue;
+        }
+        left.push(Line::from(""));
+        left.push(section_header(section.title()));
+        for row in crate::ui_core::help_keys::section_rows(section) {
+            // A row with no terminal spelling is a window-only chord; the
+            // terminal stays quiet about keys it does not answer (#2438).
+            if let Some(label) = row.tui {
+                left.push(kv(label, row.description, cyan));
+            }
+        }
+    }
+
+    left.push(Line::from(""));
+    left.push(section_header("SLASH COMMANDS"));
 
     // Commands come from the catalogue collected on entry (#1530) rather than
     // from a directory walk and a TOML parse per frame. The SLASH COMMANDS
@@ -138,19 +137,21 @@ pub(super) fn render_help(f: &mut Frame, app: &mut App, area: Rect) {
     ]);
 
     // ── RIGHT COLUMN ──
-    let right = vec![
-        section_header("SESSIONS"),
-        kv("↑ / ↓", "Navigate", cyan),
-        kv("Enter", "Load session", cyan),
-        kv("N", "New session", cyan),
-        kv("R", "Rename", cyan),
-        kv("D", "Delete", cyan),
-        kv("/", "Search sessions", cyan),
-        kv("F", "Session files", cyan),
-        kv("P", "Projects", cyan),
-        kv("Esc", "Back to chat", cyan),
-        Line::from(""),
-        section_header("FILE ARTIFACTS"),
+    // The session keys print here, above the mode references they belong
+    // with, and they come from the shared table. The hand-written copy this
+    // used to be never learned the card's chord, which is how the one list
+    // people read ended up missing it (#2463).
+    let mut right = vec![section_header("SESSIONS")];
+    for row in
+        crate::ui_core::help_keys::section_rows(crate::ui_core::help_keys::HelpSection::Sessions)
+    {
+        if let Some(label) = row.tui {
+            right.push(kv(label, row.description, cyan));
+        }
+    }
+    right.push(Line::from(""));
+    right.push(section_header("FILE ARTIFACTS"));
+    right.extend([
         kv("↑ / ↓", "Navigate files", cyan),
         kv("Enter", "Open file", cyan),
         kv("D", "Remove tracking", cyan),
@@ -172,12 +173,6 @@ pub(super) fn render_help(f: &mut Frame, app: &mut App, area: Rect) {
         kv("Enter", "Confirm selection", cyan),
         kv("D / Esc", "Deny", cyan),
         kv("V", "Toggle details", cyan),
-        Line::from(""),
-        section_header("SPLIT PANES (from Sessions)"),
-        kv("| (in sessions)", "Split horizontal (L|R)", cyan),
-        kv("_ (in sessions)", "Split vertical (T/B)", cyan),
-        kv("Tab", "Cycle pane focus", cyan),
-        kv("Ctrl+X", "Close pane", cyan),
         Line::from(""),
         section_header("MISSION CONTROL"),
         kv("h/l or Tab", "Cycle panel focus", cyan),
@@ -237,7 +232,7 @@ pub(super) fn render_help(f: &mut Frame, app: &mut App, area: Rect) {
             ),
         ]),
         Line::from(""),
-    ];
+    ]);
 
     // Full-bleed (#2162): content fills everything above the last two rows.
     // The second to last is a dim rule and the last is the shared command

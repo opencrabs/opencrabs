@@ -181,17 +181,29 @@ pub(crate) fn retain_react_directive(text: &str) -> String {
 ///     30s killed real Unsloth cold starts (2026-04-17 20:18: 35B
 ///     gguf loading KV cache succeeded at +38s); 90s still fails an
 ///     unrecoverable wedge in under 2 min via the retry chain.
+///   - The built-in OpenCrabs endpoint (`inference.opencrabs.com`):
+///     **120s**. It is a proxy in front of upstream models, so a cold
+///     upstream can legitimately need longer than 60s to produce
+///     response headers. A handshake that lands at 70s or 100s is slow,
+///     not broken, and the 60s cloud budget was killing it and burning
+///     a retry on a healthy request (#2232).
 ///   - Cloud HTTP (OpenAI, Anthropic, Zhipu, opencode.ai, NVIDIA NIM,
 ///     etc.): **60s**. Healthy cloud gateways return headers in <5s,
 ///     but routing proxies (dialagram, openrouter) can take 20-45s
 ///     when upstream is slow. Wedged servers are >120s, so 60s still
 ///     catches real hangs in under 3 min via the retry chain. Previous
 ///     30s killed legitimate requests to slower-but-healthy providers.
+///
+/// The endpoint class is a host check, not a provider-name check, so a
+/// `[providers.custom.*]` section that reaches the same endpoint gets the
+/// same budget.
 pub(crate) fn handshake_timeout_for(cli_handles_tools: bool, base_url: Option<&str>) -> Duration {
     if cli_handles_tools {
         Duration::from_secs(600)
     } else if base_url.is_some_and(crate::brain::provider::factory::is_local_base_url) {
         Duration::from_secs(90)
+    } else if crate::brain::provider::opencrabs_install::is_opencrabs_endpoint(base_url) {
+        Duration::from_secs(120)
     } else {
         Duration::from_secs(60)
     }

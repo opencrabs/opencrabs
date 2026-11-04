@@ -4,7 +4,7 @@
 //! Queries hit the DB pool directly — no dependency on repository structs.
 
 use crate::db::{Pool, interact_err};
-use crate::usage::pricing::{CacheCost, CostOrigin, PricingConfig};
+use crate::ui_core::usage::pricing::{CacheCost, CostOrigin, PricingConfig};
 use anyhow::{Context, Result};
 use rusqlite::params;
 
@@ -61,6 +61,11 @@ pub struct SummaryStats {
     pub total_cost: f64,
     pub session_count: i64,
     pub call_count: i64,
+    /// Tokens belonging to calls the ledger recorded at no cost. The header
+    /// shows this share so nobody reads `total_cost` as total spend: 31% of
+    /// this machine's token base was recorded at `0.0` before #1717 closed the
+    /// write path, and those rows stay frozen at zero by design (#2249).
+    pub unpriced_tokens: i64,
 }
 
 /// Daily usage for the sparkline / bar chart
@@ -378,14 +383,16 @@ async fn fetch_summary(pool: &Pool, since: Option<i64>) -> Result<SummaryStats> 
         let (query, param): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = if let Some(s) = since {
             (
                 "SELECT COALESCE(SUM(token_count), 0), COALESCE(SUM(cost), 0.0), \
-                 COUNT(DISTINCT session_id), COUNT(*) \
+                 COUNT(DISTINCT session_id), COUNT(*), \
+                 COALESCE(SUM(CASE WHEN COALESCE(cost, 0.0) <= 0.0 THEN token_count ELSE 0 END), 0) \
                  FROM usage_ledger WHERE created_at >= ?1",
                 vec![Box::new(s)],
             )
         } else {
             (
                 "SELECT COALESCE(SUM(token_count), 0), COALESCE(SUM(cost), 0.0), \
-                 COUNT(DISTINCT session_id), COUNT(*) \
+                 COUNT(DISTINCT session_id), COUNT(*), \
+                 COALESCE(SUM(CASE WHEN COALESCE(cost, 0.0) <= 0.0 THEN token_count ELSE 0 END), 0) \
                  FROM usage_ledger",
                 vec![],
             )
@@ -397,6 +404,7 @@ async fn fetch_summary(pool: &Pool, since: Option<i64>) -> Result<SummaryStats> 
                 total_cost: row.get(1)?,
                 session_count: row.get(2)?,
                 call_count: row.get(3)?,
+                unpriced_tokens: row.get(4)?,
             })
         })
     })
@@ -534,10 +542,13 @@ pub(crate) fn sql_normalize_model(raw: &str) -> String {
     } else {
         raw.to_lowercase()
     };
-    let m2 = if m1.ends_with(":free") || m1.ends_with("-free") {
-        &m1[..m1.len() - 5]
-    } else if m1.ends_with("-thinking") {
-        &m1[..m1.len() - 9]
+    let m2 = if let Some(s) = m1
+        .strip_suffix(":free")
+        .or_else(|| m1.strip_suffix("-free"))
+    {
+        s
+    } else if let Some(s) = m1.strip_suffix("-thinking") {
+        s
     } else {
         m1.as_str()
     };
@@ -617,7 +628,7 @@ struct RawModelRow {
 }
 
 async fn fetch_model_entries(pool: &Pool, since: Option<i64>) -> Result<Vec<ModelEntry>> {
-    let pricing = crate::usage::pricing::PricingConfig::load().ok();
+    let pricing = crate::ui_core::usage::pricing::PricingConfig::load().ok();
 
     let conn = pool.get().await.context("pool")?;
     let raw = conn.interact(move |conn| {
@@ -719,6 +730,13 @@ async fn fetch_model_entries(pool: &Pool, since: Option<i64>) -> Result<Vec<Mode
     .map_err(interact_err)?
     .context("Failed to fetch model stats")?;
 
+    // Release the pooled connection before the unattributed query below asks
+    // for one of its own. A pool with a single connection (the in-memory test
+    // pool, `max_size(1)`) deadlocks if a second `pool.get()` is awaited while
+    // this one is still held, and a small file pool would starve the same way
+    // under load (#2249).
+    drop(conn);
+
     // Group by base model (normalize away quantization suffixes), keyed on the
     // punctuation-insensitive identity so one model reported with two spellings
     // is one row rather than two smaller ones (#929).
@@ -795,7 +813,8 @@ async fn fetch_model_entries(pool: &Pool, since: Option<i64>) -> Result<Vec<Mode
                     // cost_origin, not the old cost == 0.0 sinkhole: a genuinely
                     // free model is Priced and renders $0.00 unmarked.
                     let origin_estimated = pricing.as_ref().is_some_and(|p| {
-                        p.cost_origin(&full_name) == crate::usage::pricing::CostOrigin::Estimated
+                        p.cost_origin(&full_name)
+                            == crate::ui_core::usage::pricing::CostOrigin::Estimated
                     });
                     (estimate, origin_estimated)
                 };
@@ -826,8 +845,75 @@ async fn fetch_model_entries(pool: &Pool, since: Option<i64>) -> Result<Vec<Mode
         })
         .collect();
 
+    // Calls the ledger recorded without a model name are still calls: they have
+    // tokens, a call count and often a real cost. The By Model query filters
+    // them out (`model != ''`), and the header sums these rows, so they used to
+    // vanish from both. One bucket keeps them visible (#2249).
+    if let Some(entry) = fetch_unattributed_entry(pool, since).await? {
+        entries.push(entry);
+    }
+
     entries.sort_by_key(|b| std::cmp::Reverse(b.tokens));
     Ok(entries)
+}
+
+/// Bucket name for calls the ledger recorded with no model name.
+pub const UNATTRIBUTED_MODEL: &str = "(unattributed)";
+
+/// One row for every ledger entry whose `model` is empty.
+///
+/// These are real calls: the ledger holds their tokens and whatever cost the
+/// provider reported, and By Project already counts them. The By Model query
+/// cannot represent them because it normalizes the model name, so they are
+/// gathered here and appended as a single entry (#2249).
+async fn fetch_unattributed_entry(pool: &Pool, since: Option<i64>) -> Result<Option<ModelEntry>> {
+    let conn = pool.get().await.context("pool")?;
+    let (tokens, calls, cost) = conn
+        .interact(move |conn| {
+            let (query, param): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) =
+                if let Some(s) = since {
+                    (
+                        "SELECT COALESCE(SUM(token_count), 0), COUNT(*), COALESCE(SUM(cost), 0.0) \
+                     FROM usage_ledger WHERE model = '' AND created_at >= ?1",
+                        vec![Box::new(s)],
+                    )
+                } else {
+                    (
+                        "SELECT COALESCE(SUM(token_count), 0), COUNT(*), COALESCE(SUM(cost), 0.0) \
+                     FROM usage_ledger WHERE model = ''",
+                        vec![],
+                    )
+                };
+            let refs: Vec<&dyn rusqlite::types::ToSql> = param.iter().map(|p| p.as_ref()).collect();
+            conn.query_row(query, refs.as_slice(), |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, f64>(2)?,
+                ))
+            })
+        })
+        .await
+        .map_err(interact_err)?
+        .context("Failed to fetch unattributed usage")?;
+
+    if calls == 0 {
+        return Ok(None);
+    }
+
+    // The cost stays exactly as recorded. There is no model name to price, so
+    // no estimate can stand in for it, and inventing one would be worse than
+    // showing nothing.
+    Ok(Some(ModelEntry {
+        model: UNATTRIBUTED_MODEL.to_string(),
+        tokens,
+        cost,
+        calls,
+        estimated: false,
+        cache_read_tokens: None,
+        cache_split_tokens: 0,
+        variants: Vec::new(),
+    }))
 }
 
 async fn fetch_tools(pool: &Pool, since: Option<i64>) -> Result<Vec<ToolStats>> {

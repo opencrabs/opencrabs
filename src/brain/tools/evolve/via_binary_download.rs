@@ -135,7 +135,7 @@ impl EvolveTool {
             session_id = %sid,
             "evolve: downloading release asset"
         );
-        let archive_bytes = match client.get(&download_url).send().await {
+        let archive_bytes = match super::verify::get_with_retry(client, &download_url).await {
             Ok(resp) if resp.status().is_success() => {
                 let content_length = resp.content_length();
                 match resp.bytes().await {
@@ -195,10 +195,11 @@ impl EvolveTool {
                     url = %download_url,
                     error = %e,
                     session_id = %sid,
-                    "evolve: download request failed to send"
+                    "evolve: download request failed after retries"
                 );
                 return Ok(ToolResult::error(format!(
-                    "Download from {download_url} failed: {e}"
+                    "Download from {download_url} failed: {e}. Nothing was changed, run /evolve \
+                     again to retry."
                 )));
             }
         };
@@ -227,19 +228,19 @@ impl EvolveTool {
                 },
             );
         }
-        if let Err(reason) =
+        if let Err(failure) =
             super::verify::verify_asset_checksum(client, release, &sums_asset, &archive_bytes).await
         {
+            let message = super::verify::failure_message(&failure);
             tracing::error!(
                 target: "evolve",
                 asset = %sums_asset,
-                %reason,
+                transient = failure.is_transient(),
+                reason = %failure.message(),
                 session_id = %sid,
                 "evolve: checksum verification failed, refusing to swap"
             );
-            return Ok(ToolResult::error(format!(
-                "Refusing to update: {reason}. Build from source instead."
-            )));
+            return Ok(ToolResult::error(message));
         }
         tracing::info!(
             target: "evolve",

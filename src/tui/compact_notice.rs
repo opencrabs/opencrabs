@@ -11,7 +11,7 @@
 /// The note printed once the trigger is actually away. Says it is a
 /// starting note, and names the footer as the live figure, because a
 /// compaction can legitimately take minutes while a fallback chain walks.
-pub(crate) fn requested(usage_pct: f64) -> String {
+pub fn requested(usage_pct: f64) -> String {
     format!(
         "Compaction requested at {:.0}% context. This line does not update: \
          the footer ctx counter is the live figure, and a slow provider or a \
@@ -22,6 +22,6 @@ pub(crate) fn requested(usage_pct: f64) -> String {
 
 /// The error shown when the trigger could not be dispatched. Never silent:
 /// the user typed a command and must learn that nothing is running.
-pub(crate) fn dispatch_failed(err: &dyn std::fmt::Display) -> String {
+pub fn dispatch_failed(err: &dyn std::fmt::Display) -> String {
     format!("/compact was not dispatched, nothing is compacting: {err}")
 }

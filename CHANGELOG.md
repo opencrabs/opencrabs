@@ -7,6 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### ✨ Features
+
+- **Seeker: one card that finds anything (`Ctrl+Shift+F` on both surfaces, `cmd-k` in the window)**: a centered field over the app that searches conversations, slash commands, the screens the client can open and the saved skills, and runs the row on Enter. Typing a word for the job finds the command even when you do not know its name, so `voice` lands on `/whisper`, `upgrade` on `/evolve` and `rsi` on `/mission-control`. Ranking, the keyword table, the arrows, the click and the no-match line are one engine in `ui_core::palette`, so the terminal and the window print the same rows in the same order, and a query that finds nothing gets a short roast instead of an empty box. No file or message text search in this pass (#2458)
+- **Seeker also opens the documentation pages**: a query that is not a command, a screen or a conversation is usually a question the docs answer, so `voice`, `cron` or `telegram` now also arms the matching page on docs.opencrabs.com and Enter opens it in the browser. The index is the site's own table of contents: all 31 reference pages, every path and title read from the live sitemap rather than hand-picked, because the docs site's search runs client-side and accepts no query parameter, so a `?search=` link would land on the docs home and drop the query. The case studies stay out on purpose: indexed, the Telegram story would outrank the Telegram setup page for the same word. The name of the card, the docs rows and the key reference all say Seeker (#2460, #2461, #2462)
+- **Seeker offers the channel setup, and says what it takes**: typing `telegram`, `discord`, `slack`, `whatsapp` or `trello` now arms a setup row first, with the credentials it needs in the order the setup asks for them, and Enter walks the setup inside the conversation so the config write goes through the usual gate. When the channel is not configured yet the card prints the steps under the field instead of the control legend (`Telegram is not set up: 3 steps, bot token from @BotFather, enabled = true, restart`), read from the real config once when the card opens. Skill rows now match their own description, so `telegram` also finds the channels skill (#2462)
+- **Pin a session with `Ctrl+Shift+P` on both surfaces**: the pin used to ride `ctrl-shift-f` in the window and `ctrl-f` in the terminal, which is exactly where Seeker needed to live. It now answers `ctrl-shift-p` in the window and `Ctrl+Shift+P` in the terminal, the bare `p` that opens the projects browser refuses modifiers so the two cannot collide, and the key reference lists both chords in one row each (#2457)
+
+### 🔧 Fixes
+
+- **The card opens from a terminal too, and the key reference lists it up top**: the chord asked for `ctrl-shift-f`, but a terminal delivers that as the plain control byte `0x06`, the same byte as `ctrl-f`, so the window opened the card and the terminal did nothing. The terminal arm now matches that byte, which nothing else there answers, so pressing `Ctrl+Shift+F` works on both surfaces. The key reference prints that chord and moved the row out of the last block, where it ran off the bottom of the terminal's screen and off the window's first page, and the terminal's hand-written SESSIONS list, which never learned the chord, is gone (#2463)
+- **The Help Center lists the window's zoom chords**: `ctrl-plus`, `ctrl-minus` and `ctrl-zero` were bound with the rem zoom but never appeared in the key reference, so nobody could find them. The window now prints all three. The terminal stays quiet because a terminal's font size belongs to the emulator, not to the app (#2467)
+- **Mission Control fits every card in the window**: the screen drew its cards at the width of their longest line, so a shell command pushed Analytics and Schedule past the right edge and a resize only made it worse. Each card is a cell in a grid whose column count comes from the live width minus the rail, long rows truncate and scroll inside their card, and the last row keeps its empty slots so a lone card cannot stretch across the screen (#2459)
+- **The rail's find field opens the row it found**: `ctrl-f` narrowed the session list, but the arrows went to the composer and Enter cancelled the search, so finding a chat was a two-handed trip to the mouse. The field now takes the keyboard when it opens, the arrows walk the matches, and Enter opens the row the marker is on, falling back to the top match when nothing is armed (#2454)
+- **A dialog takes the keyboard when it opens**: the composer kept focus under the theme picker, the topic prompt, the row menu and the preview, so typing landed in a field the user could not see. One derived owner now decides who has the keyboard: the topmost overlay while one is open, the screen while a full screen is up, the composer only when neither is true, and every frame reconciles it so an opener cannot forget (#2455)
+- **The delete confirmation answers Enter**: the dialog asked for the keyboard and then ignored it, so the only way to confirm a delete was a mouse click while Esc quietly did nothing. Enter now deletes the row it names and Esc cancels, and every other key is swallowed rather than reaching the dialog behind it (#2456)
+
+- **The GUI's live turn is one Telegram-shaped card**: the window used to draw a fold header, then a separate status strip, then the tool rows piling up in a row of their own, with the reasoning block floating above the input. A turn now renders the shape the Telegram channel already uses: a collapsed header, the `⚙️`/`✅`/`❌` rows interleaved with the narration in the order they happened, and a footer that carries the elapsed time and token counts once the turn settles. The context budget moved off the header and into that footer, where it belongs, and `ctrl+o` or a click on the card folds the live turn while it runs instead of reaching past it to a settled one (#2442)
+- **Attachment chips stay inside the GUI composer**: an image chip sized itself from the file it was showing, so a tall screenshot grew the strip past the input's width and the next reply button landed on top of the editor. Each image tile is now a fixed 34px box that crops to fit, the strip clips with `overflow_hidden` and `min_w_0`, and the file name truncates instead of pushing the remove button out of reach (#2443)
+- **The desktop window reopens the conversation you left**: a launch always picked the first entry on the rail, so quitting mid-task and coming back landed somewhere else. The GUI now reads the same `last_session` pointer the terminal writes, and writes it back when you switch, through one shared `utils::last_session` helper both surfaces use. A first run, or a pointer at a deleted conversation, falls back to the newest session (#2444)
+- **The Windows exe starts on a clean Windows install**: v0.5.15's `opencrabs.exe` imported `VCRUNTIME140.dll`, `VCRUNTIME140_1.dll`, `MSVCP140.dll` and `VCOMP140.DLL`, none of which ship with Windows, so it died before printing a line and told the user to reinstall a program that was never the problem. A static CRT cannot fix it here: `llama.cpp`'s CMakeLists ignores `CMAKE_MSVC_RUNTIME_LIBRARY`, so its objects stay on `/MD` while Rust goes `/MT` and the link ends with unresolved `__imp_*` externals, and `rtk.exe` is a third-party prebuilt that imports `VCRUNTIME140.dll` no matter how our own binary is built. The zip now carries those four DLLs beside both exes, which is the app-local deployment Microsoft supports for the VC runtime, so the archive starts with no Visual Studio and no vc_redist (#2257)
+- **`scripts/check-pe-imports.py` gates the artifact's import table**: a smoke run on `windows-latest` can never catch this, since that runner installs the vc_redist, which is exactly why the broken binary looked healthy. CI now reads the PE imports of the exe it built, and the release job reads the archive about to be uploaded, asking for closure: every non-system import must be a DLL that travels in the archive, and every carried DLL must parse as a PE image so a zero byte file cannot satisfy the name. `--self-test` proves the parser first (#2257)
+- **The Windows one-liner installs the whole archive**: `install.ps1` copied `opencrabs.exe` and `rtk.exe` out of the extracted zip and then deleted the temp tree, so the runtime DLLs from the fix above never reached `%LOCALAPPDATA%\OpenCrabs\bin` and an install through the documented one-liner still died on a missing DLL. The script now takes every exe and DLL the archive ships, compares what landed against the archive's own file list, and fails loudly instead of reporting a short install. It lives in `src/scripts/install.ps1` with `src/tests/install_ps1_test.rs` as its witness, and opencrabs.com carries a byte-identical vendored copy (#2260)
+
+## [0.5.15] - 2026-10-27
+
+16 commits since v0.5.14. 41 files changed, +2,821 / -572 lines.
+
+### 🔧 Fixes
+
+- `83c8eea81` **Queue row softened to a gray hierarchy**: every span now sits under the thinking line's luma instead of above it; the amber is gone and a rendered test pins the colours, so a brightness regression fails CI instead of shipping (#2244)
+- `3f3cff3fa` **A turn halted by suggest_options no longer renders intermediate narration as its answer** (#2240)
+- `f8ef89d3a` **Dropped the in-flight border title from the input box**: the row claimed attention the queue row was built for (#2243)
+- `59ea0421e` **History marker and splash tip now name PageUp**: both said Ctrl+O, which folds the newest turn instead of paging (#2242)
+- `12ae04bde` **Ctrl+O no longer throws the viewport when the turn header is off screen**: the anchor captured a saturated row 0, so expanding a long answer jumped you to the top of the turn (#2241)
+- `cc63d8296` **A caught render panic hands the terminal back**: raw mode was left off, so keystrokes echoed into the status bar and only Enter worked (#2238)
+- `74499164a` **The input box says Enter queues during a turn**, and the queue row names the key that edits it (#2237)
+- `5deaa70c4` **A mid-turn queued message is handed back to the input box** when the turn ends before a tool boundary drains it (#2236)
+- `0b28c6354` **The built-in endpoint is matched by parsed host, not substring**: any URL that merely contained `inference.opencrabs.com` was misclassified, and every special-case keyed off that check (#2234)
+- `c3a885246` **The mouse-fragment gate stops eating characters typed after a `[`** (#2233)
+- `0cb652c52` **The built-in endpoint gets a 120s handshake** and stops the retry ladder after 2 silent timeouts instead of burning all 5 sends on a dead endpoint (#2232)
+- `5d9f58976` **Evolve retries release-asset fetches** and splits a dropped connection from a bad checksum (#2229)
+- `cf5722c8d` **A failed Telegram dispatcher startup recovers instead of panicking**, so the reconnect loop runs (#2228)
+
+### 📖 Documentation
+
+- `edd4e1e8e` README and architecture docs said 3x stream retries where the code retries 5 (#2231)
+
+### 🧹 Miscellaneous
+
+- `ea01d6e79` The phantom language scan has a work-shape guard: traversal counts pinned input-flat, mutation-tested red, so the three packs landing next cannot bend the scan input-proportional (#2245)
+- `30e0b248a` The Telegram dispatcher sentinel is off the byte-slice ratchet, keeping lint green (#2230)
+
+### 👥 Contributors
+
+1 contributor this release:
+
+- @adolfousier (Adolfo Usier)
+
+### 📊 Stats
+
+- 16 commits since v0.5.14
+- 41 files changed, +2,821 / -572 lines
+- 11,422 tests (11,422 passed, 0 failed, 38 ignored)
+
+
 ## [0.5.14] - 2026-10-25
 
 26 commits since v0.5.13, 5 contributors. 64 files changed, +7,493 / -365 lines.
@@ -9776,3 +9841,4 @@ fixes.
 [0.5.12]: https://github.com/opencrabs/opencrabs/compare/v0.5.11...v0.5.12
 [0.5.13]: https://github.com/opencrabs/opencrabs/compare/v0.5.12...v0.5.13
 [0.5.14]: https://github.com/opencrabs/opencrabs/compare/v0.5.13...v0.5.14
+[0.5.15]: https://github.com/opencrabs/opencrabs/compare/v0.5.14...v0.5.15

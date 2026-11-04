@@ -3,6 +3,7 @@
 use super::events::{AppMode, ToolApprovalResponse, TuiEvent};
 use super::mission_control::McPanel;
 use super::*;
+use crate::tui::input_layout;
 use anyhow::Result;
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -20,90 +21,6 @@ pub(crate) fn should_restore_cancelled_query(
     had_intermediate: bool,
 ) -> bool {
     !has_visible_text && !has_visible_reasoning && !had_tool_activity && !had_intermediate
-}
-
-/// Detect whether a character is likely part of a mouse tracking CSI sequence
-/// that crossterm failed to parse (e.g. `[<35;116;77M` arriving as individual
-/// chars after ESC was consumed as KeyCode::Esc).
-///
-/// Strategy: scan the recent tail for the start of either:
-///
-/// - SGR mouse mode (1006): `\x1b[<Cb;Cx;Cy[Mm]` — visible as `[<…M/m`
-/// - URXVT mouse mode (1015): `\x1b[Cb;Cx;Cy M` — visible as `[N;…M`
-///
-/// crossterm enables both modes (`EnableMouseCapture` emits `?1015h ?1006h`)
-/// and some terminals fall back to URXVT for motion events. If the tail
-/// matches either prefix and the current char fits the continuation pattern
-/// (digits, `;`, `M`, `m`) we treat it as garbage.
-pub(crate) fn is_mouse_sequence_fragment(c: char, buf: &str, cursor: usize) -> bool {
-    // Raw ESC and ETX arriving as KeyCode::Char are never legitimate
-    // typing: crossterm reports Esc as KeyCode::Esc and Ctrl+C as a
-    // control event, so these bytes only reach the char path when an
-    // escape read was split mid-sequence, the head of exactly the
-    // bursts this filter rejects. (#1943)
-    if matches!(c, '\x1b' | '\u{3}') {
-        return true;
-    }
-    // Only bother checking chars that actually appear in mouse sequences
-    if !matches!(c, '[' | '<' | '>' | 'M' | 'm' | ';') && !c.is_ascii_digit() {
-        return false;
-    }
-
-    let mut tail_start = cursor.saturating_sub(30);
-    // Snap to a char boundary — cursor.saturating_sub(30) can land inside
-    // a multi-byte character (e.g. 🦀 is 4 bytes).
-    while tail_start > 0 && !buf.is_char_boundary(tail_start) {
-        tail_start -= 1;
-    }
-    let tail = &buf[tail_start..cursor];
-
-    // SGR mode (1006): `[<` anywhere in the tail starts the sequence.
-    // Everything after it (digits, ;, M/m) is garbage until a non-matching char.
-    if let Some(csi_pos) = tail.rfind("[<") {
-        let after_csi = &tail[csi_pos + 2..];
-        if after_csi
-            .chars()
-            .all(|ch| ch.is_ascii_digit() || matches!(ch, ';' | 'M' | 'm'))
-        {
-            return true;
-        }
-    }
-
-    // URXVT mode (1015): the rightmost `[` in the tail is followed only by
-    // digits/`;` — that's the cb;cx;cy stretch of `\x1b[Cb;Cx;Cy M`. Skip
-    // when the bracket is followed by `<` since that's already handled above.
-    // Requires at least one digit between `[` and the cursor so we don't
-    // false-fire on a bare `[` that the user just typed.
-    if let Some(bracket_pos) = tail.rfind('[') {
-        let after_bracket = &tail[bracket_pos + 1..];
-        if !after_bracket.starts_with('<')
-            && !after_bracket.is_empty()
-            && after_bracket
-                .chars()
-                .all(|ch| ch.is_ascii_digit() || ch == ';')
-            && matches!(c, '0'..='9' | ';' | 'M' | 'm')
-        {
-            return true;
-        }
-    }
-
-    // `[` at the end of tail = CSI just started; the next char picks the
-    // mode (`<` for SGR, digit for URXVT, letter for other CSI) or
-    // continues a sequence whose intermediate bytes were already
-    // suppressed (which leaves `;` or `M`/`m` showing up here too).
-    // Any of those after a stray `[` is garbage.
-    if tail.ends_with('[') && matches!(c, '<' | 'A'..='Z' | 'a'..='z' | '0'..='9' | ';') {
-        return true;
-    }
-
-    // Tail ends with `[<` partially built — suppress digits/; that follow
-    if tail.ends_with("[<")
-        || tail.ends_with(|ch: char| ch.is_ascii_digit() || ch == ';') && tail.contains("[<")
-    {
-        return matches!(c, '0'..='9' | ';' | 'M' | 'm');
-    }
-
-    false
 }
 
 /// Find the byte offset in `text` where the cumulative display width reaches `target_col`.
@@ -209,15 +126,20 @@ impl App {
         (line_start, col)
     }
 
-    /// Get the effective text width per visual line in the input box.
-    /// Accounts for borders (2) and prefix/padding (2).
-    fn input_visual_line_width() -> usize {
-        let term_width = crossterm::terminal::size()
-            .map(|(w, _)| w as usize)
-            .unwrap_or(80);
-        // input_content_width = term_width - 2 (borders)
-        // text area = input_content_width - 2 (prefix "❯ " or padding "  ")
-        term_width.saturating_sub(4).max(10)
+    /// Text width of one input visual line, in display columns.
+    ///
+    /// This has to be the width the renderer wraps at, or Alt+Up/Down lands on
+    /// a different column than the row it moved to. The box has no side
+    /// borders, but every row spends two columns on its prefix (`❯ ` or two
+    /// spaces), so the text wraps at `input_area_width - 2`. That is the same
+    /// number `input_layout::content_width` hands to click and drag.
+    fn input_visual_line_width(&self) -> usize {
+        let area_width = if self.input_area_width > 0 {
+            self.input_area_width
+        } else {
+            crossterm::terminal::size().map(|(w, _)| w).unwrap_or(80)
+        };
+        input_layout::content_width(area_width).max(1)
     }
 
     /// Read-only predicate: is there anywhere for the cursor to move up to?
@@ -242,7 +164,7 @@ impl App {
         let (line_start, _col_bytes) = self.cursor_line_position();
         let text_before = &self.input_buffer[line_start..self.cursor_position];
         let display_col = text_before.width();
-        let vw = Self::input_visual_line_width();
+        let vw = self.input_visual_line_width();
 
         let visual_row = display_col / vw;
         if visual_row == 0 {
@@ -269,7 +191,7 @@ impl App {
         let (line_start, _col_bytes) = self.cursor_line_position();
         let text_before = &self.input_buffer[line_start..self.cursor_position];
         let display_col = text_before.width();
-        let vw = Self::input_visual_line_width();
+        let vw = self.input_visual_line_width();
 
         // Get full logical line
         let line_text = &self.input_buffer[line_start..];
@@ -309,8 +231,10 @@ impl App {
     /// sits right now; `render_chat` restores it there after the height change.
     fn set_expand_anchor(&mut self, idx: usize) {
         if let Some(line_top) = self.chat_line_to_msg.iter().position(|m| *m == Some(idx)) {
-            let row = line_top.saturating_sub(self.chat_render_scroll) as u16;
-            self.chat_expand_anchor = Some((idx, row));
+            self.chat_expand_growth_pending = true;
+            self.chat_expand_anchor =
+                crate::tui::render::chat::turn_anchor_row(line_top, self.chat_render_scroll)
+                    .map(|row| (idx, row));
         }
     }
 
@@ -325,8 +249,10 @@ impl App {
             .iter()
             .position(|t| t.as_deref() == Some(anchor))
         {
-            let row = line_top.saturating_sub(self.chat_render_scroll) as u16;
-            self.chat_expand_anchor_turn = Some((anchor.to_string(), row));
+            self.chat_expand_growth_pending = true;
+            self.chat_expand_anchor_turn =
+                crate::tui::render::chat::turn_anchor_row(line_top, self.chat_render_scroll)
+                    .map(|row| (anchor.to_string(), row));
         }
     }
 
@@ -658,6 +584,60 @@ impl App {
         }
     }
 
+    /// Is `row` a content row of the input box, i.e. not one of its borders?
+    fn row_is_input_content(&self, row: u16) -> bool {
+        if self.input_area_height < 3 {
+            return false;
+        }
+        let first = self.input_area_y + 1;
+        let last = self.input_area_y + self.input_area_height - 2;
+        row >= first && row <= last
+    }
+
+    /// Handle a left click inside the input box: put the caret under the
+    /// pointer. Returns true when the click landed in the box, so the caller
+    /// knows the chat gesture handling must not run for it.
+    ///
+    /// The same press also seeds the drag anchor, so a selection starts at the
+    /// exact cell the user pressed instead of a cell or two later at the first
+    /// motion event. A press with no drag before the release stays a plain
+    /// caret placement; `handle_input_mouse_up` drops the anchor.
+    pub(crate) fn handle_input_mouse_click(&mut self, col: u16, row: u16) -> bool {
+        if !self.row_is_input_content(row) {
+            return false;
+        }
+        self.input_drag_selecting = false;
+        self.input_drag_current = None;
+        self.input_drag_anchor = Some((col, row));
+        // A press in the input box never starts a chat gesture, and a chat
+        // anchor left over from an earlier gesture must not survive it.
+        self.drag_anchor = None;
+        self.drag_current = None;
+
+        if self.input_buffer.is_empty() {
+            // The caret is already at 0. Consume the click anyway so it does
+            // not fall through to the chat block handling underneath.
+            return true;
+        }
+        let Some((visual_row, disp_col)) = input_layout::screen_to_visual(
+            row,
+            col,
+            self.input_area_x,
+            self.input_area_y,
+            self.input_scroll_y,
+        ) else {
+            // Border column or prefix padding: the caret stays where it is.
+            return true;
+        };
+        let rows = input_layout::visual_rows(
+            &self.input_buffer,
+            input_layout::content_width(self.input_area_width),
+        );
+        self.cursor_position =
+            input_layout::byte_at_visual_pos(&rows, &self.input_buffer, visual_row, disp_col);
+        true
+    }
+
     /// Handle mouse drag in the input area — track text selection.
     pub(crate) fn handle_input_mouse_drag(&mut self, col: u16, row: u16) {
         if self.input_area_height == 0 {
@@ -669,7 +649,12 @@ impl App {
         }
         if !self.input_drag_selecting {
             self.input_drag_selecting = true;
-            self.input_drag_anchor = Some((col, row));
+            // The press already recorded the anchor. Only a drag that began
+            // without a press (mouse capture turned on mid-gesture) falls back
+            // to the first motion event.
+            if self.input_drag_anchor.is_none() {
+                self.input_drag_anchor = Some((col, row));
+            }
             // Clear any chat drag selection
             self.drag_anchor = None;
             self.drag_current = None;
@@ -681,6 +666,10 @@ impl App {
     /// Returns true if text was copied.
     pub(crate) fn handle_input_mouse_up(&mut self, col: u16, row: u16) -> bool {
         if !self.input_drag_selecting {
+            // A plain click: the caret was already placed on press, so drop
+            // the press anchor instead of letting it leak into the next drag.
+            self.input_drag_anchor = None;
+            self.input_drag_current = None;
             return false;
         }
         self.input_drag_selecting = false;
@@ -698,88 +687,16 @@ impl App {
     }
 
     /// Extract text from input buffer based on drag selection coordinates.
-    fn extract_input_drag_selection(&self, a: (u16, u16), b: (u16, u16)) -> String {
-        let (start, end) = if (a.1, a.0) <= (b.1, b.0) {
-            (a, b)
-        } else {
-            (b, a)
-        };
-
-        let input_top = self.input_area_y;
-        let input_left = self.input_area_x;
-        let content_left = input_left + 2;
-        let input_width = self.input_area_width.saturating_sub(2) as usize;
-
-        if input_width == 0 || self.input_buffer.is_empty() {
-            return String::new();
-        }
-
-        // Build visual rows: each is (global_byte_start, global_byte_end)
-        let buf = &self.input_buffer;
-        let blen = buf.len();
-        let mut visual_rows: Vec<(usize, usize)> = Vec::new();
-        let mut ls = 0usize;
-        while ls <= blen {
-            let le = buf[ls..].find('\n').map(|i| ls + i).unwrap_or(blen);
-            let line = &buf[ls..le];
-            let lw = unicode_width::UnicodeWidthStr::width(line);
-            let rows = if lw == 0 { 1 } else { lw.div_ceil(input_width) };
-            for vr in 0..rows {
-                let chunk_start_display = vr * input_width;
-                let chunk_end_display = chunk_start_display + input_width;
-                let mut disp_w = 0;
-                let mut char_start = 0;
-                let mut char_end = line.len();
-                for (idx, ch) in line.char_indices() {
-                    let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-                    if vr == 0 && disp_w + cw > chunk_end_display {
-                        char_end = idx;
-                        break;
-                    }
-                    if vr > 0 {
-                        if disp_w < chunk_start_display {
-                            char_start = idx;
-                        }
-                        if disp_w + cw > chunk_end_display {
-                            char_end = idx;
-                            break;
-                        }
-                    }
-                    disp_w += cw;
-                }
-                visual_rows.push((ls + char_start, ls + char_end));
-            }
-            if le == blen {
-                break;
-            }
-            ls = le + 1;
-        }
-
-        // Map visual row + column to byte offset
-        let map_to_byte = |vr: usize, col: u16| -> usize {
-            if vr >= visual_rows.len() {
-                return blen;
-            }
-            let (rs, re) = visual_rows[vr];
-            let chunk = &buf[rs..re];
-            let target_disp = col.saturating_sub(content_left) as usize;
-            let mut w = 0;
-            for (idx, ch) in chunk.char_indices() {
-                if w >= target_disp {
-                    return rs + idx;
-                }
-                w += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-            }
-            re
-        };
-
-        let start_visual = start.1.saturating_sub(input_top + 1) as usize;
-        let end_visual = end.1.saturating_sub(input_top + 1) as usize;
-
-        let from = map_to_byte(start_visual, start.0);
-        let to = map_to_byte(end_visual, end.0);
-
-        buf[from.min(to)..from.max(to)].to_string()
+    pub(crate) fn extract_input_drag_selection(&self, a: (u16, u16), b: (u16, u16)) -> String {
+        input_layout::selection_text(
+            &self.input_buffer,
+            input_layout::content_width(self.input_area_width),
+            self.input_area_x,
+            self.input_area_y,
+            self.input_scroll_y,
+            a,
+            b,
+        )
     }
 
     /// Copy text to system clipboard
@@ -2246,6 +2163,13 @@ impl App {
 
             self.input_buffer.clear();
             self.cursor_position = 0;
+            // The focused pane's cached copy dies with the send too: the
+            // pane is the source of truth for inactive rendering and the
+            // next stash, and a stale duplicate would resurrect the sent
+            // text on refocus.
+            if let Some(pane) = self.pane_manager.focused_pane_mut() {
+                pane.clear_input();
+            }
             self.attachments.clear();
             self.focused_attachment = None;
             self.slash_suggestions_active = false;
@@ -2411,7 +2335,7 @@ impl App {
                         .unwrap_or(0);
                     let prev_line = &self.input_buffer[prev_line_start..prev_line_end];
                     let prev_total_width = prev_line.width();
-                    let vw = Self::input_visual_line_width();
+                    let vw = self.input_visual_line_width();
                     let last_row = if prev_total_width == 0 {
                         0
                     } else {
@@ -2453,7 +2377,7 @@ impl App {
                         .unwrap_or(self.input_buffer.len());
                     let next_line = &self.input_buffer[next_line_start..next_line_end];
                     let current_col = self.input_buffer[line_start..self.cursor_position].width();
-                    let vw = Self::input_visual_line_width();
+                    let vw = self.input_visual_line_width();
                     let target_col = (current_col % vw).min(next_line.width());
                     self.cursor_position =
                         next_line_start + byte_offset_at_display_col(next_line, target_col);
@@ -2566,16 +2490,12 @@ impl App {
                     self.open_file_picker().await?;
                 }
                 KeyCode::Char(c) if keys::types_character(event.modifiers) => {
-                    // Reject chars that are fragments of mouse tracking CSI
-                    // sequences leaked through tmux pane switches.  Pattern:
-                    // ESC [ < Ps ; Ps ; Ps M  — the ESC is eaten by crossterm
-                    // as KeyCode::Esc, leaving [, <, digits, ;, M as chars.
-                    if is_mouse_sequence_fragment(c, &self.input_buffer, self.cursor_position) {
-                        // silently drop — not real user input
-                    } else {
-                        self.input_buffer.insert(self.cursor_position, c);
-                        self.cursor_position += c.len_utf8();
-                    }
+                    // Mouse-report fragments are already dropped by the
+                    // dispatcher gate (`MouseFragGate`, #1983/#2233) before
+                    // this handler runs, so anything reaching here is real
+                    // typing - including `arr[0]` and `[0; 4]`.
+                    self.input_buffer.insert(self.cursor_position, c);
+                    self.cursor_position += c.len_utf8();
                 }
                 KeyCode::Backspace if event.modifiers.is_empty() && self.cursor_position > 0 => {
                     // Find the previous char boundary
@@ -2658,7 +2578,7 @@ impl App {
         event: crossterm::event::KeyEvent,
     ) -> Result<()> {
         use super::events::keys;
-        use crossterm::event::KeyCode;
+        use crossterm::event::{KeyCode, KeyModifiers};
 
         // Rename mode: typing the new name
         if self.session_renaming {
@@ -2700,6 +2620,24 @@ impl App {
                 KeyCode::Char(c) => {
                     self.session_rename_buffer.push(c);
                 }
+                _ => {}
+            }
+            return Ok(());
+        }
+
+        // Topic name prompt: typing the name of a topic under the selected
+        // session (#2306). Enter creates it, Esc cancels.
+        if self.topic_naming {
+            match event.code {
+                KeyCode::Enter => self.submit_topic_name().await?,
+                KeyCode::Esc => {
+                    self.topic_naming = false;
+                    self.topic_name_buffer.clear();
+                }
+                KeyCode::Backspace => {
+                    self.topic_name_buffer.pop();
+                }
+                KeyCode::Char(c) => self.topic_name_buffer.push(c),
                 _ => {}
             }
             return Ok(());
@@ -2838,6 +2776,20 @@ impl App {
                     self.switch_mode(AppMode::Chat).await?;
                 }
             }
+        } else if event.code == KeyCode::Char('t') || event.code == KeyCode::Char('T') {
+            // New topic under the selected session (#2306). The name is asked for
+            // in the prompt above the list.
+            if self.sessions.get(self.selected_session_index).is_some() {
+                self.topic_naming = true;
+                self.topic_name_buffer.clear();
+            }
+        } else if event.code == KeyCode::Char('c') || event.code == KeyCode::Char('C') {
+            // Close or reopen the selected topic (#2305).
+            self.toggle_closed_selected().await?;
+        } else if event.code == KeyCode::Char('z') || event.code == KeyCode::Char('Z') {
+            // Fold or unfold the selected session's topic tree (#2427). A plain
+            // f is the files browser, so the fold key is z, as in vim.
+            self.toggle_fold_selected().await?;
         } else if event.code == KeyCode::Char('r') || event.code == KeyCode::Char('R') {
             // Start renaming the selected session
             if let Some(session) = self.sessions.get(self.selected_session_index) {
@@ -2857,8 +2809,21 @@ impl App {
                     pane.session_id = Some(sid);
                 }
             }
+            // Stash the working input with the original pane before split
+            // moves focus; the new pane starts empty and awaits its own
+            // session (#2494).
+            self.pane_manager.stash_input(
+                &mut self.input_buffer,
+                &mut self.cursor_position,
+                &mut self.input_history_index,
+            );
             self.pane_manager
                 .split(crate::tui::pane::SplitDirection::Horizontal);
+            self.pane_manager.adopt_input(
+                &mut self.input_buffer,
+                &mut self.cursor_position,
+                &mut self.input_history_index,
+            );
             self.pane_manager.save_layout();
             // Stay on sessions screen — user picks which session goes in the new pane.
             // When they press Enter, load_session assigns it to the focused (new) pane.
@@ -2870,8 +2835,18 @@ impl App {
                     pane.session_id = Some(sid);
                 }
             }
+            self.pane_manager.stash_input(
+                &mut self.input_buffer,
+                &mut self.cursor_position,
+                &mut self.input_history_index,
+            );
             self.pane_manager
                 .split(crate::tui::pane::SplitDirection::Vertical);
+            self.pane_manager.adopt_input(
+                &mut self.input_buffer,
+                &mut self.cursor_position,
+                &mut self.input_history_index,
+            );
             self.pane_manager.save_layout();
             // Stay on sessions screen — user picks which session goes in the new pane.
         } else if event.code == KeyCode::Char('d') || event.code == KeyCode::Char('D') {
@@ -2909,23 +2884,59 @@ impl App {
                     self.selected_session_index = self.sessions.len().saturating_sub(1);
                 }
             }
-        } else if event.code == KeyCode::Char('f') || event.code == KeyCode::Char('F') {
-            // Open session files browser
+        } else if (event.code == KeyCode::Char('p') || event.code == KeyCode::Char('P'))
+            && (event.modifiers.contains(KeyModifiers::CONTROL)
+                || event.modifiers.contains(KeyModifiers::SUPER))
+            && event.modifiers.contains(KeyModifiers::SHIFT)
+        {
+            // Pin/unpin the selected session (#2457): the pin moved off
+            // `ctrl-f` when the Seeker card took a chord (alt+space since
+            // #2491), and it now rides `p` on both. A pin is a view
+            // property: it lives in the sidecar table, never touches
+            // `updated_at`, and floats the session to the top of this list
+            // without disturbing the recency order under it.
             if let Some(session) = self.sessions.get(self.selected_session_index) {
                 let session_id = session.id;
-                match self.file_service.list_files_for_session(session_id).await {
-                    Ok(files) => {
-                        self.session_files = files;
-                        self.selected_file_index = 0;
-                        self.switch_mode(AppMode::SessionFiles).await?;
-                    }
-                    Err(e) => {
-                        self.notification = Some(format!("Failed to load files: {e}"));
-                        self.notification_shown_at = Some(std::time::Instant::now());
-                    }
+                // Pulled out before `load_sessions` below: `session` borrows
+                // `self.sessions`, and the reload needs `&mut self`.
+                let title = session
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| "Untitled".to_string());
+                let pinned = self.session_favorites.contains(&session_id);
+                if pinned {
+                    self.session_service
+                        .unfavorite_session(&session_id.to_string())
+                        .await?;
+                } else {
+                    self.session_service
+                        .favorite_session(&session_id.to_string())
+                        .await?;
                 }
+                self.load_sessions().await?;
+                // The reload re-sorted the list, so follow the toggled
+                // session to its new row instead of leaving the cursor
+                // pointing at whatever moved into the old index.
+                if let Some(pos) = self.sessions.iter().position(|s| s.id == session_id) {
+                    self.selected_session_index = pos;
+                }
+                self.notification = Some(if pinned {
+                    format!("Unpinned: {title}")
+                } else {
+                    format!("Pinned to top: {title}")
+                });
+                self.notification_shown_at = Some(std::time::Instant::now());
             }
-        } else if event.code == KeyCode::Char('p') || event.code == KeyCode::Char('P') {
+        } else if (event.code == KeyCode::Char('f') || event.code == KeyCode::Char('F'))
+            && event.modifiers.is_empty()
+        {
+            // Open session files browser. Modifiers are excluded so no chord
+            // can also land here; the Seeker card opens the same view
+            // through the same method (#2458).
+            self.open_session_files_view().await?;
+        } else if (event.code == KeyCode::Char('p') || event.code == KeyCode::Char('P'))
+            && event.modifiers.is_empty()
+        {
             // Open projects browser
             match self.project_service.list_projects().await {
                 Ok(projects) => {
@@ -3353,5 +3364,32 @@ mod clipboard_backend_tests {
             ("opencrabs-no-such-clipboard-xyz", &[]),
         ];
         assert!(!copy_with_backends(backends, "payload"));
+    }
+}
+
+#[cfg(test)]
+mod palette_wiring_tests {
+    /// The pin chord moved to `ctrl-shift-p` when the Seeker card took a
+    /// chord (alt+space since #2491) (#2457), and the bare `p` that opens the projects
+    /// browser gained a modifier guard in the same move. A source scan,
+    /// because the handler needs a full app to exercise; the behaviour it
+    /// pins is which chord reaches which branch.
+    #[test]
+    fn the_pin_chord_is_ctrl_shift_p_and_bare_p_still_opens_projects() {
+        let src = include_str!("input.rs");
+        let pin = src
+            .find("KeyCode::Char('p') || event.code == KeyCode::Char('P'))\n            && (event.modifiers.contains(KeyModifiers::CONTROL)")
+            .expect("the pin branch rides p with a control modifier");
+        assert!(
+            src.contains("&& event.modifiers.contains(KeyModifiers::SHIFT)"),
+            "the pin must require shift"
+        );
+        let projects = src
+            .find("} else if (event.code == KeyCode::Char('p') || event.code == KeyCode::Char('P'))\n            && event.modifiers.is_empty()")
+            .expect("the projects branch must refuse modifiers");
+        assert!(
+            pin < projects,
+            "the pin branch is answered before the bare p"
+        );
     }
 }

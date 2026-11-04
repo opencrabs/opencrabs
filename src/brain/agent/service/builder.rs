@@ -5,6 +5,7 @@ use crate::brain::tools::ToolRegistry;
 use crate::services::ServiceContext;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use uuid::Uuid;
 
 /// Maximum number of recently-touched paths surfaced to the agent in
@@ -347,8 +348,13 @@ pub struct AgentService {
     /// (#213). `None` → the static `default_system_brain` is used as-is.
     pub(super) brain_rebuild: Option<BrainRebuild>,
 
-    /// Whether to auto-approve tool execution
-    pub(super) auto_approve_tools: bool,
+    /// Whether to auto-approve tool execution.
+    ///
+    /// Atomic so a frontend can flip it at runtime (`/approve auto-always`)
+    /// without rebuilding the service: the GUI keeps one long-lived service
+    /// for the life of the window, so a value baked in at construction would
+    /// leave the policy change written to config but never applied.
+    pub(super) auto_approve_tools: AtomicBool,
     /// Audit recording (#1705): when true, read-class tool calls persist a
     /// `turn_retrievals` row and turn finalization persists a
     /// `turn_outcomes` row for the /audit viewer. Resolved from
@@ -547,9 +553,9 @@ impl AgentService {
             // Resolving at construction rather than per tool call is
             // deliberate: the policy check that reads config hits the disk, and
             // the tool gate runs for every call.
-            auto_approve_tools: crate::utils::approval::policy_auto_approves(
+            auto_approve_tools: AtomicBool::new(crate::utils::approval::policy_auto_approves(
                 &config.agent.approval_policy,
-            ),
+            )),
             audit_recording: config.features.audit_recording,
             claude_turn_tasks: std::sync::Mutex::default(),
             headless: false,
@@ -922,7 +928,17 @@ impl AgentService {
     /// Whether tools run without an interactive approval, after folding the
     /// config policy together with any explicit caller grant.
     pub fn auto_approves_tools(&self) -> bool {
+        self.auto_approve_tools.load(Ordering::Relaxed)
+    }
+
+    /// Change the auto-approval grant at runtime, so a policy switch applies
+    /// to the next tool call instead of the next process.
+    ///
+    /// The caller writes `approval_policy` to config and calls this; both
+    /// halves are needed, or the screen and the file disagree.
+    pub fn set_auto_approve_tools(&self, auto_approve: bool) {
         self.auto_approve_tools
+            .store(auto_approve, Ordering::Relaxed);
     }
 
     /// Grant auto-approval on top of whatever the config policy already allows.
@@ -935,8 +951,10 @@ impl AgentService {
     ///
     /// `true` still forces it on for callers with their own grant, such as
     /// subagents whose spawn the parent already approved.
-    pub fn with_auto_approve_tools(mut self, auto_approve: bool) -> Self {
-        self.auto_approve_tools |= auto_approve;
+    pub fn with_auto_approve_tools(self, auto_approve: bool) -> Self {
+        if auto_approve {
+            self.auto_approve_tools.store(true, Ordering::Relaxed);
+        }
         self
     }
 
@@ -1241,6 +1259,39 @@ impl AgentService {
             .write()
             .expect("session working_directory lock poisoned") = path.clone();
         self.set_working_directory(path);
+    }
+
+    /// Apply an explicit operator `/cd` for one session (#2007, #2469).
+    ///
+    /// The ONE place allowed to move the process-global cwd, because an
+    /// operator typed `/cd` and a brand-new foreground session should seed
+    /// from the directory they chose. It sets the session's own handle, moves
+    /// the global, then persists the row so the next process restores it. Both
+    /// surfaces call this: the terminal's `/cd` handler and the window's text
+    /// command. A second copy of that sequence is how the two drifted before.
+    ///
+    /// Returns the canonical directory that was applied.
+    pub async fn apply_operator_cd(
+        &self,
+        session_id: Uuid,
+        dir: &std::path::Path,
+    ) -> std::path::PathBuf {
+        let canonical = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+        self.set_working_directory_for_session(session_id, canonical.clone());
+
+        // The DB row is the source of truth for a resume, so a `/cd` the user
+        // confirmed must survive the process, not just the pane.
+        let sessions = crate::services::SessionService::new(self.context.clone());
+        if let Err(e) = sessions
+            .update_session_working_directory(
+                session_id,
+                Some(canonical.to_string_lossy().to_string()),
+            )
+            .await
+        {
+            tracing::warn!("failed to persist session working directory: {e}");
+        }
+        canonical
     }
 
     /// True when this session has no cwd handle yet, i.e. the next
@@ -1960,6 +2011,35 @@ impl AgentService {
         let p = self.provider_for_session(session_id);
         p.active_subprovider_model()
             .unwrap_or_else(|| p.default_model().to_string())
+    }
+
+    /// The coherent display pair for a session: `(provider, model)` that are
+    /// actually serving it RIGHT NOW (#2264).
+    ///
+    /// Reading name and model from the two existing getters mixes sources
+    /// after a sticky fallback: the name comes from the chain's active entry
+    /// while the model comes from `session_models`, which still holds the
+    /// pick that belonged to the failed primary. That produced footers like
+    /// `zai / deepseek-v4.1-flash` where zai was serving its own default and
+    /// the pick belonged to another provider entirely. The model here goes
+    /// through `Provider::served_model()` (the same answer #1254 logging
+    /// uses), so a fallback that does not carry the pick reports the model
+    /// it remapped to, and one that does carry it reports the pick.
+    ///
+    /// Display only. Routing and the #705 model-refresh guard keep reading
+    /// [`Self::provider_model_for_session`], which must stay pick-first.
+    pub fn provider_pair_for_session(&self, session_id: Uuid) -> (String, String) {
+        let p = self.provider_for_session(session_id);
+        let name = p
+            .active_subprovider_name()
+            .unwrap_or_else(|| p.name().to_string());
+        let pick = self
+            .session_models
+            .read()
+            .ok()
+            .and_then(|m| m.get(&session_id).cloned())
+            .unwrap_or_else(|| p.default_model().to_string());
+        (name, p.served_model(&pick))
     }
 
     /// Derive the ambient conversation origin for a session (#148): which

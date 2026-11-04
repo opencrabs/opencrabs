@@ -22,17 +22,47 @@ pub const OPENCRABS_CONTEXT_WINDOW: u32 = 200_000;
 /// when it is reached under a provider name other than `opencrabs`.
 const OPENCRABS_HOST: &str = "inference.opencrabs.com";
 
+/// The host `base_url` addresses, lowercased, with the scheme, any userinfo,
+/// the port, the path, the query and the fragment removed.
+///
+/// Returns `None` when the input is empty or does not parse as a URL. A bare
+/// `host/path` is accepted by supplying a scheme, because `base_url` is
+/// configured without one in some setups.
+fn host_of(base_url: &str) -> Option<String> {
+    let trimmed = base_url.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // Without this, `inference.opencrabs.com:8080/v1` parses with
+    // `inference.opencrabs.com` as the SCHEME and no host at all.
+    let with_scheme;
+    let candidate = if trimmed.contains("://") {
+        trimmed
+    } else {
+        with_scheme = format!("https://{trimmed}");
+        &with_scheme
+    };
+    url::Url::parse(candidate)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_ascii_lowercase))
+}
+
 /// True when `base_url` points at the built-in inference endpoint.
 ///
 /// Deliberately a host check and not a provider-name check, mirroring
 /// `is_official_host` in `crate::config::wire_dialect`: a `[providers.custom.*]`
 /// section that copies the install token reaches the same endpoint under a
 /// different name, and the fixed window has to hold for it too (#2067).
+///
+/// The comparison is the parsed HOST against [`OPENCRABS_HOST`], never a
+/// substring of the whole URL (#2234). Five call sites hang off this answer,
+/// including the retry ladder and both voice routes, so a URL that merely
+/// carries the string in its query, its path or as a prefix of another domain
+/// must not be treated as the built-in endpoint.
 pub fn is_opencrabs_endpoint(base_url: Option<&str>) -> bool {
     base_url
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .is_some_and(|url| url.to_ascii_lowercase().contains(OPENCRABS_HOST))
+        .and_then(host_of)
+        .is_some_and(|host| host == OPENCRABS_HOST)
 }
 
 /// Path of the install route, relative to [`OPENCRABS_BASE_URL`].

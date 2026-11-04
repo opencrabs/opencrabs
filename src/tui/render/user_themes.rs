@@ -36,9 +36,12 @@ use super::theme::{AnsiColors, Role, Theme, ThemeColors, rgb_to_ansi256};
 /// same-on-same or near-black-on-black.
 pub(crate) const CONTRAST_FLOOR: f64 = 2.5;
 
-/// (foreground, background) role pairs that must stay readable. Deliberately
-/// dim decoration tiers (TextMuted, TextDim, GrayDim…) are excluded — dim is
-/// their job. Reading-critical roles only.
+/// (foreground, background) role pairs that must stay readable on a dark
+/// canvas. Deliberately dim decoration tiers (TextMuted, TextDim, GrayDim…)
+/// are excluded, since dim is their job. Reading-critical roles only.
+/// A light canvas certifies more than this table: see [`reading_floor`] and
+/// [`contrast_pairs_for`], which add the dim text tiers that a light
+/// background turns invisible (#2492).
 /// `pub(crate)` for the theme tests in `src/tests` — every test in this
 /// repository lives there, so the pair table has to be reachable from it.
 pub(crate) const CONTRAST_PAIRS: &[(Role, Role)] = &[
@@ -51,6 +54,81 @@ pub(crate) const CONTRAST_PAIRS: &[(Role, Role)] = &[
     (Role::BlueCode, Role::SurfaceCode),
     (Role::GrayMid, Role::SurfacePanel),
 ];
+
+/// Luminance above which a theme's canvas counts as light (#2492). Anything
+/// below it keeps the historical floors untouched, so every dark preset and
+/// pack theme certifies and regenerates exactly as before.
+pub(crate) const LIGHT_CANVAS_LUMINANCE: f64 = 0.5;
+
+/// The surface a theme's text sits on. Pack themes map `Ink` from the source
+/// canvas, but a hand-built light preset uses `Ink` as the colour drawn on a
+/// grey chip and declares its canvas separately, so a declared background
+/// wins when there is one.
+pub(crate) fn canvas(colors: &ThemeColors) -> Color {
+    colors.background.unwrap_or(colors.ink)
+}
+
+/// True when the canvas is light enough that a dark theme's dim fractions
+/// stop being readable (#2492).
+pub(crate) fn is_light_canvas(canvas: Color) -> bool {
+    relative_luminance(canvas) > LIGHT_CANVAS_LUMINANCE
+}
+
+/// The contrast a text role must clear against the canvas it sits on.
+/// `None` means the role is not certified against the canvas: it is a
+/// surface, or a palette colour already certified on its own pair.
+///
+/// A dark canvas keeps the historical rule, `CONTRAST_PAIRS` at
+/// [`CONTRAST_FLOOR`], so nothing that already shipped moves. A light canvas
+/// gets WCAG floors for the text tiers, because the same fractions that read
+/// as quiet on a dark canvas read as invisible on a light one: the dim tiers
+/// of `rosepine-dawn` measured 1.81:1 to 2.88:1 against its own background.
+pub(crate) fn reading_floor(role: Role, canvas: Color) -> Option<f64> {
+    if !is_light_canvas(canvas) {
+        return CONTRAST_PAIRS
+            .iter()
+            .any(|&(fg, _)| fg == role)
+            .then_some(CONTRAST_FLOOR);
+    }
+    match role {
+        Role::TextSecondary | Role::GraySoft => Some(4.5),
+        Role::TextMuted | Role::GrayMuted => Some(4.0),
+        Role::TextDim | Role::GrayDetail => Some(3.5),
+        // Drawn as a foreground (command palette, tool cards, plan widget),
+        // so a near-canvas value is invisible text rather than a quiet
+        // divider. Held at the historical floor, not a reading floor.
+        Role::GrayDim => Some(CONTRAST_FLOOR),
+        other if CONTRAST_PAIRS.iter().any(|&(fg, _)| fg == other) => Some(CONTRAST_FLOOR),
+        _ => None,
+    }
+}
+
+/// Every (foreground, background, floor) a theme must clear, keyed on the
+/// canvas it was built for. A light canvas additionally certifies the dim
+/// text tiers, which only a light palette can lose.
+pub(crate) fn contrast_pairs_for(canvas: Color) -> Vec<(Role, Role, f64)> {
+    let mut pairs: Vec<(Role, Role, f64)> = CONTRAST_PAIRS
+        .iter()
+        .map(|&(fg, bg)| (fg, bg, reading_floor(fg, canvas).unwrap_or(CONTRAST_FLOOR)))
+        .collect();
+    if !is_light_canvas(canvas) {
+        return pairs;
+    }
+    for role in [
+        Role::TextMuted,
+        Role::GrayMuted,
+        Role::TextDim,
+        Role::GrayDetail,
+        Role::GrayDim,
+    ] {
+        if let Some(floor) = reading_floor(role, canvas) {
+            // None of these roles is a foreground in `CONTRAST_PAIRS`, so
+            // this can never duplicate a pair.
+            pairs.push((role, Role::Ink, floor));
+        }
+    }
+    pairs
+}
 
 /// Raw TOML shape. `deny_unknown_fields` turns typos into parse errors;
 /// non-`Option` fields make `toml` name any missing role in its error.
@@ -383,12 +461,21 @@ pub(crate) fn build_theme(stem: &str, text: &str) -> Result<Theme, String> {
         name: Box::leak(stem.to_string().into_boxed_str()),
         colors: rgb,
     };
-    for &(fg, bg) in CONTRAST_PAIRS {
-        let (fgc, bgc) = (theme.colors.get(fg), theme.colors.get(bg));
+    // Floors are keyed on the canvas, and a light canvas certifies more than
+    // a dark one (#2492). `Ink` resolves to the declared canvas here: on a
+    // light preset it is the chip foreground, not the surface behind it.
+    let surface = canvas(&theme.colors);
+    for (fg, bg, floor) in contrast_pairs_for(surface) {
+        let bgc = if bg == Role::Ink {
+            surface
+        } else {
+            theme.colors.get(bg)
+        };
+        let fgc = theme.colors.get(fg);
         let r = contrast(fgc, bgc);
-        if r < CONTRAST_FLOOR {
+        if r < floor {
             return Err(format!(
-                "contrast {r:.2}:1 below {CONTRAST_FLOOR:.1}:1 for {} on {}",
+                "contrast {r:.2}:1 below {floor:.1}:1 for {} on {}",
                 role_key(fg),
                 role_key(bg)
             ));
@@ -432,8 +519,9 @@ pub(crate) fn parse_hex(s: &str) -> Option<Color> {
     Some(Color::Rgb((v >> 16) as u8, (v >> 8) as u8, v as u8))
 }
 
-/// WCAG 2.x relative luminance.
-fn relative_luminance(c: Color) -> f64 {
+/// WCAG 2.x relative luminance. `pub(crate)` so the theme tests in
+/// `src/tests` can measure a palette without re-deriving the formula.
+pub(crate) fn relative_luminance(c: Color) -> f64 {
     let chan = |b: u8| -> f64 {
         let x = f64::from(b) / 255.0;
         if x <= 0.04045 {
@@ -456,4 +544,10 @@ pub(crate) fn contrast(a: Color, b: Color) -> f64 {
     let (la, lb) = (relative_luminance(a), relative_luminance(b));
     let (hi, lo) = if la >= lb { (la, lb) } else { (lb, la) };
     (hi + 0.05) / (lo + 0.05)
+}
+
+/// Every loaded user preset, in the order the registry holds them.
+pub fn all() -> Vec<&'static Theme> {
+    ensure_loaded();
+    REGISTRY.read().map(|reg| reg.clone()).unwrap_or_default()
 }

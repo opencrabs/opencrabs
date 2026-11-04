@@ -298,3 +298,162 @@ async fn provider_error_drives_generic_retry() {
         "non-retryable must not retry"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Full attempt budget on every endpoint (#2277).
+//
+// The owner directive: the primary provider always rides the full 5 sends.
+// The proxy rotates upstreams between retries, so a handshake timeout is not
+// evidence that the next send repeats the silence; the #2232 stop-after-two
+// breaker was removed together with its config field. A timeout is still a
+// retryable transient like any other: 5xx, 429, stream drop and timeout all
+// burn the whole ladder before the fallback chain gets a turn.
+// ---------------------------------------------------------------------------
+
+/// The opencrabs endpoint keeps the patient default ladder.
+#[test]
+fn opencrabs_endpoint_profile_is_the_patient_default() {
+    use crate::brain::provider::custom_openai_compatible::select_retry_config;
+    use crate::utils::retry::RetryConfig;
+
+    let default = RetryConfig::default();
+    for provider_name in ["opencrabs", "my-copy"] {
+        let cfg = select_retry_config(None, provider_name, false, "deepseek-v4.1-flash");
+        assert_eq!(cfg.max_attempts, default.max_attempts);
+        assert_eq!(cfg.initial_delay, default.initial_delay);
+        assert_eq!(cfg.max_delay, default.max_delay);
+        assert_eq!(cfg.backoff_multiplier, default.backoff_multiplier);
+        assert_eq!(cfg.jitter, default.jitter);
+    }
+
+    // An explicit override still wins over the built-in default.
+    let forced = select_retry_config(
+        Some(&RetryConfig::api_aggressive()),
+        "opencrabs",
+        false,
+        "deepseek-v4.1-flash",
+    );
+    assert_eq!(
+        forced.max_attempts,
+        RetryConfig::api_aggressive().max_attempts
+    );
+}
+
+/// Two consecutive handshake timeouts do NOT stop the ladder: the proxy
+/// rotates upstreams between retries, so the next send can land on a healthy
+/// upstream. The regression from #2277: the ladder aborted on the second
+/// consecutive timeout and walked to the fallback after 2 of 5 sends.
+#[tokio::test]
+async fn two_consecutive_timeouts_do_not_stop_the_ladder() {
+    use crate::utils::retry::{RetryConfig, retry};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    let cfg = RetryConfig {
+        max_attempts: 4,
+        initial_delay: Duration::from_millis(1),
+        max_delay: Duration::from_millis(2),
+        backoff_multiplier: 2.0,
+        jitter: 0.0,
+    };
+
+    let calls = Arc::new(AtomicU32::new(0));
+    let c2 = calls.clone();
+    let out: Result<i32, ProviderError> = retry(
+        move || {
+            let c = c2.clone();
+            async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                Err(ProviderError::Timeout(120))
+            }
+        },
+        &cfg,
+    )
+    .await;
+
+    assert!(out.is_err());
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        5,
+        "timeouts are transients like any other: the ladder must burn all 1 + 4 sends"
+    );
+}
+
+/// A 5xx keeps every attempt too.
+#[tokio::test]
+async fn a_5xx_keeps_every_attempt() {
+    use crate::utils::retry::{RetryConfig, retry};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    let cfg = RetryConfig {
+        max_attempts: 4,
+        initial_delay: Duration::from_millis(1),
+        max_delay: Duration::from_millis(2),
+        backoff_multiplier: 2.0,
+        jitter: 0.0,
+    };
+
+    let calls = Arc::new(AtomicU32::new(0));
+    let c2 = calls.clone();
+    let out: Result<i32, ProviderError> = retry(
+        move || {
+            let c = c2.clone();
+            async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                Err(ProviderError::ApiError {
+                    status: 503,
+                    message: "upstream unavailable".to_string(),
+                    error_type: None,
+                })
+            }
+        },
+        &cfg,
+    )
+    .await;
+
+    assert!(out.is_err());
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        5,
+        "a 5xx is an answer, so it keeps the full 1 + 4 attempts"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Provider-level selection.
+//
+// `retry_config()` is what every request path on the [OI] client reads, so
+// the profile has to be selected there. The override wins over everything.
+// ---------------------------------------------------------------------------
+
+/// Every endpoint without an override gets its named profile, and the
+/// override beats them all.
+#[test]
+fn the_retry_profile_is_selected_by_provider_name_and_override() {
+    use crate::brain::provider::custom_openai_compatible::select_retry_config;
+    use crate::utils::retry::RetryConfig;
+
+    // Qwen and OpenRouter keep the tight 429-window profile.
+    let qwen = select_retry_config(None, "qwen", false, "qwen-max");
+    assert_eq!(
+        qwen.max_attempts,
+        RetryConfig::qwen_cli_match().max_attempts
+    );
+
+    // Every other cloud provider keeps the default attempt budget.
+    let other = select_retry_config(None, "openai", false, "gpt-4o");
+    assert_eq!(other.max_attempts, 4);
+
+    // An explicit override wins over the named profile.
+    let forced = select_retry_config(
+        Some(&RetryConfig::api_aggressive()),
+        "qwen",
+        false,
+        "qwen-max",
+    );
+    assert_eq!(
+        forced.max_attempts,
+        RetryConfig::api_aggressive().max_attempts
+    );
+}

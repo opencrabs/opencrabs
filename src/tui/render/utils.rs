@@ -135,7 +135,7 @@ pub(super) fn format_token_count_with_label(tokens: i64, label: &str) -> String 
 }
 
 /// Format token count as raw number without label (e.g. "150K", "1.2M")
-pub(super) fn format_token_count_raw(tokens: i64) -> String {
+pub fn format_token_count_raw(tokens: i64) -> String {
     let tokens = tokens.max(0) as f64;
     if tokens >= 1_000_000.0 {
         format!("{:.1}M", tokens / 1_000_000.0)

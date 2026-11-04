@@ -9,6 +9,7 @@ use crate::brain::tools::ToolExecutionContext;
 use crate::services::{MessageService, SessionService};
 use serde_json::Value;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -544,7 +545,7 @@ impl AgentService {
             super::compaction_prompts::build_continuation(
                 kind,
                 self.silent_compaction,
-                self.auto_approve_tools,
+                self.auto_approve_tools.load(Ordering::Relaxed),
                 super::compaction_prompts::PlanRecovery::for_session(session_id).await,
             ),
             &skills,
@@ -1507,7 +1508,8 @@ impl AgentService {
         // `approval_policy = "auto-always"` silently suppresses the ask the
         // override exists to make. The loop gate below already honours the
         // override; this mirror must not un-do it.
-        let context_auto_approve = self.auto_approve_tools && !has_override_approval;
+        let context_auto_approve =
+            self.auto_approve_tools.load(Ordering::Relaxed) && !has_override_approval;
         let mut tool_context = ToolExecutionContext::new(session_id)
             .with_auto_approve(context_auto_approve)
             .with_working_directory(
@@ -1679,6 +1681,10 @@ impl AgentService {
         // (#2088). Without text there is no answer on screen, so the turn asks
         // the model once more instead of ending empty.
         let mut option_halt_iteration_has_text = false;
+        // The text of the halting iteration, which is the answer on a halt
+        // (#2239). `accumulated_text` holds every iteration's narration and is
+        // not the answer.
+        let mut option_halt_answer: Option<String> = None;
         // Consecutive identical tool rounds (#1030). Observes only; the
         // repeated call still runs and its result still reaches the model.
         // Reset on a provider swap below, because a fallback replays the
@@ -2568,10 +2574,24 @@ impl AgentService {
                             )
                         } else if is_auth {
                             format!("Auth error on '{}/{}'", primary_from_name, model_name)
-                        } else {
+                        } else if e.is_quota_exhausted() {
+                            // A hard quota does not lift inside any retry window, so the
+                            // chain walks on the first hit by design (#952). Claiming
+                            // in-place retries that never ran is the lie #2270 removed.
                             format!(
-                                "Rate limit on '{}/{}' (retried 3x in-place)",
+                                "Rate limit on '{}/{}' (hard quota, no in-place retry)",
                                 primary_from_name, model_name
+                            )
+                        } else {
+                            // The provider layer spent its full in-place ladder (one send
+                            // plus `max_attempts` retries, each of which the proxy can
+                            // rotate onto a different upstream) before this error reached
+                            // the loop. Derived from the config, never a literal (#2270).
+                            let in_place_retry_attempts =
+                                crate::utils::retry::in_place_attempt_budget();
+                            format!(
+                                "Rate limit on '{}/{}' (retried up to {}x in-place)",
+                                primary_from_name, model_name, in_place_retry_attempts
                             )
                         };
                         let message = if !self.has_fallback_provider() {
@@ -6887,7 +6907,8 @@ impl AgentService {
                 // respects the auto_approve_tools flag and tool-level policy.
                 let needs_approval = if let Some(tool) = self.tool_registry.get(&tool_name) {
                     tool.requires_approval_for_input(&tool_input)
-                        && (!self.auto_approve_tools || has_override_approval)
+                        && (!self.auto_approve_tools.load(Ordering::Relaxed)
+                            || has_override_approval)
                         && !tool_context.auto_approve
                 } else {
                     false
@@ -7283,6 +7304,7 @@ impl AgentService {
                                     option_surface_halt_seen = true;
                                     option_halt_iteration_has_text =
                                         !iteration_text.trim().is_empty();
+                                    option_halt_answer = Some(iteration_text.clone());
                                     break;
                                 }
 
@@ -7581,6 +7603,7 @@ impl AgentService {
                     // tag it for the phantom-gate exemption.
                     option_surface_halt_seen = true;
                     option_halt_iteration_has_text = !iteration_text.trim().is_empty();
+                    option_halt_answer = Some(iteration_text.clone());
                     break;
                 }
             }
@@ -7950,19 +7973,20 @@ impl AgentService {
         // If the loop broke without a final_response but we have accumulated text,
         // synthesize a partial response instead of erroring — the user already saw the
         // text streamed in real-time, so returning it keeps the TUI consistent.
+        let partial_text = super::halt_answer::partial_response_text(
+            option_halt_answer.as_deref(),
+            &accumulated_text,
+        );
         let response = match final_response {
             Some(resp) => resp,
             None if !accumulated_text.is_empty() => {
                 tracing::warn!(
-                    "Synthesizing partial response from {} chars of accumulated text \
-                     (loop broke without final LLM response)",
-                    accumulated_text.len()
+                    "Synthesizing partial response from {} chars (loop broke without final LLM response)",
+                    partial_text.len()
                 );
                 LLMResponse {
                     id: String::new(),
-                    content: vec![ContentBlock::Text {
-                        text: accumulated_text.clone(),
-                    }],
+                    content: vec![ContentBlock::Text { text: partial_text }],
                     model: model_name.clone(),
                     usage: crate::brain::provider::TokenUsage {
                         input_tokens: total_input_tokens,
@@ -8336,6 +8360,25 @@ impl AgentService {
                 && let Err(e) = crate::utils::plan_files::save_plan(&finished).await
             {
                 tracing::warn!("Failed to persist auto-completed trailing plan task: {e}");
+            }
+            // #2255: a finished plan announces itself. The event carries the
+            // fact to every surface from this one place; whether anything
+            // makes noise about it is the surface's call (the TUI gates the
+            // completion sound on `[agent] completion_notification_enabled`).
+            // Emitted on the MERGED per-turn callback, not `self.progress_callback`:
+            // a channel turn carries its own callback as an override, and
+            // reading the service field alone would drop the event for it.
+            if let Some(resolved) =
+                crate::utils::completion_sound::announcement_pending(Some(&finished))
+                && let Some(cb) = progress_callback.as_ref()
+            {
+                cb(
+                    session_id,
+                    ProgressEvent::PlanCompleted {
+                        title: finished.title.clone(),
+                        tasks: resolved,
+                    },
+                );
             }
             if finished.is_complete()
                 && let Err(e) = crate::utils::plan_files::archive_plan(session_id).await

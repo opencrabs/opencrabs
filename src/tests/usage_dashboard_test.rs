@@ -1,6 +1,8 @@
 use crate::tui::app::dialog_keys::{DialogScope, dialog_keys};
+use crate::ui_core::usage::input::CACHE_CARD;
 use crate::usage::dashboard::*;
 use crate::usage::data::Period;
+use crate::usage::layout::CARD_COUNT;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// A bare key press, the shape the dashboard's keymap is written in.

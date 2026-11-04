@@ -129,8 +129,10 @@ impl OnboardingWizard {
         }
     }
 
-    /// Whether brain inputs have been modified since loading from file
-    fn brain_inputs_changed(&self) -> bool {
+    /// Whether brain inputs have been modified since loading from file.
+    /// Public so the window's wizard asks the same question the terminal does
+    /// before it decides between generating and skipping the step.
+    pub fn brain_inputs_changed(&self) -> bool {
         self.about_me != self.original_about_me
             || self.about_opencrabs != self.original_about_opencrabs
     }
@@ -289,7 +291,7 @@ CRITICAL OUTPUT RULES:
 /// Accepts both the strict `---NAME---` delimiters and a variety of
 /// header-style fallbacks so a model that forgets the exact format
 /// can still be recovered.
-pub(crate) fn parse_brain_sections(response: &str) -> [Option<String>; 5] {
+pub fn parse_brain_sections(response: &str) -> [Option<String>; 5] {
     const NAMES: [&str; 5] = ["SOUL", "USER", "AGENTS", "TOOLS", "MEMORY"];
 
     // Each entry: (section_index, byte position of header start, header length)

@@ -4,8 +4,11 @@
 
 pub mod app;
 pub(crate) mod capture;
-pub(crate) mod clear_notice;
-pub(crate) mod compact_notice;
+/// Shared by every frontend: the window prints the same `/clear` line the
+/// terminal does.
+pub mod clear_notice;
+/// Shared by every frontend, same reason as `clear_notice`.
+pub mod compact_notice;
 /// Unix-only (#1744, #1755): the handoff reaps with libc `waitpid(WUNTRACED)`
 /// and coerces stops with SIGCONT/SIGTERM/SIGKILL, none of which the windows
 /// libc crate carries. On Windows the module compiles out and bang commands
@@ -14,6 +17,11 @@ pub(crate) mod compact_notice;
 pub mod editor;
 pub mod error;
 pub mod events;
+/// One source of truth for the input box geometry: visual rows, the byte
+/// under a screen cell, and the text between two cells. Click to place the
+/// caret, drag to copy and the selection highlight all read it, so they
+/// cannot disagree.
+pub mod input_layout;
 /// Detached process launcher (#2170, #2172): spawns with nulled stdio, reaps
 /// on a background thread and reports a non-zero exit, so the draw loop never
 /// blocks and a failed open is not reported as a success.

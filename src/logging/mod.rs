@@ -6,7 +6,7 @@ pub(crate) mod crash;
 pub(crate) mod crash_unsupported;
 pub(crate) mod logger;
 pub(crate) mod panic_record;
-pub(crate) mod reader;
+pub mod reader;
 pub(crate) mod redact;
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]

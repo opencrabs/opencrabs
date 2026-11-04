@@ -29,17 +29,16 @@ pub(super) fn render_plan_overlay(f: &mut Frame, app: &App, area: Rect) {
     // (reload_plan) and the resolved plan file path. Deriving the mode-state
     // and body here keeps the render loop sync, since the location resolver
     // is a DB lookup that must not run per frame.
-    let md_path = app.plan_file_path.as_ref().map(|p| p.with_extension("md"));
+    let md_path = app.plan_file_path().map(|p| p.with_extension("md"));
     let md_exists = md_path.as_ref().is_some_and(|p| p.exists());
-    let state = plan_files::plan_mode_state_of(app.plan_document.as_ref(), md_exists);
+    let state = plan_files::plan_mode_state_of(app.plan_document(), md_exists);
     // Pre-init is now a durable marker file, not a loaded PlanDocument (#569),
     // so a pre-init session has no `plan_document` and resolves to NoPlan above.
     // Detect it here the same way `md_exists` is derived — a sibling `.preinit`
     // of the resolved plan path — so the render loop stays sync (no DB lookup).
     let state = if state == PlanModeState::NoPlan
         && app
-            .plan_file_path
-            .as_ref()
+            .plan_file_path()
             .map(|p| p.with_extension("preinit"))
             .is_some_and(|p| p.exists())
     {
@@ -84,8 +83,7 @@ pub(super) fn render_plan_overlay(f: &mut Frame, app: &App, area: Rect) {
             .and_then(|p| std::fs::read_to_string(p).ok())
             .unwrap_or_else(|| "(the session plan .md is unreadable)".to_string()),
         PlanModeState::Active => app
-            .plan_document
-            .as_ref()
+            .plan_document()
             .map(crate::utils::plan_mode::format_active_checklist)
             .unwrap_or_else(|| "Plan JSON is unreadable.".to_string()),
     };
