@@ -154,11 +154,16 @@ pub fn build_router(state: A2aState, allowed_origins: &[String]) -> Router {
 
     // Public endpoints (discovery + health + pairing). Pairing is
     // unauthenticated by design — the one-time code IS the credential —
-    // and rate-limited in the handler.
+    // and rate-limited by a from_fn layer ahead of body extraction (so
+    // malformed-JSON 400s still pay the toll; see pairing_http).
     Router::new()
         .route("/.well-known/agent.json", get(get_agent_card))
         .route("/a2a/health", get(health_check))
         .route("/a2a/pair", post(pairing_http::handle_pair))
+        .route_layer(middleware::from_fn_with_state(
+            state.pair_hits.clone(),
+            pairing_http::pair_rate_limit,
+        ))
         .merge(protected)
         .layer(cors)
         .with_state(state)
@@ -291,7 +296,15 @@ pub async fn start_server(
         let _ = tx.send(Ok(()));
     }
 
-    axum::serve(listener, app).await?;
+    // ConnectInfo makes the socket peer available to the pairing rate
+    // limiter, which trusts forwarded IP headers ONLY from loopback
+    // peers (the local tunnel proxy) and keys everyone else by their
+    // real address.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }
