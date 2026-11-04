@@ -11,7 +11,7 @@
 //! builds each row's handler in its own loop turn, then hands the finished
 //! rows to `rail`.
 
-use crate::palette;
+use crate::{icon, palette};
 use std::collections::{HashMap, HashSet};
 
 use gpui::{
@@ -73,8 +73,6 @@ pub struct SessionsState {
     pub parents: HashMap<uuid::Uuid, uuid::Uuid>,
     /// Closed sessions (#2305): drawn dimmed and refuse new turns.
     pub closed: HashSet<uuid::Uuid>,
-    /// Parents whose topic tree is folded: their topics are not drawn (#2427).
-    pub collapsed: HashSet<uuid::Uuid>,
 }
 
 impl SessionsState {
@@ -105,11 +103,8 @@ impl SessionsState {
         let mut out: Vec<&Session> = Vec::with_capacity(visible.len());
         for top in pinned {
             out.push(top);
-            // A folded tree draws nothing beneath its parent, and the arrow
-            // keys walk this same order, so they skip the folded topics too.
-            if self.collapsed.contains(&top.id) {
-                continue;
-            }
+            // Topic pins are always visible beneath their parent. The arrow
+            // keys walk this exact order, so no cursor can target a hidden row.
             out.extend(
                 visible
                     .iter()
@@ -641,78 +636,6 @@ pub async fn load_topics(db_path: std::path::PathBuf) -> Result<Vec<uuid::Uuid>,
     }
 }
 
-/// Every session whose topic tree is folded (#2427).
-pub async fn load_collapsed(db_path: std::path::PathBuf) -> Result<Vec<uuid::Uuid>, String> {
-    let (tx, rx) = futures::channel::oneshot::channel::<Result<Vec<uuid::Uuid>, String>>();
-    let spawned = std::thread::Builder::new()
-        .name("topics-collapsed-fetch".into())
-        .stack_size(4 * 1024 * 1024)
-        .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build();
-            let result = match runtime {
-                Ok(rt) => rt
-                    .block_on(async {
-                        let db = Database::connect(&db_path).await?;
-                        let repo = SessionRepository::new(db.pool().clone());
-                        repo.topics_collapsed_ids().await
-                    })
-                    .map_err(|e| format!("{e:#}")),
-                Err(e) => Err(format!("tokio runtime failed: {e}")),
-            };
-            if tx.send(result).is_err() {
-                crate::logging::error("collapsed topics result dropped: the window closed first");
-            }
-        });
-    match spawned {
-        Ok(_) => match rx.await {
-            Ok(result) => result,
-            Err(_) => Err("collapsed topics fetch thread dropped its result".into()),
-        },
-        Err(e) => Err(format!(
-            "collapsed topics fetch thread failed to spawn: {e}"
-        )),
-    }
-}
-
-/// Fold or unfold one session's topic tree and save it (#2427).
-pub async fn set_collapsed(
-    db_path: std::path::PathBuf,
-    id: uuid::Uuid,
-    collapsed: bool,
-) -> Result<(), String> {
-    let (tx, rx) = futures::channel::oneshot::channel::<Result<(), String>>();
-    let spawned = std::thread::Builder::new()
-        .name("topics-collapsed-write".into())
-        .stack_size(4 * 1024 * 1024)
-        .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build();
-            let result = match runtime {
-                Ok(rt) => rt
-                    .block_on(async {
-                        let db = Database::connect(&db_path).await?;
-                        let repo = SessionRepository::new(db.pool().clone());
-                        repo.set_topics_collapsed(id, collapsed).await
-                    })
-                    .map_err(|e| format!("{e:#}")),
-                Err(e) => Err(format!("tokio runtime failed: {e}")),
-            };
-            if tx.send(result).is_err() {
-                crate::logging::error("fold write result dropped: the window closed first");
-            }
-        });
-    match spawned {
-        Ok(_) => match rx.await {
-            Ok(result) => result,
-            Err(_) => Err("fold write thread dropped its result".into()),
-        },
-        Err(e) => Err(format!("fold write thread failed to spawn: {e}")),
-    }
-}
-
 /// Every topic's own icon. Read with the topic state, the same way the flag is.
 pub async fn load_topic_icons(
     db_path: std::path::PathBuf,
@@ -1087,7 +1010,6 @@ pub fn row(
     flags: RowFlags,
     action: Option<Stateful<Div>>,
     menu: Option<Stateful<Div>>,
-    fold: Option<Stateful<Div>>,
 ) -> Stateful<Div> {
     let RowFlags {
         selected,
@@ -1096,13 +1018,30 @@ pub fn row(
         indented,
         closed,
     } = flags;
+    let title_text = div()
+        // A closed topic reads dimmed: still there, no longer taking work.
+        .text_color(rgb(if closed {
+            palette::current().text_faint
+        } else {
+            palette::current().text
+        }))
+        .truncate()
+        .child(SharedString::from(fit(
+            s.title.as_deref().unwrap_or("(untitled)"),
+            42,
+        )));
+    let title_text = if indented {
+        title_text.text_xs()
+    } else {
+        title_text.text_sm()
+    };
     let title = div()
         .flex()
         .flex_row()
         .items_center()
         .gap_1()
         .min_w_0()
-        .children(fold)
+        .when(indented, |d| d.child(topic_pin_mark()))
         .child({
             let (mark, colour) = pin_mark(favorited);
             div()
@@ -1111,43 +1050,32 @@ pub fn row(
                 .text_color(rgb(colour))
                 .child(SharedString::from(mark))
         })
-        .child(
-            div()
-                .text_sm()
-                // A closed topic reads dimmed: still there, no longer taking work.
-                .text_color(rgb(if closed {
-                    palette::current().text_faint
-                } else {
-                    palette::current().text
-                }))
-                .truncate()
-                .child(SharedString::from(fit(
-                    s.title.as_deref().unwrap_or("(untitled)"),
-                    42,
-                ))),
-        );
-    // A topic is indented under its session, so the grouping reads at a glance.
+        .child(title_text);
+    // A grouped topic is a compact pin beneath its session. Its title stays
+    // visible, while the repeated date and cost metadata belongs to full rows.
     let body = div()
         .flex()
         .flex_col()
         .gap_0p5()
         .min_w_0()
-        .when(indented, |d| d.pl_4())
         .child(title)
-        .child(
-            div()
-                .text_xs()
-                .text_color(rgb(palette::current().text_muted))
-                .child(SharedString::from(format!(
-                    "{} · ${:.2}",
-                    s.updated_at
-                        .with_timezone(&chrono::Local)
-                        .format("%m-%d %H:%M"),
-                    s.total_cost
-                ))),
-        );
+        .when(!indented, |d| {
+            d.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(palette::current().text_muted))
+                    .child(SharedString::from(format!(
+                        "{} · ${:.2}",
+                        s.updated_at
+                            .with_timezone(&chrono::Local)
+                            .format("%m-%d %H:%M"),
+                        s.total_cost
+                    ))),
+            )
+        });
     let mut row = div()
         .id(SharedString::from(s.id.to_string()))
+        .w_full()
         .relative()
         .flex()
         .flex_row()
@@ -1155,7 +1083,7 @@ pub fn row(
         .justify_between()
         .gap_1()
         .p_2()
-        .rounded_sm()
+        .when(indented, |d| d.pl_4().pr_2().py_1())
         .cursor_pointer()
         .when(selected, |d| d.bg(rgb(palette::current().selection)))
         // The keyboard's row reads as an accent bar on the left edge,
@@ -1177,6 +1105,15 @@ pub fn row(
         row = row.child(deferred(menu).with_priority(1));
     }
     row
+}
+
+/// The quiet branch mark that makes a grouped topic read as a compact pin.
+fn topic_pin_mark() -> Div {
+    div()
+        .flex_none()
+        .text_xs()
+        .text_color(rgb(palette::current().text_muted))
+        .child("\u{2442}")
 }
 
 /// The click behaviour for a row, typed the way `cx.listener` produces it.
@@ -1254,21 +1191,6 @@ pub fn pin_button(favorited: bool) -> Stateful<Div> {
 
 /// The topic icon of a row's slide-out strip. With topics off it turns them
 /// on; with topics on it opens a new topic under the session (#2302, #2303).
-/// The chevron that folds a session's topic tree (#2427). A click folds or
-/// unfolds it; the view does the write, so this stays a plain control.
-pub fn fold_button(id: uuid::Uuid, collapsed: bool) -> Stateful<Div> {
-    let glyph = if collapsed { "\u{25B8}" } else { "\u{25BE}" };
-    div()
-        .id(SharedString::from(format!("topic-fold-{id}")))
-        .flex_none()
-        .w(rems(1.0))
-        .cursor_pointer()
-        .text_xs()
-        .text_color(rgb(palette::current().text_muted))
-        .hover(|d| d.text_color(rgb(palette::current().accent)))
-        .child(SharedString::from(glyph))
-}
-
 pub fn topic_button(topics_on: bool) -> Stateful<Div> {
     let color = if topics_on {
         palette::current().accent
@@ -1300,6 +1222,7 @@ pub fn rail(
     scroll: &ScrollHandle,
     footer: Option<AnyElement>,
 ) -> Stateful<Div> {
+    // No rail padding or inter-row gap: selection and hover paint edge to edge.
     let mut col = div()
         .id("session-rail")
         .flex()
@@ -1310,26 +1233,16 @@ pub fn rail(
         .w(rems(width_rem))
         .h_full()
         .bg(rgb(palette::current().panel))
-        .p_2()
-        .gap_1();
-
-    col = col.child(
-        div()
-            .text_xs()
-            .text_color(rgb(palette::current().text_title))
-            .child(SharedString::from(format!(
-                "SESSIONS · {}",
-                state.items.len()
-            ))),
-    );
+        .child(brand_header());
 
     if state.filter_active {
-        col = col.child(filter_bar(state));
+        col = col.child(div().w_full().p_2().child(filter_bar(state)));
     }
 
     if let Some(err) = &state.error {
         col = col.child(
             div()
+                .p_3()
                 .text_xs()
                 .text_color(rgb(palette::current().text_muted))
                 .child(err.clone()),
@@ -1340,6 +1253,7 @@ pub fn rail(
     if rows.is_empty() && !state.filter.trim().is_empty() {
         col = col.child(
             div()
+                .p_3()
                 .text_xs()
                 .text_color(rgb(palette::current().text_muted))
                 .child("no chat matches"),
@@ -1354,9 +1268,30 @@ pub fn rail(
     // list it pins to the bottom edge, with a full list it waits at the
     // end of the scroll like any other row.
     if let Some(footer) = footer {
-        col = col.child(footer);
+        col = col.child(div().w_full().mt_auto().px_2().pb_2().child(footer));
     }
     col
+}
+
+/// A compact brand header instead of a second session counter.
+fn brand_header() -> Div {
+    div()
+        .w_full()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .px_3()
+        .py_3()
+        .border_b_1()
+        .border_color(rgb(palette::current().panel_hi))
+        .child(icon::banner_logo())
+        .child(
+            div()
+                .text_sm()
+                .text_color(rgb(palette::current().text_title))
+                .child("OpenCrabs"),
+        )
 }
 
 #[cfg(test)]
@@ -1389,6 +1324,11 @@ mod tests {
         );
         assert!(state.is_indented(a1_id));
         assert!(!state.is_indented(a_id));
+        assert_eq!(
+            state.cursor_step(Some(a_id), 1),
+            Some(a1_id),
+            "the keyboard lands on the same visible topic pin the rail paints"
+        );
 
         state.favorites.insert(a1_id);
         let order: Vec<_> = state.ordered().map(|s| s.id).collect();
