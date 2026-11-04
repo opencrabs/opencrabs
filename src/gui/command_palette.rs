@@ -327,7 +327,7 @@ pub fn overlay(
                     .text_xs()
                     .text_color(rgb(INK_MUTED))
                     .mr_2()
-                    .child(SharedString::from(rowv.kind.clone())),
+                    .child(SharedString::from(rowv.kind)),
             );
             if rowv.missing {
                 // A command the terminal runs and this window does not keeps
