@@ -430,6 +430,10 @@ mod tests {
     fn topic_style_orientation_icon_is_an_embedded_modern_vector() {
         let svg = std::str::from_utf8(ORIENTATION_ICON_SVG).expect("orientation SVG is UTF-8");
         assert!(svg.starts_with("<svg"));
+        // #2542: GPUI rasterizes the vector from its intrinsic size. Keep
+        // enough source pixels for the fixed 18px display size to stay sharp.
+        assert!(svg.contains("width=\"96\" height=\"96\""));
+        assert!(svg.contains("viewBox=\"0 0 24 24\""));
         assert!(svg.contains("stroke-linecap=\"round\""));
         assert!(svg.contains("stroke-linejoin=\"round\""));
         assert!(svg.contains("<path"));
