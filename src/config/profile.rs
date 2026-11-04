@@ -1254,7 +1254,7 @@ pub fn instance_running(profile: &str) -> bool {
     )
 }
 
-pub(crate) fn instance_running_in(lock_dir: &Path, profile: &str) -> bool {
+pub fn instance_running_in(lock_dir: &Path, profile: &str) -> bool {
     let path = lock_dir.join(format!("{profile}.lock"));
     match fs::read_to_string(&path) {
         // The instance stamp is a bare `pid[:ticks]` with no profile prefix,

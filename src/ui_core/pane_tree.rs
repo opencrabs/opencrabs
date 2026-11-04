@@ -1,0 +1,405 @@
+//! The pane tree (#2472): the window's panes as a recursive structure,
+//! replacing the one-secondary-pane model. A leaf holds a session and its
+//! share of its parent's span; a split lays its children along one axis and
+//! holds the shares. A tree of one leaf is the unsplit window, so today's
+//! plain chat is the base case, not a special one.
+
+use crate::ui_core::split::{Layout, MIN_PANE_PX};
+use std::collections::HashSet;
+use uuid::Uuid;
+
+/// One node of the pane tree.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PaneTree {
+    /// A pane showing one session. `share` is this pane's fraction of its
+    /// parent split's span along the split axis; a root leaf's share is 1.
+    Leaf { session: Uuid, share: f32 },
+    /// Children laid out along one axis, in draw order. `share` is this
+    /// split's fraction of its parent split's span, exactly like a leaf's;
+    /// siblings' shares sum to 1, and the root's share is 1.
+    Split {
+        layout: Layout,
+        share: f32,
+        children: Vec<PaneTree>,
+    },
+}
+
+fn set_share(node: &mut PaneTree, share: f32) {
+    match node {
+        PaneTree::Leaf { share: s, .. } => *s = share,
+        PaneTree::Split { share: s, .. } => *s = share,
+    }
+}
+
+fn add_share(node: &mut PaneTree, by: f32) {
+    match node {
+        PaneTree::Leaf { share: s, .. } => *s += by,
+        PaneTree::Split { share: s, .. } => *s += by,
+    }
+}
+
+/// Lift every child share under `floor` up to it, taking the room off the
+/// largest share. The sum stays at 1 and every floor holds, because the
+/// deficit moves instead of being divided away by a renormalize.
+fn clamp_floors(children: &mut [PaneTree], floor: f32) {
+    for _ in 0..children.len() {
+        let Some(small) = (0..children.len()).find(|&i| children[i].share() < floor - 1e-6) else {
+            return;
+        };
+        let deficit = floor - children[small].share();
+        set_share(&mut children[small], floor);
+        let big = (0..children.len())
+            .max_by(|&x, &y| children[x].share().total_cmp(&children[y].share()))
+            .expect("children is non-empty");
+        add_share(&mut children[big], -deficit);
+    }
+}
+
+/// Bring a split's children's shares back to a sum of 1.
+fn normalize_shares(children: &mut [PaneTree]) {
+    if children.is_empty() {
+        return;
+    }
+    let total: f32 = children.iter().map(|child| child.share()).sum();
+    if !total.is_finite() || total <= 0.0 {
+        let each = 1.0 / children.len() as f32;
+        for child in children.iter_mut() {
+            set_share(child, each);
+        }
+        return;
+    }
+    for child in children.iter_mut() {
+        set_share(child, child.share() / total);
+    }
+}
+
+impl PaneTree {
+    /// The unsplit window: one pane, the whole span.
+    pub fn leaf(session: Uuid) -> Self {
+        PaneTree::Leaf {
+            session,
+            share: 1.0,
+        }
+    }
+
+    /// This node's share of its parent split's span. The root returns 1.
+    pub fn share(&self) -> f32 {
+        match self {
+            PaneTree::Leaf { share, .. } => *share,
+            PaneTree::Split { share, .. } => *share,
+        }
+    }
+
+    /// Split the leaf showing `session` in two along `layout`, the newcomer
+    /// sitting after it. Both halves start even; `false` when no leaf holds
+    /// that session, or when the tree is one leaf and the newcomer IS that
+    /// session, which would split a session with itself.
+    pub fn split(&mut self, session: Uuid, layout: Layout, new_session: Uuid) -> bool {
+        if self.leaves().len() == 1 && self.contains(new_session) {
+            return false;
+        }
+        match self {
+            PaneTree::Leaf { session: s, share } if *s == session => {
+                let half = *share / 2.0;
+                *self = PaneTree::Split {
+                    layout,
+                    share: *share,
+                    children: vec![
+                        PaneTree::Leaf {
+                            session: *s,
+                            share: half,
+                        },
+                        PaneTree::Leaf {
+                            session: new_session,
+                            share: half,
+                        },
+                    ],
+                };
+                true
+            }
+            PaneTree::Split { children, .. } => children
+                .iter_mut()
+                .any(|child| child.split(session, layout, new_session)),
+            PaneTree::Leaf { .. } => false,
+        }
+    }
+
+    /// Close the leaf showing `session`: its share is shared out evenly
+    /// among the siblings it leaves behind, and a split down to one child
+    /// collapses into that child, which keeps the space the split held.
+    /// Returns the first surviving sibling, or `None` when no leaf holds
+    /// the session.
+    pub fn close(&mut self, session: Uuid) -> Option<Uuid> {
+        let kept_share = self.share();
+        let PaneTree::Split { children, .. } = self else {
+            return None;
+        };
+        // A direct child leaf closes here: remove it, spread its share,
+        // collapse a split left with one child.
+        if let Some(at) = children
+            .iter()
+            .position(|child| matches!(child, PaneTree::Leaf { session: s, .. } if *s == session))
+        {
+            let removed = children[at].share();
+            children.remove(at);
+            let each = removed / children.len() as f32;
+            let absorbed = children
+                .iter()
+                .flat_map(|child| child.leaves())
+                .next()
+                .expect("a split keeps at least one leaf");
+            for sibling in children.iter_mut() {
+                add_share(sibling, each);
+            }
+            if children.len() == 1 {
+                let mut survivor = children.remove(0);
+                set_share(&mut survivor, kept_share);
+                *self = survivor;
+            } else {
+                normalize_shares(children);
+            }
+            return Some(absorbed);
+        }
+        // Otherwise the session lives under one child split: recurse there.
+        // A child that collapsed to a leaf stays in its slot, so the draw
+        // order never moves under a close, and it kept the share the split
+        // held, so the siblings' sum stays at 1 with no renormalize.
+        let at = children.iter().position(|child| child.contains(session))?;
+        let absorbed = children[at].close(session)?;
+        Some(absorbed)
+    }
+
+    /// Every session in visual order: depth first, children in draw order,
+    /// so cycling focus and drawing dividers both walk the same sequence.
+    pub fn leaves(&self) -> Vec<Uuid> {
+        match self {
+            PaneTree::Leaf { session, .. } => vec![*session],
+            PaneTree::Split { children, .. } => {
+                children.iter().flat_map(|child| child.leaves()).collect()
+            }
+        }
+    }
+
+    /// Whether any leaf shows this session.
+    pub fn contains(&self, session: Uuid) -> bool {
+        match self {
+            PaneTree::Leaf { session: s, .. } => *s == session,
+            PaneTree::Split { children, .. } => {
+                children.iter().any(|child| child.contains(session))
+            }
+        }
+    }
+
+    /// Clamp every split's children so no pane can sit under
+    /// [`MIN_PANE_PX`] of its own span. `span` is this node's span along its
+    /// split axis in px; the root passes the pane area. A span too small to
+    /// hold every child at that minimum leaves the shares alone: shrinking
+    /// a pane below the floor would be the one outcome a resize must never
+    /// produce.
+    pub fn normalize(&mut self, span: f32) {
+        if !span.is_finite() || span <= 0.0 {
+            return;
+        }
+        let PaneTree::Split { children, .. } = self else {
+            return;
+        };
+        normalize_shares(children);
+        if children.len() >= 2 && span > MIN_PANE_PX * children.len() as f32 {
+            clamp_floors(children, MIN_PANE_PX / span);
+        }
+        let child_spans: Vec<f32> = children.iter().map(|child| child.share() * span).collect();
+        for (child, child_span) in children.iter_mut().zip(child_spans) {
+            child.normalize(child_span);
+        }
+    }
+
+    /// The node at a child-index path from this node, for drag addressing.
+    pub fn at(&mut self, path: &[usize]) -> Option<&mut PaneTree> {
+        let mut node = self;
+        for step in path {
+            node = match node {
+                PaneTree::Split { children, .. } => children.get_mut(*step)?,
+                PaneTree::Leaf { .. } => return None,
+            };
+        }
+        Some(node)
+    }
+
+    /// Sessions this tree holds more than once, which no state machine of
+    /// ours should ever produce: a session lives in one pane only.
+    pub fn duplicates(&self) -> Vec<Uuid> {
+        let mut seen = HashSet::new();
+        let mut dupes = Vec::new();
+        for session in self.leaves() {
+            if !seen.insert(session) {
+                dupes.push(session);
+            }
+        }
+        dupes
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui_core::split::Layout;
+    use uuid::uuid;
+
+    fn a() -> Uuid {
+        uuid!("00000000-0000-0000-0000-00000000000a")
+    }
+    fn b() -> Uuid {
+        uuid!("00000000-0000-0000-0000-00000000000b")
+    }
+    fn c() -> Uuid {
+        uuid!("00000000-0000-0000-0000-00000000000c")
+    }
+
+    /// A session split in two: both halves even, both present, draw order
+    /// puts the old pane first.
+    #[test]
+    fn splitting_a_leaf_makes_two_even_siblings() {
+        let mut tree = PaneTree::leaf(a());
+        assert!(tree.split(a(), Layout::Side, b()));
+        assert_eq!(tree.leaves(), vec![a(), b()]);
+        let PaneTree::Split { children, .. } = &tree else {
+            panic!("root must be a split now");
+        };
+        assert_eq!(children[0].share(), 0.5);
+        assert_eq!(children[1].share(), 0.5);
+    }
+
+    /// Splitting a session with itself is refused: one session, one pane.
+    #[test]
+    fn splitting_the_only_leaf_with_itself_is_refused() {
+        let mut tree = PaneTree::leaf(a());
+        assert!(!tree.split(a(), Layout::Side, a()));
+        assert!(matches!(tree, PaneTree::Leaf { .. }));
+    }
+
+    /// Closing one pane of a two-pane split collapses the tree to the
+    /// survivor, which takes the closed share with it. That one-leaf tree
+    /// is the unsplit window again.
+    #[test]
+    fn closing_one_of_two_leaves_collapses_to_the_survivor() {
+        let mut tree = PaneTree::leaf(a());
+        tree.split(a(), Layout::Side, b());
+        // Drag the split to 0.75/0.25 first, so the share handover shows.
+        if let PaneTree::Split { children, .. } = &mut tree {
+            set_share(&mut children[0], 0.75);
+            set_share(&mut children[1], 0.25);
+        }
+        let absorbed = tree.close(b()).expect("the survivor absorbs");
+        assert_eq!(absorbed, a());
+        assert_eq!(tree.leaves(), vec![a()]);
+        assert_eq!(tree.share(), 1.0, "the survivor holds the whole span");
+    }
+
+    /// Closing the first pane lets the second keep the window: the tree
+    /// collapses to the session that stays, whatever its position.
+    #[test]
+    fn closing_the_first_leaf_hands_the_window_to_the_second() {
+        let mut tree = PaneTree::leaf(a());
+        tree.split(a(), Layout::Side, b());
+        let absorbed = tree.close(a()).expect("the survivor absorbs");
+        assert_eq!(absorbed, b());
+        assert_eq!(tree.leaves(), vec![b()]);
+    }
+
+    /// A nested split: close a deep leaf and its sibling takes the room,
+    /// the outer tree staying a split because other panes remain, and the
+    /// surviving nested leaf keeping the slot the split held.
+    #[test]
+    fn closing_inside_a_nested_split_gives_the_room_to_the_sibling() {
+        let mut tree = PaneTree::leaf(a());
+        assert!(tree.split(a(), Layout::Side, b()));
+        // Split the SECOND pane again: a beside a b-over-c stack.
+        assert!(tree.split(b(), Layout::Stack, c()));
+        assert_eq!(tree.leaves(), vec![a(), b(), c()]);
+        let absorbed = tree.close(b()).expect("the sibling absorbs");
+        assert_eq!(absorbed, c());
+        assert_eq!(tree.leaves(), vec![a(), c()]);
+        // The outer split's first child still holds a's half; the second
+        // child, once the b/c split, is now c's leaf with the same share.
+        let PaneTree::Split { children, .. } = &tree else {
+            panic!("the outer split must survive");
+        };
+        assert_eq!(children[0].share(), 0.5, "a keeps its half");
+        assert_eq!(children[1].share(), 0.5, "the stack's slot keeps its half");
+        let PaneTree::Leaf {
+            session: survivor, ..
+        } = &children[1]
+        else {
+            panic!("the collapsed child is a leaf now");
+        };
+        assert_eq!(*survivor, c());
+    }
+
+    /// `contains` answers for leaves at any depth.
+    #[test]
+    fn contains_reaches_nested_leaves() {
+        let mut tree = PaneTree::leaf(a());
+        tree.split(a(), Layout::Side, b());
+        assert!(tree.contains(a()));
+        assert!(tree.contains(b()));
+        assert!(!tree.contains(c()));
+    }
+
+    /// Normalize lifts any pane under the floor pixel minimum and takes
+    /// the room off the largest sibling, keeping the sum at 1.
+    #[test]
+    fn normalize_clamps_shares_to_the_pixel_floor() {
+        let mut tree = PaneTree::leaf(a());
+        tree.split(a(), Layout::Side, b());
+        if let PaneTree::Split { children, .. } = &mut tree {
+            set_share(&mut children[0], 0.99);
+            set_share(&mut children[1], 0.01);
+        }
+        // A 2000px span: the floor is 240/2000 = 0.12 per pane.
+        tree.normalize(2000.0);
+        let PaneTree::Split { children, .. } = &tree else {
+            panic!("still a split");
+        };
+        assert!(
+            children[1].share() >= 0.12 - 1e-4,
+            "small pane lifted to the floor, got {}",
+            children[1].share()
+        );
+        let total: f32 = children.iter().map(|child| child.share()).sum();
+        assert!((total - 1.0).abs() < 1e-4, "shares still sum to 1");
+    }
+
+    /// A span too small for two minimum panes is left alone: no share
+    /// change, because the only outcomes would be overlap or collapse.
+    #[test]
+    fn normalize_leaves_a_span_too_small_to_split_alone() {
+        let mut tree = PaneTree::leaf(a());
+        tree.split(a(), Layout::Side, b());
+        if let PaneTree::Split { children, .. } = &mut tree {
+            set_share(&mut children[0], 0.7);
+            set_share(&mut children[1], 0.3);
+        }
+        tree.normalize(100.0);
+        let PaneTree::Split { children, .. } = &tree else {
+            panic!("still a split");
+        };
+        assert_eq!(children[0].share(), 0.7);
+        assert_eq!(children[1].share(), 0.3);
+    }
+
+    /// A session appears in exactly one pane, and the tree can prove it.
+    #[test]
+    fn duplicates_reports_a_session_held_twice() {
+        let mut tree = PaneTree::leaf(a());
+        tree.split(a(), Layout::Side, b());
+        assert!(tree.duplicates().is_empty());
+        // Force a duplicate the way a bug would: replace a leaf's session.
+        if let PaneTree::Split { children, .. } = &mut tree {
+            children[1] = PaneTree::Leaf {
+                session: a(),
+                share: 0.5,
+            };
+        }
+        assert_eq!(tree.duplicates(), vec![a()]);
+    }
+}

@@ -56,6 +56,8 @@ use crate::screen_keys::{
     keyboard_owner, screen_chord,
 };
 use crate::theme::{BASE_REM, Size, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP, text};
+use opencrabs::ui_core::channel_status;
+use opencrabs::ui_core::rail;
 use opencrabs::ui_core::split::{self, Layout};
 use opencrabs::ui_core::topic_bar;
 use transcript::{CopyDrag, LiveTurn, TranscriptState};
@@ -64,6 +66,7 @@ use opencrabs::ui_core::commands as slash;
 // The Seeker engine: ranking, keywords and state, shared with the terminal
 // so both clients print the same rows in the same order (#2458). Named `find`
 // because `palette` here is the window's colour table.
+use opencrabs::ui_core::card::{CARD_RADIUS, glass_fill};
 use opencrabs::ui_core::palette::{
     self as find, Channel, PaletteAction, PaletteItem, PaletteKind, PaletteState,
 };
@@ -365,6 +368,61 @@ fn configured_channels() -> Vec<Channel> {
     live
 }
 
+/// Who owns the channels right now (#2452): a token lock on disk says
+/// something claimed them, a live instance lock says that something is
+/// still running. Read-only: the GUI never constructs a ChannelManager
+/// and never starts one on its own.
+fn channel_ownership() -> channel_status::Ownership {
+    let locks = opencrabs::config::profile::base_opencrabs_dir().join("locks");
+    // Token locks are files named `{channel}_{hash}.lock`; the instance,
+    // paths and scheduler locks live in their own subdirectories, so the
+    // suffix test on files only sees the channel claims.
+    let lock_present = std::fs::read_dir(&locks)
+        .map(|entries| {
+            entries.filter_map(Result::ok).any(|e| {
+                let name = e.file_name();
+                let name = name.to_string_lossy();
+                e.path().is_file() && name.ends_with(".lock") && name.contains('_')
+            })
+        })
+        .unwrap_or(false);
+    let profile = opencrabs::config::profile::active_profile().unwrap_or("default");
+    let live = opencrabs::config::profile::instance_running_in(&locks.join("instance"), profile);
+    channel_status::ownership(lock_present, live)
+}
+
+/// The chip line for the current config and lock state: `None` when every
+/// configured channel is served or nothing is configured (#2452).
+///
+/// UI THREAD ONLY: `Config::load` builds the whole config by value and on
+/// a GPUI background worker that build overflows the small stack (SIGILL,
+/// 2026-11-03). Background callers use `channel_chip_line_from` with the
+/// names read here once and passed in.
+fn channel_chip_line() -> Option<SharedString> {
+    let names: Vec<String> = configured_channels()
+        .iter()
+        .map(|c| c.name().to_string())
+        .collect();
+    channel_chip_line_from(&names)
+}
+
+/// The chip line from a fixed set of channel names: the probe path. Never
+/// touches Config, so it is safe on a background worker; the lock and
+/// instance checks are small directory reads (#2452).
+fn channel_chip_line_from(names: &[String]) -> Option<SharedString> {
+    if names.is_empty() {
+        return None;
+    }
+    let borrowed: Vec<&str> = names.iter().map(String::as_str).collect();
+    let line = channel_status::status_line(&borrowed, &channel_ownership()).map(SharedString::from);
+    logging::debug(&format!(
+        "chip probe: {} channels -> {}",
+        names.len(),
+        line.as_ref().map(|s| s.as_ref()).unwrap_or("hidden")
+    ));
+    line
+}
+
 /// The phase 1 window. Every string on screen is real data or the real error.
 struct Dashboard {
     /// Which pane the right side draws: chat by default, usage on ctrl+u.
@@ -390,6 +448,27 @@ struct Dashboard {
     /// so the hint can tell an unconfigured channel from a working one without
     /// touching the disk on every keystroke (#2462).
     finder_channels: Vec<Channel>,
+    /// The channel chip (#2452): `Some(line)` draws a quiet notice at the
+    /// bottom of the rail that the configured channels have no live owner,
+    /// with a Start daemon action. `None` means either everything is being
+    /// served or nothing is configured; the probe refreshes every few
+    /// seconds, off the UI thread.
+    channel_chip: Option<SharedString>,
+    /// The configured channel names, read from the config ONCE when the
+    /// window opens, on the UI thread. The 5s probe never calls Config:
+    /// on a GPUI background worker the config build overflows the small
+    /// stack and killed the window with SIGILL (2026-11-03 crash reports).
+    chip_channel_names: Vec<String>,
+    /// The Start daemon click is in flight: a second click while launchctl
+    /// or systemctl is running would stack two installs.
+    daemon_starting: bool,
+    /// What the last Start daemon attempt failed with, so the chip can say
+    /// why nothing changed after the click.
+    daemon_error: Option<SharedString>,
+    /// Whether the card's caret is on this half of the blink. The card is a
+    /// drawn div, not an input widget, so nothing blinks for it unless a
+    /// timer says so (#2491).
+    finder_caret: bool,
     /// Monotonic tag on the latest period fetch; only its result is applied,
     /// so a slow fetch landing after a newer one cannot paint stale data.
     pending: u64,
@@ -644,6 +723,64 @@ fn remember_preview(history: &mut Vec<String>, name: &str) {
 }
 
 impl Dashboard {
+    /// Re-read the channel chip now (#2452): after a Start click succeeds,
+    /// the daemon appears within a second or two, so poll instead of
+    /// waiting for the next 5-second tick. All IO runs off the UI thread.
+    fn refresh_channel_chip(&mut self, cx: &mut Context<Self>) {
+        let names = self.chip_channel_names.clone();
+        cx.spawn(async move |this, cx| {
+            let line = cx
+                .background_executor()
+                .spawn(async move { channel_chip_line_from(&names) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.channel_chip != line {
+                    logging::info(&format!(
+                        "channel chip -> {}",
+                        line.as_ref().map(|s| s.as_ref()).unwrap_or("hidden")
+                    ));
+                    this.channel_chip = line;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// The chip's action (#2452): install and start the daemon service via
+    /// the onboarding path (launchd on macOS, systemd user unit on Linux).
+    /// This is the only way the GUI ever starts one, and only on a click:
+    /// nothing here spawns a ChannelManager or claims a channel lock.
+    fn start_daemon(&mut self, cx: &mut Context<Self>) {
+        if self.daemon_starting {
+            return;
+        }
+        self.daemon_starting = true;
+        self.daemon_error = None;
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async { opencrabs::tui::onboarding::config::install_daemon_service() })
+                .await;
+            this.update(cx, |this, cx| {
+                this.daemon_starting = false;
+                match result {
+                    Ok(()) => {
+                        // The probe loop and the refresh below confirm the
+                        // daemon is live; the chip drops on its own word.
+                        this.refresh_channel_chip(cx);
+                        logging::info("daemon service installed");
+                    }
+                    Err(e) => {
+                        this.daemon_error = Some(SharedString::from(e));
+                        cx.notify();
+                    }
+                }
+            })
+        })
+        .detach();
+    }
+
     /// Title of the conversation the chat pane is on, if the rail knows it.
     fn session_title(&self) -> Option<&str> {
         self.transcript.session.and_then(|id| {
@@ -655,13 +792,19 @@ impl Dashboard {
         })
     }
 
-    /// Open one conversation: select it in the rail, switch the right pane to
-    /// chat, and load its newest window off the UI thread. Every door (rail
-    /// click, launch, ctrl+u return) goes through here, so the screen and the
-    /// session can never disagree.
-    fn open_session(&mut self, id: Uuid, cx: &mut Context<Self>) {
+    /// One door for arriving on a conversation (#2481): every surface that
+    /// belongs to the conversation on screen resets here, so nothing carries
+    /// across. Budget, metrics, queue, composer draft and attachments are
+    /// per-conversation state; a fresh topic must open as a completely
+    /// isolated conversation, and a plain switch must stop carrying a draft.
+    /// The reset keeps the same-session guard the old open_session had:
+    /// re-clicking the chip of the conversation already on screen is not a
+    /// switch, so its queue and draft survive. The create-topic path always
+    /// passes a brand-new id, so the full reset fires there every time.
+    fn begin_conversation(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        let switched = self.transcript.session != Some(id);
         self.sessions.selected = Some(id);
-        if self.transcript.session != Some(id) {
+        if switched {
             // A different conversation has its own budget and its own last
             // prompt size; carrying the previous one over would show a
             // counter for a session the user is not reading.
@@ -672,18 +815,32 @@ impl Dashboard {
             if let Some(b) = agent_bridge::bridge() {
                 self.ctx_max = b.service.context_limit_for_session(id);
             }
+            // The queue belongs to the conversation on screen: a message
+            // typed for one session must never be drained into another
+            // (#2441), and it must not sit waiting on one the user left.
+            self.queued.clear();
+            // The draft and its attachments belong to the conversation they
+            // were typed in (#2481).
+            self.editor.update(cx, |ed, cx| ed.begin_conversation(cx));
         }
         self.transcript.session = Some(id);
         // The next launch opens this conversation. Both surfaces read the same
         // file, so switching here means the terminal comes back to it too, and
         // a restart no longer lands on whatever the rail listed first (#2444).
         remember_open_session(id);
-        // The queue belongs to the conversation on screen: a message typed for
-        // one session must never be drained into another (#2441).
         agent_bridge::set_composer_session(Some(id));
         self.transcript.error = None;
         self.transcript.turns = Vec::new();
         self.transcript.hidden = 0;
+    }
+
+    /// Open one conversation: select it in the rail, switch the right pane to
+    /// chat, and load its newest window off the UI thread. Every door (rail
+    /// click, launch, ctrl+u return, create topic) goes through here, and the
+    /// per-conversation reset lives one layer down in `begin_conversation`,
+    /// so the screen and the session can never disagree.
+    fn open_session(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        self.begin_conversation(id, cx);
         self.screen = Screen::Chat;
         let db_path = self.db_path.clone();
         cx.spawn(async move |this, cx| {
@@ -827,6 +984,29 @@ impl Dashboard {
         }
         self.finder = Some(PaletteState::new(self.finder_items()));
         self.finder_channels = configured_channels();
+        self.finder_caret = true;
+        // The caret blinks on a timer, and the loop dies with the card (#2491).
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(530))
+                    .await;
+                let open = this
+                    .update(cx, |view, cx| {
+                        if view.finder.is_none() {
+                            return false;
+                        }
+                        view.finder_caret = !view.finder_caret;
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !open {
+                    break;
+                }
+            }
+        })
+        .detach();
         self.refocus_overlay();
         logging::info("finder: opened");
         cx.notify();
@@ -845,6 +1025,9 @@ impl Dashboard {
     fn finder_items(&self) -> Vec<PaletteItem> {
         let mut items: Vec<PaletteItem> = slash::SLASH_COMMANDS
             .iter()
+            // A destination prints its own command row: listing both would
+            // show `/usage` twice (#2491).
+            .filter(|cmd| !find::is_surface_command(cmd.name))
             .map(|cmd| {
                 PaletteItem::new(
                     cmd.name,
@@ -3273,14 +3456,16 @@ impl Dashboard {
     fn open_chat_name(&self) -> Option<String> {
         let open = self.transcript.session?;
         let root = self.sessions.parents.get(&open).copied().unwrap_or(open);
-        Some(
-            self.sessions
-                .items
-                .iter()
-                .find(|s| s.id == root)
-                .and_then(|s| s.title.clone())
-                .unwrap_or_else(|| "Untitled".to_string()),
-        )
+        let stored = self
+            .sessions
+            .items
+            .iter()
+            .find(|s| s.id == root)
+            .and_then(|s| s.title.as_deref());
+        Some(rail::rail_title(
+            stored,
+            self.sessions.topic_titles.get(&root).map(String::as_str),
+        ))
     }
 
     /// The tab strip for the open chat's topic family (#2400, #2480): `All`
@@ -3299,13 +3484,19 @@ impl Dashboard {
         if !self.sessions.is_topic_enabled(root) {
             return Vec::new();
         }
+        // The topic store outranks the stored session name (#2490): a rename
+        // in Telegram reaches this label on the next refresh pass.
         let title = |id: Uuid| {
-            self.sessions
+            let stored = self
+                .sessions
                 .items
                 .iter()
                 .find(|s| s.id == id)
-                .and_then(|s| s.title.clone())
-                .unwrap_or_else(|| "Untitled".to_string())
+                .and_then(|s| s.title.as_deref());
+            rail::rail_title(
+                stored,
+                self.sessions.topic_titles.get(&id).map(String::as_str),
+            )
         };
         let topics: Vec<Uuid> = self
             .sessions
@@ -3521,8 +3712,19 @@ impl Dashboard {
     fn refresh_rail(&mut self, cx: &mut Context<Self>) {
         let db_path = self.db_path.clone();
         cx.spawn(async move |this, cx| {
-            let result = sessions::load_sessions(db_path).await;
+            let result = sessions::load_sessions(db_path.clone()).await;
+            // One batched lookup per refresh pass, never per row per frame
+            // (#2490): the topic store outranks the stored session name and a
+            // rename has to reach the rail without a restart.
+            let titles = match &result {
+                Ok(items) => sessions::load_telegram_topic_titles(db_path, items).await,
+                Err(_) => Ok(HashMap::new()),
+            };
             this.update(cx, |this, cx| {
+                match titles {
+                    Ok(pairs) => this.sessions.topic_titles = pairs,
+                    Err(e) => logging::error(&format!("topic titles refresh: {e}")),
+                }
                 match result {
                     Ok(items) => {
                         this.sessions.items = items;
@@ -4432,6 +4634,14 @@ impl Render for Dashboard {
                 }
                 None => self.plan.set_path(None),
             }
+            // The header's ink is data, not layout: log the string the chip
+            // will print whenever the open conversation changes, so a header
+            // that reads wrong traces to its source without a rebuild. The
+            // bare `\u{2026}` the owner screenshotted had no such trail and cost
+            // two days of guessing at padding (#2480).
+            if let Some(name) = self.open_chat_name() {
+                logging::debug(&format!("header: painting name {name:?}"));
+            }
         }
         self.plan.refresh();
         // The pane's strip follows its own session the same way: resolve once
@@ -4597,11 +4807,57 @@ impl Render for Dashboard {
             let r = r.on_mouse_down(MouseButton::Left, press);
             rail_rows.push(sessions::on_click(r, handler));
         }
+        // The channel chip (#2452): quiet notice plus the one action, drawn
+        // at the end of the rail only while a configured channel has no
+        // live owner. `Start daemon` runs the onboarding installer once;
+        // the probe loop flips the chip off when the daemon is live.
+        let chip_footer = self.channel_chip.clone().map(|line| {
+            let start = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                this.start_daemon(cx);
+            });
+            let shown = palette::current();
+            let mut chip = div()
+                .id("channel-chip")
+                .flex()
+                .flex_col()
+                .gap_1()
+                .mt_auto()
+                .w_full()
+                .min_w_0()
+                .flex_none()
+                .p_1p5()
+                .rounded_md()
+                .border_1()
+                .border_color(rgb(shown.track))
+                .bg(rgb(shown.panel_hi))
+                .text_xs()
+                .text_color(rgb(shown.text_muted))
+                .child(line);
+            if let Some(err) = &self.daemon_error {
+                chip = chip.child(div().text_color(rgb(shown.red)).child(err.clone()));
+            }
+            let action = if self.daemon_starting {
+                "starting..."
+            } else {
+                "Start daemon"
+            };
+            chip.child(
+                div()
+                    .id("channel-chip-start")
+                    .text_color(rgb(shown.accent))
+                    .cursor_pointer()
+                    .hover(|s| s.text_color(rgb(shown.text)))
+                    .child(action)
+                    .on_click(start),
+            )
+            .into_any_element()
+        });
         let rail = sessions::rail(
             &self.sessions,
             rail_rows,
             self.rail_width,
             &self.rail_scroll,
+            chip_footer,
         );
 
         // One label drives the in-window chrome and the OS titlebar: the old
@@ -6599,7 +6855,12 @@ impl Render for Dashboard {
                 self.topic_edge,
                 toggle_edge,
                 tabs,
-                topic_bar(self.topic_menu, toggle, items),
+                topic_bar(
+                    self.topic_menu,
+                    toggle,
+                    items,
+                    self.topic_edge.is_vertical(),
+                ),
             );
             topic_row = Some((self.topic_edge, strip.into_any_element()));
         }
@@ -6622,7 +6883,10 @@ impl Render for Dashboard {
         if self.screen != Screen::Chat {
             right = right.child(chrome);
         } else if let Some(name) = self.open_chat_name() {
-            right = right.child(session_title_card(&name));
+            // Bordered chip hugging the name, the owner's Photoshop spec
+            // (#2480): the strip of empty row to its right is header space,
+            // same as the mockup.
+            right = right.child(session_title_chip(&name));
         }
         // The row takes the side it was saved on: above the transcript,
         // under the input, or beside the chat (#2402).
@@ -6955,7 +7219,7 @@ impl Render for Dashboard {
                     .items_center()
                     .justify_center()
                     .gap_2()
-                    .rounded(px(10.0))
+                    .rounded(px(CARD_RADIUS))
                     .border_2()
                     .border_color(rgb(palette::current().accent))
                     .bg(rgba(0x101010dd))
@@ -6995,6 +7259,7 @@ impl Render for Dashboard {
                 chip,
                 find::channel_hint(state.query(), &self.finder_channels),
                 idle_revealed,
+                self.finder_caret,
             ));
         }
         root
@@ -7111,6 +7376,7 @@ fn main() {
             parents: parents.clone(),
             closed: closed.clone(),
             topic_icons: HashMap::new(),
+            topic_titles: HashMap::new(),
             collapsed: HashSet::new(),
             selected: None,
             cursor: None,
@@ -7126,6 +7392,7 @@ fn main() {
             parents,
             closed,
             topic_icons: HashMap::new(),
+            topic_titles: HashMap::new(),
             collapsed: HashSet::new(),
             selected: None,
             cursor: None,
@@ -7192,6 +7459,53 @@ fn main() {
                         }
                     })
                     .detach();
+                    // The channel chip's slow probe (#2452): one lock-dir read
+                    // every few seconds, all of it off the UI thread. Exits
+                    // with the view like every other loop here. The names are
+                    // read from the config ONCE, here on the UI thread; the
+                    // worker never calls Config::load (SIGILL, 2026-11-03).
+                    let chip_names: Vec<String> = {
+                        let names: Vec<String> = configured_channels()
+                            .iter()
+                            .map(|c| c.name().to_string())
+                            .collect();
+                        logging::info(&format!(
+                            "channel chip probe up: {} configured channel(s)",
+                            names.len()
+                        ));
+                        names
+                    };
+                    let probe_names = chip_names.clone();
+                    cx.spawn(async move |this, cx| {
+                        loop {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_secs(5))
+                                .await;
+                            // Each tick's future owns a copy: spawned work
+                            // must be 'static and may outlive the tick.
+                            let names = probe_names.clone();
+                            let line = cx
+                                .background_executor()
+                                .spawn(async move { channel_chip_line_from(&names) })
+                                .await;
+                            if this
+                                .update(cx, |this, cx| {
+                                    if this.channel_chip != line {
+                                        logging::info(&format!(
+                                            "channel chip -> {}",
+                                            line.as_ref().map(|s| s.as_ref()).unwrap_or("hidden")
+                                        ));
+                                        this.channel_chip = line;
+                                        cx.notify();
+                                    }
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    })
+                    .detach();
                     Dashboard {
                         screen: Screen::Chat,
                         state,
@@ -7203,6 +7517,11 @@ fn main() {
                         last_owner: None,
                         finder: None,
                         finder_channels: Vec::new(),
+                        finder_caret: true,
+                        chip_channel_names: chip_names,
+                        channel_chip: channel_chip_line(),
+                        daemon_starting: false,
+                        daemon_error: None,
                         pending: 0,
                         files: Vec::new(),
                         files_for: None,
@@ -7974,10 +8293,10 @@ fn mission_control_detail(
         .max_h(px(560.0))
         // A long summary is clipped to the card instead of painting past it.
         .overflow_hidden()
-        .rounded(px(10.0))
+        .rounded(px(CARD_RADIUS))
         .border_1()
         .border_color(rgb(shown.panel_hi))
-        .bg(rgb(shown.panel))
+        .bg(glass_fill(shown.panel))
         // Inert: the click stops here instead of reaching the scrim.
         .on_click(|_ev, _window, cx| cx.stop_propagation())
         .child(
@@ -8256,8 +8575,8 @@ fn queue_strip(queued: &[agent_bridge::PendingMessage]) -> Div {
         .flex_col()
         .gap_1()
         .p_2()
-        .rounded_sm()
-        .bg(rgb(palette::current().panel))
+        .rounded(px(CARD_RADIUS))
+        .bg(glass_fill(palette::current().panel))
         .child(
             div()
                 .text_xs()
@@ -8311,10 +8630,10 @@ fn emoji_popup_view(items: &[(&'static str, &'static str)], selected: usize) -> 
         .flex_col()
         .gap_1()
         .p_2()
-        .rounded_md()
+        .rounded(px(CARD_RADIUS))
         .border_1()
         .border_color(rgb(palette::current().panel_hi))
-        .bg(rgb(palette::current().panel));
+        .bg(glass_fill(palette::current().panel));
     for (index, (glyph, code)) in items.iter().enumerate() {
         let on = index == selected;
         col = col.child(
@@ -8524,32 +8843,80 @@ fn help_rows() -> Vec<(
 /// session name led the footer), so a row of topic chips was the first thing
 /// the eye met and the session it belonged to was nowhere.
 ///
-/// One card, no tab styling, and the two-word rule does not apply: the name is
-/// the full name, and only the chips are shortened.
-fn session_title_card(name: &str) -> impl IntoElement {
+/// Plain header text, flush left, and the two-word rule does not
+/// apply: the name is the full name, and only the chips are shortened.
+///
+/// The chip shape is the owner's Photoshop spec (2026-11-03): a bordered,
+/// tinted, rounded chip that hugs the name, its height roughly 1.7x the cap
+/// height. The first card used py_2, which measured 2.5-3x cap height on the
+/// owner's screen: a fat band with the text swimming in vertical dead space.
+/// py_1 with px_2 is the mockup ratio; the border and tint stay, he asked for
+/// them and rejecting a later regression does not un-ask it.
+/// The most characters the header prints before it shortens (#2480). A name
+/// is a label, not the conversation: the rail and the window title keep the
+/// whole string.
+const HEADER_NAME_CHARS: usize = 42;
+
+/// The name the header chip prints.
+///
+/// The shortening happens here, in Rust, and never leans on the text engine.
+/// `truncate()` on a stretched column painted a bare `\u{2026}` on the owner's
+/// screen while the stored name was `CrabsDev`: a full width band whose only
+/// ink was three dots. Whatever this function returns is what gets painted.
+fn header_name(name: &str) -> String {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return rail::UNTITLED.to_string();
+    }
+    let mut chars = trimmed.chars();
+    let short: String = chars.by_ref().take(HEADER_NAME_CHARS).collect();
+    if chars.next().is_some() {
+        format!("{short}\u{2026}")
+    } else {
+        short
+    }
+}
+
+/// The conversation name as a chip hugging its text (#2480).
+///
+/// The chip sits inside a row, on purpose. A div laid straight into the
+/// header column is stretched across the whole chat by the default cross axis
+/// alignment, which is the full width band that read as a button. A row hands
+/// the chip its own content width and nothing else.
+fn session_title_chip(name: &str) -> impl IntoElement {
     div()
         .flex()
         .flex_row()
         .items_center()
-        .flex_none()
-        .w_full()
-        .px_3()
-        .py_2()
-        .rounded_md()
-        .bg(rgb(palette::current().panel))
-        .border_1()
-        .border_color(rgb(palette::current().panel_hi))
-        .text_base()
-        .text_color(rgb(palette::current().text_normal))
-        .child(SharedString::from(name.to_string()))
+        .min_w_0()
+        .child(
+            div()
+                .flex_none()
+                .px_2()
+                .py_1()
+                .rounded(px(CARD_RADIUS))
+                .bg(glass_fill(palette::current().panel))
+                .border_1()
+                .border_color(rgb(palette::current().panel_hi))
+                .text_base()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(rgb(palette::current().text_normal))
+                .child(SharedString::from(header_name(name))),
+        )
 }
 
-/// The chat's `...` button, right aligned, with its items below it while the
-/// menu is open (#2303, #2304). Only drawn for a topic or a session with topics on.
+/// The chat's `...` button with its items below it while the menu is open
+/// (#2303, #2304). The bar hugs its content: a `w_full` bar inside the strip
+/// squeezed the tabs to nothing across a row and flung the `...` to the
+/// rail's far edge down a column, the detached-dots layout the owner
+/// screenshotted three times (#2480, #2490). Down a rail the stack aligns to
+/// the leading edge like the chips above it; across a row it aligns right so
+/// the menu reads from the row's end.
 fn topic_bar(
     open: bool,
     toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     items: Vec<Stateful<Div>>,
+    vertical: bool,
 ) -> impl IntoElement {
     let button = div()
         .id("topic-menu-button")
@@ -8561,7 +8928,13 @@ fn topic_bar(
         .hover(|d| d.bg(rgb(palette::current().panel_hi)))
         .on_click(toggle)
         .child("...");
-    let mut bar = div().flex().flex_col().items_end().w_full().child(button);
+    let mut bar = div()
+        .flex()
+        .flex_col()
+        .flex_none()
+        .when(vertical, |d| d.items_start())
+        .when(!vertical, |d| d.items_end())
+        .child(button);
     if open {
         for item in items {
             bar = bar.child(item);
@@ -8597,24 +8970,26 @@ fn topic_strip(
         .on_click(toggle_edge)
         .child(SharedString::from("\u{25EB}"));
     if edge.is_vertical() {
+        // The column hugs its chips. A fixed 12rem width reserved 192px of
+        // empty rail for four narrow chips and pushed the chat ~450px right
+        // on the owner's window: that empty column was the dead space he
+        // reported for two days (#2480). max_w still stops a long topic name
+        // from eating the window.
         div()
             .flex()
             .flex_col()
             .flex_none()
-            .w(rems(12.0))
-            .items_center()
+            .max_w(rems(12.0))
+            .items_start()
             .gap_2()
             .p_2()
             .child(leading)
             .child(
-                // Centred so each chip sits at its own width (#2480). Stretched
-                // chips were the wall of colour the owner screenshotted.
-                div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap_1()
-                    .children(tabs),
+                // Chips sit at their own width on the rail's leading edge, the
+                // way Telegram's forum list reads. Centring them left a small
+                // square control floating in 90% empty column, and stretching
+                // them was the wall of colour the owner screenshotted (#2480).
+                div().flex().flex_col().items_start().gap_1().children(tabs),
             )
             .child(bar)
     } else {
@@ -8760,10 +9135,10 @@ fn update_prompt_overlay(
         .gap_3()
         .w(rems(26.0))
         .p_4()
-        .rounded(px(10.0))
+        .rounded(px(CARD_RADIUS))
         .border_1()
         .border_color(rgb(palette::current().panel_hi))
-        .bg(rgb(palette::current().panel))
+        .bg(glass_fill(palette::current().panel))
         .child(
             div()
                 .text_sm()
@@ -9083,10 +9458,10 @@ fn split_pick_overlay(layout: Layout, rail_px: gpui::Pixels) -> impl IntoElement
         .flex_col()
         .gap_1()
         .p_3()
-        .rounded(px(10.0))
+        .rounded(px(CARD_RADIUS))
         .border_1()
         .border_color(rgb(palette::current().panel_hi))
-        .bg(rgb(palette::current().panel))
+        .bg(glass_fill(palette::current().panel))
         .child(
             div()
                 .text_sm()
@@ -9132,10 +9507,10 @@ fn topic_prompt_overlay(
         .min_w_0()
         .px_3()
         .py_2()
-        .rounded_md()
+        .rounded(px(CARD_RADIUS))
         .border_1()
         .border_color(rgb(palette::current().accent))
-        .bg(rgb(palette::current().bg))
+        .bg(glass_fill(palette::current().bg))
         .text_color(rgb(palette::current().text))
         .child(SharedString::from(format!("{draft}|")));
     // The chosen icon, as a picture when it names an embedded one and as the
@@ -9149,8 +9524,8 @@ fn topic_prompt_overlay(
         .flex()
         .items_center()
         .justify_center()
-        .rounded_md()
-        .bg(rgb(palette::current().bg))
+        .rounded(px(CARD_RADIUS))
+        .bg(glass_fill(palette::current().bg))
         .text_size(rems(1.4))
         .when(picture.is_none(), |d| {
             d.child(SharedString::from(icon.to_string()))
@@ -9165,10 +9540,10 @@ fn topic_prompt_overlay(
         .gap_3()
         .w(rems(28.0))
         .p_4()
-        .rounded(px(10.0))
+        .rounded(px(CARD_RADIUS))
         .border_1()
         .border_color(rgb(palette::current().panel_hi))
-        .bg(rgb(palette::current().panel))
+        .bg(glass_fill(palette::current().panel))
         .child(
             div()
                 .text_sm()
@@ -9245,10 +9620,10 @@ fn topic_info_overlay(
         .gap_2()
         .w(rems(30.0))
         .p_4()
-        .rounded(px(10.0))
+        .rounded(px(CARD_RADIUS))
         .border_1()
         .border_color(rgb(palette::current().panel_hi))
-        .bg(rgb(palette::current().panel))
+        .bg(glass_fill(palette::current().panel))
         .child(
             div()
                 .text_sm()
@@ -9465,10 +9840,10 @@ fn confirm_delete_overlay(
                 .gap_3()
                 .w(rems(24.0))
                 .p_4()
-                .rounded(px(10.0))
+                .rounded(px(CARD_RADIUS))
                 .border_1()
                 .border_color(rgb(palette::current().panel_hi))
-                .bg(rgb(palette::current().panel))
+                .bg(glass_fill(palette::current().panel))
                 .child(
                     div()
                         .text_sm()
@@ -10293,11 +10668,14 @@ mod tests {
             );
         });
 
-        // And the wiring: `open_session` is the door every open goes through,
-        // so the record has to happen there and not on some path the user
-        // reaches only from the rail. Halves, so this test cannot match itself.
+        // And the wiring: `open_session` is the door every open goes through.
+        // Since #2452 the door delegates to `begin_conversation` and the
+        // record lives one layer down there, so both links of the composed
+        // path are pinned: the door routes through the helper and the helper
+        // does the recording. Halves, so this test cannot match itself.
         let src = include_str!("main.rs");
         let call = ["remember_open", "_session(id)"].concat();
+        let delegate = ["begin_conversation", "(id, cx)"].concat();
         let (_, after) = src
             .split_once(
                 ["fn open_", "session(&mut self, id: Uuid"]
@@ -10309,8 +10687,18 @@ mod tests {
             .split_once("\n    fn ")
             .expect("the next method ends it");
         assert!(
-            door.contains(&call),
-            "open_session records the conversation it opened"
+            door.contains(&delegate),
+            "open_session routes through begin_conversation"
+        );
+        let (_, helper) = src
+            .split_once(["fn begin_", "conversation(&mut self"].concat().as_str())
+            .expect("begin_conversation exists");
+        let (recording, _) = helper
+            .split_once("\n    fn ")
+            .expect("the next method ends it");
+        assert!(
+            recording.contains(&call),
+            "begin_conversation records the conversation it opens"
         );
     }
 

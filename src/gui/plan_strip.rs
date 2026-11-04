@@ -13,10 +13,11 @@
 //! rewitten plan redraws on the next frame.
 
 use crate::palette;
+use opencrabs::ui_core::card::{CARD_RADIUS, glass_fill};
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-use gpui::{Div, SharedString, div, prelude::*, rgb};
+use gpui::{Div, SharedString, div, prelude::*, px, rgb};
 use opencrabs::tui::plan::{PlanDocument, PlanStatus, TaskStatus};
 
 /// The strip's state: the plan file it is showing, the mtime it last read,
@@ -80,8 +81,8 @@ impl PlanStripState {
                 .flex_row()
                 .gap_2()
                 .p_2()
-                .rounded_sm()
-                .bg(rgb(palette::current().panel))
+                .rounded(px(CARD_RADIUS))
+                .bg(glass_fill(palette::current().panel))
                 .child(
                     div()
                         .text_xs()
@@ -121,8 +122,8 @@ fn checklist(plan: &PlanDocument) -> Div {
         .flex_col()
         .gap_1()
         .p_2()
-        .rounded_sm()
-        .bg(rgb(palette::current().panel))
+        .rounded(px(CARD_RADIUS))
+        .bg(glass_fill(palette::current().panel))
         .child(
             div()
                 .flex()

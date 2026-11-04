@@ -468,6 +468,10 @@ pub struct App {
     /// Topic id to parent session id (#2306). The sessions dialog lists a
     /// topic directly under its parent and indents it.
     pub(crate) topic_parents: std::collections::HashMap<Uuid, Uuid>,
+    /// The live name each Telegram topic carries (#2490), resolved in ONE
+    /// batched query per list load. A row that is not a topic-bound Telegram
+    /// session has no entry and keeps its stored name.
+    pub(crate) topic_titles: HashMap<Uuid, String>,
     /// Closed sessions (#2305): dimmed in the dialog, refuse new turns.
     pub(crate) closed_sessions: HashSet<Uuid>,
     /// Sessions whose topic tree is folded: their topics are not listed (#2427).
@@ -967,6 +971,7 @@ impl App {
             sessions: Vec::new(),
             session_favorites: HashSet::new(),
             topic_parents: std::collections::HashMap::new(),
+            topic_titles: HashMap::new(),
             closed_sessions: HashSet::new(),
             collapsed_sessions: HashSet::new(),
             topic_naming: false,
@@ -3482,6 +3487,9 @@ impl App {
         use crate::ui_core::palette::{self, PaletteAction, PaletteItem, PaletteKind};
         let mut items: Vec<PaletteItem> = crate::ui_core::commands::SLASH_COMMANDS
             .iter()
+            // A destination prints its own command row: listing both would
+            // show `/usage` twice (#2491).
+            .filter(|cmd| !palette::is_surface_command(cmd.name))
             .map(|cmd| {
                 PaletteItem::new(
                     cmd.name,

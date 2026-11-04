@@ -1285,8 +1285,11 @@ impl OnboardingWizard {
     }
 }
 
-/// Install the appropriate daemon service for the current platform
-fn install_daemon_service() -> Result<(), String> {
+/// Install the appropriate daemon service for the current platform.
+///
+/// `pub` so the GUI bin's Start daemon chip (#2452) reuses this exact
+/// path instead of growing a second installer.
+pub fn install_daemon_service() -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
         install_systemd_service()

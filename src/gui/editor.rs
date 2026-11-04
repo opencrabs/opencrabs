@@ -11,6 +11,7 @@
 //! direct dependency).
 
 use crate::palette;
+use opencrabs::ui_core::card::{CARD_RADIUS, glass_fill};
 use opencrabs::ui_core::commands::completions;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -697,6 +698,24 @@ impl Editor {
         self.command_dismissed = false;
         self.emoji_dismissed = false;
         self.emoji_index = 0;
+        cx.notify();
+    }
+
+    /// A fresh conversation owns a fresh composer (#2481): no draft carried
+    /// from the conversation just left, no attachments waiting to fly into
+    /// the wrong one, both popups back to rest. The clipboard paste hint is
+    /// derived from the empty field at render time, so it stands down with
+    /// the content; nothing stored to reset there.
+    pub fn begin_conversation(&mut self, cx: &mut Context<Self>) {
+        self.content.clear();
+        self.attachments.clear();
+        self.selected_range = 0..0;
+        self.selection_reversed = false;
+        self.marked_range = None;
+        self.command_index = 0;
+        self.command_dismissed = false;
+        self.emoji_index = 0;
+        self.emoji_dismissed = false;
         cx.notify();
     }
 
@@ -1391,11 +1410,11 @@ impl Render for Editor {
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             // One step above the chat, with a shadow, so the input reads as a
             // surface of its own in both themes.
-            .bg(rgb(palette::current().panel))
+            .bg(glass_fill(palette::current().panel))
             .shadow_sm()
             .border_1()
             .border_color(rgb(palette::current().panel_hi))
-            .rounded_sm()
+            .rounded(px(CARD_RADIUS))
             .p_2()
             .line_height(px(22.))
             .text_size(px(14.))

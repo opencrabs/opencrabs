@@ -606,7 +606,13 @@ fn session_row(
         .topic_parents
         .get(&session.id)
         .is_some_and(|p| app.sessions.iter().any(|s| s.id == *p));
-    let raw_title = session.title.as_deref().unwrap_or("New Chat");
+    // The topic store outranks the stored session name (#2490): a Telegram
+    // rename reaches this row on the next list load, no restart.
+    let raw_title = crate::ui_core::rail::rail_title(
+        session.title.as_deref(),
+        app.topic_titles.get(&session.id).map(String::as_str),
+    );
+    let raw_title = raw_title.as_str();
     // A session with topics carries a chevron that says whether its tree is
     // folded: ▸ folded, ▾ open (#2427).
     let has_topics = app.topic_parents.values().any(|p| *p == session.id);
