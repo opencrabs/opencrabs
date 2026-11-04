@@ -2235,6 +2235,60 @@ impl Dashboard {
         cx.notify();
     }
 
+    /// The visible period switcher is another door into the same period
+    /// loader as the terminal's t/w/m/a keys, not a second filter path.
+    fn usage_period_switcher(&self, cx: &mut Context<Self>) -> Div {
+        let mut bar = div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap_2()
+            .child(text("Period", Size::Xs, palette::current().text_muted));
+        for (period, label, id) in [
+            (Period::Today, "Today", "usage-period-today"),
+            (Period::Week, "Week", "usage-period-week"),
+            (Period::Month, "Month", "usage-period-month"),
+            (Period::AllTime, "All time", "usage-period-all-time"),
+        ] {
+            let active = self.dash.period == period;
+            bar = bar.child(
+                usage_view::period_tab(label, active)
+                    .id(id)
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        this.set_usage_period(period, cx);
+                    })),
+            );
+        }
+        bar
+    }
+
+    fn set_usage_period(&mut self, period: Period, cx: &mut Context<Self>) {
+        if !self.dash.set_period(period) {
+            return;
+        }
+        logging::info(&format!("period -> {period:?}: fetching"));
+        self.pending += 1;
+        let pending = self.pending;
+        let db_path = self.db_path.clone();
+        cx.spawn(async move |this, cx| {
+            // The fetch runs on its own big-stack thread (see `load_view`):
+            // gpui's background workers are dispatch-queue threads with tiny
+            // stacks. The previous view stays visible until the result lands.
+            let state = load_view(db_path, period).await;
+            this.update(cx, |this, cx| {
+                if pending == this.pending {
+                    this.state = state;
+                    logging::info("period fetch applied");
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
     /// `/mission-control`: the window's copy of the terminal's screen. The
     /// panels are drawn from the same services the terminal reads, so the
     /// screen answers with live data rather than a mock row (#2426).
@@ -4848,30 +4902,7 @@ impl Dashboard {
         }
         match input::decide(&mut self.dash, translate_key(ev)) {
             UsageKeyOutcome::Consumed => cx.notify(),
-            UsageKeyOutcome::Period(period) => {
-                logging::info(&format!("period -> {period:?}: fetching"));
-                self.dash.set_period(period);
-                self.pending += 1;
-                let pending = self.pending;
-                let db_path = self.db_path.clone();
-                cx.spawn(async move |this, cx| {
-                    // The fetch runs on its own big-stack thread (see
-                    // `load_view`): gpui's background workers are
-                    // dispatch-queue threads with tiny stacks. The previous
-                    // view stays on screen until the result lands.
-                    let state = load_view(db_path, period).await;
-                    this.update(cx, |this, cx| {
-                        if pending == this.pending {
-                            this.state = state;
-                            logging::info("period fetch applied");
-                            cx.notify();
-                        }
-                    })
-                    .ok();
-                })
-                .detach();
-                cx.notify();
-            }
+            UsageKeyOutcome::Period(period) => self.set_usage_period(period, cx),
             // `decide` maps Esc on the grid to Close, which is right for the
             // TUI's modal dialog and wrong for a desktop window: a stray Esc
             // must never destroy the window. The titlebar button and Cmd+Q
@@ -5495,7 +5526,7 @@ impl Render for Dashboard {
                     };
                     breakdown::panel(cache)
                 } else {
-                    match &self.state {
+                    let content = match &self.state {
                         LoadState::Loaded(vm) => usage_view::dashboard(vm, self.dash.focused_card),
                         LoadState::Failed(err) => div()
                             .flex()
@@ -5513,7 +5544,13 @@ impl Render for Dashboard {
                                     .text_color(rgb(palette::current().text_muted))
                                     .child(err.clone()),
                             ),
-                    }
+                    };
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(self.usage_period_switcher(cx))
+                        .child(content)
                 };
                 // The scrollable middle: an overflow-scroll element's minimum size
                 // is zero, so `flex_1` bounds it to the space left over and the
@@ -5531,12 +5568,6 @@ impl Render for Dashboard {
                     .items_center()
                     .gap_3()
                     .child(breakdown::footer(&self.dash))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(palette::current().text_muted))
-                            .child("t · today · w · weekly · m · monthly · a · all time"),
-                    )
                     .child(
                         div()
                             .text_xs()

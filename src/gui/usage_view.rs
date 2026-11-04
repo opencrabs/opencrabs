@@ -13,9 +13,8 @@
 //! - Cards wrap instead of clipping: each one asks for a 24rem column and
 //!   grows into it, so a wide window shows two abreast and a narrow one shows
 //!   one, with no breakpoint table to keep in sync.
-//! - A row that runs out of width wraps its value under its label rather than
-//!   cutting either one mid-string, and any label that is still too long ends
-//!   in an ellipsis, never in a hard clip.
+//! - Names keep their full text and wrap when necessary. Project and model
+//!   ledgers use real columns instead of one clipped label/value string.
 
 use crate::palette;
 use gpui::{Div, div, prelude::*, rems, rgb};
@@ -82,7 +81,7 @@ fn row(left: Div, right: Div) -> Div {
         .items_center()
         .justify_between()
         .gap(rems(0.5))
-        .child(left.flex_grow().flex_shrink().min_w(rems(4.0)).truncate())
+        .child(left.flex_grow().flex_shrink().min_w(rems(4.0)))
         .child(right.flex_shrink_0().truncate())
 }
 
@@ -124,60 +123,175 @@ fn daily_card(rows: &[DailyRow]) -> Div {
     body
 }
 
-/// By Project: name, cost, tokens, sessions.
-fn projects_card(rows: &[ProjectRow]) -> Div {
-    let mut body = card_shell("By project");
-    if rows.is_empty() {
-        return body.child(empty_note("projects"));
+/// A plain table model consumed directly by the GUI renderer. The first
+/// column is the full name; later columns are numeric and right aligned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Table {
+    pub headers: Vec<String>,
+    pub rows: Vec<TableRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableRow {
+    pub cells: Vec<String>,
+    pub faint: bool,
+    pub estimated: bool,
+}
+
+impl TableRow {
+    fn new(cells: Vec<String>) -> Self {
+        Self {
+            cells,
+            faint: false,
+            estimated: false,
+        }
     }
-    for p in rows {
-        body = body.child(row(
-            text(p.name.clone(), Size::Xs, palette::current().text_normal),
-            text(
-                format!(
-                    "{} · {} · {} sessions",
-                    p.cost_str, p.tokens_str, p.sessions_str
-                ),
-                Size::Xs,
-                palette::current().text_muted,
-            ),
-        ));
+}
+
+fn project_table(rows: &[ProjectRow]) -> Table {
+    Table {
+        headers: ["Project", "Cost", "Tokens", "Sessions"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        rows: rows
+            .iter()
+            .map(|project| {
+                TableRow::new(vec![
+                    project.name.clone(),
+                    project.cost_str.clone(),
+                    project.tokens_str.clone(),
+                    project.sessions_str.clone(),
+                ])
+            })
+            .collect(),
+    }
+}
+
+fn model_table(rows: &[ModelRow]) -> Table {
+    // Match the terminal: an entirely unmeasured cache column is omitted,
+    // while a row without its own split stays blank rather than claiming 0%.
+    let show_cache = rows.iter().any(|model| model.cache_cell.is_some());
+    let mut headers = vec!["Model", "Cost", "Tokens"];
+    if show_cache {
+        headers.push("Cache");
+    }
+    headers.push("Requests");
+    let mut painted = Vec::new();
+    for model in rows {
+        let mut cells = vec![
+            model.name.clone(),
+            model.cost_str.clone(),
+            model.tokens_str.clone(),
+        ];
+        if show_cache {
+            cells.push(
+                model
+                    .cache_cell
+                    .as_deref()
+                    .and_then(|cell| cell.split_whitespace().next())
+                    .unwrap_or("")
+                    .to_string(),
+            );
+        }
+        cells.push(model.calls_str.clone());
+        painted.push(TableRow {
+            estimated: model.estimated,
+            ..TableRow::new(cells)
+        });
+        for (index, variant) in model.variants.iter().enumerate() {
+            let prefix = if index + 1 == model.variants.len() {
+                "└─ "
+            } else {
+                "├─ "
+            };
+            let mut cells = vec![
+                format!("{prefix}{}", variant.name),
+                variant.cost_str.clone(),
+                variant.tokens_str.clone(),
+            ];
+            if show_cache {
+                cells.push(String::new());
+            }
+            cells.push(variant.calls_str.clone());
+            painted.push(TableRow {
+                faint: true,
+                ..TableRow::new(cells)
+            });
+        }
+    }
+    Table {
+        headers: headers.into_iter().map(str::to_string).collect(),
+        rows: painted,
+    }
+}
+
+fn table_line(cells: &[String], faint: bool, estimated: bool, header: bool) -> Div {
+    let mut line = div()
+        .flex()
+        .flex_row()
+        .items_start()
+        .gap(rems(0.5))
+        .py(rems(0.15));
+    for (index, value) in cells.iter().enumerate() {
+        let color = if header {
+            palette::current().text_muted
+        } else if index == 1 && estimated {
+            palette::current().amber
+        } else if faint {
+            palette::current().text_faint
+        } else if index == 0 {
+            palette::current().text_strong
+        } else {
+            palette::current().text_muted
+        };
+        let cell = text(value.clone(), Size::Xs, color);
+        line = line.child(if index == 0 {
+            // No truncation: a long project or model name wraps in its own
+            // flexible column while every numeric column stays put.
+            cell.flex_1().min_w_0()
+        } else {
+            cell.w(rems(6.0)).flex_shrink_0().text_right()
+        });
+    }
+    line
+}
+
+fn table(table: &Table) -> Div {
+    let mut body = div()
+        .flex()
+        .flex_col()
+        .child(table_line(&table.headers, false, false, true));
+    for row in &table.rows {
+        body = body.child(table_line(&row.cells, row.faint, row.estimated, false));
     }
     body
 }
 
-/// By Model: parent rows with their cost/tokens/calls/cache cell, variant
-/// rows indented under the parent.
+fn wide_card_shell(title: &str) -> Div {
+    // Project/model tables need the whole row at the standard window width;
+    // squeezing five columns into a half-width card was what produced the
+    // clipped names and overlapping values.
+    card_shell(title).flex_basis(rems(46.0))
+}
+
+/// By Project: full name, cost, tokens and sessions in separate columns.
+fn projects_card(rows: &[ProjectRow]) -> Div {
+    let body = wide_card_shell("By project");
+    if rows.is_empty() {
+        return body.child(empty_note("projects"));
+    }
+    body.child(table(&project_table(rows)))
+}
+
+/// By Model: parent and variant rows share aligned columns, including the
+/// measured cache percentage when the ledger has one.
 fn models_card(rows: &[ModelRow]) -> Div {
-    let mut body = card_shell("By model");
+    let body = wide_card_shell("By model");
     if rows.is_empty() {
         return body.child(empty_note("models"));
     }
-    for m in rows {
-        let mut right = format!("{} · {} · {} calls", m.cost_str, m.tokens_str, m.calls_str);
-        if let Some(cache) = &m.cache_cell {
-            right.push_str(&format!(" · {cache}"));
-        }
-        body = body.child(row(
-            text(m.name.clone(), Size::Xs, palette::current().text_strong),
-            text(right, Size::Xs, palette::current().text_muted),
-        ));
-        for v in &m.variants {
-            body = body.child(row(
-                div().pl(rems(1.0)).child(text(
-                    v.name.clone(),
-                    Size::Xs,
-                    palette::current().text_hint,
-                )),
-                text(
-                    format!("{} · {} · {} calls", v.cost_str, v.tokens_str, v.calls_str),
-                    Size::Xs,
-                    palette::current().text_faint,
-                ),
-            ));
-        }
-    }
-    body
+    body.child(table(&model_table(rows)))
 }
 
 /// Core Tools: name, calls, bar against the top tool.
@@ -287,6 +401,35 @@ fn cache_card(cache: &Option<opencrabs::ui_core::usage::view_model::CacheView>) 
     ))
 }
 
+/// One visible period-switcher segment. The window attaches its click and
+/// keyboard handling; this only paints the active state.
+pub fn period_tab(label: &str, active: bool) -> Div {
+    div()
+        .px(rems(0.75))
+        .py(rems(0.35))
+        .rounded_md()
+        .bg(rgb(if active {
+            palette::current().panel_hi
+        } else {
+            palette::current().panel
+        }))
+        .border_1()
+        .border_color(rgb(if active {
+            palette::current().focus
+        } else {
+            palette::current().track
+        }))
+        .child(text(
+            label.to_string(),
+            Size::Xs,
+            if active {
+                palette::current().text_strong
+            } else {
+                palette::current().text_muted
+            },
+        ))
+}
+
 /// The whole dashboard body: the four pinned summary cells, then the six
 /// wrapping cards. The screen's name, period and version live in the window
 /// chrome above as one line, so nothing here repeats them: the second logo
@@ -369,4 +512,61 @@ fn cell(label: &str, value: &str, footnote: Option<&str>) -> Div {
         c = c.child(text(note.to_string(), Size::Xs, palette::current().warn));
     }
     c
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use opencrabs::ui_core::usage::view_model::ModelVariantRow;
+
+    #[test]
+    fn usage_render_includes_cache_header_without_truncating_model_names() {
+        let long_name = "development/qwen3.7-max-20260520-experimental".to_string();
+        let table = model_table(&[ModelRow {
+            name: long_name.clone(),
+            cost_str: "$1.23".into(),
+            estimated: false,
+            tokens_str: "45.6K".into(),
+            calls_str: "12".into(),
+            cache_cell: Some("87% cache".into()),
+            variants: vec![ModelVariantRow {
+                name: "qwen3.7-max-20260520".into(),
+                cost_str: "$1.00".into(),
+                tokens_str: "40.0K".into(),
+                calls_str: "10".into(),
+            }],
+        }]);
+        assert_eq!(
+            table.headers,
+            ["Model", "Cost", "Tokens", "Cache", "Requests"]
+        );
+        assert_eq!(table.rows[0].cells[0], long_name);
+        assert_eq!(table.rows[0].cells[3], "87%");
+        assert_eq!(table.rows[1].cells[3], "");
+        assert!(!table.rows[0].cells[0].contains('…'));
+    }
+
+    #[test]
+    fn usage_render_omits_empty_cache_column_and_keeps_project_names() {
+        let table = model_table(&[ModelRow {
+            name: "model-without-cache-data".into(),
+            cost_str: "$0.00".into(),
+            estimated: false,
+            tokens_str: "0".into(),
+            calls_str: "0".into(),
+            cache_cell: None,
+            variants: Vec::new(),
+        }]);
+        assert_eq!(table.headers, ["Model", "Cost", "Tokens", "Requests"]);
+
+        let project = "Development / truelens regulatory compliance".to_string();
+        let projects = project_table(&[ProjectRow {
+            name: project.clone(),
+            cost_str: "$2.34".into(),
+            tokens_str: "67.8K".into(),
+            sessions_str: "3".into(),
+        }]);
+        assert_eq!(projects.rows[0].cells[0], project);
+        assert!(!projects.rows[0].cells[0].contains("..."));
+    }
 }
