@@ -1154,8 +1154,8 @@ pub fn row(
         .items_center()
         .justify_between()
         .gap_1()
+        .w_full()
         .p_2()
-        .rounded_sm()
         .cursor_pointer()
         .when(selected, |d| d.bg(rgb(palette::current().selection)))
         // The keyboard's row reads as an accent bar on the left edge,
@@ -1310,11 +1310,11 @@ pub fn rail(
         .w(rems(width_rem))
         .h_full()
         .bg(rgb(palette::current().panel))
-        .p_2()
-        .gap_1();
+        .py_2();
 
     col = col.child(
         div()
+            .px_2()
             .text_xs()
             .text_color(rgb(palette::current().text_title))
             .child(SharedString::from(format!(
@@ -1324,12 +1324,13 @@ pub fn rail(
     );
 
     if state.filter_active {
-        col = col.child(filter_bar(state));
+        col = col.child(div().px_2().pb_1().child(filter_bar(state)));
     }
 
     if let Some(err) = &state.error {
         col = col.child(
             div()
+                .px_2()
                 .text_xs()
                 .text_color(rgb(palette::current().text_muted))
                 .child(err.clone()),
@@ -1340,6 +1341,7 @@ pub fn rail(
     if rows.is_empty() && !state.filter.trim().is_empty() {
         col = col.child(
             div()
+                .px_2()
                 .text_xs()
                 .text_color(rgb(palette::current().text_muted))
                 .child("no chat matches"),
@@ -1354,7 +1356,7 @@ pub fn rail(
     // list it pins to the bottom edge, with a full list it waits at the
     // end of the scroll like any other row.
     if let Some(footer) = footer {
-        col = col.child(footer);
+        col = col.child(div().px_2().pt_1().child(footer));
     }
     col
 }
@@ -1830,5 +1832,34 @@ mod tests {
         // Nothing matches: Enter opens nothing rather than the open chat.
         state.filter = "zzz".to_string();
         assert_eq!(state.find_target(), None);
+    }
+
+    /// #2540: selection and hover are full-width row tiles, not inset cards.
+    /// The rail keeps its control insets while the rows themselves stay flush.
+    #[test]
+    fn session_rows_are_square_and_edge_to_edge() {
+        let source = include_str!("sessions.rs");
+        let row_source = source
+            .split("pub fn row(")
+            .nth(1)
+            .expect("session row renderer")
+            .split("pub fn on_click(")
+            .next()
+            .expect("row source before click handler");
+        assert!(row_source.contains(".w_full()"));
+        assert!(row_source.contains(".p_2()"), "text keeps its inset");
+        assert!(!row_source.contains(".rounded_sm()"));
+
+        let rail_source = source
+            .split("pub fn rail(")
+            .nth(1)
+            .expect("session rail renderer")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("rail source before tests");
+        assert!(rail_source.contains(".py_2()"));
+        assert!(rail_source.contains(".px_2()"), "controls keep their inset");
+        assert!(!rail_source.contains(".p_2()"));
+        assert!(!rail_source.contains(".gap_1()"));
     }
 }
