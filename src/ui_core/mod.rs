@@ -6,6 +6,10 @@
 //! binary can link it as-is.
 
 pub mod bang;
+// `card` is the shared card shape and reads `gpui` types, so it only
+// compiles with the feature that provides them (#2510). Every consumer is
+// in `src/gui/`.
+#[cfg(feature = "gui")]
 pub mod card;
 pub mod channel_status;
 pub mod commands;
