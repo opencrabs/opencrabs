@@ -322,6 +322,13 @@ pub fn overlay(
                         )
                     }),
             );
+            cell = cell.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(INK_MUTED))
+                    .mr_2()
+                    .child(SharedString::from(rowv.kind.clone())),
+            );
             if rowv.missing {
                 // A command the terminal runs and this window does not keeps
                 // its tag, dimmed; hiding it would leave a user who saw it
@@ -463,6 +470,24 @@ mod tests {
             printed.iter().any(|r| r.armed),
             "the armed row lands inside the printed window"
         );
+    }
+
+    /// Every row says what it is: a docs entry reads "docs" and a command
+    /// reads "command", so nobody clicks a docs link expecting setup (#2521).
+    #[test]
+    fn every_row_carries_its_kind_label() {
+        let state = state_with(vec![
+            item("Channels overview", PaletteKind::Docs),
+            item("Quit", PaletteKind::Command),
+        ]);
+        let printed = rows(&state);
+        assert_eq!(printed.len(), 2);
+        assert!(printed.iter().all(|r| !r.kind.is_empty()));
+        let docs = printed
+            .iter()
+            .find(|r| r.title == "Channels overview")
+            .expect("the docs row prints");
+        assert_eq!(docs.kind, "docs");
     }
 
     /// The top row is armed before any arrow press, because Enter acts on it:
