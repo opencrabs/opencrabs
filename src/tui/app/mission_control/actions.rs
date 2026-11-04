@@ -7,18 +7,13 @@
 //! applied via `rsi_proposals apply <id>`.
 
 use crate::brain::mission_control::{
-    activity_service, analytics_service, inbox_service, schedule_service,
+    ACTIVITY_LIMIT, activity_service, analytics_service, inbox_service, schedule_service,
 };
 use crate::brain::tools::dynamic::DynamicToolLoader;
 use crate::brain::tools::rsi_proposals::RsiProposalsTool;
 use crate::tui::app::App;
 use crate::tui::app::mission_control::McPanel;
 use crate::tui::events::AppMode;
-
-/// Maximum activity feed entries cached for the panel. The journal
-/// itself is unbounded, but the panel only ever displays a window —
-/// reading more wastes memory without changing what the user sees.
-const ACTIVITY_LIMIT: usize = 100;
 
 /// Enter Mission Control mode. Idempotent — re-opening from MC is a
 /// no-op (the snapshots stay as they were; call `refresh` explicitly
