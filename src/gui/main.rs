@@ -7080,6 +7080,19 @@ fn main() {
             })
             .into_iter()
             .collect();
+    // Each topic's own icon, read with the rest of the topic state (#2480).
+    // The map used to start empty and only fill after a close or a create, so
+    // every tab drew its name alone until the owner touched a topic: the
+    // "topic icons vanished" bug. The rows are already in the database; they
+    // just were never read on the way in.
+    let topic_icons: std::collections::HashMap<uuid::Uuid, String> =
+        futures::executor::block_on(sessions::load_topic_icons(db_path.clone()))
+            .unwrap_or_else(|e| {
+                logging::error(&format!("topic icons load: {e}"));
+                Vec::new()
+            })
+            .into_iter()
+            .collect();
     let sessions_state = match session_list {
         Ok(items) => sessions::SessionsState {
             items,
@@ -7087,7 +7100,7 @@ fn main() {
             topics: topics.clone(),
             parents: parents.clone(),
             closed: closed.clone(),
-            topic_icons: HashMap::new(),
+            topic_icons: topic_icons.clone(),
             topic_titles: HashMap::new(),
             collapsed: HashSet::new(),
             selected: None,
@@ -7103,7 +7116,7 @@ fn main() {
             topics,
             parents,
             closed,
-            topic_icons: HashMap::new(),
+            topic_icons,
             topic_titles: HashMap::new(),
             collapsed: HashSet::new(),
             selected: None,
