@@ -1379,6 +1379,7 @@ impl Render for Editor {
         div()
             .flex()
             .flex_col()
+            .justify_center()
             .key_context("Editor")
             .track_focus(&self.focus_handle)
             .cursor(CursorStyle::IBeam)

@@ -16,6 +16,7 @@ use gpui::{
 use std::rc::Rc;
 
 use crate::palette;
+use opencrabs::ui_core::card::{CARD_RADIUS, concentric_radius};
 use opencrabs::ui_core::commands::{Support, support};
 use opencrabs::ui_core::palette::{PaletteKind, PaletteState, roast};
 
@@ -208,7 +209,7 @@ pub fn overlay(
         .flex()
         .flex_col()
         .max_h(px(480.0))
-        .rounded(px(24.0))
+        .rounded(px(CARD_RADIUS))
         .border_1()
         .border_color(rgba(0xffffff2e))
         .bg(glass)
@@ -220,7 +221,7 @@ pub fn overlay(
         // conversation list has no kinds to filter (#2491).
         if !pick_armed {
             let wanted = state.kind_filter();
-            let mut row = div().flex().flex_row().gap_1().px_3().pt_2().pb_1();
+            let mut row = div().flex().flex_row().gap_1().px_3().pt_4().pb_2();
             for (ix, (label, kind)) in chip_defs().into_iter().enumerate() {
                 let active = wanted == kind;
                 let press = chip.clone();
@@ -253,7 +254,7 @@ pub fn overlay(
 
         // The rows: title only, subtitle and enter hint on the armed row,
         // and the one right-edge word that does work, terminal only (#2491).
-        let mut list = div().flex().flex_col().gap_0p5().px_2().pb_1();
+        let mut list = div().flex().flex_col().gap_0p5().px_3().pb_2();
         let mut handlers = pick.into_iter();
         for (ix, rowv) in printed.iter().enumerate() {
             let armed = rowv.armed;
@@ -265,7 +266,7 @@ pub fn overlay(
                 .gap_2()
                 .px_2()
                 .py_1p5()
-                .rounded(px(12.0))
+                .rounded(px(concentric_radius(12.0)))
                 .cursor_pointer()
                 .when(armed, |d| d.bg(armed_bg));
             if armed && !rowv.missing {
