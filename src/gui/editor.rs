@@ -11,7 +11,6 @@
 //! direct dependency).
 
 use crate::palette;
-use opencrabs::ui_core::card::{CARD_RADIUS, glass_fill};
 use opencrabs::ui_core::commands::completions;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -1411,11 +1410,10 @@ impl Render for Editor {
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             // One step above the chat, with a shadow, so the input reads as a
             // surface of its own in both themes.
-            .bg(glass_fill(palette::current().panel))
+            .bg(rgb(palette::current().panel))
             .shadow_sm()
             .border_1()
             .border_color(rgb(palette::current().panel_hi))
-            .rounded(px(CARD_RADIUS))
             .p_3()
             .line_height(px(22.))
             .text_size(px(14.))
@@ -1474,7 +1472,6 @@ fn attachment_strip(attachments: &[Attachment], cx: &mut Context<Editor>) -> Div
                 .h(px(34.0))
                 .flex_shrink_0()
                 .overflow_hidden()
-                .rounded(px(4.0))
                 .child(
                     img(attachment.path.clone())
                         .size_full()
@@ -1489,7 +1486,6 @@ fn attachment_strip(attachments: &[Attachment], cx: &mut Context<Editor>) -> Div
                 .w(px(34.0))
                 .h(px(34.0))
                 .flex_shrink_0()
-                .rounded(px(4.0))
                 .bg(rgb(palette::current().bg))
                 .child(if attachment.is_video { "🎬" } else { "📄" })
                 .into_any_element()
@@ -1514,7 +1510,6 @@ fn attachment_strip(attachments: &[Attachment], cx: &mut Context<Editor>) -> Div
                 .p_1()
                 .min_w_0()
                 .overflow_hidden()
-                .rounded(px(6.0))
                 .bg(rgb(palette::current().panel_hi))
                 .child(tile)
                 .child(
@@ -1553,7 +1548,6 @@ fn paperclip(cx: &mut Context<Editor>) -> impl IntoElement {
         .items_center()
         .justify_center()
         .size(gpui::rems(1.8))
-        .rounded_sm()
         .cursor_pointer()
         .text_size(gpui::rems(1.1))
         .text_color(rgb(palette::current().text_faint))

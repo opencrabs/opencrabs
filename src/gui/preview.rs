@@ -514,7 +514,6 @@ fn action_button(
         .id(SharedString::from(id.to_string()))
         .px_3()
         .py_1()
-        .rounded_sm()
         .border_1()
         .border_color(rgb(palette::current().panel_hi))
         .text_xs()
@@ -578,7 +577,6 @@ fn image_body(
         .items_center()
         .justify_center()
         .bg(rgb(palette::current().bg))
-        .rounded(px(6.0))
         .overflow_hidden()
         .cursor_pointer()
         .on_scroll_wheel(move |ev, window, cx| wheel(ev, window, cx))
@@ -625,7 +623,6 @@ fn video_body(preview: &Preview, poster: Option<&Path>) -> AnyElement {
         .w(px(IMAGE_BOX.0))
         .h(px(IMAGE_BOX.1))
         .bg(rgb(palette::current().bg))
-        .rounded(px(6.0))
         .overflow_hidden();
     match poster {
         Some(frame) => boxed
@@ -667,7 +664,6 @@ fn missing_body(preview: &Preview) -> AnyElement {
         .w(px(IMAGE_BOX.0))
         .p_4()
         .bg(rgb(palette::current().bg))
-        .rounded(px(6.0))
         .child(
             div()
                 .text_sm()
@@ -851,7 +847,6 @@ pub fn overlay(
                 // over the window: the card is the frame, the picture is what
                 // fits in it.
                 .overflow_hidden()
-                .rounded(px(10.0))
                 .border_1()
                 .border_color(rgb(palette::current().panel_hi))
                 .bg(rgb(palette::current().panel))
@@ -889,7 +884,6 @@ pub fn overlay(
                                 .id("preview-close")
                                 .px_2()
                                 .py_1()
-                                .rounded_sm()
                                 .text_xs()
                                 .text_color(rgb(palette::current().text_normal))
                                 .cursor_pointer()

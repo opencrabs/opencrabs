@@ -42,10 +42,9 @@ fn bar(ratio: f64, color: u32) -> Div {
     div()
         .w(rems(BAR_REM))
         .h(rems(0.32))
-        .rounded_sm()
         .bg(rgb(palette::current().track))
         .flex_shrink_0()
-        .child(div().w(filled).h_full().rounded_sm().bg(rgb(color)))
+        .child(div().w(filled).h_full().bg(rgb(color)))
 }
 
 /// Card shell: dark panel, muted title, content stacked under it. The card
@@ -60,7 +59,6 @@ fn card_shell(title: &str) -> Div {
         .flex_grow()
         .flex_shrink()
         .bg(rgb(palette::current().panel))
-        .rounded_md()
         .overflow_hidden()
         .p(rems(1.0))
         .child(text(
@@ -407,7 +405,6 @@ pub fn period_tab(label: &str, active: bool) -> Div {
     div()
         .px(rems(0.75))
         .py(rems(0.35))
-        .rounded_md()
         .bg(rgb(if active {
             palette::current().panel_hi
         } else {
@@ -495,7 +492,6 @@ fn cell(label: &str, value: &str, footnote: Option<&str>) -> Div {
         .flex_grow()
         .flex_shrink()
         .bg(rgb(crate::palette::current().panel_hi))
-        .rounded_md()
         .px(rems(1.0))
         .py(rems(0.6))
         .child(text(
