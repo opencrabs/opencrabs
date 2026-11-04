@@ -169,6 +169,37 @@ fn second_start_after_stop_reports_new_tunnel_url() {
 }
 
 #[test]
+fn concurrent_second_start_fails_instead_of_double_spawning() {
+    let dir = tempfile::tempdir().unwrap();
+    // Silent stub: the first start sits in its URL wait for the full
+    // timeout, holding the start lock through the whole window.
+    let silent = stub_script_with_url(dir.path(), None);
+    let first_spec = TunnelSpec {
+        port: 18995,
+        state_dir: dir.path().to_path_buf(),
+        binary: Some(silent.clone()),
+        url_timeout: Duration::from_millis(1500),
+    };
+    let first = std::thread::spawn(move || start(&first_spec).map(|_| ()));
+    // Let the first start get inside its URL wait (spawn + log poll).
+    std::thread::sleep(Duration::from_millis(400));
+    let second_spec = TunnelSpec {
+        port: 18995,
+        state_dir: dir.path().to_path_buf(),
+        binary: Some(silent),
+        url_timeout: Duration::from_millis(1500),
+    };
+    let err = start(&second_spec).expect_err("second start must not double-spawn");
+    assert!(
+        err.to_string().contains("held by another writer"),
+        "expected the start-lock error, got: {err}"
+    );
+    // The first start still ends in its clean timeout, with no state.
+    first.join().unwrap().expect_err("first start must time out");
+    assert!(status(dir.path()).unwrap().is_none());
+}
+
+#[test]
 fn start_times_out_and_kills_silent_stub() {
     let dir = tempfile::tempdir().unwrap();
     let stub = stub_script(dir.path(), false);
