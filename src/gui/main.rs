@@ -25,7 +25,6 @@
 //! runs one conversation at a time.
 
 mod agent_bridge;
-mod attachment_style;
 mod attachment_view;
 mod bang;
 mod breakdown;
@@ -69,6 +68,7 @@ use opencrabs::ui_core::commands as slash;
 // The Seeker engine: ranking, keywords and state, shared with the terminal
 // so both clients print the same rows in the same order (#2458). Named `find`
 // because `palette` here is the window's colour table.
+use opencrabs::ui_core::card::{CARD_RADIUS, glass_fill};
 use opencrabs::ui_core::palette::{
     self as find, Channel, PaletteAction, PaletteItem, PaletteKind, PaletteState,
 };
@@ -3871,13 +3871,11 @@ impl Dashboard {
                         let picture = stored
                             .as_deref()
                             .and_then(|stored| topic_icons::tab_icon(stored, icon_rems));
-                        let label = topic_label(&title(id));
-                        let label = match (&picture, stored.as_deref()) {
-                            (Some(_), _) => label,
-                            (None, Some(icon)) => format!("{icon} {label}"),
-                            (None, None) => label,
+                        let glyph = match (&picture, stored.as_deref()) {
+                            (None, Some(icon)) => Some(topic_icons::tab_glyph(icon, icon_rems)),
+                            _ => None,
                         };
-                        (label, picture)
+                        (topic_label(&title(id)), picture.or(glyph))
                     }
                 };
                 topic_tab(
@@ -5202,6 +5200,7 @@ impl Render for Dashboard {
                 .min_w_0()
                 .flex_none()
                 .p_1p5()
+                .rounded_md()
                 .border_1()
                 .border_color(rgb(shown.track))
                 .bg(rgb(shown.panel_hi))
@@ -5503,9 +5502,10 @@ impl Render for Dashboard {
                     .flex_col()
                     .gap_2()
                     .p_3()
+                    .rounded(px(CARD_RADIUS))
                     .border_1()
                     .border_color(rgb(shown.panel_hi))
-                    .bg(rgb(shown.panel))
+                    .bg(glass_fill(shown.panel))
                     .child(header)
                     .child(scroller);
                 if self.cd_entries.is_empty() {
@@ -5783,6 +5783,7 @@ impl Render for Dashboard {
                                 .gap_2()
                                 .px_3()
                                 .py_2()
+                                .rounded(px(6.0))
                                 .child(text(
                                     if here { "\u{25cf}" } else { " " },
                                     Size::Sm,
@@ -5859,6 +5860,7 @@ impl Render for Dashboard {
                                             .items_center()
                                             .px_3()
                                             .py_2()
+                                            .rounded(px(6.0))
                                             .bg(rgb(if focused {
                                                 shown.panel_hi
                                             } else {
@@ -5921,6 +5923,7 @@ impl Render for Dashboard {
                                                 .items_center()
                                                 .px_3()
                                                 .py_2()
+                                                .rounded(px(6.0))
                                                 .bg(rgb(if focused {
                                                     shown.panel_hi
                                                 } else {
@@ -5995,6 +5998,7 @@ impl Render for Dashboard {
                                 .gap_2()
                                 .px_3()
                                 .py_1()
+                                .rounded(px(6.0))
                                 .child(text(
                                     if here { "\u{25cf}" } else { " " },
                                     Size::Sm,
@@ -6045,6 +6049,7 @@ impl Render for Dashboard {
                                         .items_center()
                                         .px_3()
                                         .py_2()
+                                        .rounded(px(6.0))
                                         .bg(rgb(if search_focused {
                                             shown.panel_hi
                                         } else {
@@ -6137,6 +6142,7 @@ impl Render for Dashboard {
                                     .gap_2()
                                     .px_3()
                                     .py_2()
+                                    .rounded(px(6.0))
                                     .bg(rgb(if here { shown.panel_hi } else { shown.panel }))
                                     .border_1()
                                     .border_color(rgb(if focused {
@@ -6218,6 +6224,7 @@ impl Render for Dashboard {
                                 .gap_1()
                                 .px_3()
                                 .py_2()
+                                .rounded(px(6.0))
                                 .bg(rgb(shown.panel))
                                 .child(
                                     div()
@@ -6261,6 +6268,7 @@ impl Render for Dashboard {
                                 .gap_2()
                                 .px_3()
                                 .py_2()
+                                .rounded(px(6.0))
                                 .bg(rgb(shown.panel_hi))
                                 .child(text(
                                     if complete {
@@ -6310,6 +6318,7 @@ impl Render for Dashboard {
                                     .gap_2()
                                     .px_3()
                                     .py_2()
+                                    .rounded(px(6.0))
                                     .child(text(
                                         if focused { "\u{25b8}" } else { " " },
                                         Size::Xs,
@@ -6379,6 +6388,7 @@ impl Render for Dashboard {
                                         .gap_2()
                                         .px_3()
                                         .py_2()
+                                        .rounded(px(6.0))
                                         .border_1()
                                         .border_color(rgb(if focused {
                                             shown.amber
@@ -6435,6 +6445,7 @@ impl Render for Dashboard {
                                         .gap_2()
                                         .px_3()
                                         .py_2()
+                                        .rounded(px(6.0))
                                         .border_1()
                                         .border_color(rgb(if focused {
                                             shown.amber
@@ -6497,6 +6508,7 @@ impl Render for Dashboard {
                                             .gap_2()
                                             .px_3()
                                             .py_1()
+                                            .rounded(px(6.0))
                                             .bg(rgb(if here {
                                                 shown.panel_hi
                                             } else {
@@ -6574,6 +6586,7 @@ impl Render for Dashboard {
                                         .gap_2()
                                         .px_3()
                                         .py_2()
+                                        .rounded(px(6.0))
                                         .border_1()
                                         .border_color(rgb(if focused {
                                             shown.amber
@@ -6625,6 +6638,7 @@ impl Render for Dashboard {
                                     .gap_2()
                                     .px_3()
                                     .py_2()
+                                    .rounded(px(6.0))
                                     .border_1()
                                     .border_color(rgb(if focused {
                                         shown.amber
@@ -6712,6 +6726,7 @@ impl Render for Dashboard {
                                             .items_center()
                                             .px_3()
                                             .py_2()
+                                            .rounded(px(6.0))
                                             .bg(rgb(if focused {
                                                 shown.panel_hi
                                             } else {
@@ -6772,6 +6787,7 @@ impl Render for Dashboard {
                                 .gap_2()
                                 .px_3()
                                 .py_2()
+                                .rounded(px(6.0))
                                 .bg(rgb(shown.panel))
                                 .child(text(mark, Size::Sm, colour))
                                 .child(text(note.to_string(), Size::Sm, colour)),
@@ -6783,6 +6799,7 @@ impl Render for Dashboard {
                             div()
                                 .px_3()
                                 .py_2()
+                                .rounded(px(6.0))
                                 .bg(rgb(shown.panel))
                                 .border_1()
                                 .border_color(rgb(shown.red))
@@ -6859,6 +6876,7 @@ impl Render for Dashboard {
                     .items_center()
                     .px_3()
                     .py_2()
+                    .rounded(px(6.0))
                     .bg(rgb(shown.panel))
                     .border_1()
                     .border_color(rgb(shown.track))
@@ -6928,6 +6946,7 @@ impl Render for Dashboard {
                                 .gap_2()
                                 .px_3()
                                 .py_2()
+                                .rounded(px(6.0))
                                 .child(text(
                                     if row.current { "\u{25cf}" } else { " " },
                                     Size::Sm,
@@ -7070,6 +7089,7 @@ impl Render for Dashboard {
                         .gap_1()
                         .px_3()
                         .py_2()
+                        .rounded(px(6.0))
                         .child(head)
                         .child(text(description, Size::Xs, shown.text_muted));
                     if selected {
@@ -7160,9 +7180,10 @@ impl Render for Dashboard {
                     .flex_col()
                     .gap_2()
                     .p_3()
+                    .rounded(px(CARD_RADIUS))
                     .border_1()
                     .border_color(rgb(shown.panel_hi))
-                    .bg(rgb(shown.panel))
+                    .bg(glass_fill(shown.panel))
                     .child(header)
                     .child(scroller);
                 // The trail of previews this visit, newest first and never
@@ -7202,6 +7223,7 @@ impl Render for Dashboard {
                         .justify_center()
                         .px_3()
                         .py_1()
+                        .rounded(px(6.0))
                         .bg(rgb(shown.panel_hi))
                         .border_1()
                         .border_color(rgb(shown.accent))
@@ -7407,6 +7429,7 @@ impl Render for Dashboard {
                         .justify_center()
                         .px_2()
                         .py_0p5()
+                        .rounded(px(4.0))
                         .cursor_pointer()
                         .text_color(rgb(palette::current().text_muted))
                         .hover(|d| d.bg(rgb(palette::current().panel_hi)))
@@ -7711,6 +7734,7 @@ impl Render for Dashboard {
                     div()
                         .id(SharedString::from(format!("topic-icon-{name}")))
                         .p_0p5()
+                        .rounded(px(4.0))
                         .cursor_pointer()
                         .hover(|d| d.bg(rgb(palette::current().panel_hi)))
                         .on_click(pick)
@@ -7776,6 +7800,7 @@ impl Render for Dashboard {
                     .items_center()
                     .justify_center()
                     .gap_2()
+                    .rounded(px(CARD_RADIUS))
                     .border_2()
                     .border_color(rgb(palette::current().accent))
                     .bg(rgba(0x101010dd))
@@ -8402,7 +8427,7 @@ fn mc_panel(
         let color = if armed { shown.focus } else { row.color() };
         let mut cell = div().w_full().min_w_0().text_color(rgb(color));
         if armed {
-            cell = cell.bg(rgb(shown.selection)).px_1();
+            cell = cell.bg(rgb(shown.selection)).rounded(px(4.0)).px_1();
         }
         match row {
             McRow::Line(line, _) => cell = cell.text_xs().truncate().child(line),
@@ -8428,11 +8453,12 @@ fn mc_panel(
         .overflow_hidden()
         .gap_1()
         .p_3()
+        .rounded(px(CARD_RADIUS))
         .border_1()
         // The focused card wears the ring the rest of the window uses, so the
         // keyboard's target is never a guess.
         .border_color(rgb(if focused { shown.focus } else { shown.panel_hi }))
-        .bg(rgb(shown.panel))
+        .bg(glass_fill(shown.panel))
         .child(text(title, Size::Sm, title_color))
         .child(rows_view)
 }
@@ -8887,9 +8913,10 @@ fn mission_control_detail(
         .max_h(px(560.0))
         // A long summary is clipped to the card instead of painting past it.
         .overflow_hidden()
+        .rounded(px(CARD_RADIUS))
         .border_1()
         .border_color(rgb(shown.panel_hi))
-        .bg(rgb(shown.panel))
+        .bg(glass_fill(shown.panel))
         // Inert: the click stops here instead of reaching the scrim.
         .on_click(|_ev, _window, cx| cx.stop_propagation())
         .child(
@@ -9039,9 +9066,10 @@ fn mission_control_logs(
         .p_3()
         .w_full()
         .overflow_hidden()
+        .rounded(px(CARD_RADIUS))
         .border_1()
         .border_color(rgb(shown.panel_hi))
-        .bg(rgb(shown.panel))
+        .bg(glass_fill(shown.panel))
         // Inert: a click inside the reader never closes it by accident.
         .on_click(|_ev, _window, cx| cx.stop_propagation())
         .child(
@@ -9167,7 +9195,8 @@ fn queue_strip(queued: &[agent_bridge::PendingMessage]) -> Div {
         .flex_col()
         .gap_1()
         .p_3()
-        .bg(rgb(palette::current().panel))
+        .rounded(px(CARD_RADIUS))
+        .bg(glass_fill(palette::current().panel))
         .child(
             div()
                 .text_xs()
@@ -9221,9 +9250,10 @@ fn emoji_popup_view(items: &[(&'static str, &'static str)], selected: usize) -> 
         .flex_col()
         .gap_1()
         .p_3()
+        .rounded(px(CARD_RADIUS))
         .border_1()
         .border_color(rgb(palette::current().panel_hi))
-        .bg(rgb(palette::current().panel));
+        .bg(glass_fill(palette::current().panel));
     for (index, (glyph, code)) in items.iter().enumerate() {
         let on = index == selected;
         col = col.child(
@@ -9233,6 +9263,7 @@ fn emoji_popup_view(items: &[(&'static str, &'static str)], selected: usize) -> 
                 .gap_2()
                 .px_2()
                 .py_0p5()
+                .rounded(px(4.0))
                 .text_color(rgb(palette::current().text))
                 // A subtle fill with an accent edge: the focus colour under
                 // muted text was unreadable in the themes (#2421).
@@ -9256,6 +9287,7 @@ fn command_popup_view(names: &[&'static str], selected: usize) -> Div {
         .flex_col()
         .gap_1()
         .p_2()
+        .rounded(px(4.0))
         .border_1()
         .border_color(rgb(palette::current().panel_hi))
         .bg(rgb(palette::current().panel));
@@ -9265,7 +9297,13 @@ fn command_popup_view(names: &[&'static str], selected: usize) -> Div {
             Some(cmd) => slash::clipped(cmd.description, 52).to_string(),
             None => String::new(),
         };
-        let mut row = div().flex().flex_row().items_center().gap_2().px_1();
+        let mut row = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .px_1()
+            .rounded(px(4.0));
         if picked {
             row = row.bg(rgb(palette::current().panel_hi));
         }
@@ -9494,9 +9532,6 @@ fn topic_strip(
         .size(rems(control.control_rems))
         .flex_none()
         .cursor_pointer()
-        .rounded(px(12.0))
-        .border_1()
-        .border_color(separator)
         .hover(|d| d.bg(rgb(palette::current().panel_hi)))
         .on_click(toggle_edge)
         .child(topic_icons::orientation_icon(
@@ -9509,11 +9544,11 @@ fn topic_strip(
             .flex()
             .flex_col()
             .flex_none()
-            .w(rems(topic_tabs::CELL_REMS + 1.0))
+            .w(rems(topic_tabs::CELL_REMS))
             .h_full()
             .items_center()
             .gap_2()
-            .p_2()
+            .py_2()
             .when(edge == topic_tabs::Edge::Left, |d| d.border_r_1())
             .when(edge == topic_tabs::Edge::Right, |d| d.border_l_1())
             .border_color(separator)
@@ -9599,11 +9634,11 @@ fn topic_tab(
     on_right: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
     let colour = if current {
-        palette::current().accent
+        topic_tabs::TELEGRAM_ACCENT
     } else {
         palette::current().text_muted
     };
-    let rule = topic_tabs::focus_color(palette::current().accent, current);
+    let rule = topic_tabs::focus_color(topic_tabs::TELEGRAM_ACCENT, current);
     let vertical = shape == topic_bar::ChipShape::IconAbove;
     let style = topic_tabs::style(vertical);
     let content = div()
@@ -9623,7 +9658,7 @@ fn topic_tab(
         .when(vertical, |d| {
             d.size(rems(style.cell_rems))
                 .flex_col()
-                .gap_1()
+                .gap_0()
                 .p_1()
                 .border_l(px(style.focus_bar_px))
                 .border_color(rule)
@@ -9636,7 +9671,7 @@ fn topic_tab(
                 .border_b(px(style.focus_bar_px))
                 .border_color(rule)
         })
-        .hover(|d| d.text_color(rgb(palette::current().accent)))
+        .hover(|d| d.text_color(rgb(topic_tabs::TELEGRAM_ACCENT)))
         .on_click(on_click)
         .on_mouse_down(MouseButton::Right, on_right)
         .children(icon)
@@ -9672,9 +9707,10 @@ fn update_prompt_overlay(
         .gap_3()
         .w(rems(26.0))
         .p_4()
+        .rounded(px(CARD_RADIUS))
         .border_1()
         .border_color(rgb(palette::current().panel_hi))
-        .bg(rgb(palette::current().panel))
+        .bg(glass_fill(palette::current().panel))
         .child(
             div()
                 .text_sm()
@@ -9704,6 +9740,7 @@ fn update_prompt_overlay(
                         .id("update-prompt-cancel")
                         .px_3()
                         .py_1()
+                        .rounded(px(4.0))
                         .cursor_pointer()
                         .text_color(rgb(palette::current().text_muted))
                         .hover(|d| d.bg(rgb(palette::current().panel_hi)))
@@ -9715,6 +9752,7 @@ fn update_prompt_overlay(
                         .id("update-prompt-yes")
                         .px_3()
                         .py_1()
+                        .rounded(px(4.0))
                         .cursor_pointer()
                         .text_color(rgb(palette::current().accent))
                         .hover(|d| d.bg(rgb(palette::current().panel_hi)))
@@ -10062,9 +10100,10 @@ fn split_pick_overlay(layout: Layout, rail_px: gpui::Pixels) -> impl IntoElement
         .flex_col()
         .gap_1()
         .p_3()
+        .rounded(px(CARD_RADIUS))
         .border_1()
         .border_color(rgb(palette::current().panel_hi))
-        .bg(rgb(palette::current().panel))
+        .bg(glass_fill(palette::current().panel))
         .child(
             div()
                 .text_sm()
@@ -10110,9 +10149,10 @@ fn topic_prompt_overlay(
         .min_w_0()
         .px_3()
         .py_2()
+        .rounded(px(CARD_RADIUS))
         .border_1()
         .border_color(rgb(palette::current().accent))
-        .bg(rgb(palette::current().bg))
+        .bg(glass_fill(palette::current().bg))
         .text_color(rgb(palette::current().text))
         .child(SharedString::from(format!("{draft}|")));
     // The chosen icon, as a picture when it names an embedded one and as the
@@ -10126,7 +10166,8 @@ fn topic_prompt_overlay(
         .flex()
         .items_center()
         .justify_center()
-        .bg(rgb(palette::current().bg))
+        .rounded(px(CARD_RADIUS))
+        .bg(glass_fill(palette::current().bg))
         .text_size(rems(1.4))
         .when(picture.is_none(), |d| {
             d.child(SharedString::from(icon.to_string()))
@@ -10141,9 +10182,10 @@ fn topic_prompt_overlay(
         .gap_3()
         .w(rems(28.0))
         .p_4()
+        .rounded(px(CARD_RADIUS))
         .border_1()
         .border_color(rgb(palette::current().panel_hi))
-        .bg(rgb(palette::current().panel))
+        .bg(glass_fill(palette::current().panel))
         .child(
             div()
                 .text_sm()
@@ -10220,9 +10262,10 @@ fn topic_info_overlay(
         .gap_2()
         .w(rems(30.0))
         .p_4()
+        .rounded(px(CARD_RADIUS))
         .border_1()
         .border_color(rgb(palette::current().panel_hi))
-        .bg(rgb(palette::current().panel))
+        .bg(glass_fill(palette::current().panel))
         .child(
             div()
                 .text_sm()
@@ -10439,9 +10482,10 @@ fn confirm_delete_overlay(
                 .gap_3()
                 .w(rems(24.0))
                 .p_4()
+                .rounded(px(CARD_RADIUS))
                 .border_1()
                 .border_color(rgb(palette::current().panel_hi))
-                .bg(rgb(palette::current().panel))
+                .bg(glass_fill(palette::current().panel))
                 .child(
                     div()
                         .text_sm()
@@ -10474,6 +10518,7 @@ fn confirm_delete_overlay(
                                 .id("confirm-delete-cancel")
                                 .px_3()
                                 .py_1()
+                                .rounded(px(4.0))
                                 .text_xs()
                                 .text_color(rgb(palette::current().text_normal))
                                 .cursor_pointer()
@@ -10486,6 +10531,7 @@ fn confirm_delete_overlay(
                                 .id("confirm-delete-yes")
                                 .px_3()
                                 .py_1()
+                                .rounded(px(4.0))
                                 .text_xs()
                                 .text_color(rgb(palette::current().red))
                                 .cursor_pointer()
@@ -11272,50 +11318,6 @@ mod tests {
             src.contains(&warn),
             "a completion for another session is logged, never dropped"
         );
-    }
-
-    /// #2528: ordinary GUI chrome uses the TUI's square, opaque surfaces.
-    /// Seeker and the two pictorial logo helpers are deliberate exceptions;
-    /// every other GUI source file is scanned, including this one. Split the
-    /// needles so the test's own source cannot trip the scan.
-    #[test]
-    fn flat_style_gui_chrome_is_square_and_opaque() {
-        let rounded = [".roun", "ded"].concat();
-        let glass = ["glass_", "fill("].concat();
-        let gui = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/gui");
-        let mut violations = Vec::new();
-        for entry in std::fs::read_dir(&gui).expect("GUI source directory") {
-            let path = entry.expect("GUI source entry").path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
-                continue;
-            }
-            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if matches!(name, "command_palette.rs" | "icon.rs" | "topic_icons.rs") {
-                continue;
-            }
-            let source = std::fs::read_to_string(&path).expect("GUI source file");
-            for (index, line) in source.lines().enumerate() {
-                if line.contains(&rounded) || line.contains(&glass) {
-                    violations.push(format!("{}:{}: {line}", path.display(), index + 1));
-                }
-            }
-        }
-        assert!(
-            violations.is_empty(),
-            "non-Seeker GUI chrome must stay square and opaque:\n{}",
-            violations.join("\n")
-        );
-    }
-
-    /// The flat sweep must not flatten Seeker's separately approved shape.
-    #[test]
-    fn flat_style_seeker_keeps_its_pill_card_and_glass() {
-        let src = include_str!("command_palette.rs");
-        let pill = [".roun", "ded_full()"].concat();
-        let card = [".roun", "ded(px(CARD_RADIUS))"].concat();
-        assert!(src.matches(&pill).count() >= 2, "field and kind chips");
-        assert!(src.contains(&card), "rounded results card");
-        assert!(src.contains("linear_gradient"), "dark glass gradient");
     }
 
     /// The /cd picker's listing (#2527): the parent entry first, then the

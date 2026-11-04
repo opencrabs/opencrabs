@@ -17,6 +17,7 @@
 //! truncation everywhere (#2271).
 
 use crate::palette;
+use opencrabs::ui_core::card::{CARD_RADIUS, concentric_radius, glass_fill};
 use opencrabs::ui_core::copy_select::{self, covered_rows};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -40,7 +41,6 @@ use opencrabs::tui::render::{
     TurnSummary, format_turn_header, format_turn_spinner_meta, is_deliverable_report,
 };
 
-use crate::attachment_style;
 use crate::attachment_view;
 use crate::editor::{Attachment, marker_paths, strip_markers};
 use crate::markdown;
@@ -1035,6 +1035,7 @@ fn md_table(t: &markdown::MdTable) -> Div {
         .w_full()
         .border_1()
         .border_color(rgb(palette::current().track))
+        .rounded(px(CARD_RADIUS))
         .overflow_hidden()
         .mt(px(RHYTHM_BLOCK_MARGIN))
         .mb(px(RHYTHM_BLOCK_MARGIN));
@@ -1044,7 +1045,11 @@ fn md_table(t: &markdown::MdTable) -> Div {
         .flex_row()
         .items_start()
         .w_full()
-        .bg(rgb(palette::current().panel_hi));
+        // Top corners concentric with the grid curve (flush, gap 0): the
+        // glass band would otherwise paint square corners over it (#2514).
+        .rounded_tl(px(concentric_radius(0.0)))
+        .rounded_tr(px(concentric_radius(0.0)))
+        .bg(glass_fill(palette::current().panel_hi));
     for i in 0..cols {
         head = head.child(table_cell(t.header.get(i).unwrap_or(&empty), true));
     }
@@ -1092,6 +1097,7 @@ fn md_block(src: &str) -> Div {
                     .flex()
                     .flex_col()
                     .bg(rgb(palette::current().panel_hi))
+                    .rounded_sm()
                     .p_2()
                     .mt(px(RHYTHM_BLOCK_MARGIN))
                     .mb(px(RHYTHM_BLOCK_MARGIN))
@@ -1248,14 +1254,16 @@ fn history_attachments(
 /// that decides how tall the row is.
 fn attachment_cell(path: &std::path::Path, side: f32) -> Div {
     let attachment = Attachment::for_display(path.to_path_buf());
-    let theme = palette::current();
     let tile: AnyElement = if attachment.is_image() {
         div()
             .w(px(side))
             .h(px(side))
             .flex_shrink_0()
             .overflow_hidden()
-            .bg(rgb(theme.panel))
+            .bg(glass_fill(palette::current().panel))
+            .rounded(px(CARD_RADIUS))
+            .border_1()
+            .border_color(rgb(palette::current().track))
             .child(
                 img(path.to_path_buf())
                     .size_full()
@@ -1278,7 +1286,10 @@ fn attachment_cell(path: &std::path::Path, side: f32) -> Div {
             .h(px(side))
             .flex_shrink_0()
             .overflow_hidden()
-            .bg(attachment_style::surface(theme))
+            .rounded(px(CARD_RADIUS))
+            .border_1()
+            .border_color(rgb(palette::current().track))
+            .bg(glass_fill(palette::current().panel_hi))
             .text_lg()
             .child(if attachment.is_video {
                 "\u{1f3ac}"
@@ -1291,7 +1302,7 @@ fn attachment_cell(path: &std::path::Path, side: f32) -> Div {
                     .px_1()
                     .truncate()
                     .text_xs()
-                    .text_color(rgb(theme.text_muted))
+                    .text_color(rgb(palette::current().text_muted))
                     .child(SharedString::from(line)),
             );
         }
@@ -1302,40 +1313,19 @@ fn attachment_cell(path: &std::path::Path, side: f32) -> Div {
         .flex_col()
         .flex_shrink_0()
         .w(px(side))
-        .rounded(px(attachment_style::TILE_RADIUS))
-        .overflow_hidden()
-        .border_1()
-        .border_color(attachment_style::ring(theme))
-        .bg(attachment_style::surface(theme))
-        .shadow_sm()
+        .gap_1()
         .child(tile)
-        // The caption is part of the card and still fits the planner's exact
-        // CAPTION budget, including its separator and horizontal inset.
         .child(
             div()
-                .flex()
-                .items_center()
-                .w_full()
-                .h(px(attachment_view::CAPTION))
-                .min_w_0()
-                .px_2()
-                .border_t_1()
-                .border_color(attachment_style::ring(theme))
-                .bg(rgb(theme.panel))
-                .child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .text_xs()
-                        .text_color(rgb(theme.text_muted))
-                        .child(SharedString::from(attachment.name)),
-                ),
+                .truncate()
+                .text_xs()
+                .text_color(rgb(palette::current().text_muted))
+                .child(SharedString::from(attachment.name)),
         )
 }
 
 /// The last cell: how many files the strip did not draw.
 fn fold_cell(folded: usize, side: f32) -> AnyElement {
-    let theme = palette::current();
     div()
         .flex()
         .items_center()
@@ -1343,14 +1333,12 @@ fn fold_cell(folded: usize, side: f32) -> AnyElement {
         .w(px(side))
         .h(px(side))
         .flex_shrink_0()
-        .rounded(px(attachment_style::TILE_RADIUS))
-        .overflow_hidden()
+        .rounded(px(CARD_RADIUS))
         .border_1()
-        .border_color(attachment_style::ring(theme))
-        .bg(attachment_style::surface(theme))
-        .shadow_sm()
+        .border_color(rgb(palette::current().track))
+        .bg(glass_fill(palette::current().panel_hi))
         .text_sm()
-        .text_color(rgb(theme.text_muted))
+        .text_color(rgb(palette::current().text_muted))
         .child(SharedString::from(format!("+{folded}")))
         .into_any_element()
 }
@@ -1363,7 +1351,8 @@ fn thinking_block(content: &str, full: bool) -> Div {
         .flex_col()
         .gap_0p5()
         .p_3()
-        .bg(rgb(palette::current().panel))
+        .bg(glass_fill(palette::current().panel))
+        .rounded(px(CARD_RADIUS))
         .border_1()
         .border_color(rgb(palette::current().panel_hi))
         .child(
@@ -1393,7 +1382,8 @@ fn tools_block(calls: &[ToolCall]) -> Div {
         .flex_col()
         .gap_0p5()
         .p_3()
-        .bg(rgb(palette::current().panel_hi));
+        .rounded(px(CARD_RADIUS))
+        .bg(glass_fill(palette::current().panel_hi));
     for call in calls {
         let (mark, color) = tool_mark(call);
         col = col.child(
@@ -1475,7 +1465,8 @@ fn fold_header(turn: &Turn, folded: bool) -> Option<Stateful<Div>> {
         .gap_0p5()
         .px_3()
         .py_2()
-        .bg(rgb(palette::current().panel))
+        .bg(glass_fill(palette::current().panel))
+        .rounded(px(CARD_RADIUS))
         .cursor_pointer()
         .hover(|d| d.bg(rgb(palette::current().panel)))
         .child(row);
@@ -1662,9 +1653,10 @@ fn live_card(live: &LiveTurn, expanded: bool, ctx: (Option<u32>, u32)) -> Statef
         .w_full()
         .min_w_0()
         .flex_shrink_0()
+        .rounded(px(CARD_RADIUS))
         .border_1()
         .border_color(rgb(palette::current().panel_hi))
-        .bg(rgb(palette::current().panel))
+        .bg(glass_fill(palette::current().panel))
         .cursor_pointer()
         .hover(|d| d.bg(rgb(palette::current().panel_hi)))
         .child(head);

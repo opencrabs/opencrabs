@@ -67,6 +67,7 @@ pub fn panel(cache: Option<&CacheView>) -> Div {
                 .flex_col()
                 .gap_1()
                 .bg(rgb(0x1a1a1a))
+                .rounded_md()
                 .p_3()
                 .child(text(m.model.clone(), 13.0, 0xe8e8e8))
                 .child(text(

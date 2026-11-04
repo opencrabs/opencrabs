@@ -15,7 +15,8 @@
 //! mark in `icon.rs`.
 
 use gpui::{
-    AnyElement, Image, ImageFormat, IntoElement, ObjectFit, Styled, StyledImage, img, rems,
+    AnyElement, Image, ImageFormat, IntoElement, ObjectFit, ParentElement, SharedString, Styled,
+    StyledImage, div, img, rems,
 };
 use std::sync::Arc;
 
@@ -329,6 +330,21 @@ pub fn orientation_icon(size: f32, colour: u32) -> impl IntoElement {
 pub fn tab_icon(stored: &str, size: f32) -> Option<AnyElement> {
     let bytes = topic_icon(stored).or_else(|| crab_icon(stored))?;
     Some(picture(bytes, size).into_any_element())
+}
+
+/// A legacy emoji topic icon in the same centered slot as an embedded picture.
+/// Keeping it out of the label preserves the icon-above-name geometry and
+/// stops a color emoji from wrapping beside or beyond the topic name.
+pub fn tab_glyph(stored: &str, size: f32) -> AnyElement {
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .size(rems(size))
+        .text_size(rems(size * 0.8))
+        .child(SharedString::from(stored.to_string()))
+        .into_any_element()
 }
 
 /// A picture for a tab, a picker cell or the badge in the topic prompt.

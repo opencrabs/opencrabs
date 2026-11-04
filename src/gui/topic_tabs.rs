@@ -55,6 +55,11 @@ impl Edge {
 /// The rotate control uses the same size so it is readable and easy to hit.
 pub const CELL_REMS: f32 = 4.5;
 
+/// Telegram's selection blue from the owner's reference. Topic selection is
+/// the one piece of this chrome that deliberately does not follow the theme
+/// accent: the comparison target is Telegram's blue text and focus rule.
+pub const TELEGRAM_ACCENT: u32 = 0x40a7e3;
+
 /// The visual contract for one orientation. Filled selected cards are not
 /// part of Telegram's topic language: colour and the edge rule do that work.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -88,9 +93,9 @@ pub fn style(vertical: bool) -> Style {
             AccentEdge::Bottom
         },
         focus_bar_px: 3.0,
-        topic_icon_rems: if vertical { 1.75 } else { 1.15 },
+        topic_icon_rems: if vertical { 2.5 } else { 1.5 },
         control_rems: CELL_REMS,
-        control_icon_rems: 2.25,
+        control_icon_rems: 1.125,
     }
 }
 
@@ -127,8 +132,8 @@ mod tests {
         assert_eq!(rail.selected_fill, None);
         assert_eq!(rail.accent_edge, AccentEdge::Leading);
         assert_eq!(rail.focus_bar_px, 3.0);
-        assert_eq!(rail.topic_icon_rems, 1.75);
-        assert_eq!(rail.control_icon_rems, 2.25);
+        assert_eq!(rail.topic_icon_rems, 2.5);
+        assert_eq!(rail.control_icon_rems, 1.125);
     }
 
     #[test]
@@ -138,18 +143,18 @@ mod tests {
         assert_eq!(bar.selected_fill, None);
         assert_eq!(bar.accent_edge, AccentEdge::Bottom);
         assert_eq!(bar.focus_bar_px, 3.0);
-        assert_eq!(bar.topic_icon_rems, 1.15);
+        assert_eq!(bar.topic_icon_rems, 1.5);
         assert!(bar.control_rems >= 4.0);
-        assert_eq!(bar.control_icon_rems, 2.25);
+        assert_eq!(bar.control_icon_rems, 1.125);
     }
 
     #[test]
     fn topic_style_focus_color_is_opaque_only_when_selected() {
-        let selected = focus_color(0xd76414, true);
-        let expected: Hsla = rgb(0xd76414).into();
+        let selected = focus_color(TELEGRAM_ACCENT, true);
+        let expected: Hsla = rgb(0x40a7e3).into();
         assert_eq!(selected, expected);
         assert_eq!(selected.a, 1.0);
-        assert_eq!(focus_color(0xd76414, false).a, 0.0);
+        assert_eq!(focus_color(TELEGRAM_ACCENT, false).a, 0.0);
     }
 
     #[test]
@@ -180,6 +185,9 @@ mod tests {
             .next()
             .expect("All body");
         assert!(all.contains("store_name(\"general\")"));
+        assert!(src.contains("topic_icons::tab_glyph(icon, icon_rems)"));
+        assert!(!src.contains("format!(\"{icon} {label}\")"));
+        assert!(src.contains("topic_tabs::TELEGRAM_ACCENT"));
         let tab = src
             .split("fn topic_tab(")
             .nth(1)
@@ -207,8 +215,12 @@ mod tests {
         assert!(!strip.contains(".w_full()"));
         assert!(strip.contains(".border_r_1()"));
         assert!(strip.contains(".border_l_1()"));
+        assert!(strip.contains(".w(rems(topic_tabs::CELL_REMS))"));
+        assert!(strip.contains(".py_2()"));
+        assert!(!strip.contains(".p_2()"));
         assert!(strip.contains("control.control_icon_rems,"));
-        assert!(strip.contains(".rounded(px(12.0))"));
+        assert!(!strip.contains(".rounded(px(12.0))"));
+        assert_eq!(strip.matches(".border_color(separator)").count(), 2);
         assert!(!strip.contains("\\u{25EB}"));
     }
 }
