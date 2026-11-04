@@ -339,6 +339,7 @@ fn save_state(state_dir: &Path, state: &TunnelState) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn pid_alive(pid: u32) -> bool {
     // kill(pid, 0) probes existence: ESRCH = gone, EPERM = alive (not ours).
     // Clamp to i32::MAX: an out-of-range pid cast negative would signal -1.
@@ -349,21 +350,56 @@ fn pid_alive(pid: u32) -> bool {
     std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
+/// Windows: `tasklist` with a PID filter prints an `INFO:` banner when no
+/// process owns the pid; anything else means one does.
+#[cfg(windows)]
+fn pid_alive(pid: u32) -> bool {
+    let out = std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output();
+    matches!(out, Ok(o) if !String::from_utf8_lossy(&o.stdout).trim_start().starts_with("INFO:"))
+}
+
+#[cfg(unix)]
 fn terminate(pid: u32) {
     unsafe {
         libc::kill(pid.min(i32::MAX as u32) as i32, libc::SIGTERM);
     }
 }
 
+/// Windows has no signals: the polite rung is taskkill's graceful window
+/// close, same call shape as the unix arm.
+#[cfg(windows)]
+fn terminate(pid: u32) {
+    let _ = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+#[cfg(unix)]
 fn kill_hard(pid: u32) {
     unsafe {
         libc::kill(pid.min(i32::MAX as u32) as i32, libc::SIGKILL);
     }
 }
 
+#[cfg(windows)]
+fn kill_hard(pid: u32) {
+    let _ = std::process::Command::new("taskkill")
+        .args(["/F", "/PID", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
 /// Best-effort zombie reap. In production the CLI exits before the tunnel
 /// does, so the child is reparented and this is a harmless ECHILD; in tests
 /// the killed stub is our own child and gets reaped here.
+#[cfg(unix)]
 fn reap(pid: u32) {
     unsafe {
         libc::waitpid(
@@ -374,6 +410,12 @@ fn reap(pid: u32) {
     }
 }
 
+/// Windows: the kernel reaps terminated children; there is no zombie to
+/// collect.
+#[cfg(windows)]
+fn reap(_pid: u32) {}
+
+#[cfg(unix)]
 fn set_executable(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
@@ -381,5 +423,14 @@ fn set_executable(path: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+/// Windows: executability is the extension's job — the extracted
+/// cloudflared binary runs as-is.
+#[cfg(windows)]
+fn set_executable(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+// The tunnel tests drive cloudflared through an `#!/bin/sh` stub — the
+// lifecycle is unix-shaped by construction, so the module is unix-only.
+#[cfg(all(test, unix))]
 mod tests;
