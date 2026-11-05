@@ -84,6 +84,35 @@ fn error_stays_visible_in_the_footer() {
 }
 
 #[test]
+fn provider_selector_footer_keeps_search_and_count_visible_during_fetch() {
+    let mut wizard = provider_step_wizard();
+    wizard.auth_field = AuthField::Model;
+    wizard.ps.models_fetching = true;
+
+    let text = screen_text(&wizard, 120, 40);
+    assert!(text.contains("type to filter"), "{text}");
+    assert!(text.contains("40 models"), "{text}");
+    assert!(text.contains("fetching live models"), "{text}");
+}
+
+#[test]
+fn provider_selector_footer_shows_filtered_total_and_fetch_error() {
+    let mut wizard = provider_step_wizard();
+    wizard.quick_jump = true;
+    wizard.ps.model_filter = "gpt-model-1".to_string();
+    wizard.model_fetch_lifecycle.error = Some("provider timed out".to_string());
+
+    let text = screen_text(&wizard, 120, 40);
+    assert!(text.contains("11 of 40 models"), "{text}");
+    assert!(text.contains("filter: gpt-model-1"), "{text}");
+    assert!(
+        text.contains("model fetch failed: provider timed out"),
+        "{text}"
+    );
+    assert!(!text.contains("Step 3 of"), "{text}");
+}
+
+#[test]
 fn first_run_step_one_footer_says_quit() {
     let mut wizard = OnboardingWizard::new();
     wizard.is_first_time = true;

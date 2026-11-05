@@ -343,6 +343,33 @@ fn build_header(
 /// scrolled away under the form) and the keys this step takes.
 fn build_footer(wizard: &OnboardingWizard, width: usize) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
+    if wizard.step == OnboardingStep::ProviderAuth {
+        let matched = wizard.ps.model_count();
+        let total = wizard.ps.all_model_names().len();
+        let counted = if matched == total {
+            format!("{total} model{}", if total == 1 { "" } else { "s" })
+        } else {
+            format!(
+                "{matched} of {total} models · filter: {}",
+                wizard.ps.model_filter
+            )
+        };
+        lines.push(Line::from(Span::styled(
+            counted,
+            Style::default().fg(theme::role(Role::Gray)),
+        )));
+        if wizard.ps.models_fetching {
+            lines.push(Line::from(Span::styled(
+                "fetching live models...",
+                Style::default().fg(theme::role(Role::AccentSoft)),
+            )));
+        } else if let Some(ref err) = wizard.model_fetch_lifecycle.error {
+            lines.push(Line::from(Span::styled(
+                format!("! model fetch failed: {err}"),
+                Style::default().fg(theme::role(Role::Error)),
+            )));
+        }
+    }
     if let Some(ref err) = wizard.error_message {
         lines.push(Line::from(Span::styled(
             format!("! {err}"),
@@ -1672,33 +1699,31 @@ fn render_provider_auth(
                 }
             };
 
-            if !wizard.ps.models_fetching {
-                // Filter input — always visible above the model list so a
-                // long catalogue can never push the affordance below the
-                // fold. When focused: interactive input with cursor.
-                // When not focused: dimmed hint that typing is available.
-                if model_focused {
-                    let cursor = "█";
-                    let filter_display = if wizard.ps.model_filter.is_empty() {
-                        format!("  / type to filter…{}", cursor)
-                    } else {
-                        format!("  / {}{}", wizard.ps.model_filter, cursor)
-                    };
-                    lines.push(Line::from(Span::styled(
-                        filter_display,
-                        Style::default().fg(if wizard.ps.model_filter.is_empty() {
-                            theme::role(Role::Gray)
-                        } else {
-                            theme::role(Role::AccentSoft)
-                        }),
-                    )));
+            // Filter input stays visible during a fetch so the next search is
+            // never blocked by network progress.
+            if model_focused {
+                let cursor = "█";
+                let filter_display = if wizard.ps.model_filter.is_empty() {
+                    format!("  / type to filter…{}", cursor)
                 } else {
-                    lines.push(Line::from(Span::styled(
-                        "  / type to filter…".to_string(),
-                        Style::default().fg(theme::role(Role::GrayDim)),
-                    )));
-                }
+                    format!("  / {}{}", wizard.ps.model_filter, cursor)
+                };
+                lines.push(Line::from(Span::styled(
+                    filter_display,
+                    Style::default().fg(if wizard.ps.model_filter.is_empty() {
+                        theme::role(Role::Gray)
+                    } else {
+                        theme::role(Role::AccentSoft)
+                    }),
+                )));
+            } else {
+                lines.push(Line::from(Span::styled(
+                    "  / type to filter…".to_string(),
+                    Style::default().fg(theme::role(Role::GrayDim)),
+                )));
+            }
 
+            if !wizard.ps.models_fetching {
                 let filtered = wizard.ps.filtered_model_names();
                 if filtered.is_empty() {
                     // No suggestion match for the typed filter. Tell the
