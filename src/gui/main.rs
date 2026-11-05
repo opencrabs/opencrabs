@@ -656,6 +656,9 @@ struct Dashboard {
     models_query: String,
     /// The row the arrows stand on.
     models_index: usize,
+    /// The provider the models screen's list marks. A click sets it and moves
+    /// the model cursor to that provider's first visible model.
+    models_provider: Option<String>,
     /// Shared request lifecycle and pending providers. Static rows are only a
     /// fallback; every configured provider gets a live discovery request.
     models_fetch: Option<std::sync::mpsc::Receiver<(u64, model_fetch::FetchOutcome)>>,
@@ -1983,6 +1986,13 @@ impl Dashboard {
         }
         self.models_query.clear();
         self.screen = Screen::Models;
+        // The list opens on the provider answering right now, so the marked
+        // row and the picker's cursor agree from the first frame.
+        self.models_provider = self
+            .models_rows
+            .iter()
+            .find(|row| row.current)
+            .map(|row| row.provider.clone());
         self.rail_actions = None;
         self.sessions.rail_menu = None;
         self.start_models_fetch();
@@ -7206,6 +7216,109 @@ impl Render for Dashboard {
                 }
             },
             Screen::Models => {
+                let shown = palette::current();
+                // `/models` is the Brain Fuel step in the terminal
+                // (`tui::onboarding::deep_link` maps the command to
+                // `ProviderAuth`), so the window paints the same two lists in
+                // the same order: the providers, then the models of the
+                // provider the list marks. The wizard's rail, step counter and
+                // key fields describe a run, not a switch, so they stay out
+                // (#2582).
+                let visible = models::filtered_rows(&self.models_rows, &self.models_query);
+                let providers = models::providers(&visible);
+                let selected = self
+                    .models_provider
+                    .as_deref()
+                    .and_then(|id| providers.iter().position(|row| row.provider == id))
+                    .unwrap_or(0);
+                let (start, end) = opencrabs::tui::onboarding_render::visible_window(
+                    providers.len(),
+                    selected,
+                    models::PROVIDERS_VISIBLE,
+                );
+                let mut provider_list = div().flex().flex_col().gap_1().w_full().min_w_0();
+                if start > 0 {
+                    provider_list = provider_list.child(text(
+                        format!("\u{2191} {start} more"),
+                        Size::Xs,
+                        shown.text_faint,
+                    ));
+                }
+                for (offset, row) in providers[start..end].iter().enumerate() {
+                    let here = start + offset == selected;
+                    let id = row.provider.clone();
+                    // The cursor follows the click, so Enter and the arrows
+                    // keep working from the provider the hand just chose.
+                    let first = row.first;
+                    let count = row.count;
+                    let mut entry = div()
+                        .id(SharedString::from(format!("models-provider-{id}")))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .px_3()
+                        .py_2()
+                        .rounded(px(6.0))
+                        .child(text(
+                            if here { "\u{25cf}" } else { " " },
+                            Size::Sm,
+                            if here { shown.amber } else { shown.text_muted },
+                        ))
+                        .child(
+                            text(
+                                row.name.clone(),
+                                Size::Sm,
+                                if here { shown.text_strong } else { shown.text },
+                            )
+                            .flex_1()
+                            .min_w_0()
+                            .truncate(),
+                        )
+                        .child(text(
+                            format!("{count} model{}", if count == 1 { "" } else { "s" }),
+                            Size::Xs,
+                            shown.text_muted,
+                        ));
+                    if here {
+                        entry = entry.bg(rgb(shown.panel_hi));
+                    }
+                    provider_list = provider_list.child(entry.on_click(cx.listener(
+                        move |this, _ev, _window, cx| {
+                            this.models_provider = Some(id.clone());
+                            this.models_index = first;
+                            cx.notify();
+                        },
+                    )));
+                }
+                if end < providers.len() {
+                    provider_list = provider_list.child(text(
+                        format!("\u{2193} {} more below", providers.len() - end),
+                        Size::Xs,
+                        shown.text_faint,
+                    ));
+                }
+                // The pair this screen would answer with, the same line the
+                // step prints under its title.
+                let pair = agent_bridge::bridge()
+                    .map(|bridge| {
+                        format!(
+                            "{} \u{b7} {}",
+                            bridge.service.provider_name(),
+                            bridge.service.provider_model()
+                        )
+                    })
+                    .unwrap_or_default();
+                let header = div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(text(
+                        onboard::OnboardingStep::ProviderAuth.title(),
+                        Size::Xl,
+                        shown.text_title,
+                    ))
+                    .child(text(pair, Size::Xs, shown.text_faint));
                 let rendered = model_picker::render(
                     cx,
                     model_picker::ModelPickerView {
@@ -7223,16 +7336,32 @@ impl Render for Dashboard {
                         provider_label_width: picker_layout.provider_label_width,
                     },
                 );
-                let shown = palette::current();
                 let footer = rendered.footer.child(
                     div()
                         .text_xs()
                         .text_color(rgb(shown.text_muted))
                         .min_w_0()
                         .whitespace_normal()
-                        .child("type · filter or enter a custom id · enter · switch · esc · back"),
+                        .child("type \u{b7} filter or enter a custom id \u{b7} enter \u{b7} switch \u{b7} esc \u{b7} back"),
                 );
-                (rendered.body.into_any_element(), footer.into_any_element())
+                let body = div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .child(header)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(text("provider", Size::Xs, shown.text_faint))
+                            .child(div().id("models-providers").w_full().child(provider_list)),
+                    )
+                    .child(rendered.body);
+                (body.into_any_element(), footer.into_any_element())
             }
             Screen::Skills => {
                 // The same list `/skills` opens in the terminal, from the same
@@ -8389,6 +8518,7 @@ fn main() {
                         models_rows: Vec::new(),
                         models_query: String::new(),
                         models_index: 0,
+                        models_provider: None,
                         models_fetch: None,
                         models_fetch_lifecycle:
                             opencrabs::ui_core::model_selector::FetchLifecycle::default(),
