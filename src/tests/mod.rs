@@ -572,6 +572,7 @@ pub mod tool_search_child_registry_test;
 pub mod tools_md_regression_test;
 pub mod tui_panes_fresh_test;
 pub mod tui_themes_shortcut_test;
+pub mod ui_core_model_selector_test;
 pub mod work_status_output_full_test;
 pub mod work_status_parent_binding_test;
 pub mod write_opencrabs_file_inline_test;
