@@ -971,16 +971,20 @@ fn palette_is_dark(color: u32) -> bool {
     (r * 299 + g * 587 + b * 114) / 1000 < 128
 }
 
-/// A quiet role tint over the live panel. Dark themes get a little more ink;
-/// light themes stay pale. Both roles follow whichever theme is active.
+/// The user bubble is one small neutral step off the history canvas: a touch
+/// lighter on dark themes, a touch darker on light ones. No role colour is
+/// mixed in, so the bubble reads as depth and never competes with the text
+/// (#2570).
 fn message_surface_for(palette: &palette::Palette, role: &str) -> u32 {
-    let tint = match role {
-        "user" => palette.blue,
-        "assistant" => palette.green,
-        _ => return palette.panel,
-    };
-    let percent = if palette_is_dark(palette.bg) { 18 } else { 10 };
-    mix_rgb(palette.panel, tint, percent)
+    if role != "user" {
+        return palette.bg;
+    }
+    let step = 6;
+    if palette_is_dark(palette.bg) {
+        mix_rgb(palette.bg, 0xff_ff_ff, step)
+    } else {
+        mix_rgb(palette.bg, 0x00_00_00, step)
+    }
 }
 
 fn message_surface(role: &str) -> u32 {
@@ -2477,6 +2481,25 @@ pub fn view(
 mod tests {
     use super::*;
 
+    /// Perceived brightness of a packed RGB colour, 0..=255.
+    fn luma(color: u32) -> u32 {
+        let r = (color >> 16) & 0xff;
+        let g = (color >> 8) & 0xff;
+        let b = color & 0xff;
+        (r * 299 + g * 587 + b * 114) / 1000
+    }
+
+    /// The bubble's visible tone once the glass alpha lands on the canvas.
+    fn over(ink: u32, canvas: u32, alpha: u32) -> u32 {
+        let a = alpha.min(255);
+        let mix = |shift: u32| {
+            let ink = (ink >> shift) & 0xff;
+            let canvas = (canvas >> shift) & 0xff;
+            (ink * a + canvas * (255 - a)) / 255
+        };
+        (mix(16) << 16) | (mix(8) << 8) | mix(0)
+    }
+
     #[test]
     fn drag_copy_within_block_has_a_visible_range_and_clipboard_payload() {
         let drag = CopyDrag::default();
@@ -2563,6 +2586,94 @@ mod tests {
             guarded.contains(".bg(glass_fill(message_surface(role)))"),
             "the user surface is painted behind the guard"
         );
+    }
+
+    /// #2569: the user bubble is a neutral step off the history canvas, lighter
+    /// on dark themes and darker on light ones, and it never borrows a role
+    /// accent, so no hue is introduced.
+    #[test]
+    fn the_user_bubble_is_a_neutral_step_off_the_history_canvas() {
+        let dark = palette::DARK;
+        let light = palette::Palette {
+            bg: 0xf5f5f5,
+            panel: 0xffffff,
+            ..dark
+        };
+        // A non-default light palette proves the direction follows the canvas
+        // rather than one hardcoded theme.
+        let warm_light = palette::Palette {
+            bg: 0xfaf4e8,
+            panel: 0xfffdf8,
+            ..dark
+        };
+
+        for (label, p) in [("dark", dark), ("light", light), ("warm light", warm_light)] {
+            let surface = message_surface_for(&p, "user");
+            assert!(
+                surface <= 0x00ff_ffff,
+                "{label}: the surface stays valid RGB, got {surface:#08x}"
+            );
+            assert_ne!(surface, p.bg, "{label}: the bubble has a visible step");
+            let canvas = luma(p.bg);
+            let bubble = luma(surface);
+            assert!(
+                bubble.abs_diff(canvas) <= 20,
+                "{label}: the step stays subtle, {bubble} against {canvas}"
+            );
+            if palette_is_dark(p.bg) {
+                assert!(
+                    bubble > canvas,
+                    "{label}: the bubble lifts off a dark canvas, {bubble} against {canvas}"
+                );
+            } else {
+                assert!(
+                    bubble < canvas,
+                    "{label}: the bubble sinks into a light canvas, {bubble} against {canvas}"
+                );
+            }
+            // The glass thins the fill, so check the composite at the most
+            // transparent stop: the step must still be visible and still point
+            // the same way.
+            let visible = luma(over(
+                surface,
+                p.bg,
+                opencrabs::ui_core::card::GLASS_ALPHA_BOTTOM,
+            ));
+            assert!(
+                visible.abs_diff(canvas) >= 6,
+                "{label}: the glassed step stays visible, {visible} against {canvas}"
+            );
+            assert!(
+                visible.abs_diff(canvas) <= 20,
+                "{label}: the glassed step stays subtle, {visible} against {canvas}"
+            );
+            if palette_is_dark(p.bg) {
+                assert!(
+                    visible > canvas,
+                    "{label}: the glassed bubble lifts off a dark canvas, {visible} against {canvas}"
+                );
+            } else {
+                assert!(
+                    visible < canvas,
+                    "{label}: the glassed bubble sinks into a light canvas, {visible} against {canvas}"
+                );
+            }
+        }
+
+        // Recolouring every role accent must not move the surface: the bubble
+        // is depth, not colour.
+        let recoloured = palette::Palette {
+            blue: 0x00ff00,
+            green: 0xff00ff,
+            amber: 0x123456,
+            ..dark
+        };
+        assert_eq!(
+            message_surface_for(&dark, "user"),
+            message_surface_for(&recoloured, "user"),
+            "the bubble does not read role colours"
+        );
+        assert_eq!(message_surface_for(&dark, "assistant"), dark.bg);
     }
 
     /// #2569: the bubble keeps its inner breathing room, readable user text,
