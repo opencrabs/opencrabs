@@ -10,6 +10,13 @@ description: >
   that just failed, so every failure-capable job in `ci.yml` ends with this
   step.
 
+  Call it with `if: "!success()"`, never `if: failure()`. A step killed by a
+  runner shutdown, a job timeout or an outer cancel reports `cancelled`, not
+  `failed`, so `failure()` evaluates false and the step skips itself: exactly
+  the case that burned 17 minutes of self-hosted runner on run 42090046034.
+  `!success()` covers failure, cancellation and timeout alike. Re-cancelling a
+  run that is already being cancelled is a no-op (409), so the overlap is safe.
+
   The step always exits 0. The job has already failed, so a refused or failed
   cancel must not mask that outcome or turn one failure into two.
 
