@@ -25,3 +25,36 @@ fn the_chat_pane_has_less_top_and_bottom_padding_than_24px_on_every_side() {
     assert!(pane.contains(".pb_4()"));
     assert!(!pane.contains(".p_6()"));
 }
+
+#[test]
+fn the_right_pane_uses_the_full_window_height() {
+    let start = GUI_MAIN
+        .find("let mut right = div()")
+        .expect("the right pane is built in render");
+    let pane = GUI_MAIN
+        .get(start..start + 900)
+        .expect("the right pane is in range");
+    assert!(
+        pane.contains(".h_full()"),
+        "a tall window must stretch the pane so the footer stays below the body"
+    );
+}
+
+#[test]
+fn onboarding_footer_hints_keep_their_horizontal_width() {
+    let start = GUI_MAIN
+        .find("let horizontal_hints =")
+        .expect("onboarding footer has a responsive layout");
+    let footer = GUI_MAIN
+        .get(start..start + 2200)
+        .expect("onboarding footer is in range");
+    assert!(footer.contains(".when(horizontal_hints, |d| d.flex_1())"));
+    assert!(footer.contains(".when(horizontal_hints, |d| d.flex_none())"));
+    assert_eq!(
+        footer
+            .matches(".when(!horizontal_hints, |d| d.w_full())")
+            .count(),
+        2,
+        "stacked hints use full rows instead of shrinking to one character"
+    );
+}

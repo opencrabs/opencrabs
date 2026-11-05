@@ -7058,6 +7058,8 @@ impl Render for Dashboard {
                     } else {
                         "enter \u{b7} continue \u{b7} esc \u{b7} back"
                     };
+                    let horizontal_hints =
+                        matches!(picker_layout.footer, model_layout::FooterLayout::Row);
                     let mut footer = div().flex().w_full().gap_2().min_w_0();
                     footer = match picker_layout.footer {
                         model_layout::FooterLayout::Row => {
@@ -7072,6 +7074,8 @@ impl Render for Dashboard {
                                 .text_color(rgb(shown.text_muted))
                                 .min_w_0()
                                 .whitespace_normal()
+                                .when(horizontal_hints, |d| d.flex_1())
+                                .when(!horizontal_hints, |d| d.w_full())
                                 .child(primary_hint),
                         )
                         .child(
@@ -7080,6 +7084,8 @@ impl Render for Dashboard {
                                 .text_color(rgb(shown.text_muted))
                                 .min_w_0()
                                 .whitespace_normal()
+                                .when(horizontal_hints, |d| d.flex_none())
+                                .when(!horizontal_hints, |d| d.w_full())
                                 .child("tab \u{b7} next field \u{b7} arrows \u{b7} walk"),
                         );
                     let footer = if let Some(model_footer) = model_footer {
@@ -7464,6 +7470,7 @@ impl Render for Dashboard {
             .flex()
             .flex_col()
             .flex_1()
+            .h_full()
             .min_w_0()
             .min_h_0()
             .gap_3()
