@@ -138,6 +138,17 @@ pub fn render(cx: &mut Context<Dashboard>, view: ModelPickerView<'_>) -> Rendere
                 selected,
             } => {
                 let pair = row.pair();
+                let marker = || {
+                    text(
+                        if row.current { "\u{25cf}" } else { " " },
+                        Size::Sm,
+                        if row.current {
+                            shown.amber
+                        } else {
+                            shown.text_muted
+                        },
+                    )
+                };
                 let mut entry = div()
                     .id(SharedString::from(format!("model-row-{index}")))
                     .flex()
@@ -146,20 +157,12 @@ pub fn render(cx: &mut Context<Dashboard>, view: ModelPickerView<'_>) -> Rendere
                     .min_w_0()
                     .px_3()
                     .py_2()
-                    .rounded(px(6.0))
-                    .child(text(
-                        if row.current { "\u{25cf}" } else { " " },
-                        Size::Sm,
-                        if row.current {
-                            shown.amber
-                        } else {
-                            shown.text_muted
-                        },
-                    ));
+                    .rounded(px(6.0));
                 entry = match view.row_layout {
                     ModelRowLayout::Columns => entry
                         .flex_row()
                         .items_center()
+                        .child(marker())
                         .child(
                             text(row.model.clone(), Size::Sm, shown.text)
                                 .flex_1()
@@ -172,27 +175,34 @@ pub fn render(cx: &mut Context<Dashboard>, view: ModelPickerView<'_>) -> Rendere
                                 .flex_none()
                                 .truncate(),
                         ),
-                    ModelRowLayout::Stacked => entry.flex_row().items_start().child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .w_full()
-                            .flex_1()
-                            .min_w_0()
-                            .child(
-                                text(row.model.clone(), Size::Sm, shown.text)
-                                    .w_full()
-                                    .min_w_0()
-                                    .truncate(),
-                            )
-                            .child(
+                    ModelRowLayout::Stacked => entry
+                        .flex_col()
+                        .items_start()
+                        .gap_1()
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap_2()
+                                .w_full()
+                                .min_w_0()
+                                .child(marker())
+                                .child(
+                                    text(row.model.clone(), Size::Sm, shown.text)
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate(),
+                                ),
+                        )
+                        .child(
+                            div().flex().flex_row().w_full().min_w_0().pl_5().child(
                                 text(row.provider_name.clone(), Size::Xs, shown.text_muted)
-                                    .w_full()
+                                    .flex_1()
                                     .min_w_0()
                                     .truncate(),
                             ),
-                    ),
+                        ),
                 };
                 if selected {
                     entry = entry.bg(rgb(shown.panel_hi));

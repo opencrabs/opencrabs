@@ -61,24 +61,29 @@ fn onboarding_footer_hints_keep_their_horizontal_width() {
 }
 
 #[test]
-fn stacked_model_rows_give_their_text_column_a_full_width() {
+fn stacked_model_rows_use_flexible_text_rows() {
     let start = MODEL_PICKER
         .find("ModelRowLayout::Stacked =>")
         .expect("the shared picker has a stacked row layout");
     let row = MODEL_PICKER
-        .get(start..start + 1_100)
+        .get(start..start + 1_800)
         .expect("the stacked row is in range");
-    let column = row
-        .split(".w_full()")
-        .next()
-        .expect("the stacked text column has a full-width constraint");
-    assert!(
-        column.contains(".flex_col()"),
-        "the width belongs to the stacked model and provider labels"
-    );
     assert_eq!(
-        row.matches(".w_full()").count(),
-        3,
-        "the column and both labels share a definite width instead of truncating to ellipses"
+        row.matches(".flex_row()").count(),
+        2,
+        "the model id and provider each get a horizontal text row"
     );
+    for label in ["text(row.model.clone()", "text(row.provider_name.clone()"] {
+        let start = row.find(label).expect("the stacked label is present");
+        let label = row
+            .get(start..start + 260)
+            .expect("the stacked label is in range");
+        assert!(label.contains(".flex_1()"));
+        assert!(label.contains(".min_w_0()"));
+        assert!(label.contains(".truncate()"));
+        assert!(
+            !label.contains(".w_full()"),
+            "flex rows size the text; percentage-width nested text collapses"
+        );
+    }
 }
