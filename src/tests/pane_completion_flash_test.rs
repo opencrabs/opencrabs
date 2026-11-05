@@ -56,7 +56,12 @@ fn find_in_buffer(buffer: &Buffer, needle: &str) -> Option<(u16, u16)> {
     for y in 0..buffer.area.height {
         let text = row_text(buffer, y);
         if let Some(byte) = text.find(needle) {
-            return Some((text[..byte].chars().count() as u16, y));
+            // Count the chars the match sits after rather than slicing at the
+            // byte offset: `str::find` returns a char boundary, but the
+            // byte-slice ratchet cannot know that, and a blessed exception in
+            // a test helper is noise in every review that touches this file.
+            let column = text.char_indices().take_while(|(i, _)| *i < byte).count() as u16;
+            return Some((column, y));
         }
     }
     None
