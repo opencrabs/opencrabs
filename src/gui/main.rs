@@ -163,6 +163,15 @@ struct SplitPane {
     title: String,
     transcript: TranscriptState,
     scroll: ScrollHandle,
+    /// The pane's own composer (#2530). What is typed here stays with the pane
+    /// it was typed into, so moving focus never carries a draft across.
+    editor: Entity<editor::Editor>,
+    /// The pane's own plan strip, read from its session's plan file and cached
+    /// by mtime like the window's.
+    plan: plan_strip::PlanStripState,
+    /// Which session the strip's path was resolved for, so the DB lookup runs
+    /// once per pane rather than once per frame.
+    plan_for: Option<Uuid>,
 }
 
 /// The ledger path, unchanged: `config.database.path`, with the same
@@ -1711,6 +1720,19 @@ impl Dashboard {
             .find(|s| s.id == id)
             .and_then(|s| s.title.clone())
             .unwrap_or_else(|| "(untitled)".to_string());
+        // The pane's composer is its own entity (#2530), so a draft belongs to
+        // the pane it was typed in and the send carries that pane's session.
+        let pane_editor = cx.new(editor::Editor::new);
+        cx.subscribe(&pane_editor, move |this, _editor, event, cx| match event {
+            editor::EditorEvent::Sent(text) => {
+                this.send_from_pane(id, text.clone(), cx);
+            }
+            editor::EditorEvent::Preview(path) => this.open_preview(path.clone(), cx),
+        })
+        .detach();
+        // The pane's plan lives wherever its session is bound, which is a DB
+        // read; the same lookup the window's strip uses, resolved once here.
+        agent_bridge::spawn_plan_path(self.db_path.clone(), id, self.sink.clone());
         self.pane_states.insert(
             id,
             SplitPane {
@@ -1720,6 +1742,9 @@ impl Dashboard {
                     ..Default::default()
                 },
                 scroll: ScrollHandle::new(),
+                editor: pane_editor,
+                plan: plan_strip::PlanStripState::default(),
+                plan_for: Some(id),
             },
         );
         // Paint the pane now, with its header, rather than waiting for the
@@ -3264,6 +3289,27 @@ impl Dashboard {
 
     /// Send typed text as an agent turn (or queue it behind the running
     /// one). Called from the editor's Sent subscription.
+    /// A message typed in a pane's own composer (#2530). The window runs one
+    /// turn at a time and that turn follows the open conversation, so the pane
+    /// hands its session to the window and sends there, the same repair the
+    /// terminal makes on a split send. The pane's session becomes the chat, so
+    /// the pane closes with it: one session never sits in two leaves (#2472).
+    /// Whether the window draws more than one pane (#2530). Window-level
+    /// chrome steps aside for the per-pane copies only then, so an unsplit
+    /// window keeps the layout it has always had.
+    fn window_is_split(&self) -> bool {
+        self.panes
+            .as_ref()
+            .is_some_and(|tree| tree.leaves().len() > 1)
+    }
+
+    fn send_from_pane(&mut self, session: Uuid, text: String, cx: &mut Context<Self>) {
+        if self.transcript.session != Some(session) {
+            self.open_session(session, cx);
+        }
+        self.send_message(text, cx);
+    }
+
     fn send_message(&mut self, text: String, cx: &mut Context<Self>) {
         let text = text.trim().to_string();
         if text.is_empty() {
@@ -3485,9 +3531,15 @@ impl Dashboard {
                 }
                 agent_bridge::TurnEvent::PlanPath { session, path } => {
                     // Stale lookups (user switched conversations while the
-                    // DB read ran) are dropped, not painted.
+                    // DB read ran) are dropped, not painted. A pane's own
+                    // lookup lands on that pane's strip (#2530).
                     if self.plan_for == Some(session) {
                         self.plan.set_path(path);
+                        cx.notify();
+                    } else if let Some(pane) = self.pane_states.get_mut(&session)
+                        && pane.plan_for == Some(session)
+                    {
+                        pane.plan.set_path(path);
                         cx.notify();
                     }
                 }
@@ -5419,14 +5471,86 @@ impl Dashboard {
         // string per leaf instead of touching the bridge or the plan file.
         let leaves = tree.leaves();
         let count = leaves.len();
-        let mut order: HashMap<Uuid, usize> = HashMap::new();
         let mut footers: HashMap<Uuid, SharedString> = HashMap::new();
         for (i, session) in leaves.iter().enumerate() {
-            order.insert(*session, i + 1);
             footers.insert(
                 *session,
                 SharedString::from(self.pane_footer_text(*session, i + 1, count)),
             );
+        }
+        // Per-pane chrome (#2530): every pane carries its own plan strip,
+        // queue and composer, exactly as the terminal's panes do. Built here
+        // because a leaf walk has no Context and the plan strips need a
+        // re-read. The themes preview draws the same tree without panes
+        // owning the keyboard, so it keeps the shared chrome off.
+        let mut chrome: HashMap<Uuid, AnyElement> = HashMap::new();
+        if interactive {
+            for session in &leaves {
+                let is_chat = Some(*session) == self.transcript.session;
+                let focused = if is_chat {
+                    self.pane_focus.is_none()
+                } else {
+                    self.pane_focus == Some(*session)
+                };
+                // Each pane's plan and queue, read from that pane's session.
+                let (plan_view, queued, editor) = if is_chat {
+                    self.plan.refresh();
+                    (
+                        self.plan.view(),
+                        self.queued_for_strip(),
+                        self.editor.clone(),
+                    )
+                } else {
+                    match self.pane_states.get_mut(session) {
+                        Some(pane) => {
+                            pane.plan.refresh();
+                            (
+                                pane.plan.view(),
+                                agent_bridge::queue_snapshot(*session),
+                                pane.editor.clone(),
+                            )
+                        }
+                        None => continue,
+                    }
+                };
+                let mut col = div().flex().flex_col().flex_none().gap_2();
+                if let Some(view) = plan_view {
+                    col = col.child(view);
+                }
+                if !queued.is_empty() {
+                    col = col.child(queue_strip(&queued));
+                }
+                if let Some(label) = self.running_tasks_label_for(*session) {
+                    col = col.child(task_strip(label));
+                }
+                // The pane holding the keyboard draws the real composer; the
+                // others show the draft they hold, dimmed and inert, which is
+                // the same "disabled while unfocused" language the rest of the
+                // split uses.
+                let composer: AnyElement = if focused {
+                    // The popups that hang over the input travel with it: a
+                    // split must not lose the slash list or the emoji panel
+                    // (#2530).
+                    let mut cell = div().flex().flex_col().flex_none().gap_2();
+                    if is_chat
+                        && self.topic_draft.is_none()
+                        && let Some((names, selected)) = self.editor.read(cx).command_popup()
+                    {
+                        cell = cell.child(command_popup_view(&names, selected));
+                    } else if is_chat
+                        && self.topic_draft.is_none()
+                        && let Some((items, selected)) = self.editor.read(cx).emoji_popup()
+                    {
+                        cell = cell.child(emoji_popup_view(&items, selected));
+                    }
+                    cell.child(editor).into_any_element()
+                } else {
+                    let draft = editor.read(cx).content.clone();
+                    pane_composer_dim(draft, *session, is_chat, cx.entity().downgrade())
+                };
+                col = col.child(composer);
+                chrome.insert(*session, col.into_any_element());
+            }
         }
         let mut ctx = PanesCtx {
             chat: Some(chat),
@@ -5439,7 +5563,7 @@ impl Dashboard {
             entity: cx.entity().downgrade(),
             interactive,
             footers: &footers,
-            order: &order,
+            chrome: &mut chrome,
         };
         let mut path = Vec::new();
         let tree = self.panes.as_ref().expect("checked a moment ago");
@@ -7685,31 +7809,37 @@ impl Render for Dashboard {
                 // hints go back UNDER the input where they were: the owner
                 // called the move above the plan card out.
                 let mut col = right;
-                if let Some(plan_view) = self.plan.view() {
-                    col = col.child(plan_view);
-                }
-                let waiting = self.queued_for_strip();
-                if !waiting.is_empty() {
-                    col = col.child(queue_strip(&waiting));
-                }
-                // A detached command sits directly above the editor: the same
-                // place the TUI puts it (on the input box's top border), which
-                // is where the eye goes while waiting.
-                if let Some(label) = self.running_tasks_label() {
-                    col = col.child(task_strip(label));
-                }
-                // The slash-command list sits over the input while a name is
-                // not being spelled, the terminal's own placement. The name
-                // prompt itself is the overlay below (#2398).
-                if self.topic_draft.is_none() {
-                    let popup = self.editor.read(cx).command_popup();
-                    if let Some((names, selected)) = popup {
-                        col = col.child(command_popup_view(&names, selected));
-                    } else if let Some((items, selected)) = self.editor.read(cx).emoji_popup() {
-                        col = col.child(emoji_popup_view(&items, selected));
+                // In a split every pane carries its own plan, queue and
+                // composer (#2530), so the window-level copies stand down:
+                // drawing both would give the chat two composers. An unsplit
+                // window keeps exactly the layout it has always had.
+                if !self.window_is_split() {
+                    if let Some(plan_view) = self.plan.view() {
+                        col = col.child(plan_view);
                     }
+                    let waiting = self.queued_for_strip();
+                    if !waiting.is_empty() {
+                        col = col.child(queue_strip(&waiting));
+                    }
+                    // A detached command sits directly above the editor: the same
+                    // place the TUI puts it (on the input box's top border), which
+                    // is where the eye goes while waiting.
+                    if let Some(label) = self.running_tasks_label() {
+                        col = col.child(task_strip(label));
+                    }
+                    // The slash-command list sits over the input while a name is
+                    // not being spelled, the terminal's own placement. The name
+                    // prompt itself is the overlay below (#2398).
+                    if self.topic_draft.is_none() {
+                        let popup = self.editor.read(cx).command_popup();
+                        if let Some((names, selected)) = popup {
+                            col = col.child(command_popup_view(&names, selected));
+                        } else if let Some((items, selected)) = self.editor.read(cx).emoji_popup() {
+                            col = col.child(emoji_popup_view(&items, selected));
+                        }
+                    }
+                    col = col.child(self.editor.clone());
                 }
-                col = col.child(self.editor.clone());
                 if let Some(strip) = topic_bottom {
                     col = col.child(strip);
                 }
@@ -10302,6 +10432,52 @@ fn pane_footer(id: SharedString, text: Option<SharedString>, focused: bool) -> A
         .into_any_element()
 }
 
+/// A pane's composer while another pane holds the keyboard (#2530): the draft
+/// it keeps, dimmed and inert. Clicking it hands the keyboard to that pane, so
+/// the next frame draws the real field in the same spot and the typed text
+/// never lands in a pane the user is not looking at.
+fn pane_composer_dim(
+    draft: String,
+    session: Uuid,
+    is_chat: bool,
+    entity: gpui::WeakEntity<Dashboard>,
+) -> AnyElement {
+    let empty = draft.trim().is_empty();
+    let shown: SharedString = if empty {
+        SharedString::from("Message OpenCrabs\u{2026}")
+    } else {
+        SharedString::from(draft.replace('\n', " "))
+    };
+    let color = if empty {
+        palette::current().text_muted
+    } else {
+        palette::current().text
+    };
+    div()
+        .id(SharedString::from(format!("pane-composer-{session}")))
+        .flex()
+        .flex_none()
+        .min_h(px(44.))
+        .p_3()
+        .rounded(px(CARD_RADIUS))
+        .bg(glass_fill(palette::current().panel))
+        .border_1()
+        .border_color(rgb(palette::current().panel_hi))
+        .opacity(0.55)
+        .cursor(CursorStyle::IBeam)
+        .text_size(px(14.))
+        .text_color(rgb(color))
+        .on_mouse_down(MouseButton::Left, move |_, _, cx: &mut App| {
+            let _ = entity.update(cx, |this, cx| {
+                this.pane_focus = if is_chat { None } else { Some(session) };
+                this.refocus_screen();
+                cx.notify();
+            });
+        })
+        .child(shown)
+        .into_any_element()
+}
+
 /// One pane's header: the session's name and the × that closes that pane
 /// (#2474). Every pane carries one, so a split reads as two sessions rather
 /// than a session beside a nameless strip, and the pane holding the caret
@@ -10465,9 +10641,12 @@ struct PanesCtx<'a> {
     /// One compact footer per pane session (#2593), precomputed before the
     /// walk so a draw pass never reads the bridge or the plan file.
     footers: &'a HashMap<Uuid, SharedString>,
-    /// Pane position in tree order, for the `[i/n]` prefix every pane footer
-    /// carries once the window holds more than one.
-    order: &'a HashMap<Uuid, usize>,
+    /// Each pane's own plan strip, queue and composer (#2530). A leaf has no
+    /// `Context`, so this is built up front in `panes_body`, where the plan
+    /// files can be re-read and an editor entity read, and the walk only has
+    /// to hand each leaf its own. The chat leaf gets the window's chrome, so
+    /// an unsplit window never draws its composer twice.
+    chrome: &'a mut HashMap<Uuid, AnyElement>,
 }
 
 /// Draw the pane tree (#2472). A leaf is one pane: its header, its ×, and the
@@ -10530,7 +10709,7 @@ fn pane_element(
             let close = move |_ev: &ClickEvent, _window: &mut Window, cx: &mut App| {
                 let _ = weak.update(cx, |this, cx| this.close_pane(close_session, cx));
             };
-            div()
+            let mut node = div()
                 .id(SharedString::from(format!("pane-{session}")))
                 .flex()
                 .flex_col()
@@ -10543,13 +10722,19 @@ fn pane_element(
                     focused,
                     close,
                 ))
-                .child(body)
-                .child(pane_footer(
-                    SharedString::from(format!("pane-footer-{session}")),
-                    ctx.footers.get(session).cloned(),
-                    focused,
-                ))
-                .into_any_element()
+                .child(body);
+            // The pane's own plan, queue and composer sit between its
+            // transcript and its footer, where the window-level ones sit in
+            // an unsplit window (#2530).
+            if let Some(chrome) = ctx.chrome.remove(session) {
+                node = node.child(chrome);
+            }
+            node.child(pane_footer(
+                SharedString::from(format!("pane-footer-{session}")),
+                ctx.footers.get(session).cloned(),
+                focused,
+            ))
+            .into_any_element()
         }
         PaneTree::Split {
             layout, children, ..

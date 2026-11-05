@@ -17,6 +17,18 @@ fn chat_arm() -> &'static str {
         .expect("the chat arm comes before the usage arm")
 }
 
+/// The chat arm that wraps the window-level plan, queue and composer (#2530):
+/// the copies that stand down once a split gives every pane its own.
+fn composer_arm() -> &'static str {
+    GUI_MAIN
+        .split("right = match self.screen {")
+        .nth(1)
+        .expect("the composer match is built in render")
+        .split("Screen::Usage => right.child(footer),")
+        .next()
+        .expect("the chat arm comes before the footer-only arms")
+}
+
 /// The key handler, from its opening to the next method on the window.
 fn on_key() -> &'static str {
     GUI_MAIN
@@ -48,6 +60,29 @@ fn tab_arm() -> &'static str {
         .split("self.cycle_pane_focus(cx);")
         .next()
         .expect("the branch cycles the panes")
+}
+
+/// The body that draws the chat screen's pane tree (#2530): where each pane's
+/// own plan, queue and composer are built before the walk paints them.
+fn panes_body() -> &'static str {
+    GUI_MAIN
+        .split("fn panes_body(")
+        .nth(1)
+        .expect("panes_body is defined")
+        .split("impl Render for Dashboard {")
+        .next()
+        .expect("the body closes before the window's render")
+}
+
+/// The dimmed composer an unfocused pane shows (#2530).
+fn pane_composer_dim() -> &'static str {
+    GUI_MAIN
+        .split("fn pane_composer_dim(")
+        .nth(1)
+        .expect("pane_composer_dim is defined")
+        .split("/// One pane's header")
+        .next()
+        .expect("the dim helper comes before the header")
 }
 
 /// Source with every run of whitespace folded to one space. A `rustfmt`
@@ -376,5 +411,104 @@ fn the_chord_is_read_through_one_place() {
     assert!(
         GUI_MAIN.contains("if let Some(layout) = split_chord(ks)"),
         "opening a split goes through that reader"
+    );
+}
+
+#[test]
+fn each_pane_owns_composer_plan_and_queue() {
+    let body = flat(panes_body());
+    assert!(
+        body.contains("chrome.insert(*session, col.into_any_element())"),
+        "each leaf gets a chrome column of its own"
+    );
+    assert!(
+        body.contains("agent_bridge::queue_snapshot(*session)"),
+        "the queue is read from that pane's session, not the window's"
+    );
+    assert!(
+        body.contains("pane.plan.refresh()"),
+        "each pane's plan strip is re-read for its own session"
+    );
+    assert!(
+        body.contains("pane_composer_dim(draft, *session, is_chat, cx.entity().downgrade())"),
+        "an unfocused pane shows the draft it holds, dimmed"
+    );
+}
+
+#[test]
+fn the_pane_holding_the_keyboard_draws_the_real_composer() {
+    let body = flat(panes_body());
+    let composer = body
+        .split("let composer: AnyElement = if focused {")
+        .nth(1)
+        .expect("the composer picks one pane to draw live");
+    let composer = composer
+        .split("col = col.child(composer);")
+        .next()
+        .expect("the composer is placed in the pane's column");
+    assert!(
+        composer.contains("cell.child(editor).into_any_element()"),
+        "the focused pane draws the live editor entity"
+    );
+    assert!(
+        composer.contains("pane_composer_dim(draft, *session, is_chat, cx.entity().downgrade())"),
+        "every other pane shows the draft it holds, dimmed"
+    );
+    let live_at = composer
+        .find("cell.child(editor)")
+        .expect("the live composer");
+    let dim_at = composer.find("pane_composer_dim(").expect("the dim copy");
+    assert!(
+        live_at < dim_at,
+        "focus chooses the live composer; the dim one is the fallback"
+    );
+}
+
+#[test]
+fn the_window_composer_stands_down_once_the_window_is_split() {
+    let arm = flat(composer_arm());
+    let gated = arm
+        .split("if !self.window_is_split() {")
+        .nth(1)
+        .expect("the window chrome is gated on the split");
+    let gated = gated
+        .split("if let Some(strip) = topic_bottom")
+        .next()
+        .expect("the gate closes before the topic strip");
+    assert!(
+        gated.contains("col = col.child(self.editor.clone())"),
+        "the window's composer sits inside the gate"
+    );
+    assert!(
+        gated.contains("if let Some(plan_view) = self.plan.view()"),
+        "so does the window's plan strip"
+    );
+}
+
+#[test]
+fn an_unfocused_composer_is_dimmed_and_hands_the_keyboard_back() {
+    let dim = flat(pane_composer_dim());
+    assert!(
+        dim.contains(".opacity(0.55)"),
+        "an unfocused composer is disabled, not hidden"
+    );
+    assert!(
+        dim.contains("this.pane_focus = if is_chat { None } else { Some(session) }"),
+        "clicking it moves the keyboard to that pane"
+    );
+}
+
+#[test]
+fn a_leaf_draws_its_chrome_above_its_own_footer() {
+    let walk = flat(pane_element());
+    let chrome_at = walk
+        .find("if let Some(chrome) = ctx.chrome.remove(session)")
+        .expect("the leaf takes its chrome");
+    let footer_at = walk
+        .find("node.child(pane_footer(")
+        .expect("the leaf draws its footer");
+    assert!(
+        chrome_at < footer_at,
+        "the composer and plan sit above the footer row"
     );
 }
