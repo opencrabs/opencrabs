@@ -8,7 +8,7 @@
 //! | `a2a:read` | `tasks/get`, `session/notify-status`                     |
 //! | `a2a:send` | `message/send`, `message/stream`, `tasks/cancel`, `session/notify` |
 //!
-//! Rules (t3code invariants, adapted):
+//! Rules:
 //! - Scopes only ever narrow: a pairing exchange picks a subset of
 //!   [`ALL_SCOPES`], never adds to what the code carried.
 //! - The config `[a2a].api_key` bearer implicitly holds every scope

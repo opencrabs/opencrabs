@@ -5,7 +5,7 @@
 //! Per route: kind, source (configured routes are never pruned by
 //! learning), latency EWMA, and a windowed failure count.
 //!
-//! Race discipline (t3code, adapted):
+//! Race discipline:
 //! - Probe, never POST: racing real mutations risks double-send. `race_best`
 //!   GETs `/a2a/health` on every route concurrently; the first healthy
 //!   response wins and the rest are aborted (aborted ≠ failed: no outcome
