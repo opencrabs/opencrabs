@@ -418,6 +418,7 @@ pub mod mimo_tool_call_hint_test;
 pub mod mission_control_command_test;
 pub mod mission_control_report_test;
 pub mod model_display_label_test;
+pub mod model_layout_test;
 pub mod model_match_test;
 pub mod model_menu_test;
 pub mod model_order_test;

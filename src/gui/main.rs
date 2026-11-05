@@ -58,6 +58,7 @@ use crate::screen_keys::{
 };
 use crate::theme::{BASE_REM, Size, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP, text};
 use opencrabs::ui_core::channel_status;
+use opencrabs::ui_core::model_layout;
 use opencrabs::ui_core::pane_tree::PaneTree;
 use opencrabs::ui_core::rail;
 use opencrabs::ui_core::split::{self, Layout};
@@ -5486,6 +5487,12 @@ impl Render for Dashboard {
             f32::from(window.viewport_size().width),
             self.rail_width * self.rem,
         );
+        let picker_layout = model_layout::model_layout(
+            pane_width,
+            self.rem,
+            BASE_REM,
+            self.screen == Screen::Onboard,
+        );
 
         let (middle, footer): (AnyElement, AnyElement) = match self.screen {
             Screen::Chat => {
@@ -5881,7 +5888,18 @@ impl Render for Dashboard {
                     // The rail is the flow the current mode walks, with the
                     // step the user stands on marked. Channel sub-steps are
                     // reached from Channels and are not stops.
-                    let mut rail = div().flex().flex_col().gap_1().w(px(190.0)).pr_5();
+                    let mut rail = div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .w(px(picker_layout.onboarding_rail_width))
+                        .flex_none()
+                        .min_w_0();
+                    if picker_layout.onboarding_rail_width > 0.0 {
+                        rail = rail.pr_5();
+                    } else {
+                        rail = rail.hidden();
+                    }
                     for (n, title, here) in ob.rail() {
                         rail = rail.child(
                             div()
@@ -5889,23 +5907,29 @@ impl Render for Dashboard {
                                 .flex_row()
                                 .items_center()
                                 .gap_2()
+                                .min_w_0()
                                 .child(text(
                                     format!("{n:>2}"),
                                     Size::Xs,
                                     if here { shown.amber } else { shown.text_faint },
                                 ))
-                                .child(text(
-                                    title,
-                                    Size::Sm,
-                                    if here {
-                                        shown.text_strong
-                                    } else {
-                                        shown.text_muted
-                                    },
-                                )),
+                                .child(
+                                    text(
+                                        title,
+                                        Size::Sm,
+                                        if here {
+                                            shown.text_strong
+                                        } else {
+                                            shown.text_muted
+                                        },
+                                    )
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate(),
+                                ),
                         );
                     }
-                    let mut column = div().flex().flex_col().gap_3().flex_1().min_h_0().w_full();
+                    let mut column = div().flex().flex_col().gap_3().flex_1().min_w_0().min_h_0();
                     column = column.child(
                         div()
                             .flex()
@@ -6980,33 +7004,39 @@ impl Render for Dashboard {
                         );
                     }
 
-                    let footer = div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .justify_between()
-                        .w_full()
-                        .child(div().text_xs().text_color(rgb(shown.text_muted)).child(
-                            if ob.is_channel_step() {
-                                // Space is the key that flips a channel here,
-                                // so the hint names it instead of "save".
-                                "space \u{b7} toggle \u{b7} enter \u{b7} continue \u{b7} esc \u{b7} back"
-                            } else if ob.step()
-                                == opencrabs::tui::onboarding::OnboardingStep::BrainSetup
-                            {
-                                // This step writes files before it moves, so
-                                // the hint says what Enter starts.
-                                "enter \u{b7} write my brain files \u{b7} esc \u{b7} back"
-                            } else if ob.wizard.quick_jump {
-                                "enter \u{b7} save \u{b7} esc \u{b7} close"
-                            } else {
-                                "enter \u{b7} continue \u{b7} esc \u{b7} back"
-                            },
-                        ))
+                    let primary_hint = if ob.is_channel_step() {
+                        // Space is the key that flips a channel here, so the
+                        // hint names it instead of "save".
+                        "space \u{b7} toggle \u{b7} enter \u{b7} continue \u{b7} esc \u{b7} back"
+                    } else if ob.step() == opencrabs::tui::onboarding::OnboardingStep::BrainSetup {
+                        "enter \u{b7} write my brain files \u{b7} esc \u{b7} back"
+                    } else if ob.wizard.quick_jump {
+                        "enter \u{b7} save \u{b7} esc \u{b7} close"
+                    } else {
+                        "enter \u{b7} continue \u{b7} esc \u{b7} back"
+                    };
+                    let mut footer = div().flex().w_full().gap_2().min_w_0();
+                    footer = match picker_layout.footer {
+                        model_layout::FooterLayout::Row => {
+                            footer.flex_row().items_center().justify_between()
+                        }
+                        model_layout::FooterLayout::Column => footer.flex_col().items_start(),
+                    };
+                    let footer = footer
                         .child(
                             div()
                                 .text_xs()
                                 .text_color(rgb(shown.text_muted))
+                                .min_w_0()
+                                .whitespace_normal()
+                                .child(primary_hint),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(shown.text_muted))
+                                .min_w_0()
+                                .whitespace_normal()
                                 .child("tab \u{b7} next field \u{b7} arrows \u{b7} walk"),
                         );
                     (
@@ -7014,12 +7044,14 @@ impl Render for Dashboard {
                             .flex()
                             .flex_row()
                             .flex_1()
+                            .min_w_0()
                             .min_h_0()
                             .child(rail)
                             .child(
                                 div()
                                     .id("onboard-body")
                                     .flex_1()
+                                    .min_w_0()
                                     .min_h_0()
                                     .overflow_y_scroll()
                                     .child(column),
@@ -7213,45 +7245,54 @@ impl Render for Dashboard {
                         self.models_query
                     )
                 };
+                let status = if self.models_fetching {
+                    format!(
+                        "fetching live models · {} provider{} remaining",
+                        self.models_pending.len(),
+                        if self.models_pending.len() == 1 {
+                            ""
+                        } else {
+                            "s"
+                        }
+                    )
+                } else {
+                    self.models_fetch_error.clone().unwrap_or_default()
+                };
+                // Status and key hints get their own full-width rows. Putting
+                // all three in one horizontal flex line was the overlap.
                 let footer = div()
                     .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
+                    .flex_col()
+                    .gap_1()
                     .w_full()
+                    .min_w_0()
                     .child(
                         div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(shown.text_muted))
-                                    .child(SharedString::from(counted)),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(if self.models_fetch_error.is_some() {
-                                        shown.amber
-                                    } else {
-                                        shown.text_muted
-                                    }))
-                                    .child(SharedString::from(if self.models_fetching {
-                                        format!(
-                                            "fetching live models · {} provider{} remaining",
-                                            self.models_pending.len(),
-                                            if self.models_pending.len() == 1 { "" } else { "s" }
-                                        )
-                                    } else {
-                                        self.models_fetch_error.clone().unwrap_or_default()
-                                    })),
-                            ),
+                            .text_xs()
+                            .text_color(rgb(shown.text_muted))
+                            .whitespace_normal()
+                            .child(SharedString::from(counted)),
                     )
-                    .child(div().text_xs().text_color(rgb(shown.text_muted)).child(
-                        "type \u{b7} filter or enter a custom id \u{b7} enter \u{b7} switch \u{b7} esc \u{b7} back",
-                    ));
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(if self.models_fetch_error.is_some() {
+                                shown.amber
+                            } else {
+                                shown.text_muted
+                            }))
+                            .min_w_0()
+                            .whitespace_normal()
+                            .child(SharedString::from(status)),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(shown.text_muted))
+                            .min_w_0()
+                            .whitespace_normal()
+                            .child("type \u{b7} filter or enter a custom id \u{b7} enter \u{b7} switch \u{b7} esc \u{b7} back"),
+                    );
                 (body.into_any_element(), footer.into_any_element())
             }
             Screen::Skills => {
