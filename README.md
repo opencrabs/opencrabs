@@ -719,6 +719,8 @@ Prefer windows and buttons over the TUI? [MonoCode](https://github.com/hardbeat9
 
 A launch opens the conversation you were last in, on both surfaces, because the GUI and the terminal read and write the same `last_session` pointer. A first run, or a pointer at a conversation that has since been deleted, falls back to the newest session on the rail.
 
+Opening the window claims the profile the way the terminal does: whichever surface is running owns it, GUI, TUI or daemon, one at a time. The window therefore serves the channels and runs the scheduled jobs, so Telegram, Discord, Slack, WhatsApp and Trello answer while only the window is open, a scheduled job fires on time, and a key rotation or an allowlist edit reaches the running bots without a restart. A background instance holding the profile is shut down on start, exactly as the terminal already preempts the daemon, and the transcript names the process it took over.
+
 #### Every command answers on the window
 
 The window runs the terminal's whole slash-command surface, not a subset. All 33 commands in the [Chat Mode](#chat-mode) table answer here, and two tests hold the line: `no_command_is_left_without_a_screen` walks every name the terminal offers and fails the build if one lands on "no screen for it", and `support_separates_missing_from_unknown` fails if a name is neither answered nor recognised. A command that owns a screen opens it full width, `esc` goes back to the chat. The rest answer in the transcript through the engine's own entry point, so a plan approved on the window is the same plan object the terminal approves, and `/cd` moves this session's directory through the same shared applier the terminal calls, never another session's.
