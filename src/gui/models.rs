@@ -81,6 +81,43 @@ pub fn filtered_rows(rows: &[Row], query: &str) -> Vec<Row> {
         .collect()
 }
 
+/// Provider rows the models screen keeps in view. The picker is the screen's
+/// main content, so this stays shorter than the wizard's 14-row window.
+pub const PROVIDERS_VISIBLE: usize = 8;
+
+/// One row of the models screen's provider list.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ProviderRow {
+    /// The provider id a click selects.
+    pub provider: String,
+    /// The display name, so the row never shows an opaque id alone.
+    pub name: String,
+    /// How many models this provider contributes to the list in view.
+    pub count: usize,
+    /// Index of the provider's first model in the slice this was built from.
+    /// Passed the filtered rows, a click lands on the first visible model.
+    pub first: usize,
+}
+
+/// Group rows into the provider list, in catalogue order. Rows arrive grouped
+/// by provider, so one pass is enough, and `first` is resolved against the
+/// slice it was given rather than the unfiltered catalogue.
+pub fn providers(rows: &[Row]) -> Vec<ProviderRow> {
+    let mut out: Vec<ProviderRow> = Vec::new();
+    for (index, row) in rows.iter().enumerate() {
+        match out.last_mut() {
+            Some(last) if last.provider == row.provider => last.count += 1,
+            _ => out.push(ProviderRow {
+                provider: row.provider.clone(),
+                name: row.provider_name.clone(),
+                count: 1,
+                first: index,
+            }),
+        }
+    }
+    out
+}
+
 /// Build the grouped, windowed panel the GUI renders. The window arithmetic is
 /// the terminal picker's own, including its selection centring and end clamp.
 pub fn panel(rows: &[Row], query: &str, selected: usize, max_models: usize) -> Panel {
@@ -369,6 +406,39 @@ mod tests {
         ));
         let first = panel(&rows, "", 0, 3);
         assert_eq!((first.above, first.below), (0, 5));
+    }
+
+    #[test]
+    fn provider_list_groups_rows_and_points_at_each_first_model() {
+        let rows = vec![
+            row("one", "Provider One", "alpha"),
+            row("one", "Provider One", "beta"),
+            row("two", "Provider Two", "gamma"),
+        ];
+        assert_eq!(
+            providers(&rows),
+            vec![
+                ProviderRow {
+                    provider: "one".into(),
+                    name: "Provider One".into(),
+                    count: 2,
+                    first: 0,
+                },
+                ProviderRow {
+                    provider: "two".into(),
+                    name: "Provider Two".into(),
+                    count: 1,
+                    first: 2,
+                },
+            ]
+        );
+        // A filter rebuilds the counts and the jump targets from the rows that
+        // are actually painted, so a click can never land on a hidden row.
+        let filtered = filtered_rows(&rows, "gam");
+        let narrowed = providers(&filtered);
+        assert_eq!(narrowed.len(), 1);
+        assert_eq!((narrowed[0].count, narrowed[0].first), (1, 0));
+        assert!(providers(&[]).is_empty());
     }
 
     #[test]
