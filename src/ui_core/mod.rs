@@ -5,6 +5,7 @@
 //! ratatui, crossterm, or any other terminal-specific crate, so a GUI
 //! binary can link it as-is.
 
+pub mod actions;
 pub mod bang;
 // `card` is the shared card shape and reads `gpui` types, so it only
 // compiles with the feature that provides them (#2510). Every consumer is
@@ -34,8 +35,9 @@ mod purity_tests {
     //! break that silently at compile time for the GUI, never for us.
 
     /// Every source file in `ui_core`, with its contents.
-    fn sources() -> [(&'static str, &'static str); 28] {
+    fn sources() -> [(&'static str, &'static str); 29] {
         [
+            ("ui_core/actions.rs", include_str!("actions.rs")),
             ("ui_core/bang.rs", include_str!("bang.rs")),
             ("ui_core/card.rs", include_str!("card.rs")),
             (

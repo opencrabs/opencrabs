@@ -948,6 +948,66 @@ pub struct App {
     pub(crate) prompt_analyzer: PromptAnalyzer,
 }
 
+/// Resolve Seeker's sidebar actions without touching unrelated screens.
+fn sidebar_action_mode(current: AppMode, open: bool) -> AppMode {
+    if open {
+        AppMode::Sessions
+    } else if current == AppMode::Sessions {
+        AppMode::Chat
+    } else {
+        current
+    }
+}
+
+#[cfg(test)]
+mod sidebar_action_tests {
+    use super::*;
+
+    #[test]
+    fn sidebar_actions_tui_open_is_idempotent_from_every_mode() {
+        for current in [
+            AppMode::Chat,
+            AppMode::Sessions,
+            AppMode::Help,
+            AppMode::Settings,
+        ] {
+            let once = sidebar_action_mode(current, true);
+            assert_eq!(once, AppMode::Sessions);
+            assert_eq!(sidebar_action_mode(once, true), once);
+        }
+    }
+
+    #[test]
+    fn sidebar_actions_tui_close_only_leaves_sessions() {
+        for current in [
+            AppMode::Chat,
+            AppMode::Sessions,
+            AppMode::Help,
+            AppMode::Settings,
+        ] {
+            let once = sidebar_action_mode(current, false);
+            let expected = if current == AppMode::Sessions {
+                AppMode::Chat
+            } else {
+                current
+            };
+            assert_eq!(once, expected);
+            assert_eq!(sidebar_action_mode(once, false), once);
+        }
+
+        let source = include_str!("state.rs");
+        let dispatch = source
+            .rsplit("async fn apply_palette_action")
+            .next()
+            .and_then(|tail| tail.split("/// Handle keyboard input").next())
+            .expect("palette dispatch");
+        assert!(dispatch.contains("PaletteAction::OpenSidebar => self.apply_sidebar_action(true)"));
+        assert!(
+            dispatch.contains("PaletteAction::CloseSidebar => self.apply_sidebar_action(false)")
+        );
+    }
+}
+
 impl App {
     /// Create a new app instance
     pub fn new(
@@ -3496,6 +3556,7 @@ impl App {
     /// it can open, the saved skills and the conversation ledger. Built from
     /// what the terminal already holds, so opening the card never fetches.
     fn palette_items(&self) -> Vec<crate::ui_core::palette::PaletteItem> {
+        use crate::ui_core::actions;
         use crate::ui_core::palette::{self, PaletteAction, PaletteItem, PaletteKind};
         let mut items: Vec<PaletteItem> = crate::ui_core::commands::SLASH_COMMANDS
             .iter()
@@ -3519,11 +3580,8 @@ impl App {
         // The channel setup rows: the word that names a channel has to find the
         // row that starts its setup, not only the page that describes it (#2462).
         items.extend(palette::channel_items());
-        // The create-topic row: one shared definition, the same words on the
-        // window and here (#2482).
-        items.push(palette::new_topic_item());
-        // The favorite row: same picker, the pick pins the conversation (#2487).
-        items.push(palette::favorite_item());
+        // Standalone actions share one catalog; execution stays in this app.
+        items.extend(actions::items());
         for skill in &self.skills {
             items.push(
                 PaletteItem::new(
@@ -3582,6 +3640,14 @@ impl App {
         Ok(())
     }
 
+    async fn apply_sidebar_action(&mut self, open: bool) -> Result<()> {
+        let target = sidebar_action_mode(self.mode, open);
+        if target != self.mode {
+            self.switch_mode(target).await?;
+        }
+        Ok(())
+    }
+
     /// Run what the picked row names. Commands go through the same dispatcher
     /// the composer uses, so a pick and a typed command land in one place.
     async fn apply_palette_action(
@@ -3605,6 +3671,8 @@ impl App {
                     self.open_session_files_view().await?;
                 }
             },
+            PaletteAction::OpenSidebar => self.apply_sidebar_action(true).await?,
+            PaletteAction::CloseSidebar => self.apply_sidebar_action(false).await?,
             PaletteAction::OpenSession(id) => {
                 self.load_session(Uuid::from_u128(id)).await?;
                 self.mode = AppMode::Chat;

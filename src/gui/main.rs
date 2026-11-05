@@ -57,6 +57,7 @@ use crate::screen_keys::{
     keyboard_owner, screen_chord,
 };
 use crate::theme::{BASE_REM, Size, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP, text};
+use opencrabs::ui_core::actions;
 use opencrabs::ui_core::channel_status;
 use opencrabs::ui_core::pane_tree::PaneTree;
 use opencrabs::ui_core::rail;
@@ -754,6 +755,66 @@ fn remember_preview(history: &mut Vec<String>, name: &str) {
     }
 }
 
+/// Apply sidebar visibility without letting a closed rail retain keyboard
+/// focus or a hidden filter. Width belongs to the window layout and is not
+/// part of this transition.
+fn set_rail_open_state(
+    open: bool,
+    rail_open: &mut bool,
+    rail_focused: &mut bool,
+    sessions: &mut sessions::SessionsState,
+) {
+    *rail_open = open;
+    if !open {
+        *rail_focused = false;
+        sessions.filter.clear();
+        sessions.filter_active = false;
+    }
+}
+
+#[cfg(test)]
+mod sidebar_action_tests {
+    use super::*;
+
+    #[test]
+    fn sidebar_actions_gui_open_and_close_are_idempotent() {
+        for initially_open in [false, true] {
+            let mut open = initially_open;
+            let mut focused = initially_open;
+            let mut sessions = sessions::SessionsState {
+                filter: String::from("needle"),
+                filter_active: initially_open,
+                ..Default::default()
+            };
+
+            set_rail_open_state(true, &mut open, &mut focused, &mut sessions);
+            set_rail_open_state(true, &mut open, &mut focused, &mut sessions);
+            assert!(open);
+            assert_eq!(focused, initially_open);
+            assert_eq!(sessions.filter_active, initially_open);
+
+            set_rail_open_state(false, &mut open, &mut focused, &mut sessions);
+            set_rail_open_state(false, &mut open, &mut focused, &mut sessions);
+            assert!(!open);
+            assert!(!focused);
+            assert!(sessions.filter.is_empty());
+            assert!(!sessions.filter_active);
+        }
+    }
+
+    #[test]
+    fn sidebar_actions_existing_toggle_uses_the_same_transition() {
+        let source = include_str!("main.rs");
+        let body = source
+            .rsplit("fn toggle_rail")
+            .next()
+            .and_then(|tail| tail.split("fn stop_turn").next())
+            .expect("toggle body");
+        assert!(body.contains("self.set_rail_open(open, cx)"));
+        assert!(!body.contains("self.rail_open = !self.rail_open"));
+    }
+}
+
 impl Dashboard {
     /// Re-read the channel chip now (#2452): after a Start click succeeds,
     /// the daemon appears within a second or two, so poll instead of
@@ -1101,11 +1162,8 @@ impl Dashboard {
         // The channel setup rows: the word that names a channel has to find the
         // row that starts its setup, not only the page that describes it (#2462).
         items.extend(find::channel_items());
-        // The create-topic row: one shared definition, the same words here
-        // and on the terminal (#2482).
-        items.push(find::new_topic_item());
-        // The favorite row: same picker, the pick pins the conversation (#2487).
-        items.push(find::favorite_item());
+        // Standalone actions share one catalog; execution stays in this window.
+        items.extend(actions::items());
         for skill in opencrabs::brain::skills::load_all_skills() {
             items.push(
                 PaletteItem::new(
@@ -1306,6 +1364,8 @@ impl Dashboard {
             PaletteAction::RunSlash(name) => self.send_message(name.to_string(), cx),
             PaletteAction::OpenSession(id) => self.open_session(Uuid::from_u128(id), cx),
             PaletteAction::OpenSurface(surface) => self.open_surface(surface, cx),
+            PaletteAction::OpenSidebar => self.set_rail_open(true, cx),
+            PaletteAction::CloseSidebar => self.set_rail_open(false, cx),
             PaletteAction::SwitchModel { provider, model } => {
                 self.send_message(format!("/models {provider}/{model}"), cx)
             }
@@ -1870,10 +1930,20 @@ impl Dashboard {
     }
 
     fn toggle_rail(&mut self, cx: &mut Context<Self>) {
-        if self.rail_open {
-            self.close_rail_filter(cx);
+        let open = !self.rail_open;
+        self.set_rail_open(open, cx);
+    }
+
+    fn set_rail_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        set_rail_open_state(
+            open,
+            &mut self.rail_open,
+            &mut self.rail_focused,
+            &mut self.sessions,
+        );
+        if !open {
+            self.refocus_screen();
         }
-        self.rail_open = !self.rail_open;
         cx.notify();
     }
 

@@ -102,6 +102,8 @@ pub enum PaletteKind {
     Command,
     /// A screen or panel the frontend can show.
     Surface,
+    /// A direct interface action, such as opening or closing the sidebar.
+    Action,
     /// A conversation from the rail.
     Session,
     /// A provider model from the catalogue.
@@ -132,6 +134,7 @@ impl PaletteKind {
         match self {
             PaletteKind::Command => "command",
             PaletteKind::Surface => "surface",
+            PaletteKind::Action => "action",
             PaletteKind::Session => "session",
             PaletteKind::Model => "model",
             PaletteKind::Skill => "skill",
@@ -163,8 +166,7 @@ impl PaletteKind {
             // dead last keeps it out of the way should that ever change.
             PaletteKind::Ask => 7,
             // An action, so it sits with the destinations, above chats.
-            PaletteKind::NewTopic => 1,
-            PaletteKind::Favorite => 1,
+            PaletteKind::Action | PaletteKind::NewTopic | PaletteKind::Favorite => 1,
         }
     }
 
@@ -177,7 +179,7 @@ impl PaletteKind {
         match self {
             PaletteKind::Surface => 0,
             // Actions sit with the destinations, under the screens.
-            PaletteKind::NewTopic | PaletteKind::Favorite => 1,
+            PaletteKind::Action | PaletteKind::NewTopic | PaletteKind::Favorite => 1,
             PaletteKind::Command | PaletteKind::UserCommand | PaletteKind::Channel => 2,
             PaletteKind::Docs => 3,
             PaletteKind::Session => 4,
@@ -440,36 +442,15 @@ pub fn channel_hint(query: &str, configured: &[Channel]) -> Option<&'static str>
     Some(channel.setup_hint())
 }
 
-/// The create-topic row both frontends list. One definition, so the window
-/// and the terminal offer the same words and land in the same picker (#2482).
-pub fn new_topic_item() -> PaletteItem {
-    PaletteItem::new(
-        "create topic",
-        "pick a conversation, name the topic, done",
-        PaletteKind::NewTopic,
-        PaletteAction::NewTopic,
-    )
-    .with_keywords("create topic new topic make topic start a topic")
-}
-
-/// The favorite row both frontends list: same picker as create topic, but
-/// the pick pins the conversation to the top of the rail (#2487). One
-/// definition, so the window and the terminal offer the same words.
-pub fn favorite_item() -> PaletteItem {
-    PaletteItem::new(
-        "favorite any session",
-        "pick a conversation, pin it to the top",
-        PaletteKind::Favorite,
-        PaletteAction::Favorite,
-    )
-    .with_keywords("favorite favourite pin star session bookmark top")
-}
-
 /// What picking a row does. The frontend applies it; this module only names it.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum PaletteAction {
     RunSlash(&'static str),
     OpenSurface(Surface),
+    /// Show the sidebar. Repeating the action leaves it open.
+    OpenSidebar,
+    /// Hide the sidebar without changing unrelated frontend state.
+    CloseSidebar,
     /// A session id, held as `u128` so this module needs no uuid dependency.
     /// The frontend converts it back with `Uuid::from_u128`.
     OpenSession(u128),
@@ -1354,6 +1335,13 @@ mod tests {
         PaletteItem::new(title, "", kind, PaletteAction::OpenSurface(Surface::Help))
     }
 
+    fn action(action: PaletteAction) -> PaletteItem {
+        crate::ui_core::actions::items()
+            .into_iter()
+            .find(|item| item.action == action)
+            .expect("shared action")
+    }
+
     /// The whole point of the keyword table: the user types the word for the
     /// job, not the name of the command (#2458).
     #[test]
@@ -1745,7 +1733,7 @@ mod tests {
     /// The favorite row answers to the words a user types (#2487).
     #[test]
     fn seeker_favorite_row_answers_to_the_words() {
-        let row = favorite_item();
+        let row = action(PaletteAction::Favorite);
         assert_eq!(row.kind, PaletteKind::Favorite);
         assert_eq!(row.action, PaletteAction::Favorite);
         let mut state = PaletteState::new(vec![
@@ -1788,7 +1776,7 @@ mod tests {
     /// else naming a session (#2482).
     #[test]
     fn seeker_create_topic_row_answers_to_the_words() {
-        let row = new_topic_item();
+        let row = action(PaletteAction::NewTopic);
         assert_eq!(row.kind, PaletteKind::NewTopic);
         assert_eq!(row.action, PaletteAction::NewTopic);
         let mut state = PaletteState::new(vec![
