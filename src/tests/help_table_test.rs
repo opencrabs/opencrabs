@@ -80,6 +80,25 @@ async fn every_shared_row_reaches_the_tui_help_dialog() {
 }
 
 #[tokio::test]
+async fn help_seeker_first_viewport() {
+    let mut app = help_app().await;
+    let text = screen_text(&mut app, 120, 30);
+    let seeker = help_keys::rows()
+        .find(|row| row.neutral == "alt+space")
+        .expect("the shared help table must retain the Seeker row");
+
+    assert_eq!(help_keys::rows().next(), Some(seeker));
+    assert!(
+        text.contains("Alt+Space"),
+        "the 120x30 initial help viewport does not print Alt+Space"
+    );
+    assert!(
+        text.contains(seeker.description),
+        "the 120x30 initial help viewport does not print the Seeker description"
+    );
+}
+
+#[tokio::test]
 async fn the_dialog_prints_each_section_title_once() {
     let mut app = help_app().await;
     let text = screen_text(&mut app, 120, 100);

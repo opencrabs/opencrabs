@@ -137,6 +137,17 @@ const fn window_row(
 /// `ctrl+s` on both; `ctrl+l` stays a hidden alias in the terminal.
 pub const ROWS: &[HelpRow] = &[
     // ── GLOBAL ──
+    // The card opens from anywhere, so it belongs at the top of the help
+    // rather than under the session list, where the last block ran off the
+    // bottom of the screen (#2463). The chord is alt+space: alt arrives as
+    // the ESC prefix, so every platform sends it cleanly (#2491).
+    row(
+        HelpSection::Global,
+        "alt+space",
+        "Alt+Space",
+        Some("alt-space"),
+        "Seeker: find/docs/topic/pin/ask",
+    ),
     row(
         HelpSection::Global,
         "ctrl+c",
@@ -199,17 +210,6 @@ pub const ROWS: &[HelpRow] = &[
         "/usage",
         Some("ctrl-shift-u"),
         "tokens, cost and context",
-    ),
-    // The card opens from anywhere, so it belongs at the top of the help
-    // rather than under the session list, where the last block ran off the
-    // bottom of the screen (#2463). The chord is alt+space: alt arrives as
-    // the ESC prefix, so every platform sends it cleanly (#2491).
-    row(
-        HelpSection::Global,
-        "alt+space",
-        "Alt+Space",
-        Some("alt-space"),
-        "Seeker: find/docs/topic/pin/ask",
     ),
     // The window's rem zoom (#2425). The terminal has no rem to scale: font
     // size there belongs to the emulator, so these rows are window-only.
