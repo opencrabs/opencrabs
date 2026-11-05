@@ -4,7 +4,8 @@
 //! (`src/a2a/routes_http.rs`) and, in Phase 2b, the client route store.
 //! Two layers, deliberately split:
 //!
-//! - [`collect_interfaces`]: thin `getifaddrs(3)` FFI — the only unsafe here.
+//! - [`collect_interfaces`]: thin `getifaddrs(3)` FFI — the only unsafe here
+//!   (unix only; Windows ships a stub returning an empty table).
 //! - [`select_advertised_routes`]: pure selection over an interface table —
 //!   RFC1918 on physical NICs → `lan`, CGNAT on a tailscale utun → `tailnet`,
 //!   a live quick-tunnel URL → `tunnel`. Pure means fake-table tests, no
@@ -48,9 +49,14 @@ pub struct AnnouncedRoute {
     pub kind: RouteKind,
 }
 
-/// Enumerate up+running, non-loopback IPv4 interfaces via `getifaddrs(3)`.
+/// Enumerate up+running, non-loopback IPv4 interfaces.
+///
+/// Unix: thin `getifaddrs(3)` FFI — the only unsafe in this module.
+/// Windows: separate stub below; no FFI on that platform.
+///
 /// Returns an empty vec on FFI failure (logged) — announcement is
 /// best-effort and must never take the gateway down.
+#[cfg(unix)]
 pub fn collect_interfaces() -> Vec<Iface> {
     let mut out: Vec<Iface> = Vec::new();
     unsafe {
@@ -81,6 +87,15 @@ pub fn collect_interfaces() -> Vec<Iface> {
         libc::freeifaddrs(head);
     }
     out
+}
+
+/// Windows: no native interface enumeration yet (`GetAdaptersAddresses`
+/// is the eventual path — tracked in #2537). LAN discovery is best-effort,
+/// so an empty table is correct behavior, not an error: announcement still
+/// works over tailnet and tunnel routes.
+#[cfg(windows)]
+pub fn collect_interfaces() -> Vec<Iface> {
+    Vec::new()
 }
 
 fn is_rfc1918(ip: &Ipv4Addr) -> bool {
