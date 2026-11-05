@@ -431,7 +431,8 @@ pub(super) fn overlay(
 
     // The field: Spotlight's floating pill, fatter than his, with the
     // invitation wrapping to two grey lines. No icon in the bar; the caret
-    // blinks while the pill owns the keyboard (#2491, #2495).
+    // blinks while the pill owns the keyboard, and stops once typing does
+    // (#2491, #2495, #2531).
     let pill = div()
         .flex()
         .flex_row()
@@ -756,6 +757,25 @@ mod tests {
         assert!(
             !pill_src.contains("gap_3"),
             "the pill row itself carries no gap either"
+        );
+    }
+
+    /// The blink has an idle cutoff. A caret that never stops reads as a
+    /// stuck cell, not a field (#2531).
+    #[test]
+    fn seeker_caret_stops_blinking_once_typing_stops() {
+        let src = include_str!("main.rs");
+        assert!(
+            src.contains("const CARET_IDLE_AFTER"),
+            "the idle window is a named constant"
+        );
+        assert!(
+            src.contains("caret_blinks("),
+            "the blink loop asks the shared rule whether the field is still live"
+        );
+        assert!(
+            src.contains("fn finder_activity_reset"),
+            "a key restarts the window"
         );
     }
 

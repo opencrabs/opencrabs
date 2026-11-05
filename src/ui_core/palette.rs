@@ -14,6 +14,20 @@
 use std::time::{Duration, Instant};
 use unicode_segmentation::UnicodeSegmentation;
 
+/// How long the field's caret keeps blinking after the last keystroke. Past
+/// this the field goes quiet and the caret hides, the way Spotlight's does
+/// once typing stops; the next key brings it back (#2531).
+pub const CARET_IDLE_AFTER: Duration = Duration::from_millis(1600);
+
+/// Whether the caret is live at `now`, given the last key at `last`.
+///
+/// The rule lives here, shared, so the terminal and the window cannot pick
+/// different idle windows and so the behaviour has a test that runs without
+/// a UI (#2531).
+pub fn caret_blinks(last: Instant, now: Instant, idle_after: Duration) -> bool {
+    now.saturating_duration_since(last) < idle_after
+}
+
 /// Byte offset where the word before `offset` begins. The walk skips
 /// separators and then the word, matching the terminal and GUI composers.
 /// Grapheme boundaries keep the walk from splitting a multibyte character.
@@ -2143,6 +2157,44 @@ mod tests {
         assert_eq!(Channel::named_in("telegraph"), None);
         assert_eq!(Channel::named_in("telegram"), Some(Channel::Telegram));
         assert_eq!(Channel::named_in("WHATSAPP"), Some(Channel::WhatsApp));
+    }
+
+    /// The caret blinks while typing and hides once the field is idle, which
+    /// is the Spotlight behaviour the owner asked for (#2531).
+    #[test]
+    fn seeker_caret_blinks_then_hides_when_typing_stops() {
+        let start = Instant::now();
+        assert!(
+            caret_blinks(start, start, CARET_IDLE_AFTER),
+            "a fresh key shows it"
+        );
+        assert!(caret_blinks(
+            start,
+            start + CARET_IDLE_AFTER / 2,
+            CARET_IDLE_AFTER
+        ));
+        assert!(
+            !caret_blinks(start, start + CARET_IDLE_AFTER, CARET_IDLE_AFTER),
+            "at the window's edge the field is idle and the caret is gone"
+        );
+        assert!(!caret_blinks(
+            start,
+            start + CARET_IDLE_AFTER * 10,
+            CARET_IDLE_AFTER
+        ));
+    }
+
+    /// A clock that reads earlier than the last key must not panic and must
+    /// not resurrect the caret: `saturating_duration_since` yields zero, so
+    /// the field counts as freshly typed and the caret shows.
+    #[test]
+    fn seeker_caret_survives_a_backwards_clock() {
+        let now = Instant::now();
+        assert!(caret_blinks(
+            now,
+            now - Duration::from_millis(5),
+            CARET_IDLE_AFTER
+        ));
     }
 
     fn caret_inserts_at_the_caret(state: &mut PaletteState) {

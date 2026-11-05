@@ -322,6 +322,12 @@ const RAIL_DEFAULT_REM: f32 = 17.0;
 const RAIL_MIN_REM: f32 = 11.0;
 const RAIL_MAX_REM: f32 = 32.0;
 
+/// How long the Seeker caret keeps blinking after the last keystroke. Past
+/// this the field goes quiet and the caret hides, the way Spotlight's does
+/// once typing stops; the next key brings it back (#2531). The window and the
+/// terminal share one rule, so this aliases the engine's constant.
+const CARET_IDLE_AFTER: std::time::Duration = opencrabs::ui_core::palette::CARET_IDLE_AFTER;
+
 /// The side panel beside a previewing screen (`themes-sidebar`), plus the
 /// `gap_3` between it and the transcript. The transcript is planned against
 /// what is left, so its tiles never run under the panel.
@@ -461,6 +467,10 @@ struct Dashboard {
     /// drawn div, not an input widget, so nothing blinks for it unless a
     /// timer says so (#2491).
     finder_caret: bool,
+    /// When the Seeker field last took a key. The caret blinks for
+    /// [`CARET_IDLE_AFTER`] after that instant and then holds off, the way
+    /// Spotlight drops its caret when typing stops (#2531).
+    finder_activity: std::time::Instant,
     /// Latest shaped text and bounds for Seeker mouse hit testing (#2534).
     finder_paint: Entity<command_palette::FinderPaint>,
     /// A left-button drag is extending the field's selection.
@@ -991,6 +1001,8 @@ impl Dashboard {
         self.finder_selecting = false;
         self.finder_activity_reset();
         // The caret blinks on a timer, and the loop dies with the card (#2491).
+        // It only toggles while the field is fresh; past CARET_IDLE_AFTER the
+        // caret stays off until the next key restarts it (#2531).
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
@@ -1001,7 +1013,14 @@ impl Dashboard {
                         if view.finder.is_none() {
                             return false;
                         }
-                        view.finder_caret = !view.finder_caret;
+                        if opencrabs::ui_core::palette::caret_blinks(
+                            view.finder_activity,
+                            std::time::Instant::now(),
+                            CARET_IDLE_AFTER,
+                        ) {
+                            view.finder_caret = !view.finder_caret;
+                        } else {
+                            view.finder_caret = false;
                         }
                         cx.notify();
                         true
@@ -1018,8 +1037,11 @@ impl Dashboard {
         cx.notify();
     }
 
-    /// Seeker input keeps the caret visible while the field is being edited.
+    /// A key reached the Seeker field: the caret comes back on and its idle
+    /// clock restarts, so a paused field hides it and typing re-arms it
+    /// (#2531).
     fn finder_activity_reset(&mut self) {
+        self.finder_activity = std::time::Instant::now();
         self.finder_caret = true;
     }
 
@@ -1095,7 +1117,8 @@ impl Dashboard {
     /// the arrows move the armed row and Enter runs it. Nothing falls through
     /// to the composer, which is the whole point of the card (#2458).
     fn finder_key(&mut self, ks: &gpui::Keystroke, cx: &mut Context<Self>) {
-        // Any key is activity: keep the caret visible while editing.
+        // Any key is activity: the caret comes back and its idle clock
+        // restarts before the key does its work (#2531).
         self.finder_activity_reset();
         if let Some(edit) = find::editing_chord(
             &ks.key,
@@ -7655,6 +7678,7 @@ fn main() {
                         finder: None,
                         finder_channels: Vec::new(),
                         finder_caret: true,
+                        finder_activity: std::time::Instant::now(),
                         finder_paint: cx.new(|_| command_palette::FinderPaint::default()),
                         finder_selecting: false,
                         chip_channel_names: chip_names,
