@@ -3557,6 +3557,7 @@ impl App {
     /// what the terminal already holds, so opening the card never fetches.
     fn palette_items(&self) -> Vec<crate::ui_core::palette::PaletteItem> {
         use crate::ui_core::actions;
+        use crate::ui_core::help_keys::{self, HelpClient};
         use crate::ui_core::palette::{self, PaletteAction, PaletteItem, PaletteKind};
         let mut items: Vec<PaletteItem> = crate::ui_core::commands::SLASH_COMMANDS
             .iter()
@@ -3574,6 +3575,7 @@ impl App {
             })
             .collect();
         items.extend(palette::surface_items());
+        items.extend(help_keys::seeker_items(HelpClient::Tui));
         // The docs pages: a query that is not a command or a conversation is
         // usually a question the documentation answers (#2461).
         items.extend(crate::ui_core::docs::items());

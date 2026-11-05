@@ -104,6 +104,8 @@ pub enum PaletteKind {
     Surface,
     /// A direct interface action, such as opening or closing the sidebar.
     Action,
+    /// A client-specific chord from the shared help table.
+    Help,
     /// A conversation from the rail.
     Session,
     /// A provider model from the catalogue.
@@ -135,6 +137,7 @@ impl PaletteKind {
             PaletteKind::Command => "command",
             PaletteKind::Surface => "surface",
             PaletteKind::Action => "action",
+            PaletteKind::Help => "help",
             PaletteKind::Session => "session",
             PaletteKind::Model => "model",
             PaletteKind::Skill => "skill",
@@ -153,7 +156,7 @@ impl PaletteKind {
         match self {
             PaletteKind::Command => 0,
             PaletteKind::Surface => 1,
-            PaletteKind::Skill => 2,
+            PaletteKind::Help | PaletteKind::Skill => 2,
             // A setup row is an action, so it sits with the surfaces: for the
             // query `telegram` it is printed above the docs page that carries
             // the same name (#2462).
@@ -181,7 +184,7 @@ impl PaletteKind {
             // Actions sit with the destinations, under the screens.
             PaletteKind::Action | PaletteKind::NewTopic | PaletteKind::Favorite => 1,
             PaletteKind::Command | PaletteKind::UserCommand | PaletteKind::Channel => 2,
-            PaletteKind::Docs => 3,
+            PaletteKind::Docs | PaletteKind::Help => 3,
             PaletteKind::Session => 4,
             PaletteKind::Skill | PaletteKind::Model => 5,
             PaletteKind::Ask => 7,
@@ -1215,6 +1218,7 @@ impl PaletteState {
 
     pub fn visible(&self) -> Vec<PaletteRow> {
         let normalized = NormalizedQuery::parse(&self.query);
+        let idle = self.query.trim().is_empty();
         let mut rows: Vec<PaletteRow> = self
             .items
             .iter()
@@ -1223,6 +1227,10 @@ impl PaletteState {
                 // empty, so the whole rail prints until typing narrows it
                 // (#2482).
                 if self.pick.is_some() && item.kind != PaletteKind::Session {
+                    return None;
+                }
+                // Help-key knowledge is searchable, not part of the idle menu.
+                if idle && item.kind == PaletteKind::Help {
                     return None;
                 }
                 // A pressed chip drops every row of another kind (#2491).
@@ -1248,7 +1256,6 @@ impl PaletteState {
             .collect();
         // Which kind rank decides: the typed card ranks actions first, the
         // idle card leads with destinations (#2491).
-        let idle = self.query.trim().is_empty();
         let kind_rank = |k: PaletteKind| if idle { k.idle_rank() } else { k.rank() };
         rows.sort_by(|a, b| {
             b.score
@@ -1533,6 +1540,32 @@ mod tests {
             .map(|row| row.item.kind)
             .collect();
         assert_eq!(kinds, vec![PaletteKind::Command, PaletteKind::Session]);
+    }
+
+    #[test]
+    fn help_rows_are_typed_only_and_rank_between_actions_and_docs() {
+        let mut state = PaletteState::new(vec![
+            item("alpha", PaletteKind::Docs),
+            item("alpha", PaletteKind::Help),
+            item("alpha", PaletteKind::Action),
+        ]);
+        let idle: Vec<PaletteKind> = state
+            .visible()
+            .into_iter()
+            .map(|row| row.item.kind)
+            .collect();
+        assert_eq!(idle, vec![PaletteKind::Action, PaletteKind::Docs]);
+
+        state.insert_text("alpha");
+        let typed: Vec<PaletteKind> = state
+            .visible()
+            .into_iter()
+            .map(|row| row.item.kind)
+            .collect();
+        assert_eq!(
+            typed,
+            vec![PaletteKind::Action, PaletteKind::Help, PaletteKind::Docs]
+        );
     }
 
     /// The idle suggestions hold for three seconds after the card opens,

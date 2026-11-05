@@ -75,6 +75,7 @@ use opencrabs::ui_core::palette::{
 };
 // The docs pages Seeker can open, built once in the shared core (#2461).
 use opencrabs::ui_core::docs;
+use opencrabs::ui_core::help_keys;
 
 use futures::channel::oneshot;
 
@@ -1156,6 +1157,7 @@ impl Dashboard {
             })
             .collect();
         items.extend(find::surface_items());
+        items.extend(help_keys::seeker_items(help_keys::HelpClient::Gui));
         // The docs pages: a query that is not a command, a screen or a
         // conversation is usually a question the documentation answers (#2461).
         items.extend(docs::items());
