@@ -147,7 +147,8 @@ fn start_status_stop_lifecycle_with_stub() {
 fn parse_url_takes_latest_when_log_has_stale_entries() {
     // cloudflared appends to --logfile; leftover content from a previous
     // tunnel must never win over the live tunnel's URL.
-    let log = "INF https://old-dead-1.trycloudflare.com\nINF https://new-live-2.trycloudflare.com\n";
+    let log =
+        "INF https://old-dead-1.trycloudflare.com\nINF https://new-live-2.trycloudflare.com\n";
     assert_eq!(
         parse_trycloudflare_url(log).as_deref(),
         Some("https://new-live-2.trycloudflare.com")
@@ -171,8 +172,10 @@ fn second_start_after_stop_reports_new_tunnel_url() {
     // still on disk, exactly like a repeat `connect` in the same state dir.
     assert!(log_path(dir.path()).exists());
 
-    let second =
-        stub_script_with_url(dir.path(), Some("https://second-tunnel-2.trycloudflare.com"));
+    let second = stub_script_with_url(
+        dir.path(),
+        Some("https://second-tunnel-2.trycloudflare.com"),
+    );
     let spec = TunnelSpec {
         port: 18997,
         state_dir: dir.path().to_path_buf(),
@@ -211,7 +214,10 @@ fn concurrent_second_start_fails_instead_of_double_spawning() {
         "expected the start-lock error, got: {err}"
     );
     // The first start still ends in its clean timeout, with no state.
-    first.join().unwrap().expect_err("first start must time out");
+    first
+        .join()
+        .unwrap()
+        .expect_err("first start must time out");
     assert!(status(dir.path()).unwrap().is_none());
 }
 
@@ -242,7 +248,10 @@ fn status_and_stop_refuse_a_recycled_pid_and_clean_state() {
 
     // stop() finds no tunnel and never signals the innocent process.
     assert!(!stop(dir.path()).unwrap());
-    assert!(pid_alive(innocent.id()), "the innocent process must survive");
+    assert!(
+        pid_alive(innocent.id()),
+        "the innocent process must survive"
+    );
 
     // Cleanup through the Child handle: properly killed and reaped.
     let _ = innocent.kill();
