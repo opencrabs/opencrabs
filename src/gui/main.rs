@@ -5966,16 +5966,21 @@ impl Render for Dashboard {
                             Some(b) => (b.service.provider_name(), b.service.provider_model()),
                             None => ("-".to_string(), "-".to_string()),
                         };
-                        // Who is answering, from where, on what branch, and how
-                        // fast. The session name is not part of it: the header
-                        // above already names the conversation, so repeating it
-                        // here would print one name twice (#2578).
-                        let identity = status_identity(
-                            &provider,
-                            &model,
-                            &tilde_path(&opencrabs::utils::cwd::launch_cwd()),
-                            self.branch.as_deref().unwrap_or("-"),
-                            self.live.tokens_per_sec(),
+                        // The session name leads, as in the TUI footer. The row
+                        // across the top that used to carry it was removed
+                        // (#2596), and in a split this footer stands down while
+                        // each pane's border names its own conversation, so the
+                        // name is not printed twice anywhere (#2578).
+                        let identity = format!(
+                            "{} · {}",
+                            self.session_title().unwrap_or("chat"),
+                            status_identity(
+                                &provider,
+                                &model,
+                                &tilde_path(&opencrabs::utils::cwd::launch_cwd()),
+                                self.branch.as_deref().unwrap_or("-"),
+                                self.live.tokens_per_sec(),
+                            )
                         );
                         div()
                             .flex()
