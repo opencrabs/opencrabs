@@ -33,15 +33,13 @@ pub use types::{
 pub use setup_gaps::SetupGap;
 pub use wizard::OnboardingWizard;
 
+pub use crate::ui_core::model_selector::fetch_provider_models;
+#[cfg(test)]
+pub(crate) use crate::ui_core::model_selector::{
+    merge_minimax_baseline, opencode_models_url, xiaomi_baseline_models,
+};
 pub use brain::parse_brain_sections;
-#[cfg(test)]
-pub(crate) use fetch::opencode_models_url;
-pub use fetch::{fetch_provider_models, is_first_time};
-// merge_minimax_baseline is used by tests via `crate::tui::onboarding::fetch::...`;
-// the module is private but the function is `pub(crate)`, accessible only when
-// the `fetch` module is reachable. Test access goes through a cfg(test) bridge.
-#[cfg(test)]
-pub(crate) use fetch::{merge_minimax_baseline, xiaomi_baseline_models};
+pub use fetch::is_first_time;
 // build_onboarding_systemd_unit is used by tests via
 // `crate::tui::onboarding::build_onboarding_systemd_unit`; `config` is private,
 // so it needs the same cfg(test) bridge as `fetch` above. The path is `self::`

@@ -243,6 +243,162 @@ pub enum CodexDeviceFlowStatus {
 pub const CUSTOM_PROVIDER_IDX: usize = PROVIDERS.len() - 1;
 pub const CUSTOM_INSTANCES_START: usize = PROVIDERS.len();
 
+/// A complete, immutable snapshot for one provider model request.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FetchRequest {
+    pub provider_index: usize,
+    pub provider_id: String,
+    pub provider_name: String,
+    pub api_key: Option<String>,
+    pub zhipu_endpoint: Option<String>,
+    pub xiaomi_endpoint: Option<String>,
+    pub moonshot_endpoint: Option<String>,
+    pub base_url: Option<String>,
+    pub opencode_endpoint: Option<String>,
+}
+
+impl FetchRequest {
+    /// Capture exactly what the fetcher needs, including unsaved wizard edits.
+    pub fn from_selector(selector: &ProviderSelectorState) -> Option<Self> {
+        Self::from_selector_and_api_key(selector, selector.effective_api_key())
+    }
+
+    /// Bind an explicit credential to its provider. A late OAuth completion
+    /// must not send its token to whichever provider is selected now.
+    pub fn from_selector_and_api_key_for_provider(
+        selector: &ProviderSelectorState,
+        provider_id: &str,
+        api_key: Option<String>,
+    ) -> Option<Self> {
+        if selector.provider_id() != provider_id {
+            return None;
+        }
+        Self::from_selector_and_api_key(selector, api_key)
+    }
+
+    /// Capture a request with an explicit credential, such as a fresh OAuth
+    /// token whose config write may not have landed yet.
+    pub fn from_selector_and_api_key(
+        selector: &ProviderSelectorState,
+        api_key: Option<String>,
+    ) -> Option<Self> {
+        if !selector.supports_model_fetch() {
+            return None;
+        }
+        if !selector.is_custom() && !selector.is_keyless() && api_key.is_none() {
+            return None;
+        }
+        let info = selector.current_provider();
+        let (provider_id, provider_name) = if selector.is_custom() {
+            (selector.custom_name.clone(), selector.custom_name.clone())
+        } else {
+            (info.id.to_string(), info.name.to_string())
+        };
+        Some(Self {
+            provider_index: selector.selected_provider,
+            provider_id,
+            provider_name,
+            api_key,
+            zhipu_endpoint: selector.zhipu_endpoint_str(),
+            xiaomi_endpoint: selector.xiaomi_endpoint_str(),
+            moonshot_endpoint: selector.is_moonshot().then(|| {
+                if selector.moonshot_endpoint_type == 1 {
+                    "coding".to_string()
+                } else {
+                    "api".to_string()
+                }
+            }),
+            base_url: (!selector.base_url.trim().is_empty()).then(|| selector.base_url.clone()),
+            opencode_endpoint: (selector.provider_id() == "opencode").then(|| {
+                if selector.opencode_endpoint_type == 1 {
+                    "zen".to_string()
+                } else {
+                    "go".to_string()
+                }
+            }),
+        })
+    }
+
+    pub fn for_provider(index: usize) -> Option<Self> {
+        let mut selector = ProviderSelectorState {
+            selected_provider: index,
+            ..Default::default()
+        };
+        selector.load_custom_names();
+        selector.detect_existing_key();
+        selector.reload_config_models();
+        selector.load_custom_fields();
+        Self::from_selector(&selector)
+    }
+
+    pub fn provider_index(provider: &str) -> Option<usize> {
+        if let Some(index) = PROVIDERS.iter().position(|info| info.id == provider) {
+            return Some(index);
+        }
+        let mut selector = ProviderSelectorState::default();
+        selector.load_custom_names();
+        selector
+            .custom_names
+            .iter()
+            .position(|name| name == provider)
+            .map(|index| CUSTOM_INSTANCES_START + index)
+    }
+}
+
+/// One asynchronous response, carrying the request's provider identity.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FetchOutcome {
+    pub provider_index: usize,
+    pub provider_id: String,
+    pub provider_name: String,
+    pub models: Vec<String>,
+    pub error: Option<String>,
+}
+
+/// Monotonic request identity shared by both frontends.
+#[derive(Clone, Debug, Default)]
+pub struct FetchLifecycle {
+    generation: u64,
+    active: Option<(u64, usize)>,
+    pub error: Option<String>,
+}
+
+impl FetchLifecycle {
+    pub fn begin(&mut self, request: &FetchRequest) -> u64 {
+        self.generation = self.generation.wrapping_add(1).max(1);
+        self.active = Some((self.generation, request.provider_index));
+        self.error = None;
+        self.generation
+    }
+
+    pub fn invalidate(&mut self) {
+        self.generation = self.generation.wrapping_add(1).max(1);
+        self.active = None;
+        self.error = None;
+    }
+
+    pub fn is_fetching(&self) -> bool {
+        self.active.is_some()
+    }
+
+    /// Consume a result only if it belongs to the current request and provider.
+    pub fn finish(
+        &mut self,
+        generation: u64,
+        provider_index: usize,
+        outcome: FetchOutcome,
+    ) -> Option<FetchOutcome> {
+        if self.active != Some((generation, provider_index))
+            || outcome.provider_index != provider_index
+        {
+            return None;
+        }
+        self.active = None;
+        self.error = outcome.error.clone();
+        Some(outcome)
+    }
+}
+
 #[derive(Default)]
 pub struct ProviderSelectorState {
     pub selected_provider: usize,

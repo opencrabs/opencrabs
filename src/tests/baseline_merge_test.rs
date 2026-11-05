@@ -298,7 +298,7 @@ fn xiaomi_branch_falls_back_to_the_baseline_when_the_fetch_is_empty() {
     // branch before the fallback. Locate the unique call instead and
     // read the lines above it, which keeps the window tight enough that
     // a fallback wired to some other condition still fails.
-    let src = include_str!("../tui/onboarding/fetch.rs");
+    let src = include_str!("../ui_core/model_selector/fetch.rs");
     let call = "merge_minimax_baseline(xiaomi_baseline_models(), user_models)";
     let lines: Vec<&str> = src.lines().collect();
     let at = lines
