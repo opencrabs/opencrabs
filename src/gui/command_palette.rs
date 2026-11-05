@@ -134,6 +134,10 @@ const INK: u32 = 0xf2f3f5;
 const INK_MUTED: u32 = 0x9ba0aa;
 const INK_WARM: u32 = 0xe8b96a;
 
+/// The inactive kind chip's translucent white fill. Filled capsules read as
+/// one Spotlight control; the old transparent, bordered chips read as labels.
+const CHIP_FILL: u32 = 0xffffff14;
+
 /// The invitation the field prints while it is empty.
 const PLACEHOLDER: &str = "Seeker: sessions, feats, skills, docs, debug and more.";
 
@@ -473,17 +477,22 @@ pub(super) fn overlay(
                         .px_2()
                         .py_0p5()
                         .rounded_full()
-                        .border_1()
                         .text_xs()
                         .cursor_pointer()
                         .when(active, |d| {
-                            d.border_color(rgb(theme.accent))
+                            d.bg(rgba((theme.accent << 8) | 0x2e))
                                 .text_color(rgb(theme.accent))
                         })
                         .when(!active, |d| {
-                            d.border_color(rgba(0xffffff14)).text_color(rgb(INK_MUTED))
+                            d.bg(rgba(CHIP_FILL)).text_color(rgb(INK_MUTED))
                         })
-                        .hover(|d| d.border_color(rgb(theme.accent)))
+                        .hover(|d| {
+                            if active {
+                                d.bg(rgba((theme.accent << 8) | 0x42))
+                            } else {
+                                d.bg(rgba(0xffffff28)).text_color(rgb(INK))
+                            }
+                        })
                         .on_click(move |_ev, _window, cx| {
                             cx.stop_propagation();
                             press(kind, cx);
