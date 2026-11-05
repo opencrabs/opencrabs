@@ -188,16 +188,16 @@ pub fn render(f: &mut Frame, app: &mut App) {
 
     // In split view each pane carries its own footer inside the session
     // panel, so the window-level bar yields its row instead of spanning the
-    // split (#2578).
+    // split (#2575).
     let status_height = u16::from(!app.pane_manager.is_split());
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(CHAT_FLOOR),      // [0] Chat messages
-            Constraint::Length(plan_height),  // [1] Plan checklist (0 when no plan)
-            Constraint::Length(queue_height), // [2] Queue preview (0 when no queue)
-            Constraint::Length(input_height), // [3] Input (dynamic)
+            Constraint::Min(CHAT_FLOOR),       // [0] Chat messages
+            Constraint::Length(plan_height),   // [1] Plan checklist (0 when no plan)
+            Constraint::Length(queue_height),  // [2] Queue preview (0 when no queue)
+            Constraint::Length(input_height),  // [3] Input (dynamic)
             Constraint::Length(status_height), // [4] Status bar (0 in split view)
         ])
         .split(f.area());

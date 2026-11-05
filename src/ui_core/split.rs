@@ -98,7 +98,7 @@ pub const PANE_INPUT_ROWS: u16 = 3;
 /// Rows a pane spends on its own compact footer: the model, the approval
 /// policy and the pane's place in the split. It is the window status bar
 /// moved inside the session panel, so it stays attached to the pane it
-/// describes instead of spanning the whole window (#2578).
+/// describes instead of spanning the whole window (#2575).
 pub const PANE_FOOTER_ROWS: u16 = 1;
 
 /// The fewest rows a compact plan strip can carry: the title row, the running
