@@ -19,7 +19,10 @@ fn event(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
 #[test]
 fn alt_tab_is_the_clockwise_rotation() {
     let alt_tab = event(KeyCode::Tab, KeyModifiers::ALT);
-    assert!(keys::is_pane_rotate_next(&alt_tab), "alt+tab rotates forward");
+    assert!(
+        keys::is_pane_rotate_next(&alt_tab),
+        "alt+tab rotates forward"
+    );
     assert!(
         !keys::is_pane_rotate_prev(&alt_tab),
         "alt+tab must not also claim the reverse direction"
@@ -67,5 +70,8 @@ fn rotation_wraps_in_both_directions() {
 
     // Backward from the first wraps to the last.
     mgr.focus_prev();
-    assert_eq!(mgr.focused, ids[2], "anticlockwise wraps past the first pane");
+    assert_eq!(
+        mgr.focused, ids[2],
+        "anticlockwise wraps past the first pane"
+    );
 }
