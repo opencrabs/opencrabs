@@ -4172,28 +4172,10 @@ impl Dashboard {
             .is_some_and(|id| self.sessions.is_topic_enabled(id))
     }
 
-    /// The conversation's own name, for the card above the topic bar (#2480).
-    ///
-    /// The card names the session a topic belongs to, never the topic: the
-    /// topic is already marked in the row below it, and Telegram's forum header
-    /// keeps the chat title on top for the same reason.
-    fn open_chat_name(&self) -> Option<String> {
-        let open = self.transcript.session?;
-        let root = self.sessions.parents.get(&open).copied().unwrap_or(open);
-        let stored = self
-            .sessions
-            .items
-            .iter()
-            .find(|s| s.id == root)
-            .and_then(|s| s.title.as_deref());
-        Some(rail::rail_title(
-            stored,
-            self.sessions.topic_titles.get(&root).map(String::as_str),
-        ))
-    }
-
-    /// The chat's `...` menu (#2480): what can be done to the conversation it
-    /// belongs to, in a card under the button that opened it.
+    /// The chat's menu (#2480): what can be done to the conversation it
+    /// belongs to. It opens from a right press on the conversation or on a
+    /// topic tab; the header button that used to open it went with the title
+    /// row (#2596).
     ///
     /// The card floats over the chat as a layer. The old menu was a column of
     /// rows laid *inside* the topic strip, so opening it grew the strip and
@@ -4245,14 +4227,14 @@ impl Dashboard {
         });
         items.push(sessions::menu_item(delete_label).on_click(delete));
         Some(
-            // Anchored to the column, not the header row: the column is the
-            // positioning context that paints last. px_6 on the column puts
-            // the button's right edge one 1.5rem in, so right_6 lines the card
-            // up with it; top_12 clears the header line under pt_3.
+            // Anchored to the column, not the transcript: the column is the
+            // positioning context that paints last. px_6 puts the card's right
+            // edge one 1.5rem in, and top_3 lines it up with the first line of
+            // the conversation now that no header sits above it (#2596).
             sessions::menu_card("chat-menu", items)
                 .absolute()
                 .right_6()
-                .top_12()
+                .top_3()
                 .into_any_element(),
         )
     }
@@ -5440,14 +5422,6 @@ impl Render for Dashboard {
                     agent_bridge::spawn_plan_path(self.db_path.clone(), sid, self.sink.clone());
                 }
                 None => self.plan.set_path(None),
-            }
-            // The header's ink is data, not layout: log the string the chip
-            // will print whenever the open conversation changes, so a header
-            // that reads wrong traces to its source without a rebuild. The
-            // bare `\u{2026}` the owner screenshotted had no such trail and cost
-            // two days of guessing at padding (#2480).
-            if let Some(name) = self.open_chat_name() {
-                logging::debug(&format!("header: painting name {name:?}"));
             }
         }
         self.plan.refresh();
@@ -7711,63 +7685,12 @@ impl Render for Dashboard {
             .px_6()
             .pt_3()
             .pb_4();
-        // The chat screen leads with the conversation's name in a card (#2480),
-        // then the topic row under it, the way Telegram's forum header reads.
-        // The other screens keep their title above the body.
+        // The chat screen draws no title row (#2596). The conversation's
+        // name already prints in the footer, so a second copy across the top
+        // only cost a band of the window to repeat it. Every other screen
+        // keeps the chrome it has always had.
         if self.screen != Screen::Chat {
             right = right.child(chrome);
-        } else {
-            // The conversation's name leads the chat as plain header text
-            // (#2480), and the `...` that acts on it sits at the far end of
-            // the same row: top right of the conversation, always. The name
-            // takes the width; nothing draws a card around either of them.
-            let name = self.open_chat_name();
-            let mut header = div()
-                .relative()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_3()
-                .min_w_0()
-                // Auto cross-axis stretch lets the negative gutters reach
-                // both edges. A definite full width would stop the right
-                // hairline short; the title and menu keep their inset.
-                .mx(rems(-1.5))
-                .px_6()
-                .pb_2()
-                .border_b_1()
-                .border_color(topic_tabs::separator_color());
-            header = match name {
-                Some(name) => header.child(session_title(&name)),
-                None => header.child(div().flex_1()),
-            };
-            if self.transcript.session.is_some() {
-                let toggle = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
-                    cx.stop_propagation();
-                    this.topic_menu = match this.topic_menu {
-                        Some(_) => None,
-                        None => this.transcript.session,
-                    };
-                    cx.notify();
-                });
-                header = header.child(
-                    div()
-                        .id("chat-menu-button")
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .px_2()
-                        .py_0p5()
-                        .rounded(px(4.0))
-                        .cursor_pointer()
-                        .text_color(rgb(palette::current().text_muted))
-                        .hover(|d| d.bg(rgb(palette::current().panel_hi)))
-                        .on_click(toggle)
-                        .child(SharedString::from("...")),
-                );
-            }
-            right = right.child(header);
         }
         // The row takes the side it was saved on: above the transcript,
         // under the input, or beside the chat (#2402).
@@ -10102,58 +10025,6 @@ fn help_rows() -> Vec<(
         );
     }
     out
-}
-
-/// The most characters the header prints before it shortens (#2480).
-///
-/// A name is a label, not the conversation: the rail and the window title keep
-/// the whole string.
-const HEADER_NAME_CHARS: usize = 42;
-
-/// The name the header prints.
-///
-/// The shortening happens here, in Rust, and never leans on the text engine.
-/// `truncate()` on a stretched column painted a bare `\u{2026}` on the owner's
-/// screen while the stored name was `CrabsDev`: a full width band whose only
-/// ink was three dots. Whatever this function returns is what gets painted.
-fn header_name(name: &str) -> String {
-    let trimmed = name.trim();
-    if trimmed.is_empty() {
-        return rail::UNTITLED.to_string();
-    }
-    let mut chars = trimmed.chars();
-    let short: String = chars.by_ref().take(HEADER_NAME_CHARS).collect();
-    if chars.next().is_some() {
-        format!("{short}\u{2026}")
-    } else {
-        short
-    }
-}
-
-/// The conversation's name on the header bar (#2480).
-///
-/// Telegram's forum header puts the chat title on top and the topics under it.
-/// The GUI chat screen had no header at all (the comment below used to say the
-/// session name led the footer), so a row of topic chips was the first thing
-/// the eye met and the session it belonged to was nowhere. Plain header text,
-/// flush left, and the two-word rule does not apply: the name is the full
-/// name, and only the chips are shortened.
-///
-/// The card that used to wrap it is retired (owner, 2026-11-04): "still
-/// looking like a fucking useless button instead of taking full width ...
-/// remove its button, leave the clean title in the bar". Three passes of
-/// padding and border tuning never changed the read, because the shape itself
-/// was the problem: a bordered box on a bar looks like a button no matter how
-/// snug it is. What is left is the name, plain, across the whole row: no
-/// border, no fill, no padding, nothing that can read as a control.
-fn session_title(name: &str) -> impl IntoElement {
-    div()
-        .flex_1()
-        .min_w_0()
-        .text_lg()
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .text_color(rgb(palette::current().text_normal))
-        .child(SharedString::from(header_name(name)))
 }
 
 /// The name prompt above the input, while a topic is being named (#2303).

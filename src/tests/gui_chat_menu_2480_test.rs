@@ -106,28 +106,29 @@ fn a_right_press_on_a_tab_and_on_the_chat_opens_the_same_card() {
         "a tab's press opens the card for that tab's session, not for whatever is on screen"
     );
     assert!(
-        GUI_MAIN.contains(".child(SharedString::from(\"...\"))"),
-        "the button that opens the card lives at the conversation's top right"
+        !GUI_MAIN.contains("chat-menu-button"),
+        "the row that held the `...` is gone, so the card opens from a right press (#2596)"
     );
 }
 
-/// The card around the name read as a button no matter how snug it was, so
-/// the name is plain text across the row.
+/// The chat screen prints the conversation's name in its footer, so the row
+/// that repeated the same name across the top was removed (#2596).
 #[test]
-fn the_title_is_plain_text_and_not_a_chip() {
-    assert!(!GUI_MAIN.contains("fn session_title_chip"));
-    let (_, title_fn) = GUI_MAIN
-        .split_once("fn session_title(name: &str)")
-        .expect("the title prints");
-    let (body, _) = title_fn.split_once("\n}\n").expect("the title fn ends");
+fn the_chat_screen_draws_no_title_row() {
     assert!(
-        body.contains(".flex_1()"),
-        "the title takes the row's width instead of hugging its text"
+        !GUI_MAIN.contains("let mut header = div()"),
+        "no title row above the transcript"
     );
-    for retired in [".border_1()", ".bg(", ".px_2()", ".py_1()"] {
-        assert!(
-            !body.contains(retired),
-            "the title draws no card: {retired} came back"
-        );
-    }
+    assert!(
+        !GUI_MAIN.contains("fn session_title(name: &str)"),
+        "the row's title helper went with it"
+    );
+    assert!(
+        !GUI_MAIN.contains("fn header_name("),
+        "the shortening helper existed only for that row"
+    );
+    assert!(
+        GUI_MAIN.contains("self.session_title().unwrap_or(\"chat\"),"),
+        "the footer still leads with the conversation's name"
+    );
 }

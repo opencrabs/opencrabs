@@ -163,15 +163,13 @@ mod tests {
         assert_eq!(separator_color(), expected);
         let src = include_str!("main.rs");
         assert!(src.matches("topic_tabs::separator_color()").count() >= 2);
-        assert!(src.matches(".mx(rems(-1.5))").count() >= 2);
-        let header = src
-            .split("let mut header = div()")
-            .nth(1)
-            .expect("chat header")
-            .split("header = match name")
-            .next()
-            .expect("chat header body");
-        assert!(!header.contains(".w_full()"));
+        // One negative gutter is left: the topic strip. The chat title row
+        // carried the other until it was removed (#2596).
+        assert_eq!(src.matches(".mx(rems(-1.5))").count(), 1);
+        assert!(
+            !src.contains("let mut header = div()"),
+            "the chat screen draws no title row (#2596)"
+        );
     }
 
     #[test]
