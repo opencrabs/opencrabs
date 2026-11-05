@@ -333,71 +333,16 @@ async fn acquire_profile_instance(
     Option<crate::config::profile::InstanceLock>,
     Vec<crate::config::profile::PreemptedInstance>,
 )> {
-    use crate::config::profile::{InstanceGuard, acquire_instance_lock, active_profile};
-
-    let profile = active_profile().unwrap_or("default").to_string();
-    let claim = {
-        let p = profile.clone();
-        tokio::task::spawn_blocking(move || acquire_instance_lock(&p)).await?
-    };
-
-    let held_by = match claim {
-        InstanceGuard::Acquired(lock) => return Ok((Some(lock), Vec::new())),
-        InstanceGuard::Unavailable => return Ok((None, Vec::new())),
-        InstanceGuard::Held { pid } => pid,
-    };
-
-    if headless {
-        let who = held_by
-            .map(|p| format!("PID {p}"))
-            .unwrap_or_else(|| "another process".to_string());
-        tracing::error!(
-            "Profile '{profile}' is already running ({who}); refusing to start a second instance"
-        );
-        eprintln!("Error: OpenCrabs is already running for profile '{profile}' ({who}).");
-        eprintln!("Stop it first, or start this one with a different profile: opencrabs -p <name>");
-        std::process::exit(1);
-    }
-
-    // Interactive: the running daemon loses. Preemption also releases the
-    // channel token locks, which is the "I had to reconnect Telegram" bug it
-    // was written for; taking the instance lock here means it now also stops
-    // the duplicate reindex that used to run alongside the daemon's.
-    let preempted =
-        tokio::task::spawn_blocking(crate::config::profile::preempt_other_profile_instances)
-            .await
-            .unwrap_or_default();
-    if !preempted.is_empty() {
-        tracing::info!(
-            "TUI priority: preempted {} background instance(s) of profile '{profile}'",
-            preempted.len()
-        );
-    }
-
-    // One retry. The kernel releases the flock when the preempted process dies,
-    // which is not instant, so a single immediate retry would race the SIGTERM.
-    for attempt in 0..20u32 {
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        let p = profile.clone();
-        match tokio::task::spawn_blocking(move || acquire_instance_lock(&p)).await? {
-            InstanceGuard::Acquired(lock) => {
-                tracing::info!("Instance lock acquired after preemption ({attempt} retries)");
-                return Ok((Some(lock), preempted));
-            }
-            InstanceGuard::Unavailable => return Ok((None, preempted)),
-            InstanceGuard::Held { .. } => continue,
+    // One implementation of the claim, shared with the GUI (#2452). Two copies
+    // of the preemption dance drift, and a drift there means a surface quietly
+    // stops taking over the profile it is supposed to own.
+    match crate::services::surface::claim_profile(headless).await {
+        Ok(won) => Ok(won),
+        Err(e) => {
+            eprintln!("Error: {e:#}");
+            std::process::exit(1);
         }
     }
-
-    let who = held_by
-        .map(|p| format!("PID {p}"))
-        .unwrap_or_else(|| "another process".to_string());
-    tracing::error!("Profile '{profile}' still held by {who} two seconds after preemption");
-    eprintln!(
-        "Error: OpenCrabs is already running for profile '{profile}' ({who}) and did not stop."
-    );
-    eprintln!("Stop it manually, or start this one with a different profile: opencrabs -p <name>");
-    std::process::exit(1);
 }
 
 /// Whether a configured A2A gateway that never became ready blocks the cron
