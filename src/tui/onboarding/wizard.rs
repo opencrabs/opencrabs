@@ -7,6 +7,7 @@ pub struct OnboardingWizard {
 
     // Step 2: Provider/Auth — shared state with /models dialog
     pub ps: crate::tui::provider_selector::ProviderSelectorState,
+    pub model_fetch_lifecycle: crate::ui_core::model_selector::FetchLifecycle,
     pub auth_field: AuthField,
 
     /// Step 4: Workspace
@@ -412,6 +413,7 @@ impl OnboardingWizard {
             mode: WizardMode::QuickStart,
 
             ps,
+            model_fetch_lifecycle: crate::ui_core::model_selector::FetchLifecycle::default(),
             auth_field: AuthField::Provider,
 
             workspace_path: default_workspace.to_string_lossy().to_string(),

@@ -26,6 +26,7 @@ pub mod input_layout;
 /// on a background thread and reports a non-zero exit, so the draw loop never
 /// blocks and a failed open is not reported as a success.
 pub(crate) mod launcher;
+#[cfg(test)]
 pub(crate) mod model_order;
 pub mod onboarding;
 pub mod onboarding_layout;

@@ -35,6 +35,8 @@ mod icon;
 mod logging;
 mod markdown;
 mod mission_control;
+mod model_fetch;
+mod model_picker;
 mod models;
 mod onboard;
 mod palette;
@@ -56,7 +58,10 @@ use crate::screen_keys::{
     keyboard_owner, screen_chord,
 };
 use crate::theme::{BASE_REM, Size, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP, text};
+use opencrabs::ui_core::actions;
 use opencrabs::ui_core::channel_status;
+use opencrabs::ui_core::model_layout;
+use opencrabs::ui_core::model_selector::{FetchRequest, ProviderSelectorState};
 use opencrabs::ui_core::pane_tree::PaneTree;
 use opencrabs::ui_core::rail;
 use opencrabs::ui_core::split::{self, Layout};
@@ -73,24 +78,25 @@ use opencrabs::ui_core::palette::{
 };
 // The docs pages Seeker can open, built once in the shared core (#2461).
 use opencrabs::ui_core::docs;
+use opencrabs::ui_core::help_keys;
 
 use futures::channel::oneshot;
 
 use gpui::{
-    AnyElement, App, Application, Bounds, ClickEvent, Context, CursorStyle, Div, DragMoveEvent,
-    Entity, ExternalPaths, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString, Stateful,
-    TitlebarOptions, Window, WindowBounds, WindowOptions, div, prelude::*, px, rems, rgb, rgba,
-    size,
+    AnyElement, App, Application, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, Div,
+    DragMoveEvent, Entity, ExternalPaths, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta, ScrollHandle, ScrollWheelEvent,
+    SharedString, Stateful, TitlebarOptions, Window, WindowBounds, WindowOptions, div, point,
+    prelude::*, px, rems, rgb, rgba, size,
 };
 use opencrabs::brain::agent::ProgressEvent;
 use opencrabs::utils::drop_landing::human_size;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
 use uuid::Uuid;
 
-use opencrabs::brain::mission_control::McAnalytics;
+use opencrabs::brain::mission_control::{McActivity, McAnalytics, McInboxItem, McScheduleItem};
 use opencrabs::config::Config;
 use opencrabs::tui::app::mission_control::log_viewer::LogViewerState;
 use opencrabs::tui::render::format_token_count_raw;
@@ -127,6 +133,10 @@ enum Screen {
     /// The skills list: every skill the terminal can invoke, from the same
     /// loader, runnable from the window (#2466).
     Skills,
+    /// The /cd directory picker (#2527): the terminal's own dialog, so a
+    /// bare `/cd` opens a screen instead of answering with a text reply
+    /// that also lights the thinking spinner.
+    DirectoryPicker,
 }
 
 /// A divider drag in flight (#2472, #2476): which split, which divider in it,
@@ -322,6 +332,12 @@ const RAIL_DEFAULT_REM: f32 = 17.0;
 const RAIL_MIN_REM: f32 = 11.0;
 const RAIL_MAX_REM: f32 = 32.0;
 
+/// How long the Seeker caret keeps blinking after the last keystroke. Past
+/// this the field goes quiet and the caret hides, the way Spotlight's does
+/// once typing stops; the next key brings it back (#2531). The window and the
+/// terminal share one rule, so this aliases the engine's constant.
+const CARET_IDLE_AFTER: std::time::Duration = opencrabs::ui_core::palette::CARET_IDLE_AFTER;
+
 /// The side panel beside a previewing screen (`themes-sidebar`), plus the
 /// `gap_3` between it and the transcript. The transcript is planned against
 /// what is left, so its tiles never run under the panel.
@@ -461,6 +477,14 @@ struct Dashboard {
     /// drawn div, not an input widget, so nothing blinks for it unless a
     /// timer says so (#2491).
     finder_caret: bool,
+    /// When the Seeker field last took a key. The caret blinks for
+    /// [`CARET_IDLE_AFTER`] after that instant and then holds off, the way
+    /// Spotlight drops its caret when typing stops (#2531).
+    finder_activity: std::time::Instant,
+    /// Latest shaped text and bounds for Seeker mouse hit testing (#2534).
+    finder_paint: Entity<command_palette::FinderPaint>,
+    /// A left-button drag is extending the field's selection.
+    finder_selecting: bool,
     /// Monotonic tag on the latest period fetch; only its result is applied,
     /// so a slow fetch landing after a newer one cannot paint stale data.
     pending: u64,
@@ -617,11 +641,31 @@ struct Dashboard {
     /// how a good preview is found again without hunting the list.
     themes_index: usize,
     themes_history: Vec<String>,
+    /// The /cd picker's browse state (#2527): the directory on screen, its
+    /// subdirectories read at open and on every descend, the row the
+    /// keyboard stands on, and whether dotfile directories are listed.
+    cd_dir: std::path::PathBuf,
+    cd_entries: Vec<std::path::PathBuf>,
+    cd_selected: usize,
+    cd_show_hidden: bool,
     /// The model picker's rows, built when the screen opens so a slow frame
     /// never rebuilds the catalogue.
     models_rows: Vec<models::Row>,
+    /// The live search text. Selection indexes the filtered rows, never the
+    /// unfiltered catalogue underneath them.
+    models_query: String,
     /// The row the arrows stand on.
     models_index: usize,
+    /// The provider the models screen's list marks. A click sets it and moves
+    /// the model cursor to that provider's first visible model.
+    models_provider: Option<String>,
+    /// Shared request lifecycle and pending providers. Static rows are only a
+    /// fallback; every configured provider gets a live discovery request.
+    models_fetch: Option<std::sync::mpsc::Receiver<(u64, model_fetch::FetchOutcome)>>,
+    models_fetch_lifecycle: opencrabs::ui_core::model_selector::FetchLifecycle,
+    models_pending: Vec<FetchRequest>,
+    models_fetching: bool,
+    models_fetch_error: Option<String>,
     /// The skills screen's rows, read from the terminal's own loader when the
     /// screen opens so the list can never drift from `/skills` in the TUI,
     /// and the row the arrows stand on.
@@ -715,6 +759,66 @@ fn remember_preview(history: &mut Vec<String>, name: &str) {
     history.push(name.to_string());
     while history.len() > THEMES_HISTORY_LEN {
         history.remove(0);
+    }
+}
+
+/// Apply sidebar visibility without letting a closed rail retain keyboard
+/// focus or a hidden filter. Width belongs to the window layout and is not
+/// part of this transition.
+fn set_rail_open_state(
+    open: bool,
+    rail_open: &mut bool,
+    rail_focused: &mut bool,
+    sessions: &mut sessions::SessionsState,
+) {
+    *rail_open = open;
+    if !open {
+        *rail_focused = false;
+        sessions.filter.clear();
+        sessions.filter_active = false;
+    }
+}
+
+#[cfg(test)]
+mod sidebar_action_tests {
+    use super::*;
+
+    #[test]
+    fn sidebar_actions_gui_open_and_close_are_idempotent() {
+        for initially_open in [false, true] {
+            let mut open = initially_open;
+            let mut focused = initially_open;
+            let mut sessions = sessions::SessionsState {
+                filter: String::from("needle"),
+                filter_active: initially_open,
+                ..Default::default()
+            };
+
+            set_rail_open_state(true, &mut open, &mut focused, &mut sessions);
+            set_rail_open_state(true, &mut open, &mut focused, &mut sessions);
+            assert!(open);
+            assert_eq!(focused, initially_open);
+            assert_eq!(sessions.filter_active, initially_open);
+
+            set_rail_open_state(false, &mut open, &mut focused, &mut sessions);
+            set_rail_open_state(false, &mut open, &mut focused, &mut sessions);
+            assert!(!open);
+            assert!(!focused);
+            assert!(sessions.filter.is_empty());
+            assert!(!sessions.filter_active);
+        }
+    }
+
+    #[test]
+    fn sidebar_actions_existing_toggle_uses_the_same_transition() {
+        let source = include_str!("main.rs");
+        let body = source
+            .rsplit("fn toggle_rail")
+            .next()
+            .and_then(|tail| tail.split("fn stop_turn").next())
+            .expect("toggle body");
+        assert!(body.contains("self.set_rail_open(open, cx)"));
+        assert!(!body.contains("self.rail_open = !self.rail_open"));
     }
 }
 
@@ -984,8 +1088,11 @@ impl Dashboard {
         }
         self.finder = Some(PaletteState::new(self.finder_items()));
         self.finder_channels = configured_channels();
-        self.finder_caret = true;
+        self.finder_selecting = false;
+        self.finder_activity_reset();
         // The caret blinks on a timer, and the loop dies with the card (#2491).
+        // It only toggles while the field is fresh; past CARET_IDLE_AFTER the
+        // caret stays off until the next key restarts it (#2531).
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
@@ -996,7 +1103,15 @@ impl Dashboard {
                         if view.finder.is_none() {
                             return false;
                         }
-                        view.finder_caret = !view.finder_caret;
+                        if opencrabs::ui_core::palette::caret_blinks(
+                            view.finder_activity,
+                            std::time::Instant::now(),
+                            CARET_IDLE_AFTER,
+                        ) {
+                            view.finder_caret = !view.finder_caret;
+                        } else {
+                            view.finder_caret = false;
+                        }
                         cx.notify();
                         true
                     })
@@ -1012,9 +1127,18 @@ impl Dashboard {
         cx.notify();
     }
 
+    /// A key reached the Seeker field: the caret comes back on and its idle
+    /// clock restarts, so a paused field hides it and typing re-arms it
+    /// (#2531).
+    fn finder_activity_reset(&mut self) {
+        self.finder_activity = std::time::Instant::now();
+        self.finder_caret = true;
+    }
+
     /// Close the card and hand the keyboard back to what was under it.
     fn close_finder(&mut self, cx: &mut Context<Self>) {
         self.finder = None;
+        self.finder_selecting = false;
         self.refocus_screen();
         cx.notify();
     }
@@ -1039,17 +1163,15 @@ impl Dashboard {
             })
             .collect();
         items.extend(find::surface_items());
+        items.extend(help_keys::seeker_items(help_keys::HelpClient::Gui));
         // The docs pages: a query that is not a command, a screen or a
         // conversation is usually a question the documentation answers (#2461).
         items.extend(docs::items());
         // The channel setup rows: the word that names a channel has to find the
         // row that starts its setup, not only the page that describes it (#2462).
         items.extend(find::channel_items());
-        // The create-topic row: one shared definition, the same words here
-        // and on the terminal (#2482).
-        items.push(find::new_topic_item());
-        // The favorite row: same picker, the pick pins the conversation (#2487).
-        items.push(find::favorite_item());
+        // Standalone actions share one catalog; execution stays in this window.
+        items.extend(actions::items());
         for skill in opencrabs::brain::skills::load_all_skills() {
             items.push(
                 PaletteItem::new(
@@ -1058,10 +1180,8 @@ impl Dashboard {
                     PaletteKind::Skill,
                     PaletteAction::RunSkill(skill.slash_name.clone()),
                 )
-                // The skill's own description carries the words a user types
-                // when they do not know its slash name: `telegram` has to find
-                // the channels skill, not only the docs page (#2462).
-                .with_keywords(&format!("skill workflow recipe {}", skill.description)),
+                .with_keywords("skill workflow recipe")
+                .with_description(&skill.description),
             );
         }
         for session in &self.sessions.items {
@@ -1083,6 +1203,20 @@ impl Dashboard {
     /// the arrows move the armed row and Enter runs it. Nothing falls through
     /// to the composer, which is the whole point of the card (#2458).
     fn finder_key(&mut self, ks: &gpui::Keystroke, cx: &mut Context<Self>) {
+        // Any key is activity: the caret comes back and its idle clock
+        // restarts before the key does its work (#2531).
+        self.finder_activity_reset();
+        if let Some(edit) = find::editing_chord(
+            &ks.key,
+            ks.modifiers.control,
+            ks.modifiers.platform,
+            ks.modifiers.alt,
+            ks.modifiers.shift,
+        ) {
+            self.apply_finder_edit(edit, cx);
+            cx.notify();
+            return;
+        }
         let Some(state) = self.finder.as_mut() else {
             return;
         };
@@ -1099,11 +1233,10 @@ impl Dashboard {
             "down" => state.move_by(1, find::SEEKER_PAGE),
             "pageup" => state.move_by(-(find::SEEKER_PAGE as i32), find::SEEKER_PAGE),
             "pagedown" => state.move_by(find::SEEKER_PAGE as i32, find::SEEKER_PAGE),
-            "backspace" => state.backspace(),
             "space" => state.type_char(' '),
             _ => {
-                // A chord is not a character: ctrl+c still means what it
-                // meant, and it must not type a `c` into the field.
+                // An editing chord returned above. Any other modified key is
+                // still a chord, never text to append to the query.
                 if ks.modifiers.control || ks.modifiers.platform || ks.modifiers.alt {
                     return;
                 }
@@ -1117,6 +1250,115 @@ impl Dashboard {
         cx.notify();
     }
 
+    fn apply_finder_edit(&mut self, edit: find::SeekerEdit, cx: &mut Context<Self>) {
+        let Some(state) = self.finder.as_mut() else {
+            return;
+        };
+        match edit {
+            find::SeekerEdit::Move {
+                delta,
+                word,
+                select,
+            } => match (word, select) {
+                (true, true) => state.select_word_to(delta),
+                (true, false) => state.move_caret_word(delta),
+                (false, true) => {
+                    let len = state.query().chars().count();
+                    let target = if delta < 0 {
+                        state.caret().saturating_sub(delta.unsigned_abs())
+                    } else {
+                        state.caret().saturating_add(delta.unsigned_abs()).min(len)
+                    };
+                    state.select_to(target);
+                }
+                (false, false) => state.move_caret(delta),
+            },
+            find::SeekerEdit::Home { select } => {
+                if select {
+                    state.select_to(0);
+                } else {
+                    state.move_caret_to(0);
+                }
+            }
+            find::SeekerEdit::End { select } => {
+                let end = state.query().chars().count();
+                if select {
+                    state.select_to(end);
+                } else {
+                    state.move_caret_to(end);
+                }
+            }
+            find::SeekerEdit::Backspace { word: true } => state.delete_word_back(),
+            find::SeekerEdit::Backspace { word: false } => state.backspace(),
+            find::SeekerEdit::Delete { word: true } => state.delete_word_forward(),
+            find::SeekerEdit::Delete { word: false } => state.delete_forward(),
+            find::SeekerEdit::SelectAll => state.select_all(),
+            find::SeekerEdit::Copy => {
+                if let Some(text) = state.selected_text() {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
+                }
+            }
+            find::SeekerEdit::Cut => {
+                if let Some(text) = state.take_selected_text() {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                }
+            }
+            find::SeekerEdit::Paste => {
+                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                    state.insert_text(&text);
+                }
+            }
+        }
+    }
+
+    /// Translate a window point to the Seeker's character caret through the
+    /// shaped line captured during paint, exactly as the composer does.
+    fn seeker_index_for_position(&self, position: Point<Pixels>, cx: &App) -> usize {
+        let Some(state) = self.finder.as_ref() else {
+            return 0;
+        };
+        let paint = self.finder_paint.read(cx);
+        let (Some(line), Some(bounds)) = (paint.line.as_ref(), paint.bounds.as_ref()) else {
+            return 0;
+        };
+        let relative = point(position.x - bounds.left(), position.y - bounds.top());
+        let byte = line
+            .closest_index_for_position(relative, paint.line_height)
+            .unwrap_or_else(|index| index)
+            .min(state.query().len());
+        find::byte_to_char(state.query(), byte)
+    }
+
+    fn finder_mouse_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        let index = self.seeker_index_for_position(event.position, cx);
+        self.finder_selecting = true;
+        self.finder_activity_reset();
+        if let Some(state) = self.finder.as_mut() {
+            if event.modifiers.shift {
+                state.select_to(index);
+            } else {
+                state.move_caret_to(index);
+            }
+        }
+        cx.notify();
+    }
+
+    fn finder_mouse_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if !self.finder_selecting {
+            return;
+        }
+        let index = self.seeker_index_for_position(event.position, cx);
+        self.finder_activity_reset();
+        if let Some(state) = self.finder.as_mut() {
+            state.select_to(index);
+        }
+        cx.notify();
+    }
+
+    fn finder_mouse_up(&mut self, _cx: &mut Context<Self>) {
+        self.finder_selecting = false;
+    }
+
     /// Run the row Enter is on, or the best match when no arrow was pressed.
     fn run_finder_pick(&mut self, cx: &mut Context<Self>) {
         let Some(row) = self.finder.as_ref().and_then(|state| state.selected()) else {
@@ -1124,11 +1366,14 @@ impl Dashboard {
             return;
         };
         self.finder = None;
+        self.finder_selecting = false;
         self.refocus_screen();
         match row.item.action {
             PaletteAction::RunSlash(name) => self.send_message(name.to_string(), cx),
             PaletteAction::OpenSession(id) => self.open_session(Uuid::from_u128(id), cx),
             PaletteAction::OpenSurface(surface) => self.open_surface(surface, cx),
+            PaletteAction::OpenSidebar => self.set_rail_open(true, cx),
+            PaletteAction::CloseSidebar => self.set_rail_open(false, cx),
             PaletteAction::SwitchModel { provider, model } => {
                 self.send_message(format!("/models {provider}/{model}"), cx)
             }
@@ -1628,6 +1873,44 @@ impl Dashboard {
                     self.send_message(opencrabs::brain::goal::goal_command_prompt(&arg), cx);
                 }
             }
+            C::Cd => {
+                // The picker owns bare `/cd` (#2527): a screen, not a text
+                // reply that also lights the thinking spinner. With a path
+                // the change applies locally on the bridge service, the same
+                // applier the terminal uses, with no turn and no spinner.
+                if arg.is_empty() {
+                    self.open_cd_picker(cx);
+                } else {
+                    let Some(session) = self.transcript.session else {
+                        self.live
+                            .notices
+                            .push("No conversation is open. Type /new first.".to_string());
+                        cx.notify();
+                        return;
+                    };
+                    let expanded = opencrabs::brain::tools::error::expand_tilde(&arg);
+                    if !expanded.is_dir() {
+                        self.live
+                            .notices
+                            .push(text_commands::cd_not_a_directory(&arg));
+                        cx.notify();
+                        return;
+                    }
+                    cx.spawn(async move |this, cx| {
+                        let applied = match agent_bridge::bridge() {
+                            Some(b) => b.service.apply_operator_cd(session, &expanded).await,
+                            None => expanded.clone(),
+                        };
+                        let _ = this.update(cx, |this, cx| {
+                            this.live
+                                .notices
+                                .push(text_commands::cd_reply(&applied.display().to_string()));
+                            cx.notify();
+                        });
+                    })
+                    .detach();
+                }
+            }
             other => {
                 let Some(session) = self.transcript.session else {
                     self.live
@@ -1655,10 +1938,20 @@ impl Dashboard {
     }
 
     fn toggle_rail(&mut self, cx: &mut Context<Self>) {
-        if self.rail_open {
-            self.close_rail_filter(cx);
+        let open = !self.rail_open;
+        self.set_rail_open(open, cx);
+    }
+
+    fn set_rail_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        set_rail_open_state(
+            open,
+            &mut self.rail_open,
+            &mut self.rail_focused,
+            &mut self.sessions,
+        );
+        if !open {
+            self.refocus_screen();
         }
-        self.rail_open = !self.rail_open;
         cx.notify();
     }
 
@@ -1686,27 +1979,169 @@ impl Dashboard {
         // The catalogue is read once, here, so a frame never walks it.
         let current =
             agent_bridge::bridge().map(|b| (b.service.provider_name(), b.service.provider_model()));
-        self.models_rows = models::rows(
-            current
-                .as_ref()
-                .map(|(provider, model)| (provider.as_str(), model.as_str())),
-        );
+        self.reset_model_picker(current, None);
         if let Some(arg) = arg {
             self.switch_model(arg, cx);
             return;
         }
-        // The highlight lands on the live pair, so Enter on the screen is a
-        // no-op instead of an accidental switch.
+        self.models_query.clear();
+        self.screen = Screen::Models;
+        // The list opens on the provider answering right now, so the marked
+        // row and the picker's cursor agree from the first frame.
+        self.models_provider = self
+            .models_rows
+            .iter()
+            .find(|row| row.current)
+            .map(|row| row.provider.clone());
+        self.rail_actions = None;
+        self.sessions.rail_menu = None;
+        self.start_models_fetch();
+        self.refocus_screen();
+        cx.notify();
+    }
+
+    /// Reset the one picker catalogue used by `/models` and Brain Fuel. The
+    /// optional wizard selector contributes its unsaved provider settings.
+    fn reset_model_picker(
+        &mut self,
+        current: Option<(String, String)>,
+        edited: Option<&ProviderSelectorState>,
+    ) {
+        self.models_rows = models::rows_for_picker(
+            current
+                .as_ref()
+                .map(|(provider, model)| (provider.as_str(), model.as_str())),
+            edited,
+        );
+        let mut catalogue = ProviderSelectorState::default();
+        catalogue.load_custom_names();
+        let active_provider = current
+            .as_ref()
+            .map(|(provider, _)| provider.as_str())
+            .or_else(|| edited.map(|selector| selector.current_provider().id))
+            .unwrap_or_default();
+        self.models_pending = opencrabs::ui_core::model_selector::discovery_requests(
+            &catalogue,
+            active_provider,
+            edited,
+        );
+        self.models_fetch = None;
+        self.models_fetch_lifecycle.invalidate();
+        self.models_fetch_error = None;
+        self.models_fetching = false;
         self.models_index = self
             .models_rows
             .iter()
             .position(|row| row.current)
             .unwrap_or(0);
-        self.screen = Screen::Models;
-        self.rail_actions = None;
-        self.sessions.rail_menu = None;
-        self.refocus_screen();
-        cx.notify();
+    }
+
+    /// Restart discovery after an onboarding provider or credential edit.
+    fn refresh_onboard_models(&mut self) {
+        let Some(ob) = self
+            .onboard
+            .as_ref()
+            .filter(|ob| ob.wizard.step == onboard::OnboardingStep::ProviderAuth)
+        else {
+            return;
+        };
+        let edited = ob.wizard.ps.clone();
+        let provider = if edited.is_custom() {
+            edited.custom_name.clone()
+        } else {
+            edited.current_provider().id.to_string()
+        };
+        let current = Some((provider, ob.model()));
+        self.reset_model_picker(current, Some(&edited));
+        self.start_models_fetch();
+    }
+
+    /// Refresh every provider with a saved key, not only the active one.
+    /// Requests run one at a time; generation and provider identity are both
+    /// checked before a response can alter the visible catalogue.
+    fn start_models_fetch(&mut self) {
+        if self.models_fetch.is_some() {
+            return;
+        }
+        self.models_fetch_lifecycle.invalidate();
+        if let Some(request) = self.models_pending.first().cloned() {
+            let generation = self.models_fetch_lifecycle.begin(&request);
+            self.models_fetch = Some(model_fetch::spawn(generation, request));
+            self.models_fetching = true;
+        } else {
+            self.models_fetching = false;
+        }
+    }
+
+    /// Drain the shared model-fetch consumer. True means a visible state
+    /// changed and the poll tick must repaint even when no agent event arrived.
+    fn poll_model_fetches(&mut self) -> bool {
+        let outcome = self
+            .models_fetch
+            .as_ref()
+            .and_then(|receiver| receiver.try_recv().ok());
+        let Some((generation, outcome)) = outcome else {
+            return false;
+        };
+        self.models_fetch = None;
+        self.models_pending
+            .retain(|pending| pending.provider_index != outcome.provider_index);
+        let provider_index = outcome.provider_index;
+        let Some(outcome) = self
+            .models_fetch_lifecycle
+            .finish(generation, provider_index, outcome)
+        else {
+            self.models_fetching = false;
+            return true;
+        };
+        if matches!(self.screen, Screen::Models | Screen::Onboard) {
+            if let Some(error) = outcome.error {
+                let error = format!("{}: {error}", outcome.provider_name);
+                self.models_fetch_error = Some(match self.models_fetch_error.take() {
+                    Some(previous) => format!("{previous}; {error}"),
+                    None => error,
+                });
+            }
+            if !outcome.models.is_empty() {
+                let selected = models::filtered_rows(&self.models_rows, &self.models_query)
+                    .get(self.models_index)
+                    .map(models::Row::pair);
+                let current = if let Some(ob) = self.onboard.as_ref()
+                    && ob.wizard.step == onboard::OnboardingStep::ProviderAuth
+                {
+                    let provider = if ob.wizard.ps.is_custom() {
+                        ob.wizard.ps.custom_name.clone()
+                    } else {
+                        ob.provider_id().to_string()
+                    };
+                    Some((provider, ob.model()))
+                } else {
+                    agent_bridge::bridge().map(|bridge| {
+                        (
+                            bridge.service.provider_name(),
+                            bridge.service.provider_model(),
+                        )
+                    })
+                };
+                models::replace_provider(
+                    &mut self.models_rows,
+                    &outcome.provider_id,
+                    &outcome.provider_name,
+                    &outcome.models,
+                    current
+                        .as_ref()
+                        .map(|(provider, model)| (provider.as_str(), model.as_str())),
+                );
+                let visible = models::filtered_rows(&self.models_rows, &self.models_query);
+                self.models_index = visible
+                    .iter()
+                    .position(|row| Some(row.pair()) == selected)
+                    .or_else(|| visible.iter().position(|row| row.current))
+                    .unwrap_or_else(|| self.models_index.min(visible.len().saturating_sub(1)));
+            }
+        }
+        self.start_models_fetch();
+        true
     }
 
     /// `/skills` opens the list the terminal's own dialog shows: every skill
@@ -1754,6 +2189,133 @@ impl Dashboard {
         self.send_message(prompt, cx);
     }
 
+    /// The one model-picker keyboard path. Onboarding Enter selects and then
+    /// falls through to the wizard's normal confirm; standalone Enter switches.
+    fn shared_models_key(
+        &mut self,
+        ev: &KeyDownEvent,
+        onboarding: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let visible = models::filtered_rows(&self.models_rows, &self.models_query);
+        let last = visible.len().saturating_sub(1);
+        let mut query_changed = false;
+        match ev.keystroke.key.as_str() {
+            "up" => self.models_index = self.models_index.saturating_sub(1),
+            "down" => self.models_index = (self.models_index + 1).min(last),
+            "enter" => {
+                let pair = visible
+                    .get(self.models_index.min(last))
+                    .map(models::Row::pair)
+                    .or_else(|| {
+                        let provider = if onboarding {
+                            self.onboard.as_ref().map(|ob| {
+                                if ob.wizard.ps.is_custom() {
+                                    ob.wizard.ps.custom_name.clone()
+                                } else {
+                                    ob.provider_id().to_string()
+                                }
+                            })
+                        } else {
+                            agent_bridge::bridge().map(|bridge| bridge.service.provider_name())
+                        };
+                        models::manual_pair(
+                            &self.models_query,
+                            provider.as_deref().unwrap_or_default(),
+                        )
+                    });
+                if let Some(pair) = pair {
+                    if onboarding {
+                        self.select_onboard_pair(&pair);
+                        return false;
+                    }
+                    self.switch_model(pair, cx);
+                }
+                return !onboarding;
+            }
+            "backspace" => {
+                self.models_query.pop();
+                self.models_index = 0;
+                query_changed = true;
+            }
+            "escape" if !onboarding => {
+                if self.models_query.is_empty() {
+                    self.screen = Screen::Chat;
+                    self.refocus_screen();
+                } else {
+                    self.models_query.clear();
+                    self.models_index = 0;
+                }
+                return true;
+            }
+            "tab" | "escape" if onboarding => return false,
+            _ => {
+                if ev.keystroke.modifiers.control
+                    || ev.keystroke.modifiers.alt
+                    || ev.keystroke.modifiers.platform
+                {
+                    return false;
+                }
+                let Some(ch) = ev
+                    .keystroke
+                    .key_char
+                    .as_ref()
+                    .and_then(|s| s.chars().next())
+                    .filter(|ch| !ch.is_control())
+                else {
+                    return false;
+                };
+                self.models_query.push(ch);
+                self.models_index = 0;
+                query_changed = true;
+            }
+        }
+        if query_changed
+            && onboarding
+            && let Some(ob) = self.onboard.as_mut()
+        {
+            ob.wizard.ps.model_filter = self.models_query.clone();
+            ob.wizard.ps.selected_model = 0;
+        }
+        true
+    }
+
+    fn select_onboard_pair(&mut self, pair: &str) -> bool {
+        let Some((provider, model)) = pair.split_once('/') else {
+            return false;
+        };
+        if self
+            .onboard
+            .as_mut()
+            .is_some_and(|ob| ob.select_pair(provider, model))
+        {
+            self.models_query.clear();
+            self.models_index = models::ensure_pair(&mut self.models_rows, provider, model);
+            return true;
+        }
+        false
+    }
+
+    fn activate_model_pair(&mut self, pair: String, onboarding: bool, cx: &mut Context<Self>) {
+        if !onboarding {
+            self.switch_model(pair, cx);
+            return;
+        }
+        let provider = pair.split_once('/').map(|(provider, _)| provider);
+        let provider_changed = self.onboard.as_ref().is_some_and(|ob| {
+            let current = if ob.wizard.ps.is_custom() {
+                ob.wizard.ps.custom_name.as_str()
+            } else {
+                ob.provider_id()
+            };
+            Some(current) != provider
+        });
+        if self.select_onboard_pair(&pair) && provider_changed {
+            self.refresh_onboard_models();
+        }
+        cx.notify();
+    }
+
     /// The wizard owns the keyboard while its screen is open: Tab and the
     /// arrows walk rows, typed characters land in the focused field, Enter
     /// confirms the step and closes when there is nothing after it.
@@ -1775,7 +2337,42 @@ impl Dashboard {
         } else {
             None
         };
+        let (
+            before_provider,
+            before_field,
+            before_key_field,
+            before_endpoint_field,
+            completing_input,
+        ) = {
+            let ob = self.onboard.as_ref().expect("checked above");
+            (
+                ob.wizard.ps.selected_provider,
+                ob.field,
+                ob.key_field(),
+                ob.custom_base_url_field(),
+                key == "enter"
+                    && (ob.key_field() == Some(ob.field)
+                        || ob.custom_base_url_field() == Some(ob.field)),
+            )
+        };
+        if self.onboard.as_ref().is_some_and(|ob| {
+            ob.step() == onboard::OnboardingStep::ProviderAuth && ob.field == ob.search_field()
+        }) && self.shared_models_key(ev, true, cx)
+        {
+            cx.notify();
+            return;
+        }
+        if completing_input {
+            // Enter on the key or custom endpoint completes that field, as in
+            // the terminal; it does not skip the list by confirming the step.
+            let ob = self.onboard.as_mut().expect("checked above");
+            ob.field = ob.search_field();
+            self.refresh_onboard_models();
+            cx.notify();
+            return;
+        }
         let mut confirm = false;
+        let mut refresh_models = false;
         {
             let ob = self.onboard.as_mut().expect("checked above");
             match key.as_str() {
@@ -1813,6 +2410,13 @@ impl Dashboard {
                     }
                 }
             }
+            let provider_changed = ob.wizard.ps.selected_provider != before_provider;
+            let completed_input_with_tab = key == "tab"
+                && (before_key_field == Some(before_field)
+                    || before_endpoint_field == Some(before_field));
+            if provider_changed || completed_input_with_tab {
+                refresh_models = true;
+            }
         }
         if confirm {
             match self.onboard.as_mut().map(|ob| ob.advance()) {
@@ -1827,8 +2431,19 @@ impl Dashboard {
                     // The reason is on the wizard and the pane draws it above
                     // the footer, so the step stays put and nothing is lost.
                 }
-                _ => {}
+                Some(onboard::Advance::Moved)
+                    if self
+                        .onboard
+                        .as_ref()
+                        .is_some_and(|ob| ob.step() == onboard::OnboardingStep::ProviderAuth) =>
+                {
+                    refresh_models = true;
+                }
+                Some(onboard::Advance::Moved) | None => {}
             }
+        }
+        if refresh_models {
+            self.refresh_onboard_models();
         }
         cx.notify();
     }
@@ -1907,6 +2522,21 @@ impl Dashboard {
     /// Esc: one step back, or out of the wizard. Nothing is discarded that a
     /// confirmed step already wrote.
     fn onboard_escape(&mut self, cx: &mut Context<Self>) {
+        if self
+            .onboard
+            .as_ref()
+            .is_some_and(|ob| ob.step() == onboard::OnboardingStep::ProviderAuth)
+            && !self.models_query.is_empty()
+        {
+            self.models_query.clear();
+            self.models_index = 0;
+            if let Some(ob) = self.onboard.as_mut() {
+                ob.wizard.ps.model_filter.clear();
+                ob.wizard.ps.selected_model = 0;
+            }
+            cx.notify();
+            return;
+        }
         let stayed = self.onboard.as_mut().map(|ob| ob.escape()).unwrap_or(false);
         if stayed {
             cx.notify();
@@ -1986,7 +2616,17 @@ impl Dashboard {
             );
         }
         self.onboard = Some(wizard);
+        if self
+            .onboard
+            .as_ref()
+            .is_some_and(|ob| ob.step() == onboard::OnboardingStep::ProviderAuth)
+            && let Some(ob) = self.onboard.as_mut()
+        {
+            ob.field = 0;
+        }
+        self.models_query.clear();
         self.screen = Screen::Onboard;
+        self.refresh_onboard_models();
         self.rail_actions = None;
         self.sessions.rail_menu = None;
         self.refocus_screen();
@@ -2050,8 +2690,65 @@ impl Dashboard {
             // The skills list is a full screen too: ctrl+shift+u leaves it for
             // the ledger, the same as any other screen.
             Screen::Skills => self.screen = Screen::Usage,
+            // The picker is transient: the chord just closes it, the way Esc
+            // does, instead of hopping to the ledger.
+            Screen::DirectoryPicker => self.screen = Screen::Chat,
         }
         self.refocus_screen();
+        cx.notify();
+    }
+
+    /// The visible period switcher is another door into the same period
+    /// loader as the terminal's t/w/m/a keys, not a second filter path.
+    fn usage_period_switcher(&self, cx: &mut Context<Self>) -> Div {
+        let mut bar = div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap_2()
+            .child(text("Period", Size::Xs, palette::current().text_muted));
+        for (period, label, id) in [
+            (Period::Today, "Today", "usage-period-today"),
+            (Period::Week, "Week", "usage-period-week"),
+            (Period::Month, "Month", "usage-period-month"),
+            (Period::AllTime, "All time", "usage-period-all-time"),
+        ] {
+            let active = self.dash.period == period;
+            bar = bar.child(
+                usage_view::period_tab(label, active)
+                    .id(id)
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        this.set_usage_period(period, cx);
+                    })),
+            );
+        }
+        bar
+    }
+
+    fn set_usage_period(&mut self, period: Period, cx: &mut Context<Self>) {
+        if !self.dash.set_period(period) {
+            return;
+        }
+        logging::info(&format!("period -> {period:?}: fetching"));
+        self.pending += 1;
+        let pending = self.pending;
+        let db_path = self.db_path.clone();
+        cx.spawn(async move |this, cx| {
+            // The fetch runs on its own big-stack thread (see `load_view`):
+            // gpui's background workers are dispatch-queue threads with tiny
+            // stacks. The previous view stays visible until the result lands.
+            let state = load_view(db_path, period).await;
+            this.update(cx, |this, cx| {
+                if pending == this.pending {
+                    this.state = state;
+                    logging::info("period fetch applied");
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
         cx.notify();
     }
 
@@ -2303,6 +3000,92 @@ impl Dashboard {
         self.themes_history.clear();
         self.screen = Screen::Chat;
         self.refocus_screen();
+        cx.notify();
+    }
+
+    /// `/cd` with no argument: the directory picker screen (#2527). The
+    /// terminal opens its dialog on the session's working directory; the
+    /// window opens the same screen on the same seed, so both surfaces
+    /// answer the same key with the same screen. Needs an open conversation
+    /// like every other session-bound command here.
+    fn open_cd_picker(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.transcript.session else {
+            self.live
+                .notices
+                .push("No conversation is open. Type /new first.".to_string());
+            cx.notify();
+            return;
+        };
+        let here = agent_bridge::bridge()
+            .map(|b| b.service.get_working_directory_for_session(session))
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        self.cd_dir = here;
+        self.cd_show_hidden = false;
+        self.cd_selected = 0;
+        self.cd_entries = cd_entries_for(&self.cd_dir, false);
+        self.rail_actions = None;
+        self.screen = Screen::DirectoryPicker;
+        // The screen takes the keyboard, the same rule as Themes: on this
+        // screen the arrows walk the list, so a stale editor focus would
+        // send a message instead.
+        self.refocus_screen();
+        cx.notify();
+    }
+
+    /// Leave the picker: nothing is applied, the conversation comes back.
+    fn close_cd_picker(&mut self, cx: &mut Context<Self>) {
+        self.screen = Screen::Chat;
+        self.refocus_screen();
+        cx.notify();
+    }
+
+    /// Tab/Space on a row: make it the session's working directory. The
+    /// conversation comes back FIRST and the apply follows in a spawned
+    /// task, the ordering the terminal's picker was just fixed to use
+    /// (#2526): a slow persistence write must never hold the screen open.
+    fn cd_select_here(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.transcript.session else {
+            self.close_cd_picker(cx);
+            return;
+        };
+        let dir = self.cd_dir.clone();
+        self.screen = Screen::Chat;
+        self.refocus_screen();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let applied = match agent_bridge::bridge() {
+                Some(b) => b.service.apply_operator_cd(session, &dir).await,
+                None => dir.clone(),
+            };
+            let _ = this.update(cx, |this, cx| {
+                this.live
+                    .notices
+                    .push(text_commands::cd_reply(&applied.display().to_string()));
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Enter on a row: descend into it. `..` climbs back up one level.
+    /// Reads are synchronous and local, the way the terminal's dialog does
+    /// them, so the row list can never drift from what the screen shows.
+    fn cd_descend(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(next) = self.cd_entries.get(index) else {
+            return;
+        };
+        self.cd_dir = next.clone();
+        self.cd_selected = 0;
+        self.cd_entries = cd_entries_for(&self.cd_dir, self.cd_show_hidden);
+        cx.notify();
+    }
+
+    /// `.` in the picker: show or hide the dotfile directories, the same
+    /// toggle the terminal's dialog binds.
+    fn cd_toggle_hidden(&mut self, cx: &mut Context<Self>) {
+        self.cd_show_hidden = !self.cd_show_hidden;
+        self.cd_selected = 0;
+        self.cd_entries = cd_entries_for(&self.cd_dir, self.cd_show_hidden);
         cx.notify();
     }
 
@@ -2591,6 +3374,10 @@ impl Dashboard {
         // window must not stay tinted after the pointer leaves it.
         if self.drag_seen.is_some() && !self.file_drag_active() {
             self.drag_seen = None;
+            cx.notify();
+        }
+        let models_changed = self.poll_model_fetches();
+        if models_changed {
             cx.notify();
         }
         let events = agent_bridge::drain(&self.agent_rx);
@@ -3511,6 +4298,7 @@ impl Dashboard {
         // (#2480). Both edges hug their content, so one chip can never fill the
         // rail the way it did before.
         let shape = topic_bar::chip_shape(self.topic_edge.is_vertical());
+        let icon_rems = topic_tabs::style(self.topic_edge.is_vertical()).topic_icon_rems;
         topic_bar::bar_entries(root, &topics)
             .into_iter()
             .map(|entry| {
@@ -3529,22 +4317,28 @@ impl Dashboard {
                     this.topic_menu = Some(id);
                     cx.notify();
                 });
-                // `All` is the whole conversation, so it carries no topic icon.
+                // `All` has the same icon slot and cell geometry as a topic.
                 let (label, picture) = match entry {
-                    topic_bar::BarEntry::All => ("All".to_string(), None),
+                    topic_bar::BarEntry::All => (
+                        "All".to_string(),
+                        topic_icons::tab_icon(
+                            topic_icons::store_name("general").as_str(),
+                            icon_rems,
+                        ),
+                    ),
                     topic_bar::BarEntry::Topic(id) => {
                         // The icon sits before the name and is not a word, so the
                         // two-word shortening (#2477) is applied to the name alone.
                         // A stored picture is drawn; a stored emoji stays text (#2478).
                         let stored = self.sessions.topic_icons.get(&id).cloned();
-                        let picture = stored.as_deref().and_then(topic_icons::tab_icon);
-                        let label = topic_label(&title(id));
-                        let label = match (&picture, stored.as_deref()) {
-                            (Some(_), _) => label,
-                            (None, Some(icon)) => format!("{icon} {label}"),
-                            (None, None) => label,
+                        let picture = stored
+                            .as_deref()
+                            .and_then(|stored| topic_icons::tab_icon(stored, icon_rems));
+                        let glyph = match (&picture, stored.as_deref()) {
+                            (None, Some(icon)) => Some(topic_icons::tab_glyph(icon, icon_rems)),
+                            _ => None,
                         };
-                        (label, picture)
+                        (topic_label(&title(id)), picture.or(glyph))
                     }
                 };
                 topic_tab(
@@ -3657,37 +4451,12 @@ impl Dashboard {
         cx.notify();
     }
 
-    /// Fold or unfold a session's topic tree. The change shows at once and is
-    /// saved to the ledger, so the TUI shows the same tree (#2427).
-    fn toggle_fold(&mut self, id: Uuid, cx: &mut Context<Self>) {
-        let collapsed = !self.sessions.collapsed.contains(&id);
-        if collapsed {
-            self.sessions.collapsed.insert(id);
-        } else {
-            self.sessions.collapsed.remove(&id);
-        }
-        cx.notify();
-        let db_path = self.db_path.clone();
-        cx.spawn(async move |this, cx| {
-            if let Err(e) = sessions::set_collapsed(db_path, id, collapsed).await {
-                logging::error(&format!("fold topics {id}: {e}"));
-                this.update(cx, |this, cx| {
-                    this.live.notices.push(format!("topic tree: {e}"));
-                    cx.notify();
-                })
-                .ok();
-            }
-        })
-        .detach();
-    }
-
     /// Re-read which sessions are topics and what each topic's parent is.
     fn refresh_topic_state(&mut self, cx: &mut Context<Self>) {
         let db_path = self.db_path.clone();
         cx.spawn(async move |this, cx| {
             let parents = sessions::load_topic_parents(db_path.clone()).await;
             let closed = sessions::load_closed(db_path.clone()).await;
-            let collapsed = sessions::load_collapsed(db_path.clone()).await;
             let icons = sessions::load_topic_icons(db_path.clone()).await;
             let topics = sessions::load_topics(db_path).await;
             this.update(cx, |this, cx| {
@@ -3702,10 +4471,6 @@ impl Dashboard {
                 match topics {
                     Ok(ids) => this.sessions.topics = ids.into_iter().collect(),
                     Err(e) => logging::error(&format!("topics refresh: {e}")),
-                }
-                match collapsed {
-                    Ok(ids) => this.sessions.collapsed = ids.into_iter().collect(),
-                    Err(e) => logging::error(&format!("collapsed topics refresh: {e}")),
                 }
                 match icons {
                     Ok(pairs) => this.sessions.topic_icons = pairs.into_iter().collect(),
@@ -3903,6 +4668,28 @@ impl Dashboard {
             shift: m.shift,
             platform: m.platform,
         };
+        // A transcript selection survives mouse release so the keyboard can
+        // copy it too (#2529). A composer selection keeps its own GPUI copy
+        // action; otherwise this is the transcript's shared cmd/ctrl-C path.
+        let composer_has_copy_selection = self.editor.read(cx).focus_handle.is_focused(window)
+            && self.editor.read(cx).has_selection();
+        if self.screen == Screen::Chat
+            && !composer_has_copy_selection
+            && opencrabs::ui_core::copy_select::is_copy_chord(
+                &ev.keystroke.key,
+                m.control,
+                m.platform,
+            )
+            && self.copy_drag.has_selection()
+        {
+            // The chord takes the release path: copy, drop the highlight, and
+            // say so in the composer exactly like a mouse release (#2587).
+            if self.copy_drag.finish_copy(cx) {
+                self.copy_drag.announce_copied(cx);
+            }
+            cx.notify();
+            return;
+        }
         // The line carries the screen and the table's answer, because a report
         // that only says which key arrived cannot tell a keystroke that never
         // reached this handler from one that reached it and matched nothing
@@ -4223,6 +5010,12 @@ impl Dashboard {
                 cx.notify();
                 return;
             }
+            // Esc on the /cd picker cancels and changes nothing (#2527). It
+            // sits with the screens above: a running turn must not hold it.
+            if self.screen == Screen::DirectoryPicker {
+                self.close_cd_picker(cx);
+                return;
+            }
             // Esc in the wizard goes back one step, clearing a model search
             // first, and closes the screen on the first step. The terminal's
             // own rule, so one stray key never throws away a half-filled run.
@@ -4456,21 +5249,11 @@ impl Dashboard {
             cx.notify();
             return;
         }
-        // The model picker is a list: arrows walk it and Enter switches to the
-        // row under the highlight. Esc leaves, handled above with the screens.
+        // The model picker is a live-filtered list: arrows walk the visible
+        // models (never its provider headers) and Enter switches. Esc clears
+        // a filter first, then leaves, as the terminal's picker does.
         if self.screen == Screen::Models {
-            let last = self.models_rows.len().saturating_sub(1);
-            match ev.keystroke.key.as_str() {
-                "up" => self.models_index = self.models_index.saturating_sub(1),
-                "down" => self.models_index = (self.models_index + 1).min(last),
-                "enter" => {
-                    if let Some(row) = self.models_rows.get(self.models_index.min(last)) {
-                        let pair = row.pair();
-                        self.switch_model(pair, cx);
-                    }
-                }
-                _ => {}
-            }
+            self.shared_models_key(ev, false, cx);
             cx.notify();
             return;
         }
@@ -4506,6 +5289,28 @@ impl Dashboard {
             cx.notify();
             return;
         }
+        // The /cd picker owns the keyboard on its screen (#2527), the same
+        // bindings the terminal's dialog uses: arrows walk, Enter descends,
+        // `.` flips hidden directories, Tab and Space select here, Esc
+        // cancels (handled above with the screens).
+        if self.screen == Screen::DirectoryPicker {
+            let last = self.cd_entries.len().saturating_sub(1);
+            match ev.keystroke.key.as_str() {
+                "up" => self.cd_selected = self.cd_selected.saturating_sub(1),
+                "down" => self.cd_selected = (self.cd_selected + 1).min(last),
+                "enter" => self.cd_descend(self.cd_selected.min(last), cx),
+                "tab" | "space" => self.cd_select_here(cx),
+                _ => {
+                    // `.` flips the hidden-directories toggle, as it does in
+                    // the terminal's dialog.
+                    if ev.keystroke.key_char.as_deref() == Some(".") {
+                        self.cd_toggle_hidden(cx);
+                    }
+                }
+            }
+            cx.notify();
+            return;
+        }
         // The wizard owns the keyboard while it is open: typed characters go
         // into the focused field, Tab and the arrows walk the lists, Enter
         // confirms the step, Esc steps back (handled above).
@@ -4521,30 +5326,7 @@ impl Dashboard {
         }
         match input::decide(&mut self.dash, translate_key(ev)) {
             UsageKeyOutcome::Consumed => cx.notify(),
-            UsageKeyOutcome::Period(period) => {
-                logging::info(&format!("period -> {period:?}: fetching"));
-                self.dash.set_period(period);
-                self.pending += 1;
-                let pending = self.pending;
-                let db_path = self.db_path.clone();
-                cx.spawn(async move |this, cx| {
-                    // The fetch runs on its own big-stack thread (see
-                    // `load_view`): gpui's background workers are
-                    // dispatch-queue threads with tiny stacks. The previous
-                    // view stays on screen until the result lands.
-                    let state = load_view(db_path, period).await;
-                    this.update(cx, |this, cx| {
-                        if pending == this.pending {
-                            this.state = state;
-                            logging::info("period fetch applied");
-                            cx.notify();
-                        }
-                    })
-                    .ok();
-                })
-                .detach();
-                cx.notify();
-            }
+            UsageKeyOutcome::Period(period) => self.set_usage_period(period, cx),
             // `decide` maps Esc on the grid to Close, which is right for the
             // TUI's modal dialog and wrong for a desktop window: a stray Esc
             // must never destroy the window. The titlebar button and Cmd+Q
@@ -4772,16 +5554,7 @@ impl Render for Dashboard {
                 indented,
                 closed,
             };
-            // A session with topics gets the chevron that folds its tree (#2427).
-            let fold = self.sessions.topics.contains(&id).then(|| {
-                let collapsed = self.sessions.collapsed.contains(&id);
-                let toggle = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
-                    cx.stop_propagation();
-                    this.toggle_fold(id, cx);
-                });
-                sessions::fold_button(id, collapsed).on_click(toggle)
-            });
-            let r = sessions::row(s, flags, action, menu, fold);
+            let r = sessions::row(s, flags, action, menu);
             // The press starts the slide and closes any other row's strip.
             let press = cx.listener(move |this, _ev: &MouseDownEvent, window, cx| {
                 this.rail_slide_opened = None;
@@ -4884,6 +5657,7 @@ impl Render for Dashboard {
             Screen::Themes => "OpenCrabs \u{b7} themes".to_string(),
             Screen::Models => "OpenCrabs \u{b7} models".to_string(),
             Screen::Skills => "OpenCrabs \u{b7} skills".to_string(),
+            Screen::DirectoryPicker => "OpenCrabs \u{b7} directory".to_string(),
             Screen::Onboard => "OpenCrabs \u{b7} onboarding".to_string(),
             Screen::MissionControl => "OpenCrabs \u{b7} mission control".to_string(),
             Screen::Chat => format!(
@@ -4947,6 +5721,41 @@ impl Render for Dashboard {
             f32::from(window.viewport_size().width),
             self.rail_width * self.rem,
         );
+        let picker_layout = model_layout::model_layout(
+            pane_width,
+            self.rem,
+            BASE_REM,
+            self.screen == Screen::Onboard,
+        );
+
+        // The chat's share of the pane area comes from the tree: a leaf under
+        // stacked splits spans the full width, and a leaf beside a sibling
+        // takes its share of it (#2472, #2473). A row is still never planned
+        // wider than its box. The measure is read here rather than inside the
+        // chat arm because the conversation and the chrome under it have to
+        // agree on one width (#2588).
+        let chat_share = self
+            .panes
+            .as_ref()
+            .zip(self.transcript.session)
+            .and_then(|(tree, id)| tree.leaf_width_share(id))
+            .unwrap_or(1.0);
+        let primary_width = if chat_share < 1.0 {
+            split_pane_width(pane_width, false, chat_share)
+        } else {
+            pane_width
+        };
+        // A single pane draws the conversation at a readable measure and
+        // centres it; a split window is exempt and keeps every pane at the span
+        // the tree hands it (#2586).
+        let split_window = self
+            .panes
+            .as_ref()
+            .is_some_and(|tree| tree.leaves().len() >= 2);
+        let chat_measure_px = chat_measure(primary_width, split_window);
+        // Only a pane wider than the measure is wrapped, and a split pane is
+        // never wrapped: its measure is already its own width.
+        let centred_chat = chat_measure_px < primary_width;
 
         let (middle, footer): (AnyElement, AnyElement) = match self.screen {
             Screen::Chat => {
@@ -4958,33 +5767,28 @@ impl Render for Dashboard {
                 // leaf under stacked splits spans the full width, and a leaf
                 // beside a sibling takes its share of it (#2472, #2473). A
                 // row is still never planned wider than its box.
-                let chat_share = self
-                    .panes
-                    .as_ref()
-                    .zip(self.transcript.session)
-                    .and_then(|(tree, id)| tree.leaf_width_share(id))
-                    .unwrap_or(1.0);
-                let primary_width = if chat_share < 1.0 {
-                    split_pane_width(pane_width, false, chat_share)
-                } else {
-                    pane_width
-                };
+                let measure = chat_measure_px;
                 let primary = transcript::view(
                     &self.transcript,
                     &self.transcript_scroll,
                     &self.live,
                     self.busy,
-                    primary_width,
+                    measure,
                     fold_handlers,
                     transcript::ViewHooks {
                         attachments: attachment_handlers,
-                        drag: None,
+                        drag: Some(self.copy_drag.clone()),
                         ctx_used: self.ctx_tokens,
                         ctx_max: self.ctx_max,
                         live_click: Some(live_click.clone()),
                     },
                 )
                 .into_any_element();
+                let primary = if measure < primary_width {
+                    chat_measure_column(primary, measure)
+                } else {
+                    primary
+                };
                 // The panes come from the tree (#2472): one leaf is the
                 // window as it was, and each split adds a divider and the
                 // panes its children hold.
@@ -5057,6 +5861,108 @@ impl Render for Dashboard {
                     },
                 )
             }
+            Screen::DirectoryPicker => {
+                // The terminal's /cd dialog, as a screen (#2527): the path on
+                // top, the rows under it, one footer line naming the keys.
+                // Flat surfaces, the same styling law the rest of the window
+                // follows (#2528).
+                let shown = palette::current();
+                let last = self.cd_entries.len().saturating_sub(1);
+                let current = self.cd_selected.min(last);
+                let mut list = div().flex().flex_col().gap_1();
+                for (index, path) in self.cd_entries.iter().enumerate() {
+                    let name = if path.ends_with("..") {
+                        "..".to_string()
+                    } else {
+                        path.file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("?")
+                            .to_string()
+                    };
+                    let selected = index == current;
+                    let mut row = div()
+                        .id(SharedString::from(format!("cd-row-{index}")))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .px_2()
+                        .py_1();
+                    if selected {
+                        row = row.bg(rgb(shown.panel_hi));
+                    }
+                    let row = row
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _ev, _window, cx| {
+                            this.cd_selected = index;
+                            this.cd_descend(index, cx);
+                        }))
+                        .child(text(name, Size::Sm, shown.text))
+                        .child(text(
+                            if path.ends_with("..") { "up" } else { "open" },
+                            Size::Xs,
+                            shown.text_muted,
+                        ));
+                    list = list.child(row);
+                }
+                let scroller = div()
+                    .id("cd-body")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(list);
+                let header = div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .w_full()
+                    .child(text(
+                        SharedString::from(self.cd_dir.display().to_string()),
+                        Size::Sm,
+                        shown.text,
+                    ))
+                    .child(text(
+                        if self.cd_show_hidden {
+                            "hidden on"
+                        } else {
+                            "hidden off"
+                        },
+                        Size::Xs,
+                        shown.text_muted,
+                    ));
+                let mut panel = div()
+                    .id("cd-panel")
+                    .w_full()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .p_3()
+                    .rounded(px(CARD_RADIUS))
+                    .border_1()
+                    .border_color(rgb(shown.panel_hi))
+                    .bg(glass_fill(shown.panel))
+                    .child(header)
+                    .child(scroller);
+                if self.cd_entries.is_empty() {
+                    panel = panel.child(text("no subdirectories", Size::Sm, shown.text_muted));
+                }
+                let footer = div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .w_full()
+                    .child(div().text_xs().text_color(rgb(shown.text_muted)).child(
+                        format!("{}/{}", current + 1, self.cd_entries.len()),
+                    ))
+                    .child(div().text_xs().text_color(rgb(shown.text_muted)).child(
+                        "up/down \u{b7} walk \u{b7} enter \u{b7} open \u{b7} . \u{b7} hidden \u{b7} tab/space \u{b7} select here \u{b7} esc \u{b7} back",
+                    ));
+                (panel.into_any_element(), footer.into_any_element())
+            }
             Screen::Usage => {
                 let body: Div = if self.dash.cache_detail_open {
                     let cache = match &self.state {
@@ -5065,7 +5971,7 @@ impl Render for Dashboard {
                     };
                     breakdown::panel(cache)
                 } else {
-                    match &self.state {
+                    let content = match &self.state {
                         LoadState::Loaded(vm) => usage_view::dashboard(vm, self.dash.focused_card),
                         LoadState::Failed(err) => div()
                             .flex()
@@ -5083,7 +5989,13 @@ impl Render for Dashboard {
                                     .text_color(rgb(palette::current().text_muted))
                                     .child(err.clone()),
                             ),
-                    }
+                    };
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(self.usage_period_switcher(cx))
+                        .child(content)
                 };
                 // The scrollable middle: an overflow-scroll element's minimum size
                 // is zero, so `flex_1` bounds it to the space left over and the
@@ -5101,12 +6013,6 @@ impl Render for Dashboard {
                     .items_center()
                     .gap_3()
                     .child(breakdown::footer(&self.dash))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(palette::current().text_muted))
-                            .child("t · today · w · weekly · m · monthly · a · all time"),
-                    )
                     .child(
                         div()
                             .text_xs()
@@ -5236,11 +6142,23 @@ impl Render for Dashboard {
                 }
                 Some(ob) => {
                     let shown = palette::current();
+                    let mut model_footer = None;
                     let (number, total) = ob.progress();
                     // The rail is the flow the current mode walks, with the
                     // step the user stands on marked. Channel sub-steps are
                     // reached from Channels and are not stops.
-                    let mut rail = div().flex().flex_col().gap_1().w(px(190.0)).pr_5();
+                    let mut rail = div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .w(px(picker_layout.onboarding_rail_width))
+                        .flex_none()
+                        .min_w_0();
+                    if picker_layout.onboarding_rail_width > 0.0 {
+                        rail = rail.pr_5();
+                    } else {
+                        rail = rail.hidden();
+                    }
                     for (n, title, here) in ob.rail() {
                         rail = rail.child(
                             div()
@@ -5248,23 +6166,29 @@ impl Render for Dashboard {
                                 .flex_row()
                                 .items_center()
                                 .gap_2()
+                                .min_w_0()
                                 .child(text(
                                     format!("{n:>2}"),
                                     Size::Xs,
                                     if here { shown.amber } else { shown.text_faint },
                                 ))
-                                .child(text(
-                                    title,
-                                    Size::Sm,
-                                    if here {
-                                        shown.text_strong
-                                    } else {
-                                        shown.text_muted
-                                    },
-                                )),
+                                .child(
+                                    text(
+                                        title,
+                                        Size::Sm,
+                                        if here {
+                                            shown.text_strong
+                                        } else {
+                                            shown.text_muted
+                                        },
+                                    )
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate(),
+                                ),
                         );
                     }
-                    let mut column = div().flex().flex_col().gap_3().flex_1().min_h_0().w_full();
+                    let mut column = div().flex().flex_col().gap_3().flex_1().min_w_0().min_h_0();
                     column = column.child(
                         div()
                             .flex()
@@ -5305,7 +6229,7 @@ impl Render for Dashboard {
                                 shown.text_faint,
                             ));
                         }
-                        for (index, info) in provider_rows {
+                        for (index, provider_name) in provider_rows {
                             let here = index == selected;
                             let mut row = div()
                                 .id(SharedString::from(format!("onboard-provider-{index}")))
@@ -5322,7 +6246,7 @@ impl Render for Dashboard {
                                     if here { shown.amber } else { shown.text_muted },
                                 ))
                                 .child(text(
-                                    info.name,
+                                    provider_name,
                                     Size::Sm,
                                     if here { shown.text_strong } else { shown.text },
                                 ));
@@ -5333,7 +6257,11 @@ impl Render for Dashboard {
                                 move |this, _ev, _window, cx| {
                                     if let Some(ob) = this.onboard.as_mut() {
                                         ob.select_provider(index);
+                                        ob.wizard.ps.model_filter.clear();
                                     }
+                                    this.models_query.clear();
+                                    this.models_index = 0;
+                                    this.refresh_onboard_models();
                                     cx.notify();
                                 },
                             )));
@@ -5498,137 +6426,30 @@ impl Render for Dashboard {
                             }
                         }
 
-                        // The model list: the provider's own catalogue, or the
-                        // config's fallback, filtered by whatever is typed in
-                        // the search row above it.
-                        let models = ob.models();
-                        let chosen = ob.model();
-                        let search_focused = ob.field == ob.search_field();
-                        // Same window as the provider list: ten models painted
-                        // whole is fine, a hundred is not, and the selection
-                        // has to stay in view when the arrows move.
-                        let (visible_models, hidden_models_above, hidden_models_below) =
-                            ob.model_rows(14);
-                        let mut model_rows = div().flex().flex_col().gap_1().w_full();
-                        if hidden_models_above > 0 {
-                            model_rows = model_rows.child(text(
-                                format!("\u{2191} {hidden_models_above} more"),
-                                Size::Xs,
-                                shown.text_faint,
-                            ));
-                        }
-                        for (index, name) in visible_models.iter() {
-                            // Copied out of the borrow: the click closure has to
-                            // own the index, or it pins the whole row list.
-                            let index = *index;
-                            let here = *name == chosen;
-                            let mut row = div()
-                                .id(SharedString::from(format!("onboard-model-{index}")))
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap_2()
-                                .px_3()
-                                .py_1()
-                                .rounded(px(6.0))
-                                .child(text(
-                                    if here { "\u{25cf}" } else { " " },
-                                    Size::Sm,
-                                    if here { shown.amber } else { shown.text_muted },
-                                ))
-                                .child(text(
-                                    name.clone(),
-                                    Size::Sm,
-                                    if here { shown.text_strong } else { shown.text },
-                                ));
-                            if here {
-                                row = row.bg(rgb(shown.panel_hi));
-                            }
-                            model_rows = model_rows.child(row.on_click(cx.listener(
-                                move |this, _ev, _window, cx| {
-                                    if let Some(ob) = this.onboard.as_mut() {
-                                        ob.wizard.ps.selected_model = index;
-                                    }
-                                    cx.notify();
-                                },
-                            )));
-                        }
-                        column = column.child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_1()
-                                .child(text(
-                                    if ob.is_fetching() {
-                                        "model \u{b7} fetching the provider catalogue".to_string()
-                                    } else {
-                                        format!("model \u{b7} {} available", models.len())
-                                    },
-                                    Size::Xs,
-                                    shown.text_faint,
-                                ))
-                                .child(
-                                    div()
-                                        .id("onboard-search")
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .px_3()
-                                        .py_2()
-                                        .rounded(px(6.0))
-                                        .bg(rgb(if search_focused {
-                                            shown.panel_hi
-                                        } else {
-                                            shown.panel
-                                        }))
-                                        .border_1()
-                                        .border_color(rgb(if search_focused {
-                                            shown.focus
-                                        } else {
-                                            shown.track
-                                        }))
-                                        .child(text(
-                                            if ob.wizard.ps.model_filter.is_empty() {
-                                                "search the list".to_string()
-                                            } else {
-                                                ob.wizard.ps.model_filter.clone()
-                                            },
-                                            Size::Sm,
-                                            if ob.wizard.ps.model_filter.is_empty() {
-                                                shown.text_faint
-                                            } else {
-                                                shown.text
-                                            },
-                                        ))
-                                        .child(text(
-                                            if search_focused { "\u{258f}" } else { "" },
-                                            Size::Sm,
-                                            shown.amber,
-                                        ))
-                                        .on_click(cx.listener(move |this, _ev, _window, cx| {
-                                            if let Some(ob) = this.onboard.as_mut() {
-                                                let field = ob.search_field();
-                                                ob.field = field;
-                                            }
-                                            cx.notify();
-                                        })),
-                                )
-                                .child(
-                                    div().id("onboard-models").w_full().child(model_rows).child(
-                                        if hidden_models_below > 0 {
-                                            text(
-                                                format!(
-                                                    "\u{2193} {hidden_models_below} more below"
-                                                ),
-                                                Size::Xs,
-                                                shown.text_faint,
-                                            )
-                                        } else {
-                                            text("", Size::Xs, shown.text_faint)
-                                        },
-                                    ),
-                                ),
+                        let active_provider = if ob.wizard.ps.is_custom() {
+                            ob.wizard.ps.custom_name.clone()
+                        } else {
+                            ob.provider_id().to_string()
+                        };
+                        let rendered = model_picker::render(
+                            cx,
+                            model_picker::ModelPickerView {
+                                rows: &self.models_rows,
+                                query: &self.models_query,
+                                selected: self.models_index,
+                                fetching: self.models_fetching,
+                                pending: self.models_pending.len(),
+                                error: self.models_fetch_error.as_deref(),
+                                active_provider: &active_provider,
+                                onboarding: true,
+                                search_focused: ob.field == ob.search_field(),
+                                max_models: 14,
+                                row_layout: picker_layout.model_row,
+                                provider_label_width: picker_layout.provider_label_width,
+                            },
                         );
+                        model_footer = Some(rendered.footer);
+                        column = column.child(rendered.body);
                     } else if ob.step() == onboard::OnboardingStep::ModeSelect {
                         // The first choice the terminal asks: how much of the
                         // flow to walk. Same two options, same step counts, so
@@ -6332,46 +7153,72 @@ impl Render for Dashboard {
                         );
                     }
 
-                    let footer = div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .justify_between()
-                        .w_full()
-                        .child(div().text_xs().text_color(rgb(shown.text_muted)).child(
-                            if ob.is_channel_step() {
-                                // Space is the key that flips a channel here,
-                                // so the hint names it instead of "save".
-                                "space \u{b7} toggle \u{b7} enter \u{b7} continue \u{b7} esc \u{b7} back"
-                            } else if ob.step()
-                                == opencrabs::tui::onboarding::OnboardingStep::BrainSetup
-                            {
-                                // This step writes files before it moves, so
-                                // the hint says what Enter starts.
-                                "enter \u{b7} write my brain files \u{b7} esc \u{b7} back"
-                            } else if ob.wizard.quick_jump {
-                                "enter \u{b7} save \u{b7} esc \u{b7} close"
-                            } else {
-                                "enter \u{b7} continue \u{b7} esc \u{b7} back"
-                            },
-                        ))
+                    let primary_hint = if ob.is_channel_step() {
+                        // Space is the key that flips a channel here, so the
+                        // hint names it instead of "save".
+                        "space \u{b7} toggle \u{b7} enter \u{b7} continue \u{b7} esc \u{b7} back"
+                    } else if ob.step() == opencrabs::tui::onboarding::OnboardingStep::BrainSetup {
+                        "enter \u{b7} write my brain files \u{b7} esc \u{b7} back"
+                    } else if ob.wizard.quick_jump {
+                        "enter \u{b7} save \u{b7} esc \u{b7} close"
+                    } else {
+                        "enter \u{b7} continue \u{b7} esc \u{b7} back"
+                    };
+                    let horizontal_hints =
+                        matches!(picker_layout.footer, model_layout::FooterLayout::Row);
+                    let mut footer = div().flex().w_full().gap_2().min_w_0();
+                    footer = match picker_layout.footer {
+                        model_layout::FooterLayout::Row => {
+                            footer.flex_row().items_center().justify_between()
+                        }
+                        model_layout::FooterLayout::Column => footer.flex_col().items_start(),
+                    };
+                    let footer = footer
                         .child(
                             div()
                                 .text_xs()
                                 .text_color(rgb(shown.text_muted))
+                                .min_w_0()
+                                .whitespace_normal()
+                                .when(horizontal_hints, |d| d.flex_1())
+                                .when(!horizontal_hints, |d| d.w_full())
+                                .child(primary_hint),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(shown.text_muted))
+                                .min_w_0()
+                                .whitespace_normal()
+                                .when(horizontal_hints, |d| d.flex_none())
+                                .when(!horizontal_hints, |d| d.w_full())
                                 .child("tab \u{b7} next field \u{b7} arrows \u{b7} walk"),
                         );
+                    let footer = if let Some(model_footer) = model_footer {
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .w_full()
+                            .min_w_0()
+                            .child(model_footer)
+                            .child(footer)
+                    } else {
+                        footer
+                    };
                     (
                         div()
                             .flex()
                             .flex_row()
                             .flex_1()
+                            .min_w_0()
                             .min_h_0()
                             .child(rail)
                             .child(
                                 div()
                                     .id("onboard-body")
                                     .flex_1()
+                                    .min_w_0()
                                     .min_h_0()
                                     .overflow_y_scroll()
                                     .child(column),
@@ -6382,18 +7229,43 @@ impl Render for Dashboard {
                 }
             },
             Screen::Models => {
-                // Every pair the terminal offers, the live one marked. Enter
-                // switches to the row under the highlight and stays, so a user
-                // can compare without reopening; Esc goes back.
                 let shown = palette::current();
-                let last = self.models_rows.len().saturating_sub(1);
-                let current = self.models_index.min(last);
-                let mut list = div().flex().flex_col().gap_1();
-                for (index, row) in self.models_rows.iter().enumerate() {
-                    let pair = row.pair();
-                    let selected = index == current;
+                // `/models` is the Brain Fuel step in the terminal
+                // (`tui::onboarding::deep_link` maps the command to
+                // `ProviderAuth`), so the window paints the same two lists in
+                // the same order: the providers, then the models of the
+                // provider the list marks. The wizard's rail, step counter and
+                // key fields describe a run, not a switch, so they stay out
+                // (#2582).
+                let visible = models::filtered_rows(&self.models_rows, &self.models_query);
+                let providers = models::providers(&visible);
+                let selected = self
+                    .models_provider
+                    .as_deref()
+                    .and_then(|id| providers.iter().position(|row| row.provider == id))
+                    .unwrap_or(0);
+                let (start, end) = opencrabs::tui::onboarding_render::visible_window(
+                    providers.len(),
+                    selected,
+                    models::PROVIDERS_VISIBLE,
+                );
+                let mut provider_list = div().flex().flex_col().gap_1().w_full().min_w_0();
+                if start > 0 {
+                    provider_list = provider_list.child(text(
+                        format!("\u{2191} {start} more"),
+                        Size::Xs,
+                        shown.text_faint,
+                    ));
+                }
+                for (offset, row) in providers[start..end].iter().enumerate() {
+                    let here = start + offset == selected;
+                    let id = row.provider.clone();
+                    // The cursor follows the click, so Enter and the arrows
+                    // keep working from the provider the hand just chose.
+                    let first = row.first;
+                    let count = row.count;
                     let mut entry = div()
-                        .id(SharedString::from(format!("model-row-{index}")))
+                        .id(SharedString::from(format!("models-provider-{id}")))
                         .flex()
                         .flex_row()
                         .items_center()
@@ -6402,56 +7274,113 @@ impl Render for Dashboard {
                         .py_2()
                         .rounded(px(6.0))
                         .child(text(
-                            if row.current { "\u{25cf}" } else { " " },
+                            if here { "\u{25cf}" } else { " " },
                             Size::Sm,
-                            if row.current {
-                                shown.amber
-                            } else {
-                                shown.text_muted
-                            },
+                            if here { shown.amber } else { shown.text_muted },
                         ))
-                        .child(text(pair, Size::Sm, shown.text))
-                        .child(text(row.provider_name.clone(), Size::Xs, shown.text_muted));
-                    if selected {
+                        .child(
+                            text(
+                                row.name.clone(),
+                                Size::Sm,
+                                if here { shown.text_strong } else { shown.text },
+                            )
+                            .flex_1()
+                            .min_w_0()
+                            .truncate(),
+                        )
+                        .child(text(
+                            format!("{count} model{}", if count == 1 { "" } else { "s" }),
+                            Size::Xs,
+                            shown.text_muted,
+                        ));
+                    if here {
                         entry = entry.bg(rgb(shown.panel_hi));
                     }
-                    list =
-                        list.child(entry.on_click(cx.listener(move |this, _ev, _window, cx| {
-                            this.models_index = index;
-                            let pair = this
-                                .models_rows
-                                .get(index)
-                                .map(models::Row::pair)
-                                .unwrap_or_default();
-                            this.switch_model(pair, cx);
-                        })));
+                    provider_list = provider_list.child(entry.on_click(cx.listener(
+                        move |this, _ev, _window, cx| {
+                            this.models_provider = Some(id.clone());
+                            this.models_index = first;
+                            cx.notify();
+                        },
+                    )));
                 }
-                let scroller = div()
-                    .id("models-body")
+                if end < providers.len() {
+                    provider_list = provider_list.child(text(
+                        format!("\u{2193} {} more below", providers.len() - end),
+                        Size::Xs,
+                        shown.text_faint,
+                    ));
+                }
+                // The pair this screen would answer with, the same line the
+                // step prints under its title. Read once: the picker needs the
+                // provider for an unknown id, and the header needs both.
+                let live = agent_bridge::bridge().map(|bridge| {
+                    (
+                        bridge.service.provider_name(),
+                        bridge.service.provider_model(),
+                    )
+                });
+                let pair = live
+                    .as_ref()
+                    .map(|(provider, model)| format!("{provider} \u{b7} {model}"))
+                    .unwrap_or_default();
+                let active_provider = live
+                    .as_ref()
+                    .map(|(provider, _)| provider.as_str())
+                    .unwrap_or_default();
+                let header = div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(text(
+                        onboard::OnboardingStep::ProviderAuth.title(),
+                        Size::Xl,
+                        shown.text_title,
+                    ))
+                    .child(text(pair, Size::Xs, shown.text_faint));
+                let rendered = model_picker::render(
+                    cx,
+                    model_picker::ModelPickerView {
+                        rows: &self.models_rows,
+                        query: &self.models_query,
+                        selected: self.models_index,
+                        fetching: self.models_fetching,
+                        pending: self.models_pending.len(),
+                        error: self.models_fetch_error.as_deref(),
+                        active_provider,
+                        onboarding: false,
+                        search_focused: true,
+                        max_models: 18,
+                        row_layout: picker_layout.model_row,
+                        provider_label_width: picker_layout.provider_label_width,
+                    },
+                );
+                let footer = rendered.footer.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(shown.text_muted))
+                        .min_w_0()
+                        .whitespace_normal()
+                        .child("type \u{b7} filter or enter a custom id \u{b7} enter \u{b7} switch \u{b7} esc \u{b7} back"),
+                );
+                let body = div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
-                    .child(list);
-                let count = self.models_rows.len();
-                let footer = div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
                     .w_full()
-                    .child(div().text_xs().text_color(rgb(shown.text_muted)).child(
-                        SharedString::from(format!(
-                            "{count} model{}",
-                            if count == 1 { "" } else { "s" }
-                        )),
-                    ))
+                    .child(header)
                     .child(
                         div()
-                            .text_xs()
-                            .text_color(rgb(shown.text_muted))
-                            .child("enter \u{b7} switch \u{b7} esc \u{b7} back"),
-                    );
-                (scroller.into_any_element(), footer.into_any_element())
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(text("provider", Size::Xs, shown.text_faint))
+                            .child(div().id("models-providers").w_full().child(provider_list)),
+                    )
+                    .child(rendered.body);
+                (body.into_any_element(), footer.into_any_element())
             }
             Screen::Skills => {
                 // The same list `/skills` opens in the terminal, from the same
@@ -6564,7 +7493,11 @@ impl Render for Dashboard {
                     .flex_row()
                     .items_center()
                     .justify_between()
-                    .child(text("themes", Size::Sm, shown.text))
+                    .w_full()
+                    .pb_2()
+                    .border_b_1()
+                    .border_color(rgb(shown.track))
+                    .child(text("Themes", Size::Sm, shown.text))
                     .child(div().text_xs().text_color(rgb(shown.text_muted)).child(
                         SharedString::from(format!("{}/{}", current + 1, names.len())),
                     ));
@@ -6619,14 +7552,14 @@ impl Render for Dashboard {
                         .justify_center()
                         .px_3()
                         .py_1()
-                        .rounded(px(6.0))
+                        .rounded(px(CARD_RADIUS))
                         .bg(rgb(shown.panel_hi))
                         .border_1()
                         .border_color(rgb(shown.accent))
                         .text_color(rgb(shown.text))
                         .cursor_pointer()
                         .on_click(keep)
-                        .child("keep"),
+                        .child("Keep"),
                 );
                 let hint = match &picked {
                     Some(name) => format!(
@@ -6768,6 +7701,7 @@ impl Render for Dashboard {
             .flex()
             .flex_col()
             .flex_1()
+            .h_full()
             .min_w_0()
             .min_h_0()
             .gap_3()
@@ -6795,7 +7729,14 @@ impl Render for Dashboard {
                 .items_center()
                 .gap_3()
                 .min_w_0()
-                .w_full();
+                // Auto cross-axis stretch lets the negative gutters reach
+                // both edges. A definite full width would stop the right
+                // hairline short; the title and menu keep their inset.
+                .mx(rems(-1.5))
+                .px_6()
+                .pb_2()
+                .border_b_1()
+                .border_color(topic_tabs::separator_color());
             header = match name {
                 Some(name) => header.child(session_title(&name)),
                 None => header.child(div().flex_1()),
@@ -6841,7 +7782,11 @@ impl Render for Dashboard {
             }
         }
         if let Some(bar) = topic_top {
-            right = right.child(bar);
+            // The topic bar is a row of the chat's own stack, so it takes the
+            // same measure as the text under it (#2590). It is drawn above the
+            // screen match, which is why the wrapper is a named function and
+            // not a closure: the same two values have to reach it here.
+            right = right.child(central(bar, centred_chat, chat_measure_px));
         }
         right = right.child(middle);
         right = match self.screen {
@@ -6852,40 +7797,69 @@ impl Render for Dashboard {
                 // called the move above the plan card out.
                 let mut col = right;
                 if let Some(plan_view) = self.plan.view() {
-                    col = col.child(plan_view);
+                    col = col.child(central(
+                        plan_view.into_any_element(),
+                        centred_chat,
+                        chat_measure_px,
+                    ));
                 }
                 let waiting = self.queued_for_strip();
                 if !waiting.is_empty() {
-                    col = col.child(queue_strip(&waiting));
+                    col = col.child(central(
+                        queue_strip(&waiting).into_any_element(),
+                        centred_chat,
+                        chat_measure_px,
+                    ));
                 }
                 // A detached command sits directly above the editor: the same
                 // place the TUI puts it (on the input box's top border), which
                 // is where the eye goes while waiting.
                 if let Some(label) = self.running_tasks_label() {
-                    col = col.child(task_strip(label));
+                    col = col.child(central(
+                        task_strip(label).into_any_element(),
+                        centred_chat,
+                        chat_measure_px,
+                    ));
                 }
                 // The slash-command list sits over the input while a name is
                 // not being spelled, the terminal's own placement. The name
                 // prompt itself is the overlay below (#2398).
                 if self.topic_draft.is_none() {
+                    // The list floats over the composer, so it lines up with
+                    // it: same measure, still the child directly above the
+                    // editor, so the order it paints in does not change
+                    // (#2590).
                     let popup = self.editor.read(cx).command_popup();
                     if let Some((names, selected)) = popup {
-                        col = col.child(command_popup_view(&names, selected));
+                        col = col.child(central(
+                            command_popup_view(&names, selected).into_any_element(),
+                            centred_chat,
+                            chat_measure_px,
+                        ));
                     } else if let Some((items, selected)) = self.editor.read(cx).emoji_popup() {
-                        col = col.child(emoji_popup_view(&items, selected));
+                        col = col.child(central(
+                            emoji_popup_view(&items, selected).into_any_element(),
+                            centred_chat,
+                            chat_measure_px,
+                        ));
                     }
                 }
-                col = col.child(self.editor.clone());
+                col = col.child(central(
+                    self.editor.clone().into_any_element(),
+                    centred_chat,
+                    chat_measure_px,
+                ));
                 if let Some(strip) = topic_bottom {
-                    col = col.child(strip);
+                    col = col.child(central(strip, centred_chat, chat_measure_px));
                 }
-                col.child(footer)
+                col.child(central(footer, centred_chat, chat_measure_px))
             }
             Screen::Usage => right.child(footer),
             Screen::Files => right.child(footer),
             Screen::Themes => right.child(footer),
             Screen::Models => right.child(footer),
             Screen::Skills => right.child(footer),
+            Screen::DirectoryPicker => right.child(footer),
             Screen::Onboard => right.child(footer),
             Screen::MissionControl => right.child(footer),
         };
@@ -7239,22 +8213,25 @@ impl Render for Dashboard {
             });
             let idle_revealed = state.idle_ready(std::time::Instant::now());
             root = root.child(command_palette::overlay(
-                state,
+                command_palette::FinderOverlayState {
+                    state,
+                    idle_revealed,
+                    caret_on: self.finder_caret,
+                    view: cx.entity().downgrade(),
+                    paint: self.finder_paint.clone(),
+                },
                 handlers,
                 chip,
                 wheel,
                 find::channel_hint(state.query(), &self.finder_channels),
-                idle_revealed,
-                self.finder_caret,
             ));
         }
         root
     }
 }
 
-/// The drag handle between the rail and the chat pane. One narrow column with
-/// the resize cursor; the pointer position during the drag comes from the
-/// window, so this element only has to catch the press.
+/// The drag handle between the rail and the chat pane. The hit target stays
+/// wide, but only its centered child paints a hairline.
 fn splitter(
     grab: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> gpui::Stateful<Div> {
@@ -7263,9 +8240,16 @@ fn splitter(
         .w(px(4.0))
         .h_full()
         .flex_none()
+        .flex()
+        .justify_center()
         .cursor_col_resize()
-        .bg(rgb(palette::current().panel_hi))
-        .hover(|d| d.bg(rgb(palette::current().accent)))
+        .child(
+            div()
+                .w(px(1.0))
+                .h_full()
+                .bg(topic_tabs::separator_color())
+                .hover(|d| d.bg(rgb(palette::current().accent))),
+        )
         .on_mouse_down(MouseButton::Left, grab)
 }
 
@@ -7376,7 +8360,6 @@ fn main() {
             closed: closed.clone(),
             topic_icons: topic_icons.clone(),
             topic_titles: HashMap::new(),
-            collapsed: HashSet::new(),
             selected: None,
             cursor: None,
             rail_menu: None,
@@ -7392,7 +8375,6 @@ fn main() {
             closed,
             topic_icons,
             topic_titles: HashMap::new(),
-            collapsed: HashSet::new(),
             selected: None,
             cursor: None,
             rail_menu: None,
@@ -7431,6 +8413,17 @@ fn main() {
             |window, cx| {
                 let focus = cx.focus_handle();
                 let editor = cx.new(editor::Editor::new);
+                // A drag-copied range lands on the clipboard inside the
+                // transcript, which cannot see the composer. The dashboard owns
+                // both halves, so it is the one that turns a landed copy into
+                // the composer's own notice (#2587).
+                let copy_drag = Rc::new(CopyDrag::default());
+                {
+                    let editor = editor.downgrade();
+                    copy_drag.set_copied_listener(Rc::new(move |cx: &mut App| {
+                        let _ = editor.update(cx, |editor, cx| editor.show_copied(cx));
+                    }));
+                }
                 let view = cx.new(move |cx: &mut Context<Dashboard>| {
                     // Enter on the editor is a send: routed into the agent
                     // turn path on the Dashboard itself.
@@ -7517,6 +8510,9 @@ fn main() {
                         finder: None,
                         finder_channels: Vec::new(),
                         finder_caret: true,
+                        finder_activity: std::time::Instant::now(),
+                        finder_paint: cx.new(|_| command_palette::FinderPaint::default()),
+                        finder_selecting: false,
                         chip_channel_names: chip_names,
                         channel_chip: channel_chip_line(),
                         daemon_starting: false,
@@ -7547,7 +8543,7 @@ fn main() {
                         split_areas: Rc::new(std::cell::RefCell::new(HashMap::new())),
                         split_drag: None,
                         split_target: None,
-                        copy_drag: Rc::new(CopyDrag::default()),
+                        copy_drag,
                         split_pick: None,
                         split_creating: false,
                         topic_draft_icon: None,
@@ -7577,8 +8573,20 @@ fn main() {
                         themes_pick: None,
                         themes_index: 0,
                         themes_history: Vec::new(),
+                        cd_dir: std::env::current_dir().unwrap_or_default(),
+                        cd_entries: Vec::new(),
+                        cd_selected: 0,
+                        cd_show_hidden: false,
                         models_rows: Vec::new(),
+                        models_query: String::new(),
                         models_index: 0,
+                        models_provider: None,
+                        models_fetch: None,
+                        models_fetch_lifecycle:
+                            opencrabs::ui_core::model_selector::FetchLifecycle::default(),
+                        models_pending: Vec::new(),
+                        models_fetching: false,
+                        models_fetch_error: None,
                         skills_all: Vec::new(),
                         skills_rows: Vec::new(),
                         skills_query: String::new(),
@@ -7713,14 +8721,28 @@ fn mission_control_cards(
     nav: &mission_control::Nav,
     shown: palette::Palette,
 ) -> Vec<Div> {
-    let analytics = snapshot.map(|s| &s.analytics);
-    let focused = nav.panel == mission_control::Panel::Analytics;
     let mut cards = vec![
         mc_inbox_panel(snapshot, nav, shown),
         mc_activity_panel(snapshot, nav, shown),
         mc_schedule_panel(snapshot, nav, shown),
-        mc_totals_panel(snapshot, focused, shown),
     ];
+    cards.extend(mc_analytics_cards(
+        snapshot,
+        nav.panel == mission_control::Panel::Analytics,
+        shown,
+    ));
+    cards
+}
+
+/// The analytics sections shared by the dashboard and its detail popup.
+/// Reusing this list keeps the popup from becoming a second, stale renderer.
+fn mc_analytics_cards(
+    snapshot: Option<&mission_control::Snapshot>,
+    focused: bool,
+    shown: palette::Palette,
+) -> Vec<Div> {
+    let analytics = snapshot.map(|s| &s.analytics);
+    let mut cards = vec![mc_totals_panel(snapshot, focused, shown)];
     let Some(a) = analytics else {
         return cards;
     };
@@ -7861,6 +8883,14 @@ fn mc_inbox_panel(
             shown.text_normal,
         ));
         rows.push(McRow::Line(format!("  {}", item.summary), shown.text_faint));
+        rows.push(McRow::Line(
+            format!(
+                "  {} \u{b7} {}",
+                item.source,
+                mc_relative_time(Some(item.created_at))
+            ),
+            shown.text_faint,
+        ));
     }
     let focused = nav.panel == mission_control::Panel::Inbox;
     mc_panel(
@@ -7870,7 +8900,7 @@ fn mc_inbox_panel(
         "No pending proposals.",
         focused,
         // The selected item's first line, in the rows actually drawn.
-        (focused && !items.is_empty()).then_some((selected - start) * 2),
+        (focused && !items.is_empty()).then(|| (selected - start) * 3),
         shown,
     )
 }
@@ -7912,7 +8942,7 @@ fn mc_window_label(window: mission_control::TimeWindow) -> &'static str {
 fn mc_rate_color(rate: f64, shown: palette::Palette) -> u32 {
     if rate >= 25.0 {
         shown.red
-    } else if rate >= 5.0 {
+    } else if rate >= 10.0 {
         shown.warn
     } else {
         shown.text_muted
@@ -7969,7 +8999,8 @@ fn mc_totals_panel(
             format!("{} applied", a.rsi_applied_total),
             shown.text_muted,
         ));
-        rows.push(McRow::Line(
+        rows.push(McRow::Pair(
+            "RSI live".to_string(),
             opencrabs::brain::mission_control::staleness::rsi_staleness_line(
                 chrono::Utc::now().timestamp(),
                 a.rsi_last_call_ts,
@@ -8072,9 +9103,13 @@ fn mc_flakiest_panel(
     )
 }
 
-/// Phantom tool calls: detected, resolved, then the per-model breakdown the
-/// terminal shows.
-fn mc_phantoms_panel(a: &McAnalytics, shown: palette::Palette) -> Div {
+/// Rows for the phantom card. A totals-only line can ellipsize into three
+/// dots under the header, so an empty model breakdown stays empty and lets
+/// the shared panel render its empty state instead.
+fn mc_phantoms_rows(a: &McAnalytics, shown: palette::Palette) -> Vec<McRow> {
+    if a.phantom.by_model.is_empty() {
+        return Vec::new();
+    }
     let mut rows = vec![McRow::Line(
         format!(
             "{} detected, {} resolved ({:.1}%)",
@@ -8089,10 +9124,16 @@ fn mc_phantoms_panel(a: &McAnalytics, shown: palette::Palette) -> Div {
             shown.text_muted,
         ));
     }
+    rows
+}
+
+/// Phantom tool calls: detected, resolved, then the per-model breakdown the
+/// terminal shows.
+fn mc_phantoms_panel(a: &McAnalytics, shown: palette::Palette) -> Div {
     mc_panel(
         "phantoms",
         "Phantoms".to_string(),
-        rows,
+        mc_phantoms_rows(a, shown),
         "No phantoms detected.",
         false,
         None,
@@ -8138,8 +9179,32 @@ fn mc_brain_panel(a: &McAnalytics, shown: palette::Palette) -> Div {
     )
 }
 
-/// The busiest tools, with the call count the terminal pairs with each name.
+const MC_TOOL_BAR_WIDTH: usize = 12;
+
+/// The same proportional usage bar as the terminal, kept fixed-width so the
+/// call count and failure rate remain aligned in a GUI card.
+fn mc_tool_bar(total: i64, max: i64) -> String {
+    let max = max.max(1);
+    let filled = ((total.max(0) as f64 / max as f64) * MC_TOOL_BAR_WIDTH as f64)
+        .round()
+        .clamp(0.0, MC_TOOL_BAR_WIDTH as f64) as usize;
+    format!(
+        "{}{}",
+        "█".repeat(filled),
+        "░".repeat(MC_TOOL_BAR_WIDTH - filled)
+    )
+}
+
+/// The busiest tools, with the proportional bar, call count and failure rate
+/// the terminal pairs with each name.
 fn mc_top_tools_panel(a: &McAnalytics, shown: palette::Palette) -> Div {
+    let max = a
+        .top_tools
+        .iter()
+        .map(|t| t.total)
+        .max()
+        .unwrap_or(1)
+        .max(1);
     let rows = a
         .top_tools
         .iter()
@@ -8152,7 +9217,13 @@ fn mc_top_tools_panel(a: &McAnalytics, shown: palette::Palette) -> Div {
             };
             McRow::Pair(
                 t.name.clone(),
-                format!("{} calls \u{b7} {} failed", t.total, t.failures),
+                format!(
+                    "{} {} calls \u{b7} {} failed \u{b7} {:.1}%",
+                    mc_tool_bar(t.total, max),
+                    t.total,
+                    t.failures,
+                    t.fail_rate
+                ),
                 color,
             )
         })
@@ -8240,7 +9311,13 @@ fn mc_schedule_panel(
             ""
         };
         rows.push(McRow::Line(
-            format!("{} \u{b7} {}{}", job.label, job.schedule, state),
+            format!(
+                "{} \u{b7} {} \u{b7} {}{}",
+                job.kind.label(),
+                job.label,
+                job.schedule,
+                state
+            ),
             color,
         ));
     }
@@ -8263,22 +9340,24 @@ fn mc_schedule_panel(
     )
 }
 
-/// The full record for the selected proposal, drawn over everything: the same
-/// fields the terminal's detail popup shows (`tui/render/mission_control/
-/// detail_popup.rs`), read from the snapshot that is already on hand. Enter
-/// opens it, Esc closes it, and a click on the card is inert so reading it
-/// never throws it away.
+/// The focused panel's full record or analytics dashboard, drawn over
+/// everything. Field order follows `tui/render/mission_control/detail_popup.rs`
+/// and every value comes from the snapshot already on hand. Enter opens it,
+/// Esc closes it, and a click on the card is inert so reading never throws it
+/// away.
 fn mission_control_detail(
     snapshot: Option<&mission_control::Snapshot>,
     nav: &mission_control::Nav,
     close: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     let shown = palette::current();
-    let item = snapshot.and_then(|s| s.inbox.get(nav.selected)).cloned();
-    let title = match &item {
-        Some(item) => format!("{} detail \u{b7} {}", nav.panel.title(), item.kind.label()),
-        None => format!("{} detail", nav.panel.title()),
-    };
+    let title = match nav.panel {
+        mission_control::Panel::Inbox => snapshot
+            .and_then(|s| s.inbox.get(nav.selected))
+            .map(|item| format!("Inbox detail \u{b7} {}", item.kind.label())),
+        _ => None,
+    }
+    .unwrap_or_else(|| format!("{} detail", nav.panel.title()));
     let close = std::rc::Rc::new(close);
     let scrim_close = close.clone();
     let button_close = close.clone();
@@ -8288,9 +9367,10 @@ fn mission_control_detail(
         .flex_col()
         .gap_1()
         .p_3()
+        .w_full()
         .max_w(px(720.0))
         .max_h(px(560.0))
-        // A long summary is clipped to the card instead of painting past it.
+        // The field area scrolls inside this bounded card.
         .overflow_hidden()
         .rounded(px(CARD_RADIUS))
         .border_1()
@@ -8323,34 +9403,22 @@ fn mission_control_detail(
                         .on_click(move |ev, window, cx| button_close(ev, window, cx)),
                 ),
         );
-    match item {
-        Some(item) => {
-            // The terminal's field order, so the two clients read alike.
-            card = card
-                .child(mc_kv("Kind", item.kind.label().to_string(), shown))
-                .child(mc_kv("Label", item.label.clone(), shown))
-                .child(mc_kv("Source", item.source.clone(), shown))
-                .child(mc_kv(
-                    "Filed",
-                    item.created_at.format("%Y-%m-%d %H:%M UTC").to_string(),
-                    shown,
-                ))
-                .child(mc_kv("ID", item.id.clone(), shown))
-                .child(
-                    div()
-                        .mt_2()
-                        .text_xs()
-                        .text_color(rgb(shown.text_title))
-                        .child("Summary"),
-                );
-            for line in item.summary.split('\n') {
-                card = card.child(text(line.to_string(), Size::Xs, shown.text_normal));
-            }
-        }
-        None => {
-            card = card.child(text("No proposal selected.", Size::Xs, shown.text_faint));
-        }
-    }
+    let body = match nav.panel {
+        mission_control::Panel::Inbox => mc_inbox_detail(
+            snapshot.and_then(|s| s.inbox.get(nav.selected)).cloned(),
+            shown,
+        ),
+        mission_control::Panel::Activity => mc_activity_detail(
+            snapshot.and_then(|s| s.activity.get(nav.selected)).cloned(),
+            shown,
+        ),
+        mission_control::Panel::Schedule => mc_schedule_detail(
+            snapshot.and_then(|s| s.schedule.get(nav.selected)).cloned(),
+            shown,
+        ),
+        mission_control::Panel::Analytics => mc_analytics_detail(snapshot, shown),
+    };
+    card = card.child(body);
     div()
         .id("mission-control-detail-scrim")
         // Modal: the dim scrim owns the pointer, so a click meant for a panel
@@ -8367,6 +9435,202 @@ fn mission_control_detail(
         .bg(rgba(0x0a0a0add))
         .on_click(move |ev, window, cx| scrim_close(ev, window, cx))
         .child(card)
+}
+
+/// The scrollable body shared by all four detail views.
+fn mc_detail_body() -> Stateful<Div> {
+    div()
+        .id("mission-control-detail-fields")
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h_0()
+        .w_full()
+        .gap_1()
+        .overflow_y_scroll()
+}
+
+fn mc_detail_heading(title: &'static str, shown: palette::Palette) -> Div {
+    div()
+        .mt_2()
+        .text_xs()
+        .text_color(rgb(shown.text_title))
+        .child(title)
+}
+
+fn mc_inbox_detail(item: Option<McInboxItem>, shown: palette::Palette) -> Stateful<Div> {
+    let mut body = mc_detail_body();
+    let Some(item) = item else {
+        return body.child(text("No proposal selected.", Size::Xs, shown.text_faint));
+    };
+    body = body
+        .child(mc_kv("Kind", item.kind.label().to_string(), shown))
+        .child(mc_kv("Label", item.label.clone(), shown))
+        .child(mc_kv("Source", item.source.clone(), shown))
+        .child(mc_kv(
+            "Filed",
+            item.created_at.format("%Y-%m-%d %H:%M UTC").to_string(),
+            shown,
+        ))
+        .child(mc_kv("ID", item.id.clone(), shown))
+        .child(mc_detail_heading("Summary", shown));
+    for line in item.summary.split('\n') {
+        body = body.child(text(line.to_string(), Size::Xs, shown.text_normal));
+    }
+    body
+}
+
+fn mc_activity_level_label(
+    level: opencrabs::brain::mission_control::McActivityLevel,
+) -> &'static str {
+    use opencrabs::brain::mission_control::McActivityLevel;
+    match level {
+        McActivityLevel::Success => "success",
+        McActivityLevel::Info => "info",
+        McActivityLevel::Warn => "warn",
+        McActivityLevel::Error => "error",
+    }
+}
+
+fn mc_activity_detail(entry: Option<McActivity>, shown: palette::Palette) -> Stateful<Div> {
+    let mut body = mc_detail_body();
+    let Some(entry) = entry else {
+        return body.child(text("No activity selected.", Size::Xs, shown.text_faint));
+    };
+    body = body
+        .child(mc_kv(
+            "When",
+            entry
+                .timestamp
+                .map(|ts| ts.format("%Y-%m-%d %H:%M UTC").to_string())
+                .unwrap_or_else(|| "undated".into()),
+            shown,
+        ))
+        .child(mc_kv("Source", entry.source.clone(), shown))
+        .child(mc_kv(
+            "Level",
+            mc_activity_level_label(entry.level).to_string(),
+            shown,
+        ))
+        .child(mc_detail_heading("Detail", shown));
+    for line in entry.detail.split('\n') {
+        body = body.child(text(line.to_string(), Size::Xs, shown.text_normal));
+    }
+    body
+}
+
+fn mc_schedule_duration(secs: i64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else {
+        format!("{}m {}s", secs / 60, secs % 60)
+    }
+}
+
+fn mc_schedule_detail(job: Option<McScheduleItem>, shown: palette::Palette) -> Stateful<Div> {
+    let mut body = mc_detail_body();
+    let Some(job) = job else {
+        return body.child(text(
+            "No schedule item selected.",
+            Size::Xs,
+            shown.text_faint,
+        ));
+    };
+    let kind = match job.kind {
+        opencrabs::brain::mission_control::McScheduleKind::Cron => "cron job",
+        opencrabs::brain::mission_control::McScheduleKind::PendingApproval => "pending approval",
+    };
+    let state = if job.awaiting_user {
+        "awaiting user"
+    } else if !job.enabled {
+        "paused"
+    } else {
+        "active"
+    };
+
+    body = body
+        .child(mc_kv("Kind", kind.to_string(), shown))
+        .child(mc_kv("Label", job.label.clone(), shown))
+        .child(mc_kv("State", state.to_string(), shown))
+        .child(mc_detail_heading("Schedule", shown))
+        .child(mc_kv("Cron", job.schedule.clone(), shown))
+        .child(mc_kv(
+            "Next",
+            mc_timestamp(job.next_run_at).unwrap_or_else(|| "not scheduled".into()),
+            shown,
+        ))
+        .child(mc_detail_heading("Last run", shown))
+        .child(mc_kv(
+            "At",
+            mc_timestamp(job.last_run_at).unwrap_or_else(|| "never".into()),
+            shown,
+        ));
+    if let Some(status) = job.last_run_status.as_deref() {
+        let status = match status {
+            "running" => "running...",
+            other => other,
+        };
+        body = body.child(mc_kv("Status", status.to_string(), shown));
+    }
+    if let Some(cost) = job.last_run_cost {
+        body = body.child(mc_kv("Cost", format!("${cost:.4}"), shown));
+    }
+    if let Some(secs) = job.last_run_duration_secs {
+        body = body.child(mc_kv("Duration", mc_schedule_duration(secs), shown));
+    }
+    if let Some(target) = job.deliver_to.as_deref() {
+        body = body
+            .child(mc_detail_heading("Delivery", shown))
+            .child(mc_kv("Target", target.to_string(), shown));
+    }
+    if !job.prompt.is_empty() {
+        let prompt = if job.prompt.len() > 300 {
+            format!(
+                "{}...",
+                opencrabs::utils::string::truncate_str(&job.prompt, 300)
+            )
+        } else {
+            job.prompt.clone()
+        };
+        body = body.child(mc_detail_heading("Prompt", shown));
+        for line in prompt.split('\n') {
+            body = body.child(text(line.to_string(), Size::Xs, shown.text_normal));
+        }
+    }
+    body = body.child(mc_detail_heading("Meta", shown)).child(mc_kv(
+        "Created",
+        job.created_at.format("%Y-%m-%d %H:%M UTC").to_string(),
+        shown,
+    ));
+    if let Some(profile) = job.profile_name.as_deref() {
+        body = body.child(mc_kv("Profile", profile.to_string(), shown));
+    }
+    body.child(mc_kv("ID", job.id.clone(), shown))
+}
+
+fn mc_analytics_detail(
+    snapshot: Option<&mission_control::Snapshot>,
+    shown: palette::Palette,
+) -> Stateful<Div> {
+    let cards = mc_analytics_cards(snapshot, true, shown);
+    let count = cards.len();
+    let mut cards = cards.into_iter();
+    let mut grid = div().flex().flex_col().w_full().gap_2().pr_1();
+    for slots in mission_control::grid_rows(count, 2) {
+        let mut row = div().flex().flex_row().w_full().h(px(180.0)).gap_2();
+        for slot in slots {
+            match slot {
+                Some(_) => {
+                    if let Some(card) = cards.next() {
+                        row = row.child(card);
+                    }
+                }
+                None => row = row.child(div().flex_1().min_w_0()),
+            }
+        }
+        grid = grid.child(row);
+    }
+    mc_detail_body().child(grid)
 }
 
 /// How many log lines the window draws at once: a page key moves by a screen,
@@ -8545,6 +9809,11 @@ fn mc_kv(key: &str, value: String, shown: palette::Palette) -> Div {
                 .truncate()
                 .child(value),
         )
+}
+
+/// Format an optional timestamp for the schedule detail fields.
+fn mc_timestamp(ts: Option<chrono::DateTime<chrono::Utc>>) -> Option<String> {
+    ts.map(|ts| ts.format("%Y-%m-%d %H:%M UTC").to_string())
 }
 
 /// An event's age in the terminal's own shorthand, and "undated" when the
@@ -8900,43 +10169,45 @@ fn topic_strip(
     toggle_edge: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     tabs: Vec<AnyElement>,
 ) -> Div {
-    // A square target the size of the rail's action icons, so it is easy to
-    // hit and reads as a control rather than a stray glyph (#2414).
+    // The orientation control shares the topic cell's generous hit target.
+    let control = topic_tabs::style(edge.is_vertical());
+    let separator = topic_tabs::separator_color();
     let leading = div()
         .id("topic-edge-button")
         .flex()
         .items_center()
         .justify_center()
-        .size(rems(1.9))
-        .rounded(px(4.0))
+        .size(rems(control.control_rems))
         .flex_none()
         .cursor_pointer()
-        .text_color(rgb(palette::current().text_muted))
-        .text_size(rems(1.25))
         .hover(|d| d.bg(rgb(palette::current().panel_hi)))
         .on_click(toggle_edge)
-        .child(SharedString::from("\u{25EB}"));
+        .child(topic_icons::orientation_icon(
+            control.control_icon_rems,
+            palette::current().text_muted,
+        ));
     if edge.is_vertical() {
-        // The column hugs its chips. A fixed 12rem width reserved 192px of
-        // empty rail for four narrow chips and pushed the chat ~450px right
-        // on the owner's window: that empty column was the dead space he
-        // reported for two days (#2480). max_w still stops a long topic name
-        // from eating the window.
+        // A compact fixed rail gives every cell the same square geometry.
         div()
             .flex()
             .flex_col()
             .flex_none()
-            .max_w(rems(12.0))
-            .items_start()
+            .w(rems(topic_tabs::CELL_REMS))
+            .h_full()
+            .items_center()
             .gap_2()
-            .p_2()
+            .py_2()
+            .when(edge == topic_tabs::Edge::Left, |d| d.border_r_1())
+            .when(edge == topic_tabs::Edge::Right, |d| d.border_l_1())
+            .border_color(separator)
             .child(leading)
             .child(
-                // Chips sit at their own width on the rail's leading edge, the
-                // way Telegram's forum list reads. Centring them left a small
-                // square control floating in 90% empty column, and stretching
-                // them was the wall of colour the owner screenshotted (#2480).
-                div().flex().flex_col().items_start().gap_1().children(tabs),
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_1()
+                    .children(tabs),
             )
     } else {
         div()
@@ -8945,6 +10216,11 @@ fn topic_strip(
             .items_center()
             .gap_2()
             .min_w_0()
+            // Match the title hairline end to end without moving the tabs.
+            .mx(rems(-1.5))
+            .px_6()
+            .border_b_1()
+            .border_color(separator)
             .child(leading)
             // The tabs wrap onto a second line rather than being cut off, so a
             // narrow window never hides a topic (#2414).
@@ -8990,16 +10266,12 @@ fn topic_label(name: &str) -> String {
 }
 
 /// One tab of the topic strip (#2400, #2480). The open session is marked the
-/// way Telegram's topic bar marks it: the icon and the name take the accent
-/// colour, and a 2px accent rule sits under the tab on a horizontal bar or on
-/// its leading edge down a rail.
+/// way Telegram's topic bar marks it: the name takes the accent colour, with
+/// an opaque rule on the cell's leading edge down a rail or bottom edge on a
+/// horizontal bar.
 ///
-/// The mark is always 2px, transparent while the tab is closed, so switching
-/// topics never changes a tab's height and the row does not jump.
-///
-/// A chip is a label, so it hugs its content: `.flex_none()` plus the shape's
-/// own padding. The vertical rail shipped without that and one chip grew to
-/// the column's width, which is the wall of colour the owner reported.
+/// Both marks reserve their space while inactive, so switching topics never
+/// changes the strip's geometry. The cells themselves stay transparent.
 fn topic_tab(
     id: Uuid,
     label: String,
@@ -9010,47 +10282,48 @@ fn topic_tab(
     on_right: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
     let colour = if current {
-        palette::current().accent
+        topic_tabs::TELEGRAM_ACCENT
     } else {
         palette::current().text_muted
     };
-    let rule = if current {
-        palette::current().accent
-    } else {
-        0x00000000
-    };
+    let rule = topic_tabs::focus_color(topic_tabs::TELEGRAM_ACCENT, current);
     let vertical = shape == topic_bar::ChipShape::IconAbove;
+    let style = topic_tabs::style(vertical);
+    let content = div()
+        .when(vertical, |d| {
+            d.w_full().text_center().text_xs().line_clamp(2)
+        })
+        .child(SharedString::from(label));
     div()
         .id(SharedString::from(format!("topic-tab-{id}")))
         .flex()
         .flex_none()
         .items_center()
+        .justify_center()
         .text_sm()
         .text_color(rgb(colour))
         .cursor_pointer()
         .when(vertical, |d| {
-            d.flex_col()
-                .gap_1()
-                .px_1p5()
-                .py_1()
-                .border_l_2()
-                .border_color(rgba(rule))
+            d.size(rems(style.cell_rems))
+                .flex_col()
+                .gap_0()
+                .p_1()
+                .border_l(px(style.focus_bar_px))
+                .border_color(rule)
         })
         .when(!vertical, |d| {
             d.flex_row()
                 .gap_1()
                 .px_2()
                 .py_0p5()
-                .border_b_2()
-                .border_color(rgba(rule))
+                .border_b(px(style.focus_bar_px))
+                .border_color(rule)
         })
-        .rounded(px(4.0))
-        .when(current, |d| d.bg(rgb(palette::current().panel_hi)))
-        .hover(|d| d.bg(rgb(palette::current().panel_hi)))
+        .hover(|d| d.text_color(rgb(topic_tabs::TELEGRAM_ACCENT)))
         .on_click(on_click)
         .on_mouse_down(MouseButton::Right, on_right)
         .children(icon)
-        .child(SharedString::from(label))
+        .child(content)
 }
 
 /// The update dialog (#2406). The first stage asks whether to update by
@@ -9260,6 +10533,89 @@ fn split_pane_width(content: f32, stacked: bool, share: f32) -> f32 {
         content
     } else {
         (content - SPLIT_GAP_PX * 2.0 - SPLIT_HANDLE_PX) * share
+    }
+}
+
+/// The widest the conversation itself draws, in px (#2586). A line of body
+/// text past this is a wall: the eye travels too far back to the left margin
+/// to find the next one, so the transcript is centred inside a wide pane
+/// instead of stretching edge to edge. Any pane under this width draws at
+/// its own width, unchanged.
+pub const CHAT_MEASURE_PX: f32 = 760.0;
+
+/// What the conversation draws at, given the pane it sits in and whether the
+/// window is split (#2586). A split window is exempt: every pane there takes
+/// its full span, however narrow, because a half-width pane is already the
+/// measure. The cap is for the single pane only, so it applies when `split`
+/// is false and never in a half of a split.
+pub fn chat_measure(pane_width: f32, split: bool) -> f32 {
+    if split {
+        pane_width
+    } else {
+        pane_width.min(CHAT_MEASURE_PX)
+    }
+}
+
+/// The column a single pane draws its conversation in (#2586): the transcript
+/// sits at the measure and the slack goes to the two margins, so the text is
+/// centred in the window instead of stretching to a wall. Only a pane that is
+/// wider than the measure is wrapped, so a narrow window keeps the exact tree
+/// it had, and a split pane is never wrapped because it never takes the cap.
+fn chat_measure_column(view: AnyElement, width: f32) -> AnyElement {
+    div()
+        .flex()
+        .flex_row()
+        .flex_1()
+        .min_w_0()
+        .min_h_0()
+        .justify_center()
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .w(px(width))
+                .min_w_0()
+                .min_h_0()
+                .child(view),
+        )
+        .into_any_element()
+}
+
+/// The same centred column for the chat's chrome (#2588): the plan card, the
+/// composer and the footer take the conversation's measure instead of the
+/// pane's whole width, so the lower half of the window reads on one axis with
+/// the text above it. It carries no vertical flex, because these rows keep the
+/// height they ask for rather than growing into the column's slack.
+fn chat_measure_row(view: AnyElement, width: f32) -> AnyElement {
+    div()
+        .flex()
+        .flex_row()
+        .flex_none()
+        .w_full()
+        .min_w_0()
+        .justify_center()
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_none()
+                .w(px(width))
+                .min_w_0()
+                .child(view),
+        )
+        .into_any_element()
+}
+
+/// The chat's chrome takes the conversation's measure (#2588, #2590), so the
+/// plan card, the strips, the popups, the composer and the footer all sit on
+/// the axis the text above them draws on. It is a no-op wherever the transcript
+/// itself is not capped, which covers every split pane and every window
+/// narrower than the measure.
+fn central(view: AnyElement, centred: bool, measure: f32) -> AnyElement {
+    if centred {
+        chat_measure_row(view, measure)
+    } else {
+        view
     }
 }
 
@@ -9920,11 +11276,129 @@ fn confirm_delete_overlay(
         )
 }
 
+/// The /cd picker's rows (#2527): the parent entry first when one exists,
+/// then the subdirectories, dotfile directories hidden until toggled, all
+/// sorted by name. A free function so the tests can exercise the real
+/// listing without a live window, the same shape the terminal's dialog
+/// builds in `open_directory_picker`.
+fn cd_entries_for(dir: &std::path::Path, show_hidden: bool) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    if dir.parent().is_some() {
+        files.push(dir.join(".."));
+    }
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let hidden = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with('.'))
+                .unwrap_or(false);
+            if hidden && !show_hidden {
+                continue;
+            }
+            files.push(path);
+        }
+    }
+    files.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+    files
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        THEMES_HISTORY_LEN, pick_initial_session, remember_open_session, remember_preview,
+        CHAT_MEASURE_PX, THEMES_HISTORY_LEN, cd_entries_for, pick_initial_session,
+        remember_open_session, remember_preview,
     };
+
+    /// The conversation caps at a readable measure in a single pane, and any
+    /// pane narrower than the cap draws at its own width (#2586).
+    #[test]
+    fn chat_measure_caps_a_wide_single_pane_only() {
+        assert_eq!(super::chat_measure(2192.0, false), CHAT_MEASURE_PX);
+        assert_eq!(
+            super::chat_measure(CHAT_MEASURE_PX + 1.0, false),
+            CHAT_MEASURE_PX
+        );
+        assert_eq!(super::chat_measure(CHAT_MEASURE_PX, false), CHAT_MEASURE_PX);
+        assert_eq!(super::chat_measure(612.0, false), 612.0);
+        assert_eq!(super::chat_measure(0.0, false), 0.0);
+    }
+
+    /// A split window is exempt: a pane there takes the full span it is
+    /// given, wide or narrow, so the cap can never narrow a pane (#2586).
+    #[test]
+    fn chat_measure_leaves_a_split_pane_alone() {
+        assert_eq!(super::chat_measure(2192.0, true), 2192.0);
+        assert_eq!(super::chat_measure(996.0, true), 996.0);
+        assert_eq!(super::chat_measure(320.0, true), 320.0);
+        assert_eq!(super::chat_measure(CHAT_MEASURE_PX, true), CHAT_MEASURE_PX);
+    }
+
+    /// The measure belongs to the single pane and to nothing else (#2586). A
+    /// split leaf draws at the span its own pane owns, so the pane renderer is
+    /// asserted free of the cap: a split can never be narrowed by it, whatever
+    /// later changes do to the single-pane branch.
+    #[test]
+    fn no_measure_cap_reaches_a_split_pane() {
+        let src = include_str!("main.rs");
+        let (_, rest) = src
+            .split_once(concat!("fn pane_", "element("))
+            .expect("split leaf renderer exists");
+        let (leaf, _) = rest
+            .split_once("let close_session = *session;")
+            .expect("pane leaf body ends before its close handler");
+        assert!(
+            !leaf.contains("chat_measure") && !leaf.contains("CHAT_MEASURE_PX"),
+            "a split pane draws at its own full width, never at the measure"
+        );
+
+        let (_, primary) = src
+            .split_once("let primary = transcript::view(")
+            .expect("primary Chat transcript call exists");
+        let (call, _) = primary
+            .split_once(".into_any_element();")
+            .expect("primary Chat transcript call ends");
+        assert!(
+            call.contains("measure,"),
+            "a single pane draws at the measured width"
+        );
+        assert!(
+            src.contains(
+                &[
+                    "let chat_measure_px = chat_measure(",
+                    "primary_width, split_window);",
+                ]
+                .concat()
+            ),
+            "the measure comes from the pane width, exempting a split window"
+        );
+    }
+
+    /// The primary Chat screen must share its mouse selection state with the
+    /// transcript. The split view already did this; Chat silently passed no
+    /// state and rendered no selectable rows (#2562).
+    #[test]
+    fn primary_chat_transcript_enables_drag_copy() {
+        let src = include_str!("main.rs");
+        let (_, after) = src
+            .split_once("let primary = transcript::view(")
+            .expect("primary Chat transcript call exists");
+        let (call, _) = after
+            .split_once(".into_any_element();")
+            .expect("primary Chat transcript call ends");
+        assert!(
+            call.contains(&["drag: Some(self.copy_", "drag.clone()),"].concat()),
+            "primary Chat must pass its shared CopyDrag state"
+        );
+        assert!(
+            !call.contains(&["drag:", " None,"].concat()),
+            "primary Chat must not disable transcript selection"
+        );
+    }
 
     /// The zoom chords: they need cmd or ctrl, both spellings of plus zoom in,
     /// both of minus zoom out, zero resets to the base rem, and any other key
@@ -9958,6 +11432,42 @@ mod tests {
         assert_eq!(super::zoom_step_for("0", rem, true), Some(BASE_REM));
         // A key that is not a zoom key stays a keystroke, chord or not.
         assert_eq!(super::zoom_step_for("a", rem, true), None);
+    }
+
+    #[test]
+    fn mission_schedule_duration_matches_the_terminal_format() {
+        assert_eq!(super::mc_schedule_duration(0), "0s");
+        assert_eq!(super::mc_schedule_duration(42), "42s");
+        assert_eq!(super::mc_schedule_duration(61), "1m 1s");
+        assert_eq!(super::mc_schedule_duration(3661), "61m 1s");
+    }
+
+    #[test]
+    fn mission_top_tool_bar_tracks_relative_usage() {
+        assert_eq!(super::mc_tool_bar(0, 100), "░".repeat(12));
+        assert_eq!(
+            super::mc_tool_bar(50, 100),
+            format!("{}{}", "█".repeat(6), "░".repeat(6))
+        );
+        assert_eq!(super::mc_tool_bar(100, 100), "█".repeat(12));
+        assert_eq!(super::mc_tool_bar(200, 100), "█".repeat(12));
+    }
+
+    #[test]
+    fn mission_mc_phantoms_empty_breakdown_has_no_rows() {
+        let mut analytics = McAnalytics::default();
+        analytics.phantom.total = 1;
+        assert!(
+            super::mc_phantoms_rows(&analytics, palette::current()).is_empty(),
+            "an empty model breakdown must reach the panel's empty state"
+        );
+
+        analytics.phantom.by_model.push(("gpt-5".into(), 1, 0));
+        assert_eq!(
+            super::mc_phantoms_rows(&analytics, palette::current()).len(),
+            2,
+            "a populated breakdown keeps its totals and model rows"
+        );
     }
 
     /// A tile opens a preview of the file it stands for, Esc closes it, and
@@ -10100,6 +11610,23 @@ mod tests {
         assert!(!history.iter().any(|seen| seen == "dark"));
     }
 
+    /// #2543: the rail keeps a four-pixel drag target but paints only the
+    /// same one-pixel theme hairline used below the chat title.
+    #[test]
+    fn rail_splitter_paints_a_hairline_inside_its_drag_target() {
+        let src = include_str!("main.rs");
+        let splitter = src
+            .split("fn splitter(")
+            .nth(1)
+            .and_then(|rest| rest.split("/// The conversation").next())
+            .expect("rail splitter renderer");
+        assert!(splitter.contains(".w(px(4.0))"));
+        assert!(splitter.contains(".w(px(1.0))"));
+        assert!(splitter.contains("topic_tabs::separator_color()"));
+        assert!(splitter.contains(".on_mouse_down(MouseButton::Left, grab)"));
+        assert!(!splitter.contains(".bg(rgb(palette::current().panel_hi))"));
+    }
+
     /// The themes screen paints the conversation next to a sidebar, so a
     /// preview is judged against real content and no row is reachable only by
     /// mouse: arrows and Enter run through the same handler as a click.
@@ -10111,6 +11638,15 @@ mod tests {
         assert!(src.contains("themes_view::history_row"));
         assert!(src.contains("\"enter\" => {"));
         assert!(src.contains(".id(\"themes-keep\")"));
+        assert!(src.contains(".child(text(\"Themes\", Size::Sm, shown.text))"));
+        assert!(src.contains(".rounded(px(CARD_RADIUS))"));
+        assert!(src.contains(".child(\"Keep\")"));
+        let header = src
+            .split("let header = div()")
+            .find(|block| block.contains("text(\"Themes\""))
+            .expect("themes header");
+        assert!(header.contains(".border_b_1()"));
+        assert!(header.contains(".border_color(rgb(shown.track))"));
     }
 
     /// One dialog, one delete path. The bridge that erases the row has exactly
@@ -10660,6 +12196,130 @@ mod tests {
         assert!(
             src.contains(&warn),
             "a completion for another session is logged, never dropped"
+        );
+    }
+
+    /// The /cd picker's listing (#2527): the parent entry first, then the
+    /// subdirectories sorted by name, files never listed.
+    #[test]
+    fn cd_entries_list_parent_dirs_only_sorted() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        std::fs::create_dir(root.join("zebra")).expect("zebra");
+        std::fs::create_dir(root.join("alpha")).expect("alpha");
+        std::fs::write(root.join("file.txt"), "x").expect("file");
+
+        let entries = cd_entries_for(root, false);
+        // The parent row is a `..`-terminated path, which Rust's file_name()
+        // reports as None: name it directly instead of unwrapping.
+        let names: Vec<String> = entries
+            .iter()
+            .map(|p| {
+                if p.ends_with("..") {
+                    "..".to_string()
+                } else {
+                    p.file_name().unwrap().to_string_lossy().to_string()
+                }
+            })
+            .collect();
+        // Parent first, then children alphabetical, files skipped.
+        assert_eq!(names.first().map(String::as_str), Some(".."));
+        assert_eq!(
+            names,
+            vec!["..".to_string(), "alpha".to_string(), "zebra".to_string()]
+        );
+    }
+
+    /// Dotfile directories stay hidden until the `.` toggle turns them on,
+    /// the same rule the terminal's dialog uses (#2527).
+    #[test]
+    fn cd_entries_hide_dotfiles_until_toggled() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        std::fs::create_dir(root.join(".secret")).expect("secret");
+        std::fs::create_dir(root.join("plain")).expect("plain");
+
+        let hidden_off = cd_entries_for(root, false);
+        let names_off: Vec<String> = hidden_off
+            .iter()
+            .filter(|p| !p.ends_with(".."))
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert!(
+            !names_off.contains(&".secret".to_string()),
+            "dotfile dirs are hidden by default"
+        );
+        let hidden_on = cd_entries_for(root, true);
+        let names_on: Vec<String> = hidden_on
+            .iter()
+            .filter(|p| !p.ends_with(".."))
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert!(
+            names_on.contains(&".secret".to_string()),
+            "the toggle lists them"
+        );
+    }
+
+    /// The window's /cd wiring (#2527), read off the source because a bare
+    /// `/cd` needs a live window to open the screen: bare `/cd` opens the
+    /// picker (never a spawned text command, so no thinking spinner), the
+    /// keys match the terminal's dialog, and select-here returns to chat
+    /// before the apply task spawns so a slow write cannot hold the screen.
+    #[test]
+    fn bare_cd_opens_the_picker_screen_and_keys_match_the_terminal() {
+        let src = include_str!("main.rs");
+        // Bare `/cd` opens the screen in run_text_command, with no turn
+        // thread in the arm: that thread was the phantom spinner (#2527).
+        let (_, after) = src
+            .split_once(["C::Cd => {", "\n"].concat().as_str())
+            .expect("run_text_command handles Cd");
+        // Bound the arm at its own closing brace: everything to end-of-file
+        // would sweep in later arms that legitimately spawn text commands.
+        let (cd_arm, _) = after.split_once("\n            }").unwrap_or((after, ""));
+        assert!(
+            cd_arm.contains("self.open_cd_picker(cx)"),
+            "bare /cd opens the picker screen"
+        );
+        let (bare, rest) = cd_arm
+            .split_once("self.open_cd_picker(cx)")
+            .expect("the bare arm exists");
+        assert!(
+            !bare.is_empty() && rest.contains("apply_operator_cd"),
+            "with a path the change applies locally on the service"
+        );
+        assert!(
+            !cd_arm.contains("spawn_text_command"),
+            "no text-command thread in the /cd arm, so no spinner"
+        );
+        // The screen owns the keyboard with the terminal's bindings.
+        assert!(
+            src.contains("\"tab\" | \"space\" => self.cd_select_here(cx),"),
+            "Tab and Space select here, as in the terminal"
+        );
+        assert!(
+            src.contains("\"enter\" => self.cd_descend(self.cd_selected.min(last), cx),"),
+            "Enter descends, as in the terminal"
+        );
+        // Esc cancels from the screen, alongside the other screens.
+        assert!(
+            src.contains("if self.screen == Screen::DirectoryPicker {")
+                && src.contains("self.close_cd_picker(cx);"),
+            "Esc cancels the picker"
+        );
+        // Select-here switches to chat FIRST, the ordering #2526 just fixed
+        // on the terminal: a slow apply must never hold the screen open.
+        let (_, after) = src
+            .split_once("fn cd_select_here")
+            .expect("cd_select_here exists");
+        let (body, _) = after.split_once("\n    fn ").unwrap_or((after, ""));
+        let switch = body
+            .find("self.screen = Screen::Chat;")
+            .expect("select switches to chat");
+        let spawn = body.find("cx.spawn").expect("select applies in a task");
+        assert!(
+            switch < spawn,
+            "the conversation returns before the apply task spawns"
         );
     }
 }

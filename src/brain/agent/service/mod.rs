@@ -26,7 +26,7 @@ mod gaslighting;
 pub(crate) mod halt_answer;
 pub(crate) mod helpers;
 pub(crate) mod loop_break;
-mod messaging;
+pub(crate) mod messaging;
 mod model_refresh;
 pub(crate) mod notify_policy;
 pub(crate) mod notify_queue;

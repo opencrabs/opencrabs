@@ -403,6 +403,18 @@ impl DisplayMessage {
         }
     }
 
+    /// Clipboard text for this row. Structured history becomes readable text.
+    pub fn copy_text(&self) -> String {
+        if self.role == crate::services::message::PLAN_COMPLETED_ROLE {
+            return crate::services::message::CompletedPlanPayload::from_json(&self.content)
+                .map(|payload| {
+                    crate::ui_core::plan_history::CompletedPlanView::new(&payload.plan).copy_text()
+                })
+                .unwrap_or_default();
+        }
+        self.content.clone()
+    }
+
     /// Advance the reasoning details through the 3-state expand cycle (#727):
     /// collapsed -> capped -> full -> collapsed. Driven by a click on the block
     /// or Ctrl+O.
@@ -946,6 +958,66 @@ pub struct App {
 
     /// Prompt analyzer
     pub(crate) prompt_analyzer: PromptAnalyzer,
+}
+
+/// Resolve Seeker's sidebar actions without touching unrelated screens.
+fn sidebar_action_mode(current: AppMode, open: bool) -> AppMode {
+    if open {
+        AppMode::Sessions
+    } else if current == AppMode::Sessions {
+        AppMode::Chat
+    } else {
+        current
+    }
+}
+
+#[cfg(test)]
+mod sidebar_action_tests {
+    use super::*;
+
+    #[test]
+    fn sidebar_actions_tui_open_is_idempotent_from_every_mode() {
+        for current in [
+            AppMode::Chat,
+            AppMode::Sessions,
+            AppMode::Help,
+            AppMode::Settings,
+        ] {
+            let once = sidebar_action_mode(current, true);
+            assert_eq!(once, AppMode::Sessions);
+            assert_eq!(sidebar_action_mode(once, true), once);
+        }
+    }
+
+    #[test]
+    fn sidebar_actions_tui_close_only_leaves_sessions() {
+        for current in [
+            AppMode::Chat,
+            AppMode::Sessions,
+            AppMode::Help,
+            AppMode::Settings,
+        ] {
+            let once = sidebar_action_mode(current, false);
+            let expected = if current == AppMode::Sessions {
+                AppMode::Chat
+            } else {
+                current
+            };
+            assert_eq!(once, expected);
+            assert_eq!(sidebar_action_mode(once, false), once);
+        }
+
+        let source = include_str!("state.rs");
+        let dispatch = source
+            .rsplit("async fn apply_palette_action")
+            .next()
+            .and_then(|tail| tail.split("/// Handle keyboard input").next())
+            .expect("palette dispatch");
+        assert!(dispatch.contains("PaletteAction::OpenSidebar => self.apply_sidebar_action(true)"));
+        assert!(
+            dispatch.contains("PaletteAction::CloseSidebar => self.apply_sidebar_action(false)")
+        );
+    }
 }
 
 impl App {
@@ -2125,32 +2197,23 @@ impl App {
                         } else {
                             wizard.ps.supports_model_fetch() && !wizard.ps.api_key_input.is_empty()
                         };
-                        if should_fetch {
-                            let provider_idx = wizard.ps.selected_provider;
-                            // Real key: typed, else saved from config; never the
-                            // EXISTING_KEY_SENTINEL placeholder that 401'd custom
-                            // providers whose key lives in keys.toml (#656).
-                            let api_key = wizard.ps.effective_api_key();
-                            let base_url =
-                                if wizard.ps.is_custom() && !wizard.ps.base_url.is_empty() {
-                                    Some(wizard.ps.base_url.clone())
-                                } else {
-                                    None
-                                };
+                        if should_fetch
+                            && let Some(request) =
+                                crate::ui_core::model_selector::FetchRequest::from_selector(
+                                    &wizard.ps,
+                                )
+                        {
+                            let provider_index = request.provider_index;
+                            let generation = wizard.model_fetch_lifecycle.begin(&request);
                             wizard.ps.models_fetching = true;
                             let sender = self.event_sender();
                             tokio::spawn(async move {
-                                let models = super::onboarding::fetch_provider_models(
-                                    provider_idx,
-                                    api_key.as_deref(),
-                                    None,
-                                    None,
-                                    None,
-                                    base_url.as_deref(),
-                                    None,
-                                )
-                                .await;
-                                let _ = sender.send(TuiEvent::OnboardingModelsFetched(models));
+                                let outcome = crate::ui_core::model_selector::fetch(request).await;
+                                let _ = sender.send(TuiEvent::OnboardingModelsFetched {
+                                    generation,
+                                    provider_index,
+                                    outcome,
+                                });
                             });
                         }
                     }
@@ -3104,21 +3167,33 @@ impl App {
                 }
             }
 
-            TuiEvent::OnboardingModelsFetched(models) => {
+            TuiEvent::OnboardingModelsFetched {
+                generation,
+                provider_index,
+                outcome,
+            } => {
                 if let Some(ref mut wizard) = self.onboarding {
-                    wizard.ps.models_fetching = false;
-                    if !models.is_empty() {
-                        wizard.ps.models = models;
-                        wizard.ps.resolve_selected_model_index();
-                    } else {
-                        // Fetch returned empty — fall back to static PROVIDERS models
-                        let provider = wizard.ps.current_provider();
-                        if !provider.models.is_empty() {
-                            wizard.ps.models =
-                                provider.models.iter().map(|s| s.to_string()).collect();
-                            wizard.ps.resolve_selected_model_index();
-                        }
+                    if provider_index != wizard.ps.selected_provider
+                        || wizard
+                            .model_fetch_lifecycle
+                            .finish(generation, provider_index, outcome.clone())
+                            .is_none()
+                    {
+                        return Ok(());
                     }
+                    wizard.ps.models_fetching = false;
+                    wizard.ps.models = if outcome.models.is_empty() {
+                        wizard
+                            .ps
+                            .current_provider()
+                            .models
+                            .iter()
+                            .map(|s| s.to_string())
+                            .collect()
+                    } else {
+                        outcome.models
+                    };
+                    wizard.ps.resolve_selected_model_index();
                 }
             }
             TuiEvent::GitHubDeviceCode(code) => {
@@ -3143,22 +3218,24 @@ impl App {
                     wizard.auth_field = super::onboarding::AuthField::Model;
                     wizard.ps.models.clear();
                     wizard.ps.selected_model = 0;
-                    // Trigger model fetch using the OAuth token
-                    let token = oauth_token.clone();
-                    let sender = self.event_sender();
-                    tokio::spawn(async move {
-                        let models = super::onboarding::fetch_provider_models(
-                            2,
-                            Some(&token),
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                        )
-                        .await;
-                        let _ = sender.send(TuiEvent::OnboardingModelsFetched(models));
-                    });
+                    if let Some(request) = crate::ui_core::model_selector::FetchRequest::from_selector_and_api_key_for_provider(
+                        &wizard.ps,
+                        "github",
+                        Some(oauth_token.clone()),
+                    ) {
+                        let provider_index = request.provider_index;
+                        let generation = wizard.model_fetch_lifecycle.begin(&request);
+                        wizard.ps.models_fetching = true;
+                        let sender = self.event_sender();
+                        tokio::spawn(async move {
+                            let outcome = crate::ui_core::model_selector::fetch(request).await;
+                            let _ = sender.send(TuiEvent::OnboardingModelsFetched {
+                                generation,
+                                provider_index,
+                                outcome,
+                            });
+                        });
+                    }
                 }
             }
             TuiEvent::GitHubOAuthError(err) => {
@@ -3186,15 +3263,22 @@ impl App {
                     wizard.ps.selected_model = 0;
                     // Enable the provider in config
                     let _ = crate::config::Config::write_key("providers.codex", "enabled", "true");
-                    // Trigger model fetch
-                    let sender = self.event_sender();
-                    tokio::spawn(async move {
-                        let models = super::onboarding::fetch_provider_models(
-                            2, None, None, None, None, None, None,
-                        )
-                        .await;
-                        let _ = sender.send(TuiEvent::OnboardingModelsFetched(models));
-                    });
+                    if let Some(request) =
+                        crate::ui_core::model_selector::FetchRequest::from_selector(&wizard.ps)
+                    {
+                        let provider_index = request.provider_index;
+                        let generation = wizard.model_fetch_lifecycle.begin(&request);
+                        wizard.ps.models_fetching = true;
+                        let sender = self.event_sender();
+                        tokio::spawn(async move {
+                            let outcome = crate::ui_core::model_selector::fetch(request).await;
+                            let _ = sender.send(TuiEvent::OnboardingModelsFetched {
+                                generation,
+                                provider_index,
+                                outcome,
+                            });
+                        });
+                    }
                 }
             }
             TuiEvent::CodexOAuthError(err) => {
@@ -3484,6 +3568,8 @@ impl App {
     /// it can open, the saved skills and the conversation ledger. Built from
     /// what the terminal already holds, so opening the card never fetches.
     fn palette_items(&self) -> Vec<crate::ui_core::palette::PaletteItem> {
+        use crate::ui_core::actions;
+        use crate::ui_core::help_keys::{self, HelpClient};
         use crate::ui_core::palette::{self, PaletteAction, PaletteItem, PaletteKind};
         let mut items: Vec<PaletteItem> = crate::ui_core::commands::SLASH_COMMANDS
             .iter()
@@ -3501,17 +3587,15 @@ impl App {
             })
             .collect();
         items.extend(palette::surface_items());
+        items.extend(help_keys::seeker_items(HelpClient::Tui));
         // The docs pages: a query that is not a command or a conversation is
         // usually a question the documentation answers (#2461).
         items.extend(crate::ui_core::docs::items());
         // The channel setup rows: the word that names a channel has to find the
         // row that starts its setup, not only the page that describes it (#2462).
         items.extend(palette::channel_items());
-        // The create-topic row: one shared definition, the same words on the
-        // window and here (#2482).
-        items.push(palette::new_topic_item());
-        // The favorite row: same picker, the pick pins the conversation (#2487).
-        items.push(palette::favorite_item());
+        // Standalone actions share one catalog; execution stays in this app.
+        items.extend(actions::items());
         for skill in &self.skills {
             items.push(
                 PaletteItem::new(
@@ -3520,10 +3604,8 @@ impl App {
                     PaletteKind::Skill,
                     PaletteAction::RunSkill(skill.slash_name.clone()),
                 )
-                // The skill's own description carries the words a user types
-                // when they do not know its slash name: `telegram` has to find
-                // the channels skill, not only the docs page (#2462).
-                .with_keywords(&format!("skill workflow recipe {}", skill.description)),
+                .with_keywords("skill workflow recipe")
+                .with_description(&skill.description),
             );
         }
         for session in &self.sessions {
@@ -3572,6 +3654,14 @@ impl App {
         Ok(())
     }
 
+    async fn apply_sidebar_action(&mut self, open: bool) -> Result<()> {
+        let target = sidebar_action_mode(self.mode, open);
+        if target != self.mode {
+            self.switch_mode(target).await?;
+        }
+        Ok(())
+    }
+
     /// Run what the picked row names. Commands go through the same dispatcher
     /// the composer uses, so a pick and a typed command land in one place.
     async fn apply_palette_action(
@@ -3595,6 +3685,8 @@ impl App {
                     self.open_session_files_view().await?;
                 }
             },
+            PaletteAction::OpenSidebar => self.apply_sidebar_action(true).await?,
+            PaletteAction::CloseSidebar => self.apply_sidebar_action(false).await?,
             PaletteAction::OpenSession(id) => {
                 self.load_session(Uuid::from_u128(id)).await?;
                 self.mode = AppMode::Chat;
@@ -3716,7 +3808,10 @@ impl App {
     }
 
     /// Handle keyboard input
-    async fn handle_key_event(&mut self, event: crossterm::event::KeyEvent) -> Result<()> {
+    pub(crate) async fn handle_key_event(
+        &mut self,
+        event: crossterm::event::KeyEvent,
+    ) -> Result<()> {
         use super::events::keys;
         use crossterm::event::{KeyCode, KeyModifiers};
 
@@ -4110,7 +4205,10 @@ impl App {
             }
             return Ok(());
         }
-        if keys::is_focus_next_pane(&event) && self.pane_manager.is_split() {
+        if keys::is_focus_next_pane(&event)
+            && self.pane_manager.is_split()
+            && self.mode == AppMode::Chat
+        {
             // Input belongs to the pane it was typed in: stash it with the
             // pane we're leaving, adopt the target pane's own text (#2494).
             self.pane_manager.stash_input(

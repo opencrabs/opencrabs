@@ -50,3 +50,31 @@ fn queued_follow_up_survives_the_rebuild_and_the_empty_placeholder_does_not() {
         "no empty text block may reach the provider"
     );
 }
+
+#[test]
+fn plan_completed_excluded_from_provider_context() {
+    let session = Uuid::new_v4();
+    let rows = vec![
+        row(session, "user", "keep this question", 1),
+        row(
+            session,
+            crate::services::message::PLAN_COMPLETED_ROLE,
+            r#"{"version":1,"plan":{"title":"raw-plan-json","tasks":[]}} <<IMG:/tmp/private-plan.png>>"#,
+            2,
+        ),
+        row(session, "assistant", "keep this answer", 3),
+    ];
+    let context = AgentContext::from_db_messages(session, rows, 100_000);
+    assert_eq!(context.messages.len(), 2);
+    assert_eq!(context.messages[0].role, Role::User);
+    assert_eq!(context.messages[1].role, Role::Assistant);
+    assert!(context.messages.iter().all(|message| {
+        message.content.len() == 1 && matches!(&message.content[0], ContentBlock::Text { .. })
+    }));
+    assert!(context.messages.iter().all(|message| {
+        message.content.iter().all(|block| {
+            matches!(block, ContentBlock::Text { text }
+                if !text.contains("raw-plan-json") && !text.contains("<<IMG:"))
+        })
+    }));
+}

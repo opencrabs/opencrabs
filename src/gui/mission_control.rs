@@ -16,8 +16,8 @@ use opencrabs::brain::agent::AgentService;
 /// re-exports it rather than making every caller reach into the crate.
 pub use opencrabs::brain::mission_control::TimeWindow;
 use opencrabs::brain::mission_control::{
-    McActivity, McAnalytics, McInboxItem, McInboxKind, McScheduleItem, activity_service,
-    analytics_service, inbox_service, schedule_service,
+    ACTIVITY_LIMIT, McActivity, McAnalytics, McInboxItem, McInboxKind, McScheduleItem,
+    activity_service, analytics_service, inbox_service, schedule_service,
 };
 use opencrabs::brain::prompt_builder::BrainLoader;
 use opencrabs::brain::tools::ToolRegistry;
@@ -28,8 +28,8 @@ use opencrabs::tui::app::mission_control::log_viewer::{self, LogViewerState};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// How many activity rows the panel asks for. The terminal shows the newest
-/// handful rather than the whole journal, and this is that same handful.
+/// How many activity rows a card shows before its window follows the
+/// selection. The snapshot itself keeps the shared 100-entry fetch limit.
 pub const ACTIVITY_ROWS: usize = 12;
 
 /// Everything one Mission Control screen draws, read once.
@@ -110,16 +110,20 @@ pub struct Nav {
 }
 
 impl Nav {
-    /// Tab or `l`: the next panel, keeping the row index if it still exists,
-    /// the way the terminal keeps one selection across panels.
+    /// Tab or `l`: the next panel. Row indices are panel-local, so the
+    /// terminal and GUI both start the newly focused panel at its first row.
     pub fn focus_next(&mut self, snapshot: Option<&Snapshot>) {
         self.panel = self.panel.next();
+        self.selected = 0;
+        self.detail = false;
         self.clamp(snapshot);
     }
 
     /// Shift-Tab or `h`: the previous panel.
     pub fn focus_prev(&mut self, snapshot: Option<&Snapshot>) {
         self.panel = self.panel.prev();
+        self.selected = 0;
+        self.detail = false;
         self.clamp(snapshot);
     }
 
@@ -146,11 +150,10 @@ impl Nav {
         self.selected = self.panel.rows(snapshot).saturating_sub(1);
     }
 
-    /// Enter: open the detail when the focused panel has something to show.
-    /// The inbox is the panel whose rows carry a record to read, which is why
-    /// the terminal opens it there and nowhere else so far.
+    /// Enter: open the focused panel's detail when it has something to show.
+    /// Analytics is one snapshot-wide item, matching the terminal's count.
     pub fn open_detail(&mut self, snapshot: Option<&Snapshot>) {
-        if self.panel == Panel::Inbox && self.panel.rows(snapshot) > 0 {
+        if self.panel.rows(snapshot) > 0 {
             self.detail = true;
         }
     }
@@ -466,7 +469,7 @@ pub async fn load(db_path: PathBuf, window: TimeWindow) -> Result<Snapshot, Stri
 pub async fn read_from_pool(pool: Pool, window: TimeWindow) -> Snapshot {
     Snapshot {
         inbox: inbox_service::list(),
-        activity: activity_service::recent(ACTIVITY_ROWS),
+        activity: activity_service::recent(ACTIVITY_LIMIT),
         schedule: schedule_service::list(pool.clone()).await,
         analytics: analytics_service::summary(pool, window).await,
         window,
@@ -570,6 +573,36 @@ mod tests {
                 .collect(),
             ..Default::default()
         }
+    }
+
+    fn full_snapshot() -> Snapshot {
+        let mut snapshot = inbox_snapshot(3);
+        let activity = McActivity {
+            timestamp: Some(chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap()),
+            level: opencrabs::brain::mission_control::McActivityLevel::Success,
+            source: "improvement".into(),
+            detail: "A real activity entry".into(),
+        };
+        snapshot.activity = vec![activity.clone(), activity.clone(), activity];
+        let job = McScheduleItem {
+            id: "job-1".into(),
+            label: "Morning recap".into(),
+            schedule: "0 9 * * * (UTC)".into(),
+            kind: opencrabs::brain::mission_control::McScheduleKind::Cron,
+            awaiting_user: false,
+            prompt: "Summarise the morning".into(),
+            deliver_to: Some("here".into()),
+            last_run_at: chrono::DateTime::from_timestamp(1_700_000_100, 0),
+            next_run_at: chrono::DateTime::from_timestamp(1_700_000_200, 0),
+            created_at: chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+            enabled: true,
+            profile_name: Some("default".into()),
+            last_run_status: Some("success".into()),
+            last_run_cost: Some(0.25),
+            last_run_duration_secs: Some(42),
+        };
+        snapshot.schedule = vec![job.clone(), job.clone(), job];
+        snapshot
     }
 
     #[test]
@@ -784,6 +817,31 @@ mod tests {
     }
 
     #[test]
+    fn mission_nav_focus_change_resets_the_selection() {
+        let snapshot = full_snapshot();
+        let mut nav = Nav {
+            panel: Panel::Activity,
+            ..Nav::default()
+        };
+        nav.end(Some(&snapshot));
+        assert_eq!(nav.selected, 2);
+        nav.detail = true;
+        nav.focus_next(Some(&snapshot));
+        assert_eq!(nav.panel, Panel::Schedule);
+        assert_eq!(nav.selected, 0);
+        assert!(!nav.detail);
+
+        nav.panel = Panel::Inbox;
+        nav.end(Some(&snapshot));
+        assert_eq!(nav.selected, 2);
+        nav.detail = true;
+        nav.focus_prev(Some(&snapshot));
+        assert_eq!(nav.panel, Panel::Schedule);
+        assert_eq!(nav.selected, 0);
+        assert!(!nav.detail);
+    }
+
+    #[test]
     fn mission_nav_opens_a_detail_only_where_there_is_a_record() {
         let empty = Snapshot::default();
         let mut nav = Nav::default();
@@ -792,18 +850,20 @@ mod tests {
         nav.open_detail(None);
         assert!(!nav.detail, "no read yet means nothing to open");
 
-        let snapshot = inbox_snapshot(2);
-        nav.open_detail(Some(&snapshot));
-        assert!(nav.detail);
-
-        // The other panels have no record view yet, so Enter there is a no-op
-        // rather than a popup with nothing in it.
-        let mut nav = Nav {
-            panel: Panel::Schedule,
-            ..Nav::default()
-        };
-        nav.open_detail(Some(&snapshot));
-        assert!(!nav.detail);
+        let snapshot = full_snapshot();
+        for panel in [
+            Panel::Inbox,
+            Panel::Activity,
+            Panel::Schedule,
+            Panel::Analytics,
+        ] {
+            let mut nav = Nav {
+                panel,
+                ..Nav::default()
+            };
+            nav.open_detail(Some(&snapshot));
+            assert!(nav.detail, "{panel:?} should open its detail");
+        }
     }
     /// A proposal the window's inbox can decide on: a trivial shell tool, so
     /// the install path writes real bytes into `tools.toml` and registers a

@@ -143,8 +143,12 @@ pub enum TuiEvent {
     /// Streaming output token count (per-response, counted via tiktoken)
     StreamingOutputTokens { session_id: Uuid, tokens: u32 },
 
-    /// Onboarding wizard received fetched model list from provider API
-    OnboardingModelsFetched(Vec<String>),
+    /// Shared model selector received a provider response.
+    OnboardingModelsFetched {
+        generation: u64,
+        provider_index: usize,
+        outcome: crate::ui_core::model_selector::FetchOutcome,
+    },
 
     /// Model selector (/models) received fetched model list (provider_index, models)
 

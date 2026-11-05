@@ -13,8 +13,13 @@
 use crate::palette;
 use opencrabs::ui_core::card::{CARD_RADIUS, glass_fill};
 use opencrabs::ui_core::commands::completions;
+use opencrabs::ui_core::input_history::{
+    input_history_down, input_history_up, record_input_history,
+};
+use opencrabs::ui_core::palette::{next_word_end, previous_word_start};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, ClipboardEntry, ClipboardItem, Context, CursorStyle, Div,
@@ -220,6 +225,10 @@ pub enum EditorEvent {
 pub struct Editor {
     pub focus_handle: FocusHandle,
     pub content: String,
+    /// Submitted messages and the draft stashed while recalling them.
+    input_history: Vec<String>,
+    input_history_index: Option<usize>,
+    input_history_stash: String,
     /// Files attached to the next message. They live here, not in the window
     /// state, because the send action is what consumes them: the editor is
     /// the only place that can append the markers atomically with clearing
@@ -252,6 +261,33 @@ pub struct Editor {
     /// Esc closed it for this draft (#2413).
     emoji_index: usize,
     emoji_dismissed: bool,
+    /// The line the composer shows for a moment after an action with nothing
+    /// to look at, like a copy (#2587). Timed, never sticky.
+    notice: Option<Notice>,
+    /// Bumped on every new notice so an older timer cannot clear a newer one.
+    notice_generation: u64,
+}
+
+/// One transient line inside the composer (#2587). The terminal keeps the same
+/// notice on the input border for two seconds, so the GUI says it where the
+/// user is already looking instead of growing the transcript with chrome.
+pub struct Notice {
+    pub text: SharedString,
+    pub shown_at: Instant,
+}
+
+/// How long a notice stays up, matching the terminal's `NOTIFICATION_TTL` so
+/// the two surfaces keep the same rhythm.
+pub const NOTICE_TTL: Duration = Duration::from_secs(2);
+
+/// What the composer says once a dragged range reaches the clipboard (#2587).
+/// The terminal prints these same words on its input border.
+pub const COPIED_NOTICE: &str = "Copied to clipboard";
+
+/// True once a notice has outlived the TTL. Pure, so the expiry rule stays a
+/// test instead of a wall-clock guess.
+pub fn notice_expired(shown_at: Instant, now: Instant, ttl: Duration) -> bool {
+    now.saturating_duration_since(shown_at) >= ttl
 }
 
 impl Editor {
@@ -259,6 +295,9 @@ impl Editor {
         Self {
             focus_handle: cx.focus_handle(),
             content: String::new(),
+            input_history: Vec::new(),
+            input_history_index: None,
+            input_history_stash: String::new(),
             attachments: Vec::new(),
             placeholder: "Message OpenCrabs…".into(),
             selected_range: 0..0,
@@ -274,7 +313,47 @@ impl Editor {
             command_dismissed: false,
             emoji_index: 0,
             emoji_dismissed: false,
+            notice: None,
+            notice_generation: 0,
         }
+    }
+
+    // Notices --------------------------------------------------------------
+
+    /// Say one thing for a moment inside the composer. A newer notice replaces
+    /// the old one and its timer: the generation check is what stops the first
+    /// timer from clearing the second notice early.
+    fn show_notice(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.notice = Some(Notice {
+            text: text.into(),
+            shown_at: Instant::now(),
+        });
+        self.notice_generation = self.notice_generation.wrapping_add(1);
+        let generation = self.notice_generation;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(NOTICE_TTL).await;
+            let _ = this.update(cx, |editor, cx| {
+                if editor.notice_generation == generation && editor.notice.is_some() {
+                    editor.notice = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// A drag-copied range reached the clipboard, so say so and let the line
+    /// clear itself (#2587). Same words the terminal puts on the input border.
+    pub fn show_copied(&mut self, cx: &mut Context<Self>) {
+        self.show_notice(COPIED_NOTICE, cx);
+    }
+
+    /// The notice still inside its window, if any. Read through this so an
+    /// expired notice never paints while its timer is still in flight.
+    fn active_notice(&self, now: Instant) -> Option<&str> {
+        let notice = self.notice.as_ref()?;
+        (!notice_expired(notice.shown_at, now, NOTICE_TTL)).then(|| notice.text.as_ref())
     }
 
     // Attachments ----------------------------------------------------------
@@ -562,7 +641,24 @@ impl Editor {
         }
         let rows = self.visual_rows();
         let target = vertical_row_target(&rows, self.cursor_offset(), -1);
-        self.move_to(target, cx);
+        if target != self.cursor_offset() {
+            self.move_to(target, cx);
+            return;
+        }
+        if input_history_up(
+            &self.input_history,
+            &mut self.content,
+            &mut self.input_history_index,
+            &mut self.input_history_stash,
+        ) {
+            let end = self.content.len();
+            self.selected_range = end..end;
+            self.selection_reversed = false;
+            self.marked_range = None;
+            cx.notify();
+        } else {
+            self.move_to(target, cx);
+        }
     }
 
     fn down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
@@ -574,7 +670,24 @@ impl Editor {
         }
         let rows = self.visual_rows();
         let target = vertical_row_target(&rows, self.cursor_offset(), 1);
-        self.move_to(target, cx);
+        if target != self.cursor_offset() {
+            self.move_to(target, cx);
+            return;
+        }
+        if input_history_down(
+            &self.input_history,
+            &mut self.content,
+            &mut self.input_history_index,
+            &mut self.input_history_stash,
+        ) {
+            let end = self.content.len();
+            self.selected_range = end..end;
+            self.selection_reversed = false;
+            self.marked_range = None;
+            cx.notify();
+        } else {
+            self.move_to(target, cx);
+        }
     }
 
     // Word motion walks whole words, not graphemes. Sharing the arrow helpers
@@ -674,6 +787,7 @@ impl Editor {
             None
         };
         if let Some(name) = picked {
+            record_input_history(&mut self.input_history, name);
             self.clear_after_send(cx);
             cx.emit(EditorEvent::Sent(name.to_string()));
             return;
@@ -684,6 +798,7 @@ impl Editor {
             return;
         }
         let payload = message_with_markers(&text, &attachments);
+        record_input_history(&mut self.input_history, &text);
         self.clear_after_send(cx);
         cx.emit(EditorEvent::Sent(payload));
     }
@@ -694,6 +809,8 @@ impl Editor {
         self.selected_range = 0..0;
         self.selection_reversed = false;
         self.marked_range = None;
+        self.input_history_index = None;
+        self.input_history_stash.clear();
         self.command_index = 0;
         self.command_dismissed = false;
         self.emoji_dismissed = false;
@@ -712,6 +829,8 @@ impl Editor {
         self.selected_range = 0..0;
         self.selection_reversed = false;
         self.marked_range = None;
+        self.input_history_index = None;
+        self.input_history_stash.clear();
         self.command_index = 0;
         self.command_dismissed = false;
         self.emoji_index = 0;
@@ -733,6 +852,10 @@ impl Editor {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
             self.replace_text_in_range(None, &text, window, cx);
         }
+    }
+
+    pub fn has_selection(&self) -> bool {
+        !self.selected_range.is_empty()
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
@@ -1170,7 +1293,7 @@ impl Element for EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        let (content, selected, cursor, placeholder, empty, bare) = {
+        let (content, selected, cursor, placeholder, empty, bare, notice) = {
             let input = self.input.read(cx);
             (
                 input.content.clone(),
@@ -1179,16 +1302,24 @@ impl Element for EditorElement {
                 input.placeholder.to_string(),
                 input.content.is_empty(),
                 input.attachments.is_empty(),
+                input.active_notice(Instant::now()).map(str::to_string),
             )
         };
-        // The composer says when a screenshot is waiting (#2479): an empty
-        // field over an image-only clipboard swaps the hint in for the name,
-        // the same notice the TUI prints under its input. A picture already
-        // in the strip is the answer the hint would give, so it stands down.
-        let placeholder = if empty && bare && Editor::clipboard_image(cx).is_some() {
-            CLIPBOARD_IMAGE_HINT.to_string()
-        } else {
-            placeholder
+        // A copy leaves nothing to look at, so an empty field says it in the
+        // slot the placeholder owns (#2587). The words are the terminal's own,
+        // and the line clears itself on the same two-second clock.
+        //
+        // The composer also says when a screenshot is waiting (#2479): an empty
+        // field over an image-only clipboard swaps that hint in for the name,
+        // the same notice the TUI prints under its input. A picture already in
+        // the strip is the answer the hint would give, so it stands down, and a
+        // live copy notice outranks it because the copy is the newer event.
+        let placeholder = match notice {
+            Some(notice) => notice,
+            None if empty && bare && Editor::clipboard_image(cx).is_some() => {
+                CLIPBOARD_IMAGE_HINT.to_string()
+            }
+            None => placeholder,
         };
         let style = window.text_style();
         let font_size = style.font_size.to_pixels(window.rem_size());
@@ -1360,22 +1491,33 @@ impl Render for Editor {
         if !self.attachments.is_empty() {
             body = body.child(attachment_strip(&self.attachments, cx));
         }
+        // With a draft in the field the placeholder is gone, so the copy notice
+        // gets its own line under the text instead (#2587). It is chrome, never
+        // a transcript line: the box grows by nothing when it expires.
+        let notice_row_text = self
+            .active_notice(Instant::now())
+            .filter(|_| !self.content.is_empty())
+            .map(str::to_string);
         // The icon sits inside the input, to the right of the text, as the
         // messaging apps place it; the text and its hint are gone (#2445).
         body = body.child(
             div()
                 .flex()
                 .flex_row()
-                .items_end()
+                .items_center()
                 .gap_2()
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
+                        .pl_1()
                         .child(EditorElement { input: cx.entity() }),
                 )
                 .child(paperclip(cx)),
         );
+        if let Some(notice) = notice_row_text {
+            body = body.child(notice_row(&notice));
+        }
         div()
             .flex()
             .flex_col()
@@ -1423,6 +1565,19 @@ impl Render for Editor {
             .min_h(px(44.))
             .child(body)
     }
+}
+
+/// One transient line inside the composer, in the terminal's own voice
+/// (#2587). Faint and one row tall: it confirms the copy without competing
+/// with the draft right above it.
+fn notice_row(text: &str) -> impl IntoElement {
+    div()
+        .w_full()
+        .min_w_0()
+        .text_size(px(12.))
+        .line_height(px(16.))
+        .text_color(rgb(palette::current().text_faint))
+        .child(text.to_string())
 }
 
 /// The pending attachments as chips. Images show the real file through
@@ -1553,6 +1708,7 @@ fn paperclip(cx: &mut Context<Editor>) -> impl IntoElement {
         .items_center()
         .justify_center()
         .size(gpui::rems(1.8))
+        .mr_1()
         .rounded_sm()
         .cursor_pointer()
         .text_size(gpui::rems(1.1))
@@ -1587,6 +1743,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-a", SelectAll, None),
         KeyBinding::new("cmd-v", Paste, None),
         KeyBinding::new("cmd-c", Copy, None),
+        KeyBinding::new("ctrl-c", Copy, None),
         KeyBinding::new("cmd-x", Cut, None),
         KeyBinding::new("home", Home, None),
         KeyBinding::new("end", End, None),
@@ -1744,55 +1901,6 @@ fn line_len(content: &str, line: usize) -> usize {
     content.split('\n').nth(line).map(str::len).unwrap_or(0)
 }
 
-/// Byte offset where the word before `offset` begins.
-///
-/// The TUI composer walks back over the separators and then over the word, so
-/// the same walk happens here and the window's alt+left lands where the
-/// terminal's ctrl+left does. Graphemes keep the walk from splitting a
-/// character that spans several bytes.
-fn previous_word_start(content: &str, offset: usize) -> usize {
-    let clamped = offset.min(content.len());
-    let graphemes: Vec<(usize, &str)> = content.grapheme_indices(true).collect();
-    let mut index = graphemes
-        .iter()
-        .position(|(start, _)| *start >= clamped)
-        .unwrap_or(graphemes.len());
-    while index > 0 && !is_word_grapheme(graphemes[index - 1].1) {
-        index -= 1;
-    }
-    while index > 0 && is_word_grapheme(graphemes[index - 1].1) {
-        index -= 1;
-    }
-    graphemes.get(index).map(|(start, _)| *start).unwrap_or(0)
-}
-
-/// Byte offset the word after `offset` ends on, past the word and the
-/// separators that follow it, matching the terminal composer.
-fn next_word_end(content: &str, offset: usize) -> usize {
-    let clamped = offset.min(content.len());
-    let graphemes: Vec<(usize, &str)> = content.grapheme_indices(true).collect();
-    let mut index = graphemes
-        .iter()
-        .position(|(start, _)| *start >= clamped)
-        .unwrap_or(graphemes.len());
-    while index < graphemes.len() && is_word_grapheme(graphemes[index].1) {
-        index += 1;
-    }
-    while index < graphemes.len() && !is_word_grapheme(graphemes[index].1) {
-        index += 1;
-    }
-    graphemes
-        .get(index)
-        .map(|(start, _)| *start)
-        .unwrap_or(content.len())
-}
-
-/// Letters and digits are word content; whitespace and punctuation separate
-/// words. A grapheme counts as a word when any of its characters is a letter.
-fn is_word_grapheme(grapheme: &str) -> bool {
-    grapheme.chars().any(|ch| ch.is_alphanumeric())
-}
-
 /// (line, utf8 column) for a utf8 offset. Past-the-end offsets clamp to the
 /// last line's end rather than panicking: a stale offset must never take the
 /// window down.
@@ -1849,12 +1957,14 @@ fn write_clipboard_image(image: &(ImageFormat, Vec<u8>)) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Attachment, CLIPBOARD_IMAGE_HINT, caret_in_row, image_format_extension, line_col,
-        line_count, line_len, line_start, marker_paths, message_with_markers, next_word_end,
-        previous_word_start, strip_markers, vertical_row_target, write_clipboard_image,
+        Attachment, CLIPBOARD_IMAGE_HINT, COPIED_NOTICE, NOTICE_TTL, caret_in_row,
+        image_format_extension, line_col, line_count, line_len, line_start, marker_paths,
+        message_with_markers, next_word_end, notice_expired, previous_word_start, strip_markers,
+        vertical_row_target, write_clipboard_image,
     };
     use gpui::ImageFormat;
     use std::path::PathBuf;
+    use std::time::{Duration, Instant};
 
     /// A throwaway directory with real files in it: the classifier stats the
     /// path, so a made-up path would prove nothing about what a drop attaches.
@@ -1869,6 +1979,38 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).expect("scratch dir");
         dir
+    }
+
+    #[test]
+    fn drag_copy_composer_keeps_cmd_c_and_adds_ctrl_c() {
+        let src = include_str!("editor.rs");
+        let bindings = src
+            .split("pub fn bind_keys(")
+            .nth(1)
+            .and_then(|rest| rest.split("// Line math").next())
+            .expect("editor key bindings");
+        assert!(bindings.contains("KeyBinding::new(\"cmd-c\", Copy, None)"));
+        assert!(bindings.contains("KeyBinding::new(\"ctrl-c\", Copy, None)"));
+    }
+
+    /// The single-line hint sits in the middle of the composer, with the
+    /// same small inset at the text's left edge and the paperclip's right.
+    #[test]
+    fn composer_centres_text_and_insets_the_attachment_control() {
+        let src = include_str!("editor.rs");
+        let render = src
+            .split("impl Render for Editor")
+            .nth(1)
+            .and_then(|rest| rest.split("fn attachment_strip(").next())
+            .expect("editor render");
+        assert!(render.contains(".items_center()"));
+        assert!(render.contains(".pl_1()"));
+        let clip = src
+            .split("fn paperclip(")
+            .nth(1)
+            .and_then(|rest| rest.split("/// The keybindings").next())
+            .expect("paperclip");
+        assert!(clip.contains(".mr_1()"));
     }
 
     /// A chip's thumbnail and its ✕ are two elements with two ids and two
@@ -2318,6 +2460,73 @@ mod tests {
         assert!(
             src.contains("if empty && bare && Editor::clipboard_image(cx).is_some()"),
             "the hint only stands in while the field is empty and bare"
+        );
+    }
+
+    /// A copy is acknowledged on the terminal's own clock, so the same gesture
+    /// cannot read as instant in one surface and sticky in the other (#2587).
+    #[test]
+    fn copy_notice_expires_on_the_terminal_two_second_clock() {
+        let shown = Instant::now();
+        assert_eq!(NOTICE_TTL, Duration::from_secs(2), "the terminal's TTL");
+        assert!(!notice_expired(shown, shown, NOTICE_TTL), "fresh");
+        assert!(
+            !notice_expired(shown, shown + Duration::from_millis(1999), NOTICE_TTL),
+            "still up just before the second"
+        );
+        assert!(
+            notice_expired(shown, shown + NOTICE_TTL, NOTICE_TTL),
+            "gone on the second"
+        );
+        assert!(
+            notice_expired(shown, shown + Duration::from_secs(9), NOTICE_TTL),
+            "and gone for good"
+        );
+        // A clock that went backwards must not hold a notice forever.
+        assert!(!notice_expired(
+            shown,
+            shown - Duration::from_secs(1),
+            NOTICE_TTL
+        ));
+    }
+
+    /// The words and the slot: a copy says the terminal's line, an empty field
+    /// owns it, and a draft gets one row under the text (#2587).
+    #[test]
+    fn copy_notice_says_the_terminal_line_and_picks_its_slot() {
+        assert_eq!(COPIED_NOTICE, "Copied to clipboard");
+        assert_ne!(
+            COPIED_NOTICE, CLIPBOARD_IMAGE_HINT,
+            "a copy must not offer a paste that has no image behind it"
+        );
+        let src = include_str!("editor.rs");
+        let (_, after) = src
+            .split_once(
+                ["input.", "active_notice(Instant::now())"]
+                    .concat()
+                    .as_str(),
+            )
+            .expect("the placeholder slot reads the live notice");
+        let (slot, _) = after.split_once("\n        let style").expect("slot ends");
+        assert!(
+            slot.contains(["Some(notice) => ", "notice,"].concat().as_str()),
+            "an empty field shows the notice where the name was"
+        );
+        assert!(
+            src.contains(
+                ["body = body.child(", "notice_row(&notice))"]
+                    .concat()
+                    .as_str()
+            ),
+            "a draft gets the notice on its own row under the text"
+        );
+        assert!(
+            src.contains(
+                ["cx.background_executor().", "timer(NOTICE_TTL)"]
+                    .concat()
+                    .as_str()
+            ),
+            "and the line clears itself on a timer"
         );
     }
 }

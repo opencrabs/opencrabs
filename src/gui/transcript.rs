@@ -17,16 +17,19 @@
 //! truncation everywhere (#2271).
 
 use crate::palette;
+use opencrabs::services::message::{CompletedPlanPayload, PLAN_COMPLETED_ROLE};
 use opencrabs::ui_core::card::{CARD_RADIUS, concentric_radius, glass_fill};
-use opencrabs::ui_core::copy_select::{self, covered_rows};
+use opencrabs::ui_core::copy_select::{self, TextPoint};
+use opencrabs::ui_core::plan_history::CompletedPlanView;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::rc::Rc;
 
 use gpui::{
-    AbsoluteLength, AnyElement, App, ClickEvent, Div, MouseButton, ObjectFit, ScrollHandle,
-    SharedString, Stateful, Styled, StyledText, TextStyle, Window, div, img, prelude::*, px, rems,
-    rgb, rgba,
+    AbsoluteLength, AnyElement, App, ClickEvent, Div, HighlightStyle, MouseButton, ObjectFit,
+    ScrollHandle, SharedString, Stateful, Styled, StyledText, TextLayout, TextStyle, Window, div,
+    img, prelude::*, px, rems, rgb, rgba,
 };
 
 use opencrabs::db::Database;
@@ -159,6 +162,13 @@ pub enum Block {
     Thinking { content: String },
     /// A tool ledger: calls with their status.
     Tools { calls: Vec<ToolCall> },
+    /// A durable, read-only completed checklist. The database UUID keeps its
+    /// identity stable across reloads; the shared view keeps GUI and TUI text
+    /// identical without exposing the stored JSON.
+    CompletedPlan {
+        message_id: uuid::Uuid,
+        plan: CompletedPlanView,
+    },
     /// History marker: the rows the window hid.
     Marker { hidden: usize },
 }
@@ -666,6 +676,15 @@ pub async fn load_recent(
 /// it returns is a char boundary (#1587 grammar).
 fn row_blocks(m: &Message) -> Vec<Block> {
     let mut blocks: Vec<Block> = Vec::new();
+    if m.role == PLAN_COMPLETED_ROLE {
+        if let Some(payload) = CompletedPlanPayload::from_message(m) {
+            blocks.push(Block::CompletedPlan {
+                message_id: m.id,
+                plan: CompletedPlanView::new(&payload.plan),
+            });
+        }
+        return blocks;
+    }
     if m.content.starts_with("[CONTEXT COMPACTION") {
         return blocks;
     }
@@ -855,7 +874,7 @@ pub fn visible_when_folded(block: &Block, final_idx: Option<usize>, idx: usize) 
             _ => true,
         },
         Block::Thinking { .. } | Block::Tools { .. } => false,
-        Block::Marker { .. } => true,
+        Block::CompletedPlan { .. } | Block::Marker { .. } => true,
     }
 }
 
@@ -933,6 +952,45 @@ fn role_color(role: &str) -> u32 {
     }
 }
 
+/// Mix two packed RGB colors without introducing a theme-specific literal.
+/// The panel supplies the base tone and the role accent supplies a small tint.
+fn mix_rgb(base: u32, tint: u32, percent: u32) -> u32 {
+    let percent = percent.min(100);
+    let channel = |shift: u32| {
+        let base = (base >> shift) & 0xff;
+        let tint = (tint >> shift) & 0xff;
+        (base * (100 - percent) + tint * percent) / 100
+    };
+    (channel(16) << 16) | (channel(8) << 8) | channel(0)
+}
+
+fn palette_is_dark(color: u32) -> bool {
+    let r = (color >> 16) & 0xff;
+    let g = (color >> 8) & 0xff;
+    let b = color & 0xff;
+    (r * 299 + g * 587 + b * 114) / 1000 < 128
+}
+
+/// The user bubble is one small neutral step off the history canvas: a touch
+/// lighter on dark themes, a touch darker on light ones. No role colour is
+/// mixed in, so the bubble reads as depth and never competes with the text
+/// (#2570).
+fn message_surface_for(palette: &palette::Palette, role: &str) -> u32 {
+    if role != "user" {
+        return palette.bg;
+    }
+    let step = 6;
+    if palette_is_dark(palette.bg) {
+        mix_rgb(palette.bg, 0xff_ff_ff, step)
+    } else {
+        mix_rgb(palette.bg, 0x00_00_00, step)
+    }
+}
+
+fn message_surface(role: &str) -> u32 {
+    message_surface_for(&palette::current(), role)
+}
+
 fn body_style(size: f32) -> TextStyle {
     TextStyle {
         color: rgb(palette::current().text).into(),
@@ -970,12 +1028,11 @@ fn heading_weight(level: u8) -> gpui::FontWeight {
 }
 
 /// One styled markdown line; indent in list/quote depth steps.
-fn md_line(l: &markdown::MdLine) -> Div {
+fn md_line(l: &markdown::MdLine, selection: Option<&SelectionContext>) -> Div {
     let size = heading_size(l.heading_level);
     let mut style = body_style(size);
     style.font_weight = heading_weight(l.heading_level);
-    let text =
-        StyledText::new(l.text.clone()).with_default_highlights(&style, l.highlights.clone());
+    let text = selectable_styled_text(l.text.clone(), style, l.highlights.clone(), selection);
     let base = div().pl(rems(f32::from(l.indent) * 0.9));
     if l.heading {
         base.mt(px(RHYTHM_HEADING_ABOVE))
@@ -989,7 +1046,7 @@ fn md_line(l: &markdown::MdLine) -> Div {
 /// One table cell. Every cell is `flex_1` with `min_w_0`, so the grid takes
 /// the width the window actually has and the columns share it: a wide window
 /// gets wide columns, a narrow one wraps the text instead of clipping it.
-fn table_cell(cell: &markdown::MdCell, header: bool) -> Div {
+fn table_cell(cell: &markdown::MdCell, header: bool, selection: Option<&SelectionContext>) -> Div {
     let style = TextStyle {
         color: rgb(if header {
             palette::current().text_strong
@@ -1000,8 +1057,7 @@ fn table_cell(cell: &markdown::MdCell, header: bool) -> Div {
         font_size: AbsoluteLength::Pixels(px(13.0)),
         ..Default::default()
     };
-    let text =
-        StyledText::new(cell.text.clone()).with_default_highlights(&style, cell.highlights.clone());
+    let text = selectable_styled_text(cell.text.clone(), style, cell.highlights.clone(), selection);
     div()
         .flex_1()
         .min_w_0()
@@ -1023,7 +1079,7 @@ fn table_rule() -> Div {
 /// A markdown table as a real grid: header band, a rule under it, then one
 /// flex row per record with the same column count. This is the shape the TUI
 /// draws in box characters; the GUI draws it in panels.
-fn md_table(t: &markdown::MdTable) -> Div {
+fn md_table(t: &markdown::MdTable, selection: Option<&SelectionContext>) -> Div {
     let cols = t.columns().max(1);
     let empty = markdown::MdCell {
         text: String::new(),
@@ -1045,13 +1101,17 @@ fn md_table(t: &markdown::MdTable) -> Div {
         .flex_row()
         .items_start()
         .w_full()
-        // Top corners concentric with the grid curve (flush, gap 0): the
-        // glass band would otherwise paint square corners over it (#2514).
-        .rounded_tl(px(concentric_radius(0.0)))
-        .rounded_tr(px(concentric_radius(0.0)))
+        // Match the table's own top corners exactly. A smaller inner radius
+        // leaves a visible step between the header band and the card edge.
+        .rounded_tl(px(CARD_RADIUS))
+        .rounded_tr(px(CARD_RADIUS))
         .bg(glass_fill(palette::current().panel_hi));
     for i in 0..cols {
-        head = head.child(table_cell(t.header.get(i).unwrap_or(&empty), true));
+        head = head.child(table_cell(
+            t.header.get(i).unwrap_or(&empty),
+            true,
+            selection,
+        ));
     }
     grid = grid.child(head).child(table_rule());
 
@@ -1061,7 +1121,7 @@ fn md_table(t: &markdown::MdTable) -> Div {
         }
         let mut line = div().flex().flex_row().items_start().w_full();
         for i in 0..cols {
-            line = line.child(table_cell(row.get(i).unwrap_or(&empty), false));
+            line = line.child(table_cell(row.get(i).unwrap_or(&empty), false, selection));
         }
         grid = grid.child(line);
     }
@@ -1076,20 +1136,32 @@ const RHYTHM_BASE_GAP: f32 = 4.0;
 const RHYTHM_HEADING_ABOVE: f32 = 12.0;
 const RHYTHM_HEADING_BELOW: f32 = 4.0;
 const RHYTHM_BLOCK_MARGIN: f32 = 10.0;
-const RHYTHM_CELL_PAD_X: f32 = 12.0;
+const RHYTHM_CELL_PAD_X: f32 = 16.0;
 const RHYTHM_CELL_PAD_Y: f32 = 6.0;
+
+/// Message text sits inside the rounded surface, never on its curved edge.
+const MESSAGE_PAD_X: f32 = 16.0;
+const MESSAGE_PAD_Y: f32 = 12.0;
+
+/// The message surface carries a tighter corner than the cards around it, so a
+/// column of chat reads as conversation and not as a stack of panels. This
+/// token belongs to the message bubble alone and never reaches `CARD_RADIUS`
+/// or `SEEKER_RADIUS` (#2571).
+const MESSAGE_RADIUS: f32 = 12.0;
+const USER_TEXT_SIZE: f32 = 16.0;
+const PLAIN_TEXT_SIZE: f32 = 13.0;
 
 /// Assistant content as markdown. Consecutive fence lines group under one
 /// padded mono container so a code block reads as one shape, while a table
 /// block keeps its grid instead of being flattened into text rows.
-fn md_block(src: &str) -> Div {
+fn md_block(src: &str, selection: Option<&SelectionContext>) -> Div {
     let blocks = markdown::blocks(src);
     let mut out = div().flex().flex_col().gap(px(RHYTHM_BASE_GAP));
     let mut i = 0;
     while i < blocks.len() {
         match &blocks[i] {
             markdown::MdBlock::Table(table) => {
-                out = out.child(md_table(table));
+                out = out.child(md_table(table, selection));
                 i += 1;
             }
             markdown::MdBlock::Line(line) if line.mono => {
@@ -1105,13 +1177,12 @@ fn md_block(src: &str) -> Div {
                 while i < blocks.len() {
                     match &blocks[i] {
                         markdown::MdBlock::Line(l) if l.mono => {
-                            let style = mono_style();
-                            code = code.child(
-                                div().child(
-                                    StyledText::new(l.text.clone())
-                                        .with_default_highlights(&style, l.highlights.clone()),
-                                ),
-                            );
+                            code = code.child(selectable_styled_text(
+                                l.text.clone(),
+                                mono_style(),
+                                l.highlights.clone(),
+                                selection,
+                            ));
                             i += 1;
                         }
                         _ => break,
@@ -1120,7 +1191,7 @@ fn md_block(src: &str) -> Div {
                 out = out.child(code);
             }
             markdown::MdBlock::Line(line) => {
-                out = out.child(md_line(line));
+                out = out.child(md_line(line, selection));
                 i += 1;
             }
         }
@@ -1130,30 +1201,37 @@ fn md_block(src: &str) -> Div {
 
 /// User/system content stays plain: the TUI renders input verbatim, markdown
 /// styling is an answer-text treatment.
-fn plain_block(content: &str) -> Div {
+fn plain_block(content: &str, size: f32, selection: Option<&SelectionContext>) -> Div {
     let mut lines = div().flex().flex_col().gap_0p5();
     for line in content.split('\n') {
-        lines = lines.child(
-            div()
-                .text_sm()
-                .text_color(rgb(palette::current().text))
-                .child(SharedString::from(line.to_string())),
-        );
+        lines = lines.child(selectable_styled_text(
+            line.to_string(),
+            body_style(size),
+            Vec::new(),
+            selection,
+        ));
     }
     lines
 }
 
-/// One message: its timestamp, then the content. No role label and no panel
-/// background, because both were noise: the TUI tells the two apart by colour
-/// on the marker, and a grey card around every message made the transcript
-/// read as a stack of boxes instead of a conversation. The timestamp stays on
-/// BOTH sides, which is what the user needed to tell when an answer landed.
+/// Only the user message paints a bubble. The assistant answer is drawn
+/// straight onto the history background, so a long reply does not read as one
+/// more card (#2569).
+fn bubble_has_surface(role: &str) -> bool {
+    role == "user"
+}
+
+/// One message, drawn. The timestamp and content keep the same padding in both
+/// roles so a folded history holds one rhythm, and only the user message
+/// carries a surface behind them. That surface takes `MESSAGE_RADIUS`, so the
+/// message corners stay tighter than the cards around them (#2571).
 fn bubble(
     role: &str,
     content: &str,
     time: &str,
     content_width: f32,
     handlers: &HashMap<String, ClickHandler>,
+    selection: Option<&SelectionContext>,
 ) -> Div {
     let paths = marker_paths(content);
     let text = strip_markers(content);
@@ -1161,7 +1239,20 @@ fn bubble(
     // and `flex_shrink_0` stops the column squeezing a row below the height its
     // tiles reserved. Before #2395 the row had neither, so a tile laid out
     // taller than `TILE` painted over the line above it.
-    let mut col = div().flex().flex_col().gap_1().min_w_0().flex_shrink_0();
+    let attachment_width = (content_width - 2.0 * MESSAGE_PAD_X).max(0.0);
+    let mut col = div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .min_w_0()
+        .flex_shrink_0()
+        .px(px(MESSAGE_PAD_X))
+        .py(px(MESSAGE_PAD_Y));
+    if bubble_has_surface(role) {
+        col = col
+            .rounded(px(MESSAGE_RADIUS))
+            .bg(glass_fill(message_surface(role)));
+    }
     if !time.is_empty() {
         col = col.child(
             div()
@@ -1172,13 +1263,21 @@ fn bubble(
     }
     if !text.trim().is_empty() {
         col = col.child(if role == "assistant" {
-            md_block(&text)
+            md_block(&text, selection)
         } else {
-            plain_block(&text)
+            plain_block(
+                &text,
+                if role == "user" {
+                    USER_TEXT_SIZE
+                } else {
+                    PLAIN_TEXT_SIZE
+                },
+                selection,
+            )
         });
     }
     if !paths.is_empty() {
-        col = col.child(history_attachments(&paths, content_width, handlers));
+        col = col.child(history_attachments(&paths, attachment_width, handlers));
     }
     col
 }
@@ -1267,6 +1366,9 @@ fn attachment_cell(path: &std::path::Path, side: f32) -> Div {
             .child(
                 img(path.to_path_buf())
                     .size_full()
+                    // Clip the pixels as well as the box. GPUI's image paint
+                    // can otherwise cover the outer card's rounded top edge.
+                    .rounded(px(concentric_radius(1.0)))
                     .object_fit(ObjectFit::Cover),
             )
             .into_any_element()
@@ -1573,7 +1675,7 @@ fn live_card_body(live: &LiveTurn) -> Div {
                         .child(SharedString::from(format!("{mark} {text}"))),
                 );
             }
-            LiveCardLine::Narration(text) => body = body.child(md_block(&text)),
+            LiveCardLine::Narration(text) => body = body.child(md_block(&text, None)),
             LiveCardLine::Reasoning(text) => {
                 body = body.child(
                     div()
@@ -1702,16 +1804,24 @@ fn live_card_footer(live: &LiveTurn, ctx: (Option<u32>, u32)) -> Option<String> 
 
 /// One block, drawn. The fold decides WHETHER a block renders; this decides
 /// only what it looks like.
-fn block_view(block: &Block, content_width: f32, handlers: &HashMap<String, ClickHandler>) -> Div {
+fn block_view(
+    block: &Block,
+    content_width: f32,
+    handlers: &HashMap<String, ClickHandler>,
+    selection: Option<&SelectionContext>,
+) -> Div {
     match block {
         Block::Msg {
             role,
             content,
             time,
             ..
-        } => bubble(role, content, time, content_width, handlers),
+        } => bubble(role, content, time, content_width, handlers, selection),
         Block::Thinking { content } => thinking_block(content, false),
         Block::Tools { calls } => tools_block(calls),
+        Block::CompletedPlan { message_id, plan } => {
+            div().child(crate::plan_strip::completed_plan_card(*message_id, plan))
+        }
         Block::Marker { hidden } => div()
             .text_xs()
             .text_color(rgb(palette::current().text_muted))
@@ -1833,6 +1943,7 @@ fn live_view(
             },
             content_width,
             handlers,
+            None,
         ));
     }
     for notice in &live.notices {
@@ -1856,6 +1967,7 @@ fn live_view(
             },
             content_width,
             handlers,
+            None,
         ));
     }
     // ONE card for the whole turn: header, body when open, footer. The three
@@ -1879,6 +1991,7 @@ fn live_view(
             },
             content_width,
             handlers,
+            None,
         ));
     }
     col
@@ -1889,67 +2002,331 @@ fn live_view(
 /// by default, exactly as in the TUI; `busy` keeps the running turn's
 /// in-flight text out of the fold so the answer is never hidden while it is
 /// still being written.
-/// Drag-to-copy over the transcript's rows (#2383). Each drawn row records its
-/// plain text in order; a drag from one row to another selects the rows between
-/// them, and releasing the mouse copies their text. Selection is per row, not
-/// per character.
+/// Selection uses the same blue as the active theme, with enough alpha to
+/// remain visible over both role surfaces. No role-specific colour is pinned.
+fn selection_rgba() -> u32 {
+    (palette::current().blue << 8) | 0x55
+}
+
+/// What a successful copy tells the view that owns the composer (#2587).
+type CopiedListener = Rc<dyn Fn(&mut App)>;
+
+/// One transcript mouse release: the window to repaint and the app to write to.
+type MouseRelease = Rc<dyn Fn(&mut Window, &mut App)>;
+
+/// Drag-to-copy over transcript rows (#2383) and their UTF-8 text ranges
+/// (#2529). Each row records the text its selectable segments render. GPUI's
+/// `TextLayout` turns a pointer into a byte offset; this state orders the two
+/// endpoints and produces one clipboard payload for mouse release and keys.
 #[derive(Default)]
 pub struct CopyDrag {
     texts: RefCell<Vec<String>>,
-    anchor: Cell<Option<usize>>,
-    end: Cell<Option<usize>>,
+    anchor: Cell<Option<TextPoint>>,
+    end: Cell<Option<TextPoint>>,
     dragging: Cell<bool>,
+    /// Fired once a release or a copy chord actually put text on the
+    /// clipboard, so the composer can say so (#2587). Empty until the view
+    /// that owns the composer hands one over.
+    on_copied: RefCell<Option<CopiedListener>>,
 }
 
 impl CopyDrag {
-    /// The selected rows, first to last, when a drag covered more than one row.
-    fn range(&self) -> Option<(usize, usize)> {
-        covered_rows(self.anchor.get()?, self.end.get()?)
+    /// The owning view wires the acknowledgement here. The transcript cannot
+    /// reach the composer, so the composer's parent is the only place that
+    /// knows both halves of the gesture.
+    pub fn set_copied_listener(&self, listener: CopiedListener) {
+        *self.on_copied.borrow_mut() = Some(listener);
     }
 
-    /// The text of the selected rows, joined by blank lines. None without a range.
+    /// Tell the owner a copy landed. Only call this after a successful write:
+    /// a click copies nothing and must stay silent.
+    pub fn announce_copied(&self, app: &mut App) {
+        let listener = self.on_copied.borrow().clone();
+        if let Some(listener) = listener {
+            listener(app);
+        }
+    }
+
+    /// Drop the highlight. A release that copied has nothing left to keep lit
+    /// (#2587); an unmoved click already holds nothing.
+    pub fn clear_selection(&self) {
+        self.anchor.set(None);
+        self.end.set(None);
+        self.dragging.set(false);
+    }
+
+    /// The release path: write the dragged text and, when it landed, drop the
+    /// highlight. Returns whether the clipboard took it so the caller
+    /// acknowledges exactly once.
+    pub fn finish_copy(&self, app: &mut App) -> bool {
+        let Some(item) = self.clipboard_item() else {
+            return false;
+        };
+        app.write_to_clipboard(item);
+        self.clear_selection();
+        true
+    }
+
+    fn points(&self) -> Option<(TextPoint, TextPoint)> {
+        copy_select::ordered_points(self.anchor.get()?, self.end.get()?)
+    }
+
+    /// The selected rows, including one row when only its character range is
+    /// selected. An unmoved click still has no range.
+    fn range(&self) -> Option<(usize, usize)> {
+        let (start, end) = self.points()?;
+        Some((start.row, end.row))
+    }
+
+    pub fn has_selection(&self) -> bool {
+        self.points().is_some()
+    }
+
+    /// The exact selected text, or None for a click or a stale row range.
     fn copied_text(&self) -> Option<String> {
-        let (lo, hi) = self.range()?;
-        copy_select::copied_text(&self.texts.borrow(), lo, hi)
+        copy_select::copied_range(&self.texts.borrow(), self.anchor.get()?, self.end.get()?)
+    }
+
+    /// One payload path for release, cmd-c and ctrl-c. Tests can inspect the
+    /// item without claiming that a headless test wrote the system clipboard.
+    pub fn clipboard_item(&self) -> Option<gpui::ClipboardItem> {
+        self.copied_text().map(gpui::ClipboardItem::new_string)
+    }
+
+    /// Intersect the selection with one rendered text segment. The segment's
+    /// offset is in the row's copy text, so markdown and plain rows share the
+    /// same hit-testing and highlighting rule.
+    fn segment_range(&self, row: usize, start: usize, len: usize) -> Option<Range<usize>> {
+        let (selection_start, selection_end) = self.points()?;
+        if row < selection_start.row || row > selection_end.row {
+            return None;
+        }
+        let row_len = self.texts.borrow().get(row)?.len();
+        let selected_start = if row == selection_start.row {
+            selection_start.offset
+        } else {
+            0
+        };
+        let selected_end = if row == selection_end.row {
+            selection_end.offset
+        } else {
+            row_len
+        };
+        let end = start.checked_add(len)?;
+        let lo = start.max(selected_start);
+        let hi = end.min(selected_end);
+        (lo < hi).then(|| lo - start..hi - start)
     }
 }
 
-/// A row that takes part in a drag: its mouse down starts a selection at its
-/// ordinal, moving over it extends the selection, and it is tinted while selected.
+/// Selection state threaded through one message renderer. Every selectable
+/// `StyledText` is one segment; joining segments with newlines gives both the
+/// copy string and a stable coordinate space for endpoint offsets.
+struct SelectionContext<'a> {
+    drag: &'a Rc<CopyDrag>,
+    row: usize,
+    offset: Cell<usize>,
+    segments: Cell<usize>,
+}
+
+impl<'a> SelectionContext<'a> {
+    fn new(drag: &'a Rc<CopyDrag>, row: usize) -> Self {
+        Self {
+            drag,
+            row,
+            offset: Cell::new(0),
+            segments: Cell::new(0),
+        }
+    }
+
+    fn begin_segment(&self, len: usize) -> usize {
+        let start = if self.segments.get() == 0 {
+            0
+        } else {
+            self.offset.get() + 1
+        };
+        self.offset.set(start + len);
+        self.segments.set(self.segments.get() + 1);
+        start
+    }
+}
+
+fn layout_offset(layout: &TextLayout, position: gpui::Point<gpui::Pixels>, len: usize) -> usize {
+    match layout.index_for_position(position) {
+        Ok(index) | Err(index) => index.min(len),
+    }
+}
+
+/// Add a selection background without discarding markdown's existing runs.
+/// Splitting at every run and selection boundary keeps ranges ordered and
+/// non-overlapping, which is what `StyledText::with_default_highlights` wants.
+fn highlights_with_selection(
+    text_len: usize,
+    highlights: Vec<(Range<usize>, HighlightStyle)>,
+    selected: Option<Range<usize>>,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    let Some(selected) = selected else {
+        return highlights;
+    };
+    let mut boundaries = vec![0, text_len, selected.start, selected.end];
+    for (range, _) in &highlights {
+        boundaries.push(range.start);
+        boundaries.push(range.end);
+    }
+    boundaries.retain(|offset| *offset <= text_len);
+    boundaries.sort_unstable();
+    boundaries.dedup();
+
+    let mut out = Vec::new();
+    for pair in boundaries.windows(2) {
+        let [start, end] = pair else { continue };
+        if start == end {
+            continue;
+        }
+        let existing = highlights
+            .iter()
+            .find(|(range, _)| range.start <= *start && range.end >= *end);
+        let in_selection = *start >= selected.start && *end <= selected.end;
+        if existing.is_none() && !in_selection {
+            continue;
+        }
+        let mut style = existing.map(|(_, style)| *style).unwrap_or_default();
+        if in_selection {
+            style.background_color = Some(rgba(selection_rgba()).into());
+        }
+        out.push((*start..*end, style));
+    }
+    out
+}
+
+/// Render one real `StyledText` and retain its layout handle for pointer hit
+/// testing. Text handlers stop propagation so the row-level fallback cannot
+/// overwrite a precise offset with a block endpoint.
+fn selectable_styled_text(
+    text: String,
+    style: TextStyle,
+    highlights: Vec<(Range<usize>, HighlightStyle)>,
+    selection: Option<&SelectionContext>,
+) -> Div {
+    let segment_start = selection.map(|context| context.begin_segment(text.len()));
+    let selected = selection.and_then(|context| {
+        context
+            .drag
+            .segment_range(context.row, segment_start?, text.len())
+    });
+    let highlights = highlights_with_selection(text.len(), highlights, selected);
+    let styled = StyledText::new(text.clone()).with_default_highlights(&style, highlights);
+    let layout = styled.layout().clone();
+    let base = div().child(styled);
+    let Some(context) = selection else {
+        return base;
+    };
+    let row = context.row;
+    let start = segment_start.unwrap_or(0);
+    let len = text.len();
+    let begin = context.drag.clone();
+    let extend = context.drag.clone();
+    let move_layout = layout.clone();
+    base.on_mouse_down(MouseButton::Left, move |event, window, cx| {
+        let offset = start + layout_offset(&layout, event.position, len);
+        begin.anchor.set(Some(TextPoint::new(row, offset)));
+        begin.end.set(Some(TextPoint::new(row, offset)));
+        begin.dragging.set(true);
+        cx.stop_propagation();
+        window.refresh();
+    })
+    .on_mouse_move(move |event, window, cx| {
+        if extend.dragging.get() {
+            let offset = start + layout_offset(&move_layout, event.position, len);
+            extend.end.set(Some(TextPoint::new(row, offset)));
+            cx.stop_propagation();
+            window.refresh();
+        }
+    })
+}
+
+/// A row that takes part in a drag. Text segments provide exact offsets; these
+/// row handlers preserve selection over padding and non-text blocks.
 fn selectable_row(drag: &Rc<CopyDrag>, ordinal: usize, child: Div) -> Stateful<Div> {
     let selected = drag
         .range()
         .is_some_and(|(lo, hi)| (lo..=hi).contains(&ordinal));
+    let text_len = drag.texts.borrow().get(ordinal).map_or(0, String::len);
     let start = drag.clone();
     let extend = drag.clone();
     div()
         .id(SharedString::from(format!("tblock-{ordinal}")))
-        .when(selected, |d| d.bg(rgba(0x3311ff22)))
+        .when(selected, |d| d.bg(rgba(selection_rgba())))
         .on_mouse_down(MouseButton::Left, move |_ev, window, _app| {
-            start.anchor.set(Some(ordinal));
-            start.end.set(Some(ordinal));
+            start.anchor.set(Some(TextPoint::new(ordinal, 0)));
+            start.end.set(Some(TextPoint::new(ordinal, 0)));
             start.dragging.set(true);
             window.refresh();
         })
         .on_mouse_move(move |_ev, window, _app| {
             if extend.dragging.get() {
-                extend.end.set(Some(ordinal));
+                let offset = match extend.anchor.get() {
+                    Some(anchor) if anchor.row > ordinal => 0,
+                    Some(anchor) if anchor.row == ordinal && anchor.offset == text_len => 0,
+                    _ => text_len,
+                };
+                extend.end.set(Some(TextPoint::new(ordinal, offset)));
                 window.refresh();
             }
         })
         .child(child)
 }
 
-/// The plain text a row copies: what the row shows, without markup or folds.
+/// The visible text of a markdown block in exactly the segment order used by
+/// `md_block`: table cells follow their header and rows, and every segment is
+/// separated by one newline in the copy coordinate space.
+fn markdown_copy_text(src: &str) -> String {
+    let mut segments = Vec::new();
+    for block in markdown::blocks(src) {
+        match block {
+            markdown::MdBlock::Line(line) => segments.push(line.text),
+            markdown::MdBlock::Table(table) => {
+                let cols = table.columns().max(1);
+                for i in 0..cols {
+                    segments.push(
+                        table
+                            .header
+                            .get(i)
+                            .map_or("", |cell| cell.text.as_str())
+                            .to_string(),
+                    );
+                }
+                for row in table.rows {
+                    for i in 0..cols {
+                        segments.push(row.get(i).map_or("", |cell| cell.text.as_str()).to_string());
+                    }
+                }
+            }
+        }
+    }
+    segments.join("\n")
+}
+
+/// The plain text a row copies: what the row shows, without markers or folds.
+/// Assistant rows use the same visible markdown segments as the renderer so a
+/// character offset never points at stripped `##` or backtick source bytes.
 fn block_text(block: &Block) -> String {
     match block {
-        Block::Msg { content, .. } => strip_markers(content).trim().to_string(),
+        Block::Msg { role, content, .. } => {
+            let text = strip_markers(content);
+            if role == "assistant" {
+                markdown_copy_text(&text)
+            } else {
+                text
+            }
+        }
         Block::Thinking { content } => content.trim().to_string(),
         Block::Tools { calls } => calls
             .iter()
             .map(|c| c.description.as_str())
             .collect::<Vec<_>>()
             .join("\n"),
+        Block::CompletedPlan { plan, .. } => plan.copy_text(),
         Block::Marker { .. } => String::new(),
     }
 }
@@ -2035,6 +2412,7 @@ pub fn view(
             },
             content_width,
             &attachment_handlers,
+            None,
         ));
     }
     let last = state.turns.len().saturating_sub(1);
@@ -2078,19 +2456,31 @@ pub fn view(
             {
                 continue;
             }
-            let child = match block {
-                Block::Thinking { content } => thinking_block(content, full),
-                _ => block_view(block, content_width, &attachment_handlers),
-            };
-            col = match &drag {
-                Some(d) if !block_text(block).is_empty() => {
+            let text = block_text(block);
+            let mut selectable = None;
+            let child = match &drag {
+                Some(d) if !text.trim().is_empty() => {
                     let ordinal = {
                         let mut texts = d.texts.borrow_mut();
-                        texts.push(block_text(block));
+                        texts.push(text);
                         texts.len() - 1
                     };
-                    col.child(selectable_row(d, ordinal, child))
+                    selectable = Some(ordinal);
+                    let selection = SelectionContext::new(d, ordinal);
+                    match block {
+                        Block::Thinking { content } => thinking_block(content, full),
+                        _ => {
+                            block_view(block, content_width, &attachment_handlers, Some(&selection))
+                        }
+                    }
                 }
+                _ => match block {
+                    Block::Thinking { content } => thinking_block(content, full),
+                    _ => block_view(block, content_width, &attachment_handlers, None),
+                },
+            };
+            col = match (&drag, selectable) {
+                (Some(d), Some(ordinal)) => col.child(selectable_row(d, ordinal, child)),
                 _ => col.child(child),
             };
         }
@@ -2116,15 +2506,27 @@ pub fn view(
             &attachment_handlers,
         ));
     }
-    // Releasing the mouse ends the drag and copies the selected rows (#2383). A
-    // click that never moved selects nothing, so it copies nothing.
+    // Releasing the mouse ends the drag and copies the selected range (#2383,
+    // #2529). A click that never moved selects nothing, so it copies nothing
+    // and says nothing. A copy that landed drops the highlight and tells the
+    // composer, which is what the terminal does on release (#2587).
     if let Some(d) = drag {
-        col = col.on_mouse_up(MouseButton::Left, move |_ev, window, app| {
+        let release: MouseRelease = Rc::new(move |window, app| {
             d.dragging.set(false);
-            if let Some(text) = d.copied_text() {
-                app.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+            if d.finish_copy(app) {
+                d.announce_copied(app);
             }
             window.refresh();
+        });
+        let on_up = release.clone();
+        col = col.on_mouse_up(MouseButton::Left, move |_ev, window, app| {
+            on_up(window, app)
+        });
+        // A release past the pane's last pixel is still the end of the drag.
+        // Without this the drag stayed armed and the next click extended it
+        // instead of starting a new one.
+        col = col.on_mouse_up_out(MouseButton::Left, move |_ev, window, app| {
+            release(window, app)
         });
     }
     col
@@ -2138,6 +2540,99 @@ pub fn view(
 mod tests {
     use super::*;
 
+    /// Perceived brightness of a packed RGB colour, 0..=255.
+    fn luma(color: u32) -> u32 {
+        let r = (color >> 16) & 0xff;
+        let g = (color >> 8) & 0xff;
+        let b = color & 0xff;
+        (r * 299 + g * 587 + b * 114) / 1000
+    }
+
+    /// The bubble's visible tone once the glass alpha lands on the canvas.
+    fn over(ink: u32, canvas: u32, alpha: u32) -> u32 {
+        let a = alpha.min(255);
+        let mix = |shift: u32| {
+            let ink = (ink >> shift) & 0xff;
+            let canvas = (canvas >> shift) & 0xff;
+            (ink * a + canvas * (255 - a)) / 255
+        };
+        (mix(16) << 16) | (mix(8) << 8) | mix(0)
+    }
+
+    #[test]
+    fn drag_copy_segment_range_does_not_overflow_when_segment_is_past_selection() {
+        let drag = CopyDrag::default();
+        drag.texts.borrow_mut().push("0123456789extra".into());
+        drag.anchor.set(Some(TextPoint::new(0, 0)));
+        drag.end.set(Some(TextPoint::new(0, 3)));
+
+        // A segment past the selection release point must safely return None without panicking.
+        assert_eq!(drag.segment_range(0, 4, 2), None);
+
+        // Drag with anchor 10 and end 3 normalizes to 3..10.
+        let drag_rev = CopyDrag::default();
+        drag_rev.texts.borrow_mut().push("0123456789extra".into());
+        drag_rev.anchor.set(Some(TextPoint::new(0, 10)));
+        drag_rev.end.set(Some(TextPoint::new(0, 3)));
+        assert_eq!(drag_rev.segment_range(0, 12, 2), None);
+
+        // Fully covered segment returns the exact segment range.
+        assert_eq!(drag_rev.segment_range(0, 4, 3), Some(0..3));
+
+        // Partial overlap at the start.
+        assert_eq!(drag_rev.segment_range(0, 2, 3), Some(1..3));
+
+        // Partial overlap at the end.
+        assert_eq!(drag_rev.segment_range(0, 8, 4), Some(0..2));
+    }
+
+    #[test]
+    fn drag_copy_within_block_has_a_visible_range_and_clipboard_payload() {
+        let drag = CopyDrag::default();
+        drag.texts.borrow_mut().push("select a small range".into());
+        drag.anchor.set(Some(TextPoint::new(0, 7)));
+        drag.end.set(Some(TextPoint::new(0, 16)));
+        assert_eq!(drag.range(), Some((0, 0)));
+        assert!(drag.has_selection());
+        assert_eq!(drag.copied_text().as_deref(), Some("a small r"));
+        assert_eq!(
+            drag.clipboard_item()
+                .and_then(|item| item.text())
+                .as_deref(),
+            Some("a small r")
+        );
+    }
+
+    #[test]
+    fn drag_copy_across_blocks_preserves_partial_rows_and_blank_lines() {
+        let drag = CopyDrag::default();
+        drag.texts.borrow_mut().extend([
+            "first".to_string(),
+            "second".to_string(),
+            "third".to_string(),
+        ]);
+        drag.anchor.set(Some(TextPoint::new(2, 4)));
+        drag.end.set(Some(TextPoint::new(0, 2)));
+        assert_eq!(drag.copied_text().as_deref(), Some("rst\n\nsecond\n\nthir"));
+    }
+
+    #[test]
+    fn drag_copy_cmd_and_ctrl_chords_are_equivalent() {
+        assert!(copy_select::is_copy_chord("c", true, false));
+        assert!(copy_select::is_copy_chord("c", false, true));
+        assert!(!copy_select::is_copy_chord("c", false, false));
+        assert!(!copy_select::is_copy_chord("x", true, false));
+    }
+
+    #[test]
+    fn drag_copy_markdown_copy_text_matches_visible_segments() {
+        assert_eq!(markdown_copy_text("## Head\n\nbody"), "Head\nbody");
+        assert_eq!(
+            markdown_copy_text("| A | B |\n| --- | --- |\n| 1 | 2 |"),
+            "A\nB\n1\n2"
+        );
+    }
+
     /// The ladder steps down strictly and the body stays smallest, so a
     /// heading can never look like prose again (#2521).
     #[test]
@@ -2148,6 +2643,203 @@ mod tests {
         assert_eq!(heading_size(0), 13.0, "body stays 13px");
         assert_eq!(heading_weight(1), gpui::FontWeight::BOLD);
         assert_eq!(heading_weight(0), gpui::FontWeight::NORMAL);
+    }
+
+    /// #2569: only the user message paints a bubble. The assistant answer is
+    /// drawn straight onto the history background, so a long reply is not one
+    /// more card.
+    #[test]
+    fn only_user_messages_paint_a_bubble_surface() {
+        assert!(bubble_has_surface("user"));
+        assert!(!bubble_has_surface("assistant"));
+        assert!(!bubble_has_surface("system"));
+        assert!(!bubble_has_surface("tool"));
+
+        let src = include_str!("transcript.rs");
+        let body = src
+            .split("fn bubble(")
+            .nth(1)
+            .and_then(|rest| rest.split("/// The files").next())
+            .expect("message bubble renderer");
+        let (shared, guarded) = body
+            .split_once("if bubble_has_surface(role)")
+            .expect("the user-only surface guard");
+        assert!(
+            !shared.contains(".bg("),
+            "the shared column stays transparent for every role"
+        );
+        assert!(
+            guarded.contains(".bg(glass_fill(message_surface(role)))"),
+            "the user surface is painted behind the guard"
+        );
+    }
+
+    /// #2569: the user bubble is a neutral step off the history canvas, lighter
+    /// on dark themes and darker on light ones, and it never borrows a role
+    /// accent, so no hue is introduced.
+    #[test]
+    fn the_user_bubble_is_a_neutral_step_off_the_history_canvas() {
+        let dark = palette::DARK;
+        let light = palette::Palette {
+            bg: 0xf5f5f5,
+            panel: 0xffffff,
+            ..dark
+        };
+        // A non-default light palette proves the direction follows the canvas
+        // rather than one hardcoded theme.
+        let warm_light = palette::Palette {
+            bg: 0xfaf4e8,
+            panel: 0xfffdf8,
+            ..dark
+        };
+
+        for (label, p) in [("dark", dark), ("light", light), ("warm light", warm_light)] {
+            let surface = message_surface_for(&p, "user");
+            assert!(
+                surface <= 0x00ff_ffff,
+                "{label}: the surface stays valid RGB, got {surface:#08x}"
+            );
+            assert_ne!(surface, p.bg, "{label}: the bubble has a visible step");
+            let canvas = luma(p.bg);
+            let bubble = luma(surface);
+            assert!(
+                bubble.abs_diff(canvas) <= 20,
+                "{label}: the step stays subtle, {bubble} against {canvas}"
+            );
+            if palette_is_dark(p.bg) {
+                assert!(
+                    bubble > canvas,
+                    "{label}: the bubble lifts off a dark canvas, {bubble} against {canvas}"
+                );
+            } else {
+                assert!(
+                    bubble < canvas,
+                    "{label}: the bubble sinks into a light canvas, {bubble} against {canvas}"
+                );
+            }
+            // The glass thins the fill, so check the composite at the most
+            // transparent stop: the step must still be visible and still point
+            // the same way.
+            let visible = luma(over(
+                surface,
+                p.bg,
+                opencrabs::ui_core::card::GLASS_ALPHA_BOTTOM,
+            ));
+            assert!(
+                visible.abs_diff(canvas) >= 6,
+                "{label}: the glassed step stays visible, {visible} against {canvas}"
+            );
+            assert!(
+                visible.abs_diff(canvas) <= 20,
+                "{label}: the glassed step stays subtle, {visible} against {canvas}"
+            );
+            if palette_is_dark(p.bg) {
+                assert!(
+                    visible > canvas,
+                    "{label}: the glassed bubble lifts off a dark canvas, {visible} against {canvas}"
+                );
+            } else {
+                assert!(
+                    visible < canvas,
+                    "{label}: the glassed bubble sinks into a light canvas, {visible} against {canvas}"
+                );
+            }
+        }
+
+        // Recolouring every role accent must not move the surface: the bubble
+        // is depth, not colour.
+        let recoloured = palette::Palette {
+            blue: 0x00ff00,
+            green: 0xff00ff,
+            amber: 0x123456,
+            ..dark
+        };
+        assert_eq!(
+            message_surface_for(&dark, "user"),
+            message_surface_for(&recoloured, "user"),
+            "the bubble does not read role colours"
+        );
+        assert_eq!(message_surface_for(&dark, "assistant"), dark.bg);
+    }
+
+    /// #2569: the bubble keeps its inner breathing room, readable user text,
+    /// and an attachment budget that excludes the bubble's own padding.
+    /// #2571: its corner is the message token, tighter than a card.
+    #[test]
+    fn message_bubbles_pad_and_shrink_attachment_budget() {
+        let src = include_str!("transcript.rs");
+        let bubble = src
+            .split("fn bubble(")
+            .nth(1)
+            .and_then(|rest| rest.split("/// The files").next())
+            .expect("message bubble renderer");
+        assert!(bubble.contains(".rounded(px(MESSAGE_RADIUS))"));
+        assert!(!bubble.contains(".rounded(px(CARD_RADIUS))"));
+        assert!(bubble.contains(".px(px(MESSAGE_PAD_X))"));
+        assert!(bubble.contains(".py(px(MESSAGE_PAD_Y))"));
+        assert!(bubble.contains("glass_fill(message_surface(role))"));
+        assert!(bubble.contains("content_width - 2.0 * MESSAGE_PAD_X"));
+        assert!(bubble.contains("history_attachments(&paths, attachment_width, handlers)"));
+        const {
+            assert!(USER_TEXT_SIZE > PLAIN_TEXT_SIZE);
+        }
+    }
+
+    /// #2571: only the message surface gets the tighter corner. The shared card
+    /// and Seeker radii keep their values, so no other panel, table, ledger,
+    /// composer, sidebar or plan strip moves with the chat change.
+    #[test]
+    fn only_the_message_surface_uses_the_tighter_radius() {
+        let src = include_str!("transcript.rs");
+        const {
+            assert!(MESSAGE_RADIUS < CARD_RADIUS);
+            assert!(opencrabs::ui_core::card::SEEKER_RADIUS > CARD_RADIUS);
+        }
+        assert_eq!(MESSAGE_RADIUS, 12.0);
+        assert_eq!(CARD_RADIUS, 24.0);
+        assert_eq!(opencrabs::ui_core::card::SEEKER_RADIUS, 32.0);
+        // The token is declared once and applied once: in the bubble. Every
+        // other rounded surface in this file still reads CARD_RADIUS. Count on
+        // the production half only: this file includes itself, so the literals
+        // in this test would otherwise match themselves.
+        let production = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source before the test module");
+        assert_eq!(production.matches("const MESSAGE_RADIUS").count(), 1);
+        let message_radius_uses = production
+            .lines()
+            .filter(|line| line.contains("px(MESSAGE_RADIUS)"))
+            .count();
+        assert_eq!(
+            message_radius_uses, 1,
+            "only the bubble applies the message radius, found {message_radius_uses} uses"
+        );
+        let cell = src
+            .split("fn attachment_cell(")
+            .nth(1)
+            .and_then(|rest| rest.split("/// The last cell").next())
+            .expect("attachment cell");
+        assert!(
+            cell.contains(".rounded(px(CARD_RADIUS))"),
+            "attachment tiles keep the card radius"
+        );
+    }
+
+    /// #2536: the image needs its own concentric clip. Clipping only the
+    /// outer box still lets the image paint over the card's top corners.
+    #[test]
+    fn attachment_media_clips_inside_the_card_radius() {
+        let src = include_str!("transcript.rs");
+        let cell = src
+            .split("fn attachment_cell(")
+            .nth(1)
+            .and_then(|rest| rest.split("/// The last cell").next())
+            .expect("attachment cell");
+        assert!(cell.contains(".rounded(px(CARD_RADIUS))"));
+        assert!(cell.contains(".rounded(px(concentric_radius(1.0)))"));
+        assert!(cell.contains(".overflow_hidden()"));
+        assert_eq!(concentric_radius(1.0), CARD_RADIUS - 1.0);
     }
 
     /// The stored-rows split with nothing remembered, which is what most
@@ -2165,6 +2857,34 @@ mod tests {
         )
     }
 
+    fn completed_history_row(sequence: i32, task_count: usize) -> Message {
+        use opencrabs::tui::plan::{PlanDocument, PlanStatus, PlanTask, TaskStatus, TaskType};
+
+        let session_id = uuid::Uuid::new_v4();
+        let mut plan = PlanDocument::new(session_id, "Ship GUI history".to_string());
+        plan.status = PlanStatus::Active;
+        for order in 1..=task_count {
+            let mut task = PlanTask::new(
+                order,
+                format!("Resolved task {order}"),
+                "description".to_string(),
+                TaskType::Test,
+            );
+            task.status = if order % 2 == 0 {
+                TaskStatus::Skipped
+            } else {
+                TaskStatus::Completed
+            };
+            plan.add_task(task);
+        }
+        let content = serde_json::to_string(&CompletedPlanPayload { version: 1, plan })
+            .expect("completed plan fixture serializes");
+        let mut message = row(PLAN_COMPLETED_ROLE, &content, sequence);
+        message.id = uuid::Uuid::new_v4();
+        message.session_id = session_id;
+        message
+    }
+
     /// Every block of every turn, in order, which is what the pre-fold pane
     /// drew and what the ordering seats below assert on.
     fn flat(rows: &[Message], total: i64) -> Vec<Block> {
@@ -2173,6 +2893,117 @@ mod tests {
             .into_iter()
             .flat_map(|t| t.blocks)
             .collect()
+    }
+
+    #[test]
+    fn gui_completed_plan_history_decodes_after_answer_in_older_turn() {
+        let completed = completed_history_row(3, 8);
+        let completed_id = completed.id;
+        let rows = [
+            row("user", "ship it", 1),
+            row("assistant", "Final answer", 2),
+            completed,
+            row("user", "next question", 4),
+        ];
+
+        let (_, turns) = turns(&rows, 4);
+        assert_eq!(turns.len(), 2, "the next user row opens a new turn");
+        let older = &turns[0];
+        assert_eq!(older.final_idx, Some(1));
+        assert!(matches!(
+            &older.blocks[1],
+            Block::Msg { role, content, .. }
+                if role == "assistant" && content == "Final answer"
+        ));
+
+        let (card_index, message_id, plan) = older
+            .blocks
+            .iter()
+            .enumerate()
+            .find_map(|(index, block)| match block {
+                Block::CompletedPlan { message_id, plan } => Some((index, *message_id, plan)),
+                _ => None,
+            })
+            .expect("valid durable row becomes a completed-plan block");
+        assert_eq!(card_index, 2, "the checklist follows the final answer");
+        assert_eq!(message_id, completed_id);
+        assert_eq!(plan.tasks.len(), 8);
+        assert_eq!(plan.header(), "Plan · Ship GUI history · 8 tasks · 100%");
+
+        let text = block_text(&older.blocks[card_index]);
+        for order in 1..=8 {
+            assert!(
+                text.contains(&format!("☑ {order}. Resolved task {order}")),
+                "historical rendering must not window task {order}: {text}"
+            );
+        }
+        assert!(text.ends_with(opencrabs::ui_core::plan_history::COMPLETED_PLAN_FOOTER));
+        assert!(!text.contains("\"tasks\""));
+        assert!(!text.contains("session_id"));
+    }
+
+    #[test]
+    fn gui_completed_plan_history_fold_and_copy_keep_full_checklist() {
+        let rows = [
+            row("user", "ship it", 1),
+            row("assistant", "Final answer", 2),
+            completed_history_row(3, 8),
+        ];
+        let (_, turns) = turns(&rows, 3);
+        let turn = &turns[0];
+        let card_index = turn
+            .blocks
+            .iter()
+            .position(|block| matches!(block, Block::CompletedPlan { .. }))
+            .expect("completed card exists");
+
+        assert!(visible_when_folded(
+            &turn.blocks[card_index],
+            turn.final_idx,
+            card_index
+        ));
+        assert!(
+            turn.header.is_none(),
+            "a read-only card is not a hidden working-out step"
+        );
+
+        let copied = block_text(&turn.blocks[card_index]);
+        assert!(copied.contains("☑ 7. Resolved task 7"));
+        assert!(copied.contains("☑ 8. Resolved task 8"));
+        assert!(copied.ends_with("Plan completed and archived."));
+        assert!(!copied.contains("\"plan\""));
+
+        let drag = CopyDrag::default();
+        drag.texts.borrow_mut().push(copied.clone());
+        drag.anchor.set(Some(TextPoint::new(0, 0)));
+        drag.end.set(Some(TextPoint::new(0, copied.len())));
+        assert_eq!(
+            drag.clipboard_item()
+                .and_then(|item| item.text())
+                .as_deref(),
+            Some(copied.as_str()),
+            "drag copy returns the visible checklist, never stored JSON"
+        );
+    }
+
+    #[test]
+    fn gui_completed_plan_history_malformed_rows_never_render_json() {
+        let malformed = row(
+            PLAN_COMPLETED_ROLE,
+            "{\"secret\":\"GUI-PLAN-JSON-SENTINEL\"}",
+            2,
+        );
+        assert!(row_blocks(&malformed).is_empty());
+
+        let mut unsupported = completed_history_row(3, 2);
+        unsupported.content = unsupported
+            .content
+            .replace("\"version\":1", "\"version\":2");
+        assert!(row_blocks(&unsupported).is_empty());
+
+        let blocks = flat(&[row("user", "question", 1), malformed], 2);
+        assert_eq!(blocks.len(), 1, "only the ordinary user row remains");
+        assert!(!block_text(&blocks[0]).contains("GUI-PLAN-JSON-SENTINEL"));
     }
 
     /// The card's narration lines, in order, so a test reads the words the
@@ -2709,6 +3540,22 @@ mod tests {
         assert_eq!(table.rows[1][2].text, "slow");
     }
 
+    /// #2541: the header band follows the table's default radius, and every
+    /// cell shares enough horizontal inset to keep text off the edges.
+    #[test]
+    fn table_header_matches_card_radius_and_cells_breathe() {
+        let src = include_str!("transcript.rs");
+        let table = src
+            .split("fn md_table(")
+            .nth(1)
+            .and_then(|rest| rest.split("/// Vertical rhythm ladder").next())
+            .expect("markdown table renderer");
+        assert!(table.contains(".rounded_tl(px(CARD_RADIUS))"));
+        assert!(table.contains(".rounded_tr(px(CARD_RADIUS))"));
+        assert!(!table.contains("concentric_radius(0.0)"));
+        assert_eq!(RHYTHM_CELL_PAD_X, 16.0);
+    }
+
     /// #2325: reasoning is output, so its time belongs in the denominator the
     /// same way the channel bridge counts its tokens in the numerator.
     /// Excluding it would report a reasoning-heavy turn at its final answer's
@@ -3194,6 +4041,58 @@ mod tests {
         assert!(
             !live_src.contains(["status_", "line(live)"].concat().as_str()),
             "nor a status line below the rows"
+        );
+    }
+
+    #[test]
+    fn drag_copy_release_clears_only_a_selection_it_copied() {
+        let drag = CopyDrag::default();
+        drag.texts.borrow_mut().push("drag to copy".into());
+
+        // An unmoved click: anchor and end sit on the same point, so there is
+        // no range to copy and the release stays silent (#2587).
+        drag.anchor.set(Some(TextPoint::new(0, 4)));
+        drag.end.set(Some(TextPoint::new(0, 4)));
+        assert!(!drag.has_selection(), "a click selects no range");
+        assert_eq!(drag.clipboard_item(), None, "so it has nothing to copy");
+
+        // A drag over real characters copies, and the release clears the
+        // highlight the moment that text lands.
+        drag.end.set(Some(TextPoint::new(0, 8)));
+        assert!(drag.has_selection());
+        assert!(drag.clipboard_item().is_some());
+        drag.clear_selection();
+        assert!(!drag.has_selection(), "the copied range stops painting");
+        assert_eq!(drag.range(), None, "so no row stays highlighted");
+        assert_eq!(
+            drag.clipboard_item(),
+            None,
+            "and there is nothing left to copy twice"
+        );
+    }
+
+    #[test]
+    fn drag_copy_announces_through_one_listener_and_ends_outside_too() {
+        const SRC: &str = include_str!("transcript.rs");
+        // The listener is the only path from the transcript to the composer,
+        // so a landed copy has to go through it instead of writing silently.
+        let (_, after_release) = SRC
+            .split_once(["if d.", "finish_copy(app)"].concat().as_str())
+            .expect("the release handler copies through finish_copy");
+        let (body, _) = after_release
+            .split_once("\n        });")
+            .expect("the release handler ends");
+        assert!(
+            body.contains(["d.", "announce_copied(app)"].concat().as_str()),
+            "a landed copy must announce, or the composer cannot say so"
+        );
+        assert!(
+            SRC.contains(["on_mouse_up_", "out(MouseButton::Left"].concat().as_str()),
+            "a release past the pane's edge still ends the drag"
+        );
+        assert!(
+            !SRC.contains(["d.", "write_to_clipboard(app);"].concat().as_str()),
+            "no caller writes the clipboard without clearing the selection"
         );
     }
 }

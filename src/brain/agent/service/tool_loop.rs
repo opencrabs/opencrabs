@@ -1412,6 +1412,7 @@ impl AgentService {
                         model: model_name,
                         provider_name: self.provider_name_for_session(session_id),
                         started_on_session_provider,
+                        completed_plan: None,
                     });
                 }
                 Err(e) => {
@@ -1446,6 +1447,7 @@ impl AgentService {
                         model: model_name,
                         provider_name: self.provider_name_for_session(session_id),
                         started_on_session_provider,
+                        completed_plan: None,
                     });
                 }
             }
@@ -8349,6 +8351,7 @@ impl AgentService {
         // `is_complete` requires non-empty, all-resolved tasks, so Editing and
         // in-progress plans are untouched; `load_plan` is a fast no-op when the
         // session has no live plan.
+        let mut completed_plan = None;
         if let Some(mut finished) = crate::utils::plan_files::load_plan(session_id).await {
             // A plan whose only remaining task is the trailing delivery step
             // never reaches is_complete() on its own — delivering the answer is
@@ -8380,11 +8383,11 @@ impl AgentService {
                     },
                 );
             }
-            if finished.is_complete()
-                && let Err(e) = crate::utils::plan_files::archive_plan(session_id).await
-            {
-                tracing::warn!("Failed to archive completed plan at turn settle: {e}");
-            }
+            completed_plan = super::messaging::persist_completed_plan_before_archive(
+                &message_service,
+                &finished,
+            )
+            .await;
         }
 
         // Channel-safe suggest_options recovery (#1774): a model that fails
@@ -8440,6 +8443,7 @@ impl AgentService {
             model: response.model,
             provider_name: self.provider_name_for_session(session_id),
             started_on_session_provider,
+            completed_plan,
         })
     }
 }

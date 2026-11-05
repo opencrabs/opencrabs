@@ -15,7 +15,8 @@
 //! mark in `icon.rs`.
 
 use gpui::{
-    AnyElement, Image, ImageFormat, IntoElement, ObjectFit, Styled, StyledImage, img, rems,
+    AnyElement, Image, ImageFormat, IntoElement, ObjectFit, ParentElement, SharedString, Styled,
+    StyledImage, div, img, rems,
 };
 use std::sync::Arc;
 
@@ -303,14 +304,47 @@ pub fn crab_icon(name: &str) -> Option<&'static [u8]> {
         .map(|(_, bytes)| *bytes)
 }
 
+const ORIENTATION_ICON_SVG: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/src/assets/topic-orientation.svg"
+));
+
+/// The topic strip's orientation control. An embedded vector keeps the glyph
+/// crisp at the larger size and avoids depending on a checkout at run time.
+pub fn orientation_icon(size: f32, colour: u32) -> impl IntoElement {
+    let svg = String::from_utf8_lossy(ORIENTATION_ICON_SVG)
+        .replace("#8a8a8a", &format!("#{colour:06x}"))
+        .into_bytes();
+    img(Arc::new(Image::from_bytes(ImageFormat::Svg, svg)))
+        .w(rems(size))
+        .h(rems(size))
+        .flex_none()
+        .object_fit(ObjectFit::Contain)
+}
+
 /// A stored topic icon resolved to a picture, or `None` when it is a plain
 /// emoji and has to stay text (#2478).
 ///
 /// Both embedded sets are consulted: a tab draws whatever it holds, so moving
 /// a row from the crab set to the topic set, or back, needs no migration.
-pub fn tab_icon(stored: &str) -> Option<AnyElement> {
+pub fn tab_icon(stored: &str, size: f32) -> Option<AnyElement> {
     let bytes = topic_icon(stored).or_else(|| crab_icon(stored))?;
-    Some(picture(bytes, 1.15).into_any_element())
+    Some(picture(bytes, size).into_any_element())
+}
+
+/// A legacy emoji topic icon in the same centered slot as an embedded picture.
+/// Keeping it out of the label preserves the icon-above-name geometry and
+/// stops a color emoji from wrapping beside or beyond the topic name.
+pub fn tab_glyph(stored: &str, size: f32) -> AnyElement {
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .size(rems(size))
+        .text_size(rems(size * 0.8))
+        .child(SharedString::from(stored.to_string()))
+        .into_any_element()
 }
 
 /// A picture for a tab, a picker cell or the badge in the topic prompt.
@@ -390,5 +424,19 @@ mod tests {
         assert_eq!(stored, "topic:ops");
         assert_eq!(topic_icon(&stored), topic_icon("ops"));
         assert_eq!(topic_icon("topic:nope"), None);
+    }
+
+    #[test]
+    fn topic_style_orientation_icon_is_an_embedded_modern_vector() {
+        let svg = std::str::from_utf8(ORIENTATION_ICON_SVG).expect("orientation SVG is UTF-8");
+        assert!(svg.starts_with("<svg"));
+        // #2542: GPUI rasterizes the vector from its intrinsic size. Keep
+        // enough source pixels for the fixed 18px display size to stay sharp.
+        assert!(svg.contains("width=\"96\" height=\"96\""));
+        assert!(svg.contains("viewBox=\"0 0 24 24\""));
+        assert!(svg.contains("stroke-linecap=\"round\""));
+        assert!(svg.contains("stroke-linejoin=\"round\""));
+        assert!(svg.contains("<path"));
+        assert!(!svg.contains("<rect"));
     }
 }

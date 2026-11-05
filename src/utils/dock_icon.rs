@@ -19,12 +19,8 @@
 //!   is main-thread and GUI-session only, and touching it in either wrong
 //!   context can abort the process, so both cases log and do nothing.
 //!
-//! The pure helpers compile for tests on every target — and for production
-//! only on macOS, where their callers live — so the tests below still run on
-//! the Linux CI runners while a plain non-macOS build carries no dead code.
-
-#[cfg(target_os = "macos")]
-use std::path::Path;
+//! Every non-macOS target compiles the helpers (they are pure) and skips the
+//! FFI, so the tests below run on the Linux CI runners too.
 
 /// Icon bytes shipped in the binary, the same asset the `.app` bundle uses.
 #[cfg(target_os = "macos")]
@@ -44,7 +40,9 @@ const MAX_ICON_BYTES: u64 = 16 * 1024 * 1024;
 /// An `.icns` file starts with the ASCII magic `icns` and a big-endian total
 /// length that must cover the whole buffer. Checking it here means a truncated
 /// or wrong-format override is rejected with a log line instead of handing
-/// AppKit garbage.
+/// AppKit garbage. Also compiled for tests on any platform: the test file
+/// exercises this validator directly, while the only non-test caller
+/// (`icon_bytes`) is macOS-only.
 #[cfg(any(test, target_os = "macos"))]
 pub(crate) fn icns_is_valid(bytes: &[u8]) -> bool {
     if bytes.len() < 8 || &bytes[0..4] != b"icns" {
@@ -71,6 +69,7 @@ pub(crate) fn should_install(opt_out: Option<&str>) -> bool {
 /// rather than silently producing a blank tile.
 #[cfg(target_os = "macos")]
 fn icon_bytes(override_path: Option<&str>) -> Vec<u8> {
+    use std::path::Path;
     if let Some(raw) = override_path {
         let path = Path::new(raw);
         match std::fs::metadata(path) {

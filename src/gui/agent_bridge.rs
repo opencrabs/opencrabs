@@ -1050,6 +1050,10 @@ async fn run_text_command(
     };
 
     match command {
+        // The window handles `/cd` itself (#2527): the picker screen for a
+        // bare `/cd`, the local applier for a path. It never reaches this
+        // runner, so this arm is an unreachable guard, not a reply.
+        tc::TextCommand::Cd => vec![],
         tc::TextCommand::Plan => {
             let line = opencrabs::utils::plan_mode::enter_plan_mode(session_id).await;
             let mut out = vec![TurnEvent::CommandReply(line)];
@@ -1164,43 +1168,10 @@ async fn run_text_command(
                 }
             }
         }
-        tc::TextCommand::Cd => {
-            if arg.is_empty() {
-                // The session's own directory, which falls back to the
-                // service's, so `/cd` never answers with a path the next turn
-                // will not actually run in.
-                let here = bridge()
-                    .map(|b| {
-                        b.service
-                            .get_working_directory_for_session(session_id)
-                            .display()
-                            .to_string()
-                    })
-                    .unwrap_or_else(|| "(unknown)".to_string());
-                return vec![TurnEvent::CommandReply(tc::cd_current(&here))];
-            }
-            let expanded = opencrabs::brain::tools::error::expand_tilde(arg);
-            if !expanded.is_dir() {
-                return vec![TurnEvent::CommandReply(tc::cd_not_a_directory(arg))];
-            }
-            match bridge() {
-                Some(bridge) => {
-                    // Same applier the terminal uses: session handle, global
-                    // seed and the persisted row move together (#2469).
-                    let applied = bridge
-                        .service
-                        .apply_operator_cd(session_id, &expanded)
-                        .await;
-                    vec![TurnEvent::CommandReply(tc::cd_reply(
-                        &applied.display().to_string(),
-                    ))]
-                }
-                None => vec![TurnEvent::CommandReply(format!(
-                    "{} (the agent is offline, so the change was not applied)",
-                    tc::cd_not_a_directory(arg)
-                ))],
-            }
-        }
+        // `Cd` has no arm here any more (#2527): the window intercepts it in
+        // `run_text_command` (the picker screen for a bare `/cd`, the local
+        // applier for `/cd <path>`), so a directory change never travels the
+        // turn pipeline and never lights the thinking spinner.
         tc::TextCommand::Profiles => {
             let current = opencrabs::config::profile::current_profile_name();
             let entries: Vec<(String, Option<String>)> =

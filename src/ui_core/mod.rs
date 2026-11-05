@@ -5,6 +5,7 @@
 //! ratatui, crossterm, or any other terminal-specific crate, so a GUI
 //! binary can link it as-is.
 
+pub mod actions;
 pub mod bang;
 // `card` is the shared card shape and reads `gpui` types, so it only
 // compiles with the feature that provides them (#2510). Every consumer is
@@ -16,9 +17,14 @@ pub mod commands;
 pub mod copy_select;
 pub mod docs;
 pub mod help_keys;
+pub mod input_history;
 pub mod keys;
+pub mod model_layout;
+pub mod model_selector;
 pub mod palette;
 pub mod pane_tree;
+pub mod plan_history;
+pub mod query;
 pub mod rail;
 pub mod split;
 pub mod topic_bar;
@@ -31,8 +37,9 @@ mod purity_tests {
     //! break that silently at compile time for the GUI, never for us.
 
     /// Every source file in `ui_core`, with its contents.
-    fn sources() -> [(&'static str, &'static str); 21] {
+    fn sources() -> [(&'static str, &'static str); 32] {
         [
+            ("ui_core/actions.rs", include_str!("actions.rs")),
             ("ui_core/bang.rs", include_str!("bang.rs")),
             ("ui_core/card.rs", include_str!("card.rs")),
             (
@@ -43,13 +50,41 @@ mod purity_tests {
             ("ui_core/docs.rs", include_str!("docs.rs")),
             ("ui_core/mod.rs", include_str!("mod.rs")),
             ("ui_core/palette.rs", include_str!("palette.rs")),
+            ("ui_core/plan_history.rs", include_str!("plan_history.rs")),
             ("ui_core/pane_tree.rs", include_str!("pane_tree.rs")),
+            ("ui_core/query.rs", include_str!("query.rs")),
             ("ui_core/split.rs", include_str!("split.rs")),
             ("ui_core/rail.rs", include_str!("rail.rs")),
             ("ui_core/topic_bar.rs", include_str!("topic_bar.rs")),
             ("ui_core/commands.rs", include_str!("commands.rs")),
             ("ui_core/help_keys.rs", include_str!("help_keys.rs")),
+            ("ui_core/input_history.rs", include_str!("input_history.rs")),
             ("ui_core/keys.rs", include_str!("keys.rs")),
+            ("ui_core/model_layout.rs", include_str!("model_layout.rs")),
+            (
+                "ui_core/model_selector/mod.rs",
+                include_str!("model_selector/mod.rs"),
+            ),
+            (
+                "ui_core/model_selector/state.rs",
+                include_str!("model_selector/state.rs"),
+            ),
+            (
+                "ui_core/model_selector/discovery.rs",
+                include_str!("model_selector/discovery.rs"),
+            ),
+            (
+                "ui_core/model_selector/fetch.rs",
+                include_str!("model_selector/fetch.rs"),
+            ),
+            (
+                "ui_core/model_selector/catalogue.rs",
+                include_str!("model_selector/catalogue.rs"),
+            ),
+            (
+                "ui_core/model_selector/order.rs",
+                include_str!("model_selector/order.rs"),
+            ),
             ("ui_core/usage/mod.rs", include_str!("usage/mod.rs")),
             ("ui_core/usage/data.rs", include_str!("usage/data.rs")),
             ("ui_core/usage/pricing.rs", include_str!("usage/pricing.rs")),

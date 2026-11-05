@@ -218,11 +218,6 @@ pub fn cd_not_a_directory(arg: &str) -> String {
     format!("Not a directory: {arg}")
 }
 
-/// What a bare `/cd` says.
-pub fn cd_current(path: &str) -> String {
-    format!("Working directory: {path}\nUse /cd <path> to change it.")
-}
-
 /// The RTK statistics block.
 pub fn rtk_reply(succeeded: bool, stdout: &str, stderr: &str) -> String {
     let body = if succeeded {
@@ -331,11 +326,11 @@ mod tests {
     }
 
     /// `/cd` reports the directory it landed in, or refuses the one it did not,
-    /// in the same words the terminal uses.
+    /// in the same words the terminal uses. A bare `/cd` has no text reply on
+    /// the window any more (#2527): the picker screen owns it.
     #[test]
     fn text_command_cd_reports_the_directory() {
         assert_eq!(cd_reply("/opt/x"), "Working directory: /opt/x");
         assert_eq!(cd_not_a_directory("nope"), "Not a directory: nope");
-        assert!(cd_current("/opt/x").contains("/opt/x"));
     }
 }
