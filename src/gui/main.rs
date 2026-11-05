@@ -5726,6 +5726,35 @@ impl Render for Dashboard {
             self.screen == Screen::Onboard,
         );
 
+        // The chat's share of the pane area comes from the tree: a leaf under
+        // stacked splits spans the full width, and a leaf beside a sibling
+        // takes its share of it (#2472, #2473). A row is still never planned
+        // wider than its box. The measure is read here rather than inside the
+        // chat arm because the conversation and the chrome under it have to
+        // agree on one width (#2588).
+        let chat_share = self
+            .panes
+            .as_ref()
+            .zip(self.transcript.session)
+            .and_then(|(tree, id)| tree.leaf_width_share(id))
+            .unwrap_or(1.0);
+        let primary_width = if chat_share < 1.0 {
+            split_pane_width(pane_width, false, chat_share)
+        } else {
+            pane_width
+        };
+        // A single pane draws the conversation at a readable measure and
+        // centres it; a split window is exempt and keeps every pane at the span
+        // the tree hands it (#2586).
+        let split_window = self
+            .panes
+            .as_ref()
+            .is_some_and(|tree| tree.leaves().len() >= 2);
+        let chat_measure_px = chat_measure(primary_width, split_window);
+        // Only a pane wider than the measure is wrapped, and a split pane is
+        // never wrapped: its measure is already its own width.
+        let centred_chat = chat_measure_px < primary_width;
+
         let (middle, footer): (AnyElement, AnyElement) = match self.screen {
             Screen::Chat => {
                 // The chat is the primary pane, and a split draws its session
@@ -5736,25 +5765,7 @@ impl Render for Dashboard {
                 // leaf under stacked splits spans the full width, and a leaf
                 // beside a sibling takes its share of it (#2472, #2473). A
                 // row is still never planned wider than its box.
-                let chat_share = self
-                    .panes
-                    .as_ref()
-                    .zip(self.transcript.session)
-                    .and_then(|(tree, id)| tree.leaf_width_share(id))
-                    .unwrap_or(1.0);
-                let primary_width = if chat_share < 1.0 {
-                    split_pane_width(pane_width, false, chat_share)
-                } else {
-                    pane_width
-                };
-                // A single pane draws the conversation at a readable measure
-                // and centres it; a split window is exempt and keeps every pane
-                // at the span the tree hands it (#2586).
-                let split_window = self
-                    .panes
-                    .as_ref()
-                    .is_some_and(|tree| tree.leaves().len() >= 2);
-                let measure = chat_measure(primary_width, split_window);
+                let measure = chat_measure_px;
                 let primary = transcript::view(
                     &self.transcript,
                     &self.transcript_scroll,
@@ -7779,8 +7790,18 @@ impl Render for Dashboard {
                 // hints go back UNDER the input where they were: the owner
                 // called the move above the plan card out.
                 let mut col = right;
+                // The chrome under the conversation takes the same measure as
+                // the text above it (#2588). A split pane, or a pane narrower
+                // than the measure, keeps the full width it has today.
+                let central = |view: AnyElement| {
+                    if centred_chat {
+                        chat_measure_row(view, chat_measure_px)
+                    } else {
+                        view
+                    }
+                };
                 if let Some(plan_view) = self.plan.view() {
-                    col = col.child(plan_view);
+                    col = col.child(central(plan_view.into_any_element()));
                 }
                 let waiting = self.queued_for_strip();
                 if !waiting.is_empty() {
@@ -7803,11 +7824,11 @@ impl Render for Dashboard {
                         col = col.child(emoji_popup_view(&items, selected));
                     }
                 }
-                col = col.child(self.editor.clone());
+                col = col.child(central(self.editor.clone().into_any_element()));
                 if let Some(strip) = topic_bottom {
                     col = col.child(strip);
                 }
-                col.child(footer)
+                col.child(central(footer))
             }
             Screen::Usage => right.child(footer),
             Screen::Files => right.child(footer),
@@ -10525,6 +10546,31 @@ fn chat_measure_column(view: AnyElement, width: f32) -> AnyElement {
         .into_any_element()
 }
 
+/// The same centred column for the chat's chrome (#2588): the plan card, the
+/// composer and the footer take the conversation's measure instead of the
+/// pane's whole width, so the lower half of the window reads on one axis with
+/// the text above it. It carries no vertical flex, because these rows keep the
+/// height they ask for rather than growing into the column's slack.
+fn chat_measure_row(view: AnyElement, width: f32) -> AnyElement {
+    div()
+        .flex()
+        .flex_row()
+        .flex_none()
+        .w_full()
+        .min_w_0()
+        .justify_center()
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_none()
+                .w(px(width))
+                .min_w_0()
+                .child(view),
+        )
+        .into_any_element()
+}
+
 /// The rule between two panes: vertical when they sit side by side, horizontal
 /// when they stack, and draggable to resize both (#2473, #2476). The strip is
 /// the target and the rule inside it is what is drawn, so the layout is
@@ -11273,7 +11319,13 @@ mod tests {
             "a single pane draws at the measured width"
         );
         assert!(
-            src.contains("let measure = chat_measure(primary_width, split_window);"),
+            src.contains(
+                &[
+                    "let chat_measure_px = chat_measure(",
+                    "primary_width, split_window);",
+                ]
+                .concat()
+            ),
             "the measure comes from the pane width, exempting a split window"
         );
     }
