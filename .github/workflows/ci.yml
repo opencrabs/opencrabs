@@ -134,7 +134,7 @@ jobs:
       # Fail fast from inside the job that failed (#2595): the fan-in `abort`
       # job cannot do it, because `needs` holds it until the run is over.
       - name: Cancel this run on failure
-        if: "!success()"  # also catches SIGTERM/timeout-killed steps, where failure() is false
+        if: "always() && !success()"  # always() required: GitHub skips steps of a cancelled job
         uses: ./.github/actions/cancel-run
         with:
           token: ${{ github.token }}
@@ -242,7 +242,7 @@ jobs:
       # Fail fast from inside the job that failed (#2595): the fan-in `abort`
       # job cannot do it, because `needs` holds it until the run is over.
       - name: Cancel this run on failure
-        if: "!success()"  # also catches SIGTERM/timeout-killed steps, where failure() is false
+        if: "always() && !success()"  # always() required: GitHub skips steps of a cancelled job
         uses: ./.github/actions/cancel-run
         with:
           token: ${{ github.token }}
@@ -327,7 +327,7 @@ jobs:
       # Fail fast from inside the job that failed (#2595): the fan-in `abort`
       # job cannot do it, because `needs` holds it until the run is over.
       - name: Cancel this run on failure
-        if: "!success()"  # also catches SIGTERM/timeout-killed steps, where failure() is false
+        if: "always() && !success()"  # always() required: GitHub skips steps of a cancelled job
         uses: ./.github/actions/cancel-run
         with:
           token: ${{ github.token }}
@@ -531,7 +531,7 @@ jobs:
       # Fail fast from inside the job that failed (#2595): the fan-in `abort`
       # job cannot do it, because `needs` holds it until the run is over.
       - name: Cancel this run on failure
-        if: "!success()"  # also catches SIGTERM/timeout-killed steps, where failure() is false
+        if: "always() && !success()"  # always() required: GitHub skips steps of a cancelled job
         uses: ./.github/actions/cancel-run
         with:
           token: ${{ github.token }}
@@ -564,7 +564,7 @@ jobs:
       # Fail fast from inside the job that failed (#2595): the fan-in `abort`
       # job cannot do it, because `needs` holds it until the run is over.
       - name: Cancel this run on failure
-        if: "!success()"  # also catches SIGTERM/timeout-killed steps, where failure() is false
+        if: "always() && !success()"  # always() required: GitHub skips steps of a cancelled job
         uses: ./.github/actions/cancel-run
         with:
           token: ${{ github.token }}
@@ -655,14 +655,42 @@ jobs:
         # verdict. The wrapper detects the silence, dumps thread stacks of
         # cargo and its test children, kills the tree, and fails in ~5
         # minutes instead of 60. The command it runs is unchanged.
-        run: bash scripts/test-stall-watchdog.sh cargo test --locked --profile ci --all-features --verbose
+        # #2598: the platform kills this leg 5 to 8 minutes in, before any test
+        # runs, and a killed job executes no cleanup step, so a file written
+        # for upload-artifact dies with the runner. The sampler prints one
+        # line every 10s to stdout instead: those lines are already published
+        # when the signal lands, so the memory, swap, disk and OOM counters at
+        # the moment of death are in the log. Linux-only at runtime (it reads
+        # /proc and the cgroup memory controller and returns immediately
+        # elsewhere), so this stays one copy of the suite command.
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            bash scripts/ci-resource-sampler.sh 10 &
+            sampler=$!
+            trap 'kill "$sampler" 2>/dev/null || true' EXIT
+          fi
+          bash scripts/test-stall-watchdog.sh cargo test --locked --profile ci --all-features --verbose
+
+      # #2598: the definitive out-of-memory receipt, for the runs that live
+      # long enough to execute a step after the suite. A platform-killed job
+      # never reaches this one, which is why the sampler above prints to
+      # stdout instead of writing a file for upload.
+      - name: Capture kernel OOM evidence (Linux)
+        if: "always() && runner.os == 'Linux'"
+        run: |
+          echo "--- cgroup memory events ---"
+          cat /sys/fs/cgroup/memory.events 2>/dev/null || true
+          echo "--- cgroup memory peak ---"
+          cat /sys/fs/cgroup/memory.peak 2>/dev/null || true
+          echo "--- kernel log: out-of-memory and killed-process lines ---"
+          sudo -n dmesg 2>/dev/null | grep -iE 'out of memory|oom-kill|killed process' | tail -20 || echo "(no kernel OOM lines, or dmesg is restricted)"
 
       # Fail fast from inside the job that failed (#2595): the fan-in `abort`
       # job cannot do it, because `needs` holds it until the run is over.
       # This step is inside the `&test-steps` anchor, so `test-linux` inherits
       # it: neither leg can outlive the other by more than one API call.
       - name: Cancel this run on failure
-        if: "!success()"  # also catches SIGTERM/timeout-killed steps, where failure() is false
+        if: "always() && !success()"  # always() required: GitHub skips steps of a cancelled job
         uses: ./.github/actions/cancel-run
         with:
           token: ${{ github.token }}
@@ -822,7 +850,7 @@ jobs:
       # Fail fast from inside the job that failed (#2595): the fan-in `abort`
       # job cannot do it, because `needs` holds it until the run is over.
       - name: Cancel this run on failure
-        if: "!success()"  # also catches SIGTERM/timeout-killed steps, where failure() is false
+        if: "always() && !success()"  # always() required: GitHub skips steps of a cancelled job
         uses: ./.github/actions/cancel-run
         with:
           token: ${{ github.token }}
@@ -908,7 +936,7 @@ jobs:
       # Fail fast from inside the job that failed (#2595): the fan-in `abort`
       # job cannot do it, because `needs` holds it until the run is over.
       - name: Cancel this run on failure
-        if: "!success()"  # also catches SIGTERM/timeout-killed steps, where failure() is false
+        if: "always() && !success()"  # always() required: GitHub skips steps of a cancelled job
         uses: ./.github/actions/cancel-run
         with:
           token: ${{ github.token }}
