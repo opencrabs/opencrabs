@@ -23,7 +23,7 @@ fn session_rows_paint_edge_to_edge_without_card_chrome() {
     );
     assert!(row.contains(".p_2()"), "the title keeps its internal inset");
 
-    let rail_root = block(SESSIONS, "pub fn rail(", "    if state.filter_active");
+    let rail_root = block(SESSIONS, "pub fn rail(", ".child(brand_header())");
     assert!(
         !rail_root.contains(".p_2()") && !rail_root.contains(".gap_1()"),
         "the rail adds no outer gutter or gap around its rows"
@@ -32,6 +32,18 @@ fn session_rows_paint_edge_to_edge_without_card_chrome() {
         SESSIONS.contains(".when(!selected, |d| d.hover(")
             && SESSIONS.contains(".when(selected, |d| d.bg("),
         "hover and selection still paint on the full-width row"
+    );
+}
+
+#[test]
+fn the_rail_header_is_compact_opencrabs_branding() {
+    let header = block(SESSIONS, "fn brand_header()", "#[cfg(test)]");
+    assert!(header.contains("icon::banner_logo()"));
+    assert!(header.contains(".child(\"OpenCrabs\")"));
+    assert!(header.contains(".text_sm()"));
+    assert!(
+        !SESSIONS.contains("SESSIONS · {}"),
+        "the brand replaces the redundant session counter"
     );
 }
 

@@ -11,7 +11,7 @@
 //! builds each row's handler in its own loop turn, then hands the finished
 //! rows to `rail`.
 
-use crate::palette;
+use crate::{icon, palette};
 use std::collections::{HashMap, HashSet};
 
 use gpui::{
@@ -1310,17 +1310,8 @@ pub fn rail(
         .flex_none()
         .w(rems(width_rem))
         .h_full()
-        .bg(rgb(palette::current().panel));
-
-    col = col.child(
-        div()
-            .text_xs()
-            .text_color(rgb(palette::current().text_title))
-            .child(SharedString::from(format!(
-                "SESSIONS · {}",
-                state.items.len()
-            ))),
-    );
+        .bg(rgb(palette::current().panel))
+        .child(brand_header());
 
     if state.filter_active {
         col = col.child(div().w_full().p_2().child(filter_bar(state)));
@@ -1358,6 +1349,27 @@ pub fn rail(
         col = col.child(div().w_full().mt_auto().px_2().pb_2().child(footer));
     }
     col
+}
+
+/// A compact brand header instead of a second session counter.
+fn brand_header() -> Div {
+    div()
+        .w_full()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .px_3()
+        .py_3()
+        .border_b_1()
+        .border_color(rgb(palette::current().panel_hi))
+        .child(icon::banner_logo())
+        .child(
+            div()
+                .text_sm()
+                .text_color(rgb(palette::current().text_title))
+                .child("OpenCrabs"),
+        )
 }
 
 #[cfg(test)]
