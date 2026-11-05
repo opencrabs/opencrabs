@@ -4672,8 +4672,10 @@ impl Dashboard {
             )
             && self.copy_drag.has_selection()
         {
-            if let Some(item) = self.copy_drag.clipboard_item() {
-                cx.write_to_clipboard(item);
+            // The chord takes the release path: copy, drop the highlight, and
+            // say so in the composer exactly like a mouse release (#2587).
+            if self.copy_drag.finish_copy(cx) {
+                self.copy_drag.announce_copied(cx);
             }
             cx.notify();
             return;
@@ -8220,6 +8222,17 @@ fn main() {
             |window, cx| {
                 let focus = cx.focus_handle();
                 let editor = cx.new(editor::Editor::new);
+                // A drag-copied range lands on the clipboard inside the
+                // transcript, which cannot see the composer. The dashboard owns
+                // both halves, so it is the one that turns a landed copy into
+                // the composer's own notice (#2587).
+                let copy_drag = Rc::new(CopyDrag::default());
+                {
+                    let editor = editor.downgrade();
+                    copy_drag.set_copied_listener(Rc::new(move |cx: &mut App| {
+                        let _ = editor.update(cx, |editor, cx| editor.show_copied(cx));
+                    }));
+                }
                 let view = cx.new(move |cx: &mut Context<Dashboard>| {
                     // Enter on the editor is a send: routed into the agent
                     // turn path on the Dashboard itself.
@@ -8339,7 +8352,7 @@ fn main() {
                         split_areas: Rc::new(std::cell::RefCell::new(HashMap::new())),
                         split_drag: None,
                         split_target: None,
-                        copy_drag: Rc::new(CopyDrag::default()),
+                        copy_drag,
                         split_pick: None,
                         split_creating: false,
                         topic_draft_icon: None,
