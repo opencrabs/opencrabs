@@ -76,11 +76,11 @@ pub fn default_state_dir() -> PathBuf {
     crate::config::opencrabs_home().join("state").join("remote")
 }
 
-fn state_path(state_dir: &Path) -> PathBuf {
+pub(crate) fn state_path(state_dir: &Path) -> PathBuf {
     state_dir.join("tunnel.json")
 }
 
-fn log_path(state_dir: &Path) -> PathBuf {
+pub(crate) fn log_path(state_dir: &Path) -> PathBuf {
     state_dir.join("tunnel.log")
 }
 
@@ -340,7 +340,7 @@ pub fn parse_trycloudflare_url(text: &str) -> Option<String> {
         .next_back()
 }
 
-fn save_state(state_dir: &Path, state: &TunnelState) -> Result<()> {
+pub(crate) fn save_state(state_dir: &Path, state: &TunnelState) -> Result<()> {
     let json = serde_json::to_vec_pretty(state).context("serialize tunnel state")?;
     let path = state_path(state_dir);
     let tmp = PathBuf::from(format!("{}.tmp", path.display()));
@@ -451,8 +451,3 @@ fn set_executable(path: &Path) -> Result<()> {
 fn set_executable(_path: &Path) -> Result<()> {
     Ok(())
 }
-
-// The tunnel tests drive cloudflared through an `#!/bin/sh` stub — the
-// lifecycle is unix-shaped by construction, so the module is unix-only.
-#[cfg(all(test, unix))]
-mod tests;

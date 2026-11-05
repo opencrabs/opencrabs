@@ -65,7 +65,7 @@ pub struct RouteEntry {
 }
 
 impl RouteEntry {
-    fn new(url: String, kind: RouteKind, source: RouteSource, now: u64) -> Self {
+    pub(crate) fn new(url: String, kind: RouteKind, source: RouteSource, now: u64) -> Self {
         Self {
             url,
             kind,
@@ -413,6 +413,3 @@ pub async fn race_best(routes: &[RouteEntry], now: u64) -> (Option<String>, Vec<
     }
     (winner, outcomes)
 }
-
-#[cfg(test)]
-mod tests;

@@ -2,9 +2,10 @@
 //! ordering, learn-merge/prune, promotion, persistence, URL lookup, and
 //! live races against mock listeners on ephemeral loopback ports.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use super::*;
+use crate::remote::route_store::*;
+use crate::remote::routes::{AnnouncedRoute, RouteKind};
 
 const NOW: u64 = 1_800_000_000;
 
