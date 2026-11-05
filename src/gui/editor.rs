@@ -13,6 +13,7 @@
 use crate::palette;
 use opencrabs::ui_core::card::{CARD_RADIUS, glass_fill};
 use opencrabs::ui_core::commands::completions;
+use opencrabs::ui_core::palette::{next_word_end, previous_word_start};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
@@ -1742,55 +1743,6 @@ fn line_start(content: &str, line: usize) -> usize {
 
 fn line_len(content: &str, line: usize) -> usize {
     content.split('\n').nth(line).map(str::len).unwrap_or(0)
-}
-
-/// Byte offset where the word before `offset` begins.
-///
-/// The TUI composer walks back over the separators and then over the word, so
-/// the same walk happens here and the window's alt+left lands where the
-/// terminal's ctrl+left does. Graphemes keep the walk from splitting a
-/// character that spans several bytes.
-fn previous_word_start(content: &str, offset: usize) -> usize {
-    let clamped = offset.min(content.len());
-    let graphemes: Vec<(usize, &str)> = content.grapheme_indices(true).collect();
-    let mut index = graphemes
-        .iter()
-        .position(|(start, _)| *start >= clamped)
-        .unwrap_or(graphemes.len());
-    while index > 0 && !is_word_grapheme(graphemes[index - 1].1) {
-        index -= 1;
-    }
-    while index > 0 && is_word_grapheme(graphemes[index - 1].1) {
-        index -= 1;
-    }
-    graphemes.get(index).map(|(start, _)| *start).unwrap_or(0)
-}
-
-/// Byte offset the word after `offset` ends on, past the word and the
-/// separators that follow it, matching the terminal composer.
-fn next_word_end(content: &str, offset: usize) -> usize {
-    let clamped = offset.min(content.len());
-    let graphemes: Vec<(usize, &str)> = content.grapheme_indices(true).collect();
-    let mut index = graphemes
-        .iter()
-        .position(|(start, _)| *start >= clamped)
-        .unwrap_or(graphemes.len());
-    while index < graphemes.len() && is_word_grapheme(graphemes[index].1) {
-        index += 1;
-    }
-    while index < graphemes.len() && !is_word_grapheme(graphemes[index].1) {
-        index += 1;
-    }
-    graphemes
-        .get(index)
-        .map(|(start, _)| *start)
-        .unwrap_or(content.len())
-}
-
-/// Letters and digits are word content; whitespace and punctuation separate
-/// words. A grapheme counts as a word when any of its characters is a letter.
-fn is_word_grapheme(grapheme: &str) -> bool {
-    grapheme.chars().any(|ch| ch.is_alphanumeric())
 }
 
 /// (line, utf8 column) for a utf8 offset. Past-the-end offsets clamp to the
