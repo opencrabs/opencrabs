@@ -2148,7 +2148,7 @@ OpenCrabs supports multi-agent structured debate via the **Bee Colony** protocol
 
 ## 🔭 Remote Access (connect · pairing · routes)
 
-Reach this machine's agent from anywhere without an open gate. Three pieces, inspired by [t3code](https://t3.codes)'s T3 Connect and adapted for a single-owner, relay-free deployment.
+Reach this machine's agent from anywhere without an open gate. Three pieces, built for a single-owner, relay-free deployment.
 
 ### `opencrabs connect` — one command to expose the gateway
 

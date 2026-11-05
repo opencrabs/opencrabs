@@ -161,7 +161,7 @@ pub enum Commands {
     Daemon,
 
     /// Expose this machine's A2A gateway for remote access: managed
-    /// cloudflared quick tunnel + one-time pairing code (t3code-style).
+    /// cloudflared quick tunnel + one-time pairing code.
     ///
     /// Prints a public HTTPS URL and a single-use code; the remote client
     /// exchanges the code at POST /a2a/pair for a scoped session token.
