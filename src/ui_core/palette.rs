@@ -265,10 +265,10 @@ impl Surface {
             Surface::Usage => "cost tokens spend budget context ctx",
             Surface::Files => "attachments uploads downloads artifacts",
             Surface::Themes => {
-                "theme themes colour color dark light palette appearance change switch"
+                "theme themes colour color dark light palette appearance change switch open"
             }
             Surface::Models => "provider llm sonnet opus haiku switch",
-            Surface::Sessions => "chats conversations history rail sidebar",
+            Surface::Sessions => "chats conversations history rail sidebar open close",
             Surface::Help => {
                 "keys key bindings keyboard shortcuts controls commands what can i press"
             }
@@ -726,6 +726,9 @@ const MIN_EXACT_CHARS: usize = 3;
 const MIN_PREFIX_CHARS: usize = 4;
 const SKILL_DESCRIPTION_WORDS: usize = 12;
 const PHRASE_ABBREVIATIONS: &[(&str, &[&str])] = &[("gst", &["git", "status"])];
+/// A generic intent can name more than one docs page. Keep the established
+/// destination when a newer page also carries the same word.
+const DOC_INTENT_PRIORITIES: &[(&str, &str)] = &[("automation", "/features/cron-jobs.html")];
 
 /// Score one candidate against normalized intent groups. Every required group
 /// must land on one whole candidate word or on an explicit phrase alias.
@@ -752,24 +755,33 @@ fn score_normalized(query: &NormalizedQuery, item: &PaletteItem) -> Option<u16> 
     let keywords = field_tokens(&item.keywords);
     let subtitle = field_tokens(&item.subtitle);
     let description = field_tokens(&item.description);
+    // Both frontends show a skill's full description as its subtitle. Treat
+    // that duplicate as the same bounded prose, not as a stronger keyword
+    // field that can reintroduce matches the description limit rejected.
+    let skill_prose = item.kind == PaletteKind::Skill;
     let fields = [
         (&command, 1100u16, false, false),
         (&title, 1000, false, false),
         (&keywords, 700, false, false),
-        (&subtitle, 500, false, true),
+        (
+            &subtitle,
+            if skill_prose { 150 } else { 500 },
+            skill_prose,
+            !skill_prose,
+        ),
         (&description, 150, true, false),
     ];
 
     let mut total = 0u16;
     for group in query.groups() {
         let mut best = None;
-        for (tokens, weight, is_description, allow_substring) in &fields {
-            if *is_description && (item.kind != PaletteKind::Skill || query.groups().len() < 2) {
+        for (tokens, weight, is_prose, allow_substring) in &fields {
+            if *is_prose && (item.kind != PaletteKind::Skill || query.groups().len() < 2) {
                 continue;
             }
             // Legacy multiword abbreviations are explicit aliases, never a
             // loose subsequence through unrelated words.
-            if !*is_description && tokens.len() > 1 {
+            if !*is_prose && tokens.len() > 1 {
                 for (abbreviation, phrase) in PHRASE_ABBREVIATIONS {
                     let same_phrase = tokens.iter().map(String::as_str).eq(phrase.iter().copied());
                     if same_phrase && group.iter().any(|word| word.as_str() == *abbreviation) {
@@ -779,7 +791,7 @@ fn score_normalized(query: &NormalizedQuery, item: &PaletteItem) -> Option<u16> 
                 }
             }
             for (index, candidate) in tokens.iter().enumerate() {
-                if *is_description && index >= SKILL_DESCRIPTION_WORDS {
+                if *is_prose && index >= SKILL_DESCRIPTION_WORDS {
                     continue;
                 }
                 for alternative in group {
@@ -791,6 +803,13 @@ fn score_normalized(query: &NormalizedQuery, item: &PaletteItem) -> Option<u16> 
             }
         }
         total = total.saturating_add(best?);
+    }
+    if let PaletteAction::OpenDocs(path) = item.action
+        && DOC_INTENT_PRIORITIES.iter().any(|(intent, priority_path)| {
+            path == *priority_path && query.groups().iter().flatten().any(|token| token == intent)
+        })
+    {
+        total = total.saturating_add(400);
     }
     Some(total)
 }
@@ -1347,6 +1366,246 @@ mod tests {
             .into_iter()
             .find(|item| item.action == action)
             .expect("shared action")
+    }
+
+    /// The real catalog shape, with deterministic sessions and skills instead
+    /// of reading the developer's skill directory or conversation database.
+    fn realistic_items(client: crate::ui_core::help_keys::HelpClient) -> Vec<PaletteItem> {
+        let mut items: Vec<PaletteItem> = crate::ui_core::commands::SLASH_COMMANDS
+            .iter()
+            .filter(|cmd| !is_surface_command(cmd.name))
+            .map(|cmd| {
+                PaletteItem::new(
+                    cmd.name,
+                    cmd.description,
+                    PaletteKind::Command,
+                    PaletteAction::RunSlash(cmd.name),
+                )
+                .with_keywords(keywords_for(cmd.name))
+            })
+            .collect();
+        items.extend(surface_items());
+        items.extend(crate::ui_core::help_keys::seeker_items(client));
+        items.extend(crate::ui_core::docs::items());
+        items.extend(channel_items());
+        items.extend(crate::ui_core::actions::items());
+        for (name, description) in [
+            (
+                "/drop-release",
+                "Research draft publish release commits contributors changelog notes version assets then change theme and open sidebar",
+            ),
+            (
+                "/mutation-test-verify",
+                "Mutation test Rust changes plant anchored mutants run scoped tests before merge then change theme and open sidebar",
+            ),
+        ] {
+            items.push(
+                PaletteItem::new(
+                    name,
+                    description,
+                    PaletteKind::Skill,
+                    PaletteAction::RunSkill(name.to_string()),
+                )
+                .with_keywords("skill workflow recipe")
+                .with_description(description),
+            );
+        }
+        for (id, title) in [
+            (1, "git status"),
+            (2, "Theme rollout"),
+            (3, "Sidebar copy review"),
+            (4, "Telegram setup"),
+        ] {
+            items.push(PaletteItem::new(
+                title,
+                "2026-11-05 12:00",
+                PaletteKind::Session,
+                PaletteAction::OpenSession(id),
+            ));
+        }
+        items
+    }
+
+    fn realistic_rows(
+        client: crate::ui_core::help_keys::HelpClient,
+        query: &str,
+    ) -> Vec<PaletteRow> {
+        let mut state = PaletteState::new(realistic_items(client));
+        state.insert_text(query);
+        state.visible()
+    }
+
+    fn realistic_actions(
+        client: crate::ui_core::help_keys::HelpClient,
+        query: &str,
+    ) -> Vec<PaletteAction> {
+        realistic_rows(client, query)
+            .into_iter()
+            .map(|row| row.item.action)
+            .collect()
+    }
+
+    fn assert_realistic_destinations(rows: &[PaletteRow], query: &str, theme: bool) {
+        let (surface, help, docs) = if theme {
+            (
+                PaletteAction::OpenSurface(Surface::Themes),
+                "/help Themes: preview and keep a theme",
+                PaletteAction::OpenDocs("/features/themes.html"),
+            )
+        } else {
+            (
+                PaletteAction::OpenSurface(Surface::Sessions),
+                "/help List sessions",
+                PaletteAction::OpenDocs("/features/sessions.html"),
+            )
+        };
+        assert!(
+            rows.iter().any(|row| row.item.action == surface),
+            "{query} missed {surface:?}: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.item.title == help),
+            "{query} missed {help}: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.item.action == docs),
+            "{query} missed {docs:?}: {rows:?}"
+        );
+        assert!(
+            rows.iter().all(|row| row.item.kind != PaletteKind::Skill),
+            "{query} leaked skill prose: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn realistic_theme_queries_keep_surface_help_and_docs() {
+        for client in [
+            crate::ui_core::help_keys::HelpClient::Tui,
+            crate::ui_core::help_keys::HelpClient::Gui,
+        ] {
+            for query in [
+                "/theme",
+                "themes",
+                "appearance",
+                "How do I change themes?",
+                "change theme/appearance",
+                "open theme",
+                "\"change themes!\"",
+            ] {
+                let rows = realistic_rows(client, query);
+                assert_eq!(
+                    rows.first().map(|row| &row.item.action),
+                    Some(&PaletteAction::OpenSurface(Surface::Themes)),
+                    "{client:?} ranked the wrong row for {query}: {rows:?}"
+                );
+                assert_realistic_destinations(&rows, query, true);
+            }
+        }
+    }
+
+    #[test]
+    fn realistic_sidebar_queries_put_actions_first_and_keep_destinations() {
+        for client in [
+            crate::ui_core::help_keys::HelpClient::Tui,
+            crate::ui_core::help_keys::HelpClient::Gui,
+        ] {
+            for (query, expected) in [
+                ("open sidebar", PaletteAction::OpenSidebar),
+                ("close sidebar", PaletteAction::CloseSidebar),
+                ("\"close, sidebar!\"", PaletteAction::CloseSidebar),
+            ] {
+                let rows = realistic_rows(client, query);
+                assert_eq!(
+                    rows.first().map(|row| &row.item.action),
+                    Some(&expected),
+                    "{client:?} ranked the wrong row for {query}: {rows:?}"
+                );
+                assert_realistic_destinations(&rows, query, false);
+            }
+
+            let rows = realistic_rows(client, "open/close sidebar");
+            let open = rows
+                .iter()
+                .position(|row| row.item.action == PaletteAction::OpenSidebar)
+                .expect("open action");
+            let close = rows
+                .iter()
+                .position(|row| row.item.action == PaletteAction::CloseSidebar)
+                .expect("close action");
+            let surface = rows
+                .iter()
+                .position(|row| row.item.action == PaletteAction::OpenSurface(Surface::Sessions))
+                .expect("sessions surface");
+            assert!(open.max(close) < surface, "actions must lead: {rows:?}");
+            assert_realistic_destinations(&rows, "open/close sidebar", false);
+        }
+    }
+
+    #[test]
+    fn realistic_aliases_plurals_channels_and_direct_names_work() {
+        for client in [
+            crate::ui_core::help_keys::HelpClient::Tui,
+            crate::ui_core::help_keys::HelpClient::Gui,
+        ] {
+            assert_eq!(
+                realistic_actions(client, "command"),
+                realistic_actions(client, "commands"),
+                "{client:?} split singular and plural commands"
+            );
+            for (query, expected) in [
+                ("terminal voice", PaletteAction::RunSlash("/whisper")),
+                ("gst", PaletteAction::OpenSession(1)),
+                (
+                    "trbl",
+                    PaletteAction::OpenDocs("/getting-started/troubleshooting.html"),
+                ),
+                ("/whisper", PaletteAction::RunSlash("/whisper")),
+                (
+                    "/drop-release",
+                    PaletteAction::RunSkill("/drop-release".to_string()),
+                ),
+                (
+                    "/mutation-test-verify",
+                    PaletteAction::RunSkill("/mutation-test-verify".to_string()),
+                ),
+            ] {
+                assert_eq!(
+                    realistic_actions(client, query).first(),
+                    Some(&expected),
+                    "{client:?} missed {query}"
+                );
+            }
+            for channel in Channel::ALL {
+                let rows = realistic_rows(client, channel.name());
+                assert_eq!(
+                    rows.first().map(|row| &row.item.action),
+                    Some(&PaletteAction::SetupChannel(*channel)),
+                    "{client:?} ranked {} wrong: {rows:?}",
+                    channel.name()
+                );
+                assert!(
+                    rows.iter()
+                        .any(|row| row.item.action == PaletteAction::OpenDocs(channel.doc_path())),
+                    "{client:?} missed {} docs: {rows:?}",
+                    channel.name()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn realistic_genuine_miss_preserves_exact_ask_text() {
+        let query = "  xyzzy \"quux\" /not-a-real-command?  ";
+        for client in [
+            crate::ui_core::help_keys::HelpClient::Tui,
+            crate::ui_core::help_keys::HelpClient::Gui,
+        ] {
+            let rows = realistic_rows(client, query);
+            assert_eq!(rows.len(), 1, "{client:?}: {rows:?}");
+            assert_eq!(rows[0].item.kind, PaletteKind::Ask);
+            assert_eq!(rows[0].item.title, query);
+            assert_eq!(rows[0].item.action, PaletteAction::Ask(query.to_string()));
+        }
     }
 
     /// The whole point of the keyword table: the user types the word for the
@@ -2221,6 +2480,11 @@ mod tests {
             armed("automation"),
             Some(PaletteAction::OpenDocs("/features/cron-jobs.html")),
             "the single word automation is the cron page"
+        );
+        assert_eq!(
+            armed("browser automation"),
+            Some(PaletteAction::OpenDocs("/features/browser.html")),
+            "naming the browser makes the more specific page win"
         );
         let official = |path: &str| format!("{}{}", crate::ui_core::docs::DOCS_BASE, path);
         for path in [
