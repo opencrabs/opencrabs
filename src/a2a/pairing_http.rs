@@ -162,10 +162,7 @@ pub async fn pair_rate_limit(
 
 /// POST /a2a/pair — exchange a one-time code for a scoped session token.
 /// Rate limiting happens in [`pair_rate_limit`], before this handler.
-pub async fn handle_pair(
-    State(state): State<A2aState>,
-    Json(body): Json<PairRequest>,
-) -> Response {
+pub async fn handle_pair(State(state): State<A2aState>, Json(body): Json<PairRequest>) -> Response {
     match state.pairing.verify_code(&body.code, &body.label) {
         Ok((token, session)) => {
             tracing::info!(label = %session.label, session = %session.id, "A2A pairing: session issued");
