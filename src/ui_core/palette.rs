@@ -611,9 +611,10 @@ pub fn opens(alt: bool, platform: bool, key: &str) -> bool {
 /// The chord that opens the card in a terminal. Alt arrives there as the ESC
 /// prefix, which crossterm reports as the ALT modifier on the space event, so
 /// `alt+space` reaches this gate intact; the ctrl byte-collision hack of
-/// #2463 is retired because the chord no longer needs it (#2491).
+/// #2463 is retired because the chord no longer needs it (#2491). macOS can
+/// encode Option+Space as NBSP, sometimes without the ALT modifier (#2558).
 pub fn opens_in_terminal(alt: bool, key: &str) -> bool {
-    alt && (key == " " || key.eq_ignore_ascii_case("space"))
+    (alt && (key == " " || key.eq_ignore_ascii_case("space"))) || key == "\u{a0}"
 }
 
 /// One editing chord, translated before the GUI touches its state. Keeping
