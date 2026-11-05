@@ -431,13 +431,7 @@ fn channel_chip_line_from(names: &[String]) -> Option<SharedString> {
         return None;
     }
     let borrowed: Vec<&str> = names.iter().map(String::as_str).collect();
-    let line = channel_status::status_line(&borrowed, &channel_ownership()).map(SharedString::from);
-    logging::debug(&format!(
-        "chip probe: {} channels -> {}",
-        names.len(),
-        line.as_ref().map(|s| s.as_ref()).unwrap_or("hidden")
-    ));
-    line
+    channel_status::status_line(&borrowed, &channel_ownership()).map(SharedString::from)
 }
 
 /// The phase 1 window. Every string on screen is real data or the real error.
