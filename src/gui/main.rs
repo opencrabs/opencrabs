@@ -5746,7 +5746,7 @@ impl Render for Dashboard {
                     fold_handlers,
                     transcript::ViewHooks {
                         attachments: attachment_handlers,
-                        drag: None,
+                        drag: Some(self.copy_drag.clone()),
                         ctx_used: self.ctx_tokens,
                         ctx_max: self.ctx_max,
                         live_click: Some(live_click.clone()),
@@ -11025,6 +11025,28 @@ mod tests {
         THEMES_HISTORY_LEN, cd_entries_for, pick_initial_session, remember_open_session,
         remember_preview,
     };
+
+    /// The primary Chat screen must share its mouse selection state with the
+    /// transcript. The split view already did this; Chat silently passed no
+    /// state and rendered no selectable rows (#2562).
+    #[test]
+    fn primary_chat_transcript_enables_drag_copy() {
+        let src = include_str!("main.rs");
+        let (_, after) = src
+            .split_once("let primary = transcript::view(")
+            .expect("primary Chat transcript call exists");
+        let (call, _) = after
+            .split_once(".into_any_element();")
+            .expect("primary Chat transcript call ends");
+        assert!(
+            call.contains(&["drag: Some(self.copy_", "drag.clone()),"].concat()),
+            "primary Chat must pass its shared CopyDrag state"
+        );
+        assert!(
+            !call.contains(&["drag:", " None,"].concat()),
+            "primary Chat must not disable transcript selection"
+        );
+    }
 
     /// The zoom chords: they need cmd or ctrl, both spellings of plus zoom in,
     /// both of minus zoom out, zero resets to the base rem, and any other key
