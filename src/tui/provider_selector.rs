@@ -632,7 +632,7 @@ impl ProviderSelectorState {
         // fetched-then-config insertion order is a contract other callers
         // rely on. Ordering is purely what the picker shows, so it belongs on
         // the display path and never touches config.models on disk (#1057).
-        crate::tui::model_order::sort_newest_first(&mut out);
+        crate::ui_core::model_selector::sort_newest_first(&mut out);
         out
     }
 
