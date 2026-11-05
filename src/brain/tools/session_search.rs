@@ -554,7 +554,7 @@ impl SessionSearchTool {
         };
 
         let messages = message_repo
-            .find_recent_by_session(session.id, n)
+            .find_recent_without_completed_plans(session.id, n)
             .await
             .map_err(|e| super::error::ToolError::Execution(e.to_string()))?;
 

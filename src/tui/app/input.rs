@@ -574,9 +574,12 @@ impl App {
 
         let Some(idx) = msg_idx else { return };
         let content = match self.messages.get(idx) {
-            Some(msg) if !msg.content.trim().is_empty() => msg.content.clone(),
+            Some(msg) if !msg.content.trim().is_empty() => msg.copy_text(),
             _ => return,
         };
+        if content.trim().is_empty() {
+            return;
+        }
 
         if Self::copy_to_clipboard(&content) {
             self.notification = Some("Copied to clipboard".to_string());

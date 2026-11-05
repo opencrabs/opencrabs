@@ -131,9 +131,9 @@ fn the_settle_hook_announces_after_the_trailing_task_and_before_archive() {
     let archive = TOOL_LOOP
         .get(announce..)
         .expect("a str::find offset always sits on a char boundary")
-        .find("archive_plan(session_id)")
+        .find("persist_completed_plan_before_archive(")
         .map(|i| i + announce)
-        .expect("the archive call below the announce");
+        .expect("the record-before-archive call below the announce");
 
     assert!(
         trailing < announce,

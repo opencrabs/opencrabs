@@ -51,7 +51,11 @@ fn is_compaction_row(content: &str) -> bool {
 fn recent_tail(rows: &[(String, String)]) -> Vec<(String, String)> {
     let relevant: Vec<(String, String)> = rows
         .iter()
-        .filter(|(_, content)| !content.trim().is_empty() && !is_compaction_row(content))
+        .filter(|(role, content)| {
+            role != crate::services::message::PLAN_COMPLETED_ROLE
+                && !content.trim().is_empty()
+                && !is_compaction_row(content)
+        })
         .cloned()
         .collect();
     let start = relevant.len().saturating_sub(RECENT_PAIRS * 2);

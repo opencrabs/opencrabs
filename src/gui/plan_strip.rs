@@ -14,10 +14,11 @@
 
 use crate::palette;
 use opencrabs::ui_core::card::{CARD_RADIUS, glass_fill};
+use opencrabs::ui_core::plan_history::{COMPLETED_PLAN_FOOTER, CompletedPlanView};
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-use gpui::{Div, SharedString, div, prelude::*, px, rgb};
+use gpui::{Div, SharedString, Stateful, div, prelude::*, px, rgb};
 use opencrabs::tui::plan::{PlanDocument, PlanStatus, TaskStatus};
 
 /// The strip's state: the plan file it is showing, the mtime it last read,
@@ -188,6 +189,59 @@ fn checklist(plan: &PlanDocument) -> Div {
         );
     }
     col
+}
+
+/// A historical checklist in the transcript. Unlike the live strip above the
+/// editor, this card has no six-row window and no interactive controls. Its
+/// DOM id comes from the durable message, not from its position in the turn.
+pub fn completed_plan_card(message_id: uuid::Uuid, plan: &CompletedPlanView) -> Stateful<Div> {
+    let mut card = div()
+        .id(SharedString::from(format!("completed-plan-{message_id}")))
+        .flex()
+        .flex_col()
+        .gap_1()
+        .p_3()
+        .rounded(px(CARD_RADIUS))
+        .bg(glass_fill(palette::current().panel))
+        .child(
+            div()
+                .text_xs()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(rgb(palette::current().teal))
+                .child(SharedString::from(format!("☑ {}", plan.header()))),
+        );
+
+    for task in &plan.tasks {
+        card = card.child(
+            div()
+                .flex()
+                .flex_row()
+                .gap_2()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(palette::current().teal))
+                        .child("☑"),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(palette::current().text_muted))
+                        .child(SharedString::from(format!(
+                            "{}. {}",
+                            task.order, task.title
+                        ))),
+                ),
+        );
+    }
+
+    card.child(
+        div()
+            .text_xs()
+            .italic()
+            .text_color(rgb(palette::current().text_faint))
+            .child(COMPLETED_PLAN_FOOTER),
+    )
 }
 
 /// The task window: six rows, centred on the running task, or the first six

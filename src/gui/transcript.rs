@@ -17,8 +17,10 @@
 //! truncation everywhere (#2271).
 
 use crate::palette;
+use opencrabs::services::message::{CompletedPlanPayload, PLAN_COMPLETED_ROLE};
 use opencrabs::ui_core::card::{CARD_RADIUS, concentric_radius, glass_fill};
 use opencrabs::ui_core::copy_select::{self, TextPoint};
+use opencrabs::ui_core::plan_history::CompletedPlanView;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -160,6 +162,13 @@ pub enum Block {
     Thinking { content: String },
     /// A tool ledger: calls with their status.
     Tools { calls: Vec<ToolCall> },
+    /// A durable, read-only completed checklist. The database UUID keeps its
+    /// identity stable across reloads; the shared view keeps GUI and TUI text
+    /// identical without exposing the stored JSON.
+    CompletedPlan {
+        message_id: uuid::Uuid,
+        plan: CompletedPlanView,
+    },
     /// History marker: the rows the window hid.
     Marker { hidden: usize },
 }
@@ -667,6 +676,15 @@ pub async fn load_recent(
 /// it returns is a char boundary (#1587 grammar).
 fn row_blocks(m: &Message) -> Vec<Block> {
     let mut blocks: Vec<Block> = Vec::new();
+    if m.role == PLAN_COMPLETED_ROLE {
+        if let Some(payload) = CompletedPlanPayload::from_message(m) {
+            blocks.push(Block::CompletedPlan {
+                message_id: m.id,
+                plan: CompletedPlanView::new(&payload.plan),
+            });
+        }
+        return blocks;
+    }
     if m.content.starts_with("[CONTEXT COMPACTION") {
         return blocks;
     }
@@ -856,7 +874,7 @@ pub fn visible_when_folded(block: &Block, final_idx: Option<usize>, idx: usize) 
             _ => true,
         },
         Block::Thinking { .. } | Block::Tools { .. } => false,
-        Block::Marker { .. } => true,
+        Block::CompletedPlan { .. } | Block::Marker { .. } => true,
     }
 }
 
@@ -1779,6 +1797,9 @@ fn block_view(
         } => bubble(role, content, time, content_width, handlers, selection),
         Block::Thinking { content } => thinking_block(content, false),
         Block::Tools { calls } => tools_block(calls),
+        Block::CompletedPlan { message_id, plan } => {
+            div().child(crate::plan_strip::completed_plan_card(*message_id, plan))
+        }
         Block::Marker { hidden } => div()
             .text_xs()
             .text_color(rgb(palette::current().text_muted))
@@ -2245,6 +2266,7 @@ fn block_text(block: &Block) -> String {
             .map(|c| c.description.as_str())
             .collect::<Vec<_>>()
             .join("\n"),
+        Block::CompletedPlan { plan, .. } => plan.copy_text(),
         Block::Marker { .. } => String::new(),
     }
 }
@@ -2580,6 +2602,34 @@ mod tests {
         )
     }
 
+    fn completed_history_row(sequence: i32, task_count: usize) -> Message {
+        use opencrabs::tui::plan::{PlanDocument, PlanStatus, PlanTask, TaskStatus, TaskType};
+
+        let session_id = uuid::Uuid::new_v4();
+        let mut plan = PlanDocument::new(session_id, "Ship GUI history".to_string());
+        plan.status = PlanStatus::Active;
+        for order in 1..=task_count {
+            let mut task = PlanTask::new(
+                order,
+                format!("Resolved task {order}"),
+                "description".to_string(),
+                TaskType::Test,
+            );
+            task.status = if order % 2 == 0 {
+                TaskStatus::Skipped
+            } else {
+                TaskStatus::Completed
+            };
+            plan.add_task(task);
+        }
+        let content = serde_json::to_string(&CompletedPlanPayload { version: 1, plan })
+            .expect("completed plan fixture serializes");
+        let mut message = row(PLAN_COMPLETED_ROLE, &content, sequence);
+        message.id = uuid::Uuid::new_v4();
+        message.session_id = session_id;
+        message
+    }
+
     /// Every block of every turn, in order, which is what the pre-fold pane
     /// drew and what the ordering seats below assert on.
     fn flat(rows: &[Message], total: i64) -> Vec<Block> {
@@ -2588,6 +2638,117 @@ mod tests {
             .into_iter()
             .flat_map(|t| t.blocks)
             .collect()
+    }
+
+    #[test]
+    fn gui_completed_plan_history_decodes_after_answer_in_older_turn() {
+        let completed = completed_history_row(3, 8);
+        let completed_id = completed.id;
+        let rows = [
+            row("user", "ship it", 1),
+            row("assistant", "Final answer", 2),
+            completed,
+            row("user", "next question", 4),
+        ];
+
+        let (_, turns) = turns(&rows, 4);
+        assert_eq!(turns.len(), 2, "the next user row opens a new turn");
+        let older = &turns[0];
+        assert_eq!(older.final_idx, Some(1));
+        assert!(matches!(
+            &older.blocks[1],
+            Block::Msg { role, content, .. }
+                if role == "assistant" && content == "Final answer"
+        ));
+
+        let (card_index, message_id, plan) = older
+            .blocks
+            .iter()
+            .enumerate()
+            .find_map(|(index, block)| match block {
+                Block::CompletedPlan { message_id, plan } => Some((index, *message_id, plan)),
+                _ => None,
+            })
+            .expect("valid durable row becomes a completed-plan block");
+        assert_eq!(card_index, 2, "the checklist follows the final answer");
+        assert_eq!(message_id, completed_id);
+        assert_eq!(plan.tasks.len(), 8);
+        assert_eq!(plan.header(), "Plan · Ship GUI history · 8 tasks · 100%");
+
+        let text = block_text(&older.blocks[card_index]);
+        for order in 1..=8 {
+            assert!(
+                text.contains(&format!("☑ {order}. Resolved task {order}")),
+                "historical rendering must not window task {order}: {text}"
+            );
+        }
+        assert!(text.ends_with(opencrabs::ui_core::plan_history::COMPLETED_PLAN_FOOTER));
+        assert!(!text.contains("\"tasks\""));
+        assert!(!text.contains("session_id"));
+    }
+
+    #[test]
+    fn gui_completed_plan_history_fold_and_copy_keep_full_checklist() {
+        let rows = [
+            row("user", "ship it", 1),
+            row("assistant", "Final answer", 2),
+            completed_history_row(3, 8),
+        ];
+        let (_, turns) = turns(&rows, 3);
+        let turn = &turns[0];
+        let card_index = turn
+            .blocks
+            .iter()
+            .position(|block| matches!(block, Block::CompletedPlan { .. }))
+            .expect("completed card exists");
+
+        assert!(visible_when_folded(
+            &turn.blocks[card_index],
+            turn.final_idx,
+            card_index
+        ));
+        assert!(
+            turn.header.is_none(),
+            "a read-only card is not a hidden working-out step"
+        );
+
+        let copied = block_text(&turn.blocks[card_index]);
+        assert!(copied.contains("☑ 7. Resolved task 7"));
+        assert!(copied.contains("☑ 8. Resolved task 8"));
+        assert!(copied.ends_with("Plan completed and archived."));
+        assert!(!copied.contains("\"plan\""));
+
+        let drag = CopyDrag::default();
+        drag.texts.borrow_mut().push(copied.clone());
+        drag.anchor.set(Some(TextPoint::new(0, 0)));
+        drag.end.set(Some(TextPoint::new(0, copied.len())));
+        assert_eq!(
+            drag.clipboard_item()
+                .and_then(|item| item.text())
+                .as_deref(),
+            Some(copied.as_str()),
+            "drag copy returns the visible checklist, never stored JSON"
+        );
+    }
+
+    #[test]
+    fn gui_completed_plan_history_malformed_rows_never_render_json() {
+        let malformed = row(
+            PLAN_COMPLETED_ROLE,
+            "{\"secret\":\"GUI-PLAN-JSON-SENTINEL\"}",
+            2,
+        );
+        assert!(row_blocks(&malformed).is_empty());
+
+        let mut unsupported = completed_history_row(3, 2);
+        unsupported.content = unsupported
+            .content
+            .replace("\"version\":1", "\"version\":2");
+        assert!(row_blocks(&unsupported).is_empty());
+
+        let blocks = flat(&[row("user", "question", 1), malformed], 2);
+        assert_eq!(blocks.len(), 1, "only the ordinary user row remains");
+        assert!(!block_text(&blocks[0]).contains("GUI-PLAN-JSON-SENTINEL"));
     }
 
     /// The card's narration lines, in order, so a test reads the words the

@@ -90,6 +90,36 @@ impl MessageRepository {
         Ok(messages)
     }
 
+    /// Recent conversation rows for tools that must not expose plan history.
+    /// Filtering in SQL preserves the requested tail size.
+    pub async fn find_recent_without_completed_plans(
+        &self,
+        session_id: Uuid,
+        limit: usize,
+    ) -> Result<Vec<Message>> {
+        let sid = session_id.to_string();
+        let limit = limit as i64;
+        let mut messages = self
+            .pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                let mut stmt = conn.prepare_cached(
+                    "SELECT * FROM messages WHERE session_id = ?1 \
+                     AND role != 'plan_completed' \
+                     ORDER BY sequence DESC LIMIT ?2",
+                )?;
+                let rows = stmt.query_map(params![sid, limit], Message::from_row)?;
+                rows.collect::<std::result::Result<Vec<_>, _>>()
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to find recent conversation messages")?;
+        messages.reverse();
+        Ok(messages)
+    }
+
     /// Find up to `limit` messages strictly older than `before_sequence`,
     /// oldest-first. The PageUp counterpart of [`find_recent_by_session`]:
     /// paging back costs `limit` rows per step, never the whole history.
@@ -402,8 +432,8 @@ impl MessageRepository {
                     let placeholders = vec!["?"; ids.len()].join(",");
                     let sql = format!(
                         "SELECT * FROM messages \
-                         WHERE session_id IN ({}) AND content LIKE ? ESCAPE '\\' \
-                         COLLATE NOCASE \
+                         WHERE session_id IN ({}) AND role != 'plan_completed' \
+                         AND content LIKE ? ESCAPE '\\' COLLATE NOCASE \
                          ORDER BY created_at DESC LIMIT ?",
                         placeholders
                     );
@@ -420,7 +450,8 @@ impl MessageRepository {
                 } else {
                     let mut stmt = conn.prepare_cached(
                         "SELECT * FROM messages \
-                         WHERE content LIKE ?1 ESCAPE '\\' COLLATE NOCASE \
+                         WHERE role != 'plan_completed' \
+                         AND content LIKE ?1 ESCAPE '\\' COLLATE NOCASE \
                          ORDER BY created_at DESC LIMIT ?2",
                     )?;
                     let rows = stmt.query_map(params![pattern, limit_i], Message::from_row)?;
@@ -479,7 +510,8 @@ impl MessageRepository {
                     let placeholders = vec!["?"; ids.len()].join(",");
                     let sql = format!(
                         "SELECT * FROM messages \
-                         WHERE session_id IN ({}) AND {like_arms} \
+                         WHERE session_id IN ({}) AND role != 'plan_completed' \
+                         AND {like_arms} \
                          ORDER BY created_at DESC LIMIT ?",
                         placeholders
                     );
@@ -496,7 +528,7 @@ impl MessageRepository {
                 } else {
                     let sql = format!(
                         "SELECT * FROM messages \
-                         WHERE {like_arms} \
+                         WHERE role != 'plan_completed' AND {like_arms} \
                          ORDER BY created_at DESC LIMIT ?"
                     );
                     let mut stmt = conn.prepare(&sql)?;

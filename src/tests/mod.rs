@@ -504,6 +504,7 @@ pub mod services_project_test;
 pub mod services_session_test;
 pub mod session_list_shows_last_activity_test;
 pub mod session_project_autolink_test;
+pub mod session_search_completed_plan_test;
 pub mod session_search_empty_query_test;
 #[cfg(feature = "telegram")]
 pub mod session_search_query_test;
@@ -755,6 +756,7 @@ pub mod plan_card_line_breaks_test;
 pub mod plan_card_lock_test;
 pub mod plan_card_persist_test;
 pub mod plan_card_rate_limit_test;
+pub mod plan_completed_archive_test;
 pub mod plan_completed_persist_test;
 pub mod plan_document_test;
 pub mod plan_files_test;
@@ -837,6 +839,7 @@ pub mod tui_clickable_test;
 pub mod tui_clipboard_hint_test;
 pub mod tui_clipboard_paste_keys_test;
 pub mod tui_clipboard_route_test;
+pub mod tui_completed_plan_history_test;
 pub mod tui_components_logo_test;
 pub mod tui_direct_model_switch_test;
 // Unix-only alongside the editor module it exercises (#1755).

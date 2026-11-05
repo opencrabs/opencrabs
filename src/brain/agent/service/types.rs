@@ -462,6 +462,9 @@ pub struct AgentResponse {
     /// genuine fallback starts matched (`true`) and diverges later, and is
     /// persisted by the ProviderSwitched handler.
     pub started_on_session_provider: bool,
+
+    /// Durable completed-plan history written by this turn, if any.
+    pub completed_plan: Option<crate::db::models::Message>,
 }
 
 /// Streaming response from the agent

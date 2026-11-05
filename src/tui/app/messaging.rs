@@ -2282,7 +2282,14 @@ impl App {
         }
     }
 
-    fn expand_message(msg: crate::db::models::Message) -> Vec<DisplayMessage> {
+    pub(crate) fn expand_message(msg: crate::db::models::Message) -> Vec<DisplayMessage> {
+        if msg.role == crate::services::message::PLAN_COMPLETED_ROLE {
+            return if crate::services::message::CompletedPlanPayload::from_message(&msg).is_some() {
+                vec![DisplayMessage::from(msg)]
+            } else {
+                Vec::new()
+            };
+        }
         // Compaction markers are stored as a user message containing the full
         // structured summary the LLM uses to recover context. They must stay
         // fully transparent in the TUI — don't render them at all on reload.
@@ -3919,6 +3926,12 @@ impl App {
                     .map(|t| t.elapsed().as_secs() as i64),
             };
             self.messages.push(assistant_msg);
+        }
+
+        if let Some(completed) = response.completed_plan
+            && !self.messages.iter().any(|msg| msg.id == completed.id)
+        {
+            self.messages.extend(Self::expand_message(completed));
         }
 
         // Auto-scroll to bottom

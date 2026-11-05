@@ -4,6 +4,28 @@ use crate::brain::agent::error::{AgentError, Result};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+/// Write completed history before removing the live plan. Persistence failure
+/// keeps the plan active; archive failure leaves a durable row for retry.
+pub(crate) async fn persist_completed_plan_before_archive(
+    message_service: &crate::services::MessageService,
+    plan: &crate::tui::plan::PlanDocument,
+) -> Option<crate::db::models::Message> {
+    if !plan.is_complete() {
+        return None;
+    }
+    let record = match message_service.record_completed_plan(plan).await {
+        Ok(record) => record,
+        Err(error) => {
+            tracing::warn!("Failed to persist completed plan history: {error}");
+            return None;
+        }
+    };
+    if let Err(error) = crate::utils::plan_files::archive_plan(plan.session_id).await {
+        tracing::warn!("Failed to archive completed plan at turn settle: {error}");
+    }
+    Some(record)
+}
+
 impl AgentService {
     /// Send a message and get a response
     ///
@@ -128,6 +150,7 @@ impl AgentService {
             // resolves the session provider directly, so it always counts as
             // started-on-session-provider.
             started_on_session_provider: true,
+            completed_plan: None,
         })
     }
 

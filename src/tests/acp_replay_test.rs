@@ -79,6 +79,11 @@ fn skips_empty_and_non_transcript_roles() {
         msg("user", "   ", None),
         msg("system", "[SYSTEM: Compact context now.]", None),
         msg("tool", "tool output", None),
+        msg(
+            crate::services::message::PLAN_COMPLETED_ROLE,
+            "raw-plan-json",
+            None,
+        ),
         msg("user", "real", None),
     ];
     let updates = replay_updates(&messages);
@@ -101,6 +106,11 @@ fn replay_usage_takes_last_assistant_input_tokens() {
         earlier,
         msg("user", "again", None),
         later,
+        msg(
+            crate::services::message::PLAN_COMPLETED_ROLE,
+            "raw-plan-json",
+            None,
+        ),
     ];
     // The provider's own measurement from the LAST assistant row — not the
     // first, not a user row, not a sum.

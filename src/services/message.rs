@@ -4,9 +4,48 @@
 
 use crate::db::{models::Message, repository::MessageRepository};
 use crate::services::ServiceContext;
-use anyhow::{Context, Result};
+use crate::tui::plan::PlanDocument;
+use crate::utils::completion_sound::announcement_pending;
+use anyhow::{Context, Result, bail};
 use chrono::Utc;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+pub const PLAN_COMPLETED_ROLE: &str = "plan_completed";
+const PLAN_COMPLETED_PAYLOAD_VERSION: u8 = 1;
+
+/// Versioned, structured history for a plan that reached its completion seam.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompletedPlanPayload {
+    pub version: u8,
+    pub plan: PlanDocument,
+}
+
+impl CompletedPlanPayload {
+    /// Decode only a current, fully resolved payload.
+    pub fn from_json(content: &str) -> Option<Self> {
+        let payload: Self = serde_json::from_str(content).ok()?;
+        (payload.version == PLAN_COMPLETED_PAYLOAD_VERSION
+            && announcement_pending(Some(&payload.plan)).is_some())
+        .then_some(payload)
+    }
+
+    /// Decode only the current payload shape on the dedicated history role.
+    pub fn from_message(message: &Message) -> Option<Self> {
+        (message.role == PLAN_COMPLETED_ROLE)
+            .then(|| Self::from_json(&message.content))
+            .flatten()
+    }
+}
+
+fn validate_existing_completed_plan(message: Message, plan: &PlanDocument) -> Result<Message> {
+    let payload = CompletedPlanPayload::from_message(&message)
+        .context("Existing completed-plan row has an invalid payload")?;
+    if message.session_id != plan.session_id || payload.plan.id != plan.id {
+        bail!("Deterministic completed-plan ID belongs to a different plan");
+    }
+    Ok(message)
+}
 
 /// Everything recorded on an assistant row once its turn ends.
 ///
@@ -35,6 +74,76 @@ impl MessageService {
     /// Create a new message service
     pub fn new(context: ServiceContext) -> Self {
         Self { context }
+    }
+
+    /// Persist the final checklist once, before the live plan is archived.
+    pub async fn record_completed_plan(&self, plan: &PlanDocument) -> Result<Message> {
+        if announcement_pending(Some(plan)).is_none() {
+            bail!("Only an active plan whose tasks are all resolved can be recorded");
+        }
+
+        let id = Uuid::new_v5(
+            &Uuid::NAMESPACE_OID,
+            format!(
+                "opencrabs.plan_completed.v1:{}:{}",
+                plan.session_id, plan.id
+            )
+            .as_bytes(),
+        );
+        let repo = MessageRepository::new(self.context.pool());
+        if let Some(existing) = repo
+            .find_by_id(id)
+            .await
+            .context("Failed to check completed-plan history")?
+        {
+            return validate_existing_completed_plan(existing, plan);
+        }
+
+        let content = serde_json::to_string(&CompletedPlanPayload {
+            version: PLAN_COMPLETED_PAYLOAD_VERSION,
+            plan: plan.clone(),
+        })
+        .context("Failed to serialize completed plan")?;
+        let message = Message {
+            id,
+            session_id: plan.session_id,
+            role: PLAN_COMPLETED_ROLE.to_string(),
+            content,
+            sequence: self.get_next_sequence(plan.session_id).await?,
+            // The repository stores Unix seconds. Return that same precision
+            // so an immediate retry compares identical to the durable row.
+            created_at: chrono::DateTime::from_timestamp(Utc::now().timestamp(), 0)
+                .expect("current Unix seconds always form a valid UTC timestamp"),
+            token_count: None,
+            cost: None,
+            input_tokens: None,
+            cache_creation_tokens: None,
+            cache_read_tokens: None,
+            thinking: None,
+            duration_secs: None,
+        };
+
+        match repo.create(&message).await {
+            Ok(()) => {
+                tracing::debug!(
+                    "Recorded completed plan {} in session {} (seq: {})",
+                    plan.id,
+                    plan.session_id,
+                    message.sequence
+                );
+                Ok(message)
+            }
+            Err(error) => {
+                if let Some(existing) = repo
+                    .find_by_id(id)
+                    .await
+                    .context("Failed to re-check completed-plan history")?
+                {
+                    return validate_existing_completed_plan(existing, plan);
+                }
+                Err(error).context("Failed to record completed plan")
+            }
+        }
     }
 
     /// Create a new message

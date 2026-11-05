@@ -164,6 +164,25 @@ fn clear_aborts_a_background_summariser_before_writing_the_marker() {
 }
 
 #[test]
+fn clear_marker_excludes_completed_plan_history() {
+    let marker = clear_marker(
+        Some("Router audit"),
+        &[
+            ("user".to_string(), "keep the question".to_string()),
+            (
+                crate::services::message::PLAN_COMPLETED_ROLE.to_string(),
+                "raw-plan-json <<IMG:/tmp/private-plan.png>>".to_string(),
+            ),
+            ("assistant".to_string(), "keep the answer".to_string()),
+        ],
+    );
+    assert!(marker.contains("user: keep the question"));
+    assert!(marker.contains("assistant: keep the answer"));
+    assert!(!marker.contains("raw-plan-json"));
+    assert!(!marker.contains("<<IMG:"));
+}
+
+#[test]
 fn channels_parse_clear_owner_only() {
     // The parser is exercised through handle_command in the channel tests;
     // here only the variant and its help entry are pinned.

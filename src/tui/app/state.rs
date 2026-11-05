@@ -403,6 +403,18 @@ impl DisplayMessage {
         }
     }
 
+    /// Clipboard text for this row. Structured history becomes readable text.
+    pub fn copy_text(&self) -> String {
+        if self.role == crate::services::message::PLAN_COMPLETED_ROLE {
+            return crate::services::message::CompletedPlanPayload::from_json(&self.content)
+                .map(|payload| {
+                    crate::ui_core::plan_history::CompletedPlanView::new(&payload.plan).copy_text()
+                })
+                .unwrap_or_default();
+        }
+        self.content.clone()
+    }
+
     /// Advance the reasoning details through the 3-state expand cycle (#727):
     /// collapsed -> capped -> full -> collapsed. Driven by a click on the block
     /// or Ctrl+O.

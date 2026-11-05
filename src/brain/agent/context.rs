@@ -96,6 +96,9 @@ impl AgentContext {
         let mut context = Self::new(session_id, max_tokens);
 
         for db_msg in db_messages {
+            if db_msg.role == crate::services::message::PLAN_COMPLETED_ROLE {
+                continue;
+            }
             // Skip messages with empty content AND no captured reasoning —
             // Anthropic rejects empty text blocks. A non-empty thinking
             // column alone still justifies keeping the row so downstream

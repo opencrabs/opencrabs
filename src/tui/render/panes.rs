@@ -225,6 +225,14 @@ pub(crate) fn render_simple_message(
         return;
     }
 
+    if msg.role == crate::services::message::PLAN_COMPLETED_ROLE {
+        if let Some(card) = super::chat::completed_plan_lines(msg, width) {
+            lines.extend(card);
+            lines.push(Line::from(""));
+        }
+        return;
+    }
+
     let is_assistant = msg.role == "assistant";
 
     // Strip reasoning/tool-marker blocks from content

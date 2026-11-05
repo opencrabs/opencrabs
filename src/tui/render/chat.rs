@@ -461,6 +461,46 @@ fn push_folded_header(out: &mut Vec<Line<'static>>, base: &str, preview: Option<
     }
 }
 
+/// Full read-only checklist for a durable completed-plan row.
+pub(crate) fn completed_plan_lines(
+    message: &DisplayMessage,
+    width: usize,
+) -> Option<Vec<Line<'static>>> {
+    if message.role != crate::services::message::PLAN_COMPLETED_ROLE {
+        return None;
+    }
+    let payload = crate::services::message::CompletedPlanPayload::from_json(&message.content)?;
+    let view = crate::ui_core::plan_history::CompletedPlanView::new(&payload.plan);
+    let mut lines = Vec::with_capacity(view.tasks.len() + 2);
+    lines.extend(wrap_line_with_padding(
+        Line::from(Span::styled(
+            format!("  ☑ {}", view.header()),
+            Style::default()
+                .fg(theme::role(Role::AccentTeal))
+                .add_modifier(Modifier::BOLD),
+        )),
+        width.max(12),
+        "    ",
+    ));
+    for task in &view.tasks {
+        lines.extend(wrap_line_with_padding(
+            Line::from(Span::styled(
+                format!("    ☑ {}. {}", task.order, task.title),
+                Style::default().fg(theme::role(Role::GrayMid)),
+            )),
+            width.max(12),
+            "       ",
+        ));
+    }
+    lines.push(Line::from(Span::styled(
+        format!("  {}", crate::ui_core::plan_history::COMPLETED_PLAN_FOOTER),
+        Style::default()
+            .fg(theme::role(Role::GrayDim))
+            .add_modifier(Modifier::ITALIC),
+    )));
+    Some(lines)
+}
+
 /// Whether row `idx` still renders while its turn is folded (#758).
 ///
 /// Folding hides the turn's working-out — thinking, tool groups, and the
@@ -479,6 +519,9 @@ pub(crate) fn visible_when_folded(
     };
     // Never hide something the user has to act on, or an error they must see.
     if m.approval.is_some() || m.approve_menu.is_some() {
+        return true;
+    }
+    if m.role == crate::services::message::PLAN_COMPLETED_ROLE {
         return true;
     }
     match m.role.as_str() {
@@ -644,7 +687,7 @@ struct TurnHeader {
 }
 
 /// Render the chat messages
-pub(super) fn render_chat(f: &mut Frame, app: &mut App, area: Rect) {
+pub(crate) fn render_chat(f: &mut Frame, app: &mut App, area: Rect) {
     // A theme switch invalidates every cached line: the cache holds spans whose
     // colours are already resolved, so `/theme` would otherwise repaint only the
     // chrome and leave the transcript on the previous palette (#1634).
@@ -844,6 +887,17 @@ pub(super) fn render_chat(f: &mut Frame, app: &mut App, area: Rect) {
             )));
             lines.push(Line::from(""));
             line_to_msg.resize(lines.len(), None);
+            continue;
+        }
+
+        if app.messages[msg_idx].role == crate::services::message::PLAN_COMPLETED_ROLE {
+            if let Some(card) = completed_plan_lines(&app.messages[msg_idx], content_width) {
+                lines.extend(card);
+                lines.push(Line::from(""));
+                for _ in lines_before..lines.len() {
+                    line_to_msg.push(Some(msg_idx));
+                }
+            }
             continue;
         }
 
