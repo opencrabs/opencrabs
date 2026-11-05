@@ -90,7 +90,7 @@ use std::ops::Range;
 use std::rc::Rc;
 use uuid::Uuid;
 
-use opencrabs::brain::mission_control::McAnalytics;
+use opencrabs::brain::mission_control::{McActivity, McAnalytics, McInboxItem, McScheduleItem};
 use opencrabs::config::Config;
 use opencrabs::tui::app::mission_control::log_viewer::LogViewerState;
 use opencrabs::tui::render::format_token_count_raw;
@@ -7877,14 +7877,28 @@ fn mission_control_cards(
     nav: &mission_control::Nav,
     shown: palette::Palette,
 ) -> Vec<Div> {
-    let analytics = snapshot.map(|s| &s.analytics);
-    let focused = nav.panel == mission_control::Panel::Analytics;
     let mut cards = vec![
         mc_inbox_panel(snapshot, nav, shown),
         mc_activity_panel(snapshot, nav, shown),
         mc_schedule_panel(snapshot, nav, shown),
-        mc_totals_panel(snapshot, focused, shown),
     ];
+    cards.extend(mc_analytics_cards(
+        snapshot,
+        nav.panel == mission_control::Panel::Analytics,
+        shown,
+    ));
+    cards
+}
+
+/// The analytics sections shared by the dashboard and its detail popup.
+/// Reusing this list keeps the popup from becoming a second, stale renderer.
+fn mc_analytics_cards(
+    snapshot: Option<&mission_control::Snapshot>,
+    focused: bool,
+    shown: palette::Palette,
+) -> Vec<Div> {
+    let analytics = snapshot.map(|s| &s.analytics);
+    let mut cards = vec![mc_totals_panel(snapshot, focused, shown)];
     let Some(a) = analytics else {
         return cards;
     };
@@ -8025,6 +8039,14 @@ fn mc_inbox_panel(
             shown.text_normal,
         ));
         rows.push(McRow::Line(format!("  {}", item.summary), shown.text_faint));
+        rows.push(McRow::Line(
+            format!(
+                "  {} \u{b7} {}",
+                item.source,
+                mc_relative_time(Some(item.created_at))
+            ),
+            shown.text_faint,
+        ));
     }
     let focused = nav.panel == mission_control::Panel::Inbox;
     mc_panel(
@@ -8034,7 +8056,7 @@ fn mc_inbox_panel(
         "No pending proposals.",
         focused,
         // The selected item's first line, in the rows actually drawn.
-        (focused && !items.is_empty()).then_some((selected - start) * 2),
+        (focused && !items.is_empty()).then_some((selected - start) * 3),
         shown,
     )
 }
@@ -8076,7 +8098,7 @@ fn mc_window_label(window: mission_control::TimeWindow) -> &'static str {
 fn mc_rate_color(rate: f64, shown: palette::Palette) -> u32 {
     if rate >= 25.0 {
         shown.red
-    } else if rate >= 5.0 {
+    } else if rate >= 10.0 {
         shown.warn
     } else {
         shown.text_muted
@@ -8133,7 +8155,8 @@ fn mc_totals_panel(
             format!("{} applied", a.rsi_applied_total),
             shown.text_muted,
         ));
-        rows.push(McRow::Line(
+        rows.push(McRow::Pair(
+            "RSI live".to_string(),
             opencrabs::brain::mission_control::staleness::rsi_staleness_line(
                 chrono::Utc::now().timestamp(),
                 a.rsi_last_call_ts,
@@ -8302,8 +8325,32 @@ fn mc_brain_panel(a: &McAnalytics, shown: palette::Palette) -> Div {
     )
 }
 
-/// The busiest tools, with the call count the terminal pairs with each name.
+const MC_TOOL_BAR_WIDTH: usize = 12;
+
+/// The same proportional usage bar as the terminal, kept fixed-width so the
+/// call count and failure rate remain aligned in a GUI card.
+fn mc_tool_bar(total: i64, max: i64) -> String {
+    let max = max.max(1);
+    let filled = ((total.max(0) as f64 / max as f64) * MC_TOOL_BAR_WIDTH as f64)
+        .round()
+        .clamp(0.0, MC_TOOL_BAR_WIDTH as f64) as usize;
+    format!(
+        "{}{}",
+        "█".repeat(filled),
+        "░".repeat(MC_TOOL_BAR_WIDTH - filled)
+    )
+}
+
+/// The busiest tools, with the proportional bar, call count and failure rate
+/// the terminal pairs with each name.
 fn mc_top_tools_panel(a: &McAnalytics, shown: palette::Palette) -> Div {
+    let max = a
+        .top_tools
+        .iter()
+        .map(|t| t.total)
+        .max()
+        .unwrap_or(1)
+        .max(1);
     let rows = a
         .top_tools
         .iter()
@@ -8316,7 +8363,13 @@ fn mc_top_tools_panel(a: &McAnalytics, shown: palette::Palette) -> Div {
             };
             McRow::Pair(
                 t.name.clone(),
-                format!("{} calls \u{b7} {} failed", t.total, t.failures),
+                format!(
+                    "{} {} calls \u{b7} {} failed \u{b7} {:.1}%",
+                    mc_tool_bar(t.total, max),
+                    t.total,
+                    t.failures,
+                    t.fail_rate
+                ),
                 color,
             )
         })
@@ -8404,7 +8457,13 @@ fn mc_schedule_panel(
             ""
         };
         rows.push(McRow::Line(
-            format!("{} \u{b7} {}{}", job.label, job.schedule, state),
+            format!(
+                "{} \u{b7} {} \u{b7} {}{}",
+                job.kind.label(),
+                job.label,
+                job.schedule,
+                state
+            ),
             color,
         ));
     }
@@ -8427,22 +8486,24 @@ fn mc_schedule_panel(
     )
 }
 
-/// The full record for the selected proposal, drawn over everything: the same
-/// fields the terminal's detail popup shows (`tui/render/mission_control/
-/// detail_popup.rs`), read from the snapshot that is already on hand. Enter
-/// opens it, Esc closes it, and a click on the card is inert so reading it
-/// never throws it away.
+/// The focused panel's full record or analytics dashboard, drawn over
+/// everything. Field order follows `tui/render/mission_control/detail_popup.rs`
+/// and every value comes from the snapshot already on hand. Enter opens it,
+/// Esc closes it, and a click on the card is inert so reading never throws it
+/// away.
 fn mission_control_detail(
     snapshot: Option<&mission_control::Snapshot>,
     nav: &mission_control::Nav,
     close: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     let shown = palette::current();
-    let item = snapshot.and_then(|s| s.inbox.get(nav.selected)).cloned();
-    let title = match &item {
-        Some(item) => format!("{} detail \u{b7} {}", nav.panel.title(), item.kind.label()),
-        None => format!("{} detail", nav.panel.title()),
-    };
+    let title = match nav.panel {
+        mission_control::Panel::Inbox => snapshot
+            .and_then(|s| s.inbox.get(nav.selected))
+            .map(|item| format!("Inbox detail \u{b7} {}", item.kind.label())),
+        _ => None,
+    }
+    .unwrap_or_else(|| format!("{} detail", nav.panel.title()));
     let close = std::rc::Rc::new(close);
     let scrim_close = close.clone();
     let button_close = close.clone();
@@ -8452,9 +8513,10 @@ fn mission_control_detail(
         .flex_col()
         .gap_1()
         .p_3()
+        .w_full()
         .max_w(px(720.0))
         .max_h(px(560.0))
-        // A long summary is clipped to the card instead of painting past it.
+        // The field area scrolls inside this bounded card.
         .overflow_hidden()
         .rounded(px(CARD_RADIUS))
         .border_1()
@@ -8487,34 +8549,22 @@ fn mission_control_detail(
                         .on_click(move |ev, window, cx| button_close(ev, window, cx)),
                 ),
         );
-    match item {
-        Some(item) => {
-            // The terminal's field order, so the two clients read alike.
-            card = card
-                .child(mc_kv("Kind", item.kind.label().to_string(), shown))
-                .child(mc_kv("Label", item.label.clone(), shown))
-                .child(mc_kv("Source", item.source.clone(), shown))
-                .child(mc_kv(
-                    "Filed",
-                    item.created_at.format("%Y-%m-%d %H:%M UTC").to_string(),
-                    shown,
-                ))
-                .child(mc_kv("ID", item.id.clone(), shown))
-                .child(
-                    div()
-                        .mt_2()
-                        .text_xs()
-                        .text_color(rgb(shown.text_title))
-                        .child("Summary"),
-                );
-            for line in item.summary.split('\n') {
-                card = card.child(text(line.to_string(), Size::Xs, shown.text_normal));
-            }
-        }
-        None => {
-            card = card.child(text("No proposal selected.", Size::Xs, shown.text_faint));
-        }
-    }
+    let body = match nav.panel {
+        mission_control::Panel::Inbox => mc_inbox_detail(
+            snapshot.and_then(|s| s.inbox.get(nav.selected)).cloned(),
+            shown,
+        ),
+        mission_control::Panel::Activity => mc_activity_detail(
+            snapshot.and_then(|s| s.activity.get(nav.selected)).cloned(),
+            shown,
+        ),
+        mission_control::Panel::Schedule => mc_schedule_detail(
+            snapshot.and_then(|s| s.schedule.get(nav.selected)).cloned(),
+            shown,
+        ),
+        mission_control::Panel::Analytics => mc_analytics_detail(snapshot, shown),
+    };
+    card = card.child(body);
     div()
         .id("mission-control-detail-scrim")
         // Modal: the dim scrim owns the pointer, so a click meant for a panel
@@ -8531,6 +8581,202 @@ fn mission_control_detail(
         .bg(rgba(0x0a0a0add))
         .on_click(move |ev, window, cx| scrim_close(ev, window, cx))
         .child(card)
+}
+
+/// The scrollable body shared by all four detail views.
+fn mc_detail_body() -> Stateful<Div> {
+    div()
+        .id("mission-control-detail-fields")
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h_0()
+        .w_full()
+        .gap_1()
+        .overflow_y_scroll()
+}
+
+fn mc_detail_heading(title: &'static str, shown: palette::Palette) -> Div {
+    div()
+        .mt_2()
+        .text_xs()
+        .text_color(rgb(shown.text_title))
+        .child(title)
+}
+
+fn mc_inbox_detail(item: Option<McInboxItem>, shown: palette::Palette) -> Stateful<Div> {
+    let mut body = mc_detail_body();
+    let Some(item) = item else {
+        return body.child(text("No proposal selected.", Size::Xs, shown.text_faint));
+    };
+    body = body
+        .child(mc_kv("Kind", item.kind.label().to_string(), shown))
+        .child(mc_kv("Label", item.label.clone(), shown))
+        .child(mc_kv("Source", item.source.clone(), shown))
+        .child(mc_kv(
+            "Filed",
+            item.created_at.format("%Y-%m-%d %H:%M UTC").to_string(),
+            shown,
+        ))
+        .child(mc_kv("ID", item.id.clone(), shown))
+        .child(mc_detail_heading("Summary", shown));
+    for line in item.summary.split('\n') {
+        body = body.child(text(line.to_string(), Size::Xs, shown.text_normal));
+    }
+    body
+}
+
+fn mc_activity_level_label(
+    level: opencrabs::brain::mission_control::McActivityLevel,
+) -> &'static str {
+    use opencrabs::brain::mission_control::McActivityLevel;
+    match level {
+        McActivityLevel::Success => "success",
+        McActivityLevel::Info => "info",
+        McActivityLevel::Warn => "warn",
+        McActivityLevel::Error => "error",
+    }
+}
+
+fn mc_activity_detail(entry: Option<McActivity>, shown: palette::Palette) -> Stateful<Div> {
+    let mut body = mc_detail_body();
+    let Some(entry) = entry else {
+        return body.child(text("No activity selected.", Size::Xs, shown.text_faint));
+    };
+    body = body
+        .child(mc_kv(
+            "When",
+            entry
+                .timestamp
+                .map(|ts| ts.format("%Y-%m-%d %H:%M UTC").to_string())
+                .unwrap_or_else(|| "undated".into()),
+            shown,
+        ))
+        .child(mc_kv("Source", entry.source.clone(), shown))
+        .child(mc_kv(
+            "Level",
+            mc_activity_level_label(entry.level).to_string(),
+            shown,
+        ))
+        .child(mc_detail_heading("Detail", shown));
+    for line in entry.detail.split('\n') {
+        body = body.child(text(line.to_string(), Size::Xs, shown.text_normal));
+    }
+    body
+}
+
+fn mc_schedule_duration(secs: i64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else {
+        format!("{}m {}s", secs / 60, secs % 60)
+    }
+}
+
+fn mc_schedule_detail(job: Option<McScheduleItem>, shown: palette::Palette) -> Stateful<Div> {
+    let mut body = mc_detail_body();
+    let Some(job) = job else {
+        return body.child(text(
+            "No schedule item selected.",
+            Size::Xs,
+            shown.text_faint,
+        ));
+    };
+    let kind = match job.kind {
+        opencrabs::brain::mission_control::McScheduleKind::Cron => "cron job",
+        opencrabs::brain::mission_control::McScheduleKind::PendingApproval => "pending approval",
+    };
+    let state = if job.awaiting_user {
+        "awaiting user"
+    } else if !job.enabled {
+        "paused"
+    } else {
+        "active"
+    };
+
+    body = body
+        .child(mc_kv("Kind", kind.to_string(), shown))
+        .child(mc_kv("Label", job.label.clone(), shown))
+        .child(mc_kv("State", state.to_string(), shown))
+        .child(mc_detail_heading("Schedule", shown))
+        .child(mc_kv("Cron", job.schedule.clone(), shown))
+        .child(mc_kv(
+            "Next",
+            mc_timestamp(job.next_run_at).unwrap_or_else(|| "not scheduled".into()),
+            shown,
+        ))
+        .child(mc_detail_heading("Last run", shown))
+        .child(mc_kv(
+            "At",
+            mc_timestamp(job.last_run_at).unwrap_or_else(|| "never".into()),
+            shown,
+        ));
+    if let Some(status) = job.last_run_status.as_deref() {
+        let status = match status {
+            "running" => "running...",
+            other => other,
+        };
+        body = body.child(mc_kv("Status", status.to_string(), shown));
+    }
+    if let Some(cost) = job.last_run_cost {
+        body = body.child(mc_kv("Cost", format!("${cost:.4}"), shown));
+    }
+    if let Some(secs) = job.last_run_duration_secs {
+        body = body.child(mc_kv("Duration", mc_schedule_duration(secs), shown));
+    }
+    if let Some(target) = job.deliver_to.as_deref() {
+        body = body
+            .child(mc_detail_heading("Delivery", shown))
+            .child(mc_kv("Target", target.to_string(), shown));
+    }
+    if !job.prompt.is_empty() {
+        let prompt = if job.prompt.len() > 300 {
+            format!(
+                "{}...",
+                opencrabs::utils::string::truncate_str(&job.prompt, 300)
+            )
+        } else {
+            job.prompt.clone()
+        };
+        body = body.child(mc_detail_heading("Prompt", shown));
+        for line in prompt.split('\n') {
+            body = body.child(text(line.to_string(), Size::Xs, shown.text_normal));
+        }
+    }
+    body = body.child(mc_detail_heading("Meta", shown)).child(mc_kv(
+        "Created",
+        job.created_at.format("%Y-%m-%d %H:%M UTC").to_string(),
+        shown,
+    ));
+    if let Some(profile) = job.profile_name.as_deref() {
+        body = body.child(mc_kv("Profile", profile.to_string(), shown));
+    }
+    body.child(mc_kv("ID", job.id.clone(), shown))
+}
+
+fn mc_analytics_detail(
+    snapshot: Option<&mission_control::Snapshot>,
+    shown: palette::Palette,
+) -> Stateful<Div> {
+    let cards = mc_analytics_cards(snapshot, true, shown);
+    let count = cards.len();
+    let mut cards = cards.into_iter();
+    let mut grid = div().flex().flex_col().w_full().gap_2().pr_1();
+    for slots in mission_control::grid_rows(count, 2) {
+        let mut row = div().flex().flex_row().w_full().h(px(180.0)).gap_2();
+        for slot in slots {
+            match slot {
+                Some(_) => {
+                    if let Some(card) = cards.next() {
+                        row = row.child(card);
+                    }
+                }
+                None => row = row.child(div().flex_1().min_w_0()),
+            }
+        }
+        grid = grid.child(row);
+    }
+    mc_detail_body().child(grid)
 }
 
 /// How many log lines the window draws at once: a page key moves by a screen,
@@ -8709,6 +8955,11 @@ fn mc_kv(key: &str, value: String, shown: palette::Palette) -> Div {
                 .truncate()
                 .child(value),
         )
+}
+
+/// Format an optional timestamp for the schedule detail fields.
+fn mc_timestamp(ts: Option<chrono::DateTime<chrono::Utc>>) -> Option<String> {
+    ts.map(|ts| ts.format("%Y-%m-%d %H:%M UTC").to_string())
 }
 
 /// An event's age in the terminal's own shorthand, and "undated" when the
@@ -10122,6 +10373,25 @@ mod tests {
         assert_eq!(super::zoom_step_for("0", rem, true), Some(BASE_REM));
         // A key that is not a zoom key stays a keystroke, chord or not.
         assert_eq!(super::zoom_step_for("a", rem, true), None);
+    }
+
+    #[test]
+    fn mission_schedule_duration_matches_the_terminal_format() {
+        assert_eq!(super::mc_schedule_duration(0), "0s");
+        assert_eq!(super::mc_schedule_duration(42), "42s");
+        assert_eq!(super::mc_schedule_duration(61), "1m 1s");
+        assert_eq!(super::mc_schedule_duration(3661), "61m 1s");
+    }
+
+    #[test]
+    fn mission_top_tool_bar_tracks_relative_usage() {
+        assert_eq!(super::mc_tool_bar(0, 100), "░".repeat(12));
+        assert_eq!(
+            super::mc_tool_bar(50, 100),
+            format!("{}{}", "█".repeat(6), "░".repeat(6))
+        );
+        assert_eq!(super::mc_tool_bar(100, 100), "█".repeat(12));
+        assert_eq!(super::mc_tool_bar(200, 100), "█".repeat(12));
     }
 
     /// A tile opens a preview of the file it stands for, Esc closes it, and

@@ -945,6 +945,7 @@ pub mod memory_embedding_gate_test;
 pub mod merge_provider_keys_test;
 pub mod mission_control_activity_malformed_test;
 pub mod mission_control_activity_service_test;
+pub mod mission_control_gui_parity_test;
 pub mod mission_control_inbox_service_test;
 pub mod mission_control_input_test;
 pub mod mission_control_layout_test;
