@@ -5737,12 +5737,20 @@ impl Render for Dashboard {
                 } else {
                     pane_width
                 };
+                // A single pane draws the conversation at a readable measure
+                // and centres it; a split window is exempt and keeps every pane
+                // at the span the tree hands it (#2586).
+                let split_window = self
+                    .panes
+                    .as_ref()
+                    .is_some_and(|tree| tree.leaves().len() >= 2);
+                let measure = chat_measure(primary_width, split_window);
                 let primary = transcript::view(
                     &self.transcript,
                     &self.transcript_scroll,
                     &self.live,
                     self.busy,
-                    primary_width,
+                    measure,
                     fold_handlers,
                     transcript::ViewHooks {
                         attachments: attachment_handlers,
@@ -5753,6 +5761,11 @@ impl Render for Dashboard {
                     },
                 )
                 .into_any_element();
+                let primary = if measure < primary_width {
+                    chat_measure_column(primary, measure)
+                } else {
+                    primary
+                };
                 // The panes come from the tree (#2472): one leaf is the
                 // window as it was, and each split adds a divider and the
                 // panes its children hold.
@@ -10331,6 +10344,51 @@ fn split_pane_width(content: f32, stacked: bool, share: f32) -> f32 {
     }
 }
 
+/// The widest the conversation itself draws, in px (#2586). A line of body
+/// text past this is a wall: the eye travels too far back to the left margin
+/// to find the next one, so the transcript is centred inside a wide pane
+/// instead of stretching edge to edge. Any pane under this width draws at
+/// its own width, unchanged.
+pub const CHAT_MEASURE_PX: f32 = 760.0;
+
+/// What the conversation draws at, given the pane it sits in and whether the
+/// window is split (#2586). A split window is exempt: every pane there takes
+/// its full span, however narrow, because a half-width pane is already the
+/// measure. The cap is for the single pane only, so it applies when `split`
+/// is false and never in a half of a split.
+pub fn chat_measure(pane_width: f32, split: bool) -> f32 {
+    if split {
+        pane_width
+    } else {
+        pane_width.min(CHAT_MEASURE_PX)
+    }
+}
+
+/// The column a single pane draws its conversation in (#2586): the transcript
+/// sits at the measure and the slack goes to the two margins, so the text is
+/// centred in the window instead of stretching to a wall. Only a pane that is
+/// wider than the measure is wrapped, so a narrow window keeps the exact tree
+/// it had, and a split pane is never wrapped because it never takes the cap.
+fn chat_measure_column(view: AnyElement, width: f32) -> AnyElement {
+    div()
+        .flex()
+        .flex_row()
+        .flex_1()
+        .min_w_0()
+        .min_h_0()
+        .justify_center()
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .w(px(width))
+                .min_w_0()
+                .min_h_0()
+                .child(view),
+        )
+        .into_any_element()
+}
+
 /// The rule between two panes: vertical when they sit side by side, horizontal
 /// when they stack, and draggable to resize both (#2473, #2476). The strip is
 /// the target and the rule inside it is what is drawn, so the layout is
@@ -11022,9 +11080,67 @@ fn cd_entries_for(dir: &std::path::Path, show_hidden: bool) -> Vec<std::path::Pa
 #[cfg(test)]
 mod tests {
     use super::{
-        THEMES_HISTORY_LEN, cd_entries_for, pick_initial_session, remember_open_session,
-        remember_preview,
+        CHAT_MEASURE_PX, THEMES_HISTORY_LEN, cd_entries_for, pick_initial_session,
+        remember_open_session, remember_preview,
     };
+
+    /// The conversation caps at a readable measure in a single pane, and any
+    /// pane narrower than the cap draws at its own width (#2586).
+    #[test]
+    fn chat_measure_caps_a_wide_single_pane_only() {
+        assert_eq!(super::chat_measure(2192.0, false), CHAT_MEASURE_PX);
+        assert_eq!(
+            super::chat_measure(CHAT_MEASURE_PX + 1.0, false),
+            CHAT_MEASURE_PX
+        );
+        assert_eq!(super::chat_measure(CHAT_MEASURE_PX, false), CHAT_MEASURE_PX);
+        assert_eq!(super::chat_measure(612.0, false), 612.0);
+        assert_eq!(super::chat_measure(0.0, false), 0.0);
+    }
+
+    /// A split window is exempt: a pane there takes the full span it is
+    /// given, wide or narrow, so the cap can never narrow a pane (#2586).
+    #[test]
+    fn chat_measure_leaves_a_split_pane_alone() {
+        assert_eq!(super::chat_measure(2192.0, true), 2192.0);
+        assert_eq!(super::chat_measure(996.0, true), 996.0);
+        assert_eq!(super::chat_measure(320.0, true), 320.0);
+        assert_eq!(super::chat_measure(CHAT_MEASURE_PX, true), CHAT_MEASURE_PX);
+    }
+
+    /// The measure belongs to the single pane and to nothing else (#2586). A
+    /// split leaf draws at the span its own pane owns, so the pane renderer is
+    /// asserted free of the cap: a split can never be narrowed by it, whatever
+    /// later changes do to the single-pane branch.
+    #[test]
+    fn no_measure_cap_reaches_a_split_pane() {
+        let src = include_str!("main.rs");
+        let (_, rest) = src
+            .split_once("fn pane_element(")
+            .expect("split leaf renderer exists");
+        let (leaf, _) = rest
+            .split_once("let close_session = *session;")
+            .expect("pane leaf body ends before its close handler");
+        assert!(
+            !leaf.contains("chat_measure") && !leaf.contains("CHAT_MEASURE_PX"),
+            "a split pane draws at its own full width, never at the measure"
+        );
+
+        let (_, primary) = src
+            .split_once("let primary = transcript::view(")
+            .expect("primary Chat transcript call exists");
+        let (call, _) = primary
+            .split_once(".into_any_element();")
+            .expect("primary Chat transcript call ends");
+        assert!(
+            call.contains("measure,"),
+            "a single pane draws at the measured width"
+        );
+        assert!(
+            src.contains("let measure = chat_measure(primary_width, split_window);"),
+            "the measure comes from the pane width, exempting a split window"
+        );
+    }
 
     /// The primary Chat screen must share its mouse selection state with the
     /// transcript. The split view already did this; Chat silently passed no
