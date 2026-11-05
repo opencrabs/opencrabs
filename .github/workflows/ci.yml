@@ -136,7 +136,18 @@ jobs:
   # promote it via the matrix.
   build:
     name: Build (${{ matrix.target }})
-    needs: [lint, audit]
+    # A build is only worth its cycles on a tree the tests have not already
+    # rejected (#2583): with `needs: [lint, audit]` this job kept compiling
+    # --all-features on the self-hosted Mac after the test legs had gone red.
+    # That cannot change the run's outcome and only holds the box the tests
+    # themselves need. On that runner lint, audit, test and build queue for a
+    # single slot and already run one after another, so waiting on the tests
+    # costs no wall time there.
+    #
+    # always() is required: without it a job whose needs did not all succeed
+    # is skipped outright, and `test-linux` is legitimately skipped on fork
+    # PRs. The explicit checks below carry the real gate.
+    needs: [lint, audit, test, test-linux]
     # Cross-platform build verification. Runs where it pays off — on PRs
     # (gate contributions) and on-demand (workflow_dispatch, e.g. before a
     # release tag) — but NOT on every routine push to main. Direct main
@@ -148,7 +159,13 @@ jobs:
     # release.yml's build-release matrix already builds + validates Windows
     # before any tag is published, so a platform regression cannot reach a
     # release unnoticed.
-    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    if: >-
+      always() &&
+      (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') &&
+      needs.lint.result == 'success' &&
+      needs.audit.result == 'success' &&
+      needs.test.result == 'success' &&
+      (needs.test-linux.result == 'success' || needs.test-linux.result == 'skipped')
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     strategy:
