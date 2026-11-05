@@ -78,20 +78,20 @@ use opencrabs::ui_core::docs;
 use futures::channel::oneshot;
 
 use gpui::{
-    AnyElement, App, Application, Bounds, ClickEvent, Context, CursorStyle, Div, DragMoveEvent,
-    Entity, ExternalPaths, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString, Stateful,
-    TitlebarOptions, Window, WindowBounds, WindowOptions, div, prelude::*, px, rems, rgb, rgba,
-    size,
+    AnyElement, App, Application, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, Div,
+    DragMoveEvent, Entity, ExternalPaths, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta, ScrollHandle, ScrollWheelEvent,
+    SharedString, Stateful, TitlebarOptions, Window, WindowBounds, WindowOptions, div, point,
+    prelude::*, px, rems, rgb, rgba, size,
 };
 use opencrabs::brain::agent::ProgressEvent;
 use opencrabs::utils::drop_landing::human_size;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
 use uuid::Uuid;
 
-use opencrabs::brain::mission_control::McAnalytics;
+use opencrabs::brain::mission_control::{McActivity, McAnalytics, McInboxItem, McScheduleItem};
 use opencrabs::config::Config;
 use opencrabs::tui::app::mission_control::log_viewer::LogViewerState;
 use opencrabs::tui::render::format_token_count_raw;
@@ -327,6 +327,12 @@ const RAIL_DEFAULT_REM: f32 = 17.0;
 const RAIL_MIN_REM: f32 = 11.0;
 const RAIL_MAX_REM: f32 = 32.0;
 
+/// How long the Seeker caret keeps blinking after the last keystroke. Past
+/// this the field goes quiet and the caret hides, the way Spotlight's does
+/// once typing stops; the next key brings it back (#2531). The window and the
+/// terminal share one rule, so this aliases the engine's constant.
+const CARET_IDLE_AFTER: std::time::Duration = opencrabs::ui_core::palette::CARET_IDLE_AFTER;
+
 /// The side panel beside a previewing screen (`themes-sidebar`), plus the
 /// `gap_3` between it and the transcript. The transcript is planned against
 /// what is left, so its tiles never run under the panel.
@@ -466,6 +472,14 @@ struct Dashboard {
     /// drawn div, not an input widget, so nothing blinks for it unless a
     /// timer says so (#2491).
     finder_caret: bool,
+    /// When the Seeker field last took a key. The caret blinks for
+    /// [`CARET_IDLE_AFTER`] after that instant and then holds off, the way
+    /// Spotlight drops its caret when typing stops (#2531).
+    finder_activity: std::time::Instant,
+    /// Latest shaped text and bounds for Seeker mouse hit testing (#2534).
+    finder_paint: Entity<command_palette::FinderPaint>,
+    /// A left-button drag is extending the field's selection.
+    finder_selecting: bool,
     /// Monotonic tag on the latest period fetch; only its result is applied,
     /// so a slow fetch landing after a newer one cannot paint stale data.
     pending: u64,
@@ -1005,8 +1019,11 @@ impl Dashboard {
         }
         self.finder = Some(PaletteState::new(self.finder_items()));
         self.finder_channels = configured_channels();
-        self.finder_caret = true;
+        self.finder_selecting = false;
+        self.finder_activity_reset();
         // The caret blinks on a timer, and the loop dies with the card (#2491).
+        // It only toggles while the field is fresh; past CARET_IDLE_AFTER the
+        // caret stays off until the next key restarts it (#2531).
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
@@ -1017,7 +1034,15 @@ impl Dashboard {
                         if view.finder.is_none() {
                             return false;
                         }
-                        view.finder_caret = !view.finder_caret;
+                        if opencrabs::ui_core::palette::caret_blinks(
+                            view.finder_activity,
+                            std::time::Instant::now(),
+                            CARET_IDLE_AFTER,
+                        ) {
+                            view.finder_caret = !view.finder_caret;
+                        } else {
+                            view.finder_caret = false;
+                        }
                         cx.notify();
                         true
                     })
@@ -1033,9 +1058,18 @@ impl Dashboard {
         cx.notify();
     }
 
+    /// A key reached the Seeker field: the caret comes back on and its idle
+    /// clock restarts, so a paused field hides it and typing re-arms it
+    /// (#2531).
+    fn finder_activity_reset(&mut self) {
+        self.finder_activity = std::time::Instant::now();
+        self.finder_caret = true;
+    }
+
     /// Close the card and hand the keyboard back to what was under it.
     fn close_finder(&mut self, cx: &mut Context<Self>) {
         self.finder = None;
+        self.finder_selecting = false;
         self.refocus_screen();
         cx.notify();
     }
@@ -1104,6 +1138,20 @@ impl Dashboard {
     /// the arrows move the armed row and Enter runs it. Nothing falls through
     /// to the composer, which is the whole point of the card (#2458).
     fn finder_key(&mut self, ks: &gpui::Keystroke, cx: &mut Context<Self>) {
+        // Any key is activity: the caret comes back and its idle clock
+        // restarts before the key does its work (#2531).
+        self.finder_activity_reset();
+        if let Some(edit) = find::editing_chord(
+            &ks.key,
+            ks.modifiers.control,
+            ks.modifiers.platform,
+            ks.modifiers.alt,
+            ks.modifiers.shift,
+        ) {
+            self.apply_finder_edit(edit, cx);
+            cx.notify();
+            return;
+        }
         let Some(state) = self.finder.as_mut() else {
             return;
         };
@@ -1120,11 +1168,10 @@ impl Dashboard {
             "down" => state.move_by(1, find::SEEKER_PAGE),
             "pageup" => state.move_by(-(find::SEEKER_PAGE as i32), find::SEEKER_PAGE),
             "pagedown" => state.move_by(find::SEEKER_PAGE as i32, find::SEEKER_PAGE),
-            "backspace" => state.backspace(),
             "space" => state.type_char(' '),
             _ => {
-                // A chord is not a character: ctrl+c still means what it
-                // meant, and it must not type a `c` into the field.
+                // An editing chord returned above. Any other modified key is
+                // still a chord, never text to append to the query.
                 if ks.modifiers.control || ks.modifiers.platform || ks.modifiers.alt {
                     return;
                 }
@@ -1138,6 +1185,115 @@ impl Dashboard {
         cx.notify();
     }
 
+    fn apply_finder_edit(&mut self, edit: find::SeekerEdit, cx: &mut Context<Self>) {
+        let Some(state) = self.finder.as_mut() else {
+            return;
+        };
+        match edit {
+            find::SeekerEdit::Move {
+                delta,
+                word,
+                select,
+            } => match (word, select) {
+                (true, true) => state.select_word_to(delta),
+                (true, false) => state.move_caret_word(delta),
+                (false, true) => {
+                    let len = state.query().chars().count();
+                    let target = if delta < 0 {
+                        state.caret().saturating_sub(delta.unsigned_abs())
+                    } else {
+                        state.caret().saturating_add(delta.unsigned_abs()).min(len)
+                    };
+                    state.select_to(target);
+                }
+                (false, false) => state.move_caret(delta),
+            },
+            find::SeekerEdit::Home { select } => {
+                if select {
+                    state.select_to(0);
+                } else {
+                    state.move_caret_to(0);
+                }
+            }
+            find::SeekerEdit::End { select } => {
+                let end = state.query().chars().count();
+                if select {
+                    state.select_to(end);
+                } else {
+                    state.move_caret_to(end);
+                }
+            }
+            find::SeekerEdit::Backspace { word: true } => state.delete_word_back(),
+            find::SeekerEdit::Backspace { word: false } => state.backspace(),
+            find::SeekerEdit::Delete { word: true } => state.delete_word_forward(),
+            find::SeekerEdit::Delete { word: false } => state.delete_forward(),
+            find::SeekerEdit::SelectAll => state.select_all(),
+            find::SeekerEdit::Copy => {
+                if let Some(text) = state.selected_text() {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
+                }
+            }
+            find::SeekerEdit::Cut => {
+                if let Some(text) = state.take_selected_text() {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                }
+            }
+            find::SeekerEdit::Paste => {
+                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                    state.insert_text(&text);
+                }
+            }
+        }
+    }
+
+    /// Translate a window point to the Seeker's character caret through the
+    /// shaped line captured during paint, exactly as the composer does.
+    fn seeker_index_for_position(&self, position: Point<Pixels>, cx: &App) -> usize {
+        let Some(state) = self.finder.as_ref() else {
+            return 0;
+        };
+        let paint = self.finder_paint.read(cx);
+        let (Some(line), Some(bounds)) = (paint.line.as_ref(), paint.bounds.as_ref()) else {
+            return 0;
+        };
+        let relative = point(position.x - bounds.left(), position.y - bounds.top());
+        let byte = line
+            .closest_index_for_position(relative, paint.line_height)
+            .unwrap_or_else(|index| index)
+            .min(state.query().len());
+        find::byte_to_char(state.query(), byte)
+    }
+
+    fn finder_mouse_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        let index = self.seeker_index_for_position(event.position, cx);
+        self.finder_selecting = true;
+        self.finder_activity_reset();
+        if let Some(state) = self.finder.as_mut() {
+            if event.modifiers.shift {
+                state.select_to(index);
+            } else {
+                state.move_caret_to(index);
+            }
+        }
+        cx.notify();
+    }
+
+    fn finder_mouse_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if !self.finder_selecting {
+            return;
+        }
+        let index = self.seeker_index_for_position(event.position, cx);
+        self.finder_activity_reset();
+        if let Some(state) = self.finder.as_mut() {
+            state.select_to(index);
+        }
+        cx.notify();
+    }
+
+    fn finder_mouse_up(&mut self, _cx: &mut Context<Self>) {
+        self.finder_selecting = false;
+    }
+
     /// Run the row Enter is on, or the best match when no arrow was pressed.
     fn run_finder_pick(&mut self, cx: &mut Context<Self>) {
         let Some(row) = self.finder.as_ref().and_then(|state| state.selected()) else {
@@ -1145,6 +1301,7 @@ impl Dashboard {
             return;
         };
         self.finder = None;
+        self.finder_selecting = false;
         self.refocus_screen();
         match row.item.action {
             PaletteAction::RunSlash(name) => self.send_message(name.to_string(), cx),
@@ -3988,37 +4145,12 @@ impl Dashboard {
         cx.notify();
     }
 
-    /// Fold or unfold a session's topic tree. The change shows at once and is
-    /// saved to the ledger, so the TUI shows the same tree (#2427).
-    fn toggle_fold(&mut self, id: Uuid, cx: &mut Context<Self>) {
-        let collapsed = !self.sessions.collapsed.contains(&id);
-        if collapsed {
-            self.sessions.collapsed.insert(id);
-        } else {
-            self.sessions.collapsed.remove(&id);
-        }
-        cx.notify();
-        let db_path = self.db_path.clone();
-        cx.spawn(async move |this, cx| {
-            if let Err(e) = sessions::set_collapsed(db_path, id, collapsed).await {
-                logging::error(&format!("fold topics {id}: {e}"));
-                this.update(cx, |this, cx| {
-                    this.live.notices.push(format!("topic tree: {e}"));
-                    cx.notify();
-                })
-                .ok();
-            }
-        })
-        .detach();
-    }
-
     /// Re-read which sessions are topics and what each topic's parent is.
     fn refresh_topic_state(&mut self, cx: &mut Context<Self>) {
         let db_path = self.db_path.clone();
         cx.spawn(async move |this, cx| {
             let parents = sessions::load_topic_parents(db_path.clone()).await;
             let closed = sessions::load_closed(db_path.clone()).await;
-            let collapsed = sessions::load_collapsed(db_path.clone()).await;
             let icons = sessions::load_topic_icons(db_path.clone()).await;
             let topics = sessions::load_topics(db_path).await;
             this.update(cx, |this, cx| {
@@ -4033,10 +4165,6 @@ impl Dashboard {
                 match topics {
                     Ok(ids) => this.sessions.topics = ids.into_iter().collect(),
                     Err(e) => logging::error(&format!("topics refresh: {e}")),
-                }
-                match collapsed {
-                    Ok(ids) => this.sessions.collapsed = ids.into_iter().collect(),
-                    Err(e) => logging::error(&format!("collapsed topics refresh: {e}")),
                 }
                 match icons {
                     Ok(pairs) => this.sessions.topic_icons = pairs.into_iter().collect(),
@@ -5157,16 +5285,7 @@ impl Render for Dashboard {
                 indented,
                 closed,
             };
-            // A session with topics gets the chevron that folds its tree (#2427).
-            let fold = self.sessions.topics.contains(&id).then(|| {
-                let collapsed = self.sessions.collapsed.contains(&id);
-                let toggle = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
-                    cx.stop_propagation();
-                    this.toggle_fold(id, cx);
-                });
-                sessions::fold_button(id, collapsed).on_click(toggle)
-            });
-            let r = sessions::row(s, flags, action, menu, fold);
+            let r = sessions::row(s, flags, action, menu);
             // The press starts the slide and closes any other row's strip.
             let press = cx.listener(move |this, _ev: &MouseDownEvent, window, cx| {
                 this.rail_slide_opened = None;
@@ -7875,13 +7994,17 @@ impl Render for Dashboard {
             });
             let idle_revealed = state.idle_ready(std::time::Instant::now());
             root = root.child(command_palette::overlay(
-                state,
+                command_palette::FinderOverlayState {
+                    state,
+                    idle_revealed,
+                    caret_on: self.finder_caret,
+                    view: cx.entity().downgrade(),
+                    paint: self.finder_paint.clone(),
+                },
                 handlers,
                 chip,
                 wheel,
                 find::channel_hint(state.query(), &self.finder_channels),
-                idle_revealed,
-                self.finder_caret,
             ));
         }
         root
@@ -8018,7 +8141,6 @@ fn main() {
             closed: closed.clone(),
             topic_icons: topic_icons.clone(),
             topic_titles: HashMap::new(),
-            collapsed: HashSet::new(),
             selected: None,
             cursor: None,
             rail_menu: None,
@@ -8034,7 +8156,6 @@ fn main() {
             closed,
             topic_icons,
             topic_titles: HashMap::new(),
-            collapsed: HashSet::new(),
             selected: None,
             cursor: None,
             rail_menu: None,
@@ -8159,6 +8280,9 @@ fn main() {
                         finder: None,
                         finder_channels: Vec::new(),
                         finder_caret: true,
+                        finder_activity: std::time::Instant::now(),
+                        finder_paint: cx.new(|_| command_palette::FinderPaint::default()),
+                        finder_selecting: false,
                         chip_channel_names: chip_names,
                         channel_chip: channel_chip_line(),
                         daemon_starting: false,
@@ -8364,14 +8488,28 @@ fn mission_control_cards(
     nav: &mission_control::Nav,
     shown: palette::Palette,
 ) -> Vec<Div> {
-    let analytics = snapshot.map(|s| &s.analytics);
-    let focused = nav.panel == mission_control::Panel::Analytics;
     let mut cards = vec![
         mc_inbox_panel(snapshot, nav, shown),
         mc_activity_panel(snapshot, nav, shown),
         mc_schedule_panel(snapshot, nav, shown),
-        mc_totals_panel(snapshot, focused, shown),
     ];
+    cards.extend(mc_analytics_cards(
+        snapshot,
+        nav.panel == mission_control::Panel::Analytics,
+        shown,
+    ));
+    cards
+}
+
+/// The analytics sections shared by the dashboard and its detail popup.
+/// Reusing this list keeps the popup from becoming a second, stale renderer.
+fn mc_analytics_cards(
+    snapshot: Option<&mission_control::Snapshot>,
+    focused: bool,
+    shown: palette::Palette,
+) -> Vec<Div> {
+    let analytics = snapshot.map(|s| &s.analytics);
+    let mut cards = vec![mc_totals_panel(snapshot, focused, shown)];
     let Some(a) = analytics else {
         return cards;
     };
@@ -8512,6 +8650,14 @@ fn mc_inbox_panel(
             shown.text_normal,
         ));
         rows.push(McRow::Line(format!("  {}", item.summary), shown.text_faint));
+        rows.push(McRow::Line(
+            format!(
+                "  {} \u{b7} {}",
+                item.source,
+                mc_relative_time(Some(item.created_at))
+            ),
+            shown.text_faint,
+        ));
     }
     let focused = nav.panel == mission_control::Panel::Inbox;
     mc_panel(
@@ -8521,7 +8667,7 @@ fn mc_inbox_panel(
         "No pending proposals.",
         focused,
         // The selected item's first line, in the rows actually drawn.
-        (focused && !items.is_empty()).then_some((selected - start) * 2),
+        (focused && !items.is_empty()).then_some((selected - start) * 3),
         shown,
     )
 }
@@ -8563,7 +8709,7 @@ fn mc_window_label(window: mission_control::TimeWindow) -> &'static str {
 fn mc_rate_color(rate: f64, shown: palette::Palette) -> u32 {
     if rate >= 25.0 {
         shown.red
-    } else if rate >= 5.0 {
+    } else if rate >= 10.0 {
         shown.warn
     } else {
         shown.text_muted
@@ -8620,7 +8766,8 @@ fn mc_totals_panel(
             format!("{} applied", a.rsi_applied_total),
             shown.text_muted,
         ));
-        rows.push(McRow::Line(
+        rows.push(McRow::Pair(
+            "RSI live".to_string(),
             opencrabs::brain::mission_control::staleness::rsi_staleness_line(
                 chrono::Utc::now().timestamp(),
                 a.rsi_last_call_ts,
@@ -8723,9 +8870,13 @@ fn mc_flakiest_panel(
     )
 }
 
-/// Phantom tool calls: detected, resolved, then the per-model breakdown the
-/// terminal shows.
-fn mc_phantoms_panel(a: &McAnalytics, shown: palette::Palette) -> Div {
+/// Rows for the phantom card. A totals-only line can ellipsize into three
+/// dots under the header, so an empty model breakdown stays empty and lets
+/// the shared panel render its empty state instead.
+fn mc_phantoms_rows(a: &McAnalytics, shown: palette::Palette) -> Vec<McRow> {
+    if a.phantom.by_model.is_empty() {
+        return Vec::new();
+    }
     let mut rows = vec![McRow::Line(
         format!(
             "{} detected, {} resolved ({:.1}%)",
@@ -8740,10 +8891,16 @@ fn mc_phantoms_panel(a: &McAnalytics, shown: palette::Palette) -> Div {
             shown.text_muted,
         ));
     }
+    rows
+}
+
+/// Phantom tool calls: detected, resolved, then the per-model breakdown the
+/// terminal shows.
+fn mc_phantoms_panel(a: &McAnalytics, shown: palette::Palette) -> Div {
     mc_panel(
         "phantoms",
         "Phantoms".to_string(),
-        rows,
+        mc_phantoms_rows(a, shown),
         "No phantoms detected.",
         false,
         None,
@@ -8789,8 +8946,32 @@ fn mc_brain_panel(a: &McAnalytics, shown: palette::Palette) -> Div {
     )
 }
 
-/// The busiest tools, with the call count the terminal pairs with each name.
+const MC_TOOL_BAR_WIDTH: usize = 12;
+
+/// The same proportional usage bar as the terminal, kept fixed-width so the
+/// call count and failure rate remain aligned in a GUI card.
+fn mc_tool_bar(total: i64, max: i64) -> String {
+    let max = max.max(1);
+    let filled = ((total.max(0) as f64 / max as f64) * MC_TOOL_BAR_WIDTH as f64)
+        .round()
+        .clamp(0.0, MC_TOOL_BAR_WIDTH as f64) as usize;
+    format!(
+        "{}{}",
+        "█".repeat(filled),
+        "░".repeat(MC_TOOL_BAR_WIDTH - filled)
+    )
+}
+
+/// The busiest tools, with the proportional bar, call count and failure rate
+/// the terminal pairs with each name.
 fn mc_top_tools_panel(a: &McAnalytics, shown: palette::Palette) -> Div {
+    let max = a
+        .top_tools
+        .iter()
+        .map(|t| t.total)
+        .max()
+        .unwrap_or(1)
+        .max(1);
     let rows = a
         .top_tools
         .iter()
@@ -8803,7 +8984,13 @@ fn mc_top_tools_panel(a: &McAnalytics, shown: palette::Palette) -> Div {
             };
             McRow::Pair(
                 t.name.clone(),
-                format!("{} calls \u{b7} {} failed", t.total, t.failures),
+                format!(
+                    "{} {} calls \u{b7} {} failed \u{b7} {:.1}%",
+                    mc_tool_bar(t.total, max),
+                    t.total,
+                    t.failures,
+                    t.fail_rate
+                ),
                 color,
             )
         })
@@ -8891,7 +9078,13 @@ fn mc_schedule_panel(
             ""
         };
         rows.push(McRow::Line(
-            format!("{} \u{b7} {}{}", job.label, job.schedule, state),
+            format!(
+                "{} \u{b7} {} \u{b7} {}{}",
+                job.kind.label(),
+                job.label,
+                job.schedule,
+                state
+            ),
             color,
         ));
     }
@@ -8914,22 +9107,24 @@ fn mc_schedule_panel(
     )
 }
 
-/// The full record for the selected proposal, drawn over everything: the same
-/// fields the terminal's detail popup shows (`tui/render/mission_control/
-/// detail_popup.rs`), read from the snapshot that is already on hand. Enter
-/// opens it, Esc closes it, and a click on the card is inert so reading it
-/// never throws it away.
+/// The focused panel's full record or analytics dashboard, drawn over
+/// everything. Field order follows `tui/render/mission_control/detail_popup.rs`
+/// and every value comes from the snapshot already on hand. Enter opens it,
+/// Esc closes it, and a click on the card is inert so reading never throws it
+/// away.
 fn mission_control_detail(
     snapshot: Option<&mission_control::Snapshot>,
     nav: &mission_control::Nav,
     close: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     let shown = palette::current();
-    let item = snapshot.and_then(|s| s.inbox.get(nav.selected)).cloned();
-    let title = match &item {
-        Some(item) => format!("{} detail \u{b7} {}", nav.panel.title(), item.kind.label()),
-        None => format!("{} detail", nav.panel.title()),
-    };
+    let title = match nav.panel {
+        mission_control::Panel::Inbox => snapshot
+            .and_then(|s| s.inbox.get(nav.selected))
+            .map(|item| format!("Inbox detail \u{b7} {}", item.kind.label())),
+        _ => None,
+    }
+    .unwrap_or_else(|| format!("{} detail", nav.panel.title()));
     let close = std::rc::Rc::new(close);
     let scrim_close = close.clone();
     let button_close = close.clone();
@@ -8939,9 +9134,10 @@ fn mission_control_detail(
         .flex_col()
         .gap_1()
         .p_3()
+        .w_full()
         .max_w(px(720.0))
         .max_h(px(560.0))
-        // A long summary is clipped to the card instead of painting past it.
+        // The field area scrolls inside this bounded card.
         .overflow_hidden()
         .rounded(px(CARD_RADIUS))
         .border_1()
@@ -8974,34 +9170,22 @@ fn mission_control_detail(
                         .on_click(move |ev, window, cx| button_close(ev, window, cx)),
                 ),
         );
-    match item {
-        Some(item) => {
-            // The terminal's field order, so the two clients read alike.
-            card = card
-                .child(mc_kv("Kind", item.kind.label().to_string(), shown))
-                .child(mc_kv("Label", item.label.clone(), shown))
-                .child(mc_kv("Source", item.source.clone(), shown))
-                .child(mc_kv(
-                    "Filed",
-                    item.created_at.format("%Y-%m-%d %H:%M UTC").to_string(),
-                    shown,
-                ))
-                .child(mc_kv("ID", item.id.clone(), shown))
-                .child(
-                    div()
-                        .mt_2()
-                        .text_xs()
-                        .text_color(rgb(shown.text_title))
-                        .child("Summary"),
-                );
-            for line in item.summary.split('\n') {
-                card = card.child(text(line.to_string(), Size::Xs, shown.text_normal));
-            }
-        }
-        None => {
-            card = card.child(text("No proposal selected.", Size::Xs, shown.text_faint));
-        }
-    }
+    let body = match nav.panel {
+        mission_control::Panel::Inbox => mc_inbox_detail(
+            snapshot.and_then(|s| s.inbox.get(nav.selected)).cloned(),
+            shown,
+        ),
+        mission_control::Panel::Activity => mc_activity_detail(
+            snapshot.and_then(|s| s.activity.get(nav.selected)).cloned(),
+            shown,
+        ),
+        mission_control::Panel::Schedule => mc_schedule_detail(
+            snapshot.and_then(|s| s.schedule.get(nav.selected)).cloned(),
+            shown,
+        ),
+        mission_control::Panel::Analytics => mc_analytics_detail(snapshot, shown),
+    };
+    card = card.child(body);
     div()
         .id("mission-control-detail-scrim")
         // Modal: the dim scrim owns the pointer, so a click meant for a panel
@@ -9018,6 +9202,202 @@ fn mission_control_detail(
         .bg(rgba(0x0a0a0add))
         .on_click(move |ev, window, cx| scrim_close(ev, window, cx))
         .child(card)
+}
+
+/// The scrollable body shared by all four detail views.
+fn mc_detail_body() -> Stateful<Div> {
+    div()
+        .id("mission-control-detail-fields")
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h_0()
+        .w_full()
+        .gap_1()
+        .overflow_y_scroll()
+}
+
+fn mc_detail_heading(title: &'static str, shown: palette::Palette) -> Div {
+    div()
+        .mt_2()
+        .text_xs()
+        .text_color(rgb(shown.text_title))
+        .child(title)
+}
+
+fn mc_inbox_detail(item: Option<McInboxItem>, shown: palette::Palette) -> Stateful<Div> {
+    let mut body = mc_detail_body();
+    let Some(item) = item else {
+        return body.child(text("No proposal selected.", Size::Xs, shown.text_faint));
+    };
+    body = body
+        .child(mc_kv("Kind", item.kind.label().to_string(), shown))
+        .child(mc_kv("Label", item.label.clone(), shown))
+        .child(mc_kv("Source", item.source.clone(), shown))
+        .child(mc_kv(
+            "Filed",
+            item.created_at.format("%Y-%m-%d %H:%M UTC").to_string(),
+            shown,
+        ))
+        .child(mc_kv("ID", item.id.clone(), shown))
+        .child(mc_detail_heading("Summary", shown));
+    for line in item.summary.split('\n') {
+        body = body.child(text(line.to_string(), Size::Xs, shown.text_normal));
+    }
+    body
+}
+
+fn mc_activity_level_label(
+    level: opencrabs::brain::mission_control::McActivityLevel,
+) -> &'static str {
+    use opencrabs::brain::mission_control::McActivityLevel;
+    match level {
+        McActivityLevel::Success => "success",
+        McActivityLevel::Info => "info",
+        McActivityLevel::Warn => "warn",
+        McActivityLevel::Error => "error",
+    }
+}
+
+fn mc_activity_detail(entry: Option<McActivity>, shown: palette::Palette) -> Stateful<Div> {
+    let mut body = mc_detail_body();
+    let Some(entry) = entry else {
+        return body.child(text("No activity selected.", Size::Xs, shown.text_faint));
+    };
+    body = body
+        .child(mc_kv(
+            "When",
+            entry
+                .timestamp
+                .map(|ts| ts.format("%Y-%m-%d %H:%M UTC").to_string())
+                .unwrap_or_else(|| "undated".into()),
+            shown,
+        ))
+        .child(mc_kv("Source", entry.source.clone(), shown))
+        .child(mc_kv(
+            "Level",
+            mc_activity_level_label(entry.level).to_string(),
+            shown,
+        ))
+        .child(mc_detail_heading("Detail", shown));
+    for line in entry.detail.split('\n') {
+        body = body.child(text(line.to_string(), Size::Xs, shown.text_normal));
+    }
+    body
+}
+
+fn mc_schedule_duration(secs: i64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else {
+        format!("{}m {}s", secs / 60, secs % 60)
+    }
+}
+
+fn mc_schedule_detail(job: Option<McScheduleItem>, shown: palette::Palette) -> Stateful<Div> {
+    let mut body = mc_detail_body();
+    let Some(job) = job else {
+        return body.child(text(
+            "No schedule item selected.",
+            Size::Xs,
+            shown.text_faint,
+        ));
+    };
+    let kind = match job.kind {
+        opencrabs::brain::mission_control::McScheduleKind::Cron => "cron job",
+        opencrabs::brain::mission_control::McScheduleKind::PendingApproval => "pending approval",
+    };
+    let state = if job.awaiting_user {
+        "awaiting user"
+    } else if !job.enabled {
+        "paused"
+    } else {
+        "active"
+    };
+
+    body = body
+        .child(mc_kv("Kind", kind.to_string(), shown))
+        .child(mc_kv("Label", job.label.clone(), shown))
+        .child(mc_kv("State", state.to_string(), shown))
+        .child(mc_detail_heading("Schedule", shown))
+        .child(mc_kv("Cron", job.schedule.clone(), shown))
+        .child(mc_kv(
+            "Next",
+            mc_timestamp(job.next_run_at).unwrap_or_else(|| "not scheduled".into()),
+            shown,
+        ))
+        .child(mc_detail_heading("Last run", shown))
+        .child(mc_kv(
+            "At",
+            mc_timestamp(job.last_run_at).unwrap_or_else(|| "never".into()),
+            shown,
+        ));
+    if let Some(status) = job.last_run_status.as_deref() {
+        let status = match status {
+            "running" => "running...",
+            other => other,
+        };
+        body = body.child(mc_kv("Status", status.to_string(), shown));
+    }
+    if let Some(cost) = job.last_run_cost {
+        body = body.child(mc_kv("Cost", format!("${cost:.4}"), shown));
+    }
+    if let Some(secs) = job.last_run_duration_secs {
+        body = body.child(mc_kv("Duration", mc_schedule_duration(secs), shown));
+    }
+    if let Some(target) = job.deliver_to.as_deref() {
+        body = body
+            .child(mc_detail_heading("Delivery", shown))
+            .child(mc_kv("Target", target.to_string(), shown));
+    }
+    if !job.prompt.is_empty() {
+        let prompt = if job.prompt.len() > 300 {
+            format!(
+                "{}...",
+                opencrabs::utils::string::truncate_str(&job.prompt, 300)
+            )
+        } else {
+            job.prompt.clone()
+        };
+        body = body.child(mc_detail_heading("Prompt", shown));
+        for line in prompt.split('\n') {
+            body = body.child(text(line.to_string(), Size::Xs, shown.text_normal));
+        }
+    }
+    body = body.child(mc_detail_heading("Meta", shown)).child(mc_kv(
+        "Created",
+        job.created_at.format("%Y-%m-%d %H:%M UTC").to_string(),
+        shown,
+    ));
+    if let Some(profile) = job.profile_name.as_deref() {
+        body = body.child(mc_kv("Profile", profile.to_string(), shown));
+    }
+    body.child(mc_kv("ID", job.id.clone(), shown))
+}
+
+fn mc_analytics_detail(
+    snapshot: Option<&mission_control::Snapshot>,
+    shown: palette::Palette,
+) -> Stateful<Div> {
+    let cards = mc_analytics_cards(snapshot, true, shown);
+    let count = cards.len();
+    let mut cards = cards.into_iter();
+    let mut grid = div().flex().flex_col().w_full().gap_2().pr_1();
+    for slots in mission_control::grid_rows(count, 2) {
+        let mut row = div().flex().flex_row().w_full().h(px(180.0)).gap_2();
+        for slot in slots {
+            match slot {
+                Some(_) => {
+                    if let Some(card) = cards.next() {
+                        row = row.child(card);
+                    }
+                }
+                None => row = row.child(div().flex_1().min_w_0()),
+            }
+        }
+        grid = grid.child(row);
+    }
+    mc_detail_body().child(grid)
 }
 
 /// How many log lines the window draws at once: a page key moves by a screen,
@@ -9196,6 +9576,11 @@ fn mc_kv(key: &str, value: String, shown: palette::Palette) -> Div {
                 .truncate()
                 .child(value),
         )
+}
+
+/// Format an optional timestamp for the schedule detail fields.
+fn mc_timestamp(ts: Option<chrono::DateTime<chrono::Utc>>) -> Option<String> {
+    ts.map(|ts| ts.format("%Y-%m-%d %H:%M UTC").to_string())
 }
 
 /// An event's age in the terminal's own shorthand, and "undated" when the
@@ -10645,6 +11030,42 @@ mod tests {
         assert_eq!(super::zoom_step_for("0", rem, true), Some(BASE_REM));
         // A key that is not a zoom key stays a keystroke, chord or not.
         assert_eq!(super::zoom_step_for("a", rem, true), None);
+    }
+
+    #[test]
+    fn mission_schedule_duration_matches_the_terminal_format() {
+        assert_eq!(super::mc_schedule_duration(0), "0s");
+        assert_eq!(super::mc_schedule_duration(42), "42s");
+        assert_eq!(super::mc_schedule_duration(61), "1m 1s");
+        assert_eq!(super::mc_schedule_duration(3661), "61m 1s");
+    }
+
+    #[test]
+    fn mission_top_tool_bar_tracks_relative_usage() {
+        assert_eq!(super::mc_tool_bar(0, 100), "░".repeat(12));
+        assert_eq!(
+            super::mc_tool_bar(50, 100),
+            format!("{}{}", "█".repeat(6), "░".repeat(6))
+        );
+        assert_eq!(super::mc_tool_bar(100, 100), "█".repeat(12));
+        assert_eq!(super::mc_tool_bar(200, 100), "█".repeat(12));
+    }
+
+    #[test]
+    fn mission_mc_phantoms_empty_breakdown_has_no_rows() {
+        let mut analytics = McAnalytics::default();
+        analytics.phantom.total = 1;
+        assert!(
+            super::mc_phantoms_rows(&analytics, palette::current()).is_empty(),
+            "an empty model breakdown must reach the panel's empty state"
+        );
+
+        analytics.phantom.by_model.push(("gpt-5".into(), 1, 0));
+        assert_eq!(
+            super::mc_phantoms_rows(&analytics, palette::current()).len(),
+            2,
+            "a populated breakdown keeps its totals and model rows"
+        );
     }
 
     /// A tile opens a preview of the file it stands for, Esc closes it, and

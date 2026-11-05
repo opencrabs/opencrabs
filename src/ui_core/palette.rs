@@ -12,6 +12,87 @@
 //! and no UI toolkit in sight (#2458).
 
 use std::time::{Duration, Instant};
+use unicode_segmentation::UnicodeSegmentation;
+
+/// How long the field's caret keeps blinking after the last keystroke. Past
+/// this the field goes quiet and the caret hides, the way Spotlight's does
+/// once typing stops; the next key brings it back (#2531).
+pub const CARET_IDLE_AFTER: Duration = Duration::from_millis(1600);
+
+/// Whether the caret is live at `now`, given the last key at `last`.
+///
+/// The rule lives here, shared, so the terminal and the window cannot pick
+/// different idle windows and so the behaviour has a test that runs without
+/// a UI (#2531).
+pub fn caret_blinks(last: Instant, now: Instant, idle_after: Duration) -> bool {
+    now.saturating_duration_since(last) < idle_after
+}
+
+/// Byte offset where the word before `offset` begins. The walk skips
+/// separators and then the word, matching the terminal and GUI composers.
+/// Grapheme boundaries keep the walk from splitting a multibyte character.
+pub fn previous_word_start(content: &str, offset: usize) -> usize {
+    let clamped = offset.min(content.len());
+    let graphemes: Vec<(usize, &str)> = content.grapheme_indices(true).collect();
+    let mut index = graphemes
+        .iter()
+        .position(|(start, _)| *start >= clamped)
+        .unwrap_or(graphemes.len());
+    while index > 0 && !is_word_grapheme(graphemes[index - 1].1) {
+        index -= 1;
+    }
+    while index > 0 && is_word_grapheme(graphemes[index - 1].1) {
+        index -= 1;
+    }
+    graphemes.get(index).map(|(start, _)| *start).unwrap_or(0)
+}
+
+/// Byte offset the word after `offset` ends on, past the word and the
+/// separators that follow it, matching the terminal composer.
+pub fn next_word_end(content: &str, offset: usize) -> usize {
+    let clamped = offset.min(content.len());
+    let graphemes: Vec<(usize, &str)> = content.grapheme_indices(true).collect();
+    let mut index = graphemes
+        .iter()
+        .position(|(start, _)| *start >= clamped)
+        .unwrap_or(graphemes.len());
+    while index < graphemes.len() && is_word_grapheme(graphemes[index].1) {
+        index += 1;
+    }
+    while index < graphemes.len() && !is_word_grapheme(graphemes[index].1) {
+        index += 1;
+    }
+    graphemes
+        .get(index)
+        .map(|(start, _)| *start)
+        .unwrap_or(content.len())
+}
+
+/// Letters and digits are word content; whitespace and punctuation separate
+/// words. A grapheme counts as a word when any of its characters is a letter.
+fn is_word_grapheme(grapheme: &str) -> bool {
+    grapheme.chars().any(|ch| ch.is_alphanumeric())
+}
+
+/// Byte index of a character offset, clamped to the end. The Seeker caret is
+/// counted in chars so it can never land inside a UTF-8 codepoint.
+fn char_to_byte(content: &str, offset: usize) -> usize {
+    content
+        .char_indices()
+        .nth(offset)
+        .map(|(index, _)| index)
+        .unwrap_or(content.len())
+}
+
+/// Character index of a byte offset produced by a word walk or a shaped-text
+/// mouse hit. Public so the GUI can translate GPUI's byte index without doing
+/// UTF-8 arithmetic of its own.
+pub fn byte_to_char(content: &str, offset: usize) -> usize {
+    content
+        .char_indices()
+        .take_while(|(index, _)| *index < offset)
+        .count()
+}
 
 /// What a row is, which decides how it is labelled and how ties break.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -530,6 +611,84 @@ pub fn opens_in_terminal(alt: bool, key: &str) -> bool {
     alt && (key == " " || key.eq_ignore_ascii_case("space"))
 }
 
+/// One editing chord, translated before the GUI touches its state. Keeping
+/// the reading here makes the key behavior testable without a window and
+/// keeps platform chords out of the query text (#2534).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SeekerEdit {
+    Move {
+        delta: isize,
+        word: bool,
+        select: bool,
+    },
+    Home {
+        select: bool,
+    },
+    End {
+        select: bool,
+    },
+    Backspace {
+        word: bool,
+    },
+    Delete {
+        word: bool,
+    },
+    SelectAll,
+    Copy,
+    Cut,
+    Paste,
+}
+
+/// Translate the Seeker's editing keys. Command is the primary modifier on
+/// macOS; Control does the same clipboard work elsewhere. Alt or Control
+/// walks words, Command+Left/Right reaches the line edges, and Shift extends
+/// the selection instead of collapsing it.
+pub fn editing_chord(
+    key: &str,
+    control: bool,
+    platform: bool,
+    alt: bool,
+    shift: bool,
+) -> Option<SeekerEdit> {
+    let primary = control || platform;
+    if primary && !alt {
+        match key {
+            "a" => return Some(SeekerEdit::SelectAll),
+            "c" => return Some(SeekerEdit::Copy),
+            "x" => return Some(SeekerEdit::Cut),
+            "v" => return Some(SeekerEdit::Paste),
+            _ => {}
+        }
+    }
+    match key {
+        "left" | "right" => {
+            let delta = if key == "left" { -1 } else { 1 };
+            if platform && !control && !alt {
+                Some(if delta < 0 {
+                    SeekerEdit::Home { select: shift }
+                } else {
+                    SeekerEdit::End { select: shift }
+                })
+            } else {
+                Some(SeekerEdit::Move {
+                    delta,
+                    word: alt || control,
+                    select: shift,
+                })
+            }
+        }
+        "home" => Some(SeekerEdit::Home { select: shift }),
+        "end" => Some(SeekerEdit::End { select: shift }),
+        "backspace" => Some(SeekerEdit::Backspace {
+            word: alt || control,
+        }),
+        "delete" => Some(SeekerEdit::Delete {
+            word: alt || control,
+        }),
+        _ => None,
+    }
+}
+
 /// The line to print when the query matched nothing. Chosen by a hash of the
 /// query, so the same query always gets the same line and the card does not
 /// flicker while the user keeps typing.
@@ -689,6 +848,12 @@ pub struct PaletteRow {
 #[derive(Clone, Debug)]
 pub struct PaletteState {
     query: String,
+    /// Insertion point as a character offset into `query`, never a byte
+    /// offset, so editing cannot split a UTF-8 codepoint (#2534).
+    caret: usize,
+    /// Where a shift or mouse selection began. `None` means no selection;
+    /// the live end is always `caret` (#2534).
+    selection_anchor: Option<usize>,
     /// Index into `visible()`, not into `items`: the list is re-ranked on every
     /// keystroke, so a raw index would arm a different row than the one the
     /// user is looking at.
@@ -725,6 +890,8 @@ impl PaletteState {
     pub fn new(items: Vec<PaletteItem>) -> Self {
         Self {
             query: String::new(),
+            caret: 0,
+            selection_anchor: None,
             cursor: None,
             scroll: 0,
             items,
@@ -739,6 +906,8 @@ impl PaletteState {
     pub fn picking(purpose: PickFor, items: Vec<PaletteItem>) -> Self {
         Self {
             query: String::new(),
+            caret: 0,
+            selection_anchor: None,
             cursor: None,
             scroll: 0,
             items,
@@ -750,6 +919,119 @@ impl PaletteState {
 
     pub fn query(&self) -> &str {
         &self.query
+    }
+
+    /// The insertion point as a character offset into [`PaletteState::query`].
+    pub fn caret(&self) -> usize {
+        self.caret
+    }
+
+    /// Move by whole characters and clamp at both ends. With a selection, an
+    /// ordinary arrow collapses to its near edge, as the composer does.
+    /// Movement alone never re-ranks the result list (#2534).
+    pub fn move_caret(&mut self, delta: isize) {
+        if let Some((start, end)) = self.selection() {
+            if delta != 0 {
+                self.caret = if delta < 0 { start } else { end };
+            }
+            self.collapse();
+            return;
+        }
+        let len = self.query.chars().count();
+        self.caret = if delta < 0 {
+            self.caret.saturating_sub(delta.unsigned_abs())
+        } else {
+            self.caret.saturating_add(delta.unsigned_abs()).min(len)
+        };
+        self.collapse();
+    }
+
+    /// Move to an absolute character offset and collapse any selection.
+    /// Home, End and mouse clicks use the same clamped landing rule.
+    pub fn move_caret_to(&mut self, offset: usize) {
+        self.caret = offset.min(self.query.chars().count());
+        self.collapse();
+    }
+
+    /// Move by the same word boundaries as the composer. The engine stores
+    /// chars, while the shared word walk speaks bytes, so convert at the seam.
+    pub fn move_caret_word(&mut self, delta: isize) {
+        let byte_caret = char_to_byte(&self.query, self.caret);
+        let target = if delta < 0 {
+            previous_word_start(&self.query, byte_caret)
+        } else if delta > 0 {
+            next_word_end(&self.query, byte_caret)
+        } else {
+            byte_caret
+        };
+        self.caret = byte_to_char(&self.query, target);
+        self.collapse();
+    }
+
+    /// Extend a selection to an absolute character offset. The first call
+    /// anchors at the current caret; later calls keep that anchor, including
+    /// when the direction reverses (#2534).
+    pub fn select_to(&mut self, offset: usize) {
+        let len = self.query.chars().count();
+        let anchor = *self.selection_anchor.get_or_insert(self.caret);
+        self.caret = offset.min(len);
+        if self.caret == anchor {
+            self.selection_anchor = None;
+        }
+    }
+
+    /// Extend the selection by one composer word boundary. The original
+    /// anchor survives repeated presses and direction reversals (#2534).
+    pub fn select_word_to(&mut self, delta: isize) {
+        let byte_caret = char_to_byte(&self.query, self.caret);
+        let target = if delta < 0 {
+            previous_word_start(&self.query, byte_caret)
+        } else if delta > 0 {
+            next_word_end(&self.query, byte_caret)
+        } else {
+            byte_caret
+        };
+        self.select_to(byte_to_char(&self.query, target));
+    }
+
+    /// Select the whole query, ready for copy, cut, or replacement typing.
+    pub fn select_all(&mut self) {
+        self.selection_anchor = Some(0);
+        self.caret = self.query.chars().count();
+    }
+
+    /// Drop the selection without moving the caret or touching the ranking.
+    pub fn collapse(&mut self) {
+        self.selection_anchor = None;
+    }
+
+    /// Selected character offsets in ascending order. An empty selection is
+    /// no selection, so editing falls back to the caret.
+    pub fn selection(&self) -> Option<(usize, usize)> {
+        let anchor = self.selection_anchor?;
+        (anchor != self.caret).then_some((anchor.min(self.caret), anchor.max(self.caret)))
+    }
+
+    /// The selected text without changing anything, for copy.
+    pub fn selected_text(&self) -> Option<&str> {
+        let (start, end) = self.selection()?;
+        let start = char_to_byte(&self.query, start);
+        let end = char_to_byte(&self.query, end);
+        self.query.get(start..end)
+    }
+
+    /// Text slices before the caret or selection, inside the selection, and
+    /// after it. With no selection the middle slice is empty and the split is
+    /// the caret, which lets a frontend paint all three without UTF-8 math.
+    pub fn render_spans(&self) -> (&str, &str, &str) {
+        let (start, end) = self.selection().unwrap_or((self.caret, self.caret));
+        let start = char_to_byte(&self.query, start);
+        let end = char_to_byte(&self.query, end);
+        (
+            self.query.get(..start).unwrap_or(""),
+            self.query.get(start..end).unwrap_or(""),
+            self.query.get(end..).unwrap_or(""),
+        )
     }
 
     pub fn cursor(&self) -> Option<usize> {
@@ -796,27 +1078,109 @@ impl PaletteState {
         self.cursor = Some(row.min(len - 1));
     }
 
-    /// A typed character extends the query and disarms the cursor, so the
-    /// best match is the one Enter acts on until an arrow steps in.
-    pub fn type_char(&mut self, c: char) {
-        if c.is_control() {
-            return;
-        }
-        self.query.push(c);
+    /// Replace a character range and put the caret after the replacement.
+    /// Every real edit funnels through here, so every edit also disarms the
+    /// old result row and returns the list to its first page (#2534).
+    fn replace_range(&mut self, start: usize, end: usize, replacement: &str) {
+        let len = self.query.chars().count();
+        let start = start.min(len);
+        let end = end.min(len).max(start);
+        let byte_start = char_to_byte(&self.query, start);
+        let byte_end = char_to_byte(&self.query, end);
+        self.query.replace_range(byte_start..byte_end, replacement);
+        self.caret = start + replacement.chars().count();
+        self.selection_anchor = None;
         self.cursor = None;
         self.scroll = 0;
     }
 
+    /// Insert text at the caret, replacing any selection. Paste uses the same
+    /// path as typing, so both frontends inherit identical editing (#2534).
+    pub fn insert_text(&mut self, text: &str) {
+        let (start, end) = self.selection().unwrap_or((self.caret, self.caret));
+        if text.is_empty() && start == end {
+            return;
+        }
+        self.replace_range(start, end, text);
+    }
+
+    /// A typed character inserts at the caret rather than always appending.
+    pub fn type_char(&mut self, c: char) {
+        if c.is_control() {
+            return;
+        }
+        let mut encoded = [0; 4];
+        let text = c.encode_utf8(&mut encoded);
+        self.insert_text(text);
+    }
+
+    /// Remove the selection, if one exists. Returns without touching the
+    /// ranking when there is nothing to delete.
+    pub fn delete_selection(&mut self) {
+        if let Some((start, end)) = self.selection() {
+            self.replace_range(start, end, "");
+        }
+    }
+
+    /// Remove and return the selected text, for cut. Copy uses
+    /// [`PaletteState::selected_text`] and leaves the query alone.
+    pub fn take_selected_text(&mut self) -> Option<String> {
+        let taken = self.selected_text().map(str::to_owned);
+        if taken.is_some() {
+            self.delete_selection();
+        }
+        taken
+    }
+
     pub fn backspace(&mut self) {
-        self.query.pop();
-        self.cursor = None;
-        self.scroll = 0;
+        if self.selection().is_some() {
+            self.delete_selection();
+        } else if self.caret > 0 {
+            self.replace_range(self.caret - 1, self.caret, "");
+        }
+    }
+
+    /// Delete the character after the caret, or the whole selection.
+    pub fn delete_forward(&mut self) {
+        if self.selection().is_some() {
+            self.delete_selection();
+        } else if self.caret < self.query.chars().count() {
+            self.replace_range(self.caret, self.caret + 1, "");
+        }
+    }
+
+    /// Delete back to the previous composer word boundary.
+    pub fn delete_word_back(&mut self) {
+        if self.selection().is_some() {
+            self.delete_selection();
+            return;
+        }
+        let byte_caret = char_to_byte(&self.query, self.caret);
+        let start = byte_to_char(&self.query, previous_word_start(&self.query, byte_caret));
+        if start < self.caret {
+            self.replace_range(start, self.caret, "");
+        }
+    }
+
+    /// Delete forward through the next composer word boundary.
+    pub fn delete_word_forward(&mut self) {
+        if self.selection().is_some() {
+            self.delete_selection();
+            return;
+        }
+        let byte_caret = char_to_byte(&self.query, self.caret);
+        let end = byte_to_char(&self.query, next_word_end(&self.query, byte_caret));
+        if end > self.caret {
+            self.replace_range(self.caret, end, "");
+        }
     }
 
     /// Clear the query but keep the card open. Esc closes the card, so this is
     /// the key that clears the field without leaving.
     pub fn clear(&mut self) {
         self.query.clear();
+        self.caret = 0;
+        self.selection_anchor = None;
         self.cursor = None;
         self.scroll = 0;
     }
@@ -1793,5 +2157,237 @@ mod tests {
         assert_eq!(Channel::named_in("telegraph"), None);
         assert_eq!(Channel::named_in("telegram"), Some(Channel::Telegram));
         assert_eq!(Channel::named_in("WHATSAPP"), Some(Channel::WhatsApp));
+    }
+
+    /// The caret blinks while typing and hides once the field is idle, which
+    /// is the Spotlight behaviour the owner asked for (#2531).
+    #[test]
+    fn seeker_caret_blinks_then_hides_when_typing_stops() {
+        let start = Instant::now();
+        assert!(
+            caret_blinks(start, start, CARET_IDLE_AFTER),
+            "a fresh key shows it"
+        );
+        assert!(caret_blinks(
+            start,
+            start + CARET_IDLE_AFTER / 2,
+            CARET_IDLE_AFTER
+        ));
+        assert!(
+            !caret_blinks(start, start + CARET_IDLE_AFTER, CARET_IDLE_AFTER),
+            "at the window's edge the field is idle and the caret is gone"
+        );
+        assert!(!caret_blinks(
+            start,
+            start + CARET_IDLE_AFTER * 10,
+            CARET_IDLE_AFTER
+        ));
+    }
+
+    /// A clock that reads earlier than the last key must not panic and must
+    /// not resurrect the caret: `saturating_duration_since` yields zero, so
+    /// the field counts as freshly typed and the caret shows.
+    #[test]
+    fn seeker_caret_survives_a_backwards_clock() {
+        let now = Instant::now();
+        assert!(caret_blinks(
+            now,
+            now - Duration::from_millis(5),
+            CARET_IDLE_AFTER
+        ));
+    }
+
+    fn caret_inserts_at_the_caret(state: &mut PaletteState) {
+        state.insert_text("ac");
+        state.move_caret(-1);
+        state.type_char('b');
+        assert_eq!(state.query(), "abc");
+        assert_eq!(state.caret(), 2);
+
+        state.insert_text("é");
+        assert_eq!(state.query(), "abéc");
+        assert_eq!(state.caret(), 3);
+        state.move_caret(1);
+        state.type_char('🦀');
+        assert_eq!(state.query(), "abéc🦀");
+        assert_eq!(state.caret(), 5);
+
+        state.move_caret(-99);
+        state.type_char('\n');
+        assert_eq!(state.query(), "abéc🦀", "control input stays out");
+    }
+
+    #[test]
+    fn palette_caret_inserts_at_the_caret() {
+        caret_inserts_at_the_caret(&mut PaletteState::new(Vec::new()));
+    }
+
+    #[test]
+    fn palette_caret_movement_clamps_and_collapses_selection() {
+        let mut state = PaletteState::new(Vec::new());
+        state.insert_text("a🦀b");
+        assert_eq!(state.caret(), 3);
+        state.move_caret(-1);
+        assert_eq!(state.caret(), 2);
+        state.move_caret(-99);
+        assert_eq!(state.caret(), 0);
+        state.move_caret(99);
+        assert_eq!(state.caret(), 3);
+
+        state.select_to(1);
+        assert_eq!(state.selection(), Some((1, 3)));
+        state.move_caret(-1);
+        assert_eq!(state.caret(), 1, "left collapses to the selection start");
+        assert_eq!(state.selection(), None);
+
+        state.select_all();
+        assert_eq!(state.selection(), Some((0, 3)));
+        state.move_caret(1);
+        assert_eq!(state.caret(), 3, "right collapses to the selection end");
+        assert_eq!(state.selection(), None);
+    }
+
+    #[test]
+    fn palette_caret_word_movement_matches_the_composer() {
+        let mut state = PaletteState::new(Vec::new());
+        state.insert_text("alpha beta gamma");
+        state.move_caret_word(-1);
+        assert_eq!(state.caret(), 11);
+        state.move_caret_word(-1);
+        assert_eq!(state.caret(), 6);
+        state.move_caret_word(-1);
+        assert_eq!(state.caret(), 0);
+        state.move_caret_word(1);
+        assert_eq!(state.caret(), 6);
+        state.move_caret_word(1);
+        assert_eq!(state.caret(), 11);
+        state.move_caret_word(1);
+        assert_eq!(state.caret(), 16);
+
+        state.clear();
+        state.insert_text("olá mundo");
+        state.move_caret(-99);
+        state.move_caret_word(1);
+        assert_eq!(state.caret(), 4, "multibyte words still count in chars");
+    }
+
+    #[test]
+    fn palette_caret_selection_peek_and_render_spans() {
+        let mut state = PaletteState::new(Vec::new());
+        state.insert_text("alpha beta");
+        state.move_caret(-99);
+        state.select_to(5);
+        assert_eq!(state.selection(), Some((0, 5)));
+        assert_eq!(state.selected_text(), Some("alpha"));
+        assert_eq!(state.render_spans(), ("", "alpha", " beta"));
+
+        state.collapse();
+        assert_eq!(state.render_spans(), ("alpha", "", " beta"));
+        state.move_caret(1);
+        assert_eq!(state.render_spans(), ("alpha ", "", "beta"));
+        state.select_all();
+        assert_eq!(state.render_spans(), ("", "alpha beta", ""));
+    }
+
+    #[test]
+    fn palette_caret_insert_replaces_and_take_cuts_selection() {
+        let mut state = PaletteState::new(Vec::new());
+        state.insert_text("alpha beta");
+        state.select_all();
+        state.insert_text("x");
+        assert_eq!(state.query(), "x");
+        assert_eq!(state.caret(), 1);
+        assert_eq!(state.selection(), None);
+
+        state.clear();
+        state.insert_text("alpha beta");
+        state.move_caret(-99);
+        state.select_to(5);
+        assert_eq!(state.take_selected_text().as_deref(), Some("alpha"));
+        assert_eq!(state.query(), " beta");
+        assert_eq!(state.caret(), 0);
+        assert_eq!(state.selection(), None);
+        assert_eq!(state.take_selected_text(), None);
+    }
+
+    #[test]
+    fn palette_caret_delete_backward_forward_and_selection() {
+        let mut state = PaletteState::new(Vec::new());
+        state.insert_text("aé🦀b");
+        state.move_caret(-1);
+        state.backspace();
+        assert_eq!(state.query(), "aéb");
+        assert_eq!(state.caret(), 2);
+        state.delete_forward();
+        assert_eq!(state.query(), "aé");
+        state.backspace();
+        assert_eq!(state.query(), "a");
+        state.move_caret(-1);
+        state.delete_forward();
+        assert_eq!(state.query(), "");
+        state.backspace();
+        state.delete_forward();
+
+        state.insert_text("abcd");
+        state.move_caret(-99);
+        state.select_to(2);
+        state.backspace();
+        assert_eq!(state.query(), "cd");
+        state.select_all();
+        state.delete_forward();
+        assert_eq!(state.query(), "");
+        assert_eq!(state.caret(), 0);
+    }
+
+    #[test]
+    fn palette_caret_delete_word_in_both_directions() {
+        let mut state = PaletteState::new(Vec::new());
+        state.insert_text("alpha beta gamma");
+        state.delete_word_back();
+        assert_eq!(state.query(), "alpha beta ");
+        assert_eq!(state.caret(), 11);
+        state.delete_word_back();
+        assert_eq!(state.query(), "alpha ");
+        assert_eq!(state.caret(), 6);
+
+        state.clear();
+        state.insert_text("alpha beta gamma");
+        state.move_caret(-99);
+        state.delete_word_forward();
+        assert_eq!(state.query(), "beta gamma");
+        state.delete_word_forward();
+        assert_eq!(state.query(), "gamma");
+        state.delete_word_forward();
+        assert_eq!(state.query(), "");
+        state.delete_word_forward();
+    }
+
+    #[test]
+    fn palette_caret_only_mutations_reset_the_result_cursor() {
+        let mut state = PaletteState::new(
+            (0..12)
+                .map(|index| item(&format!("row{index}"), PaletteKind::Command))
+                .collect(),
+        );
+        for _ in 0..4 {
+            state.move_by(1, 3);
+        }
+        let cursor = state.cursor();
+        let scroll = state.scroll();
+        let visible = state.visible();
+        state.move_caret(1);
+        state.select_to(0);
+        assert_eq!(state.cursor(), cursor);
+        assert_eq!(state.scroll(), scroll);
+        assert_eq!(state.visible(), visible);
+
+        state.type_char('x');
+        assert_eq!(state.cursor(), None);
+        assert_eq!(state.scroll(), 0);
+        state.select_all();
+        state.clear();
+        assert_eq!(state.query(), "");
+        assert_eq!(state.caret(), 0);
+        assert_eq!(state.selection(), None);
     }
 }

@@ -4,6 +4,7 @@ use super::events::{AppMode, ToolApprovalResponse, TuiEvent};
 use super::mission_control::McPanel;
 use super::*;
 use crate::tui::input_layout;
+use crate::ui_core::input_history::{input_history_down, input_history_up};
 use anyhow::Result;
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -2439,48 +2440,36 @@ impl App {
         } else if keys::is_up(&event)
             && !self.slash_suggestions_active
             && !self.input_history.is_empty()
-            && (self.input_buffer.is_empty() || self.input_history_index.is_some())
         {
-            // Arrow Up — browse input history (older). Only when the buffer
-            // is empty (nothing to lose) or we're already inside history.
-            match self.input_history_index {
-                None => {
-                    // Entering history — stash current input
-                    self.input_history_stash = self.input_buffer.clone();
-                    let idx = self.input_history.len() - 1;
-                    self.input_history_index = Some(idx);
-                    // Scrub on recall: history.txt predating #1943 can
-                    // still carry a poisoned line, and Arrow-Up would
-                    // reinstate it verbatim into the buffer.
-                    self.input_buffer = Self::strip_terminal_escapes(&self.input_history[idx]);
-                    self.cursor_position = self.input_buffer.len();
-                }
-                Some(idx) if idx > 0 => {
-                    let idx = idx - 1;
-                    self.input_history_index = Some(idx);
-                    // Scrub on recall: history.txt predating #1943 can
-                    // still carry a poisoned line, and Arrow-Up would
-                    // reinstate it verbatim into the buffer.
-                    self.input_buffer = Self::strip_terminal_escapes(&self.input_history[idx]);
-                    self.cursor_position = self.input_buffer.len();
-                }
-                _ => {} // already at oldest
+            // Entering history stashes even a nonempty draft. Down past the
+            // newest entry restores that draft through the shared state machine.
+            if input_history_up(
+                &self.input_history,
+                &mut self.input_buffer,
+                &mut self.input_history_index,
+                &mut self.input_history_stash,
+            ) {
+                // Scrub on recall: history.txt predating #1943 can still carry
+                // a poisoned line, which must not return verbatim to the input.
+                self.input_buffer = Self::strip_terminal_escapes(&self.input_buffer);
+                self.cursor_position = self.input_buffer.len();
             }
         } else if keys::is_down(&event)
             && !self.slash_suggestions_active
             && self.input_history_index.is_some()
         {
-            // Arrow Down — browse input history (newer)
-            let idx = self.input_history_index.expect("checked is_some");
-            if idx + 1 < self.input_history.len() {
-                let idx = idx + 1;
-                self.input_history_index = Some(idx);
-                self.input_buffer = Self::strip_terminal_escapes(&self.input_history[idx]);
-                self.cursor_position = self.input_buffer.len();
-            } else {
-                // Past newest — restore stashed input
-                self.input_history_index = None;
-                self.input_buffer = std::mem::take(&mut self.input_history_stash);
+            let restoring_draft = self
+                .input_history_index
+                .is_some_and(|idx| idx + 1 >= self.input_history.len());
+            if input_history_down(
+                &self.input_history,
+                &mut self.input_buffer,
+                &mut self.input_history_index,
+                &mut self.input_history_stash,
+            ) {
+                if !restoring_draft {
+                    self.input_buffer = Self::strip_terminal_escapes(&self.input_buffer);
+                }
                 self.cursor_position = self.input_buffer.len();
             }
         } else {

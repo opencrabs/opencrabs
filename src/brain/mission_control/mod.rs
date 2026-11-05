@@ -29,6 +29,11 @@ pub mod schedule_service;
 pub mod staleness;
 pub mod types;
 
+/// Maximum activity entries loaded by every Mission Control frontend.
+/// Keeping the fetch limit here prevents the terminal and GUI snapshots
+/// from silently covering different windows.
+pub const ACTIVITY_LIMIT: usize = 100;
+
 pub use types::{
     McActivity, McActivityLevel, McAnalytics, McBrainFile, McInboxDetail, McInboxItem, McInboxKind,
     McScheduleItem, McScheduleKind, McToolStat, TimeWindow,

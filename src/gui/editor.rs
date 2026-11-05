@@ -13,6 +13,10 @@
 use crate::palette;
 use opencrabs::ui_core::card::{CARD_RADIUS, glass_fill};
 use opencrabs::ui_core::commands::completions;
+use opencrabs::ui_core::input_history::{
+    input_history_down, input_history_up, record_input_history,
+};
+use opencrabs::ui_core::palette::{next_word_end, previous_word_start};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
@@ -220,6 +224,10 @@ pub enum EditorEvent {
 pub struct Editor {
     pub focus_handle: FocusHandle,
     pub content: String,
+    /// Submitted messages and the draft stashed while recalling them.
+    input_history: Vec<String>,
+    input_history_index: Option<usize>,
+    input_history_stash: String,
     /// Files attached to the next message. They live here, not in the window
     /// state, because the send action is what consumes them: the editor is
     /// the only place that can append the markers atomically with clearing
@@ -259,6 +267,9 @@ impl Editor {
         Self {
             focus_handle: cx.focus_handle(),
             content: String::new(),
+            input_history: Vec::new(),
+            input_history_index: None,
+            input_history_stash: String::new(),
             attachments: Vec::new(),
             placeholder: "Message OpenCrabs…".into(),
             selected_range: 0..0,
@@ -562,7 +573,24 @@ impl Editor {
         }
         let rows = self.visual_rows();
         let target = vertical_row_target(&rows, self.cursor_offset(), -1);
-        self.move_to(target, cx);
+        if target != self.cursor_offset() {
+            self.move_to(target, cx);
+            return;
+        }
+        if input_history_up(
+            &self.input_history,
+            &mut self.content,
+            &mut self.input_history_index,
+            &mut self.input_history_stash,
+        ) {
+            let end = self.content.len();
+            self.selected_range = end..end;
+            self.selection_reversed = false;
+            self.marked_range = None;
+            cx.notify();
+        } else {
+            self.move_to(target, cx);
+        }
     }
 
     fn down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
@@ -574,7 +602,24 @@ impl Editor {
         }
         let rows = self.visual_rows();
         let target = vertical_row_target(&rows, self.cursor_offset(), 1);
-        self.move_to(target, cx);
+        if target != self.cursor_offset() {
+            self.move_to(target, cx);
+            return;
+        }
+        if input_history_down(
+            &self.input_history,
+            &mut self.content,
+            &mut self.input_history_index,
+            &mut self.input_history_stash,
+        ) {
+            let end = self.content.len();
+            self.selected_range = end..end;
+            self.selection_reversed = false;
+            self.marked_range = None;
+            cx.notify();
+        } else {
+            self.move_to(target, cx);
+        }
     }
 
     // Word motion walks whole words, not graphemes. Sharing the arrow helpers
@@ -674,6 +719,7 @@ impl Editor {
             None
         };
         if let Some(name) = picked {
+            record_input_history(&mut self.input_history, name);
             self.clear_after_send(cx);
             cx.emit(EditorEvent::Sent(name.to_string()));
             return;
@@ -684,6 +730,7 @@ impl Editor {
             return;
         }
         let payload = message_with_markers(&text, &attachments);
+        record_input_history(&mut self.input_history, &text);
         self.clear_after_send(cx);
         cx.emit(EditorEvent::Sent(payload));
     }
@@ -694,6 +741,8 @@ impl Editor {
         self.selected_range = 0..0;
         self.selection_reversed = false;
         self.marked_range = None;
+        self.input_history_index = None;
+        self.input_history_stash.clear();
         self.command_index = 0;
         self.command_dismissed = false;
         self.emoji_dismissed = false;
@@ -712,6 +761,8 @@ impl Editor {
         self.selected_range = 0..0;
         self.selection_reversed = false;
         self.marked_range = None;
+        self.input_history_index = None;
+        self.input_history_stash.clear();
         self.command_index = 0;
         self.command_dismissed = false;
         self.emoji_index = 0;
@@ -1749,55 +1800,6 @@ fn line_start(content: &str, line: usize) -> usize {
 
 fn line_len(content: &str, line: usize) -> usize {
     content.split('\n').nth(line).map(str::len).unwrap_or(0)
-}
-
-/// Byte offset where the word before `offset` begins.
-///
-/// The TUI composer walks back over the separators and then over the word, so
-/// the same walk happens here and the window's alt+left lands where the
-/// terminal's ctrl+left does. Graphemes keep the walk from splitting a
-/// character that spans several bytes.
-fn previous_word_start(content: &str, offset: usize) -> usize {
-    let clamped = offset.min(content.len());
-    let graphemes: Vec<(usize, &str)> = content.grapheme_indices(true).collect();
-    let mut index = graphemes
-        .iter()
-        .position(|(start, _)| *start >= clamped)
-        .unwrap_or(graphemes.len());
-    while index > 0 && !is_word_grapheme(graphemes[index - 1].1) {
-        index -= 1;
-    }
-    while index > 0 && is_word_grapheme(graphemes[index - 1].1) {
-        index -= 1;
-    }
-    graphemes.get(index).map(|(start, _)| *start).unwrap_or(0)
-}
-
-/// Byte offset the word after `offset` ends on, past the word and the
-/// separators that follow it, matching the terminal composer.
-fn next_word_end(content: &str, offset: usize) -> usize {
-    let clamped = offset.min(content.len());
-    let graphemes: Vec<(usize, &str)> = content.grapheme_indices(true).collect();
-    let mut index = graphemes
-        .iter()
-        .position(|(start, _)| *start >= clamped)
-        .unwrap_or(graphemes.len());
-    while index < graphemes.len() && is_word_grapheme(graphemes[index].1) {
-        index += 1;
-    }
-    while index < graphemes.len() && !is_word_grapheme(graphemes[index].1) {
-        index += 1;
-    }
-    graphemes
-        .get(index)
-        .map(|(start, _)| *start)
-        .unwrap_or(content.len())
-}
-
-/// Letters and digits are word content; whitespace and punctuation separate
-/// words. A grapheme counts as a word when any of its characters is a letter.
-fn is_word_grapheme(grapheme: &str) -> bool {
-    grapheme.chars().any(|ch| ch.is_alphanumeric())
 }
 
 /// (line, utf8 column) for a utf8 offset. Past-the-end offsets clamp to the
