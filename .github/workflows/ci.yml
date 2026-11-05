@@ -134,7 +134,7 @@ jobs:
       # Fail fast from inside the job that failed (#2595): the fan-in `abort`
       # job cannot do it, because `needs` holds it until the run is over.
       - name: Cancel this run on failure
-        if: "!success()"  # also catches SIGTERM/timeout-killed steps, where failure() is false
+        if: "always() && !success()"  # always() required: GitHub skips steps of a cancelled job
         uses: ./.github/actions/cancel-run
         with:
           token: ${{ github.token }}
@@ -242,7 +242,7 @@ jobs:
       # Fail fast from inside the job that failed (#2595): the fan-in `abort`
       # job cannot do it, because `needs` holds it until the run is over.
       - name: Cancel this run on failure
-        if: "!success()"  # also catches SIGTERM/timeout-killed steps, where failure() is false
+        if: "always() && !success()"  # always() required: GitHub skips steps of a cancelled job
         uses: ./.github/actions/cancel-run
         with:
           token: ${{ github.token }}
@@ -327,7 +327,7 @@ jobs:
       # Fail fast from inside the job that failed (#2595): the fan-in `abort`
       # job cannot do it, because `needs` holds it until the run is over.
       - name: Cancel this run on failure
-        if: "!success()"  # also catches SIGTERM/timeout-killed steps, where failure() is false
+        if: "always() && !success()"  # always() required: GitHub skips steps of a cancelled job
         uses: ./.github/actions/cancel-run
         with:
           token: ${{ github.token }}
@@ -531,7 +531,7 @@ jobs:
       # Fail fast from inside the job that failed (#2595): the fan-in `abort`
       # job cannot do it, because `needs` holds it until the run is over.
       - name: Cancel this run on failure
-        if: "!success()"  # also catches SIGTERM/timeout-killed steps, where failure() is false
+        if: "always() && !success()"  # always() required: GitHub skips steps of a cancelled job
         uses: ./.github/actions/cancel-run
         with:
           token: ${{ github.token }}
@@ -564,7 +564,7 @@ jobs:
       # Fail fast from inside the job that failed (#2595): the fan-in `abort`
       # job cannot do it, because `needs` holds it until the run is over.
       - name: Cancel this run on failure
-        if: "!success()"  # also catches SIGTERM/timeout-killed steps, where failure() is false
+        if: "always() && !success()"  # always() required: GitHub skips steps of a cancelled job
         uses: ./.github/actions/cancel-run
         with:
           token: ${{ github.token }}
@@ -662,7 +662,7 @@ jobs:
       # This step is inside the `&test-steps` anchor, so `test-linux` inherits
       # it: neither leg can outlive the other by more than one API call.
       - name: Cancel this run on failure
-        if: "!success()"  # also catches SIGTERM/timeout-killed steps, where failure() is false
+        if: "always() && !success()"  # always() required: GitHub skips steps of a cancelled job
         uses: ./.github/actions/cancel-run
         with:
           token: ${{ github.token }}
@@ -822,7 +822,7 @@ jobs:
       # Fail fast from inside the job that failed (#2595): the fan-in `abort`
       # job cannot do it, because `needs` holds it until the run is over.
       - name: Cancel this run on failure
-        if: "!success()"  # also catches SIGTERM/timeout-killed steps, where failure() is false
+        if: "always() && !success()"  # always() required: GitHub skips steps of a cancelled job
         uses: ./.github/actions/cancel-run
         with:
           token: ${{ github.token }}
@@ -908,7 +908,7 @@ jobs:
       # Fail fast from inside the job that failed (#2595): the fan-in `abort`
       # job cannot do it, because `needs` holds it until the run is over.
       - name: Cancel this run on failure
-        if: "!success()"  # also catches SIGTERM/timeout-killed steps, where failure() is false
+        if: "always() && !success()"  # always() required: GitHub skips steps of a cancelled job
         uses: ./.github/actions/cancel-run
         with:
           token: ${{ github.token }}
