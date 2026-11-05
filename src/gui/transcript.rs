@@ -2077,7 +2077,7 @@ impl CopyDrag {
         let end = start.checked_add(len)?;
         let lo = start.max(selected_start);
         let hi = end.min(selected_end);
-        (lo < hi).then_some(lo - start..hi - start)
+        (lo < hi).then(|| lo - start..hi - start)
     }
 }
 
@@ -2505,6 +2505,33 @@ mod tests {
             (ink * a + canvas * (255 - a)) / 255
         };
         (mix(16) << 16) | (mix(8) << 8) | mix(0)
+    }
+
+    #[test]
+    fn drag_copy_segment_range_does_not_overflow_when_segment_is_past_selection() {
+        let drag = CopyDrag::default();
+        drag.texts.borrow_mut().push("0123456789extra".into());
+        drag.anchor.set(Some(TextPoint::new(0, 0)));
+        drag.end.set(Some(TextPoint::new(0, 3)));
+
+        // A segment past the selection release point must safely return None without panicking.
+        assert_eq!(drag.segment_range(0, 4, 2), None);
+
+        // Drag with anchor 10 and end 3 normalizes to 3..10.
+        let drag_rev = CopyDrag::default();
+        drag_rev.texts.borrow_mut().push("0123456789extra".into());
+        drag_rev.anchor.set(Some(TextPoint::new(0, 10)));
+        drag_rev.end.set(Some(TextPoint::new(0, 3)));
+        assert_eq!(drag_rev.segment_range(0, 12, 2), None);
+
+        // Fully covered segment returns the exact segment range.
+        assert_eq!(drag_rev.segment_range(0, 4, 3), Some(0..3));
+
+        // Partial overlap at the start.
+        assert_eq!(drag_rev.segment_range(0, 2, 3), Some(1..3));
+
+        // Partial overlap at the end.
+        assert_eq!(drag_rev.segment_range(0, 8, 4), Some(0..2));
     }
 
     #[test]

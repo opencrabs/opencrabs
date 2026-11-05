@@ -8695,7 +8695,7 @@ fn mc_inbox_panel(
         "No pending proposals.",
         focused,
         // The selected item's first line, in the rows actually drawn.
-        (focused && !items.is_empty()).then_some((selected - start) * 3),
+        (focused && !items.is_empty()).then(|| (selected - start) * 3),
         shown,
     )
 }
