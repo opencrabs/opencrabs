@@ -1142,6 +1142,12 @@ const RHYTHM_CELL_PAD_Y: f32 = 6.0;
 /// Message text sits inside the rounded surface, never on its curved edge.
 const MESSAGE_PAD_X: f32 = 16.0;
 const MESSAGE_PAD_Y: f32 = 12.0;
+
+/// The message surface carries a tighter corner than the cards around it, so a
+/// column of chat reads as conversation and not as a stack of panels. This
+/// token belongs to the message bubble alone and never reaches `CARD_RADIUS`
+/// or `SEEKER_RADIUS` (#2571).
+const MESSAGE_RADIUS: f32 = 12.0;
 const USER_TEXT_SIZE: f32 = 16.0;
 const PLAIN_TEXT_SIZE: f32 = 13.0;
 
@@ -1217,7 +1223,8 @@ fn bubble_has_surface(role: &str) -> bool {
 
 /// One message, drawn. The timestamp and content keep the same padding in both
 /// roles so a folded history holds one rhythm, and only the user message
-/// carries a surface behind them.
+/// carries a surface behind them. That surface takes `MESSAGE_RADIUS`, so the
+/// message corners stay tighter than the cards around them (#2571).
 fn bubble(
     role: &str,
     content: &str,
@@ -1243,7 +1250,7 @@ fn bubble(
         .py(px(MESSAGE_PAD_Y));
     if bubble_has_surface(role) {
         col = col
-            .rounded(px(CARD_RADIUS))
+            .rounded(px(MESSAGE_RADIUS))
             .bg(glass_fill(message_surface(role)));
     }
     if !time.is_empty() {
@@ -2678,6 +2685,7 @@ mod tests {
 
     /// #2569: the bubble keeps its inner breathing room, readable user text,
     /// and an attachment budget that excludes the bubble's own padding.
+    /// #2571: its corner is the message token, tighter than a card.
     #[test]
     fn message_bubbles_pad_and_shrink_attachment_budget() {
         let src = include_str!("transcript.rs");
@@ -2686,7 +2694,8 @@ mod tests {
             .nth(1)
             .and_then(|rest| rest.split("/// The files").next())
             .expect("message bubble renderer");
-        assert!(bubble.contains(".rounded(px(CARD_RADIUS))"));
+        assert!(bubble.contains(".rounded(px(MESSAGE_RADIUS))"));
+        assert!(!bubble.contains(".rounded(px(CARD_RADIUS))"));
         assert!(bubble.contains(".px(px(MESSAGE_PAD_X))"));
         assert!(bubble.contains(".py(px(MESSAGE_PAD_Y))"));
         assert!(bubble.contains("glass_fill(message_surface(role))"));
@@ -2695,6 +2704,47 @@ mod tests {
         const {
             assert!(USER_TEXT_SIZE > PLAIN_TEXT_SIZE);
         }
+    }
+
+    /// #2571: only the message surface gets the tighter corner. The shared card
+    /// and Seeker radii keep their values, so no other panel, table, ledger,
+    /// composer, sidebar or plan strip moves with the chat change.
+    #[test]
+    fn only_the_message_surface_uses_the_tighter_radius() {
+        let src = include_str!("transcript.rs");
+        const {
+            assert!(MESSAGE_RADIUS < CARD_RADIUS);
+            assert!(opencrabs::ui_core::card::SEEKER_RADIUS > CARD_RADIUS);
+        }
+        assert_eq!(MESSAGE_RADIUS, 12.0);
+        assert_eq!(CARD_RADIUS, 24.0);
+        assert_eq!(opencrabs::ui_core::card::SEEKER_RADIUS, 32.0);
+        // The token is declared once and applied once: in the bubble. Every
+        // other rounded surface in this file still reads CARD_RADIUS. Count on
+        // the production half only: this file includes itself, so the literals
+        // in this test would otherwise match themselves.
+        let production = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source before the test module");
+        assert_eq!(production.matches("const MESSAGE_RADIUS").count(), 1);
+        let message_radius_uses = production
+            .lines()
+            .filter(|line| line.contains("px(MESSAGE_RADIUS)"))
+            .count();
+        assert_eq!(
+            message_radius_uses, 1,
+            "only the bubble applies the message radius, found {message_radius_uses} uses"
+        );
+        let cell = src
+            .split("fn attachment_cell(")
+            .nth(1)
+            .and_then(|rest| rest.split("/// The last cell").next())
+            .expect("attachment cell");
+        assert!(
+            cell.contains(".rounded(px(CARD_RADIUS))"),
+            "attachment tiles keep the card radius"
+        );
     }
 
     /// #2536: the image needs its own concentric clip. Clipping only the
