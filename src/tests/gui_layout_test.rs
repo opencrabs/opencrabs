@@ -4,6 +4,7 @@
 
 const SESSIONS: &str = include_str!("../gui/sessions.rs");
 const GUI_MAIN: &str = include_str!("../gui/main.rs");
+const MODEL_PICKER: &str = include_str!("../gui/model_picker.rs");
 
 #[test]
 fn the_hover_tint_is_not_applied_to_the_selected_row() {
@@ -56,5 +57,28 @@ fn onboarding_footer_hints_keep_their_horizontal_width() {
             .count(),
         2,
         "stacked hints use full rows instead of shrinking to one character"
+    );
+}
+
+#[test]
+fn stacked_model_rows_give_their_text_column_a_full_width() {
+    let start = MODEL_PICKER
+        .find("ModelRowLayout::Stacked =>")
+        .expect("the shared picker has a stacked row layout");
+    let row = MODEL_PICKER
+        .get(start..start + 1_100)
+        .expect("the stacked row is in range");
+    let column = row
+        .split(".w_full()")
+        .next()
+        .expect("the stacked text column has a full-width constraint");
+    assert!(
+        column.contains(".flex_col()"),
+        "the width belongs to the stacked model and provider labels"
+    );
+    assert_eq!(
+        row.matches(".w_full()").count(),
+        3,
+        "the column and both labels share a definite width instead of truncating to ellipses"
     );
 }

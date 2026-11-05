@@ -177,6 +177,7 @@ pub fn render(cx: &mut Context<Dashboard>, view: ModelPickerView<'_>) -> Rendere
                             .flex()
                             .flex_col()
                             .gap_1()
+                            .w_full()
                             .flex_1()
                             .min_w_0()
                             .child(
