@@ -270,7 +270,8 @@ pub fn spawn_bootstrap(config: Config, sink: EventSink) {
         .name("gui-agent-boot".into())
         .spawn(move || {
             let sink = thread_sink;
-            let runtime = match tokio::runtime::Builder::new_current_thread()
+            let runtime = match tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
                 .enable_all()
                 .build()
             {
@@ -281,6 +282,12 @@ pub fn spawn_bootstrap(config: Config, sink: EventSink) {
                     return;
                 }
             };
+            // Kept for the life of the process, not just for the boot: the
+            // channel agents and the cron scheduler live on this runtime, and a
+            // dropped runtime would stop both while the window still ran
+            // (#2452, #2607). Two workers: one poll, one for whatever a channel
+            // or a job is doing.
+            let runtime = SURFACE_RUNTIME.get_or_init(|| runtime);
             runtime.block_on(async move {
                 match build(config, sink.clone()).await {
                     Ok(bridge) => {
@@ -308,6 +315,17 @@ pub fn spawn_bootstrap(config: Config, sink: EventSink) {
 }
 
 static SERVICE_VEHICLE: OnceBridge = OnceBridge::new();
+
+/// The runtime the window's background services run on, kept alive for the
+/// whole process. The bridge's own calls still open a short-lived runtime each,
+/// which is cheap and cannot collide with this one; the channel agents and the
+/// cron scheduler need a runtime that outlives the boot thread.
+static SURFACE_RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+
+/// Channels, cron and hot reload, held for the process so their locks stay
+/// claimed (#2452, #2607).
+static SURFACE_STACK: std::sync::OnceLock<opencrabs::services::surface::SurfaceServices> =
+    std::sync::OnceLock::new();
 
 /// One-shot holder so the service (and its tokio-internal pieces) survive
 /// the bootstrap thread. `OnceLock` semantics, no unsafe.
@@ -383,6 +401,68 @@ async fn build(config: Config, sink: EventSink) -> Result<AgentBridge, String> {
     // no manager a long command cannot detach at all, `tasks_list` is blind,
     // and no detached row can be drawn or settled.
     let enqueue: MessageEnqueueCallback = install_enqueue_forwarder(&sink);
+
+    // The services half (#2452, #2607). Whichever surface is running owns the
+    // profile, so the window claims it here and serves the same things the TUI
+    // serves: channels, scheduled jobs, hot reload, memory upkeep. Best effort
+    // on purpose: if another instance holds the profile and will not stop, the
+    // window still chats, it just does not serve.
+    let notice_sink: opencrabs::services::surface::NoticeSink = {
+        let sink = sink.clone();
+        Arc::new(move |msg: &str| {
+            crate::logging::info(&format!("surface: {msg}"));
+            let _ = sink.send(TurnEvent::CommandReply(msg.to_string()));
+        })
+    };
+    let provider_hook: Arc<dyn Fn(Arc<dyn opencrabs::brain::provider::Provider>) + Send + Sync> =
+        Arc::new(|new_provider| {
+            if let Some(bridge) = bridge() {
+                bridge.service.swap_provider(new_provider);
+                crate::logging::info("config reload: window agent swapped provider");
+            }
+        });
+    let deps = opencrabs::services::surface::SurfaceDeps {
+        pool: db.pool().clone(),
+        provider: provider.clone(),
+        tool_registry: tool_registry.clone(),
+        subagent_manager: subagent_manager.clone(),
+        service_context: context.clone(),
+        system_brain: system_brain.clone(),
+        working_directory: working_directory.clone(),
+        brain_path,
+        runtime_info: Some(runtime_info),
+        shared_session_id: Arc::new(tokio::sync::Mutex::new(None)),
+        notices: notice_sink,
+        session_events: None,
+        progress: Some(forwarder.clone()),
+        provider_reloaded: Some(provider_hook),
+        // Interactive: opening the window is a human asking to use this profile
+        // now, the same claim the TUI makes.
+        headless: false,
+    };
+    // Detached on purpose: connecting the channels can take a few seconds and a
+    // slow gateway waits up to 30s, and the window must not sit on a boot
+    // screen for that. Services come up behind an already usable chat.
+    {
+        let boot_config = config.clone();
+        tokio::spawn(async move {
+            match opencrabs::services::surface::boot_surface(&boot_config, deps).await {
+                Ok(services) => {
+                    crate::logging::info(&format!(
+                        "surface services ready: cron={} a2a={} preempted={}",
+                        services.cron_spawned,
+                        services.a2a_ready,
+                        services.preempted.len()
+                    ));
+                    let _ = SURFACE_STACK.set(services);
+                }
+                Err(e) => {
+                    // The window keeps working; only the background half is off.
+                    crate::logging::error(&format!("surface services failed: {e:#}"));
+                }
+            }
+        });
+    }
 
     let service = AgentService::new(provider, context.clone(), &config)
         .await

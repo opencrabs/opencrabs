@@ -644,4 +644,62 @@ mod tests {
         assert!(!line.contains("stays down"), "{line}");
         assert!(line.contains("channels"), "{line}");
     }
+
+    /// The window reaches the services half through this module, never by
+    /// building its own copy (#2607).
+    ///
+    /// A `ChannelManager` or a `CronScheduler` constructed inside `src/gui/` is
+    /// a second stack on the same profile: two pollers on one bot token, two
+    /// schedulers on one `cron_jobs` table, and a job that fires twice. The
+    /// lock would turn the second one away, which is exactly the silent failure
+    /// this guards: the surface looks alive and serves nothing.
+    #[test]
+    fn the_gui_never_builds_its_own_channel_or_cron_stack() {
+        let gui = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/gui");
+        let mut checked = 0usize;
+        let mut offenders: Vec<String> = Vec::new();
+        let mut pending = vec![gui.clone()];
+        while let Some(dir) = pending.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    pending.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                checked += 1;
+                let Ok(body) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                for needle in [
+                    "ChannelManager::new(",
+                    "CronScheduler::new(",
+                    "spawn_cron_scheduler(",
+                ] {
+                    if body.contains(needle) {
+                        offenders.push(format!("{}: {needle}", path.display()));
+                    }
+                }
+            }
+        }
+        assert!(checked > 0, "no GUI sources found under {}", gui.display());
+        assert!(
+            offenders.is_empty(),
+            "the window must boot the shared stack instead of a local copy:\n{}",
+            offenders.join("\n")
+        );
+
+        // And it must actually use it: a GUI that drops the call loses channels
+        // and cron again with nothing failing at build time.
+        let bridge = std::fs::read_to_string(gui.join("agent_bridge.rs")).unwrap_or_default();
+        assert!(
+            bridge.contains("services::surface::boot_surface("),
+            "the GUI bootstrap must call the shared boot"
+        );
+    }
 }
