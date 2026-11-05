@@ -6,12 +6,15 @@
 
 const GUI_MAIN: &str = include_str!("../gui/main.rs");
 
-/// The chat arm of the screen body, from its opening to the next screen.
+/// The chat's width planning and its screen arm, from where the pane width is
+/// read to the next screen. The share and the measure are planned above the
+/// match so the chrome under the conversation aligns to one width (#2588), so
+/// the region starts at the pane width rather than at the match.
 fn chat_arm() -> &'static str {
     GUI_MAIN
-        .split("let (middle, footer): (AnyElement, AnyElement) = match self.screen {")
+        .split("let pane_width = attachment_view::content_width(")
         .nth(1)
-        .expect("the screen body match is built in render")
+        .expect("the chat reads the pane width in render")
         .split("Screen::Usage => {")
         .next()
         .expect("the chat arm comes before the usage arm")
