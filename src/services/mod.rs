@@ -10,6 +10,7 @@ pub mod message;
 pub mod project;
 pub mod project_match;
 pub mod session;
+pub mod surface;
 
 pub use context::{ServiceContext, ServiceManager};
 pub use file::FileService;
