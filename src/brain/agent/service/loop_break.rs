@@ -11,7 +11,7 @@
 //! chain before the turn is allowed to end. A different model does not
 //! reproduce the same loop, which is the whole reason the chain exists.
 //!
-//! The break is now the provider-attributable [`ProviderError::AnnouncementLoop`]
+//! The break is now the provider-attributable [`ProviderError::ToolLoop`]
 //! the #1023 rotation wrapper already reacts to: it promotes the next
 //! provider and replays the turn, and only when `force_next_fallback` has
 //! nowhere left to go does the error reach the user. The message carries the
@@ -48,7 +48,7 @@ pub(crate) fn describe_pending_calls(tool_uses: &[(String, String, Value)]) -> S
 }
 
 /// The error a loop guard returns in place of ending the turn. Routed as
-/// `AnnouncementLoop` on purpose: that is the variant the rotation wrapper
+/// `ToolLoop` on purpose: that is the variant the rotation wrapper
 /// in `run_tool_loop` matches to hand the turn to the next provider.
 pub(crate) fn loop_break_error(
     guard: &str,
@@ -57,7 +57,7 @@ pub(crate) fn loop_break_error(
     window: usize,
     pending: &str,
 ) -> AgentError {
-    AgentError::Provider(ProviderError::AnnouncementLoop(format!(
+    AgentError::Provider(ProviderError::ToolLoop(format!(
         "{guard}: '{label}' recurred {count}x in the last {window} steps; dropped call: {pending}"
     )))
 }
@@ -67,6 +67,12 @@ pub(crate) fn loop_break_error(
 /// other error passes through untouched.
 pub(crate) fn chain_exhausted(err: AgentError, providers_tried: u32) -> AgentError {
     match err {
+        AgentError::Provider(ProviderError::ToolLoop(msg)) => {
+            AgentError::Provider(ProviderError::ToolLoop(format!(
+                "{msg}; every provider in the fallback chain ({providers_tried} tried) hit the \
+                 same loop. Nothing is queued, say the word to resume"
+            )))
+        }
         AgentError::Provider(ProviderError::AnnouncementLoop(msg)) => {
             AgentError::Provider(ProviderError::AnnouncementLoop(format!(
                 "{msg}; every provider in the fallback chain ({providers_tried} tried) hit the \
