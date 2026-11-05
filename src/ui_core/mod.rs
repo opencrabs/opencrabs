@@ -34,7 +34,7 @@ mod purity_tests {
     //! break that silently at compile time for the GUI, never for us.
 
     /// Every source file in `ui_core`, with its contents.
-    fn sources() -> [(&'static str, &'static str); 28] {
+    fn sources() -> [(&'static str, &'static str); 29] {
         [
             ("ui_core/bang.rs", include_str!("bang.rs")),
             ("ui_core/card.rs", include_str!("card.rs")),
@@ -62,6 +62,10 @@ mod purity_tests {
             (
                 "ui_core/model_selector/state.rs",
                 include_str!("model_selector/state.rs"),
+            ),
+            (
+                "ui_core/model_selector/discovery.rs",
+                include_str!("model_selector/discovery.rs"),
             ),
             (
                 "ui_core/model_selector/fetch.rs",

@@ -12,11 +12,20 @@ const ONBOARDING_RAIL_REM: f32 = 13.5;
 const PANE_PADDING_REM: f32 = 3.0;
 /// Below this content width the two footer groups stack instead of colliding.
 const FOOTER_ROW_MIN_REM: f32 = 44.0;
+/// Below this picker width the provider name moves under the model id.
+const MODEL_COLUMNS_MIN_REM: f32 = 36.0;
+const PROVIDER_LABEL_REM: f32 = 12.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FooterLayout {
     Row,
     Column,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModelRowLayout {
+    Columns,
+    Stacked,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -26,6 +35,9 @@ pub struct ModelLayout {
     /// Zero hides the onboarding rail before it can paint over the picker.
     pub onboarding_rail_width: f32,
     pub footer: FooterLayout,
+    pub model_row: ModelRowLayout,
+    /// Zero in stacked mode; bounded to one third of the picker in columns.
+    pub provider_label_width: f32,
 }
 
 /// Plan one picker frame. `pane_width` is the live middle-pane width, `rem`
@@ -59,9 +71,22 @@ pub fn model_layout(
     } else {
         FooterLayout::Column
     };
+    let picker_width = (content_width - onboarding_rail_width).max(0.0);
+    let model_row = if picker_width >= MODEL_COLUMNS_MIN_REM * rem {
+        ModelRowLayout::Columns
+    } else {
+        ModelRowLayout::Stacked
+    };
+    let provider_label_width = if model_row == ModelRowLayout::Columns {
+        (PROVIDER_LABEL_REM * rem).min(picker_width / 3.0)
+    } else {
+        0.0
+    };
     ModelLayout {
         pane_width,
         onboarding_rail_width,
         footer,
+        model_row,
+        provider_label_width,
     }
 }

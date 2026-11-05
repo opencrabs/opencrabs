@@ -1,4 +1,4 @@
-use crate::ui_core::model_layout::{FooterLayout, model_layout};
+use crate::ui_core::model_layout::{FooterLayout, ModelRowLayout, model_layout};
 
 const BASE_REM: f32 = 14.0;
 const MIN_CONTENT_REM: f32 = 20.0;
@@ -9,6 +9,8 @@ fn model_layout_keeps_rail_and_content_separate_at_normal_size() {
     let layout = model_layout(708.0, BASE_REM, BASE_REM, true);
     assert_eq!(layout.onboarding_rail_width, 189.0);
     assert_eq!(layout.footer, FooterLayout::Row);
+    assert_eq!(layout.model_row, ModelRowLayout::Stacked);
+    assert_eq!(layout.provider_label_width, 0.0);
     let remaining = layout.pane_width - PANE_PADDING_REM * BASE_REM - layout.onboarding_rail_width;
     assert!(remaining >= MIN_CONTENT_REM * BASE_REM);
 }
@@ -20,6 +22,8 @@ fn model_layout_drops_rail_before_content_can_overlap_at_zoom() {
     assert!(normal.onboarding_rail_width > 0.0);
     assert_eq!(zoomed.onboarding_rail_width, 0.0);
     assert_eq!(zoomed.footer, FooterLayout::Column);
+    assert_eq!(zoomed.model_row, ModelRowLayout::Stacked);
+    assert_eq!(zoomed.provider_label_width, 0.0);
 }
 
 #[test]
@@ -38,6 +42,9 @@ fn model_layout_stacks_footer_before_hints_can_collide() {
 fn model_layout_standalone_never_reserves_onboarding_rail() {
     let layout = model_layout(1_400.0, BASE_REM, BASE_REM, false);
     assert_eq!(layout.onboarding_rail_width, 0.0);
+    assert_eq!(layout.model_row, ModelRowLayout::Columns);
+    assert!(layout.provider_label_width > 0.0);
+    assert!(layout.provider_label_width <= 12.0 * BASE_REM);
 }
 
 #[test]

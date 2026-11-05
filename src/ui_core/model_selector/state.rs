@@ -399,7 +399,7 @@ impl FetchLifecycle {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct ProviderSelectorState {
     pub selected_provider: usize,
     pub custom_names: Vec<String>,

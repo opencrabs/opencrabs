@@ -180,3 +180,36 @@ async fn shared_transport_reads_a_real_custom_models_endpoint() {
     assert_eq!(outcome.models, ["custom-future-model"]);
     assert_eq!(outcome.error, None);
 }
+
+#[test]
+fn discovery_queue_snapshots_unsaved_credentials_before_saved_providers() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::config::profile::with_home_override(dir.path().to_path_buf(), || {
+        let catalogue = ProviderSelectorState::default();
+        let edited = keyed_openai();
+        let requests = model_selector::discovery_requests(&catalogue, "openai", Some(&edited));
+        let first = requests.first().unwrap();
+        assert_eq!(first.provider_id, "openai");
+        assert_eq!(first.api_key.as_deref(), Some("typed-test-key"));
+    });
+}
+
+#[test]
+fn discovery_queue_does_not_resurrect_an_empty_edited_endpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::config::profile::with_home_override(dir.path().to_path_buf(), || {
+        let catalogue = ProviderSelectorState::default();
+        let edited = ProviderSelectorState {
+            selected_provider: CUSTOM_PROVIDER_IDX,
+            custom_name: "unsaved-custom".into(),
+            ..Default::default()
+        };
+        let requests =
+            model_selector::discovery_requests(&catalogue, "unsaved-custom", Some(&edited));
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.provider_id != "unsaved-custom")
+        );
+    });
+}
