@@ -118,3 +118,13 @@ fn mission_control_gui_detail_dispatch_covers_every_panel() {
     assert!(analytics.contains("mission_control::grid_rows(count, 2)"));
 }
 
+#[test]
+fn mc_phantoms_empty_breakdown_uses_the_panel_empty_state() {
+    let rows = between(GUI_MAIN, "fn mc_phantoms_rows", "fn mc_phantoms_panel");
+    assert!(rows.contains("if a.phantom.by_model.is_empty()"));
+    assert!(rows.contains("return Vec::new()"));
+
+    let panel = between(GUI_MAIN, "fn mc_phantoms_panel", "fn mc_rsi_panel");
+    assert!(panel.contains("mc_phantoms_rows(a, shown)"));
+    assert!(panel.contains("\"No phantoms detected.\""));
+}

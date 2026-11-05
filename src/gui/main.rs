@@ -8259,9 +8259,13 @@ fn mc_flakiest_panel(
     )
 }
 
-/// Phantom tool calls: detected, resolved, then the per-model breakdown the
-/// terminal shows.
-fn mc_phantoms_panel(a: &McAnalytics, shown: palette::Palette) -> Div {
+/// Rows for the phantom card. A totals-only line can ellipsize into three
+/// dots under the header, so an empty model breakdown stays empty and lets
+/// the shared panel render its empty state instead.
+fn mc_phantoms_rows(a: &McAnalytics, shown: palette::Palette) -> Vec<McRow> {
+    if a.phantom.by_model.is_empty() {
+        return Vec::new();
+    }
     let mut rows = vec![McRow::Line(
         format!(
             "{} detected, {} resolved ({:.1}%)",
@@ -8276,10 +8280,16 @@ fn mc_phantoms_panel(a: &McAnalytics, shown: palette::Palette) -> Div {
             shown.text_muted,
         ));
     }
+    rows
+}
+
+/// Phantom tool calls: detected, resolved, then the per-model breakdown the
+/// terminal shows.
+fn mc_phantoms_panel(a: &McAnalytics, shown: palette::Palette) -> Div {
     mc_panel(
         "phantoms",
         "Phantoms".to_string(),
-        rows,
+        mc_phantoms_rows(a, shown),
         "No phantoms detected.",
         false,
         None,
@@ -10392,6 +10402,23 @@ mod tests {
         );
         assert_eq!(super::mc_tool_bar(100, 100), "█".repeat(12));
         assert_eq!(super::mc_tool_bar(200, 100), "█".repeat(12));
+    }
+
+    #[test]
+    fn mission_mc_phantoms_empty_breakdown_has_no_rows() {
+        let mut analytics = McAnalytics::default();
+        analytics.phantom.total = 1;
+        assert!(
+            super::mc_phantoms_rows(&analytics, palette::current()).is_empty(),
+            "an empty model breakdown must reach the panel's empty state"
+        );
+
+        analytics.phantom.by_model.push(("gpt-5".into(), 1, 0));
+        assert_eq!(
+            super::mc_phantoms_rows(&analytics, palette::current()).len(),
+            2,
+            "a populated breakdown keeps its totals and model rows"
+        );
     }
 
     /// A tile opens a preview of the file it stands for, Esc closes it, and
