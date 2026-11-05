@@ -7780,7 +7780,11 @@ impl Render for Dashboard {
             }
         }
         if let Some(bar) = topic_top {
-            right = right.child(bar);
+            // The topic bar is a row of the chat's own stack, so it takes the
+            // same measure as the text under it (#2590). It is drawn above the
+            // screen match, which is why the wrapper is a named function and
+            // not a closure: the same two values have to reach it here.
+            right = right.child(central(bar, centred_chat, chat_measure_px));
         }
         right = right.child(middle);
         right = match self.screen {
@@ -7790,45 +7794,63 @@ impl Render for Dashboard {
                 // hints go back UNDER the input where they were: the owner
                 // called the move above the plan card out.
                 let mut col = right;
-                // The chrome under the conversation takes the same measure as
-                // the text above it (#2588). A split pane, or a pane narrower
-                // than the measure, keeps the full width it has today.
-                let central = |view: AnyElement| {
-                    if centred_chat {
-                        chat_measure_row(view, chat_measure_px)
-                    } else {
-                        view
-                    }
-                };
                 if let Some(plan_view) = self.plan.view() {
-                    col = col.child(central(plan_view.into_any_element()));
+                    col = col.child(central(
+                        plan_view.into_any_element(),
+                        centred_chat,
+                        chat_measure_px,
+                    ));
                 }
                 let waiting = self.queued_for_strip();
                 if !waiting.is_empty() {
-                    col = col.child(queue_strip(&waiting));
+                    col = col.child(central(
+                        queue_strip(&waiting).into_any_element(),
+                        centred_chat,
+                        chat_measure_px,
+                    ));
                 }
                 // A detached command sits directly above the editor: the same
                 // place the TUI puts it (on the input box's top border), which
                 // is where the eye goes while waiting.
                 if let Some(label) = self.running_tasks_label() {
-                    col = col.child(task_strip(label));
+                    col = col.child(central(
+                        task_strip(label).into_any_element(),
+                        centred_chat,
+                        chat_measure_px,
+                    ));
                 }
                 // The slash-command list sits over the input while a name is
                 // not being spelled, the terminal's own placement. The name
                 // prompt itself is the overlay below (#2398).
                 if self.topic_draft.is_none() {
+                    // The list floats over the composer, so it lines up with
+                    // it: same measure, still the child directly above the
+                    // editor, so the order it paints in does not change
+                    // (#2590).
                     let popup = self.editor.read(cx).command_popup();
                     if let Some((names, selected)) = popup {
-                        col = col.child(command_popup_view(&names, selected));
+                        col = col.child(central(
+                            command_popup_view(&names, selected).into_any_element(),
+                            centred_chat,
+                            chat_measure_px,
+                        ));
                     } else if let Some((items, selected)) = self.editor.read(cx).emoji_popup() {
-                        col = col.child(emoji_popup_view(&items, selected));
+                        col = col.child(central(
+                            emoji_popup_view(&items, selected).into_any_element(),
+                            centred_chat,
+                            chat_measure_px,
+                        ));
                     }
                 }
-                col = col.child(central(self.editor.clone().into_any_element()));
+                col = col.child(central(
+                    self.editor.clone().into_any_element(),
+                    centred_chat,
+                    chat_measure_px,
+                ));
                 if let Some(strip) = topic_bottom {
-                    col = col.child(strip);
+                    col = col.child(central(strip, centred_chat, chat_measure_px));
                 }
-                col.child(central(footer))
+                col.child(central(footer, centred_chat, chat_measure_px))
             }
             Screen::Usage => right.child(footer),
             Screen::Files => right.child(footer),
@@ -10569,6 +10591,19 @@ fn chat_measure_row(view: AnyElement, width: f32) -> AnyElement {
                 .child(view),
         )
         .into_any_element()
+}
+
+/// The chat's chrome takes the conversation's measure (#2588, #2590), so the
+/// plan card, the strips, the popups, the composer and the footer all sit on
+/// the axis the text above them draws on. It is a no-op wherever the transcript
+/// itself is not capped, which covers every split pane and every window
+/// narrower than the measure.
+fn central(view: AnyElement, centred: bool, measure: f32) -> AnyElement {
+    if centred {
+        chat_measure_row(view, measure)
+    } else {
+        view
+    }
 }
 
 /// The rule between two panes: vertical when they sit side by side, horizontal
