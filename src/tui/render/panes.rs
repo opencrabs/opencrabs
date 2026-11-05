@@ -184,7 +184,8 @@ pub(super) fn render_inactive_pane(
 
     // The pane's own chrome: its plan strip and queued preview in the slots
     // the budget carved, its stashed input read-only at the bottom (#2494).
-    render_pane_strips(f, app, pane_id, layout.strip, layout.queue);
+    // Inactive pane: its chrome is drawn dim so the live pane is obvious (#2577).
+    render_pane_strips(f, app, pane_id, layout.strip, layout.queue, false);
     render_pane_input_readonly(f, &pane.input_buffer, layout.input);
 }
 
@@ -411,11 +412,24 @@ pub(super) fn pane_layout(inner: Rect, rows: PaneRows) -> PaneLayout {
     }
 }
 
+/// Style for a pane's own chrome text. The focused pane reads at full
+/// strength; an unfocused pane drops to the existing inactive colour so its
+/// composer and plan strip cannot be mistaken for the live one (#2577). No new
+/// colour is introduced: the dim role is the one the inactive border already
+/// uses.
+fn pane_chrome_style(focused: bool, role: Role) -> Style {
+    if focused {
+        Style::default().fg(theme::role(role))
+    } else {
+        Style::default().fg(theme::role(Role::GrayDim))
+    }
+}
+
 /// The three strip lines a pane shows for its live checklist: the title with
 /// done/total, the bar with the percent, and the running task (or its
 /// absence) (#2494). An Active plan whose checklist was never seeded gets a
 /// single warning line instead of a zero division dressed up as progress.
-fn pane_strip_lines(plan: &PlanDocument) -> Vec<Line<'static>> {
+fn pane_strip_lines(plan: &PlanDocument, focused: bool) -> Vec<Line<'static>> {
     let done = plan
         .tasks
         .iter()
@@ -425,7 +439,7 @@ fn pane_strip_lines(plan: &PlanDocument) -> Vec<Line<'static>> {
     if total == 0 {
         return vec![Line::from(Span::styled(
             format!("📋 {} · checklist not seeded", plan.title),
-            Style::default().fg(theme::role(Role::Warning)),
+            pane_chrome_style(focused, Role::Warning),
         ))];
     }
 
@@ -445,15 +459,15 @@ fn pane_strip_lines(plan: &PlanDocument) -> Vec<Line<'static>> {
     vec![
         Line::from(Span::styled(
             format!("📋 {} · {}/{}", plan.title, done, total),
-            Style::default().fg(theme::role(Role::AccentTeal)),
+            pane_chrome_style(focused, Role::AccentTeal),
         )),
         Line::from(Span::styled(
             format!("{} {}%", bar, pct),
-            Style::default().fg(theme::role(Role::Success)),
+            pane_chrome_style(focused, Role::Success),
         )),
         Line::from(Span::styled(
             running,
-            Style::default().fg(theme::role(Role::TextPrimary)),
+            pane_chrome_style(focused, Role::TextPrimary),
         )),
     ]
 }
@@ -480,6 +494,7 @@ pub(super) fn render_pane_strips(
     pane_id: PaneId,
     strip: Option<Rect>,
     queue: Option<Rect>,
+    focused: bool,
 ) {
     let Some(pane) = app.pane_manager.get(pane_id) else {
         return;
@@ -491,7 +506,7 @@ pub(super) fn render_pane_strips(
             .clone()
             .filter(|p| p.status == PlanStatus::Active)
     {
-        f.render_widget(Paragraph::new(pane_strip_lines(&plan)), area);
+        f.render_widget(Paragraph::new(pane_strip_lines(&plan, focused)), area);
     }
 
     if let Some(area) = queue
@@ -512,6 +527,8 @@ pub(super) fn render_pane_strips(
 /// A pane's stashed input, read-only: a dim box showing the tail lines that
 /// fit, so tabbing to a pane shows what was about to be sent there without
 /// implying the buffer is editable from a pane that is not focused (#2494).
+/// Its text uses the dim role rather than the live composer's text colour, so
+/// an unfocused pane's composer reads as inactive at a glance (#2577).
 fn render_pane_input_readonly(f: &mut Frame, buffer: &str, area: Rect) {
     if area.height == 0 || area.width == 0 {
         return;
@@ -524,7 +541,7 @@ fn render_pane_input_readonly(f: &mut Frame, buffer: &str, area: Rect) {
         .map(|l| {
             Line::from(Span::styled(
                 l.to_string(),
-                Style::default().fg(theme::role(Role::TextPrimary)),
+                pane_chrome_style(false, Role::TextPrimary),
             ))
         })
         .collect();
@@ -626,7 +643,7 @@ mod tests {
                 p.add_task(t);
             }
         });
-        let lines = pane_strip_lines(&plan);
+        let lines = pane_strip_lines(&plan, true);
         assert_eq!(lines.len(), 3);
         assert!(lines[0].spans[0].content.contains("📋 Landing · 3/8"));
         assert_eq!(lines[1].spans[0].content, "███░░░░░░░ 37%");
@@ -636,7 +653,7 @@ mod tests {
     #[test]
     fn split_pane_strip_seed_line_when_checklist_not_seeded() {
         let plan = plan_with(|_| {});
-        let lines = pane_strip_lines(&plan);
+        let lines = pane_strip_lines(&plan, true);
         assert_eq!(lines.len(), 1);
         assert!(
             lines[0].spans[0]
@@ -660,14 +677,14 @@ mod tests {
                 p.add_task(t);
             }
         });
-        let lines = pane_strip_lines(&running);
+        let lines = pane_strip_lines(&running, true);
         assert_eq!(lines[2].spans[0].content, "▸ task 4");
 
         running
             .tasks
             .iter_mut()
             .for_each(|t| t.status = TaskStatus::Completed);
-        let lines = pane_strip_lines(&running);
+        let lines = pane_strip_lines(&running, true);
         assert_eq!(lines[2].spans[0].content, "✓ complete");
     }
 
@@ -679,5 +696,65 @@ mod tests {
         ];
         let line = pane_queue_line(&msgs);
         assert_eq!(line.spans[0].content, "⏳ 2 queued: first");
+    }
+
+    /// An unfocused pane's composer text drops to the dim role while the live
+    /// composer keeps its text colour, and the two differ (#2577).
+    #[test]
+    fn pane_composer_dim_text_style_when_unfocused() {
+        let live = pane_chrome_style(true, Role::TextPrimary);
+        let dim = pane_chrome_style(false, Role::TextPrimary);
+        assert_eq!(live.fg, Some(theme::role(Role::TextPrimary)));
+        assert_eq!(dim.fg, Some(theme::role(Role::GrayDim)));
+        assert_ne!(live.fg, dim.fg);
+    }
+
+    /// The read-only composer box actually renders its text in the dim role,
+    /// which is what makes an unfocused pane read as inactive on screen.
+    #[test]
+    fn pane_composer_dim_renders_the_unfocused_box_dim() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut terminal = Terminal::new(TestBackend::new(20, 4)).unwrap();
+        terminal
+            .draw(|f| render_pane_input_readonly(f, "hello", rect(0, 0, 20, 4)))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell = &buffer[(1, 1)];
+        assert_eq!(cell.symbol(), "h");
+        assert_eq!(cell.fg, theme::role(Role::GrayDim));
+    }
+
+    /// The plan strip follows the same rule: full colour while focused, dim in
+    /// every line once the pane loses focus, with the text itself unchanged
+    /// (#2577).
+    #[test]
+    fn pane_composer_dim_plan_strip_when_unfocused() {
+        let plan = plan_with(|p| {
+            for i in 0..8 {
+                let mut t =
+                    PlanTask::new(i + 1, format!("task {i}"), String::new(), TaskType::Edit);
+                if i < 3 {
+                    t.status = TaskStatus::Completed;
+                }
+                p.add_task(t);
+            }
+        });
+
+        let live = pane_strip_lines(&plan, true);
+        assert_eq!(
+            live[0].spans[0].style.fg,
+            Some(theme::role(Role::AccentTeal))
+        );
+        assert_eq!(live[1].spans[0].style.fg, Some(theme::role(Role::Success)));
+
+        let dim = pane_strip_lines(&plan, false);
+        for line in &dim {
+            assert_eq!(line.spans[0].style.fg, Some(theme::role(Role::GrayDim)));
+        }
+        assert_eq!(dim[0].spans[0].content, live[0].spans[0].content);
+        assert_eq!(dim[1].spans[0].content, live[1].spans[0].content);
     }
 }

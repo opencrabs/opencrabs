@@ -407,7 +407,7 @@ fn render_split_panes(f: &mut Frame, app: &mut App, area: Rect) -> (Rect, u16) {
             let inner = panes::focused_pane_border(f, app, rect);
             let layout = panes::pane_layout(inner, rows);
             render_chat(f, app, layout.body);
-            panes::render_pane_strips(f, app, pane_id, layout.strip, layout.queue);
+            panes::render_pane_strips(f, app, pane_id, layout.strip, layout.queue, true);
             let scroll_y = render_input(f, app, layout.input);
             focused_input = Some((layout.input, scroll_y));
         } else {
