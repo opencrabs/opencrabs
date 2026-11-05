@@ -19,7 +19,7 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use crate::{Dashboard, palette};
-use opencrabs::ui_core::card::{CARD_RADIUS, concentric_radius};
+use opencrabs::ui_core::card::{SEEKER_RADIUS, seeker_concentric_radius};
 use opencrabs::ui_core::commands::{Support, support};
 use opencrabs::ui_core::palette::{PaletteKind, PaletteState, SEEKER_PAGE, roast};
 
@@ -451,7 +451,7 @@ pub(super) fn overlay(
         .flex()
         .flex_col()
         .max_h(px(480.0))
-        .rounded(px(CARD_RADIUS))
+        .rounded(px(SEEKER_RADIUS))
         .border_1()
         .border_color(rgba(0xffffff2e))
         .bg(glass)
@@ -514,7 +514,7 @@ pub(super) fn overlay(
                 .gap_2()
                 .px_2()
                 .py_1p5()
-                .rounded(px(concentric_radius(12.0)))
+                .rounded(px(seeker_concentric_radius(12.0)))
                 .cursor_pointer()
                 .when(armed, |d| d.bg(armed_bg));
             if armed && !rowv.missing {
@@ -757,6 +757,21 @@ mod tests {
         assert!(
             !pill_src.contains("gap_3"),
             "the pill row itself carries no gap either"
+        );
+    }
+
+    /// The results card uses its dedicated 32px radius, and its rows nest
+    /// on that curve instead of carrying a hardcoded radius (#2532).
+    #[test]
+    fn seeker_card_is_rounder_and_its_rows_nest() {
+        let src = include_str!("command_palette.rs");
+        assert!(
+            src.contains(".rounded(px(SEEKER_RADIUS))"),
+            "the results card is drawn on the dedicated Seeker radius"
+        );
+        assert!(
+            src.contains(".rounded(px(seeker_concentric_radius("),
+            "rows nest on the Seeker curve instead of a hardcoded number"
         );
     }
 
