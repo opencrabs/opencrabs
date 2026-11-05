@@ -651,10 +651,11 @@ struct Dashboard {
     models_query: String,
     /// The row the arrows stand on.
     models_index: usize,
-    /// The current provider's live catalogue request. Static rows stay
-    /// visible until a successful response replaces that provider's section.
-    models_fetch: Option<std::sync::mpsc::Receiver<model_fetch::FetchOutcome>>,
-    models_provider: Option<usize>,
+    /// Shared request lifecycle and pending providers. Static rows are only a
+    /// fallback; every configured provider gets a live discovery request.
+    models_fetch: Option<std::sync::mpsc::Receiver<(u64, model_fetch::FetchOutcome)>>,
+    models_fetch_lifecycle: opencrabs::ui_core::model_selector::FetchLifecycle,
+    models_pending: Vec<usize>,
     models_fetching: bool,
     models_fetch_error: Option<String>,
     /// The skills screen's rows, read from the terminal's own loader when the
@@ -1919,9 +1920,17 @@ impl Dashboard {
             .iter()
             .position(|row| row.current)
             .unwrap_or(0);
-        self.models_provider = current
-            .as_ref()
-            .and_then(|(provider, _)| model_fetch::FetchRequest::provider_index(provider));
+        let mut selector = opencrabs::ui_core::model_selector::ProviderSelectorState::default();
+        selector.load_custom_names();
+        self.models_pending = selector.refresh_order(
+            current
+                .as_ref()
+                .map(|(provider, _)| provider.as_str())
+                .unwrap_or_default(),
+        );
+        self.models_fetch = None;
+        self.models_fetch_lifecycle.invalidate();
+        self.models_fetch_error = None;
         self.screen = Screen::Models;
         self.rail_actions = None;
         self.sessions.rail_menu = None;
@@ -1930,21 +1939,24 @@ impl Dashboard {
         cx.notify();
     }
 
-    /// Fetch only the active provider on `/models`; the other provider
-    /// sections remain the instant static fallback. Opening the screen again
-    /// invalidates the previous request.
+    /// Refresh every provider with a saved key, not only the active one.
+    /// Requests run one at a time; generation and provider identity are both
+    /// checked before a response can alter the visible catalogue.
     fn start_models_fetch(&mut self) {
-        self.models_fetch = None;
+        if self.models_fetch.is_some() {
+            return;
+        }
+        self.models_fetch_lifecycle.invalidate();
+        while let Some(index) = self.models_pending.first().copied() {
+            if let Some(request) = model_fetch::FetchRequest::for_provider(index) {
+                let generation = self.models_fetch_lifecycle.begin(&request);
+                self.models_fetch = Some(model_fetch::spawn(generation, request));
+                self.models_fetching = true;
+                return;
+            }
+            self.models_pending.remove(0);
+        }
         self.models_fetching = false;
-        self.models_fetch_error = None;
-        let Some(index) = self.models_provider else {
-            return;
-        };
-        let Some(request) = model_fetch::FetchRequest::for_provider(index) else {
-            return;
-        };
-        self.models_fetch = Some(model_fetch::spawn(request));
-        self.models_fetching = true;
     }
 
     /// Drain both model-fetch consumers. True means a visible state changed
@@ -1960,37 +1972,52 @@ impl Dashboard {
             .models_fetch
             .as_ref()
             .and_then(|receiver| receiver.try_recv().ok());
-        let Some(outcome) = outcome else {
+        let Some((generation, outcome)) = outcome else {
             return changed;
         };
         self.models_fetch = None;
-        self.models_fetching = false;
-        if self.screen != Screen::Models || self.models_provider != Some(outcome.provider_index) {
-            return changed;
+        self.models_pending
+            .retain(|index| *index != outcome.provider_index);
+        let provider_index = outcome.provider_index;
+        let Some(outcome) = self
+            .models_fetch_lifecycle
+            .finish(generation, provider_index, outcome)
+        else {
+            self.models_fetching = false;
+            return true;
+        };
+        if self.screen == Screen::Models {
+            if let Some(error) = outcome.error {
+                let error = format!("{}: {error}", outcome.provider_name);
+                self.models_fetch_error = Some(match self.models_fetch_error.take() {
+                    Some(previous) => format!("{previous}; {error}"),
+                    None => error,
+                });
+            }
+            if !outcome.models.is_empty() {
+                let current = agent_bridge::bridge().map(|bridge| {
+                    (
+                        bridge.service.provider_name(),
+                        bridge.service.provider_model(),
+                    )
+                });
+                models::replace_provider(
+                    &mut self.models_rows,
+                    &outcome.provider_id,
+                    &outcome.provider_name,
+                    &outcome.models,
+                    current
+                        .as_ref()
+                        .map(|(provider, model)| (provider.as_str(), model.as_str())),
+                );
+                let visible = models::filtered_rows(&self.models_rows, &self.models_query);
+                self.models_index = visible
+                    .iter()
+                    .position(|row| row.current)
+                    .unwrap_or_else(|| self.models_index.min(visible.len().saturating_sub(1)));
+            }
         }
-        self.models_fetch_error = outcome.error;
-        if !outcome.models.is_empty() {
-            let current = agent_bridge::bridge().map(|bridge| {
-                (
-                    bridge.service.provider_name(),
-                    bridge.service.provider_model(),
-                )
-            });
-            models::replace_provider(
-                &mut self.models_rows,
-                &outcome.provider_id,
-                &outcome.provider_name,
-                &outcome.models,
-                current
-                    .as_ref()
-                    .map(|(provider, model)| (provider.as_str(), model.as_str())),
-            );
-            let visible = models::filtered_rows(&self.models_rows, &self.models_query);
-            self.models_index = visible
-                .iter()
-                .position(|row| row.current)
-                .unwrap_or_else(|| self.models_index.min(visible.len().saturating_sub(1)));
-        }
+        self.start_models_fetch();
         true
     }
 
@@ -4954,6 +4981,13 @@ impl Dashboard {
                     if let Some(row) = visible.get(self.models_index.min(last)) {
                         let pair = row.pair();
                         self.switch_model(pair, cx);
+                    } else {
+                        let provider = agent_bridge::bridge()
+                            .map(|bridge| bridge.service.provider_name())
+                            .unwrap_or_default();
+                        if let Some(pair) = models::manual_pair(&self.models_query, &provider) {
+                            self.switch_model(pair, cx);
+                        }
                     }
                 }
                 "backspace" => {
@@ -5912,7 +5946,7 @@ impl Render for Dashboard {
                                 shown.text_faint,
                             ));
                         }
-                        for (index, info) in provider_rows {
+                        for (index, provider_name) in provider_rows {
                             let here = index == selected;
                             let mut row = div()
                                 .id(SharedString::from(format!("onboard-provider-{index}")))
@@ -5929,7 +5963,7 @@ impl Render for Dashboard {
                                     if here { shown.amber } else { shown.text_muted },
                                 ))
                                 .child(text(
-                                    info.name,
+                                    provider_name,
                                     Size::Sm,
                                     if here { shown.text_strong } else { shown.text },
                                 ));
@@ -7123,11 +7157,31 @@ impl Render for Dashboard {
                     }
                 }
                 if matched == 0 {
-                    list = list.child(div().px_3().py_2().child(text(
-                        format!("no models match \"{}\"", self.models_query),
-                        Size::Sm,
-                        shown.text_muted,
-                    )));
+                    let active = agent_bridge::bridge()
+                        .map(|bridge| bridge.service.provider_name())
+                        .unwrap_or_default();
+                    if let Some(pair) = models::manual_pair(&self.models_query, &active) {
+                        list = list.child(
+                            div()
+                                .id("models-use-custom-id")
+                                .px_3()
+                                .py_2()
+                                .child(text(
+                                    format!("Use custom model: {pair}"),
+                                    Size::Sm,
+                                    shown.amber,
+                                ))
+                                .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                    this.switch_model(pair.clone(), cx);
+                                })),
+                        );
+                    } else {
+                        list = list.child(div().px_3().py_2().child(text(
+                            format!("no models match \"{}\"", self.models_query),
+                            Size::Sm,
+                            shown.text_muted,
+                        )));
+                    }
                 }
                 if below > 0 {
                     list = list.child(div().px_3().child(text(
@@ -7185,14 +7239,18 @@ impl Render for Dashboard {
                                         shown.text_muted
                                     }))
                                     .child(SharedString::from(if self.models_fetching {
-                                        "fetching the current provider's live models".to_string()
+                                        format!(
+                                            "fetching live models · {} provider{} remaining",
+                                            self.models_pending.len(),
+                                            if self.models_pending.len() == 1 { "" } else { "s" }
+                                        )
                                     } else {
                                         self.models_fetch_error.clone().unwrap_or_default()
                                     })),
                             ),
                     )
                     .child(div().text_xs().text_color(rgb(shown.text_muted)).child(
-                        "type \u{b7} filter \u{b7} enter \u{b7} switch \u{b7} esc \u{b7} back",
+                        "type \u{b7} filter or enter a custom id \u{b7} enter \u{b7} switch \u{b7} esc \u{b7} back",
                     ));
                 (body.into_any_element(), footer.into_any_element())
             }
@@ -8351,7 +8409,9 @@ fn main() {
                         models_query: String::new(),
                         models_index: 0,
                         models_fetch: None,
-                        models_provider: None,
+                        models_fetch_lifecycle:
+                            opencrabs::ui_core::model_selector::FetchLifecycle::default(),
+                        models_pending: Vec::new(),
                         models_fetching: false,
                         models_fetch_error: None,
                         skills_all: Vec::new(),

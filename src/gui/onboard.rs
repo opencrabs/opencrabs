@@ -6,10 +6,12 @@
 //! the two cannot drift. This module only adds what a window needs on top:
 //! which field owns the keyboard, and which rows the rail and the lists show.
 
+#[cfg(test)]
+use crate::model_fetch::FetchRequest;
 use crate::model_fetch::{self, FetchOutcome};
 use opencrabs::tui::onboarding::{
-    CHANNEL_NAMES, EXISTING_KEY_SENTINEL, HealthStatus, OnboardingWizard, PROVIDERS, ProviderInfo,
-    SttProvider, TtsProvider,
+    CHANNEL_NAMES, EXISTING_KEY_SENTINEL, HealthStatus, OnboardingWizard, PROVIDERS, SttProvider,
+    TtsProvider,
 };
 pub use opencrabs::tui::onboarding::{OnboardingStep, WizardMode};
 
@@ -122,7 +124,7 @@ pub struct Onboard {
     /// every step change, the same way the terminal resets `focused_field`.
     pub field: usize,
     /// The live provider-model request, drained by the window's poll tick.
-    model_fetch: Option<std::sync::mpsc::Receiver<FetchOutcome>>,
+    model_fetch: Option<std::sync::mpsc::Receiver<(u64, FetchOutcome)>>,
     model_fetch_error: Option<String>,
 }
 
@@ -241,24 +243,39 @@ impl Onboard {
     }
 
     /// Every provider the terminal offers, in the terminal's own order.
-    pub fn providers(&self) -> Vec<(usize, &'static ProviderInfo)> {
+    /// Saved custom instances have runtime names rather than static metadata.
+    pub fn providers(&self) -> Vec<(usize, String)> {
         self.wizard
             .ps
             .provider_display_order()
             .into_iter()
-            .filter_map(|index| PROVIDERS.get(index).map(|info| (index, info)))
+            .filter_map(|index| {
+                if index >= opencrabs::ui_core::model_selector::CUSTOM_INSTANCES_START {
+                    self.wizard
+                        .ps
+                        .custom_names
+                        .get(index - opencrabs::ui_core::model_selector::CUSTOM_INSTANCES_START)
+                        .cloned()
+                        .map(|name| (index, name))
+                } else {
+                    PROVIDERS
+                        .get(index)
+                        .map(|info| (index, info.name.to_string()))
+                }
+            })
             .collect()
     }
 
-    /// Select a provider by its index in `PROVIDERS`, and re-probe the key and
+    /// Select a provider by its shared selector index, and re-probe the key and
     /// the config models the way the terminal does when the row is walked.
     pub fn select_provider(&mut self, index: usize) {
-        if index >= PROVIDERS.len() {
+        if !self.wizard.ps.provider_display_order().contains(&index) {
             return;
         }
         // Dropping the receiver invalidates an older provider's request. Its
         // worker may finish, but there is no route back into this wizard.
         self.model_fetch = None;
+        self.wizard.model_fetch_lifecycle.invalidate();
         self.model_fetch_error = None;
         self.wizard.ps.models_fetching = false;
         self.wizard.ps.selected_provider = index;
@@ -287,8 +304,9 @@ impl Onboard {
         let Some(request) = model_fetch::FetchRequest::from_selector(&self.wizard.ps) else {
             return false;
         };
+        let generation = self.wizard.model_fetch_lifecycle.begin(&request);
         self.model_fetch_error = None;
-        self.model_fetch = Some(model_fetch::spawn(request));
+        self.model_fetch = Some(model_fetch::spawn(generation, request));
         self.wizard.ps.models_fetching = true;
         true
     }
@@ -300,14 +318,25 @@ impl Onboard {
             .model_fetch
             .as_ref()
             .and_then(|receiver| receiver.try_recv().ok());
-        let Some(outcome) = outcome else {
+        let Some((generation, outcome)) = outcome else {
             return false;
         };
         self.model_fetch = None;
-        self.wizard.ps.models_fetching = false;
-        if outcome.provider_index != self.wizard.ps.selected_provider {
+        let provider_index = outcome.provider_index;
+        if provider_index != self.wizard.ps.selected_provider {
+            self.wizard.model_fetch_lifecycle.invalidate();
+            self.wizard.ps.models_fetching = false;
             return true;
         }
+        let Some(outcome) =
+            self.wizard
+                .model_fetch_lifecycle
+                .finish(generation, provider_index, outcome)
+        else {
+            self.wizard.ps.models_fetching = false;
+            return true;
+        };
+        self.wizard.ps.models_fetching = false;
         self.model_fetch_error = outcome.error;
         if !outcome.models.is_empty() {
             self.wizard.ps.models = outcome.models;
@@ -361,10 +390,7 @@ impl Onboard {
     /// way (`visible_window`), so a short window keeps the fields under it
     /// reachable instead of pushing them off screen, and the arrows can still
     /// walk every provider.
-    pub fn provider_rows(
-        &self,
-        list_rows: usize,
-    ) -> (Vec<(usize, &'static ProviderInfo)>, usize, usize) {
+    pub fn provider_rows(&self, list_rows: usize) -> (Vec<(usize, String)>, usize, usize) {
         let all = self.providers();
         let total = all.len();
         let selected = all
@@ -1833,6 +1859,25 @@ mod tests {
     }
 
     #[test]
+    fn saved_custom_providers_are_visible_and_selectable() {
+        let dir = home();
+        with_home_override(dir.path().to_path_buf(), || {
+            let mut onboard = Onboard::open_at(OnboardingStep::ProviderAuth);
+            onboard.wizard.ps.custom_names = vec!["local-test".into()];
+            let index = opencrabs::ui_core::model_selector::CUSTOM_INSTANCES_START;
+            assert!(
+                onboard
+                    .providers()
+                    .iter()
+                    .any(|(candidate, name)| *candidate == index && name == "local-test")
+            );
+            onboard.select_provider(index);
+            assert_eq!(onboard.wizard.ps.selected_provider, index);
+            assert!(onboard.wizard.ps.is_custom());
+        });
+    }
+
+    #[test]
     fn fetch_models_result_applies_and_clears_loading() {
         let dir = home();
         with_home_override(dir.path().to_path_buf(), || {
@@ -1843,16 +1888,23 @@ mod tests {
                 .expect("anthropic provider");
             onboard.select_provider(provider);
             let (sender, receiver) = std::sync::mpsc::channel();
+            let generation = onboard.wizard.model_fetch_lifecycle.begin(&FetchRequest {
+                provider_index: provider,
+                ..Default::default()
+            });
             onboard.model_fetch = Some(receiver);
             onboard.wizard.ps.models_fetching = true;
             sender
-                .send(FetchOutcome {
-                    provider_index: provider,
-                    provider_id: "anthropic".into(),
-                    provider_name: "Anthropic".into(),
-                    models: vec!["live-model".into()],
-                    error: None,
-                })
+                .send((
+                    generation,
+                    FetchOutcome {
+                        provider_index: provider,
+                        provider_id: "anthropic".into(),
+                        provider_name: "Anthropic".into(),
+                        models: vec!["live-model".into()],
+                        error: None,
+                    },
+                ))
                 .expect("test result");
             assert!(onboard.poll_model_fetch());
             assert!(!onboard.is_fetching());
@@ -1870,20 +1922,38 @@ mod tests {
             onboard.select_provider(1);
             let current = onboard.models();
             let (sender, receiver) = std::sync::mpsc::channel();
+            let generation = onboard.wizard.model_fetch_lifecycle.begin(&FetchRequest {
+                provider_index: 1,
+                ..Default::default()
+            });
             onboard.model_fetch = Some(receiver);
             onboard.wizard.ps.models_fetching = true;
             sender
-                .send(FetchOutcome {
-                    provider_index: 0,
-                    provider_id: "stale".into(),
-                    provider_name: "Stale".into(),
-                    models: vec!["must-not-appear".into()],
-                    error: None,
-                })
+                .send((
+                    generation,
+                    FetchOutcome {
+                        provider_index: 0,
+                        provider_id: "stale".into(),
+                        provider_name: "Stale".into(),
+                        models: vec!["must-not-appear".into()],
+                        error: None,
+                    },
+                ))
                 .expect("test result");
             assert!(onboard.poll_model_fetch());
             assert!(!onboard.is_fetching());
             assert_eq!(onboard.models(), current);
+        });
+    }
+
+    #[test]
+    fn onboard_model_filter_keeps_arbitrary_model_ids() {
+        let dir = home();
+        with_home_override(dir.path().to_path_buf(), || {
+            let mut onboard = Onboard::open_at(OnboardingStep::ProviderAuth);
+            onboard.wizard.ps.models = vec!["existing-model".into()];
+            onboard.wizard.ps.model_filter = "custom-future-model".into();
+            assert_eq!(onboard.model(), "custom-future-model");
         });
     }
 

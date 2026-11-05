@@ -3,15 +3,16 @@
 //! The catalogue is the one the terminal's own picker reads
 //! ([`load_default_models`], sourced from the embedded `config.toml.example`),
 //! so the window cannot offer a model the terminal has never heard of, or miss
-//! one the terminal ships. `/models` opens on that catalogue immediately and
-//! replaces the current provider's section after its live fetch succeeds.
+//! one the terminal ships. `/models` opens on the saved fallback immediately
+//! and replaces each provider's section after its live fetch succeeds.
 //!
 //! The row list and panel model are pure, which makes the picker testable
 //! without a window.
 
-use opencrabs::tui::onboarding::PROVIDERS;
 use opencrabs::tui::onboarding_render::visible_window;
-use opencrabs::tui::provider_selector::load_default_models;
+use opencrabs::ui_core::model_selector::{
+    CUSTOM_PROVIDER_IDX, ProviderSelectorState, sort_newest_first,
+};
 
 /// One selectable pair.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -127,26 +128,68 @@ pub fn panel(rows: &[Row], query: &str, selected: usize, max_models: usize) -> P
 /// Every model in the shared catalogue, in provider order, with the live pair
 /// marked.
 ///
-/// The dynamic "custom" entry carries an empty id and has no catalogue, so it is
-/// skipped: a switch has nothing to name there until the user configures it.
+/// Saved custom instances use their runtime name and models. Only the empty
+/// "new custom" sentinel is skipped until the user configures it.
 pub fn rows(current: Option<(&str, &str)>) -> Vec<Row> {
+    let mut selector = ProviderSelectorState::default();
+    selector.load_custom_names();
     let mut out = Vec::new();
-    for info in PROVIDERS.iter().filter(|info| !info.id.is_empty()) {
-        for model in load_default_models(info.id) {
+    for index in selector.provider_display_order() {
+        if index == CUSTOM_PROVIDER_IDX {
+            continue;
+        }
+        selector.selected_provider = index;
+        selector.detect_existing_key();
+        selector.reload_config_models();
+        let (provider, provider_name) = if index > CUSTOM_PROVIDER_IDX {
+            (selector.custom_name.clone(), selector.custom_name.clone())
+        } else {
+            (
+                selector.current_provider().id.to_string(),
+                selector.current_provider().name.to_string(),
+            )
+        };
+        let models: Vec<String> = selector
+            .filtered_model_names()
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        for model in models {
             out.push(Row {
-                provider: info.id.to_string(),
-                provider_name: info.name.to_string(),
-                current: current.is_some_and(|(p, m)| p == info.id && m == model),
+                current: current.is_some_and(|(active, active_model)| {
+                    active == provider && active_model == model
+                }),
                 model,
+                provider: provider.clone(),
+                provider_name: provider_name.clone(),
             });
         }
     }
     out
 }
 
-/// Replace one provider's static section with a successful live fetch. Other
-/// providers keep their rows and order; the selected highlight is resolved
-/// again by the caller because indices may move.
+/// Resolve a typed id which is absent from every fetched catalogue. A fully
+/// qualified pair keeps its provider; a bare id uses the active provider.
+pub fn manual_pair(query: &str, active_provider: &str) -> Option<String> {
+    let query = query.trim();
+    if query.is_empty() || query.chars().any(char::is_whitespace) {
+        return None;
+    }
+    if query.starts_with('/') || query.ends_with('/') {
+        return None;
+    }
+    if query.contains('/') {
+        Some(query.to_string())
+    } else if active_provider.is_empty() {
+        None
+    } else {
+        Some(format!("{active_provider}/{query}"))
+    }
+}
+
+/// Replace one provider's fallback section with a successful live fetch. Other
+/// providers keep their rows and order until their own responses arrive; the
+/// selected highlight is resolved again because indices may move.
 pub fn replace_provider(
     rows: &mut Vec<Row>,
     provider_id: &str,
@@ -162,12 +205,14 @@ pub fn replace_provider(
         .position(|row| row.provider == provider_id)
         .unwrap_or(rows.len());
     rows.retain(|row| row.provider != provider_id);
-    let live = fetched.iter().map(|model| Row {
+    let mut models: Vec<&str> = fetched.iter().map(String::as_str).collect();
+    sort_newest_first(&mut models);
+    let live = models.iter().map(|model| Row {
         provider: provider_id.to_string(),
         provider_name: provider_name.to_string(),
         current: current
-            .is_some_and(|(provider, active)| provider == provider_id && active == model),
-        model: model.clone(),
+            .is_some_and(|(provider, active)| provider == provider_id && active == *model),
+        model: (*model).to_string(),
     });
     rows.splice(insert_at..insert_at, live);
 }
@@ -280,6 +325,21 @@ mod tests {
     }
 
     #[test]
+    fn unmatched_model_ids_can_be_selected_without_a_catalogue_row() {
+        assert_eq!(
+            manual_pair("new-model-2027", "openai").as_deref(),
+            Some("openai/new-model-2027")
+        );
+        assert_eq!(
+            manual_pair("custom/tenant/model", "openai").as_deref(),
+            Some("custom/tenant/model")
+        );
+        assert_eq!(manual_pair("   ", "openai"), None);
+        assert_eq!(manual_pair("has spaces", "openai"), None);
+        assert_eq!(manual_pair("new-model", ""), None);
+    }
+
+    #[test]
     fn the_catalogue_is_not_empty() {
         // A picker with no rows is the failure this test exists for.
         let rows = rows(None);
@@ -323,10 +383,25 @@ mod tests {
             Some(("one", "live-new")),
         );
         assert_eq!(rows.len(), 3);
-        assert_eq!(rows[0].model, "live-new");
-        assert!(rows[0].current);
-        assert_eq!(rows[1].model, "live-old");
+        assert_eq!(rows[0].model, "live-old");
+        assert!(!rows[0].current);
+        assert_eq!(rows[1].model, "live-new");
+        assert!(rows[1].current);
         assert_eq!(rows[2].pair(), "two/untouched");
+    }
+
+    #[test]
+    fn live_rows_use_shared_numeric_version_order() {
+        let mut rows = Vec::new();
+        replace_provider(
+            &mut rows,
+            "test",
+            "Test",
+            &["glm-5.2".into(), "glm-5.10".into(), "glm-5-turbo".into()],
+            None,
+        );
+        let models: Vec<&str> = rows.iter().map(|row| row.model.as_str()).collect();
+        assert_eq!(models, ["glm-5.10", "glm-5.2", "glm-5-turbo"]);
     }
 
     #[test]
