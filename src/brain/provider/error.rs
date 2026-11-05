@@ -88,6 +88,10 @@ pub enum ProviderError {
     #[error("Repetition detected: {0}")]
     AnnouncementLoop(String),
 
+    /// Repetitive or near-identical tool-call loop detected (#1397, #2465).
+    #[error("Tool loop detected: {0}")]
+    ToolLoop(String),
+
     /// Internal error
     #[error("Internal error: {0}")]
     Internal(String),

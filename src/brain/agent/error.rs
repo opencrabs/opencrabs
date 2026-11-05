@@ -95,19 +95,19 @@ pub fn format_user_error(err: &AgentError) -> String {
                 switch to a different model via `/models`."
             .to_string();
     }
-    if raw.contains("Repetition detected") {
+    if raw.contains("Repetition detected") || raw.contains("Tool loop detected") {
         // Name what actually ended the turn (#1023). This is OUR loop
         // detector, not the provider: the model kept announcing an action
-        // without emitting the call, and the turn was stopped rather than
-        // left to spin. Blaming the provider sent users looking for
-        // provider-side causes, and `/models` "worked" often enough to
-        // teach the wrong mental model -- a different model usually DOES
-        // emit the call, which is why the suggestion stays, now with the
-        // real reason attached.
+        // without emitting the call, or repeated near-identical tool calls,
+        // and the turn was stopped rather than left to spin (#2465). Blaming
+        // the provider sent users looking for provider-side causes, and
+        // `/models` "worked" often enough to teach the wrong mental model --
+        // a different model usually DOES emit the call, which is why the
+        // suggestion stays, now with the real reason attached.
         //
-        // When diagnostic context is embedded in the AnnouncementLoop
-        // message (model name, retry/swap/roll counts), surface it so the
-        // user sees how many recovery attempts were exhausted before the
+        // When diagnostic context is embedded in the AnnouncementLoop or
+        // ToolLoop message (model name, retry/swap/roll counts), surface it so
+        // the user sees how many recovery attempts were exhausted before the
         // turn was killed. Reported by @loonix.
         let diag = extract_loop_diagnostics(&raw);
         let counts = match &diag {
@@ -118,9 +118,13 @@ pub fn format_user_error(err: &AgentError) -> String {
             ),
             None => String::new(),
         };
+        let what = if raw.contains("Tool loop detected") {
+            "near-identical tool calls recurred"
+        } else {
+            "I kept announcing the same action without actually running it"
+        };
         return format!(
-            "I stopped the turn: I kept announcing the same action \
-             without actually running it, and the loop detector ended \
+            "I stopped the turn: {what}, and the loop detector ended \
              it rather than let it spin. This is usually the model \
              struggling to emit a tool call it has described -- \
              rephrasing the request, or switching models via `/models`, \

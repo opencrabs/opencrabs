@@ -149,6 +149,21 @@ fn repetition_loop_surfaces_diagnostic_counts_when_present() {
 }
 
 #[test]
+fn tool_loop_produces_loop_message_with_models_remedy() {
+    let err = AgentError::Provider(ProviderError::ToolLoop(
+        "near-identical tool-call loop: 'bash' recurred 4x".to_string(),
+    ));
+    let msg = format_user_error(&err);
+    assert!(
+        msg.contains("loop") || msg.contains("tool"),
+        "must describe the tool loop: {msg}"
+    );
+    assert!(
+        msg.contains("/models"),
+        "must still suggest /models: {msg}"
+    );
+}
+
 fn repetition_loop_works_without_diagnostic_suffix() {
     let err = AgentError::Provider(ProviderError::AnnouncementLoop(
         "near-identical announcements repeated within the turn".to_string(),
