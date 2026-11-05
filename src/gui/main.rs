@@ -665,6 +665,9 @@ struct Dashboard {
     models_query: String,
     /// The row the arrows stand on.
     models_index: usize,
+    /// The provider the models screen's list marks. A click sets it and moves
+    /// the model cursor to that provider's first visible model.
+    models_provider: Option<String>,
     /// Shared request lifecycle and pending providers. Static rows are only a
     /// fallback; every configured provider gets a live discovery request.
     models_fetch: Option<std::sync::mpsc::Receiver<(u64, model_fetch::FetchOutcome)>>,
@@ -2008,6 +2011,13 @@ impl Dashboard {
         }
         self.models_query.clear();
         self.screen = Screen::Models;
+        // The list opens on the provider answering right now, so the marked
+        // row and the picker's cursor agree from the first frame.
+        self.models_provider = self
+            .models_rows
+            .iter()
+            .find(|row| row.current)
+            .map(|row| row.provider.clone());
         self.rail_actions = None;
         self.sessions.rail_menu = None;
         self.start_models_fetch();
@@ -4763,8 +4773,10 @@ impl Dashboard {
             )
             && self.copy_drag.has_selection()
         {
-            if let Some(item) = self.copy_drag.clipboard_item() {
-                cx.write_to_clipboard(item);
+            // The chord takes the release path: copy, drop the highlight, and
+            // say so in the composer exactly like a mouse release (#2587).
+            if self.copy_drag.finish_copy(cx) {
+                self.copy_drag.announce_copied(cx);
             }
             cx.notify();
             return;
@@ -5895,6 +5907,35 @@ impl Render for Dashboard {
             self.screen == Screen::Onboard,
         );
 
+        // The chat's share of the pane area comes from the tree: a leaf under
+        // stacked splits spans the full width, and a leaf beside a sibling
+        // takes its share of it (#2472, #2473). A row is still never planned
+        // wider than its box. The measure is read here rather than inside the
+        // chat arm because the conversation and the chrome under it have to
+        // agree on one width (#2588).
+        let chat_share = self
+            .panes
+            .as_ref()
+            .zip(self.transcript.session)
+            .and_then(|(tree, id)| tree.leaf_width_share(id))
+            .unwrap_or(1.0);
+        let primary_width = if chat_share < 1.0 {
+            split_pane_width(pane_width, false, chat_share)
+        } else {
+            pane_width
+        };
+        // A single pane draws the conversation at a readable measure and
+        // centres it; a split window is exempt and keeps every pane at the span
+        // the tree hands it (#2586).
+        let split_window = self
+            .panes
+            .as_ref()
+            .is_some_and(|tree| tree.leaves().len() >= 2);
+        let chat_measure_px = chat_measure(primary_width, split_window);
+        // Only a pane wider than the measure is wrapped, and a split pane is
+        // never wrapped: its measure is already its own width.
+        let centred_chat = chat_measure_px < primary_width;
+
         let (middle, footer): (AnyElement, AnyElement) = match self.screen {
             Screen::Chat => {
                 // The chat is the primary pane, and a split draws its session
@@ -5905,23 +5946,13 @@ impl Render for Dashboard {
                 // leaf under stacked splits spans the full width, and a leaf
                 // beside a sibling takes its share of it (#2472, #2473). A
                 // row is still never planned wider than its box.
-                let chat_share = self
-                    .panes
-                    .as_ref()
-                    .zip(self.transcript.session)
-                    .and_then(|(tree, id)| tree.leaf_width_share(id))
-                    .unwrap_or(1.0);
-                let primary_width = if chat_share < 1.0 {
-                    split_pane_width(pane_width, false, chat_share)
-                } else {
-                    pane_width
-                };
+                let measure = chat_measure_px;
                 let primary = transcript::view(
                     &self.transcript,
                     &self.transcript_scroll,
                     &self.live,
                     self.busy,
-                    primary_width,
+                    measure,
                     fold_handlers,
                     transcript::ViewHooks {
                         attachments: attachment_handlers,
@@ -5932,6 +5963,11 @@ impl Render for Dashboard {
                     },
                 )
                 .into_any_element();
+                let primary = if measure < primary_width {
+                    chat_measure_column(primary, measure)
+                } else {
+                    primary
+                };
                 // The panes come from the tree (#2472): one leaf is the
                 // window as it was, and each split adds a divider and the
                 // panes its children hold.
@@ -7371,6 +7407,115 @@ impl Render for Dashboard {
                 }
             },
             Screen::Models => {
+                let shown = palette::current();
+                // `/models` is the Brain Fuel step in the terminal
+                // (`tui::onboarding::deep_link` maps the command to
+                // `ProviderAuth`), so the window paints the same two lists in
+                // the same order: the providers, then the models of the
+                // provider the list marks. The wizard's rail, step counter and
+                // key fields describe a run, not a switch, so they stay out
+                // (#2582).
+                let visible = models::filtered_rows(&self.models_rows, &self.models_query);
+                let providers = models::providers(&visible);
+                let selected = self
+                    .models_provider
+                    .as_deref()
+                    .and_then(|id| providers.iter().position(|row| row.provider == id))
+                    .unwrap_or(0);
+                let (start, end) = opencrabs::tui::onboarding_render::visible_window(
+                    providers.len(),
+                    selected,
+                    models::PROVIDERS_VISIBLE,
+                );
+                let mut provider_list = div().flex().flex_col().gap_1().w_full().min_w_0();
+                if start > 0 {
+                    provider_list = provider_list.child(text(
+                        format!("\u{2191} {start} more"),
+                        Size::Xs,
+                        shown.text_faint,
+                    ));
+                }
+                for (offset, row) in providers[start..end].iter().enumerate() {
+                    let here = start + offset == selected;
+                    let id = row.provider.clone();
+                    // The cursor follows the click, so Enter and the arrows
+                    // keep working from the provider the hand just chose.
+                    let first = row.first;
+                    let count = row.count;
+                    let mut entry = div()
+                        .id(SharedString::from(format!("models-provider-{id}")))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .px_3()
+                        .py_2()
+                        .rounded(px(6.0))
+                        .child(text(
+                            if here { "\u{25cf}" } else { " " },
+                            Size::Sm,
+                            if here { shown.amber } else { shown.text_muted },
+                        ))
+                        .child(
+                            text(
+                                row.name.clone(),
+                                Size::Sm,
+                                if here { shown.text_strong } else { shown.text },
+                            )
+                            .flex_1()
+                            .min_w_0()
+                            .truncate(),
+                        )
+                        .child(text(
+                            format!("{count} model{}", if count == 1 { "" } else { "s" }),
+                            Size::Xs,
+                            shown.text_muted,
+                        ));
+                    if here {
+                        entry = entry.bg(rgb(shown.panel_hi));
+                    }
+                    provider_list = provider_list.child(entry.on_click(cx.listener(
+                        move |this, _ev, _window, cx| {
+                            this.models_provider = Some(id.clone());
+                            this.models_index = first;
+                            cx.notify();
+                        },
+                    )));
+                }
+                if end < providers.len() {
+                    provider_list = provider_list.child(text(
+                        format!("\u{2193} {} more below", providers.len() - end),
+                        Size::Xs,
+                        shown.text_faint,
+                    ));
+                }
+                // The pair this screen would answer with, the same line the
+                // step prints under its title. Read once: the picker needs the
+                // provider for an unknown id, and the header needs both.
+                let live = agent_bridge::bridge().map(|bridge| {
+                    (
+                        bridge.service.provider_name(),
+                        bridge.service.provider_model(),
+                    )
+                });
+                let pair = live
+                    .as_ref()
+                    .map(|(provider, model)| format!("{provider} \u{b7} {model}"))
+                    .unwrap_or_default();
+                let active_provider = live
+                    .as_ref()
+                    .map(|(provider, _)| provider.as_str())
+                    .unwrap_or_default();
+                let header = div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(text(
+                        onboard::OnboardingStep::ProviderAuth.title(),
+                        Size::Xl,
+                        shown.text_title,
+                    ))
+                    .child(text(pair, Size::Xs, shown.text_faint));
                 let rendered = model_picker::render(
                     cx,
                     model_picker::ModelPickerView {
@@ -7380,7 +7525,7 @@ impl Render for Dashboard {
                         fetching: self.models_fetching,
                         pending: self.models_pending.len(),
                         error: self.models_fetch_error.as_deref(),
-                        active_provider: "",
+                        active_provider,
                         onboarding: false,
                         search_focused: true,
                         max_models: 18,
@@ -7388,16 +7533,32 @@ impl Render for Dashboard {
                         provider_label_width: picker_layout.provider_label_width,
                     },
                 );
-                let shown = palette::current();
                 let footer = rendered.footer.child(
                     div()
                         .text_xs()
                         .text_color(rgb(shown.text_muted))
                         .min_w_0()
                         .whitespace_normal()
-                        .child("type · filter or enter a custom id · enter · switch · esc · back"),
+                        .child("type \u{b7} filter or enter a custom id \u{b7} enter \u{b7} switch \u{b7} esc \u{b7} back"),
                 );
-                (rendered.body.into_any_element(), footer.into_any_element())
+                let body = div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .child(header)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(text("provider", Size::Xs, shown.text_faint))
+                            .child(div().id("models-providers").w_full().child(provider_list)),
+                    )
+                    .child(rendered.body);
+                (body.into_any_element(), footer.into_any_element())
             }
             Screen::Skills => {
                 // The same list `/skills` opens in the terminal, from the same
@@ -7799,7 +7960,11 @@ impl Render for Dashboard {
             }
         }
         if let Some(bar) = topic_top {
-            right = right.child(bar);
+            // The topic bar is a row of the chat's own stack, so it takes the
+            // same measure as the text under it (#2590). It is drawn above the
+            // screen match, which is why the wrapper is a named function and
+            // not a closure: the same two values have to reach it here.
+            right = right.child(central(bar, centred_chat, chat_measure_px));
         }
         right = right.child(middle);
         right = match self.screen {
@@ -7812,38 +7977,66 @@ impl Render for Dashboard {
                 // In a split every pane carries its own plan, queue and
                 // composer (#2530), so the window-level copies stand down:
                 // drawing both would give the chat two composers. An unsplit
-                // window keeps exactly the layout it has always had.
+                // window keeps exactly the layout it has always had, measure
+                // wrapper included (#2594).
                 if !self.window_is_split() {
                     if let Some(plan_view) = self.plan.view() {
-                        col = col.child(plan_view);
+                        col = col.child(central(
+                            plan_view.into_any_element(),
+                            centred_chat,
+                            chat_measure_px,
+                        ));
                     }
                     let waiting = self.queued_for_strip();
                     if !waiting.is_empty() {
-                        col = col.child(queue_strip(&waiting));
+                        col = col.child(central(
+                            queue_strip(&waiting).into_any_element(),
+                            centred_chat,
+                            chat_measure_px,
+                        ));
                     }
                     // A detached command sits directly above the editor: the same
                     // place the TUI puts it (on the input box's top border), which
                     // is where the eye goes while waiting.
                     if let Some(label) = self.running_tasks_label() {
-                        col = col.child(task_strip(label));
+                        col = col.child(central(
+                            task_strip(label).into_any_element(),
+                            centred_chat,
+                            chat_measure_px,
+                        ));
                     }
                     // The slash-command list sits over the input while a name is
                     // not being spelled, the terminal's own placement. The name
-                    // prompt itself is the overlay below (#2398).
+                    // prompt itself is the overlay below (#2398). The list floats
+                    // over the composer, so it lines up with it: same measure,
+                    // still the child directly above the editor, so the order it
+                    // paints in does not change (#2590).
                     if self.topic_draft.is_none() {
                         let popup = self.editor.read(cx).command_popup();
                         if let Some((names, selected)) = popup {
-                            col = col.child(command_popup_view(&names, selected));
+                            col = col.child(central(
+                                command_popup_view(&names, selected).into_any_element(),
+                                centred_chat,
+                                chat_measure_px,
+                            ));
                         } else if let Some((items, selected)) = self.editor.read(cx).emoji_popup() {
-                            col = col.child(emoji_popup_view(&items, selected));
+                            col = col.child(central(
+                                emoji_popup_view(&items, selected).into_any_element(),
+                                centred_chat,
+                                chat_measure_px,
+                            ));
                         }
                     }
-                    col = col.child(self.editor.clone());
+                    col = col.child(central(
+                        self.editor.clone().into_any_element(),
+                        centred_chat,
+                        chat_measure_px,
+                    ));
                 }
                 if let Some(strip) = topic_bottom {
-                    col = col.child(strip);
+                    col = col.child(central(strip, centred_chat, chat_measure_px));
                 }
-                col.child(footer)
+                col.child(central(footer, centred_chat, chat_measure_px))
             }
             Screen::Usage => right.child(footer),
             Screen::Files => right.child(footer),
@@ -8404,6 +8597,17 @@ fn main() {
             |window, cx| {
                 let focus = cx.focus_handle();
                 let editor = cx.new(editor::Editor::new);
+                // A drag-copied range lands on the clipboard inside the
+                // transcript, which cannot see the composer. The dashboard owns
+                // both halves, so it is the one that turns a landed copy into
+                // the composer's own notice (#2587).
+                let copy_drag = Rc::new(CopyDrag::default());
+                {
+                    let editor = editor.downgrade();
+                    copy_drag.set_copied_listener(Rc::new(move |cx: &mut App| {
+                        let _ = editor.update(cx, |editor, cx| editor.show_copied(cx));
+                    }));
+                }
                 let view = cx.new(move |cx: &mut Context<Dashboard>| {
                     // Enter on the editor is a send: routed into the agent
                     // turn path on the Dashboard itself.
@@ -8523,7 +8727,7 @@ fn main() {
                         split_areas: Rc::new(std::cell::RefCell::new(HashMap::new())),
                         split_drag: None,
                         split_target: None,
-                        copy_drag: Rc::new(CopyDrag::default()),
+                        copy_drag,
                         split_pick: None,
                         split_creating: false,
                         topic_draft_icon: None,
@@ -8560,6 +8764,7 @@ fn main() {
                         models_rows: Vec::new(),
                         models_query: String::new(),
                         models_index: 0,
+                        models_provider: None,
                         models_fetch: None,
                         models_fetch_lifecycle:
                             opencrabs::ui_core::model_selector::FetchLifecycle::default(),
@@ -8879,7 +9084,7 @@ fn mc_inbox_panel(
         "No pending proposals.",
         focused,
         // The selected item's first line, in the rows actually drawn.
-        (focused && !items.is_empty()).then_some((selected - start) * 3),
+        (focused && !items.is_empty()).then(|| (selected - start) * 3),
         shown,
     )
 }
@@ -10592,6 +10797,89 @@ fn split_pane_width(content: f32, stacked: bool, share: f32) -> f32 {
     }
 }
 
+/// The widest the conversation itself draws, in px (#2586). A line of body
+/// text past this is a wall: the eye travels too far back to the left margin
+/// to find the next one, so the transcript is centred inside a wide pane
+/// instead of stretching edge to edge. Any pane under this width draws at
+/// its own width, unchanged.
+pub const CHAT_MEASURE_PX: f32 = 760.0;
+
+/// What the conversation draws at, given the pane it sits in and whether the
+/// window is split (#2586). A split window is exempt: every pane there takes
+/// its full span, however narrow, because a half-width pane is already the
+/// measure. The cap is for the single pane only, so it applies when `split`
+/// is false and never in a half of a split.
+pub fn chat_measure(pane_width: f32, split: bool) -> f32 {
+    if split {
+        pane_width
+    } else {
+        pane_width.min(CHAT_MEASURE_PX)
+    }
+}
+
+/// The column a single pane draws its conversation in (#2586): the transcript
+/// sits at the measure and the slack goes to the two margins, so the text is
+/// centred in the window instead of stretching to a wall. Only a pane that is
+/// wider than the measure is wrapped, so a narrow window keeps the exact tree
+/// it had, and a split pane is never wrapped because it never takes the cap.
+fn chat_measure_column(view: AnyElement, width: f32) -> AnyElement {
+    div()
+        .flex()
+        .flex_row()
+        .flex_1()
+        .min_w_0()
+        .min_h_0()
+        .justify_center()
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .w(px(width))
+                .min_w_0()
+                .min_h_0()
+                .child(view),
+        )
+        .into_any_element()
+}
+
+/// The same centred column for the chat's chrome (#2588): the plan card, the
+/// composer and the footer take the conversation's measure instead of the
+/// pane's whole width, so the lower half of the window reads on one axis with
+/// the text above it. It carries no vertical flex, because these rows keep the
+/// height they ask for rather than growing into the column's slack.
+fn chat_measure_row(view: AnyElement, width: f32) -> AnyElement {
+    div()
+        .flex()
+        .flex_row()
+        .flex_none()
+        .w_full()
+        .min_w_0()
+        .justify_center()
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_none()
+                .w(px(width))
+                .min_w_0()
+                .child(view),
+        )
+        .into_any_element()
+}
+
+/// The chat's chrome takes the conversation's measure (#2588, #2590), so the
+/// plan card, the strips, the popups, the composer and the footer all sit on
+/// the axis the text above them draws on. It is a no-op wherever the transcript
+/// itself is not capped, which covers every split pane and every window
+/// narrower than the measure.
+fn central(view: AnyElement, centred: bool, measure: f32) -> AnyElement {
+    if centred {
+        chat_measure_row(view, measure)
+    } else {
+        view
+    }
+}
+
 /// The rule between two panes: vertical when they sit side by side, horizontal
 /// when they stack, and draggable to resize both (#2473, #2476). The strip is
 /// the target and the rule inside it is what is drawn, so the layout is
@@ -11303,9 +11591,73 @@ fn cd_entries_for(dir: &std::path::Path, show_hidden: bool) -> Vec<std::path::Pa
 #[cfg(test)]
 mod tests {
     use super::{
-        THEMES_HISTORY_LEN, cd_entries_for, pick_initial_session, remember_open_session,
-        remember_preview,
+        CHAT_MEASURE_PX, THEMES_HISTORY_LEN, cd_entries_for, pick_initial_session,
+        remember_open_session, remember_preview,
     };
+
+    /// The conversation caps at a readable measure in a single pane, and any
+    /// pane narrower than the cap draws at its own width (#2586).
+    #[test]
+    fn chat_measure_caps_a_wide_single_pane_only() {
+        assert_eq!(super::chat_measure(2192.0, false), CHAT_MEASURE_PX);
+        assert_eq!(
+            super::chat_measure(CHAT_MEASURE_PX + 1.0, false),
+            CHAT_MEASURE_PX
+        );
+        assert_eq!(super::chat_measure(CHAT_MEASURE_PX, false), CHAT_MEASURE_PX);
+        assert_eq!(super::chat_measure(612.0, false), 612.0);
+        assert_eq!(super::chat_measure(0.0, false), 0.0);
+    }
+
+    /// A split window is exempt: a pane there takes the full span it is
+    /// given, wide or narrow, so the cap can never narrow a pane (#2586).
+    #[test]
+    fn chat_measure_leaves_a_split_pane_alone() {
+        assert_eq!(super::chat_measure(2192.0, true), 2192.0);
+        assert_eq!(super::chat_measure(996.0, true), 996.0);
+        assert_eq!(super::chat_measure(320.0, true), 320.0);
+        assert_eq!(super::chat_measure(CHAT_MEASURE_PX, true), CHAT_MEASURE_PX);
+    }
+
+    /// The measure belongs to the single pane and to nothing else (#2586). A
+    /// split leaf draws at the span its own pane owns, so the pane renderer is
+    /// asserted free of the cap: a split can never be narrowed by it, whatever
+    /// later changes do to the single-pane branch.
+    #[test]
+    fn no_measure_cap_reaches_a_split_pane() {
+        let src = include_str!("main.rs");
+        let (_, rest) = src
+            .split_once(concat!("fn pane_", "element("))
+            .expect("split leaf renderer exists");
+        let (leaf, _) = rest
+            .split_once("let close_session = *session;")
+            .expect("pane leaf body ends before its close handler");
+        assert!(
+            !leaf.contains("chat_measure") && !leaf.contains("CHAT_MEASURE_PX"),
+            "a split pane draws at its own full width, never at the measure"
+        );
+
+        let (_, primary) = src
+            .split_once("let primary = transcript::view(")
+            .expect("primary Chat transcript call exists");
+        let (call, _) = primary
+            .split_once(".into_any_element();")
+            .expect("primary Chat transcript call ends");
+        assert!(
+            call.contains("measure,"),
+            "a single pane draws at the measured width"
+        );
+        assert!(
+            src.contains(
+                &[
+                    "let chat_measure_px = chat_measure(",
+                    "primary_width, split_window);",
+                ]
+                .concat()
+            ),
+            "the measure comes from the pane width, exempting a split window"
+        );
+    }
 
     /// The primary Chat screen must share its mouse selection state with the
     /// transcript. The split view already did this; Chat silently passed no

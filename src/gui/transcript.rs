@@ -2008,6 +2008,12 @@ fn selection_rgba() -> u32 {
     (palette::current().blue << 8) | 0x55
 }
 
+/// What a successful copy tells the view that owns the composer (#2587).
+type CopiedListener = Rc<dyn Fn(&mut App)>;
+
+/// One transcript mouse release: the window to repaint and the app to write to.
+type MouseRelease = Rc<dyn Fn(&mut Window, &mut App)>;
+
 /// Drag-to-copy over transcript rows (#2383) and their UTF-8 text ranges
 /// (#2529). Each row records the text its selectable segments render. GPUI's
 /// `TextLayout` turns a pointer into a byte offset; this state orders the two
@@ -2018,9 +2024,49 @@ pub struct CopyDrag {
     anchor: Cell<Option<TextPoint>>,
     end: Cell<Option<TextPoint>>,
     dragging: Cell<bool>,
+    /// Fired once a release or a copy chord actually put text on the
+    /// clipboard, so the composer can say so (#2587). Empty until the view
+    /// that owns the composer hands one over.
+    on_copied: RefCell<Option<CopiedListener>>,
 }
 
 impl CopyDrag {
+    /// The owning view wires the acknowledgement here. The transcript cannot
+    /// reach the composer, so the composer's parent is the only place that
+    /// knows both halves of the gesture.
+    pub fn set_copied_listener(&self, listener: CopiedListener) {
+        *self.on_copied.borrow_mut() = Some(listener);
+    }
+
+    /// Tell the owner a copy landed. Only call this after a successful write:
+    /// a click copies nothing and must stay silent.
+    pub fn announce_copied(&self, app: &mut App) {
+        let listener = self.on_copied.borrow().clone();
+        if let Some(listener) = listener {
+            listener(app);
+        }
+    }
+
+    /// Drop the highlight. A release that copied has nothing left to keep lit
+    /// (#2587); an unmoved click already holds nothing.
+    pub fn clear_selection(&self) {
+        self.anchor.set(None);
+        self.end.set(None);
+        self.dragging.set(false);
+    }
+
+    /// The release path: write the dragged text and, when it landed, drop the
+    /// highlight. Returns whether the clipboard took it so the caller
+    /// acknowledges exactly once.
+    pub fn finish_copy(&self, app: &mut App) -> bool {
+        let Some(item) = self.clipboard_item() else {
+            return false;
+        };
+        app.write_to_clipboard(item);
+        self.clear_selection();
+        true
+    }
+
     fn points(&self) -> Option<(TextPoint, TextPoint)> {
         copy_select::ordered_points(self.anchor.get()?, self.end.get()?)
     }
@@ -2047,14 +2093,6 @@ impl CopyDrag {
         self.copied_text().map(gpui::ClipboardItem::new_string)
     }
 
-    pub fn write_to_clipboard(&self, app: &mut App) -> bool {
-        let Some(item) = self.clipboard_item() else {
-            return false;
-        };
-        app.write_to_clipboard(item);
-        true
-    }
-
     /// Intersect the selection with one rendered text segment. The segment's
     /// offset is in the row's copy text, so markdown and plain rows share the
     /// same hit-testing and highlighting rule.
@@ -2077,7 +2115,7 @@ impl CopyDrag {
         let end = start.checked_add(len)?;
         let lo = start.max(selected_start);
         let hi = end.min(selected_end);
-        (lo < hi).then_some(lo - start..hi - start)
+        (lo < hi).then(|| lo - start..hi - start)
     }
 }
 
@@ -2469,12 +2507,26 @@ pub fn view(
         ));
     }
     // Releasing the mouse ends the drag and copies the selected range (#2383,
-    // #2529). A click that never moved selects nothing, so it copies nothing.
+    // #2529). A click that never moved selects nothing, so it copies nothing
+    // and says nothing. A copy that landed drops the highlight and tells the
+    // composer, which is what the terminal does on release (#2587).
     if let Some(d) = drag {
-        col = col.on_mouse_up(MouseButton::Left, move |_ev, window, app| {
+        let release: MouseRelease = Rc::new(move |window, app| {
             d.dragging.set(false);
-            d.write_to_clipboard(app);
+            if d.finish_copy(app) {
+                d.announce_copied(app);
+            }
             window.refresh();
+        });
+        let on_up = release.clone();
+        col = col.on_mouse_up(MouseButton::Left, move |_ev, window, app| {
+            on_up(window, app)
+        });
+        // A release past the pane's last pixel is still the end of the drag.
+        // Without this the drag stayed armed and the next click extended it
+        // instead of starting a new one.
+        col = col.on_mouse_up_out(MouseButton::Left, move |_ev, window, app| {
+            release(window, app)
         });
     }
     col
@@ -2505,6 +2557,33 @@ mod tests {
             (ink * a + canvas * (255 - a)) / 255
         };
         (mix(16) << 16) | (mix(8) << 8) | mix(0)
+    }
+
+    #[test]
+    fn drag_copy_segment_range_does_not_overflow_when_segment_is_past_selection() {
+        let drag = CopyDrag::default();
+        drag.texts.borrow_mut().push("0123456789extra".into());
+        drag.anchor.set(Some(TextPoint::new(0, 0)));
+        drag.end.set(Some(TextPoint::new(0, 3)));
+
+        // A segment past the selection release point must safely return None without panicking.
+        assert_eq!(drag.segment_range(0, 4, 2), None);
+
+        // Drag with anchor 10 and end 3 normalizes to 3..10.
+        let drag_rev = CopyDrag::default();
+        drag_rev.texts.borrow_mut().push("0123456789extra".into());
+        drag_rev.anchor.set(Some(TextPoint::new(0, 10)));
+        drag_rev.end.set(Some(TextPoint::new(0, 3)));
+        assert_eq!(drag_rev.segment_range(0, 12, 2), None);
+
+        // Fully covered segment returns the exact segment range.
+        assert_eq!(drag_rev.segment_range(0, 4, 3), Some(0..3));
+
+        // Partial overlap at the start.
+        assert_eq!(drag_rev.segment_range(0, 2, 3), Some(1..3));
+
+        // Partial overlap at the end.
+        assert_eq!(drag_rev.segment_range(0, 8, 4), Some(0..2));
     }
 
     #[test]
@@ -3962,6 +4041,58 @@ mod tests {
         assert!(
             !live_src.contains(["status_", "line(live)"].concat().as_str()),
             "nor a status line below the rows"
+        );
+    }
+
+    #[test]
+    fn drag_copy_release_clears_only_a_selection_it_copied() {
+        let drag = CopyDrag::default();
+        drag.texts.borrow_mut().push("drag to copy".into());
+
+        // An unmoved click: anchor and end sit on the same point, so there is
+        // no range to copy and the release stays silent (#2587).
+        drag.anchor.set(Some(TextPoint::new(0, 4)));
+        drag.end.set(Some(TextPoint::new(0, 4)));
+        assert!(!drag.has_selection(), "a click selects no range");
+        assert_eq!(drag.clipboard_item(), None, "so it has nothing to copy");
+
+        // A drag over real characters copies, and the release clears the
+        // highlight the moment that text lands.
+        drag.end.set(Some(TextPoint::new(0, 8)));
+        assert!(drag.has_selection());
+        assert!(drag.clipboard_item().is_some());
+        drag.clear_selection();
+        assert!(!drag.has_selection(), "the copied range stops painting");
+        assert_eq!(drag.range(), None, "so no row stays highlighted");
+        assert_eq!(
+            drag.clipboard_item(),
+            None,
+            "and there is nothing left to copy twice"
+        );
+    }
+
+    #[test]
+    fn drag_copy_announces_through_one_listener_and_ends_outside_too() {
+        const SRC: &str = include_str!("transcript.rs");
+        // The listener is the only path from the transcript to the composer,
+        // so a landed copy has to go through it instead of writing silently.
+        let (_, after_release) = SRC
+            .split_once(["if d.", "finish_copy(app)"].concat().as_str())
+            .expect("the release handler copies through finish_copy");
+        let (body, _) = after_release
+            .split_once("\n        });")
+            .expect("the release handler ends");
+        assert!(
+            body.contains(["d.", "announce_copied(app)"].concat().as_str()),
+            "a landed copy must announce, or the composer cannot say so"
+        );
+        assert!(
+            SRC.contains(["on_mouse_up_", "out(MouseButton::Left"].concat().as_str()),
+            "a release past the pane's edge still ends the drag"
+        );
+        assert!(
+            !SRC.contains(["d.", "write_to_clipboard(app);"].concat().as_str()),
+            "no caller writes the clipboard without clearing the selection"
         );
     }
 }

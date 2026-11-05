@@ -19,6 +19,7 @@ use opencrabs::ui_core::input_history::{
 use opencrabs::ui_core::palette::{next_word_end, previous_word_start};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, ClipboardEntry, ClipboardItem, Context, CursorStyle, Div,
@@ -260,6 +261,33 @@ pub struct Editor {
     /// Esc closed it for this draft (#2413).
     emoji_index: usize,
     emoji_dismissed: bool,
+    /// The line the composer shows for a moment after an action with nothing
+    /// to look at, like a copy (#2587). Timed, never sticky.
+    notice: Option<Notice>,
+    /// Bumped on every new notice so an older timer cannot clear a newer one.
+    notice_generation: u64,
+}
+
+/// One transient line inside the composer (#2587). The terminal keeps the same
+/// notice on the input border for two seconds, so the GUI says it where the
+/// user is already looking instead of growing the transcript with chrome.
+pub struct Notice {
+    pub text: SharedString,
+    pub shown_at: Instant,
+}
+
+/// How long a notice stays up, matching the terminal's `NOTIFICATION_TTL` so
+/// the two surfaces keep the same rhythm.
+pub const NOTICE_TTL: Duration = Duration::from_secs(2);
+
+/// What the composer says once a dragged range reaches the clipboard (#2587).
+/// The terminal prints these same words on its input border.
+pub const COPIED_NOTICE: &str = "Copied to clipboard";
+
+/// True once a notice has outlived the TTL. Pure, so the expiry rule stays a
+/// test instead of a wall-clock guess.
+pub fn notice_expired(shown_at: Instant, now: Instant, ttl: Duration) -> bool {
+    now.saturating_duration_since(shown_at) >= ttl
 }
 
 impl Editor {
@@ -285,7 +313,47 @@ impl Editor {
             command_dismissed: false,
             emoji_index: 0,
             emoji_dismissed: false,
+            notice: None,
+            notice_generation: 0,
         }
+    }
+
+    // Notices --------------------------------------------------------------
+
+    /// Say one thing for a moment inside the composer. A newer notice replaces
+    /// the old one and its timer: the generation check is what stops the first
+    /// timer from clearing the second notice early.
+    fn show_notice(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.notice = Some(Notice {
+            text: text.into(),
+            shown_at: Instant::now(),
+        });
+        self.notice_generation = self.notice_generation.wrapping_add(1);
+        let generation = self.notice_generation;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(NOTICE_TTL).await;
+            let _ = this.update(cx, |editor, cx| {
+                if editor.notice_generation == generation && editor.notice.is_some() {
+                    editor.notice = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// A drag-copied range reached the clipboard, so say so and let the line
+    /// clear itself (#2587). Same words the terminal puts on the input border.
+    pub fn show_copied(&mut self, cx: &mut Context<Self>) {
+        self.show_notice(COPIED_NOTICE, cx);
+    }
+
+    /// The notice still inside its window, if any. Read through this so an
+    /// expired notice never paints while its timer is still in flight.
+    fn active_notice(&self, now: Instant) -> Option<&str> {
+        let notice = self.notice.as_ref()?;
+        (!notice_expired(notice.shown_at, now, NOTICE_TTL)).then(|| notice.text.as_ref())
     }
 
     // Attachments ----------------------------------------------------------
@@ -1225,7 +1293,7 @@ impl Element for EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        let (content, selected, cursor, placeholder, empty, bare) = {
+        let (content, selected, cursor, placeholder, empty, bare, notice) = {
             let input = self.input.read(cx);
             (
                 input.content.clone(),
@@ -1234,16 +1302,24 @@ impl Element for EditorElement {
                 input.placeholder.to_string(),
                 input.content.is_empty(),
                 input.attachments.is_empty(),
+                input.active_notice(Instant::now()).map(str::to_string),
             )
         };
-        // The composer says when a screenshot is waiting (#2479): an empty
-        // field over an image-only clipboard swaps the hint in for the name,
-        // the same notice the TUI prints under its input. A picture already
-        // in the strip is the answer the hint would give, so it stands down.
-        let placeholder = if empty && bare && Editor::clipboard_image(cx).is_some() {
-            CLIPBOARD_IMAGE_HINT.to_string()
-        } else {
-            placeholder
+        // A copy leaves nothing to look at, so an empty field says it in the
+        // slot the placeholder owns (#2587). The words are the terminal's own,
+        // and the line clears itself on the same two-second clock.
+        //
+        // The composer also says when a screenshot is waiting (#2479): an empty
+        // field over an image-only clipboard swaps that hint in for the name,
+        // the same notice the TUI prints under its input. A picture already in
+        // the strip is the answer the hint would give, so it stands down, and a
+        // live copy notice outranks it because the copy is the newer event.
+        let placeholder = match notice {
+            Some(notice) => notice,
+            None if empty && bare && Editor::clipboard_image(cx).is_some() => {
+                CLIPBOARD_IMAGE_HINT.to_string()
+            }
+            None => placeholder,
         };
         let style = window.text_style();
         let font_size = style.font_size.to_pixels(window.rem_size());
@@ -1415,6 +1491,13 @@ impl Render for Editor {
         if !self.attachments.is_empty() {
             body = body.child(attachment_strip(&self.attachments, cx));
         }
+        // With a draft in the field the placeholder is gone, so the copy notice
+        // gets its own line under the text instead (#2587). It is chrome, never
+        // a transcript line: the box grows by nothing when it expires.
+        let notice_row_text = self
+            .active_notice(Instant::now())
+            .filter(|_| !self.content.is_empty())
+            .map(str::to_string);
         // The icon sits inside the input, to the right of the text, as the
         // messaging apps place it; the text and its hint are gone (#2445).
         body = body.child(
@@ -1432,6 +1515,9 @@ impl Render for Editor {
                 )
                 .child(paperclip(cx)),
         );
+        if let Some(notice) = notice_row_text {
+            body = body.child(notice_row(&notice));
+        }
         div()
             .flex()
             .flex_col()
@@ -1479,6 +1565,19 @@ impl Render for Editor {
             .min_h(px(44.))
             .child(body)
     }
+}
+
+/// One transient line inside the composer, in the terminal's own voice
+/// (#2587). Faint and one row tall: it confirms the copy without competing
+/// with the draft right above it.
+fn notice_row(text: &str) -> impl IntoElement {
+    div()
+        .w_full()
+        .min_w_0()
+        .text_size(px(12.))
+        .line_height(px(16.))
+        .text_color(rgb(palette::current().text_faint))
+        .child(text.to_string())
 }
 
 /// The pending attachments as chips. Images show the real file through
@@ -1858,12 +1957,14 @@ fn write_clipboard_image(image: &(ImageFormat, Vec<u8>)) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Attachment, CLIPBOARD_IMAGE_HINT, caret_in_row, image_format_extension, line_col,
-        line_count, line_len, line_start, marker_paths, message_with_markers, next_word_end,
-        previous_word_start, strip_markers, vertical_row_target, write_clipboard_image,
+        Attachment, CLIPBOARD_IMAGE_HINT, COPIED_NOTICE, NOTICE_TTL, caret_in_row,
+        image_format_extension, line_col, line_count, line_len, line_start, marker_paths,
+        message_with_markers, next_word_end, notice_expired, previous_word_start, strip_markers,
+        vertical_row_target, write_clipboard_image,
     };
     use gpui::ImageFormat;
     use std::path::PathBuf;
+    use std::time::{Duration, Instant};
 
     /// A throwaway directory with real files in it: the classifier stats the
     /// path, so a made-up path would prove nothing about what a drop attaches.
@@ -2359,6 +2460,73 @@ mod tests {
         assert!(
             src.contains("if empty && bare && Editor::clipboard_image(cx).is_some()"),
             "the hint only stands in while the field is empty and bare"
+        );
+    }
+
+    /// A copy is acknowledged on the terminal's own clock, so the same gesture
+    /// cannot read as instant in one surface and sticky in the other (#2587).
+    #[test]
+    fn copy_notice_expires_on_the_terminal_two_second_clock() {
+        let shown = Instant::now();
+        assert_eq!(NOTICE_TTL, Duration::from_secs(2), "the terminal's TTL");
+        assert!(!notice_expired(shown, shown, NOTICE_TTL), "fresh");
+        assert!(
+            !notice_expired(shown, shown + Duration::from_millis(1999), NOTICE_TTL),
+            "still up just before the second"
+        );
+        assert!(
+            notice_expired(shown, shown + NOTICE_TTL, NOTICE_TTL),
+            "gone on the second"
+        );
+        assert!(
+            notice_expired(shown, shown + Duration::from_secs(9), NOTICE_TTL),
+            "and gone for good"
+        );
+        // A clock that went backwards must not hold a notice forever.
+        assert!(!notice_expired(
+            shown,
+            shown - Duration::from_secs(1),
+            NOTICE_TTL
+        ));
+    }
+
+    /// The words and the slot: a copy says the terminal's line, an empty field
+    /// owns it, and a draft gets one row under the text (#2587).
+    #[test]
+    fn copy_notice_says_the_terminal_line_and_picks_its_slot() {
+        assert_eq!(COPIED_NOTICE, "Copied to clipboard");
+        assert_ne!(
+            COPIED_NOTICE, CLIPBOARD_IMAGE_HINT,
+            "a copy must not offer a paste that has no image behind it"
+        );
+        let src = include_str!("editor.rs");
+        let (_, after) = src
+            .split_once(
+                ["input.", "active_notice(Instant::now())"]
+                    .concat()
+                    .as_str(),
+            )
+            .expect("the placeholder slot reads the live notice");
+        let (slot, _) = after.split_once("\n        let style").expect("slot ends");
+        assert!(
+            slot.contains(["Some(notice) => ", "notice,"].concat().as_str()),
+            "an empty field shows the notice where the name was"
+        );
+        assert!(
+            src.contains(
+                ["body = body.child(", "notice_row(&notice))"]
+                    .concat()
+                    .as_str()
+            ),
+            "a draft gets the notice on its own row under the text"
+        );
+        assert!(
+            src.contains(
+                ["cx.background_executor().", "timer(NOTICE_TTL)"]
+                    .concat()
+                    .as_str()
+            ),
+            "and the line clears itself on a timer"
         );
     }
 }

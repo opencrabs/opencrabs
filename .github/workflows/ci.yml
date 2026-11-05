@@ -34,6 +34,10 @@ concurrency:
 
 permissions:
   contents: read
+  # Every failure-capable job ends with a cancel step (#2595), which posts to
+  # the runs/{id}/cancel API. Fork PRs get a read-only token whatever this
+  # says, so a refusal is reported and the step still exits 0.
+  actions: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -127,6 +131,15 @@ jobs:
           touch src/lib.rs
           python3 scripts/check-byte-slice-ratchet.py
 
+      # Fail fast from inside the job that failed (#2595): the fan-in `abort`
+      # job cannot do it, because `needs` holds it until the run is over.
+      - name: Cancel this run on failure
+        if: "!success()"  # also catches SIGTERM/timeout-killed steps, where failure() is false
+        uses: ./.github/actions/cancel-run
+        with:
+          token: ${{ github.token }}
+          run-id: ${{ github.run_id }}
+
   # ── Stage 2: Build verification (parallel, gated on lint + audit) ────────
   # Cross-platform BUILD on macOS confirms target compatibility without
   # running tests there (tests run on Linux only — see `test` below).
@@ -136,7 +149,18 @@ jobs:
   # promote it via the matrix.
   build:
     name: Build (${{ matrix.target }})
-    needs: [lint, audit]
+    # A build is only worth its cycles on a tree the tests have not already
+    # rejected (#2583): with `needs: [lint, audit]` this job kept compiling
+    # --all-features on the self-hosted Mac after the test legs had gone red.
+    # That cannot change the run's outcome and only holds the box the tests
+    # themselves need. On that runner lint, audit, test and build queue for a
+    # single slot and already run one after another, so waiting on the tests
+    # costs no wall time there.
+    #
+    # always() is required: without it a job whose needs did not all succeed
+    # is skipped outright, and `test-linux` is legitimately skipped on fork
+    # PRs. The explicit checks below carry the real gate.
+    needs: [lint, audit, test, test-linux]
     # Cross-platform build verification. Runs where it pays off — on PRs
     # (gate contributions) and on-demand (workflow_dispatch, e.g. before a
     # release tag) — but NOT on every routine push to main. Direct main
@@ -148,11 +172,19 @@ jobs:
     # release.yml's build-release matrix already builds + validates Windows
     # before any tag is published, so a platform regression cannot reach a
     # release unnoticed.
-    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    if: >-
+      always() &&
+      (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') &&
+      needs.lint.result == 'success' &&
+      needs.audit.result == 'success' &&
+      needs.test.result == 'success' &&
+      (needs.test-linux.result == 'success' || needs.test-linux.result == 'skipped')
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     strategy:
-      fail-fast: false
+      # One failed target cancels the rest. The fail-fast philosophy of this
+      # workflow is in the `abort` job at the bottom (#2584).
+      fail-fast: true
       matrix:
         include:
           - os: self-hosted
@@ -206,6 +238,15 @@ jobs:
           CFLAGS: -march=armv8-a+crypto
           CXXFLAGS: -march=armv8-a+crypto
         run: cargo build --locked --profile ci --target ${{ matrix.target }} ${{ matrix.features }}
+
+      # Fail fast from inside the job that failed (#2595): the fan-in `abort`
+      # job cannot do it, because `needs` holds it until the run is over.
+      - name: Cancel this run on failure
+        if: "!success()"  # also catches SIGTERM/timeout-killed steps, where failure() is false
+        uses: ./.github/actions/cancel-run
+        with:
+          token: ${{ github.token }}
+          run-id: ${{ github.run_id }}
 
   # ── Stage 2a2: Windows path filter (decides whether Stage 2b runs) ────────
   # Path filter, fail-open. A 51-minute GitHub-hosted build on every push
@@ -282,6 +323,15 @@ jobs:
             echo "no Windows-relevant paths touched, skipping the build"
             echo "run=false" >> "$GITHUB_OUTPUT"
           fi
+
+      # Fail fast from inside the job that failed (#2595): the fan-in `abort`
+      # job cannot do it, because `needs` holds it until the run is over.
+      - name: Cancel this run on failure
+        if: "!success()"  # also catches SIGTERM/timeout-killed steps, where failure() is false
+        uses: ./.github/actions/cancel-run
+        with:
+          token: ${{ github.token }}
+          run-id: ${{ github.run_id }}
 
   # ── Stage 2b: Windows build (gated on lint, audit, path filter) ─────────
   # Windows is where platform-specific regressions actually ship: the `sh -c`
@@ -478,6 +528,15 @@ jobs:
           done
           exit $status
 
+      # Fail fast from inside the job that failed (#2595): the fan-in `abort`
+      # job cannot do it, because `needs` holds it until the run is over.
+      - name: Cancel this run on failure
+        if: "!success()"  # also catches SIGTERM/timeout-killed steps, where failure() is false
+        uses: ./.github/actions/cancel-run
+        with:
+          token: ${{ github.token }}
+          run-id: ${{ github.run_id }}
+
   # ── Windows footgun gate (static, cheap, blocks the merge) ─────────────
   # The only python step in this workflow, and deliberately not part of the
   # Windows build lane: it scans source text, so it costs seconds instead
@@ -501,6 +560,15 @@ jobs:
 
       - name: Scan the tree
         run: python3 scripts/check-windows-footguns.py --root src
+
+      # Fail fast from inside the job that failed (#2595): the fan-in `abort`
+      # job cannot do it, because `needs` holds it until the run is over.
+      - name: Cancel this run on failure
+        if: "!success()"  # also catches SIGTERM/timeout-killed steps, where failure() is false
+        uses: ./.github/actions/cancel-run
+        with:
+          token: ${{ github.token }}
+          run-id: ${{ github.run_id }}
 
   # ── Stage 3: Test (gated on lint + audit, parallel with build) ──
   # Two legs, one per platform. Both call .github/workflows/test-suite.yml so
@@ -588,6 +656,17 @@ jobs:
         # cargo and its test children, kills the tree, and fails in ~5
         # minutes instead of 60. The command it runs is unchanged.
         run: bash scripts/test-stall-watchdog.sh cargo test --locked --profile ci --all-features --verbose
+
+      # Fail fast from inside the job that failed (#2595): the fan-in `abort`
+      # job cannot do it, because `needs` holds it until the run is over.
+      # This step is inside the `&test-steps` anchor, so `test-linux` inherits
+      # it: neither leg can outlive the other by more than one API call.
+      - name: Cancel this run on failure
+        if: "!success()"  # also catches SIGTERM/timeout-killed steps, where failure() is false
+        uses: ./.github/actions/cancel-run
+        with:
+          token: ${{ github.token }}
+          run-id: ${{ github.run_id }}
 
   # Linux leg. The requirement is that any commit which can be tagged has at
   # least one test run on Linux (#2216). ubuntu-24.04 rather than
@@ -740,6 +819,15 @@ jobs:
         #   ignore when `cargo tree -i webpki-roots@0.26.11` prints nothing.
         run: cargo audit --ignore RUSTSEC-2024-0436 --ignore RUSTSEC-2025-0119 --ignore RUSTSEC-2025-0134 --ignore RUSTSEC-2025-0141 --ignore RUSTSEC-2026-0002 --ignore RUSTSEC-2026-0173 --ignore RUSTSEC-2026-0192 --ignore RUSTSEC-2026-0253 --ignore RUSTSEC-2026-0258 --ignore RUSTSEC-2026-0367 --ignore RUSTSEC-2026-0368 --ignore RUSTSEC-2026-0369 --ignore RUSTSEC-2026-0381 --ignore RUSTSEC-2026-0429
 
+      # Fail fast from inside the job that failed (#2595): the fan-in `abort`
+      # job cannot do it, because `needs` holds it until the run is over.
+      - name: Cancel this run on failure
+        if: "!success()"  # also catches SIGTERM/timeout-killed steps, where failure() is false
+        uses: ./.github/actions/cancel-run
+        with:
+          token: ${{ github.token }}
+          run-id: ${{ github.run_id }}
+
   # ── Stage 5: Coverage (on-demand only) ───────────────────────────────────
   # Tarpaulin is the slowest job (~12 min). Running it on every main push
   # would re-add the cost we just trimmed, so it's on-demand: trigger the
@@ -817,6 +905,15 @@ jobs:
         with:
           files: ./cobertura.xml
 
+      # Fail fast from inside the job that failed (#2595): the fan-in `abort`
+      # job cannot do it, because `needs` holds it until the run is over.
+      - name: Cancel this run on failure
+        if: "!success()"  # also catches SIGTERM/timeout-killed steps, where failure() is false
+        uses: ./.github/actions/cancel-run
+        with:
+          token: ${{ github.token }}
+          run-id: ${{ github.run_id }}
+
   # ── Required gate ────────────────────────────────────────────────────────
   # Single status check for branch protection. Internal job structure
   # can change without touching branch protection settings.
@@ -843,4 +940,48 @@ jobs:
           if [[ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" == "true" ]]; then
             echo "::error::One or more CI jobs failed or were cancelled"
             exit 1
+          fi
+  # ── Fail fast: the first red job ends the run (#2584) ────────────────────
+  # Nothing used to stop a doomed run: a test leg went red at 16:14 and the
+  # macOS build still started at 16:25 on the same self-hosted box the tests
+  # need, compiling --all-features for a run that could no longer pass
+  # (#2583). Downstream jobs are gated so they never start; this job cancels
+  # whatever is already in flight.
+  #
+  # Hosted on purpose. A stop that queues behind the self-hosted machine it
+  # is trying to stop is not a stop.
+  #
+  # Since #2595 this job is the safety net, not the mechanism. Every
+  # failure-capable job cancels the run from inside itself, which is the only
+  # way a sibling stops early: this job cannot, because `needs` holds it until
+  # every listed job has finished. It still catches the failures whose cancel
+  # step never ran (a timeout kill, a runner shutting down).
+  abort:
+    name: Abort run on failure
+    if: failure()
+    needs: [lint, build, test, test-linux, audit, windows-footguns, windows-build, coverage]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      # The workflow default is read-only, so this job has to ask for the one
+      # scope it needs. It is the only job in this workflow with write access.
+      actions: write
+    steps:
+      - name: Cancel this run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          # Fork PRs get a read-only token no matter what the job asks for, so
+          # a refused cancel is reported and not turned into a second error:
+          # the gated jobs still refuse to start, only the running ones finish.
+          if curl -sf -X POST \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/$REPO/actions/runs/$RUN_ID/cancel"; then
+            echo "Cancellation requested for run $RUN_ID."
+          else
+            echo "::warning::could not cancel run $RUN_ID (fork PR tokens are read-only); running jobs will finish on their own."
           fi
