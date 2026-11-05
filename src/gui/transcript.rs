@@ -1204,8 +1204,16 @@ fn plain_block(content: &str, size: f32, selection: Option<&SelectionContext>) -
     lines
 }
 
-/// One message with a quiet role surface. The timestamp and content share the
-/// same padded card so the role stays legible in a long history.
+/// Only the user message paints a bubble. The assistant answer is drawn
+/// straight onto the history background, so a long reply does not read as one
+/// more card (#2569).
+fn bubble_has_surface(role: &str) -> bool {
+    role == "user"
+}
+
+/// One message, drawn. The timestamp and content keep the same padding in both
+/// roles so a folded history holds one rhythm, and only the user message
+/// carries a surface behind them.
 fn bubble(
     role: &str,
     content: &str,
@@ -1228,9 +1236,12 @@ fn bubble(
         .min_w_0()
         .flex_shrink_0()
         .px(px(MESSAGE_PAD_X))
-        .py(px(MESSAGE_PAD_Y))
-        .rounded(px(CARD_RADIUS))
-        .bg(glass_fill(message_surface(role)));
+        .py(px(MESSAGE_PAD_Y));
+    if bubble_has_surface(role) {
+        col = col
+            .rounded(px(CARD_RADIUS))
+            .bg(glass_fill(message_surface(role)));
+    }
     if !time.is_empty() {
         col = col.child(
             div()
@@ -2525,35 +2536,39 @@ mod tests {
         assert_eq!(heading_weight(0), gpui::FontWeight::NORMAL);
     }
 
-    /// #2544: role surfaces are tinted from the active palette in both appearances.
+    /// #2569: only the user message paints a bubble. The assistant answer is
+    /// drawn straight onto the history background, so a long reply is not one
+    /// more card.
     #[test]
-    fn message_surfaces_follow_theme_and_role() {
-        let dark = palette::DARK;
-        let light = palette::Palette {
-            bg: 0xf5f5f5,
-            panel: 0xffffff,
-            ..dark
-        };
-        let dark_user = message_surface_for(&dark, "user");
-        let dark_assistant = message_surface_for(&dark, "assistant");
-        let light_user = message_surface_for(&light, "user");
-        let light_assistant = message_surface_for(&light, "assistant");
+    fn only_user_messages_paint_a_bubble_surface() {
+        assert!(bubble_has_surface("user"));
+        assert!(!bubble_has_surface("assistant"));
+        assert!(!bubble_has_surface("system"));
+        assert!(!bubble_has_surface("tool"));
 
-        assert!(palette_is_dark(dark.bg));
-        assert!(!palette_is_dark(light.bg));
-        assert_ne!(dark_user, dark_assistant);
-        assert_ne!(light_user, light_assistant);
-        assert_ne!(dark_user, dark.panel);
-        assert_ne!(light_user, light.panel);
-        assert_eq!(dark_user, mix_rgb(dark.panel, dark.blue, 18));
-        assert_eq!(light_user, mix_rgb(light.panel, light.blue, 10));
-        assert_eq!(message_surface_for(&dark, "system"), dark.panel);
+        let src = include_str!("transcript.rs");
+        let body = src
+            .split("fn bubble(")
+            .nth(1)
+            .and_then(|rest| rest.split("/// The files").next())
+            .expect("message bubble renderer");
+        let (shared, guarded) = body
+            .split_once("if bubble_has_surface(role)")
+            .expect("the user-only surface guard");
+        assert!(
+            !shared.contains(".bg("),
+            "the shared column stays transparent for every role"
+        );
+        assert!(
+            guarded.contains(".bg(glass_fill(message_surface(role)))"),
+            "the user surface is painted behind the guard"
+        );
     }
 
-    /// #2544: the bubble keeps its radius, inner breathing room, readable user
-    /// text, and an attachment budget that excludes the bubble's own padding.
+    /// #2569: the bubble keeps its inner breathing room, readable user text,
+    /// and an attachment budget that excludes the bubble's own padding.
     #[test]
-    fn message_bubbles_pad_role_surfaces_and_shrink_attachment_budget() {
+    fn message_bubbles_pad_and_shrink_attachment_budget() {
         let src = include_str!("transcript.rs");
         let bubble = src
             .split("fn bubble(")
