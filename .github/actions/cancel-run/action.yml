@@ -10,6 +10,22 @@ description: >
   that just failed, so every failure-capable job in `ci.yml` ends with this
   step.
 
+  Call it with `if: "always() && !success()"`. Every other spelling skips the
+  step in at least one failure mode, and all three have already happened here:
+
+  - `failure()` alone: a step killed by a runner shutdown, a job timeout or an
+    outer cancel reports `cancelled`, not `failed`, so `failure()` is false and
+    the step skips itself. Run 42090046034 burned 17 extra minutes this way.
+  - `!success()` alone: when a job is cancelled GitHub skips every remaining
+    step whose condition does not contain `always()` or `cancelled()`, so the
+    expression is never evaluated. Run 42103003221 burned another five minutes
+    on the macOS leg exactly this way.
+  - `always()` alone: it would fire on green runs and cancel them.
+
+  `always() && !success()` runs on failure, cancellation and timeout, and stays
+  out of the way on success. Re-cancelling a run that is already ending is a
+  no-op (409), so the overlap is safe.
+
   The step always exits 0. The job has already failed, so a refused or failed
   cancel must not mask that outcome or turn one failure into two.
 
