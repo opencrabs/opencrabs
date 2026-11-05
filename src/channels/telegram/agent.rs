@@ -920,6 +920,63 @@ impl TelegramAgent {
                                     }
                                     return ResponseResult::Ok(());
                                 }
+                                // A provider with exactly one model has nothing to pick:
+                                // the tile the user just tapped IS the choice. v0.5.15
+                                // answered that tap with a second screen holding the one
+                                // model already marked ✓ (it is the active one), so the
+                                // tap read as dead. The built-in `opencrabs` provider has
+                                // exactly one model, which is how it surfaced.
+                                if let Some(model_name) =
+                                    crate::channels::commands::single_model_choice(&resp.models)
+                                {
+                                    // Resolve the session before the swap so the pin lands
+                                    // on the per-session slot that pressed, not the TUI's.
+                                    let session_id =
+                                        resolve_callback_session(&query, &state, &shared_session)
+                                            .await;
+                                    let (switch_ok, display_text) =
+                                        match crate::channels::commands::switch_model(
+                                            &agent,
+                                            model_name,
+                                            session_id,
+                                            Some(provider_name),
+                                        )
+                                        .await
+                                        {
+                                            Ok(_) => (
+                                                true,
+                                                format!(
+                                                    "✅ Model switched to <code>{}</code>",
+                                                    model_name
+                                                ),
+                                            ),
+                                            Err(e) => (false, format!("⚠️ {}", e)),
+                                        };
+                                    crate::channels::telegram::keyboards::ack_callback(
+                                        &bot,
+                                        &query,
+                                        "model switch",
+                                    )
+                                    .await;
+                                    if let Some(msg) = &query.message {
+                                        super::edit_retry::edit_text_ui(
+                                            bot.clone(),
+                                            msg.chat().id,
+                                            msg.id(),
+                                            display_text.clone(),
+                                            true,
+                                            None,
+                                            "callback UI update",
+                                        );
+                                    }
+                                    if !switch_ok {
+                                        tracing::warn!(
+                                            "Telegram single-model switch failed: {}",
+                                            display_text
+                                        );
+                                    }
+                                    return ResponseResult::Ok(());
+                                }
                                 crate::channels::telegram::keyboards::ack_callback(&bot, &query, "callback").await;
                                 if let Some(msg) = &query.message {
                                     use teloxide::payloads::EditMessageTextSetters;
