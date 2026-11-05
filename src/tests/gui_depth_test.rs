@@ -35,3 +35,36 @@ fn the_input_has_a_panel_background_and_a_shadow() {
     );
     assert!(root.contains(".shadow_sm()"));
 }
+
+/// The leaf arm of the pane walk, from its panel down to the split arm
+/// (#2472, #2581).
+fn leaf_arm() -> &'static str {
+    GUI_MAIN
+        .split("let mut node = div()")
+        .nth(1)
+        .expect("a leaf is built in pane_element")
+        .split("PaneTree::Split {")
+        .next()
+        .expect("the leaf arm comes before the split arm")
+}
+
+#[test]
+fn a_split_panel_carries_its_own_composer_and_footer() {
+    let leaf = leaf_arm();
+    assert!(
+        leaf.contains(".child(body)"),
+        "the transcript still opens the panel"
+    );
+    assert!(
+        leaf.contains("if let Some(chrome) = ctx.chrome.remove(session)"),
+        "the panel draws its own composer and plan, not the window's"
+    );
+    let chrome_at = leaf.find("node.child(chrome)").expect("the panel takes it");
+    let footer_at = leaf
+        .find("node.child(pane_footer(")
+        .expect("the panel draws its own footer row");
+    assert!(
+        chrome_at < footer_at,
+        "the composer sits above the footer, as it does unsplit"
+    );
+}
