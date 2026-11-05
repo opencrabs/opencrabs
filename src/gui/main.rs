@@ -7299,15 +7299,21 @@ impl Render for Dashboard {
                     ));
                 }
                 // The pair this screen would answer with, the same line the
-                // step prints under its title.
-                let pair = agent_bridge::bridge()
-                    .map(|bridge| {
-                        format!(
-                            "{} \u{b7} {}",
-                            bridge.service.provider_name(),
-                            bridge.service.provider_model()
-                        )
-                    })
+                // step prints under its title. Read once: the picker needs the
+                // provider for an unknown id, and the header needs both.
+                let live = agent_bridge::bridge().map(|bridge| {
+                    (
+                        bridge.service.provider_name(),
+                        bridge.service.provider_model(),
+                    )
+                });
+                let pair = live
+                    .as_ref()
+                    .map(|(provider, model)| format!("{provider} \u{b7} {model}"))
+                    .unwrap_or_default();
+                let active_provider = live
+                    .as_ref()
+                    .map(|(provider, _)| provider.as_str())
                     .unwrap_or_default();
                 let header = div()
                     .flex()
@@ -7328,7 +7334,7 @@ impl Render for Dashboard {
                         fetching: self.models_fetching,
                         pending: self.models_pending.len(),
                         error: self.models_fetch_error.as_deref(),
-                        active_provider: "",
+                        active_provider,
                         onboarding: false,
                         search_focused: true,
                         max_models: 18,
