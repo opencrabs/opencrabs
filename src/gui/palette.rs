@@ -179,6 +179,12 @@ pub fn follow_appearance(appearance: WindowAppearance) {
     );
     SYSTEM_DARK.store(dark, Ordering::Relaxed);
     let palette = for_appearance(dark);
+    // The window calls this once while building and the appearance observer
+    // fires once on subscribe with the same value, so a launch used to log the
+    // same line twice. Writing an identical palette is a no-op anyway (#2601).
+    if palette == current() {
+        return;
+    }
     logging::info(&format!(
         "palette: system {} -> bg 0x{:06x}",
         if dark { "dark" } else { "light" },
