@@ -1148,6 +1148,7 @@ pub fn row(
         );
     let mut row = div()
         .id(SharedString::from(s.id.to_string()))
+        .w_full()
         .relative()
         .flex()
         .flex_row()
@@ -1155,7 +1156,6 @@ pub fn row(
         .justify_between()
         .gap_1()
         .p_2()
-        .rounded_sm()
         .cursor_pointer()
         .when(selected, |d| d.bg(rgb(palette::current().selection)))
         // The keyboard's row reads as an accent bar on the left edge,
@@ -1300,6 +1300,7 @@ pub fn rail(
     scroll: &ScrollHandle,
     footer: Option<AnyElement>,
 ) -> Stateful<Div> {
+    // No rail padding or inter-row gap: selection and hover paint edge to edge.
     let mut col = div()
         .id("session-rail")
         .flex()
@@ -1309,9 +1310,7 @@ pub fn rail(
         .flex_none()
         .w(rems(width_rem))
         .h_full()
-        .bg(rgb(palette::current().panel))
-        .p_2()
-        .gap_1();
+        .bg(rgb(palette::current().panel));
 
     col = col.child(
         div()
@@ -1324,12 +1323,13 @@ pub fn rail(
     );
 
     if state.filter_active {
-        col = col.child(filter_bar(state));
+        col = col.child(div().w_full().p_2().child(filter_bar(state)));
     }
 
     if let Some(err) = &state.error {
         col = col.child(
             div()
+                .p_3()
                 .text_xs()
                 .text_color(rgb(palette::current().text_muted))
                 .child(err.clone()),
@@ -1340,6 +1340,7 @@ pub fn rail(
     if rows.is_empty() && !state.filter.trim().is_empty() {
         col = col.child(
             div()
+                .p_3()
                 .text_xs()
                 .text_color(rgb(palette::current().text_muted))
                 .child("no chat matches"),
@@ -1354,7 +1355,7 @@ pub fn rail(
     // list it pins to the bottom edge, with a full list it waits at the
     // end of the scroll like any other row.
     if let Some(footer) = footer {
-        col = col.child(footer);
+        col = col.child(div().w_full().mt_auto().px_2().pb_2().child(footer));
     }
     col
 }
