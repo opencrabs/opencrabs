@@ -129,12 +129,12 @@ fn stem_plural(word: &str) -> String {
         return format!("{stem}y");
     }
     if word.len() > 3
-        && word.ends_with('s')
         && !word.ends_with("ss")
         && !word.ends_with("us")
         && !word.ends_with("is")
+        && let Some(stem) = word.strip_suffix('s')
     {
-        return word[..word.len() - 1].to_string();
+        return stem.to_string();
     }
     word.to_string()
 }
@@ -220,6 +220,7 @@ mod tests {
             ("sidebar", "sidebars"),
             ("appearance", "appearances"),
             ("query", "queries"),
+            ("cafe", "cafés"),
         ] {
             assert_eq!(normalize_token(plural), singular);
             assert_eq!(field_tokens(plural), vec![singular]);

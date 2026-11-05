@@ -883,9 +883,11 @@ mod tests {
         let start = src
             .find("pub(super) fn overlay(")
             .expect("overlay renderer");
-        let overlay = &src[start..];
+        let overlay = src.get(start..).expect("overlay start is a char boundary");
         let end = overlay.find("/// The kind label").expect("overlay ends");
-        let compact: String = overlay[..end]
+        let compact: String = overlay
+            .get(..end)
+            .expect("overlay end is a char boundary")
             .chars()
             .filter(|ch| !ch.is_whitespace())
             .collect();
