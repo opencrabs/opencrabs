@@ -508,6 +508,7 @@ mod tests {
     /// A slice, not a sized array: the row set grows, the length must follow
     /// it instead of being a second hand-maintained count.
     const TUI_LABELS: &[&str] = &[
+        "Alt+Space",
         "Ctrl+C",
         "Ctrl+N",
         "Alt+T",
@@ -517,7 +518,6 @@ mod tests {
         "Mouse click",
         "/help",
         "/usage",
-        "Alt+Space",
         "Enter",
         "Shift+Enter",
         "Ctrl+J",
