@@ -169,7 +169,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     strategy:
-      fail-fast: false
+      # One failed target cancels the rest. The fail-fast philosophy of this
+      # workflow is in the `abort` job at the bottom (#2584).
+      fail-fast: true
       matrix:
         include:
           - os: self-hosted
@@ -860,4 +862,42 @@ jobs:
           if [[ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" == "true" ]]; then
             echo "::error::One or more CI jobs failed or were cancelled"
             exit 1
+          fi
+  # ── Fail fast: the first red job ends the run (#2584) ────────────────────
+  # Nothing used to stop a doomed run: a test leg went red at 16:14 and the
+  # macOS build still started at 16:25 on the same self-hosted box the tests
+  # need, compiling --all-features for a run that could no longer pass
+  # (#2583). Downstream jobs are gated so they never start; this job cancels
+  # whatever is already in flight.
+  #
+  # Hosted on purpose. A stop that queues behind the self-hosted machine it
+  # is trying to stop is not a stop.
+  abort:
+    name: Abort run on failure
+    if: failure()
+    needs: [lint, build, test, test-linux, audit, windows-footguns, windows-build, coverage]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      # The workflow default is read-only, so this job has to ask for the one
+      # scope it needs. It is the only job in this workflow with write access.
+      actions: write
+    steps:
+      - name: Cancel this run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          # Fork PRs get a read-only token no matter what the job asks for, so
+          # a refused cancel is reported and not turned into a second error:
+          # the gated jobs still refuse to start, only the running ones finish.
+          if curl -sf -X POST \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/$REPO/actions/runs/$RUN_ID/cancel"; then
+            echo "Cancellation requested for run $RUN_ID."
+          else
+            echo "::warning::could not cancel run $RUN_ID (fork PR tokens are read-only); running jobs will finish on their own."
           fi
