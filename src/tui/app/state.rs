@@ -584,6 +584,13 @@ pub struct App {
     /// the sound once-per-completion instead of once-per-read.
     pub(crate) announced_task_completions: std::collections::HashSet<uuid::Uuid>,
 
+    /// Sessions whose plan just finished a task, and when (#2593). The pane
+    /// ring pulses in a colour the focused pane does not use, so the chime has
+    /// a visible owner: you hear it and the panel that produced it is the one
+    /// blinking. Entries age out on their own (`COMPLETION_FLASH`), so nothing
+    /// has to clear them.
+    pub(crate) plan_completion_flash: HashMap<Uuid, std::time::Instant>,
+
     /// Escape confirmation state (double-press to clear)
     pub(crate) escape_pending_at: Option<std::time::Instant>,
 
@@ -1092,6 +1099,7 @@ impl App {
             build_msg_idx: None,
             animation_frame: 0,
             announced_task_completions: std::collections::HashSet::new(),
+            plan_completion_flash: HashMap::new(),
 
             escape_pending_at: None,
             ctrl_c_pending_at: None,
@@ -1437,19 +1445,46 @@ impl App {
     /// moment of the chime, so flipping
     /// `[agent] completion_notification_enabled` takes effect without a restart.
     fn chime_settled_plan_tasks(&mut self) {
-        let mut plans: Vec<Option<&crate::tui::plan::PlanDocument>> =
-            vec![self.pane_manager.focused_plan()];
-        for id in self.pane_manager.pane_ids_in_order() {
-            if let Some(pane) = self.pane_manager.get(id) {
-                plans.push(pane.plan_document.as_ref());
+        // Each pane's document is checked against ITS OWN session, so the
+        // chime also knows which panel to blink (#2593). The window-level plan
+        // is folded in afterwards for the case where no pane owns it; it has
+        // no pane to flash.
+        let per_pane: Vec<(Option<Uuid>, Option<crate::tui::plan::PlanDocument>)> = self
+            .pane_manager
+            .pane_ids_in_order()
+            .into_iter()
+            .filter_map(|id| {
+                self.pane_manager
+                    .get(id)
+                    .map(|pane| (pane.session_id, pane.plan_document.clone()))
+            })
+            .collect();
+        let window_plan = self.pane_manager.focused_plan().cloned();
+
+        let mut settled = 0usize;
+        let mut flashes: Vec<Uuid> = Vec::new();
+        for (session_id, plan) in &per_pane {
+            let count = crate::utils::completion_sound::newly_resolved(
+                &mut self.announced_task_completions,
+                &[plan.as_ref()],
+            );
+            settled += count;
+            if count > 0
+                && let Some(session_id) = session_id
+            {
+                flashes.push(*session_id);
             }
         }
-        let fresh = crate::utils::completion_sound::newly_resolved(
+        settled += crate::utils::completion_sound::newly_resolved(
             &mut self.announced_task_completions,
-            &plans,
+            &[window_plan.as_ref()],
         );
-        if fresh == 0 {
+        if settled == 0 {
             return;
+        }
+        let now = std::time::Instant::now();
+        for session_id in flashes {
+            self.plan_completion_flash.insert(session_id, now);
         }
         Self::play_task_chime();
     }

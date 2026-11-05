@@ -3789,6 +3789,12 @@ impl Dashboard {
     /// extra timer.
     fn running_tasks_label(&self) -> Option<String> {
         let session = self.transcript.session?;
+        self.running_tasks_label_for(session)
+    }
+
+    /// The same roster for ANY session, not just the open conversation: the
+    /// pane footers report each panel's own detached commands (#2593).
+    fn running_tasks_label_for(&self, session: Uuid) -> Option<String> {
         let bridge = agent_bridge::bridge()?;
         let mgr = bridge.service.background_manager()?;
         let tasks: Vec<(String, u64)> = mgr
@@ -3797,6 +3803,39 @@ impl Dashboard {
             .map(|t| (t.label, t.started.elapsed().as_secs()))
             .collect();
         opencrabs::tui::render::format_background_tasks(&tasks, opencrabs::tui::render::LABEL_CHARS)
+    }
+
+    /// One pane's footer text (#2593): pane index, whether that session is
+    /// mid-turn, who is answering it, the detached commands it is waiting on,
+    /// and its plan progress. Resolved here, once per frame, because it reads
+    /// the bridge and the plan state, neither of which belongs in a draw pass
+    /// per pane.
+    fn pane_footer_text(&self, session: Uuid, index: usize, count: usize) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        if count > 1 {
+            parts.push(format!("[{index}/{count}]"));
+        }
+        if self.busy && self.transcript.session == Some(session) {
+            // The GUI runs one conversation at a time, so the only pane that
+            // can be mid-turn is the open one.
+            parts.push("⠙ working".to_string());
+        }
+        if let Some(bridge) = agent_bridge::bridge() {
+            let (provider, model) = bridge.service.provider_pair_for_session(session);
+            if !model.is_empty() {
+                let label = model.rsplit('/').next().unwrap_or(&model).to_string();
+                parts.push(format!("{provider} / {label}"));
+            }
+        }
+        if let Some(roster) = self.running_tasks_label_for(session) {
+            parts.push(format!("⏳ {roster}"));
+        }
+        if self.plan_for == Some(session)
+            && let Some(progress) = self.plan.progress_label()
+        {
+            parts.push(progress);
+        }
+        parts.join("  ·  ")
     }
 
     /// Settle one detached row in the live turn, if it still holds it.
@@ -5375,6 +5414,20 @@ impl Dashboard {
             Some(title) => SharedString::from(title.to_string()),
             None => SharedString::from("Chat"),
         };
+        // Every pane carries its own status row (#2593). Resolved once here, from
+        // the pane's own session, so the draw pass walks the tree with a plain
+        // string per leaf instead of touching the bridge or the plan file.
+        let leaves = tree.leaves();
+        let count = leaves.len();
+        let mut order: HashMap<Uuid, usize> = HashMap::new();
+        let mut footers: HashMap<Uuid, SharedString> = HashMap::new();
+        for (i, session) in leaves.iter().enumerate() {
+            order.insert(*session, i + 1);
+            footers.insert(
+                *session,
+                SharedString::from(self.pane_footer_text(*session, i + 1, count)),
+            );
+        }
         let mut ctx = PanesCtx {
             chat: Some(chat),
             chat_session: self.transcript.session,
@@ -5385,6 +5438,8 @@ impl Dashboard {
             areas: &self.split_areas,
             entity: cx.entity().downgrade(),
             interactive,
+            footers: &footers,
+            order: &order,
         };
         let mut path = Vec::new();
         let tree = self.panes.as_ref().expect("checked a moment ago");
@@ -10216,6 +10271,37 @@ fn update_prompt_overlay(
         .child(panel)
 }
 
+/// A pane's status row at its bottom edge (#2593): the fields the window
+/// footer carries window-wide, scoped to the pane's own session. Unfocused
+/// panes draw it muted and the focused one in the accent, so feedback stays
+/// visible on every panel while the pane holding the keyboard stays the only
+/// one at full strength.
+fn pane_footer(id: SharedString, text: Option<SharedString>, focused: bool) -> AnyElement {
+    let Some(text) = text else {
+        return div().into_any_element();
+    };
+    let color = if focused {
+        palette::current().accent
+    } else {
+        palette::current().text_muted
+    };
+    div()
+        .id(id)
+        .flex()
+        .flex_row()
+        .flex_none()
+        .items_center()
+        .gap_2()
+        .px_2()
+        .py_1()
+        .text_xs()
+        .text_color(rgb(color))
+        .border_t_1()
+        .border_color(rgb(split_rule_color()))
+        .child(text)
+        .into_any_element()
+}
+
 /// One pane's header: the session's name and the × that closes that pane
 /// (#2474). Every pane carries one, so a split reads as two sessions rather
 /// than a session beside a nameless strip, and the pane holding the caret
@@ -10376,6 +10462,12 @@ struct PanesCtx<'a> {
     /// Whether the dividers take the pointer. The themes preview draws the
     /// same panes but never resizes them (#2438).
     interactive: bool,
+    /// One compact footer per pane session (#2593), precomputed before the
+    /// walk so a draw pass never reads the bridge or the plan file.
+    footers: &'a HashMap<Uuid, SharedString>,
+    /// Pane position in tree order, for the `[i/n]` prefix every pane footer
+    /// carries once the window holds more than one.
+    order: &'a HashMap<Uuid, usize>,
 }
 
 /// Draw the pane tree (#2472). A leaf is one pane: its header, its ×, and the
@@ -10452,6 +10544,11 @@ fn pane_element(
                     close,
                 ))
                 .child(body)
+                .child(pane_footer(
+                    SharedString::from(format!("pane-footer-{session}")),
+                    ctx.footers.get(session).cloned(),
+                    focused,
+                ))
                 .into_any_element()
         }
         PaneTree::Split {

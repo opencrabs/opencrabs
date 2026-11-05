@@ -71,13 +71,19 @@ pub(super) fn render_inactive_pane(
         .filter(|sid| app.is_session_processing(*sid))
         .and_then(|sid| app.background_sessions.get(&sid));
 
+    // A pane whose session just settled a plan task pulses amber on its ring
+    // (#2593). The chime alone cannot say WHICH panel finished; the ring can,
+    // and amber is not the focused pane's colour, so the answer stays readable
+    // even when the finished pane is the one holding focus.
+    let ring_role = pane_completion_flash(app, pane_id).unwrap_or(Role::GrayDim);
+
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::role(Role::GrayDim)))
+        .border_style(Style::default().fg(theme::role(ring_role)))
         .title(Span::styled(
             format!(" {}{} ", session_label, status),
             Style::default()
-                .fg(theme::role(Role::GrayDim))
+                .fg(theme::role(ring_role))
                 .add_modifier(Modifier::BOLD),
         ))
         .padding(Padding::horizontal(1));
@@ -338,13 +344,21 @@ pub(super) fn focused_pane_border(f: &mut Frame, app: &App, area: Rect) -> Rect 
         })
         .unwrap_or_else(|| "No session".to_string());
 
+    let flash = pane
+        .session_id
+        .and_then(|sid| app.plan_completion_flash.get(&sid))
+        .and_then(|started| completion_flash_role(started.elapsed()));
+    // Same pulse the inactive panes use, but the fallback here is the focused
+    // ring colour so an idle focused pane looks exactly as it always has.
+    let ring_role = flash.unwrap_or(Role::Success);
+
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::role(Role::Success)))
+        .border_style(Style::default().fg(theme::role(ring_role)))
         .title(Span::styled(
             format!(" {} ", session_label),
             Style::default()
-                .fg(theme::role(Role::Success))
+                .fg(theme::role(ring_role))
                 .add_modifier(Modifier::BOLD),
         ))
         .padding(Padding::horizontal(0));
@@ -448,6 +462,37 @@ fn pane_chrome_style(focused: bool, role: Role) -> Style {
     } else {
         Style::default().fg(theme::role(Role::GrayDim))
     }
+}
+
+/// How long a finished plan keeps announcing itself on its own pane (#2593).
+const COMPLETION_FLASH: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// One on/off cycle of that announcement. Slow on purpose: the chime already
+/// said "done", so this is the "which pane was it" cue, not an alarm.
+const COMPLETION_FLASH_PERIOD: std::time::Duration = std::time::Duration::from_millis(1600);
+
+/// Amber while a settled session's ring is on its visible phase, `None` when
+/// the blink is off or the announcement has expired.
+///
+/// Amber is deliberately NOT the focused pane's colour: a pane that finished
+/// still reads as "this one completed" even while it holds the keyboard.
+pub(crate) fn completion_flash_role(elapsed: std::time::Duration) -> Option<Role> {
+    if elapsed >= COMPLETION_FLASH {
+        return None;
+    }
+    let period = COMPLETION_FLASH_PERIOD.as_millis();
+    if elapsed.as_millis() % period < period / 2 {
+        Some(Role::Warning)
+    } else {
+        None
+    }
+}
+
+/// The ring colour for a pane whose session just settled a plan task.
+fn pane_completion_flash(app: &App, pane_id: PaneId) -> Option<Role> {
+    let session_id = app.pane_manager.get(pane_id)?.session_id?;
+    let started = app.plan_completion_flash.get(&session_id)?;
+    completion_flash_role(started.elapsed())
 }
 
 /// The three strip lines a pane shows for its live checklist: the title with
@@ -579,10 +624,13 @@ fn render_pane_input_readonly(
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::role(Role::GrayDim)));
     if let Some(title) = background_title {
+        // Inactive pane chrome: the roster stays visible on every panel so a
+        // neighbour's build is not invisible, and it drops to the inactive
+        // colour the way the plan strip and footer already do (#2577, #2593).
         block = block.title(
             Line::from(Span::styled(
                 format!(" ⏳ {title} "),
-                Style::default().fg(theme::role(Role::GrayDim)),
+                pane_chrome_style(false, Role::Warning),
             ))
             .alignment(ratatui::layout::Alignment::Right),
         );

@@ -1135,13 +1135,7 @@ pub(super) fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
 /// footer, full or compact, asks this one place.
 fn status_provider_model(app: &App) -> (String, String) {
     if let Some(ref session) = app.current_session {
-        let (prov, model) = app.agent_service.provider_pair_for_session(session.id);
-        let prefix = format!("{}/", prov);
-        let stripped = model.strip_prefix(&prefix).unwrap_or(&model);
-        (
-            prov,
-            crate::tui::provider_selector::model_display_label(stripped).to_string(),
-        )
+        display_pair_for_session(app, session.id)
     } else {
         (
             app.agent_service.provider_name(),
@@ -1151,6 +1145,22 @@ fn status_provider_model(app: &App) -> (String, String) {
             .to_string(),
         )
     }
+}
+
+/// The display pair for ONE session.
+///
+/// The window bar and the per-pane footer both need this, but they must not
+/// share the *session*: reading `app.current_session` in a pane footer makes
+/// an unfocused pane report the focused pane's model, which is the same
+/// "footer belongs to no pane" bug the split footer was meant to fix (#2575).
+fn display_pair_for_session(app: &App, session_id: uuid::Uuid) -> (String, String) {
+    let (prov, model) = app.agent_service.provider_pair_for_session(session_id);
+    let prefix = format!("{prov}/");
+    let stripped = model.strip_prefix(&prefix).unwrap_or(&model);
+    (
+        prov,
+        crate::tui::provider_selector::model_display_label(stripped).to_string(),
+    )
 }
 
 /// The approval-policy chip every footer carries: label plus colour role.
@@ -1172,6 +1182,10 @@ fn status_policy(app: &App) -> (&'static str, Role) {
 /// title already carries it, so one panel never says the same name
 /// twice. An unfocused pane draws the same fields in the inactive colour so
 /// the pane holding the keyboard is the one that reads at full strength.
+///
+/// The pair is resolved from the PANE's session, not the focused one (#2581).
+/// Two panes can run different models; showing the focused pane's model on
+/// its neighbour's footer is a lie about who is answering where.
 pub(super) fn render_pane_footer(
     f: &mut Frame,
     app: &App,
@@ -1193,7 +1207,15 @@ pub(super) fn render_pane_footer(
     let count = pane_ids.len();
     let index = pane_ids.iter().position(|id| *id == pane_id).map(|i| i + 1);
 
-    let (provider, model) = status_provider_model(app);
+    let session_id = app
+        .pane_manager
+        .panes
+        .iter()
+        .find(|p| p.id == pane_id)
+        .and_then(|p| p.session_id);
+    let (provider, model) = session_id
+        .map(|session_id| display_pair_for_session(app, session_id))
+        .unwrap_or_else(|| status_provider_model(app));
     let (policy_text, policy_role) = status_policy(app);
 
     let mut spans = Vec::new();
@@ -1206,6 +1228,19 @@ pub(super) fn render_pane_footer(
                 theme::role(Role::GrayDim)
             }),
         ));
+        spans.push(Span::styled(
+            "  ",
+            Style::default().fg(theme::role(Role::GrayDim)),
+        ));
+    }
+    // A pane mid-turn says so on its own footer, immediately after the index
+    // so a narrow split cannot clip the marker off the row (#2593). In split
+    // view the window status bar is gone, so in the old layout an unfocused
+    // pane running a turn looked identical to an idle one.
+    // `processing_sessions` is per session: two panes can run at once and each
+    // lights only its own row. Unfocused panes draw it in the inactive colour.
+    if let Some(working) = pane_working_span(app, session_id, focused) {
+        spans.push(working);
         spans.push(Span::styled(
             "  ",
             Style::default().fg(theme::role(Role::GrayDim)),
@@ -1229,4 +1264,28 @@ pub(super) fn render_pane_footer(
     ));
 
     f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// `⠙ working` for the pane's session, or `None` when that session is idle.
+///
+/// Focused panes draw it in the live role; unfocused ones in the inactive
+/// colour, so feedback stays visible on every panel while the pane holding the
+/// keyboard is still the only one at full strength (#2593).
+fn pane_working_span(
+    app: &App,
+    session_id: Option<uuid::Uuid>,
+    focused: bool,
+) -> Option<Span<'static>> {
+    let session_id = session_id?;
+    if !app.processing_sessions.contains(&session_id) {
+        return None;
+    }
+    Some(Span::styled(
+        "⠙ working",
+        Style::default().fg(if focused {
+            theme::role(Role::Success)
+        } else {
+            theme::role(Role::GrayDim)
+        }),
+    ))
 }

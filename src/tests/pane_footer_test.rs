@@ -159,7 +159,7 @@ async fn pane_footer_single_pane_keeps_the_full_window_bar() {
 }
 
 #[tokio::test]
-async fn pane_footer_never_repeats_the_session_name() {
+async fn footer_no_session_name_repeated_in_pane_footer() {
     let mut app = app().await;
     app.session_service
         .create_session(Some("alpha-conversation".into()))
@@ -206,5 +206,129 @@ async fn pane_footer_never_repeats_the_session_name() {
     assert!(
         !footer.contains("beta-conversation"),
         "footer repeated the session name: {footer:?}"
+    );
+}
+
+#[tokio::test]
+async fn pane_footer_reads_each_panes_own_model() {
+    let mut app = app().await;
+    app.session_service
+        .create_session(Some("left-pane".into()))
+        .await
+        .unwrap();
+    app.session_service
+        .create_session(Some("right-pane".into()))
+        .await
+        .unwrap();
+    app.load_sessions().await.unwrap();
+
+    app.pane_manager.split(SplitDirection::Horizontal);
+    let ids = app.pane_manager.pane_ids_in_order();
+    assert_eq!(ids.len(), 2);
+
+    let left = app
+        .sessions
+        .iter()
+        .find(|s| s.title.as_deref() == Some("left-pane"))
+        .cloned()
+        .expect("left session");
+    let right = app
+        .sessions
+        .iter()
+        .find(|s| s.title.as_deref() == Some("right-pane"))
+        .cloned()
+        .expect("right session");
+    app.pane_manager.get_mut(ids[0]).unwrap().session_id = Some(left.id);
+    app.pane_manager.get_mut(ids[1]).unwrap().session_id = Some(right.id);
+
+    // Two panes, two independently selected models. The footer used to read
+    // `app.current_session`, so both rows printed whichever pane had focus.
+    app.agent_service
+        .set_session_model(left.id, "left-model".to_string());
+    app.agent_service
+        .set_session_model(right.id, "right-model".to_string());
+
+    let buffer = draw(&mut app, 120, 30);
+    let (_, y) = find_in_buffer(&buffer, "[1/2]").expect("first pane footer");
+    let row = row_text(&buffer, y);
+
+    let left_at = row
+        .find("left-model")
+        .unwrap_or_else(|| panic!("left pane footer must name its own model, row: {row:?}"));
+    let right_at = row
+        .find("right-model")
+        .unwrap_or_else(|| panic!("right pane footer must name its own model, row: {row:?}"));
+    assert!(
+        left_at < right_at,
+        "each model stays in the columns of the pane that owns it: {row:?}"
+    );
+}
+
+#[tokio::test]
+async fn pane_footer_marks_only_the_pane_that_is_working() {
+    let mut app = app().await;
+    app.session_service
+        .create_session(Some("left-pane".into()))
+        .await
+        .unwrap();
+    app.session_service
+        .create_session(Some("right-pane".into()))
+        .await
+        .unwrap();
+    app.load_sessions().await.unwrap();
+
+    app.pane_manager.split(SplitDirection::Horizontal);
+    let ids = app.pane_manager.pane_ids_in_order();
+    let left = app
+        .sessions
+        .iter()
+        .find(|s| s.title.as_deref() == Some("left-pane"))
+        .cloned()
+        .expect("left session");
+    let right = app
+        .sessions
+        .iter()
+        .find(|s| s.title.as_deref() == Some("right-pane"))
+        .cloned()
+        .expect("right session");
+    app.pane_manager.get_mut(ids[0]).unwrap().session_id = Some(left.id);
+    app.pane_manager.get_mut(ids[1]).unwrap().session_id = Some(right.id);
+
+    // Only the right pane's session is mid-turn. In split view the window bar
+    // is gone, so each pane has to say this itself or the busy one looks idle.
+    app.processing_sessions.insert(right.id);
+
+    // `split` moves focus to the new pane, so put the keyboard back on the idle
+    // left pane: the dim assertion below is about a busy pane nobody is in.
+    app.pane_manager.focused = ids[0];
+
+    let buffer = draw(&mut app, 120, 30);
+    let (second_x, y) = find_in_buffer(&buffer, "[2/2]").expect("right footer");
+    let (working_x, working_y) = find_in_buffer(&buffer, "working").expect("working marker");
+    assert_eq!(working_y, y, "the marker rides the pane's own footer row");
+    assert!(
+        working_x > second_x,
+        "the marker belongs to the working pane's columns: {working_x} > {second_x}"
+    );
+    assert_eq!(
+        row_text(&buffer, y).matches("working").count(),
+        1,
+        "only the pane doing the work is marked"
+    );
+    assert_eq!(
+        buffer[(working_x, working_y)].fg,
+        theme::role(Role::GrayDim),
+        "an unfocused busy pane reports in the inactive colour"
+    );
+
+    // Focus it: same fact, live colour, so feedback survives on every panel
+    // while the pane holding the keyboard stays the only one at full strength.
+    app.pane_manager.focused = ids[1];
+    let buffer = draw(&mut app, 120, 30);
+    let (working_x, working_y) = find_in_buffer(&buffer, "working").expect("working marker");
+    assert_eq!(
+        buffer[(working_x, working_y)].fg,
+        theme::role(Role::Success),
+        "the focused busy pane reports at full strength"
     );
 }

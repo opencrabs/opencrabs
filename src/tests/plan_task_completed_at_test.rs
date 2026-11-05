@@ -8,7 +8,7 @@
 
 use chrono::{Duration, Utc};
 
-use crate::tui::plan::{PlanDocument, PlanTask, PlanStatus, TaskStatus, TaskType};
+use crate::tui::plan::{PlanDocument, PlanStatus, PlanTask, TaskStatus, TaskType};
 use crate::tui::render::plan_widget::settled_task_role;
 use crate::tui::render::theme::Role;
 use crate::utils::completion_sound::newly_resolved;
@@ -74,7 +74,7 @@ fn a_plan_saved_before_this_field_still_loads() {
         "dependencies": [],
         "complexity": 3,
         "acceptance_criteria": [],
-        "status": "completed",
+        "status": "Completed",
         "notes": null,
         "retry_count": 0
     }"#;
@@ -92,7 +92,10 @@ fn the_stamp_round_trips_through_json() {
     let mut task = task();
     task.complete(None);
     let json = serde_json::to_string(&task).expect("serializes");
-    assert!(json.contains("completed_at"), "the stamp is persisted: {json}");
+    assert!(
+        json.contains("completed_at"),
+        "the stamp is persisted: {json}"
+    );
 
     let back: PlanTask = serde_json::from_str(&json).expect("deserializes");
     assert_eq!(back.completed_at, task.completed_at);
@@ -147,12 +150,7 @@ fn plan_with(statuses: &[TaskStatus]) -> PlanDocument {
     let mut plan = PlanDocument::new(uuid::Uuid::new_v4(), "chime".to_string());
     plan.status = PlanStatus::Active;
     for (i, status) in statuses.iter().enumerate() {
-        let mut task = PlanTask::new(
-            i + 1,
-            format!("task {i}"),
-            String::new(),
-            TaskType::Edit,
-        );
+        let mut task = PlanTask::new(i + 1, format!("task {i}"), String::new(), TaskType::Edit);
         task.status = status.clone();
         plan.add_task(task);
     }
@@ -165,7 +163,11 @@ fn each_settled_task_chimes_exactly_once() {
     let plan = plan_with(&[TaskStatus::Completed, TaskStatus::InProgress]);
     let plans = [Some(&plan)];
 
-    assert_eq!(newly_resolved(&mut seen, &plans), 1, "the first read chimes");
+    assert_eq!(
+        newly_resolved(&mut seen, &plans),
+        1,
+        "the first read chimes"
+    );
     assert_eq!(
         newly_resolved(&mut seen, &plans),
         0,

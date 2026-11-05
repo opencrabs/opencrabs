@@ -65,6 +65,29 @@ impl PlanStripState {
             .and_then(opencrabs::utils::plan_files::load_plan_from_path);
     }
 
+    /// One compact line for the pane footer (#2593): `3/12` plus the task in
+    /// flight. The strip above the composer already carries the detail; this
+    /// is the version that survives inside a split, where the strip of a
+    /// session is not always the one the user is reading.
+    pub fn progress_label(&self) -> Option<String> {
+        let plan = self.doc.as_ref()?;
+        if plan.tasks.is_empty() {
+            return Some(format!("📋 {} · not seeded", plan.title));
+        }
+        let done = plan
+            .tasks
+            .iter()
+            .filter(|t| matches!(t.status, TaskStatus::Completed | TaskStatus::Skipped))
+            .count();
+        let running = plan
+            .tasks
+            .iter()
+            .find(|t| t.status == TaskStatus::InProgress)
+            .map(|t| format!(" · ▸ {}", t.title))
+            .unwrap_or_default();
+        Some(format!("📋 {done}/{}{running}", plan.tasks.len()))
+    }
+
     /// The strip, or `None` when there is no plan to show.
     pub fn view(&self) -> Option<Div> {
         let plan = self.doc.as_ref()?;
