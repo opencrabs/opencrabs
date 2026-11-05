@@ -95,6 +95,12 @@ pub const PANE_BODY_FLOOR: u16 = 3;
 /// not shrink on a short pane; the strip and the queue give way first.
 pub const PANE_INPUT_ROWS: u16 = 3;
 
+/// Rows a pane spends on its own compact footer: the model, the approval
+/// policy and the pane's place in the split. It is the window status bar
+/// moved inside the session panel, so it stays attached to the pane it
+/// describes instead of spanning the whole window (#2578).
+pub const PANE_FOOTER_ROWS: u16 = 1;
+
 /// The fewest rows a compact plan strip can carry: the title row, the running
 /// task and enough left over to read them apart.
 pub const PANE_STRIP_MIN: u16 = 3;
@@ -114,12 +120,15 @@ pub struct PaneRows {
     pub queue: u16,
     /// Input rows.
     pub input: u16,
+    /// Footer rows at the very bottom of the pane, 0 when the pane cannot
+    /// afford one.
+    pub footer: u16,
 }
 
 impl PaneRows {
     /// Rows inside the pane's border, the sum the four fields must equal.
     pub fn inner(self) -> u16 {
-        self.body + self.strip + self.queue + self.input
+        self.body + self.strip + self.queue + self.input + self.footer
     }
 }
 
@@ -167,21 +176,34 @@ pub fn pane_rows(pane_height: u16, desired_strip: u16) -> PaneRows {
 /// same reason: a plan in flight outlives one queued message.
 pub fn pane_rows_with(pane_height: u16, desired_strip: u16, desired_queue: u16) -> PaneRows {
     let inner = pane_height.saturating_sub(PANE_CHROME_ROWS);
-    let input = PANE_INPUT_ROWS.min(inner);
-    let strip = pane_strip_height(pane_height, desired_strip);
+    // The footer is identity, not content: it is reserved before anything
+    // else, but only when the pane can spare the row. It yields to the
+    // transcript floor, because a pane too short to read is worse than a
+    // pane without a label.
+    let footer = if inner >= PANE_INPUT_ROWS + PANE_BODY_FLOOR + PANE_FOOTER_ROWS {
+        PANE_FOOTER_ROWS
+    } else {
+        0
+    };
+    let work = inner.saturating_sub(footer);
+    let input = PANE_INPUT_ROWS.min(work);
+    // Budget the strip against the rows the footer left behind, expressed in
+    // the pane-height terms `pane_strip_height` expects.
+    let strip = pane_strip_height(work.saturating_add(PANE_CHROME_ROWS), desired_strip);
     let fixed = input.saturating_add(strip).saturating_add(PANE_BODY_FLOOR);
-    let queue = if desired_queue > 0 && inner >= fixed.saturating_add(desired_queue) {
+    let queue = if desired_queue > 0 && work >= fixed.saturating_add(desired_queue) {
         desired_queue
     } else {
         0
     };
     PaneRows {
-        body: inner
+        body: work
             .saturating_sub(input)
             .saturating_sub(strip)
             .saturating_sub(queue),
         strip,
         queue,
         input,
+        footer,
     }
 }

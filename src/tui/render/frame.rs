@@ -18,8 +18,8 @@ use super::dialogs::{
 };
 use super::help::{render_help, render_settings};
 use super::input::{
-    render_emoji_picker, render_followup, render_input, render_queue, render_slash_autocomplete,
-    render_status_bar,
+    render_emoji_picker, render_followup, render_input, render_pane_footer, render_queue,
+    render_slash_autocomplete, render_status_bar,
 };
 use super::plan_widget::render_plan_checklist;
 use super::projects::render_projects;
@@ -186,6 +186,11 @@ pub fn render(f: &mut Frame, app: &mut App) {
         (plan_height, queue_height, input_height)
     };
 
+    // In split view each pane carries its own footer inside the session
+    // panel, so the window-level bar yields its row instead of spanning the
+    // split (#2578).
+    let status_height = u16::from(!app.pane_manager.is_split());
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -193,7 +198,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
             Constraint::Length(plan_height),  // [1] Plan checklist (0 when no plan)
             Constraint::Length(queue_height), // [2] Queue preview (0 when no queue)
             Constraint::Length(input_height), // [3] Input (dynamic)
-            Constraint::Length(1),            // [4] Status bar
+            Constraint::Length(status_height), // [4] Status bar (0 in split view)
         ])
         .split(f.area());
 
@@ -409,6 +414,7 @@ fn render_split_panes(f: &mut Frame, app: &mut App, area: Rect) -> (Rect, u16) {
             render_chat(f, app, layout.body);
             panes::render_pane_strips(f, app, pane_id, layout.strip, layout.queue, true);
             let scroll_y = render_input(f, app, layout.input);
+            render_pane_footer(f, app, pane_id, layout.footer, true);
             focused_input = Some((layout.input, scroll_y));
         } else {
             panes::render_inactive_pane(f, app, pane_id, rect, rows);

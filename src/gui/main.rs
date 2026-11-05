@@ -5777,17 +5777,16 @@ impl Render for Dashboard {
                             Some(b) => (b.service.provider_name(), b.service.provider_model()),
                             None => ("-".to_string(), "-".to_string()),
                         };
-                        // The session name leads, as in the TUI footer.
-                        let identity = format!(
-                            "{} · {}",
-                            self.session_title().unwrap_or("chat"),
-                            status_identity(
-                                &provider,
-                                &model,
-                                &tilde_path(&opencrabs::utils::cwd::launch_cwd()),
-                                self.branch.as_deref().unwrap_or("-"),
-                                self.live.tokens_per_sec(),
-                            )
+                        // Who is answering, from where, on what branch, and how
+                        // fast. The session name is not part of it: the header
+                        // above already names the conversation, so repeating it
+                        // here would print one name twice (#2578).
+                        let identity = status_identity(
+                            &provider,
+                            &model,
+                            &tilde_path(&opencrabs::utils::cwd::launch_cwd()),
+                            self.branch.as_deref().unwrap_or("-"),
+                            self.live.tokens_per_sec(),
                         );
                         div()
                             .flex()

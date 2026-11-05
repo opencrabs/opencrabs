@@ -1002,23 +1002,7 @@ pub(super) fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
     // One coherent pair (#2264): name and model must come from the same
     // source. Reading them from the two separate getters mixes the chain's
     // active fallback with the primary's stale pick after a sticky fallback.
-    let (provider_str, model_str) = if let Some(ref session) = app.current_session {
-        let (prov, model) = app.agent_service.provider_pair_for_session(session.id);
-        let prefix = format!("{}/", prov);
-        let stripped = model.strip_prefix(&prefix).unwrap_or(&model);
-        (
-            prov,
-            crate::tui::provider_selector::model_display_label(stripped).to_string(),
-        )
-    } else {
-        (
-            app.agent_service.provider_name(),
-            crate::tui::provider_selector::model_display_label(
-                app.agent_service.provider_model().as_str(),
-            )
-            .to_string(),
-        )
-    };
+    let (provider_str, model_str) = status_provider_model(app);
 
     // Working directory — collapse $HOME to ~, then truncate if still long
     let raw_dir = app.working_directory.to_string_lossy();
@@ -1062,13 +1046,8 @@ pub(super) fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
     let sep_text = "  ·  ";
 
     // --- Approval policy (centre-left) ---
-    let (policy_text, policy_color) = if app.approval_auto_always {
-        ("⚡ yolo", theme::role(Role::Error))
-    } else if app.approval_auto_session {
-        ("⚡ auto (session)", orange)
-    } else {
-        ("🔒 approve", theme::role(Role::GrayDim))
-    };
+    let (policy_text, policy_role) = status_policy(app);
+    let policy_color = theme::role(policy_role);
 
     let mut spans = vec![
         Span::styled(
@@ -1149,4 +1128,110 @@ pub(super) fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
     let line = Line::from(spans);
     let para = Paragraph::new(line).alignment(Alignment::Left);
     f.render_widget(para, area);
+}
+
+/// Provider and model for a status line, from one coherent source.
+///
+/// Reading them from two separate getters mixed the chain's active fallback
+/// with the primary's stale pick after a sticky fallback (#2264), so every
+/// footer, full or compact, asks this one place.
+fn status_provider_model(app: &App) -> (String, String) {
+    if let Some(ref session) = app.current_session {
+        let (prov, model) = app.agent_service.provider_pair_for_session(session.id);
+        let prefix = format!("{}/", prov);
+        let stripped = model.strip_prefix(&prefix).unwrap_or(&model);
+        (
+            prov,
+            crate::tui::provider_selector::model_display_label(stripped).to_string(),
+        )
+    } else {
+        (
+            app.agent_service.provider_name(),
+            crate::tui::provider_selector::model_display_label(
+                app.agent_service.provider_model().as_str(),
+            )
+            .to_string(),
+        )
+    }
+}
+
+/// The approval-policy chip every footer carries: label plus colour role.
+fn status_policy(app: &App) -> (&'static str, Role) {
+    if app.approval_auto_always {
+        ("⚡ yolo", Role::Error)
+    } else if app.approval_auto_session {
+        ("⚡ auto (session)", Role::Accent)
+    } else {
+        ("🔒 approve", Role::GrayDim)
+    }
+}
+
+/// The compact footer a pane carries in split view (#2578).
+///
+/// This is the window status bar moved inside the session panel: the model
+/// answering in that pane, the approval policy, and the pane's place in the
+/// split. The session name is deliberately absent because the pane's border
+/// title already carries it (#2579), so one panel never says the same name
+/// twice. An unfocused pane draws the same fields in the inactive colour so
+/// the pane holding the keyboard is the one that reads at full strength.
+pub(super) fn render_pane_footer(
+    f: &mut Frame,
+    app: &App,
+    pane_id: crate::tui::pane::PaneId,
+    area: Rect,
+    focused: bool,
+) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+
+    let dim = if focused {
+        theme::role(Role::BlueSlate)
+    } else {
+        theme::role(Role::GrayDim)
+    };
+
+    let pane_ids = app.pane_manager.pane_ids_in_order();
+    let count = pane_ids.len();
+    let index = pane_ids
+        .iter()
+        .position(|id| *id == pane_id)
+        .map(|i| i + 1);
+
+    let (provider, model) = status_provider_model(app);
+    let (policy_text, policy_role) = status_policy(app);
+
+    let mut spans = Vec::new();
+    if let (Some(index), true) = (index, count > 1) {
+        spans.push(Span::styled(
+            format!("[{index}/{count}]"),
+            Style::default().fg(if focused {
+                theme::role(Role::Success)
+            } else {
+                theme::role(Role::GrayDim)
+            }),
+        ));
+        spans.push(Span::styled(
+            "  ",
+            Style::default().fg(theme::role(Role::GrayDim)),
+        ));
+    }
+    spans.push(Span::styled(
+        format!("{provider} / {model}"),
+        Style::default().fg(dim),
+    ));
+    spans.push(Span::styled(
+        "  ·  ",
+        Style::default().fg(theme::role(Role::GrayDim)),
+    ));
+    spans.push(Span::styled(
+        policy_text,
+        Style::default().fg(if focused {
+            theme::role(policy_role)
+        } else {
+            theme::role(Role::GrayDim)
+        }),
+    ));
+
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }

@@ -187,6 +187,9 @@ pub(super) fn render_inactive_pane(
     // Inactive pane: its chrome is drawn dim so the live pane is obvious (#2577).
     render_pane_strips(f, app, pane_id, layout.strip, layout.queue, false);
     render_pane_input_readonly(f, &pane.input_buffer, layout.input);
+    // The pane's own footer, compact and dim: the window bar no longer spans
+    // the split, so each session panel carries its identity row (#2578).
+    super::input::render_pane_footer(f, app, pane_id, layout.footer, false);
 }
 
 /// Render a single message in simplified form for inactive panes.
@@ -352,8 +355,10 @@ pub(super) struct PaneLayout {
     pub strip: Option<Rect>,
     /// Queued-preview slot, `None` when nothing is queued or no room.
     pub queue: Option<Rect>,
-    /// Input rows at the bottom.
+    /// Input rows, above the footer.
     pub input: Rect,
+    /// Compact footer row at the bottom edge: model, policy, pane index.
+    pub footer: Rect,
 }
 
 /// Slice a pane's inner area into body / strip / queue / input using the
@@ -362,6 +367,16 @@ pub(super) struct PaneLayout {
 /// above, so the input box always sits where the window input used to.
 pub(super) fn pane_layout(inner: Rect, rows: PaneRows) -> PaneLayout {
     let mut bottom = inner.bottom();
+
+    // The footer owns the pane's last row; everything else stacks above it.
+    let footer_h = rows.footer.min(bottom.saturating_sub(inner.y));
+    bottom = bottom.saturating_sub(footer_h);
+    let footer = Rect {
+        x: inner.x,
+        y: bottom,
+        width: inner.width,
+        height: footer_h,
+    };
 
     let input_h = rows.input.min(bottom.saturating_sub(inner.y));
     bottom = bottom.saturating_sub(input_h);
@@ -409,6 +424,7 @@ pub(super) fn pane_layout(inner: Rect, rows: PaneRows) -> PaneLayout {
         strip,
         queue,
         input,
+        footer,
     }
 }
 
@@ -604,31 +620,36 @@ mod tests {
     fn split_pane_layout_slices_bottom_up() {
         let inner = rect(0, 0, 40, 30);
         let rows = PaneRows {
-            body: 20,
+            body: 19,
             strip: 5,
             queue: 2,
             input: 3,
+            footer: 1,
         };
         let l = pane_layout(inner, rows);
-        assert_eq!(l.input, rect(0, 27, 40, 3));
-        assert_eq!(l.queue, Some(rect(0, 25, 40, 2)));
-        assert_eq!(l.strip, Some(rect(0, 20, 40, 5)));
-        assert_eq!(l.body, rect(0, 0, 40, 20));
+        assert_eq!(l.footer, rect(0, 29, 40, 1));
+        assert_eq!(l.input, rect(0, 26, 40, 3));
+        assert_eq!(l.queue, Some(rect(0, 24, 40, 2)));
+        assert_eq!(l.strip, Some(rect(0, 19, 40, 5)));
+        assert_eq!(l.body, rect(0, 0, 40, 19));
     }
 
     #[test]
     fn split_pane_layout_zero_strip_and_queue_fill_the_body() {
         let inner = rect(0, 0, 40, 30);
         let rows = PaneRows {
-            body: 27,
+            body: 26,
             strip: 0,
             queue: 0,
             input: 3,
+            footer: 1,
         };
         let l = pane_layout(inner, rows);
         assert_eq!(l.strip, None);
         assert_eq!(l.queue, None);
-        assert_eq!(l.body, rect(0, 0, 40, 27));
+        assert_eq!(l.input, rect(0, 26, 40, 3));
+        assert_eq!(l.footer, rect(0, 29, 40, 1));
+        assert_eq!(l.body, rect(0, 0, 40, 26));
     }
 
     #[test]

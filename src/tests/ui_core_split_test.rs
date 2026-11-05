@@ -1,8 +1,9 @@
 //! The split-pane chord and layout rule (#2438).
 
 use crate::ui_core::split::{
-    EVEN_SHARE, Layout, MIN_PANE_PX, PANE_BODY_FLOOR, PANE_CHROME_ROWS, PANE_INPUT_ROWS,
-    PANE_STRIP_MAX, PANE_STRIP_MIN, chord_layout, pane_rows, pane_strip_height, share_after_drag,
+    EVEN_SHARE, Layout, MIN_PANE_PX, PANE_BODY_FLOOR, PANE_CHROME_ROWS, PANE_FOOTER_ROWS,
+    PANE_INPUT_ROWS, PANE_STRIP_MAX, PANE_STRIP_MIN, chord_layout, pane_rows, pane_rows_with,
+    pane_strip_height, share_after_drag,
 };
 
 #[test]
@@ -113,7 +114,11 @@ fn a_normal_pane_gives_its_strip_three_rows() {
     assert_eq!(pane_strip_height(24, 3), PANE_STRIP_MIN);
     let rows = pane_rows(24, 3);
     assert_eq!(rows.strip, 3);
-    assert_eq!(rows.body, 24 - PANE_CHROME_ROWS - PANE_INPUT_ROWS - 3);
+    assert_eq!(rows.footer, PANE_FOOTER_ROWS);
+    assert_eq!(
+        rows.body,
+        24 - PANE_CHROME_ROWS - PANE_INPUT_ROWS - 3 - PANE_FOOTER_ROWS
+    );
 }
 
 #[test]
@@ -155,4 +160,34 @@ fn the_rows_add_up_to_the_inner_height() {
             assert!((PANE_STRIP_MIN..=PANE_STRIP_MAX).contains(&rows.strip));
         }
     }
+}
+
+#[test]
+fn pane_footer_costs_one_row_in_a_normal_pane() {
+    // A pane with room to spare spends its last row on the footer, and that
+    // row comes out of the transcript rather than the composer, which stays at
+    // its full PANE_INPUT_ROWS (#2575).
+    let rows = pane_rows_with(24, 3, 0);
+    assert_eq!(rows.footer, PANE_FOOTER_ROWS);
+    assert_eq!(rows.input, PANE_INPUT_ROWS);
+    assert_eq!(
+        rows.body,
+        24 - PANE_CHROME_ROWS - PANE_INPUT_ROWS - rows.strip - PANE_FOOTER_ROWS
+    );
+}
+
+#[test]
+fn pane_footer_yields_before_the_transcript_floor() {
+    // Too short to carry a footer: the label gives way, because a pane too
+    // short to read is worse than a pane without one.
+    let too_short = PANE_CHROME_ROWS + PANE_INPUT_ROWS + PANE_BODY_FLOOR;
+    let rows = pane_rows_with(too_short, 3, 0);
+    assert_eq!(rows.footer, 0);
+    assert_eq!(rows.body, PANE_BODY_FLOOR);
+
+    // One row more and the footer appears again.
+    let fits = rows;
+    let taller = pane_rows_with(too_short + PANE_FOOTER_ROWS, 0, 0);
+    assert_eq!(taller.footer, PANE_FOOTER_ROWS);
+    assert_eq!(fits.inner(), too_short - PANE_CHROME_ROWS);
 }

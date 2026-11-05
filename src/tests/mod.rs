@@ -848,6 +848,7 @@ pub mod dialog_ctrl_c_panel_test;
 pub mod dialog_footer_batch_test;
 pub mod fullscreen_dialogs_test;
 pub mod help_responsive_test;
+pub mod pane_footer_test;
 pub mod retry_send_label_test;
 pub mod tool_approval_hotkeys_test;
 pub mod tool_loop_rotation_rows_test;
