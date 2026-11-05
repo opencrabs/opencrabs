@@ -11252,7 +11252,7 @@ mod tests {
     fn no_measure_cap_reaches_a_split_pane() {
         let src = include_str!("main.rs");
         let (_, rest) = src
-            .split_once("fn pane_element(")
+            .split_once(concat!("fn pane_", "element("))
             .expect("split leaf renderer exists");
         let (leaf, _) = rest
             .split_once("let close_session = *session;")
