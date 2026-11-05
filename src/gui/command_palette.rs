@@ -88,10 +88,16 @@ pub fn status(state: &PaletteState) -> String {
                 roast(query).to_string()
             } else if rows.len() == 1 && rows[0].item.kind == PaletteKind::Ask {
                 "no match. enter asks a fresh session".to_string()
-            } else if rows.len() == 1 {
-                "1 match".to_string()
             } else {
-                format!("{} matches", rows.len())
+                let matches = rows
+                    .iter()
+                    .filter(|row| row.item.kind != PaletteKind::Ask)
+                    .count();
+                if matches == 1 {
+                    "1 match".to_string()
+                } else {
+                    format!("{matches} matches")
+                }
             }
         }
     }
@@ -859,14 +865,13 @@ mod tests {
         let mut state = state_with(vec![
             item("alpha", PaletteKind::Command),
             item("beta", PaletteKind::Command),
+            item("alphabet", PaletteKind::Command),
         ]);
         assert_eq!(status(&state), "", "an empty query prints no count");
-        state.type_char('a');
-        state.type_char('l');
+        state.insert_text("beta");
         assert_eq!(status(&state), "1 match");
-        state.backspace();
         state.clear();
-        state.type_char('a');
+        state.insert_text("alph");
         assert_eq!(status(&state), "2 matches");
     }
 

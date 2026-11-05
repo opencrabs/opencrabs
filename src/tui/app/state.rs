@@ -3532,10 +3532,8 @@ impl App {
                     PaletteKind::Skill,
                     PaletteAction::RunSkill(skill.slash_name.clone()),
                 )
-                // The skill's own description carries the words a user types
-                // when they do not know its slash name: `telegram` has to find
-                // the channels skill, not only the docs page (#2462).
-                .with_keywords(&format!("skill workflow recipe {}", skill.description)),
+                .with_keywords("skill workflow recipe")
+                .with_description(&skill.description),
             );
         }
         for session in &self.sessions {
