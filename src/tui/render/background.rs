@@ -21,6 +21,30 @@
 /// what identify the command, so the tail is what gets dropped.
 pub const LABEL_CHARS: usize = 28;
 
+/// The running-task text for ONE session, shaped for a border title (#2576).
+///
+/// Decorating it (`⏳`, padding, colour) is the caller's job: the focused
+/// composer and the read-only pane composer style the same fact differently,
+/// and one helper that baked in the glyph made the second caller show it
+/// twice.
+///
+/// Per-pane split view needs the roster scoped to the pane's own session: the
+/// same manager holds every session's detached commands, so formatting the
+/// whole roster would put a neighbouring pane's build on this pane's border.
+/// `None` when that session has nothing running, which is what makes the row
+/// disappear instead of showing an empty slot.
+pub fn pane_background_title(
+    manager: &crate::brain::agent::service::background_tasks::BackgroundTaskManager,
+    session_id: uuid::Uuid,
+) -> Option<String> {
+    let tasks: Vec<(String, u64)> = manager
+        .running_tasks(session_id)
+        .into_iter()
+        .map(|t| (t.label, t.started.elapsed().as_secs()))
+        .collect();
+    format_background_tasks(&tasks, LABEL_CHARS)
+}
+
 /// `cargo test 32s`, or `cargo test 32s +2` when other tasks are also running.
 ///
 /// The oldest task is the one named: it is the one the user has been waiting

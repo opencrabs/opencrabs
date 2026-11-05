@@ -510,17 +510,15 @@ pub(super) fn render_input(f: &mut Frame, app: &App, area: Rect) -> u16 {
     // work is still happening. It used to sit in the status bar, which is where
     // the eye goes least; here it shares a border with the ctx budget below and
     // lands in the box the user is already looking at while they wait.
+    // The roster belongs to the session this composer sends into, which in
+    // split view is the FOCUSED PANE's session, not the window bind (#2576):
+    // reading `current_session` put one pane's detached commands on another
+    // pane's input border, where they read as that pane's work.
     let bg_task_title = app
-        .current_session
-        .as_ref()
+        .send_target_session_id()
         .zip(app.agent_service.background_manager())
-        .and_then(|(session, mgr)| {
-            let tasks: Vec<(String, u64)> = mgr
-                .running_tasks(session.id)
-                .into_iter()
-                .map(|t| (t.label, t.started.elapsed().as_secs()))
-                .collect();
-            super::background::format_background_tasks(&tasks, super::background::LABEL_CHARS)
+        .and_then(|(session_id, mgr)| {
+            super::background::pane_background_title(mgr.as_ref(), session_id)
         })
         .map(|text| {
             Line::from(Span::styled(
@@ -1166,12 +1164,12 @@ fn status_policy(app: &App) -> (&'static str, Role) {
     }
 }
 
-/// The compact footer a pane carries in split view (#2578).
+/// The compact footer a pane carries in split view (#2575).
 ///
 /// This is the window status bar moved inside the session panel: the model
 /// answering in that pane, the approval policy, and the pane's place in the
 /// split. The session name is deliberately absent because the pane's border
-/// title already carries it (#2579), so one panel never says the same name
+/// title already carries it, so one panel never says the same name
 /// twice. An unfocused pane draws the same fields in the inactive colour so
 /// the pane holding the keyboard is the one that reads at full strength.
 pub(super) fn render_pane_footer(
@@ -1193,10 +1191,7 @@ pub(super) fn render_pane_footer(
 
     let pane_ids = app.pane_manager.pane_ids_in_order();
     let count = pane_ids.len();
-    let index = pane_ids
-        .iter()
-        .position(|id| *id == pane_id)
-        .map(|i| i + 1);
+    let index = pane_ids.iter().position(|id| *id == pane_id).map(|i| i + 1);
 
     let (provider, model) = status_provider_model(app);
     let (policy_text, policy_role) = status_policy(app);

@@ -186,9 +186,18 @@ pub(super) fn render_inactive_pane(
     // the budget carved, its stashed input read-only at the bottom (#2494).
     // Inactive pane: its chrome is drawn dim so the live pane is obvious (#2577).
     render_pane_strips(f, app, pane_id, layout.strip, layout.queue, false);
-    render_pane_input_readonly(f, &pane.input_buffer, layout.input);
+    // The pane's own running-task row, resolved from ITS session (#2576):
+    // each panel names the detached commands it is waiting on, not a
+    // window-wide roster that would read as this pane's work.
+    let bg_title = pane
+        .session_id
+        .zip(app.agent_service.background_manager())
+        .and_then(|(session_id, mgr)| {
+            super::background::pane_background_title(mgr.as_ref(), session_id)
+        });
+    render_pane_input_readonly(f, &pane.input_buffer, bg_title, layout.input);
     // The pane's own footer, compact and dim: the window bar no longer spans
-    // the split, so each session panel carries its identity row (#2578).
+    // the split, so each session panel carries its identity row (#2575).
     super::input::render_pane_footer(f, app, pane_id, layout.footer, false);
 }
 
@@ -545,7 +554,12 @@ pub(super) fn render_pane_strips(
 /// implying the buffer is editable from a pane that is not focused (#2494).
 /// Its text uses the dim role rather than the live composer's text colour, so
 /// an unfocused pane's composer reads as inactive at a glance (#2577).
-fn render_pane_input_readonly(f: &mut Frame, buffer: &str, area: Rect) {
+fn render_pane_input_readonly(
+    f: &mut Frame,
+    buffer: &str,
+    background_title: Option<String>,
+    area: Rect,
+) {
     if area.height == 0 || area.width == 0 {
         return;
     }
@@ -561,9 +575,18 @@ fn render_pane_input_readonly(f: &mut Frame, buffer: &str, area: Rect) {
             ))
         })
         .collect();
-    let block = Block::default()
+    let mut block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::role(Role::GrayDim)));
+    if let Some(title) = background_title {
+        block = block.title(
+            Line::from(Span::styled(
+                format!(" ⏳ {title} "),
+                Style::default().fg(theme::role(Role::GrayDim)),
+            ))
+            .alignment(ratatui::layout::Alignment::Right),
+        );
+    }
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
@@ -739,7 +762,7 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(20, 4)).unwrap();
         terminal
-            .draw(|f| render_pane_input_readonly(f, "hello", rect(0, 0, 20, 4)))
+            .draw(|f| render_pane_input_readonly(f, "hello", None, rect(0, 0, 20, 4)))
             .unwrap();
 
         let buffer = terminal.backend().buffer();
