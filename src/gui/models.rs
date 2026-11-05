@@ -125,47 +125,63 @@ pub fn panel(rows: &[Row], query: &str, selected: usize, max_models: usize) -> P
     }
 }
 
-/// Every model in the shared catalogue, in provider order, with the live pair
-/// marked.
-///
-/// Saved custom instances use their runtime name and models. Only the empty
-/// "new custom" sentinel is skipped until the user configures it.
-pub fn rows(current: Option<(&str, &str)>) -> Vec<Row> {
-    let mut selector = ProviderSelectorState::default();
-    selector.load_custom_names();
+/// Build the shared catalogue in provider order, substituting the wizard's
+/// live provider state for its saved counterpart and marking the current pair.
+/// Saved custom instances use their runtime name and models; the empty "new
+/// custom" sentinel is skipped. Search text never removes entries here: it is
+/// applied only by `filtered_rows`, so counts and discovery keep the full set.
+pub fn rows_for_picker(
+    current: Option<(&str, &str)>,
+    edited: Option<&ProviderSelectorState>,
+) -> Vec<Row> {
+    let mut catalogue = ProviderSelectorState::default();
+    catalogue.load_custom_names();
+    let order = edited.unwrap_or(&catalogue).provider_display_order();
     let mut out = Vec::new();
-    for index in selector.provider_display_order() {
-        if index == CUSTOM_PROVIDER_IDX {
+    for index in order {
+        let selector =
+            if let Some(edited) = edited.filter(|selector| selector.selected_provider == index) {
+                edited.clone()
+            } else {
+                if index == CUSTOM_PROVIDER_IDX {
+                    continue;
+                }
+                let mut saved = catalogue.clone();
+                saved.selected_provider = index;
+                saved.detect_existing_key();
+                saved.reload_config_models();
+                saved
+            };
+        if index == CUSTOM_PROVIDER_IDX && selector.custom_name.trim().is_empty() {
             continue;
         }
-        selector.selected_provider = index;
-        selector.detect_existing_key();
-        selector.reload_config_models();
-        let (provider, provider_name) = if index > CUSTOM_PROVIDER_IDX {
-            (selector.custom_name.clone(), selector.custom_name.clone())
-        } else {
-            (
-                selector.current_provider().id.to_string(),
-                selector.current_provider().name.to_string(),
-            )
-        };
-        let models: Vec<String> = selector
-            .filtered_model_names()
-            .into_iter()
-            .map(str::to_string)
-            .collect();
-        for model in models {
-            out.push(Row {
-                current: current.is_some_and(|(active, active_model)| {
-                    active == provider && active_model == model
-                }),
-                model,
-                provider: provider.clone(),
-                provider_name: provider_name.clone(),
-            });
-        }
+        out.extend(provider_rows(&selector, current));
     }
     out
+}
+
+/// Build one provider's rows from an immutable selector snapshot. Keeping this
+/// separate makes edited-provider behavior testable without reading a live HOME.
+fn provider_rows(selector: &ProviderSelectorState, current: Option<(&str, &str)>) -> Vec<Row> {
+    let (provider, provider_name) = if selector.selected_provider >= CUSTOM_PROVIDER_IDX {
+        (selector.custom_name.clone(), selector.custom_name.clone())
+    } else {
+        (
+            selector.current_provider().id.to_string(),
+            selector.current_provider().name.to_string(),
+        )
+    };
+    selector
+        .all_model_names()
+        .into_iter()
+        .map(|model| Row {
+            current: current
+                .is_some_and(|(active, active_model)| active == provider && active_model == model),
+            model: model.to_string(),
+            provider: provider.clone(),
+            provider_name: provider_name.clone(),
+        })
+        .collect()
 }
 
 /// Resolve a typed id which is absent from every fetched catalogue. A fully
@@ -185,6 +201,37 @@ pub fn manual_pair(query: &str, active_provider: &str) -> Option<String> {
     } else {
         Some(format!("{active_provider}/{query}"))
     }
+}
+
+/// Mark a picked pair current, inserting an arbitrary id beside its provider
+/// when no catalogue row exists yet. Returns its visible unfiltered index.
+pub fn ensure_pair(rows: &mut Vec<Row>, provider: &str, model: &str) -> usize {
+    for row in rows.iter_mut() {
+        row.current = row.provider == provider && row.model == model;
+    }
+    if let Some(index) = rows
+        .iter()
+        .position(|row| row.provider == provider && row.model == model)
+    {
+        return index;
+    }
+    let provider_name = rows
+        .iter()
+        .find(|row| row.provider == provider)
+        .map(|row| row.provider_name.clone())
+        .unwrap_or_else(|| provider.to_string());
+    let row = Row {
+        provider: provider.to_string(),
+        provider_name,
+        model: model.to_string(),
+        current: true,
+    };
+    let index = rows
+        .iter()
+        .rposition(|candidate| candidate.provider == provider)
+        .map_or(rows.len(), |index| index + 1);
+    rows.insert(index, row);
+    index
 }
 
 /// Replace one provider's fallback section with a successful live fetch. Other
@@ -342,7 +389,7 @@ mod tests {
     #[test]
     fn the_catalogue_is_not_empty() {
         // A picker with no rows is the failure this test exists for.
-        let rows = rows(None);
+        let rows = rows_for_picker(None, None);
         assert!(!rows.is_empty(), "the shared catalogue produced no rows");
         assert!(
             rows.len() > 20,
@@ -353,9 +400,9 @@ mod tests {
 
     #[test]
     fn the_live_pair_is_marked_once() {
-        let all = rows(None);
+        let all = rows_for_picker(None, None);
         let first = all.first().expect("a row");
-        let live = rows(Some((&first.provider, &first.model)));
+        let live = rows_for_picker(Some((&first.provider, &first.model)), None);
         assert_eq!(live.iter().filter(|row| row.current).count(), 1);
         assert!(live[0].current);
     }
@@ -405,8 +452,46 @@ mod tests {
     }
 
     #[test]
+    fn edited_provider_search_does_not_shrink_its_catalogue() {
+        let edited = ProviderSelectorState {
+            config_models: vec!["visible-model".into(), "other-model".into()],
+            model_filter: "visible".into(),
+            ..Default::default()
+        };
+        let provider = edited.provider_id().to_string();
+        let rows = provider_rows(&edited, None);
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| row.provider == provider));
+        assert!(rows.iter().any(|row| row.model == "other-model"));
+        let filtered = panel(&rows, &edited.model_filter, 0, 20);
+        assert_eq!(filtered.matched, 1);
+        assert_eq!(filtered.total, 2);
+    }
+
+    #[test]
+    fn arbitrary_pair_is_inserted_once_and_marked_current() {
+        let edited = ProviderSelectorState {
+            config_models: vec!["known-model".into()],
+            ..Default::default()
+        };
+        let provider = edited.provider_id().to_string();
+        let mut rows = provider_rows(&edited, None);
+        let original = rows.len();
+        ensure_pair(&mut rows, &provider, "future-model");
+        ensure_pair(&mut rows, &provider, "future-model");
+        assert_eq!(rows.len(), original + 1);
+        let matches: Vec<_> = rows
+            .iter()
+            .filter(|row| row.provider == provider && row.model == "future-model")
+            .collect();
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].current);
+        assert_eq!(rows.iter().filter(|row| row.current).count(), 1);
+    }
+
+    #[test]
     fn a_pair_round_trips_through_find() {
-        let all = rows(None);
+        let all = rows_for_picker(None, None);
         // The catalogue decides, not a fixed id: several providers ship no
         // static model list because the terminal fetches theirs live, so the
         // first row stands in for "a pair that is really on the screen".

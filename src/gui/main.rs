@@ -36,6 +36,7 @@ mod logging;
 mod markdown;
 mod mission_control;
 mod model_fetch;
+mod model_picker;
 mod models;
 mod onboard;
 mod palette;
@@ -59,6 +60,8 @@ use crate::screen_keys::{
 use crate::theme::{BASE_REM, Size, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP, text};
 use opencrabs::ui_core::actions;
 use opencrabs::ui_core::channel_status;
+use opencrabs::ui_core::model_layout;
+use opencrabs::ui_core::model_selector::{FetchRequest, ProviderSelectorState};
 use opencrabs::ui_core::pane_tree::PaneTree;
 use opencrabs::ui_core::rail;
 use opencrabs::ui_core::split::{self, Layout};
@@ -657,7 +660,7 @@ struct Dashboard {
     /// fallback; every configured provider gets a live discovery request.
     models_fetch: Option<std::sync::mpsc::Receiver<(u64, model_fetch::FetchOutcome)>>,
     models_fetch_lifecycle: opencrabs::ui_core::model_selector::FetchLifecycle,
-    models_pending: Vec<usize>,
+    models_pending: Vec<FetchRequest>,
     models_fetching: bool,
     models_fetch_error: Option<String>,
     /// The skills screen's rows, read from the terminal's own loader when the
@@ -1973,40 +1976,74 @@ impl Dashboard {
         // The catalogue is read once, here, so a frame never walks it.
         let current =
             agent_bridge::bridge().map(|b| (b.service.provider_name(), b.service.provider_model()));
-        self.models_rows = models::rows(
-            current
-                .as_ref()
-                .map(|(provider, model)| (provider.as_str(), model.as_str())),
-        );
+        self.reset_model_picker(current, None);
         if let Some(arg) = arg {
             self.switch_model(arg, cx);
             return;
         }
         self.models_query.clear();
-        // The highlight lands on the live pair, so Enter on the screen is a
-        // no-op instead of an accidental switch.
-        self.models_index = self
-            .models_rows
-            .iter()
-            .position(|row| row.current)
-            .unwrap_or(0);
-        let mut selector = opencrabs::ui_core::model_selector::ProviderSelectorState::default();
-        selector.load_custom_names();
-        self.models_pending = selector.refresh_order(
-            current
-                .as_ref()
-                .map(|(provider, _)| provider.as_str())
-                .unwrap_or_default(),
-        );
-        self.models_fetch = None;
-        self.models_fetch_lifecycle.invalidate();
-        self.models_fetch_error = None;
         self.screen = Screen::Models;
         self.rail_actions = None;
         self.sessions.rail_menu = None;
         self.start_models_fetch();
         self.refocus_screen();
         cx.notify();
+    }
+
+    /// Reset the one picker catalogue used by `/models` and Brain Fuel. The
+    /// optional wizard selector contributes its unsaved provider settings.
+    fn reset_model_picker(
+        &mut self,
+        current: Option<(String, String)>,
+        edited: Option<&ProviderSelectorState>,
+    ) {
+        self.models_rows = models::rows_for_picker(
+            current
+                .as_ref()
+                .map(|(provider, model)| (provider.as_str(), model.as_str())),
+            edited,
+        );
+        let mut catalogue = ProviderSelectorState::default();
+        catalogue.load_custom_names();
+        let active_provider = current
+            .as_ref()
+            .map(|(provider, _)| provider.as_str())
+            .or_else(|| edited.map(|selector| selector.current_provider().id))
+            .unwrap_or_default();
+        self.models_pending = opencrabs::ui_core::model_selector::discovery_requests(
+            &catalogue,
+            active_provider,
+            edited,
+        );
+        self.models_fetch = None;
+        self.models_fetch_lifecycle.invalidate();
+        self.models_fetch_error = None;
+        self.models_fetching = false;
+        self.models_index = self
+            .models_rows
+            .iter()
+            .position(|row| row.current)
+            .unwrap_or(0);
+    }
+
+    /// Restart discovery after an onboarding provider or credential edit.
+    fn refresh_onboard_models(&mut self) {
+        let Some(ob) = self
+            .onboard
+            .as_ref()
+            .filter(|ob| ob.wizard.step == onboard::OnboardingStep::ProviderAuth)
+        else {
+            return;
+        };
+        let edited = ob.wizard.ps.clone();
+        let provider = if edited.is_custom() {
+            edited.custom_name.clone()
+        } else {
+            edited.current_provider().id.to_string()
+        };
+        let current = Some((provider, ob.model()));
+        self.reset_model_picker(current, Some(&edited));
+        self.start_models_fetch();
     }
 
     /// Refresh every provider with a saved key, not only the active one.
@@ -2017,37 +2054,28 @@ impl Dashboard {
             return;
         }
         self.models_fetch_lifecycle.invalidate();
-        while let Some(index) = self.models_pending.first().copied() {
-            if let Some(request) = model_fetch::FetchRequest::for_provider(index) {
-                let generation = self.models_fetch_lifecycle.begin(&request);
-                self.models_fetch = Some(model_fetch::spawn(generation, request));
-                self.models_fetching = true;
-                return;
-            }
-            self.models_pending.remove(0);
+        if let Some(request) = self.models_pending.first().cloned() {
+            let generation = self.models_fetch_lifecycle.begin(&request);
+            self.models_fetch = Some(model_fetch::spawn(generation, request));
+            self.models_fetching = true;
+        } else {
+            self.models_fetching = false;
         }
-        self.models_fetching = false;
     }
 
-    /// Drain both model-fetch consumers. True means a visible state changed
-    /// and the poll tick must repaint even when no agent event arrived.
+    /// Drain the shared model-fetch consumer. True means a visible state
+    /// changed and the poll tick must repaint even when no agent event arrived.
     fn poll_model_fetches(&mut self) -> bool {
-        let mut changed = false;
-        if let Some(ob) = self.onboard.as_mut()
-            && ob.poll_model_fetch()
-        {
-            changed = true;
-        }
         let outcome = self
             .models_fetch
             .as_ref()
             .and_then(|receiver| receiver.try_recv().ok());
         let Some((generation, outcome)) = outcome else {
-            return changed;
+            return false;
         };
         self.models_fetch = None;
         self.models_pending
-            .retain(|index| *index != outcome.provider_index);
+            .retain(|pending| pending.provider_index != outcome.provider_index);
         let provider_index = outcome.provider_index;
         let Some(outcome) = self
             .models_fetch_lifecycle
@@ -2056,7 +2084,7 @@ impl Dashboard {
             self.models_fetching = false;
             return true;
         };
-        if self.screen == Screen::Models {
+        if matches!(self.screen, Screen::Models | Screen::Onboard) {
             if let Some(error) = outcome.error {
                 let error = format!("{}: {error}", outcome.provider_name);
                 self.models_fetch_error = Some(match self.models_fetch_error.take() {
@@ -2065,12 +2093,26 @@ impl Dashboard {
                 });
             }
             if !outcome.models.is_empty() {
-                let current = agent_bridge::bridge().map(|bridge| {
-                    (
-                        bridge.service.provider_name(),
-                        bridge.service.provider_model(),
-                    )
-                });
+                let selected = models::filtered_rows(&self.models_rows, &self.models_query)
+                    .get(self.models_index)
+                    .map(models::Row::pair);
+                let current = if let Some(ob) = self.onboard.as_ref()
+                    && ob.wizard.step == onboard::OnboardingStep::ProviderAuth
+                {
+                    let provider = if ob.wizard.ps.is_custom() {
+                        ob.wizard.ps.custom_name.clone()
+                    } else {
+                        ob.provider_id().to_string()
+                    };
+                    Some((provider, ob.model()))
+                } else {
+                    agent_bridge::bridge().map(|bridge| {
+                        (
+                            bridge.service.provider_name(),
+                            bridge.service.provider_model(),
+                        )
+                    })
+                };
                 models::replace_provider(
                     &mut self.models_rows,
                     &outcome.provider_id,
@@ -2083,7 +2125,8 @@ impl Dashboard {
                 let visible = models::filtered_rows(&self.models_rows, &self.models_query);
                 self.models_index = visible
                     .iter()
-                    .position(|row| row.current)
+                    .position(|row| Some(row.pair()) == selected)
+                    .or_else(|| visible.iter().position(|row| row.current))
                     .unwrap_or_else(|| self.models_index.min(visible.len().saturating_sub(1)));
             }
         }
@@ -2136,6 +2179,133 @@ impl Dashboard {
         self.send_message(prompt, cx);
     }
 
+    /// The one model-picker keyboard path. Onboarding Enter selects and then
+    /// falls through to the wizard's normal confirm; standalone Enter switches.
+    fn shared_models_key(
+        &mut self,
+        ev: &KeyDownEvent,
+        onboarding: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let visible = models::filtered_rows(&self.models_rows, &self.models_query);
+        let last = visible.len().saturating_sub(1);
+        let mut query_changed = false;
+        match ev.keystroke.key.as_str() {
+            "up" => self.models_index = self.models_index.saturating_sub(1),
+            "down" => self.models_index = (self.models_index + 1).min(last),
+            "enter" => {
+                let pair = visible
+                    .get(self.models_index.min(last))
+                    .map(models::Row::pair)
+                    .or_else(|| {
+                        let provider = if onboarding {
+                            self.onboard.as_ref().map(|ob| {
+                                if ob.wizard.ps.is_custom() {
+                                    ob.wizard.ps.custom_name.clone()
+                                } else {
+                                    ob.provider_id().to_string()
+                                }
+                            })
+                        } else {
+                            agent_bridge::bridge().map(|bridge| bridge.service.provider_name())
+                        };
+                        models::manual_pair(
+                            &self.models_query,
+                            provider.as_deref().unwrap_or_default(),
+                        )
+                    });
+                if let Some(pair) = pair {
+                    if onboarding {
+                        self.select_onboard_pair(&pair);
+                        return false;
+                    }
+                    self.switch_model(pair, cx);
+                }
+                return !onboarding;
+            }
+            "backspace" => {
+                self.models_query.pop();
+                self.models_index = 0;
+                query_changed = true;
+            }
+            "escape" if !onboarding => {
+                if self.models_query.is_empty() {
+                    self.screen = Screen::Chat;
+                    self.refocus_screen();
+                } else {
+                    self.models_query.clear();
+                    self.models_index = 0;
+                }
+                return true;
+            }
+            "tab" | "escape" if onboarding => return false,
+            _ => {
+                if ev.keystroke.modifiers.control
+                    || ev.keystroke.modifiers.alt
+                    || ev.keystroke.modifiers.platform
+                {
+                    return false;
+                }
+                let Some(ch) = ev
+                    .keystroke
+                    .key_char
+                    .as_ref()
+                    .and_then(|s| s.chars().next())
+                    .filter(|ch| !ch.is_control())
+                else {
+                    return false;
+                };
+                self.models_query.push(ch);
+                self.models_index = 0;
+                query_changed = true;
+            }
+        }
+        if query_changed
+            && onboarding
+            && let Some(ob) = self.onboard.as_mut()
+        {
+            ob.wizard.ps.model_filter = self.models_query.clone();
+            ob.wizard.ps.selected_model = 0;
+        }
+        true
+    }
+
+    fn select_onboard_pair(&mut self, pair: &str) -> bool {
+        let Some((provider, model)) = pair.split_once('/') else {
+            return false;
+        };
+        if self
+            .onboard
+            .as_mut()
+            .is_some_and(|ob| ob.select_pair(provider, model))
+        {
+            self.models_query.clear();
+            self.models_index = models::ensure_pair(&mut self.models_rows, provider, model);
+            return true;
+        }
+        false
+    }
+
+    fn activate_model_pair(&mut self, pair: String, onboarding: bool, cx: &mut Context<Self>) {
+        if !onboarding {
+            self.switch_model(pair, cx);
+            return;
+        }
+        let provider = pair.split_once('/').map(|(provider, _)| provider);
+        let provider_changed = self.onboard.as_ref().is_some_and(|ob| {
+            let current = if ob.wizard.ps.is_custom() {
+                ob.wizard.ps.custom_name.as_str()
+            } else {
+                ob.provider_id()
+            };
+            Some(current) != provider
+        });
+        if self.select_onboard_pair(&pair) && provider_changed {
+            self.refresh_onboard_models();
+        }
+        cx.notify();
+    }
+
     /// The wizard owns the keyboard while its screen is open: Tab and the
     /// arrows walk rows, typed characters land in the focused field, Enter
     /// confirms the step and closes when there is nothing after it.
@@ -2175,16 +2345,24 @@ impl Dashboard {
                         || ob.custom_base_url_field() == Some(ob.field)),
             )
         };
+        if self.onboard.as_ref().is_some_and(|ob| {
+            ob.step() == onboard::OnboardingStep::ProviderAuth && ob.field == ob.search_field()
+        }) && self.shared_models_key(ev, true, cx)
+        {
+            cx.notify();
+            return;
+        }
         if completing_input {
             // Enter on the key or custom endpoint completes that field, as in
             // the terminal; it does not skip the list by confirming the step.
             let ob = self.onboard.as_mut().expect("checked above");
             ob.field = ob.search_field();
-            ob.start_model_fetch();
+            self.refresh_onboard_models();
             cx.notify();
             return;
         }
         let mut confirm = false;
+        let mut refresh_models = false;
         {
             let ob = self.onboard.as_mut().expect("checked above");
             match key.as_str() {
@@ -2227,7 +2405,7 @@ impl Dashboard {
                 && (before_key_field == Some(before_field)
                     || before_endpoint_field == Some(before_field));
             if provider_changed || completed_input_with_tab {
-                ob.start_model_fetch();
+                refresh_models = true;
             }
         }
         if confirm {
@@ -2243,15 +2421,19 @@ impl Dashboard {
                     // The reason is on the wizard and the pane draws it above
                     // the footer, so the step stays put and nothing is lost.
                 }
-                Some(onboard::Advance::Moved) => {
-                    if let Some(ob) = self.onboard.as_mut()
-                        && ob.step() == onboard::OnboardingStep::ProviderAuth
-                    {
-                        ob.start_model_fetch();
-                    }
+                Some(onboard::Advance::Moved)
+                    if self
+                        .onboard
+                        .as_ref()
+                        .is_some_and(|ob| ob.step() == onboard::OnboardingStep::ProviderAuth) =>
+                {
+                    refresh_models = true;
                 }
-                None => {}
+                Some(onboard::Advance::Moved) | None => {}
             }
+        }
+        if refresh_models {
+            self.refresh_onboard_models();
         }
         cx.notify();
     }
@@ -2330,6 +2512,21 @@ impl Dashboard {
     /// Esc: one step back, or out of the wizard. Nothing is discarded that a
     /// confirmed step already wrote.
     fn onboard_escape(&mut self, cx: &mut Context<Self>) {
+        if self
+            .onboard
+            .as_ref()
+            .is_some_and(|ob| ob.step() == onboard::OnboardingStep::ProviderAuth)
+            && !self.models_query.is_empty()
+        {
+            self.models_query.clear();
+            self.models_index = 0;
+            if let Some(ob) = self.onboard.as_mut() {
+                ob.wizard.ps.model_filter.clear();
+                ob.wizard.ps.selected_model = 0;
+            }
+            cx.notify();
+            return;
+        }
         let stayed = self.onboard.as_mut().map(|ob| ob.escape()).unwrap_or(false);
         if stayed {
             cx.notify();
@@ -2415,9 +2612,11 @@ impl Dashboard {
             .is_some_and(|ob| ob.step() == onboard::OnboardingStep::ProviderAuth)
             && let Some(ob) = self.onboard.as_mut()
         {
-            ob.start_model_fetch();
+            ob.field = 0;
         }
+        self.models_query.clear();
         self.screen = Screen::Onboard;
+        self.refresh_onboard_models();
         self.rail_actions = None;
         self.sessions.rail_menu = None;
         self.refocus_screen();
@@ -5042,53 +5241,7 @@ impl Dashboard {
         // models (never its provider headers) and Enter switches. Esc clears
         // a filter first, then leaves, as the terminal's picker does.
         if self.screen == Screen::Models {
-            let visible = models::filtered_rows(&self.models_rows, &self.models_query);
-            let last = visible.len().saturating_sub(1);
-            match ev.keystroke.key.as_str() {
-                "up" => self.models_index = self.models_index.saturating_sub(1),
-                "down" => self.models_index = (self.models_index + 1).min(last),
-                "enter" => {
-                    if let Some(row) = visible.get(self.models_index.min(last)) {
-                        let pair = row.pair();
-                        self.switch_model(pair, cx);
-                    } else {
-                        let provider = agent_bridge::bridge()
-                            .map(|bridge| bridge.service.provider_name())
-                            .unwrap_or_default();
-                        if let Some(pair) = models::manual_pair(&self.models_query, &provider) {
-                            self.switch_model(pair, cx);
-                        }
-                    }
-                }
-                "backspace" => {
-                    self.models_query.pop();
-                    self.models_index = 0;
-                }
-                "escape" => {
-                    if self.models_query.is_empty() {
-                        self.screen = Screen::Chat;
-                        self.refocus_screen();
-                    } else {
-                        self.models_query.clear();
-                        self.models_index = 0;
-                    }
-                }
-                _ => {
-                    if !ev.keystroke.modifiers.control
-                        && !ev.keystroke.modifiers.alt
-                        && !ev.keystroke.modifiers.platform
-                        && let Some(ch) = ev
-                            .keystroke
-                            .key_char
-                            .as_ref()
-                            .and_then(|s| s.chars().next())
-                        && !ch.is_control()
-                    {
-                        self.models_query.push(ch);
-                        self.models_index = 0;
-                    }
-                }
-            }
+            self.shared_models_key(ev, false, cx);
             cx.notify();
             return;
         }
@@ -5556,6 +5709,12 @@ impl Render for Dashboard {
             f32::from(window.viewport_size().width),
             self.rail_width * self.rem,
         );
+        let picker_layout = model_layout::model_layout(
+            pane_width,
+            self.rem,
+            BASE_REM,
+            self.screen == Screen::Onboard,
+        );
 
         let (middle, footer): (AnyElement, AnyElement) = match self.screen {
             Screen::Chat => {
@@ -5947,11 +6106,23 @@ impl Render for Dashboard {
                 }
                 Some(ob) => {
                     let shown = palette::current();
+                    let mut model_footer = None;
                     let (number, total) = ob.progress();
                     // The rail is the flow the current mode walks, with the
                     // step the user stands on marked. Channel sub-steps are
                     // reached from Channels and are not stops.
-                    let mut rail = div().flex().flex_col().gap_1().w(px(190.0)).pr_5();
+                    let mut rail = div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .w(px(picker_layout.onboarding_rail_width))
+                        .flex_none()
+                        .min_w_0();
+                    if picker_layout.onboarding_rail_width > 0.0 {
+                        rail = rail.pr_5();
+                    } else {
+                        rail = rail.hidden();
+                    }
                     for (n, title, here) in ob.rail() {
                         rail = rail.child(
                             div()
@@ -5959,23 +6130,29 @@ impl Render for Dashboard {
                                 .flex_row()
                                 .items_center()
                                 .gap_2()
+                                .min_w_0()
                                 .child(text(
                                     format!("{n:>2}"),
                                     Size::Xs,
                                     if here { shown.amber } else { shown.text_faint },
                                 ))
-                                .child(text(
-                                    title,
-                                    Size::Sm,
-                                    if here {
-                                        shown.text_strong
-                                    } else {
-                                        shown.text_muted
-                                    },
-                                )),
+                                .child(
+                                    text(
+                                        title,
+                                        Size::Sm,
+                                        if here {
+                                            shown.text_strong
+                                        } else {
+                                            shown.text_muted
+                                        },
+                                    )
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate(),
+                                ),
                         );
                     }
-                    let mut column = div().flex().flex_col().gap_3().flex_1().min_h_0().w_full();
+                    let mut column = div().flex().flex_col().gap_3().flex_1().min_w_0().min_h_0();
                     column = column.child(
                         div()
                             .flex()
@@ -6043,8 +6220,12 @@ impl Render for Dashboard {
                             list = list.child(row.on_click(cx.listener(
                                 move |this, _ev, _window, cx| {
                                     if let Some(ob) = this.onboard.as_mut() {
-                                        ob.select_provider_and_fetch(index);
+                                        ob.select_provider(index);
+                                        ob.wizard.ps.model_filter.clear();
                                     }
+                                    this.models_query.clear();
+                                    this.models_index = 0;
+                                    this.refresh_onboard_models();
                                     cx.notify();
                                 },
                             )));
@@ -6209,144 +6390,30 @@ impl Render for Dashboard {
                             }
                         }
 
-                        // The model list: the provider's own catalogue, or the
-                        // config's fallback, filtered by whatever is typed in
-                        // the search row above it.
-                        let models = ob.models();
-                        let chosen = ob.model();
-                        let search_focused = ob.field == ob.search_field();
-                        // Same window as the provider list: ten models painted
-                        // whole is fine, a hundred is not, and the selection
-                        // has to stay in view when the arrows move.
-                        let (visible_models, hidden_models_above, hidden_models_below) =
-                            ob.model_rows(14);
-                        let mut model_rows = div().flex().flex_col().gap_1().w_full();
-                        if hidden_models_above > 0 {
-                            model_rows = model_rows.child(text(
-                                format!("\u{2191} {hidden_models_above} more"),
-                                Size::Xs,
-                                shown.text_faint,
-                            ));
-                        }
-                        for (index, name) in visible_models.iter() {
-                            // Copied out of the borrow: the click closure has to
-                            // own the index, or it pins the whole row list.
-                            let index = *index;
-                            let here = *name == chosen;
-                            let mut row = div()
-                                .id(SharedString::from(format!("onboard-model-{index}")))
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap_2()
-                                .px_3()
-                                .py_1()
-                                .rounded(px(6.0))
-                                .child(text(
-                                    if here { "\u{25cf}" } else { " " },
-                                    Size::Sm,
-                                    if here { shown.amber } else { shown.text_muted },
-                                ))
-                                .child(text(
-                                    name.clone(),
-                                    Size::Sm,
-                                    if here { shown.text_strong } else { shown.text },
-                                ));
-                            if here {
-                                row = row.bg(rgb(shown.panel_hi));
-                            }
-                            model_rows = model_rows.child(row.on_click(cx.listener(
-                                move |this, _ev, _window, cx| {
-                                    if let Some(ob) = this.onboard.as_mut() {
-                                        ob.wizard.ps.selected_model = index;
-                                    }
-                                    cx.notify();
-                                },
-                            )));
-                        }
-                        column = column.child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_1()
-                                .child(text(
-                                    if ob.is_fetching() {
-                                        "model \u{b7} fetching the provider catalogue".to_string()
-                                    } else if let Some(error) = ob.model_fetch_error() {
-                                        format!("model \u{b7} {error}")
-                                    } else {
-                                        format!("model \u{b7} {} available", models.len())
-                                    },
-                                    Size::Xs,
-                                    if ob.model_fetch_error().is_some() && !ob.is_fetching() {
-                                        shown.amber
-                                    } else {
-                                        shown.text_faint
-                                    },
-                                ))
-                                .child(
-                                    div()
-                                        .id("onboard-search")
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .px_3()
-                                        .py_2()
-                                        .rounded(px(6.0))
-                                        .bg(rgb(if search_focused {
-                                            shown.panel_hi
-                                        } else {
-                                            shown.panel
-                                        }))
-                                        .border_1()
-                                        .border_color(rgb(if search_focused {
-                                            shown.focus
-                                        } else {
-                                            shown.track
-                                        }))
-                                        .child(text(
-                                            if ob.wizard.ps.model_filter.is_empty() {
-                                                "search the list".to_string()
-                                            } else {
-                                                ob.wizard.ps.model_filter.clone()
-                                            },
-                                            Size::Sm,
-                                            if ob.wizard.ps.model_filter.is_empty() {
-                                                shown.text_faint
-                                            } else {
-                                                shown.text
-                                            },
-                                        ))
-                                        .child(text(
-                                            if search_focused { "\u{258f}" } else { "" },
-                                            Size::Sm,
-                                            shown.amber,
-                                        ))
-                                        .on_click(cx.listener(move |this, _ev, _window, cx| {
-                                            if let Some(ob) = this.onboard.as_mut() {
-                                                let field = ob.search_field();
-                                                ob.field = field;
-                                                ob.start_model_fetch();
-                                            }
-                                            cx.notify();
-                                        })),
-                                )
-                                .child(
-                                    div().id("onboard-models").w_full().child(model_rows).child(
-                                        if hidden_models_below > 0 {
-                                            text(
-                                                format!(
-                                                    "\u{2193} {hidden_models_below} more below"
-                                                ),
-                                                Size::Xs,
-                                                shown.text_faint,
-                                            )
-                                        } else {
-                                            text("", Size::Xs, shown.text_faint)
-                                        },
-                                    ),
-                                ),
+                        let active_provider = if ob.wizard.ps.is_custom() {
+                            ob.wizard.ps.custom_name.clone()
+                        } else {
+                            ob.provider_id().to_string()
+                        };
+                        let rendered = model_picker::render(
+                            cx,
+                            model_picker::ModelPickerView {
+                                rows: &self.models_rows,
+                                query: &self.models_query,
+                                selected: self.models_index,
+                                fetching: self.models_fetching,
+                                pending: self.models_pending.len(),
+                                error: self.models_fetch_error.as_deref(),
+                                active_provider: &active_provider,
+                                onboarding: true,
+                                search_focused: ob.field == ob.search_field(),
+                                max_models: 14,
+                                row_layout: picker_layout.model_row,
+                                provider_label_width: picker_layout.provider_label_width,
+                            },
                         );
+                        model_footer = Some(rendered.footer);
+                        column = column.child(rendered.body);
                     } else if ob.step() == onboard::OnboardingStep::ModeSelect {
                         // The first choice the terminal asks: how much of the
                         // flow to walk. Same two options, same step counts, so
@@ -7050,46 +7117,72 @@ impl Render for Dashboard {
                         );
                     }
 
-                    let footer = div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .justify_between()
-                        .w_full()
-                        .child(div().text_xs().text_color(rgb(shown.text_muted)).child(
-                            if ob.is_channel_step() {
-                                // Space is the key that flips a channel here,
-                                // so the hint names it instead of "save".
-                                "space \u{b7} toggle \u{b7} enter \u{b7} continue \u{b7} esc \u{b7} back"
-                            } else if ob.step()
-                                == opencrabs::tui::onboarding::OnboardingStep::BrainSetup
-                            {
-                                // This step writes files before it moves, so
-                                // the hint says what Enter starts.
-                                "enter \u{b7} write my brain files \u{b7} esc \u{b7} back"
-                            } else if ob.wizard.quick_jump {
-                                "enter \u{b7} save \u{b7} esc \u{b7} close"
-                            } else {
-                                "enter \u{b7} continue \u{b7} esc \u{b7} back"
-                            },
-                        ))
+                    let primary_hint = if ob.is_channel_step() {
+                        // Space is the key that flips a channel here, so the
+                        // hint names it instead of "save".
+                        "space \u{b7} toggle \u{b7} enter \u{b7} continue \u{b7} esc \u{b7} back"
+                    } else if ob.step() == opencrabs::tui::onboarding::OnboardingStep::BrainSetup {
+                        "enter \u{b7} write my brain files \u{b7} esc \u{b7} back"
+                    } else if ob.wizard.quick_jump {
+                        "enter \u{b7} save \u{b7} esc \u{b7} close"
+                    } else {
+                        "enter \u{b7} continue \u{b7} esc \u{b7} back"
+                    };
+                    let horizontal_hints =
+                        matches!(picker_layout.footer, model_layout::FooterLayout::Row);
+                    let mut footer = div().flex().w_full().gap_2().min_w_0();
+                    footer = match picker_layout.footer {
+                        model_layout::FooterLayout::Row => {
+                            footer.flex_row().items_center().justify_between()
+                        }
+                        model_layout::FooterLayout::Column => footer.flex_col().items_start(),
+                    };
+                    let footer = footer
                         .child(
                             div()
                                 .text_xs()
                                 .text_color(rgb(shown.text_muted))
+                                .min_w_0()
+                                .whitespace_normal()
+                                .when(horizontal_hints, |d| d.flex_1())
+                                .when(!horizontal_hints, |d| d.w_full())
+                                .child(primary_hint),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(shown.text_muted))
+                                .min_w_0()
+                                .whitespace_normal()
+                                .when(horizontal_hints, |d| d.flex_none())
+                                .when(!horizontal_hints, |d| d.w_full())
                                 .child("tab \u{b7} next field \u{b7} arrows \u{b7} walk"),
                         );
+                    let footer = if let Some(model_footer) = model_footer {
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .w_full()
+                            .min_w_0()
+                            .child(model_footer)
+                            .child(footer)
+                    } else {
+                        footer
+                    };
                     (
                         div()
                             .flex()
                             .flex_row()
                             .flex_1()
+                            .min_w_0()
                             .min_h_0()
                             .child(rail)
                             .child(
                                 div()
                                     .id("onboard-body")
                                     .flex_1()
+                                    .min_w_0()
                                     .min_h_0()
                                     .overflow_y_scroll()
                                     .child(column),
@@ -7100,229 +7193,33 @@ impl Render for Dashboard {
                 }
             },
             Screen::Models => {
-                // The terminal picker's shape: a fixed search field, grouped
-                // provider sections, a selection-centred window, and counts
-                // for everything hidden above or below it (#2523).
+                let rendered = model_picker::render(
+                    cx,
+                    model_picker::ModelPickerView {
+                        rows: &self.models_rows,
+                        query: &self.models_query,
+                        selected: self.models_index,
+                        fetching: self.models_fetching,
+                        pending: self.models_pending.len(),
+                        error: self.models_fetch_error.as_deref(),
+                        active_provider: "",
+                        onboarding: false,
+                        search_focused: true,
+                        max_models: 18,
+                        row_layout: picker_layout.model_row,
+                        provider_label_width: picker_layout.provider_label_width,
+                    },
+                );
                 let shown = palette::current();
-                let models::Panel {
-                    search,
-                    rows,
-                    matched,
-                    total,
-                    above,
-                    below,
-                } = models::panel(&self.models_rows, &self.models_query, self.models_index, 18);
-                let search_field = div()
-                    .id("models-search-input")
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .px_3()
-                    .py_2()
-                    .rounded(px(6.0))
-                    .bg(rgb(shown.panel))
-                    .border_1()
-                    .border_color(rgb(shown.track))
-                    .child(text(
-                        search,
-                        Size::Sm,
-                        if self.models_query.is_empty() {
-                            shown.text_faint
-                        } else {
-                            shown.text
-                        },
-                    ))
-                    .child(text("\u{258f}", Size::Sm, shown.amber));
-
-                let mut list = div().flex().flex_col().gap_1();
-                if above > 0 {
-                    list = list.child(div().px_3().child(text(
-                        format!("\u{2191} {above} more"),
-                        Size::Xs,
-                        shown.text_muted,
-                    )));
-                }
-                for line in rows {
-                    match line {
-                        models::PanelRow::Header {
-                            provider,
-                            name,
-                            count,
-                        } => {
-                            list = list.child(
-                                div()
-                                    .id(SharedString::from(format!("model-provider-{provider}")))
-                                    .flex()
-                                    .flex_row()
-                                    .items_center()
-                                    .gap_2()
-                                    .px_3()
-                                    .pt_3()
-                                    .pb_1()
-                                    .child(
-                                        text(name, Size::Xs, shown.amber)
-                                            .flex_1()
-                                            .min_w_0()
-                                            .truncate(),
-                                    )
-                                    .child(text(
-                                        format!(
-                                            "{count} model{}",
-                                            if count == 1 { "" } else { "s" }
-                                        ),
-                                        Size::Xs,
-                                        shown.text_muted,
-                                    )),
-                            );
-                        }
-                        models::PanelRow::Model {
-                            row,
-                            index,
-                            selected,
-                        } => {
-                            let pair = row.pair();
-                            let mut entry = div()
-                                .id(SharedString::from(format!("model-row-{index}")))
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap_2()
-                                .px_3()
-                                .py_2()
-                                .rounded(px(6.0))
-                                .child(text(
-                                    if row.current { "\u{25cf}" } else { " " },
-                                    Size::Sm,
-                                    if row.current {
-                                        shown.amber
-                                    } else {
-                                        shown.text_muted
-                                    },
-                                ))
-                                // Two real columns: long model ids truncate in
-                                // the flexible first one, provider labels all
-                                // begin at the same fixed second-column x.
-                                .child(
-                                    text(row.model.clone(), Size::Sm, shown.text)
-                                        .flex_1()
-                                        .min_w_0()
-                                        .truncate(),
-                                )
-                                .child(
-                                    text(row.provider_name.clone(), Size::Xs, shown.text_muted)
-                                        .w(px(180.0))
-                                        .flex_none()
-                                        .truncate(),
-                                );
-                            if selected {
-                                entry = entry.bg(rgb(shown.panel_hi));
-                            }
-                            list = list.child(entry.on_click(cx.listener(
-                                move |this, _ev, _window, cx| {
-                                    this.models_index = index;
-                                    this.switch_model(pair.clone(), cx);
-                                },
-                            )));
-                        }
-                    }
-                }
-                if matched == 0 {
-                    let active = agent_bridge::bridge()
-                        .map(|bridge| bridge.service.provider_name())
-                        .unwrap_or_default();
-                    if let Some(pair) = models::manual_pair(&self.models_query, &active) {
-                        list = list.child(
-                            div()
-                                .id("models-use-custom-id")
-                                .px_3()
-                                .py_2()
-                                .child(text(
-                                    format!("Use custom model: {pair}"),
-                                    Size::Sm,
-                                    shown.amber,
-                                ))
-                                .on_click(cx.listener(move |this, _ev, _window, cx| {
-                                    this.switch_model(pair.clone(), cx);
-                                })),
-                        );
-                    } else {
-                        list = list.child(div().px_3().py_2().child(text(
-                            format!("no models match \"{}\"", self.models_query),
-                            Size::Sm,
-                            shown.text_muted,
-                        )));
-                    }
-                }
-                if below > 0 {
-                    list = list.child(div().px_3().child(text(
-                        format!("\u{2193} {below} more"),
-                        Size::Xs,
-                        shown.text_muted,
-                    )));
-                }
-                let body = div()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_h_0()
-                    .gap_2()
-                    .child(search_field)
-                    .child(
-                        div()
-                            .id("models-body")
-                            .flex_1()
-                            .min_h_0()
-                            .overflow_y_scroll()
-                            .child(list),
-                    );
-                let counted = if matched == total {
-                    format!("{total} model{}", if total == 1 { "" } else { "s" })
-                } else {
-                    format!(
-                        "{matched} of {total} models \u{b7} filter: {}",
-                        self.models_query
-                    )
-                };
-                let footer = div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .w_full()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(shown.text_muted))
-                                    .child(SharedString::from(counted)),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(if self.models_fetch_error.is_some() {
-                                        shown.amber
-                                    } else {
-                                        shown.text_muted
-                                    }))
-                                    .child(SharedString::from(if self.models_fetching {
-                                        format!(
-                                            "fetching live models · {} provider{} remaining",
-                                            self.models_pending.len(),
-                                            if self.models_pending.len() == 1 { "" } else { "s" }
-                                        )
-                                    } else {
-                                        self.models_fetch_error.clone().unwrap_or_default()
-                                    })),
-                            ),
-                    )
-                    .child(div().text_xs().text_color(rgb(shown.text_muted)).child(
-                        "type \u{b7} filter or enter a custom id \u{b7} enter \u{b7} switch \u{b7} esc \u{b7} back",
-                    ));
-                (body.into_any_element(), footer.into_any_element())
+                let footer = rendered.footer.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(shown.text_muted))
+                        .min_w_0()
+                        .whitespace_normal()
+                        .child("type · filter or enter a custom id · enter · switch · esc · back"),
+                );
+                (rendered.body.into_any_element(), footer.into_any_element())
             }
             Screen::Skills => {
                 // The same list `/skills` opens in the terminal, from the same
@@ -7643,6 +7540,7 @@ impl Render for Dashboard {
             .flex()
             .flex_col()
             .flex_1()
+            .h_full()
             .min_w_0()
             .min_h_0()
             .gap_3()

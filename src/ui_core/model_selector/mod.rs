@@ -1,11 +1,13 @@
 //! Provider discovery and model selection shared by every frontend.
 
 mod catalogue;
+mod discovery;
 mod fetch;
 mod order;
 mod state;
 
 pub use catalogue::load_default_models;
+pub use discovery::discovery_requests;
 pub use fetch::fetch_provider_models;
 #[cfg(test)]
 pub(crate) use fetch::{merge_minimax_baseline, opencode_models_url, xiaomi_baseline_models};

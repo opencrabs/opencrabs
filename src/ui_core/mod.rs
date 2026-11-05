@@ -19,6 +19,7 @@ pub mod docs;
 pub mod help_keys;
 pub mod input_history;
 pub mod keys;
+pub mod model_layout;
 pub mod model_selector;
 pub mod palette;
 pub mod pane_tree;
@@ -57,6 +58,7 @@ mod purity_tests {
             ("ui_core/help_keys.rs", include_str!("help_keys.rs")),
             ("ui_core/input_history.rs", include_str!("input_history.rs")),
             ("ui_core/keys.rs", include_str!("keys.rs")),
+            ("ui_core/model_layout.rs", include_str!("model_layout.rs")),
             (
                 "ui_core/model_selector/mod.rs",
                 include_str!("model_selector/mod.rs"),
@@ -64,6 +66,10 @@ mod purity_tests {
             (
                 "ui_core/model_selector/state.rs",
                 include_str!("model_selector/state.rs"),
+            ),
+            (
+                "ui_core/model_selector/discovery.rs",
+                include_str!("model_selector/discovery.rs"),
             ),
             (
                 "ui_core/model_selector/fetch.rs",
