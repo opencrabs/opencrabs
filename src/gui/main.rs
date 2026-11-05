@@ -627,6 +627,11 @@ struct Dashboard {
     topic_menu: Option<uuid::Uuid>,
     /// The topic name being typed, while the name prompt is open (#2303).
     topic_draft: Option<String>,
+    /// The pick the window has to explain before it goes on (#2605): the
+    /// seeker's topic pick named a topic, and a topic cannot hold topics, so
+    /// this carries that row's title for the warning instead of opening a
+    /// prompt that would nest one under another.
+    topic_warning: Option<String>,
     /// Which side of the chat the topic row sits on (#2402).
     topic_edge: topic_tabs::Edge,
     /// The topic being renamed, while the prompt is open for a rename (#2304).
@@ -1051,6 +1056,9 @@ impl Dashboard {
         if self.confirm_delete.is_some() {
             open.push(OverlayId::ConfirmDelete);
         }
+        if self.topic_warning.is_some() {
+            open.push(OverlayId::Warning);
+        }
         if self.sessions.filter_active {
             open.push(OverlayId::RailFind);
         }
@@ -1406,10 +1414,24 @@ impl Dashboard {
                 cx.notify();
             }
             PaletteAction::NewTopicOn(id) => {
-                // The exact path the "New topic" menu item walks: the
-                // conversation on screen, then the draft dialog (#2482).
-                self.open_session(Uuid::from_u128(id), cx);
-                self.start_topic_draft(cx);
+                // The picker lists every conversation, topics included, and a
+                // topic cannot hold topics (#2605). Every other pick walks the
+                // exact path the "New topic" menu item does (#2482).
+                let id = Uuid::from_u128(id);
+                if self.sessions.parents.contains_key(&id) {
+                    let title = self
+                        .sessions
+                        .items
+                        .iter()
+                        .find(|s| s.id == id)
+                        .and_then(|s| s.title.clone())
+                        .unwrap_or_else(|| "That row".to_string());
+                    self.topic_warning = Some(title);
+                    cx.notify();
+                } else {
+                    self.open_session(id, cx);
+                    self.start_topic_draft(cx);
+                }
             }
             PaletteAction::Favorite => {
                 // Same card, same picker, different purpose: the pick pins
@@ -4978,6 +5000,18 @@ impl Dashboard {
                 return;
             }
         }
+        // A warning that stopped a pick has one answer, so it owns the
+        // keyboard while it is up (#2605): Enter or Esc closes it, and every
+        // other keystroke is swallowed instead of reaching the card behind
+        // it.
+        if self.topic_warning.is_some() {
+            if matches!(ev.keystroke.key.as_str(), "enter" | "escape") {
+                self.topic_warning = None;
+                self.refocus_screen();
+            }
+            cx.notify();
+            return;
+        }
         // The delete confirmation is a modal with two answers, so it owns
         // both keys while it is up: Enter confirms, Esc cancels, and every
         // other keystroke is swallowed rather than reaching anything behind
@@ -8132,6 +8166,20 @@ impl Render for Dashboard {
             });
             root = root.child(confirm_delete_overlay(title, confirm, cancel));
         }
+        // A pick that named a topic says why no prompt opened (#2605). The
+        // card is the delete dialog's shape with one answer, so a stopped
+        // pick can never be mistaken for a progress notice.
+        if let Some(title) = self.topic_warning.clone() {
+            let dismiss = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                this.topic_warning = None;
+                this.refocus_screen();
+                cx.notify();
+            });
+            let body = format!(
+                "\"{title}\" is a topic, not a conversation. A topic cannot hold topics, so pick the conversation it sits under, then name the new topic."
+            );
+            root = root.child(warning_overlay(&body, dismiss));
+        }
         // A preview sits over both panes, and over everything else on the
         // window: it is where the user went to look at something, and the
         // transcript behind it must not take a click meant for it (#2395).
@@ -8667,6 +8715,7 @@ fn main() {
                         help_open: false,
                         topic_menu: None,
                         topic_draft: None,
+                        topic_warning: None,
                         topic_edge: topic_tabs::Edge::from_config(
                             Config::load()
                                 .ok()
@@ -11333,6 +11382,81 @@ fn help_overlay(view: &HelpView) -> impl IntoElement {
         .child(footer)
 }
 
+/// A warning the window has to say before it does anything else (#2605). The
+/// header bar names the app and the kind, so a card that stopped a pick is
+/// never read as a progress notice, and one button is the whole answer.
+fn warning_overlay(
+    body: &str,
+    dismiss: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let p = palette::current();
+    div()
+        .id("warning-scrim")
+        .occlude()
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(rgba(0x0a0a0acc))
+        .child(
+            div()
+                .id("warning-panel")
+                .occlude()
+                .flex()
+                .flex_col()
+                .w(rems(26.0))
+                .rounded(px(CARD_RADIUS))
+                .border_1()
+                .border_color(rgb(p.panel_hi))
+                .bg(glass_fill(p.panel))
+                .overflow_hidden()
+                .child(
+                    div()
+                        .id("warning-header")
+                        .px_4()
+                        .py_2()
+                        .border_b_1()
+                        .border_color(rgb(p.panel_hi))
+                        .bg(rgb(p.panel_hi))
+                        .text_sm()
+                        .text_color(rgb(p.warn))
+                        .child(SharedString::from("OpenCrabs - Warning")),
+                )
+                .child(
+                    div()
+                        .px_4()
+                        .py_3()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(p.text))
+                                .child(SharedString::from(body.to_string())),
+                        )
+                        .child(
+                            div().flex().flex_row().justify_end().child(
+                                div()
+                                    .id("warning-ok")
+                                    .px_3()
+                                    .py_1()
+                                    .rounded(px(4.0))
+                                    .text_xs()
+                                    .cursor_pointer()
+                                    .text_color(rgb(p.accent))
+                                    .hover(|d| d.bg(rgb(p.panel_hi)))
+                                    .on_click(dismiss)
+                                    .child(SharedString::from("ok")),
+                            ),
+                        ),
+                ),
+        )
+}
+
 /// The delete confirmation: a dim card over both panes naming the
 /// conversation, with the erase on its own button and nothing else. Every
 /// delete path routes here, so the conversation is never one mis-click or one
@@ -12072,6 +12196,26 @@ mod tests {
         assert!(
             src.contains("for (section, row) in help_rows()"),
             "the renderer must paint the list the test checks"
+        );
+    }
+
+    /// The picker lists topics as conversations, so a pick that names one has
+    /// to say so instead of opening a prompt that would nest a topic under a
+    /// topic (#2605).
+    #[test]
+    fn seeker_topic_pick_warns_on_a_topic() {
+        let src = include_str!("main.rs");
+        assert!(
+            src.contains(&["if self.sessions.parents", ".contains_key(&id) {"].concat()),
+            "a topic pick is the one the parents map knows"
+        );
+        assert!(
+            src.contains(&["self.topic_warning = Some(", "title);"].concat()),
+            "the warning carries the row it named"
+        );
+        assert!(
+            src.contains("OpenCrabs - Warning"),
+            "the header bar is the one the report asked for"
         );
     }
 
