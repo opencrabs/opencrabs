@@ -85,7 +85,7 @@ use gpui::{
 };
 use opencrabs::brain::agent::ProgressEvent;
 use opencrabs::utils::drop_landing::human_size;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
 use uuid::Uuid;
@@ -3814,37 +3814,12 @@ impl Dashboard {
         cx.notify();
     }
 
-    /// Fold or unfold a session's topic tree. The change shows at once and is
-    /// saved to the ledger, so the TUI shows the same tree (#2427).
-    fn toggle_fold(&mut self, id: Uuid, cx: &mut Context<Self>) {
-        let collapsed = !self.sessions.collapsed.contains(&id);
-        if collapsed {
-            self.sessions.collapsed.insert(id);
-        } else {
-            self.sessions.collapsed.remove(&id);
-        }
-        cx.notify();
-        let db_path = self.db_path.clone();
-        cx.spawn(async move |this, cx| {
-            if let Err(e) = sessions::set_collapsed(db_path, id, collapsed).await {
-                logging::error(&format!("fold topics {id}: {e}"));
-                this.update(cx, |this, cx| {
-                    this.live.notices.push(format!("topic tree: {e}"));
-                    cx.notify();
-                })
-                .ok();
-            }
-        })
-        .detach();
-    }
-
     /// Re-read which sessions are topics and what each topic's parent is.
     fn refresh_topic_state(&mut self, cx: &mut Context<Self>) {
         let db_path = self.db_path.clone();
         cx.spawn(async move |this, cx| {
             let parents = sessions::load_topic_parents(db_path.clone()).await;
             let closed = sessions::load_closed(db_path.clone()).await;
-            let collapsed = sessions::load_collapsed(db_path.clone()).await;
             let icons = sessions::load_topic_icons(db_path.clone()).await;
             let topics = sessions::load_topics(db_path).await;
             this.update(cx, |this, cx| {
@@ -3859,10 +3834,6 @@ impl Dashboard {
                 match topics {
                     Ok(ids) => this.sessions.topics = ids.into_iter().collect(),
                     Err(e) => logging::error(&format!("topics refresh: {e}")),
-                }
-                match collapsed {
-                    Ok(ids) => this.sessions.collapsed = ids.into_iter().collect(),
-                    Err(e) => logging::error(&format!("collapsed topics refresh: {e}")),
                 }
                 match icons {
                     Ok(pairs) => this.sessions.topic_icons = pairs.into_iter().collect(),
@@ -4929,16 +4900,7 @@ impl Render for Dashboard {
                 indented,
                 closed,
             };
-            // A session with topics gets the chevron that folds its tree (#2427).
-            let fold = self.sessions.topics.contains(&id).then(|| {
-                let collapsed = self.sessions.collapsed.contains(&id);
-                let toggle = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
-                    cx.stop_propagation();
-                    this.toggle_fold(id, cx);
-                });
-                sessions::fold_button(id, collapsed).on_click(toggle)
-            });
-            let r = sessions::row(s, flags, action, menu, fold);
+            let r = sessions::row(s, flags, action, menu);
             // The press starts the slide and closes any other row's strip.
             let press = cx.listener(move |this, _ev: &MouseDownEvent, window, cx| {
                 this.rail_slide_opened = None;
@@ -7537,7 +7499,6 @@ fn main() {
             closed: closed.clone(),
             topic_icons: topic_icons.clone(),
             topic_titles: HashMap::new(),
-            collapsed: HashSet::new(),
             selected: None,
             cursor: None,
             rail_menu: None,
@@ -7553,7 +7514,6 @@ fn main() {
             closed,
             topic_icons,
             topic_titles: HashMap::new(),
-            collapsed: HashSet::new(),
             selected: None,
             cursor: None,
             rail_menu: None,

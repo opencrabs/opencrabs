@@ -47,3 +47,30 @@ fn the_rail_header_is_compact_opencrabs_branding() {
     );
 }
 
+#[test]
+fn grouped_topics_are_compact_visible_pins_not_a_dropdown() {
+    let ordered = block(SESSIONS, "pub fn ordered(", "/// Whether a row is a topic");
+    assert!(
+        !ordered.contains("collapsed"),
+        "ordering never hides a topic behind a fold"
+    );
+
+    let row = block(SESSIONS, "pub fn row(", "pub fn on_click(");
+    assert!(row.contains(".when(indented, |d| d.child(topic_pin_mark()))"));
+    assert!(row.contains(".when(indented, |d| d.pl_4().pr_2().py_1())"));
+    assert!(row.contains("title_text.text_xs()"));
+    assert!(
+        row.contains(".when(!indented, |d|"),
+        "compact topic pins omit repeated date and cost metadata"
+    );
+    assert!(
+        !SESSIONS.contains("pub fn fold_button(")
+            && !GUI_MAIN.contains("sessions::fold_button(")
+            && !GUI_MAIN.contains("self.sessions.collapsed"),
+        "no fold control or hidden-row state remains in the GUI rail"
+    );
+    assert!(
+        GUI_MAIN.contains("sessions::row(s, flags, action, menu)"),
+        "topic pins keep their click action, slide actions, and context menu"
+    );
+}
