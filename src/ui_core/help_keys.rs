@@ -24,6 +24,8 @@
 //! are live values read from the running app, not keys, and they carry no
 //! chord to render.
 
+use super::palette::{PaletteAction, PaletteItem, PaletteKind, Surface};
+
 /// Which block of the help screen a row belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HelpSection {
@@ -51,6 +53,22 @@ impl HelpSection {
 
     /// Every section, in the order the help screen shows them.
     pub const ALL: [Self; 4] = [Self::Global, Self::Chat, Self::InputEditing, Self::Sessions];
+}
+
+/// Which frontend's supported chords Seeker may offer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HelpClient {
+    Tui,
+    Gui,
+}
+
+impl HelpClient {
+    fn chord(self, row: &HelpRow) -> Option<&'static str> {
+        match self {
+            Self::Tui => row.tui,
+            Self::Gui => row.gui,
+        }
+    }
 }
 
 /// One documented chord and what it does.
@@ -444,9 +462,45 @@ pub fn find(neutral: &str) -> Option<&'static HelpRow> {
     ROWS.iter().find(|r| r.neutral == neutral)
 }
 
+/// Build Seeker rows from the chords this client actually supports. Every
+/// row opens the existing help surface; the chord and description supply the
+/// searchable knowledge without adding another command.
+pub fn seeker_items(client: HelpClient) -> Vec<PaletteItem> {
+    ROWS.iter()
+        .filter_map(|row| {
+            let chord = client.chord(row)?;
+            let mut keywords = format!(
+                "help key keyboard shortcut {} {} {}",
+                row.neutral,
+                chord,
+                row.section.title()
+            );
+            match row.neutral {
+                "alt+t" => keywords.push_str(
+                    " theme themes appearance appearances color colour change open switch customize customization preview",
+                ),
+                "ctrl+s" => keywords.push_str(
+                    " sidebar side bar open show reveal close hide collapse sessions session list rail drawer",
+                ),
+                _ => {}
+            }
+            Some(
+                PaletteItem::new(
+                    format!("/help {}", row.description),
+                    format!("{} ({chord})", row.description),
+                    PaletteKind::Help,
+                    PaletteAction::OpenSurface(Surface::Help),
+                )
+                .with_keywords(&keywords),
+            )
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui_core::palette::PaletteState;
 
     /// The TUI labels, written out so a row cannot vanish during a
     /// refactor without a test going red. Kept as data rather than derived
@@ -610,6 +664,86 @@ mod tests {
             assert_eq!(row.gui, Some(gui), "{neutral} lost its window spelling");
             assert_eq!(row.tui, None, "{neutral} is not a terminal chord");
             assert_eq!(row.section, HelpSection::Global);
+        }
+    }
+
+    #[test]
+    fn seeker_rows_convert_every_supported_entry_with_unique_titles() {
+        for client in [HelpClient::Tui, HelpClient::Gui] {
+            let supported: Vec<&HelpRow> = ROWS
+                .iter()
+                .filter(|row| client.chord(row).is_some())
+                .collect();
+            let items = seeker_items(client);
+            assert_eq!(items.len(), supported.len());
+            let mut titles = std::collections::HashSet::new();
+
+            for (row, item) in supported.into_iter().zip(items) {
+                let chord = client.chord(row).expect("supported row");
+                assert_eq!(item.title, format!("/help {}", row.description));
+                assert_eq!(item.subtitle, format!("{} ({chord})", row.description));
+                assert_eq!(item.kind, PaletteKind::Help);
+                assert_eq!(item.action, PaletteAction::OpenSurface(Surface::Help));
+                assert!(titles.insert(item.title), "duplicate help title");
+            }
+        }
+    }
+
+    #[test]
+    fn seeker_rows_never_offer_another_clients_chords() {
+        let tui = seeker_items(HelpClient::Tui);
+        let gui = seeker_items(HelpClient::Gui);
+
+        assert!(tui.iter().any(|item| item.title.contains("Rename")));
+        assert!(!gui.iter().any(|item| item.title.contains("Rename")));
+        assert!(gui.iter().any(|item| item.title.contains("Zoom")));
+        assert!(!tui.iter().any(|item| item.title.contains("Zoom")));
+
+        let terminal_help = tui
+            .iter()
+            .find(|item| item.title == "/help This help")
+            .expect("terminal help row");
+        let window_help = gui
+            .iter()
+            .find(|item| item.title == "/help This help")
+            .expect("window help row");
+        assert!(terminal_help.subtitle.ends_with("(/help)"));
+        assert!(window_help.subtitle.ends_with("(ctrl-h)"));
+    }
+
+    #[test]
+    fn seeker_frontends_select_their_own_help_rows() {
+        let gui = include_str!("../gui/main.rs");
+        let tui = include_str!("../tui/app/state.rs");
+        assert!(gui.contains("help_keys::seeker_items(help_keys::HelpClient::Gui)"));
+        assert!(tui.contains("help_keys::seeker_items(HelpClient::Tui)"));
+    }
+
+    #[test]
+    fn seeker_help_answers_theme_and_sidebar_action_language() {
+        for client in [HelpClient::Tui, HelpClient::Gui] {
+            for query in ["change theme", "open theme", "switch appearance"] {
+                let mut state = PaletteState::new(seeker_items(client));
+                state.insert_text(query);
+                assert!(
+                    state
+                        .visible()
+                        .iter()
+                        .any(|row| { row.item.title == "/help Themes: preview and keep a theme" }),
+                    "{client:?} missed {query}"
+                );
+            }
+            for query in ["open sidebar", "close sidebar", "open/close sidebar"] {
+                let mut state = PaletteState::new(seeker_items(client));
+                state.insert_text(query);
+                assert!(
+                    state
+                        .visible()
+                        .iter()
+                        .any(|row| row.item.title == "/help List sessions"),
+                    "{client:?} missed {query}"
+                );
+            }
         }
     }
 }

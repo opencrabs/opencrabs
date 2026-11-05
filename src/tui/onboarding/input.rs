@@ -503,6 +503,8 @@ impl OnboardingWizard {
                     if pos > 0 {
                         self.ps.selected_provider = order[pos - 1];
                     }
+                    self.model_fetch_lifecycle.invalidate();
+                    self.ps.models_fetching = false;
                     self.ps.selected_model = 0;
                     self.ps.model_filter.clear();
                     self.ps.api_key_input.clear();
@@ -521,6 +523,8 @@ impl OnboardingWizard {
                     if pos + 1 < order.len() {
                         self.ps.selected_provider = order[pos + 1];
                     }
+                    self.model_fetch_lifecycle.invalidate();
+                    self.ps.models_fetching = false;
                     self.ps.selected_model = 0;
                     self.ps.model_filter.clear();
                     self.ps.api_key_input.clear();

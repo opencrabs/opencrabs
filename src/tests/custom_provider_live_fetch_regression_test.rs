@@ -93,20 +93,27 @@ fn custom_provider_blank_base_url_does_not_support_fetch() {
 
 const DIALOGS_SRC: &str = include_str!("../tui/app/dialogs.rs");
 const INPUT_SRC: &str = include_str!("../tui/onboarding/input.rs");
+const REQUEST_SRC: &str = include_str!("../ui_core/model_selector/state.rs");
+const FETCH_SRC: &str = include_str!("../ui_core/model_selector/mod.rs");
 
 #[test]
 fn fetch_models_handler_forwards_base_url_not_none() {
-    // Regression #1: the FetchModels handler must forward the captured
-    // base_url into fetch_provider_models. If this reverts to a literal
-    // `None` 4th argument, custom providers silently get an empty list.
+    // The handler snapshots the wizard before spawning. The shared fetcher
+    // must forward that snapshot's base_url instead of discarding it.
     assert!(
-        DIALOGS_SRC.contains("base_url.as_deref()"),
-        "WizardAction::FetchModels must forward base_url.as_deref() to \
-         fetch_provider_models so custom providers reach <base_url>/v1/models"
+        DIALOGS_SRC.contains("FetchRequest::from_selector(&wizard.ps)"),
+        "WizardAction::FetchModels must snapshot the wizard's provider state"
     );
     assert!(
-        DIALOGS_SRC.contains("Some(wizard.ps.base_url.clone())"),
-        "the handler must capture wizard.ps.base_url before the spawn"
+        REQUEST_SRC.contains(
+            "base_url: (!selector.base_url.trim().is_empty()).then(|| selector.base_url.clone())"
+        ),
+        "the request must preserve the unsaved custom provider base_url"
+    );
+    assert!(
+        FETCH_SRC.contains("request.base_url.as_deref()"),
+        "the shared fetcher must forward base_url.as_deref() so custom providers \
+         reach <base_url>/v1/models"
     );
 }
 

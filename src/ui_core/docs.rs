@@ -144,7 +144,7 @@ pub const PAGES: &[DocPage] = &[
     DocPage {
         title: "Sessions",
         path: "/features/sessions.html",
-        keywords: "session conversation resume history rail favorite favourite pin star",
+        keywords: "session sessions conversation resume history rail favorite favourite pin star sidebar side bar open close show hide reveal collapse drawer list",
     },
     DocPage {
         title: "Cron jobs",
@@ -165,6 +165,91 @@ pub const PAGES: &[DocPage] = &[
         title: "Voice (TTS and STT)",
         path: "/features/voice.html",
         keywords: "voice tts stt speech transcribe dictation audio speak whisper",
+    },
+    DocPage {
+        title: "ACP: Editor Integration",
+        path: "/features/acp.html",
+        keywords: "acp editor integration zed client protocol agent",
+    },
+    DocPage {
+        title: "Browser Automation",
+        path: "/features/browser.html",
+        keywords: "browser automation navigate click type screenshot chrome cdp web",
+    },
+    DocPage {
+        title: "Companion Tools",
+        path: "/features/companion-tools.html",
+        keywords: "companion tools utilities helper helpers",
+    },
+    DocPage {
+        title: "Document Generation",
+        path: "/features/document-generation.html",
+        keywords: "document documents generate excel xlsx word docx pdf powerpoint pptx spreadsheet report",
+    },
+    DocPage {
+        title: "Dynamic Tools",
+        path: "/features/dynamic-tools.html",
+        keywords: "dynamic tools tool_manage tools.toml create enable disable reload runtime",
+    },
+    DocPage {
+        title: "/goal: Autonomous Goal Loop",
+        path: "/features/goal.html",
+        keywords: "goal goals autonomous loop objective manage",
+    },
+    DocPage {
+        title: "Mission Control",
+        path: "/features/mission-control.html",
+        keywords: "mission control analytics dashboard metrics usage tools performance report",
+    },
+    DocPage {
+        title: "Multi-Agent Orchestration",
+        path: "/features/multi-agent.html",
+        keywords: "multi agent agents orchestration team spawn delegate parallel models providers",
+    },
+    DocPage {
+        title: "Multi-Profile",
+        path: "/features/profiles.html",
+        keywords: "profile profiles multi profile isolated workspace configuration switch",
+    },
+    DocPage {
+        title: "RTK: Token Savings",
+        path: "/features/rtk.html",
+        keywords: "rtk token savings context compression reduce tokens",
+    },
+    DocPage {
+        title: "Self-Healing",
+        path: "/features/self-healing.html",
+        keywords: "self healing recover recovery error errors phantom tool gaslighting",
+    },
+    DocPage {
+        title: "Self-Improvement (RSI)",
+        path: "/features/self-improvement.html",
+        keywords: "self improvement rsi evolve improve feedback brain files proposals",
+    },
+    DocPage {
+        title: "Skills System",
+        path: "/features/skills.html",
+        keywords: "skill skills system workflow workflows slash skill.md",
+    },
+    DocPage {
+        title: "Split Panes",
+        path: "/features/split-panes.html",
+        keywords: "split panes pane layout terminal sidebar",
+    },
+    DocPage {
+        title: "Themes",
+        path: "/features/themes.html",
+        keywords: "theme themes appearance appearances color colour change open switch customize customization preview style styles dark light palette",
+    },
+    DocPage {
+        title: "Usage Dashboard",
+        path: "/features/usage-dashboard.html",
+        keywords: "usage dashboard token tokens cost costs statistics stats spending",
+    },
+    DocPage {
+        title: "Web Scraping",
+        path: "/features/web-scrape.html",
+        keywords: "web scrape scraping fetch url markdown website extract",
     },
     DocPage {
         title: "Building from source",
@@ -233,6 +318,7 @@ pub const SITEMAP: &[&str] = &[
     "/getting-started/onboarding.html",
     "/getting-started/cli-commands.html",
     "/getting-started/troubleshooting.html",
+    "/getting-started/videos.html",
     "/brain/providers-overview.html",
     "/brain/providers.html",
     "/brain/images.html",
@@ -251,12 +337,30 @@ pub const SITEMAP: &[&str] = &[
     "/features/plans.html",
     "/features/a2a.html",
     "/features/voice.html",
+    "/features/acp.html",
+    "/features/browser.html",
+    "/features/companion-tools.html",
+    "/features/document-generation.html",
+    "/features/dynamic-tools.html",
+    "/features/goal.html",
+    "/features/mission-control.html",
+    "/features/multi-agent.html",
+    "/features/profiles.html",
+    "/features/rtk.html",
+    "/features/self-healing.html",
+    "/features/self-improvement.html",
+    "/features/skills.html",
+    "/features/split-panes.html",
+    "/features/themes.html",
+    "/features/usage-dashboard.html",
+    "/features/web-scrape.html",
     "/development/building.html",
     "/development/architecture.html",
     "/development/testing.html",
     "/development/contributing.html",
     "/development/security.html",
     "/changelog.html",
+    "/toc.html",
 ];
 
 /// The curated pages. A function rather than a bare const so the call sites
@@ -306,6 +410,13 @@ pub fn items() -> Vec<PaletteItem> {
 mod tests {
     use super::*;
     use crate::ui_core::palette::PaletteState;
+
+    /// Keep the deterministic coverage check on the generator's exclusion
+    /// contract. Live URL discovery belongs to the Python checker, not here.
+    fn is_reference_path(path: &str) -> bool {
+        !matches!(path, "/" | "/toc.html" | "/getting-started/videos.html")
+            && !path.starts_with("/stories/")
+    }
 
     /// Every path must be the shape the sitemap publishes, or the row ships a
     /// 404 the user cannot tell from a docs outage.
@@ -357,7 +468,7 @@ mod tests {
     #[test]
     fn the_index_covers_every_published_page() {
         for path in SITEMAP {
-            if *path == "/" || path.starts_with("/stories/") {
+            if !is_reference_path(path) {
                 continue;
             }
             assert!(
@@ -384,6 +495,20 @@ mod tests {
                 .all(|page| !page.path.starts_with("/stories/"))
         );
         assert!(pages().iter().any(|page| page.path == "/user-stories.html"));
+    }
+
+    /// Non-reference pages stay pinned in the sitemap but never become rows.
+    #[test]
+    fn non_reference_pages_are_explicitly_excluded() {
+        for path in ["/", "/toc.html", "/getting-started/videos.html"] {
+            assert!(SITEMAP.contains(&path), "{path} left the pinned sitemap");
+            assert!(!is_reference_path(path));
+            assert!(pages().iter().all(|page| page.path != path));
+        }
+        assert!(SITEMAP.iter().any(|path| path.starts_with("/stories/")));
+        assert!(SITEMAP.iter().all(|path| {
+            is_reference_path(path) == pages().iter().any(|page| page.path == *path)
+        }));
     }
 
     /// A page whose title is the bare section name is unreadable in the card,

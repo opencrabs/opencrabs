@@ -6,10 +6,9 @@
 //! the two cannot drift. This module only adds what a window needs on top:
 //! which field owns the keyboard, and which rows the rail and the lists show.
 
-use crate::model_fetch::{self, FetchOutcome};
 use opencrabs::tui::onboarding::{
-    CHANNEL_NAMES, EXISTING_KEY_SENTINEL, HealthStatus, OnboardingWizard, PROVIDERS, ProviderInfo,
-    SttProvider, TtsProvider,
+    CHANNEL_NAMES, EXISTING_KEY_SENTINEL, HealthStatus, OnboardingWizard, PROVIDERS, SttProvider,
+    TtsProvider,
 };
 pub use opencrabs::tui::onboarding::{OnboardingStep, WizardMode};
 
@@ -121,9 +120,6 @@ pub struct Onboard {
     /// Which editable field owns the keyboard on the current step. Reset on
     /// every step change, the same way the terminal resets `focused_field`.
     pub field: usize,
-    /// The live provider-model request, drained by the window's poll tick.
-    model_fetch: Option<std::sync::mpsc::Receiver<FetchOutcome>>,
-    model_fetch_error: Option<String>,
 }
 
 impl Onboard {
@@ -139,12 +135,7 @@ impl Onboard {
         };
         wizard.step = OnboardingStep::ModeSelect;
         wizard.is_first_time = opencrabs::tui::onboarding::is_first_time();
-        Self {
-            wizard,
-            field: 0,
-            model_fetch: None,
-            model_fetch_error: None,
-        }
+        Self { wizard, field: 0 }
     }
 
     /// Open the wizard at one step, for a slash command that names it.
@@ -172,12 +163,7 @@ impl Onboard {
             wizard.start_health_check();
             wizard.tick_health_check();
         }
-        Self {
-            wizard,
-            field: 0,
-            model_fetch: None,
-            model_fetch_error: None,
-        }
+        Self { wizard, field: 0 }
     }
 
     /// Point the provider step at the pair the session is answering with, the
@@ -241,26 +227,35 @@ impl Onboard {
     }
 
     /// Every provider the terminal offers, in the terminal's own order.
-    pub fn providers(&self) -> Vec<(usize, &'static ProviderInfo)> {
+    /// Saved custom instances have runtime names rather than static metadata.
+    pub fn providers(&self) -> Vec<(usize, String)> {
         self.wizard
             .ps
             .provider_display_order()
             .into_iter()
-            .filter_map(|index| PROVIDERS.get(index).map(|info| (index, info)))
+            .filter_map(|index| {
+                if index >= opencrabs::ui_core::model_selector::CUSTOM_INSTANCES_START {
+                    self.wizard
+                        .ps
+                        .custom_names
+                        .get(index - opencrabs::ui_core::model_selector::CUSTOM_INSTANCES_START)
+                        .cloned()
+                        .map(|name| (index, name))
+                } else {
+                    PROVIDERS
+                        .get(index)
+                        .map(|info| (index, info.name.to_string()))
+                }
+            })
             .collect()
     }
 
-    /// Select a provider by its index in `PROVIDERS`, and re-probe the key and
+    /// Select a provider by its shared selector index, and re-probe the key and
     /// the config models the way the terminal does when the row is walked.
     pub fn select_provider(&mut self, index: usize) {
-        if index >= PROVIDERS.len() {
+        if !self.wizard.ps.provider_display_order().contains(&index) {
             return;
         }
-        // Dropping the receiver invalidates an older provider's request. Its
-        // worker may finish, but there is no route back into this wizard.
-        self.model_fetch = None;
-        self.model_fetch_error = None;
-        self.wizard.ps.models_fetching = false;
         self.wizard.ps.selected_provider = index;
         self.wizard.ps.detect_existing_key();
         self.wizard.ps.reload_config_models();
@@ -270,54 +265,46 @@ impl Onboard {
         self.field = 0;
     }
 
-    /// The mouse/keyboard selection path used by the window. Keeping the pure
-    /// `select_provider` above also lets tests walk the catalogue without
-    /// unexpectedly contacting a real provider.
-    pub fn select_provider_and_fetch(&mut self, index: usize) {
-        self.select_provider(index);
-        self.start_model_fetch();
-    }
-
-    /// Start the same live fetch the terminal starts when a provider becomes
-    /// usable. False means the provider is unsupported or still needs a key.
-    pub fn start_model_fetch(&mut self) -> bool {
-        if self.wizard.ps.models_fetching {
-            return true;
-        }
-        let Some(request) = model_fetch::FetchRequest::from_selector(&self.wizard.ps) else {
+    /// Select a row from the shared all-provider picker without saving yet.
+    /// Unknown model ids are retained as real wizard selections.
+    pub fn select_pair(&mut self, provider: &str, model: &str) -> bool {
+        if model.trim().is_empty() {
             return false;
-        };
-        self.model_fetch_error = None;
-        self.model_fetch = Some(model_fetch::spawn(request));
-        self.wizard.ps.models_fetching = true;
-        true
-    }
-
-    /// Apply a completed request. The provider index is checked as a second
-    /// stale-result guard in addition to dropping the old receiver on select.
-    pub fn poll_model_fetch(&mut self) -> bool {
-        let outcome = self
-            .model_fetch
-            .as_ref()
-            .and_then(|receiver| receiver.try_recv().ok());
-        let Some(outcome) = outcome else {
-            return false;
-        };
-        self.model_fetch = None;
-        self.wizard.ps.models_fetching = false;
-        if outcome.provider_index != self.wizard.ps.selected_provider {
-            return true;
         }
-        self.model_fetch_error = outcome.error;
-        if !outcome.models.is_empty() {
-            self.wizard.ps.models = outcome.models;
+        let current = if self.wizard.ps.is_custom() {
+            self.wizard.ps.custom_name.as_str()
+        } else {
+            self.provider_id()
+        };
+        if current == provider {
+            if !self.wizard.ps.all_model_names().contains(&model) {
+                self.wizard.ps.config_models.push(model.to_string());
+            }
+            self.wizard.ps.custom_model = model.to_string();
             self.wizard.ps.resolve_selected_model_index();
+            self.wizard.ps.model_filter.clear();
+            self.field = self.search_field();
+            return true;
         }
+        let Ok(config) = opencrabs::config::Config::load() else {
+            return false;
+        };
+        let custom = config
+            .providers
+            .custom
+            .as_ref()
+            .is_some_and(|providers| providers.contains_key(provider));
+        let provider = if custom {
+            format!("custom:{provider}")
+        } else {
+            provider.to_string()
+        };
+        if !self.wizard.select_session_pair(&provider, model, &config) {
+            return false;
+        }
+        self.wizard.ps.model_filter.clear();
+        self.field = self.search_field();
         true
-    }
-
-    pub fn model_fetch_error(&self) -> Option<&str> {
-        self.model_fetch_error.as_deref()
     }
 
     /// True when this provider takes a pasted key. OpenCrabs mints its own and
@@ -341,17 +328,6 @@ impl Onboard {
         self.wizard.ps.current_provider().help_lines
     }
 
-    /// The models this provider offers, filtered by whatever is typed in the
-    /// search field. Same list the terminal's dialog shows.
-    pub fn models(&self) -> Vec<String> {
-        self.wizard
-            .ps
-            .filtered_model_names()
-            .into_iter()
-            .map(str::to_string)
-            .collect()
-    }
-
     pub fn model(&self) -> String {
         self.wizard.ps.selected_model_name().to_string()
     }
@@ -361,10 +337,7 @@ impl Onboard {
     /// way (`visible_window`), so a short window keeps the fields under it
     /// reachable instead of pushing them off screen, and the arrows can still
     /// walk every provider.
-    pub fn provider_rows(
-        &self,
-        list_rows: usize,
-    ) -> (Vec<(usize, &'static ProviderInfo)>, usize, usize) {
+    pub fn provider_rows(&self, list_rows: usize) -> (Vec<(usize, String)>, usize, usize) {
         let all = self.providers();
         let total = all.len();
         let selected = all
@@ -374,31 +347,6 @@ impl Onboard {
         let (start, end) =
             opencrabs::tui::onboarding_render::visible_window(total, selected, list_rows);
         (all[start..end].to_vec(), start, total.saturating_sub(end))
-    }
-
-    /// The slice of the model list the window paints, as `(index, name)` pairs
-    /// so a click still selects from the full filtered list. Same window as
-    /// the terminal's model pane.
-    pub fn model_rows(&self, list_rows: usize) -> (Vec<(usize, String)>, usize, usize) {
-        let all = self.models();
-        let total = all.len();
-        let selected = self.wizard.ps.selected_model.min(total.saturating_sub(1));
-        let (start, end) =
-            opencrabs::tui::onboarding_render::visible_window(total, selected, list_rows);
-        (
-            all.iter()
-                .enumerate()
-                .skip(start)
-                .take(end - start)
-                .map(|(index, name)| (index, name.clone()))
-                .collect(),
-            start,
-            total.saturating_sub(end),
-        )
-    }
-
-    pub fn is_fetching(&self) -> bool {
-        self.wizard.ps.models_fetching
     }
 
     /// How many rows the keyboard can stand on for this step. On the provider
@@ -1120,15 +1068,9 @@ impl Onboard {
     /// An arrow key: it walks whichever list the focus is on, and moves the
     /// focus when it is on a text field.
     pub fn walk(&mut self, delta: isize) {
-        if self.wizard.step == OnboardingStep::ProviderAuth {
-            if self.field == 0 {
-                self.provider_step(delta);
-                return;
-            }
-            if self.field == 1 {
-                self.model_step(delta);
-                return;
-            }
+        if self.wizard.step == OnboardingStep::ProviderAuth && self.field == 0 {
+            self.provider_step(delta);
+            return;
         }
         // On a step with switches the arrows travel them, and the rows that
         // are a single pick apply what the arrows land on. That is the
@@ -1173,18 +1115,6 @@ impl Onboard {
         let next = (current + delta).rem_euclid(order.len() as isize) as usize;
         self.select_provider(order[next]);
         self.field = 0;
-    }
-
-    /// Walk the model list by one row. The list is the filtered one, so a
-    /// search narrows what the arrows travel.
-    pub fn model_step(&mut self, delta: isize) {
-        let count = self.wizard.ps.filtered_model_names().len();
-        if count == 0 {
-            return;
-        }
-        let current = self.wizard.ps.selected_model.min(count - 1) as isize;
-        let next = (current + delta).rem_euclid(count as isize) as usize;
-        self.wizard.ps.selected_model = next;
     }
 
     /// Tab: the next row the keyboard can stand on, wrapping.
@@ -1833,81 +1763,35 @@ mod tests {
     }
 
     #[test]
-    fn fetch_models_result_applies_and_clears_loading() {
+    fn saved_custom_providers_are_visible_and_selectable() {
         let dir = home();
         with_home_override(dir.path().to_path_buf(), || {
             let mut onboard = Onboard::open_at(OnboardingStep::ProviderAuth);
-            let provider = PROVIDERS
-                .iter()
-                .position(|info| info.id == "anthropic")
-                .expect("anthropic provider");
-            onboard.select_provider(provider);
-            let (sender, receiver) = std::sync::mpsc::channel();
-            onboard.model_fetch = Some(receiver);
-            onboard.wizard.ps.models_fetching = true;
-            sender
-                .send(FetchOutcome {
-                    provider_index: provider,
-                    provider_id: "anthropic".into(),
-                    provider_name: "Anthropic".into(),
-                    models: vec!["live-model".into()],
-                    error: None,
-                })
-                .expect("test result");
-            assert!(onboard.poll_model_fetch());
-            assert!(!onboard.is_fetching());
-            assert!(onboard.models().iter().any(|model| model == "live-model"));
-            assert_eq!(onboard.model_fetch_error(), None);
+            onboard.wizard.ps.custom_names = vec!["local-test".into()];
+            let index = opencrabs::ui_core::model_selector::CUSTOM_INSTANCES_START;
+            assert!(
+                onboard
+                    .providers()
+                    .iter()
+                    .any(|(candidate, name)| *candidate == index && name == "local-test")
+            );
+            onboard.select_provider(index);
+            assert_eq!(onboard.wizard.ps.selected_provider, index);
+            assert!(onboard.wizard.ps.is_custom());
         });
     }
 
     #[test]
-    fn fetch_models_stale_provider_result_is_ignored() {
+    fn onboard_model_filter_keeps_arbitrary_model_ids() {
         let dir = home();
         with_home_override(dir.path().to_path_buf(), || {
             let mut onboard = Onboard::open_at(OnboardingStep::ProviderAuth);
-            onboard.select_provider(0);
-            onboard.select_provider(1);
-            let current = onboard.models();
-            let (sender, receiver) = std::sync::mpsc::channel();
-            onboard.model_fetch = Some(receiver);
-            onboard.wizard.ps.models_fetching = true;
-            sender
-                .send(FetchOutcome {
-                    provider_index: 0,
-                    provider_id: "stale".into(),
-                    provider_name: "Stale".into(),
-                    models: vec!["must-not-appear".into()],
-                    error: None,
-                })
-                .expect("test result");
-            assert!(onboard.poll_model_fetch());
-            assert!(!onboard.is_fetching());
-            assert_eq!(onboard.models(), current);
-        });
-    }
-
-    #[test]
-    fn the_model_window_keeps_the_picked_model_painted_and_clickable() {
-        let dir = home();
-        with_home_override(dir.path().to_path_buf(), || {
-            let mut onboard = Onboard::open();
-            onboard.wizard.step = OnboardingStep::ProviderAuth;
-            // A catalogue long enough that the window has to move: the real
-            // providers size varies, so the list is pinned instead of borrowed
-            // from whatever this machine has configured.
-            onboard.wizard.ps.models.clear();
-            onboard.wizard.ps.config_models = (0..40).map(|i| format!("model-{i:02}")).collect();
-            onboard.wizard.ps.model_filter.clear();
-            onboard.wizard.ps.selected_model = 39;
-
-            let models = onboard.models();
-            let (rows, above, below) = onboard.model_rows(6);
-            assert_eq!(below, 0, "the last model has nothing under it");
-            assert_eq!(above, 34, "the window reports what it hid");
-            let (index, name) = rows.last().expect("a painted row");
-            assert_eq!(*index, 39, "the click still selects from the full list");
-            assert_eq!(name, &models[39], "the painted row is the picked model");
+            onboard.wizard.ps.models = vec!["existing-model".into()];
+            onboard.wizard.ps.model_filter = "custom-future-model".into();
+            let provider = onboard.provider_id().to_string();
+            assert!(onboard.select_pair(&provider, "custom-future-model"));
+            assert_eq!(onboard.model(), "custom-future-model");
+            assert!(onboard.wizard.ps.model_filter.is_empty());
         });
     }
 

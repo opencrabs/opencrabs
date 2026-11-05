@@ -438,76 +438,23 @@ impl App {
                     }
                 }
                 WizardAction::FetchModels => {
-                    let provider_idx = wizard.ps.selected_provider;
-                    // Resolve the real API key: a freshly typed one, else the
-                    // saved key from config (keys.toml) for ANY provider,
-                    // including custom. Never the EXISTING_KEY_SENTINEL, which
-                    // 401'd custom endpoints like Model Studio (#656).
-                    let api_key = wizard.ps.effective_api_key();
+                    use crate::ui_core::model_selector::FetchRequest;
+                    let Some(request) = FetchRequest::from_selector(&wizard.ps) else {
+                        wizard.model_fetch_lifecycle.invalidate();
+                        wizard.ps.models_fetching = false;
+                        return Ok(());
+                    };
+                    let provider_index = request.provider_index;
+                    let generation = wizard.model_fetch_lifecycle.begin(&request);
                     wizard.ps.models_fetching = true;
-
-                    // Capture custom base_url so custom providers can hit <base_url>/v1/models
-                    let base_url = if wizard.ps.base_url.trim().is_empty() {
-                        None
-                    } else {
-                        Some(wizard.ps.base_url.clone())
-                    };
-
-                    // OpenCode plan (Zen or Go) picks the /models catalog (#2040)
-                    let opencode_et = (wizard.ps.provider_id() == "opencode").then(|| {
-                        if wizard.ps.opencode_endpoint_type == 1 {
-                            "zen".to_string()
-                        } else {
-                            "go".to_string()
-                        }
-                    });
-
-                    // Capture zhipu endpoint type from wizard state (not yet saved to config)
-                    let zhipu_et = if wizard.ps.provider_id() == "zai" {
-                        Some(if wizard.ps.zhipu_endpoint_type == 1 {
-                            "coding".to_string()
-                        } else {
-                            "api".to_string()
-                        })
-                    } else {
-                        None
-                    };
-
-                    // Capture xiaomi endpoint type from wizard state (not yet saved to config)
-                    let xiaomi_et = if wizard.ps.provider_id() == "xiaomi" {
-                        Some(if wizard.ps.xiaomi_endpoint_type == 1 {
-                            "token-plan".to_string()
-                        } else {
-                            "api".to_string()
-                        })
-                    } else {
-                        None
-                    };
-
-                    // Capture moonshot endpoint type from wizard state (not yet saved to config)
-                    let moonshot_et = if wizard.ps.provider_id() == "moonshot" {
-                        Some(if wizard.ps.moonshot_endpoint_type == 1 {
-                            "coding".to_string()
-                        } else {
-                            "api".to_string()
-                        })
-                    } else {
-                        None
-                    };
-
                     let sender = self.event_sender();
                     tokio::spawn(async move {
-                        let models = super::onboarding::fetch_provider_models(
-                            provider_idx,
-                            api_key.as_deref(),
-                            zhipu_et.as_deref(),
-                            xiaomi_et.as_deref(),
-                            moonshot_et.as_deref(),
-                            base_url.as_deref(),
-                            opencode_et.as_deref(),
-                        )
-                        .await;
-                        let _ = sender.send(TuiEvent::OnboardingModelsFetched(models));
+                        let outcome = crate::ui_core::model_selector::fetch(request).await;
+                        let _ = sender.send(TuiEvent::OnboardingModelsFetched {
+                            generation,
+                            provider_index,
+                            outcome,
+                        });
                     });
                 }
                 WizardAction::GitHubDeviceFlow => {

@@ -88,10 +88,16 @@ pub fn status(state: &PaletteState) -> String {
                 roast(query).to_string()
             } else if rows.len() == 1 && rows[0].item.kind == PaletteKind::Ask {
                 "no match. enter asks a fresh session".to_string()
-            } else if rows.len() == 1 {
-                "1 match".to_string()
             } else {
-                format!("{} matches", rows.len())
+                let matches = rows
+                    .iter()
+                    .filter(|row| row.item.kind != PaletteKind::Ask)
+                    .count();
+                if matches == 1 {
+                    "1 match".to_string()
+                } else {
+                    format!("{matches} matches")
+                }
             }
         }
     }
@@ -508,6 +514,7 @@ pub(super) fn overlay(
         let mut list = div()
             .flex()
             .flex_col()
+            .min_w_0()
             .gap_0p5()
             .px_3()
             .pb_2()
@@ -519,6 +526,7 @@ pub(super) fn overlay(
                 .id(("palette-row", ix))
                 .flex()
                 .flex_row()
+                .min_w_0()
                 .items_center()
                 .gap_2()
                 .px_2()
@@ -540,6 +548,7 @@ pub(super) fn overlay(
             cell = cell.child(
                 div()
                     .flex_1()
+                    .min_w_0()
                     .flex()
                     .flex_col()
                     .child(
@@ -561,6 +570,7 @@ pub(super) fn overlay(
             );
             cell = cell.child(
                 div()
+                    .flex_shrink_0()
                     .text_xs()
                     .text_color(rgb(INK_MUTED))
                     .mr_2()
@@ -572,19 +582,33 @@ pub(super) fn overlay(
                 // in the terminal wondering why it vanished (#2458).
                 cell = cell.child(
                     div()
+                        .flex_shrink_0()
                         .text_xs()
                         .text_color(rgb(INK_MUTED))
                         .child("terminal only"),
                 );
             } else if armed {
-                cell = cell.child(div().text_xs().text_color(rgb(INK_MUTED)).child("↵ enter"));
+                cell = cell.child(
+                    div()
+                        .flex_shrink_0()
+                        .text_xs()
+                        .text_color(rgb(INK_MUTED))
+                        .child("↵ enter"),
+                );
             }
             if let Some(handler) = handlers.next() {
                 cell = cell.on_click(handler);
             }
             list = list.child(cell);
         }
-        card = card.child(div().flex().flex_col().overflow_hidden().child(list));
+        card = card.child(
+            div()
+                .flex()
+                .flex_col()
+                .min_w_0()
+                .overflow_hidden()
+                .child(list),
+        );
 
         // Status only when it does work: the roast on a miss, the ask row's
         // naming. The count is chrome; the rows are the answer (#2491).
@@ -839,6 +863,48 @@ mod tests {
         assert_eq!(printed[0].kind, "session");
     }
 
+    /// A long selected skill row yields only its flexible text. The source
+    /// assertions pin GPUI's layout contract; the owner hand test checks paint.
+    #[test]
+    fn long_skill_rows_keep_fixed_labels_and_shrink_only_text() {
+        let long_subtitle = "a useful skill description that keeps going ".repeat(16);
+        let mut skill = item("skill with an intentionally long title", PaletteKind::Skill);
+        skill.subtitle = long_subtitle.clone();
+        let mut state = state_with(vec![skill]);
+        state.insert_text("skill with");
+        let printed = rows(&state);
+        assert_eq!(printed.len(), 1);
+        assert!(printed[0].armed);
+        assert_eq!(printed[0].kind, "skill");
+        assert_eq!(printed[0].subtitle, long_subtitle);
+        assert!(printed[0].subtitle.len() > 600);
+
+        let src = include_str!("command_palette.rs");
+        let start = src
+            .find("pub(super) fn overlay(")
+            .expect("overlay renderer");
+        let overlay = &src[start..];
+        let end = overlay.find("/// The kind label").expect("overlay ends");
+        let compact: String = overlay[..end]
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect();
+        for required in [
+            ".flex_col().min_w_0().gap_0p5()",
+            ".flex_row().min_w_0().items_center()",
+            ".flex_1().min_w_0().flex().flex_col()",
+            ".flex_shrink_0().text_xs().text_color(rgb(INK_MUTED)).mr_2().child(SharedString::from(rowv.kind))",
+            ".flex_shrink_0().text_xs().text_color(rgb(INK_MUTED)).child(\"terminalonly\")",
+            ".flex_shrink_0().text_xs().text_color(rgb(INK_MUTED)).child(\"↵enter\")",
+            ".flex().flex_col().min_w_0().overflow_hidden().child(list)",
+        ] {
+            assert!(
+                compact.contains(required),
+                "selected-row layout lost {required}"
+            );
+        }
+    }
+
     /// A miss offers the ask row and names it in the status line, never an
     /// empty panel with a silent footer (#2482).
     #[test]
@@ -859,14 +925,13 @@ mod tests {
         let mut state = state_with(vec![
             item("alpha", PaletteKind::Command),
             item("beta", PaletteKind::Command),
+            item("alphabet", PaletteKind::Command),
         ]);
         assert_eq!(status(&state), "", "an empty query prints no count");
-        state.type_char('a');
-        state.type_char('l');
+        state.insert_text("beta");
         assert_eq!(status(&state), "1 match");
-        state.backspace();
         state.clear();
-        state.type_char('a');
+        state.insert_text("alph");
         assert_eq!(status(&state), "2 matches");
     }
 

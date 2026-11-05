@@ -3,15 +3,16 @@
 //! The catalogue is the one the terminal's own picker reads
 //! ([`load_default_models`], sourced from the embedded `config.toml.example`),
 //! so the window cannot offer a model the terminal has never heard of, or miss
-//! one the terminal ships. `/models` opens on that catalogue immediately and
-//! replaces the current provider's section after its live fetch succeeds.
+//! one the terminal ships. `/models` opens on the saved fallback immediately
+//! and replaces each provider's section after its live fetch succeeds.
 //!
 //! The row list and panel model are pure, which makes the picker testable
 //! without a window.
 
-use opencrabs::tui::onboarding::PROVIDERS;
 use opencrabs::tui::onboarding_render::visible_window;
-use opencrabs::tui::provider_selector::load_default_models;
+use opencrabs::ui_core::model_selector::{
+    CUSTOM_PROVIDER_IDX, ProviderSelectorState, sort_newest_first,
+};
 
 /// One selectable pair.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -124,29 +125,118 @@ pub fn panel(rows: &[Row], query: &str, selected: usize, max_models: usize) -> P
     }
 }
 
-/// Every model in the shared catalogue, in provider order, with the live pair
-/// marked.
-///
-/// The dynamic "custom" entry carries an empty id and has no catalogue, so it is
-/// skipped: a switch has nothing to name there until the user configures it.
-pub fn rows(current: Option<(&str, &str)>) -> Vec<Row> {
+/// Build the shared catalogue in provider order, substituting the wizard's
+/// live provider state for its saved counterpart and marking the current pair.
+/// Saved custom instances use their runtime name and models; the empty "new
+/// custom" sentinel is skipped. Search text never removes entries here: it is
+/// applied only by `filtered_rows`, so counts and discovery keep the full set.
+pub fn rows_for_picker(
+    current: Option<(&str, &str)>,
+    edited: Option<&ProviderSelectorState>,
+) -> Vec<Row> {
+    let mut catalogue = ProviderSelectorState::default();
+    catalogue.load_custom_names();
+    let order = edited.unwrap_or(&catalogue).provider_display_order();
     let mut out = Vec::new();
-    for info in PROVIDERS.iter().filter(|info| !info.id.is_empty()) {
-        for model in load_default_models(info.id) {
-            out.push(Row {
-                provider: info.id.to_string(),
-                provider_name: info.name.to_string(),
-                current: current.is_some_and(|(p, m)| p == info.id && m == model),
-                model,
-            });
+    for index in order {
+        let selector =
+            if let Some(edited) = edited.filter(|selector| selector.selected_provider == index) {
+                edited.clone()
+            } else {
+                if index == CUSTOM_PROVIDER_IDX {
+                    continue;
+                }
+                let mut saved = catalogue.clone();
+                saved.selected_provider = index;
+                saved.detect_existing_key();
+                saved.reload_config_models();
+                saved
+            };
+        if index == CUSTOM_PROVIDER_IDX && selector.custom_name.trim().is_empty() {
+            continue;
         }
+        out.extend(provider_rows(&selector, current));
     }
     out
 }
 
-/// Replace one provider's static section with a successful live fetch. Other
-/// providers keep their rows and order; the selected highlight is resolved
-/// again by the caller because indices may move.
+/// Build one provider's rows from an immutable selector snapshot. Keeping this
+/// separate makes edited-provider behavior testable without reading a live HOME.
+fn provider_rows(selector: &ProviderSelectorState, current: Option<(&str, &str)>) -> Vec<Row> {
+    let (provider, provider_name) = if selector.selected_provider >= CUSTOM_PROVIDER_IDX {
+        (selector.custom_name.clone(), selector.custom_name.clone())
+    } else {
+        (
+            selector.current_provider().id.to_string(),
+            selector.current_provider().name.to_string(),
+        )
+    };
+    selector
+        .all_model_names()
+        .into_iter()
+        .map(|model| Row {
+            current: current
+                .is_some_and(|(active, active_model)| active == provider && active_model == model),
+            model: model.to_string(),
+            provider: provider.clone(),
+            provider_name: provider_name.clone(),
+        })
+        .collect()
+}
+
+/// Resolve a typed id which is absent from every fetched catalogue. A fully
+/// qualified pair keeps its provider; a bare id uses the active provider.
+pub fn manual_pair(query: &str, active_provider: &str) -> Option<String> {
+    let query = query.trim();
+    if query.is_empty() || query.chars().any(char::is_whitespace) {
+        return None;
+    }
+    if query.starts_with('/') || query.ends_with('/') {
+        return None;
+    }
+    if query.contains('/') {
+        Some(query.to_string())
+    } else if active_provider.is_empty() {
+        None
+    } else {
+        Some(format!("{active_provider}/{query}"))
+    }
+}
+
+/// Mark a picked pair current, inserting an arbitrary id beside its provider
+/// when no catalogue row exists yet. Returns its visible unfiltered index.
+pub fn ensure_pair(rows: &mut Vec<Row>, provider: &str, model: &str) -> usize {
+    for row in rows.iter_mut() {
+        row.current = row.provider == provider && row.model == model;
+    }
+    if let Some(index) = rows
+        .iter()
+        .position(|row| row.provider == provider && row.model == model)
+    {
+        return index;
+    }
+    let provider_name = rows
+        .iter()
+        .find(|row| row.provider == provider)
+        .map(|row| row.provider_name.clone())
+        .unwrap_or_else(|| provider.to_string());
+    let row = Row {
+        provider: provider.to_string(),
+        provider_name,
+        model: model.to_string(),
+        current: true,
+    };
+    let index = rows
+        .iter()
+        .rposition(|candidate| candidate.provider == provider)
+        .map_or(rows.len(), |index| index + 1);
+    rows.insert(index, row);
+    index
+}
+
+/// Replace one provider's fallback section with a successful live fetch. Other
+/// providers keep their rows and order until their own responses arrive; the
+/// selected highlight is resolved again because indices may move.
 pub fn replace_provider(
     rows: &mut Vec<Row>,
     provider_id: &str,
@@ -162,12 +252,14 @@ pub fn replace_provider(
         .position(|row| row.provider == provider_id)
         .unwrap_or(rows.len());
     rows.retain(|row| row.provider != provider_id);
-    let live = fetched.iter().map(|model| Row {
+    let mut models: Vec<&str> = fetched.iter().map(String::as_str).collect();
+    sort_newest_first(&mut models);
+    let live = models.iter().map(|model| Row {
         provider: provider_id.to_string(),
         provider_name: provider_name.to_string(),
         current: current
-            .is_some_and(|(provider, active)| provider == provider_id && active == model),
-        model: model.clone(),
+            .is_some_and(|(provider, active)| provider == provider_id && active == *model),
+        model: (*model).to_string(),
     });
     rows.splice(insert_at..insert_at, live);
 }
@@ -280,9 +372,24 @@ mod tests {
     }
 
     #[test]
+    fn unmatched_model_ids_can_be_selected_without_a_catalogue_row() {
+        assert_eq!(
+            manual_pair("new-model-2027", "openai").as_deref(),
+            Some("openai/new-model-2027")
+        );
+        assert_eq!(
+            manual_pair("custom/tenant/model", "openai").as_deref(),
+            Some("custom/tenant/model")
+        );
+        assert_eq!(manual_pair("   ", "openai"), None);
+        assert_eq!(manual_pair("has spaces", "openai"), None);
+        assert_eq!(manual_pair("new-model", ""), None);
+    }
+
+    #[test]
     fn the_catalogue_is_not_empty() {
         // A picker with no rows is the failure this test exists for.
-        let rows = rows(None);
+        let rows = rows_for_picker(None, None);
         assert!(!rows.is_empty(), "the shared catalogue produced no rows");
         assert!(
             rows.len() > 20,
@@ -293,9 +400,9 @@ mod tests {
 
     #[test]
     fn the_live_pair_is_marked_once() {
-        let all = rows(None);
+        let all = rows_for_picker(None, None);
         let first = all.first().expect("a row");
-        let live = rows(Some((&first.provider, &first.model)));
+        let live = rows_for_picker(Some((&first.provider, &first.model)), None);
         assert_eq!(live.iter().filter(|row| row.current).count(), 1);
         assert!(live[0].current);
     }
@@ -323,15 +430,68 @@ mod tests {
             Some(("one", "live-new")),
         );
         assert_eq!(rows.len(), 3);
-        assert_eq!(rows[0].model, "live-new");
-        assert!(rows[0].current);
-        assert_eq!(rows[1].model, "live-old");
+        assert_eq!(rows[0].model, "live-old");
+        assert!(!rows[0].current);
+        assert_eq!(rows[1].model, "live-new");
+        assert!(rows[1].current);
         assert_eq!(rows[2].pair(), "two/untouched");
     }
 
     #[test]
+    fn live_rows_use_shared_numeric_version_order() {
+        let mut rows = Vec::new();
+        replace_provider(
+            &mut rows,
+            "test",
+            "Test",
+            &["glm-5.2".into(), "glm-5.10".into(), "glm-5-turbo".into()],
+            None,
+        );
+        let models: Vec<&str> = rows.iter().map(|row| row.model.as_str()).collect();
+        assert_eq!(models, ["glm-5.10", "glm-5.2", "glm-5-turbo"]);
+    }
+
+    #[test]
+    fn edited_provider_search_does_not_shrink_its_catalogue() {
+        let edited = ProviderSelectorState {
+            config_models: vec!["visible-model".into(), "other-model".into()],
+            model_filter: "visible".into(),
+            ..Default::default()
+        };
+        let provider = edited.provider_id().to_string();
+        let rows = provider_rows(&edited, None);
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| row.provider == provider));
+        assert!(rows.iter().any(|row| row.model == "other-model"));
+        let filtered = panel(&rows, &edited.model_filter, 0, 20);
+        assert_eq!(filtered.matched, 1);
+        assert_eq!(filtered.total, 2);
+    }
+
+    #[test]
+    fn arbitrary_pair_is_inserted_once_and_marked_current() {
+        let edited = ProviderSelectorState {
+            config_models: vec!["known-model".into()],
+            ..Default::default()
+        };
+        let provider = edited.provider_id().to_string();
+        let mut rows = provider_rows(&edited, None);
+        let original = rows.len();
+        ensure_pair(&mut rows, &provider, "future-model");
+        ensure_pair(&mut rows, &provider, "future-model");
+        assert_eq!(rows.len(), original + 1);
+        let matches: Vec<_> = rows
+            .iter()
+            .filter(|row| row.provider == provider && row.model == "future-model")
+            .collect();
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].current);
+        assert_eq!(rows.iter().filter(|row| row.current).count(), 1);
+    }
+
+    #[test]
     fn a_pair_round_trips_through_find() {
-        let all = rows(None);
+        let all = rows_for_picker(None, None);
         // The catalogue decides, not a fixed id: several providers ship no
         // static model list because the terminal fetches theirs live, so the
         // first row stands in for "a pair that is really on the screen".

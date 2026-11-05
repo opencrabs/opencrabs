@@ -11,6 +11,7 @@
 //! keyword table, the ordering and the state all live here, with no terminal
 //! and no UI toolkit in sight (#2458).
 
+use super::query::{NormalizedQuery, field_tokens};
 use std::time::{Duration, Instant};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -101,6 +102,10 @@ pub enum PaletteKind {
     Command,
     /// A screen or panel the frontend can show.
     Surface,
+    /// A direct interface action, such as opening or closing the sidebar.
+    Action,
+    /// A client-specific chord from the shared help table.
+    Help,
     /// A conversation from the rail.
     Session,
     /// A provider model from the catalogue.
@@ -131,6 +136,8 @@ impl PaletteKind {
         match self {
             PaletteKind::Command => "command",
             PaletteKind::Surface => "surface",
+            PaletteKind::Action => "action",
+            PaletteKind::Help => "help",
             PaletteKind::Session => "session",
             PaletteKind::Model => "model",
             PaletteKind::Skill => "skill",
@@ -149,7 +156,7 @@ impl PaletteKind {
         match self {
             PaletteKind::Command => 0,
             PaletteKind::Surface => 1,
-            PaletteKind::Skill => 2,
+            PaletteKind::Help | PaletteKind::Skill => 2,
             // A setup row is an action, so it sits with the surfaces: for the
             // query `telegram` it is printed above the docs page that carries
             // the same name (#2462).
@@ -162,8 +169,7 @@ impl PaletteKind {
             // dead last keeps it out of the way should that ever change.
             PaletteKind::Ask => 7,
             // An action, so it sits with the destinations, above chats.
-            PaletteKind::NewTopic => 1,
-            PaletteKind::Favorite => 1,
+            PaletteKind::Action | PaletteKind::NewTopic | PaletteKind::Favorite => 1,
         }
     }
 
@@ -176,9 +182,9 @@ impl PaletteKind {
         match self {
             PaletteKind::Surface => 0,
             // Actions sit with the destinations, under the screens.
-            PaletteKind::NewTopic | PaletteKind::Favorite => 1,
+            PaletteKind::Action | PaletteKind::NewTopic | PaletteKind::Favorite => 1,
             PaletteKind::Command | PaletteKind::UserCommand | PaletteKind::Channel => 2,
-            PaletteKind::Docs => 3,
+            PaletteKind::Docs | PaletteKind::Help => 3,
             PaletteKind::Session => 4,
             PaletteKind::Skill | PaletteKind::Model => 5,
             PaletteKind::Ask => 7,
@@ -258,10 +264,14 @@ impl Surface {
         match self {
             Surface::Usage => "cost tokens spend budget context ctx",
             Surface::Files => "attachments uploads downloads artifacts",
-            Surface::Themes => "colour color dark light palette appearance",
+            Surface::Themes => {
+                "theme themes colour color dark light palette appearance change switch open"
+            }
             Surface::Models => "provider llm sonnet opus haiku switch",
-            Surface::Sessions => "chats conversations history rail sidebar",
-            Surface::Help => "keys shortcuts commands what can i press",
+            Surface::Sessions => "chats conversations history rail sidebar open close",
+            Surface::Help => {
+                "keys key bindings keyboard shortcuts controls commands what can i press"
+            }
             Surface::Skills => "workflows recipes macros",
             Surface::Profiles => "accounts workspaces tenants switch",
             Surface::MissionControl => "rsi mc control jobs analytics dashboard",
@@ -435,36 +445,15 @@ pub fn channel_hint(query: &str, configured: &[Channel]) -> Option<&'static str>
     Some(channel.setup_hint())
 }
 
-/// The create-topic row both frontends list. One definition, so the window
-/// and the terminal offer the same words and land in the same picker (#2482).
-pub fn new_topic_item() -> PaletteItem {
-    PaletteItem::new(
-        "create topic",
-        "pick a conversation, name the topic, done",
-        PaletteKind::NewTopic,
-        PaletteAction::NewTopic,
-    )
-    .with_keywords("create topic new topic make topic start a topic")
-}
-
-/// The favorite row both frontends list: same picker as create topic, but
-/// the pick pins the conversation to the top of the rail (#2487). One
-/// definition, so the window and the terminal offer the same words.
-pub fn favorite_item() -> PaletteItem {
-    PaletteItem::new(
-        "favorite any session",
-        "pick a conversation, pin it to the top",
-        PaletteKind::Favorite,
-        PaletteAction::Favorite,
-    )
-    .with_keywords("favorite favourite pin star session bookmark top")
-}
-
 /// What picking a row does. The frontend applies it; this module only names it.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum PaletteAction {
     RunSlash(&'static str),
     OpenSurface(Surface),
+    /// Show the sidebar. Repeating the action leaves it open.
+    OpenSidebar,
+    /// Hide the sidebar without changing unrelated frontend state.
+    CloseSidebar,
     /// A session id, held as `u128` so this module needs no uuid dependency.
     /// The frontend converts it back with `Uuid::from_u128`.
     OpenSession(u128),
@@ -523,6 +512,9 @@ pub struct PaletteItem {
     /// Words that should find this row without being in its title. Weighted
     /// below the title, so a real name match always wins.
     pub keywords: String,
+    /// Longer prose searched under stricter limits than names and keywords.
+    /// Skill descriptions live here instead of being duplicated as keywords.
+    pub description: String,
     pub action: PaletteAction,
 }
 
@@ -538,6 +530,7 @@ impl PaletteItem {
             subtitle: subtitle.into(),
             kind,
             keywords: String::new(),
+            description: String::new(),
             action,
         }
     }
@@ -545,6 +538,12 @@ impl PaletteItem {
     /// Add the words that should find this row by meaning rather than by name.
     pub fn with_keywords(mut self, keywords: &str) -> Self {
         self.keywords = keywords.to_string();
+        self
+    }
+
+    /// Add prose separately so the matcher can bound its contribution.
+    pub fn with_description(mut self, description: &str) -> Self {
+        self.description = description.to_string();
         self
     }
 }
@@ -561,7 +560,10 @@ const KEYWORDS: &[(&str, &str)] = &[
         "rsi mc control analytics inbox dashboard",
         "/mission-control",
     ),
-    ("commands keys shortcuts help what can you do", "/help"),
+    (
+        "commands keys key bindings keyboard shortcuts controls help what can you do",
+        "/help",
+    ),
     ("new session new conversation fresh start topic", "/new"),
     (
         "channels telegram discord slack whatsapp trello connect setup bot",
@@ -573,7 +575,10 @@ const KEYWORDS: &[(&str, &str)] = &[
         "/compact",
     ),
     ("model provider llm sonnet opus haiku", "/models"),
-    ("colour color dark light palette", "/theme"),
+    (
+        "theme themes colour color dark light palette appearance change switch",
+        "/theme",
+    ),
     ("chat conversation history resume reopen", "/sessions"),
     ("skill workflow recipe", "/skills"),
     ("profile account workspace switch", "/profiles"),
@@ -710,132 +715,136 @@ pub fn keywords_for(command: &str) -> &'static str {
         .unwrap_or("")
 }
 
-/// Score one candidate against a query, or `None` when it does not match.
-///
-/// Matching is a case-insensitive subsequence over characters, never bytes, so
-/// a multi-byte title cannot be sliced apart. The score rewards what a reader
-/// would call a better match: a prefix beats a word start, a word start beats a
-/// run in the middle, and a spread-out match still counts but scores low, which
-/// is what keeps `gst` finding `git status` without ranking it above an exact
-/// hit.
+/// Short exact words that are real app vocabulary rather than stray letters.
+const SHORT_TOKENS: &[&str] = &[
+    "a2a", "acp", "ai", "api", "cd", "ci", "cli", "ctx", "db", "dns", "doc", "fs", "gif", "go",
+    "gui", "io", "js", "key", "llm", "ls", "mc", "mcp", "new", "pdf", "pr", "qa", "rsi", "rtk",
+    "sdk", "sql", "ssh", "ssl", "stt", "tls", "tts", "tui", "ui", "url", "vps", "xml",
+];
+
+const MIN_EXACT_CHARS: usize = 3;
+const MIN_PREFIX_CHARS: usize = 4;
+const SKILL_DESCRIPTION_WORDS: usize = 12;
+const PHRASE_ABBREVIATIONS: &[(&str, &[&str])] = &[("gst", &["git", "status"])];
+/// A generic intent can name more than one docs page. Keep the established
+/// destination when a newer page also carries the same word.
+const DOC_INTENT_PRIORITIES: &[(&str, &str)] = &[("automation", "/features/cron-jobs.html")];
+
+/// Score one candidate against normalized intent groups. Every required group
+/// must land on one whole candidate word or on an explicit phrase alias.
+/// Bounded abbreviations never hop across words or fields.
 pub fn score(query: &str, item: &PaletteItem) -> Option<u16> {
-    let query = query.trim();
+    score_normalized(&NormalizedQuery::parse(query), item)
+}
+
+fn score_normalized(query: &NormalizedQuery, item: &PaletteItem) -> Option<u16> {
     if query.is_empty() {
         return Some(0);
     }
-    // A phrase is matched one word at a time, and every word has to land
-    // somewhere: "terminal voice" asks two things at once, so a row that only
-    // knows the word "voice" is not the answer. Flattening the phrase into a
-    // single subsequence (the old rule) demanded both words appear letter for
-    // letter inside one field, which no keyword list can satisfy, so the query
-    // that names the microphone matched nothing at all (#2461).
-    //
-    // Each word must START a word in the field, then may be abbreviated to a
-    // subsequence ("trbl" still reaches "troubleshooting"). Without that
-    // anchor a sentence like "i want to setup a browser" matched by reading
-    // stray letters out of every keyword string it passed.
-    let mut total: u16 = 0;
-    for token in query.split_whitespace() {
-        let title = match_from(token, &item.title, 10);
-        let words = match_from(token, &item.keywords, 6);
-        let best = match (title, words) {
-            (None, None) => return None,
-            (Some(t), None) => t,
-            (None, Some(w)) => w,
-            (Some(t), Some(w)) => t.max(w),
-        };
-        total = total.saturating_add(best);
+
+    let title = field_tokens(&item.title);
+    let command = if matches!(
+        item.kind,
+        PaletteKind::Command | PaletteKind::Surface | PaletteKind::UserCommand
+    ) && item.title.starts_with('/')
+    {
+        title.clone()
+    } else {
+        Vec::new()
+    };
+    let keywords = field_tokens(&item.keywords);
+    let subtitle = field_tokens(&item.subtitle);
+    let description = field_tokens(&item.description);
+    // Both frontends show a skill's full description as its subtitle. Treat
+    // that duplicate as the same bounded prose, not as a stronger keyword
+    // field that can reintroduce matches the description limit rejected.
+    let skill_prose = item.kind == PaletteKind::Skill;
+    let fields = [
+        (&command, 1100u16, false, false),
+        (&title, 1000, false, false),
+        (&keywords, 700, false, false),
+        (
+            &subtitle,
+            if skill_prose { 150 } else { 500 },
+            skill_prose,
+            !skill_prose,
+        ),
+        (&description, 150, true, false),
+    ];
+
+    let mut total = 0u16;
+    for group in query.groups() {
+        let mut best = None;
+        for (tokens, weight, is_prose, allow_substring) in &fields {
+            if *is_prose && (item.kind != PaletteKind::Skill || query.groups().len() < 2) {
+                continue;
+            }
+            // Legacy multiword abbreviations are explicit aliases, never a
+            // loose subsequence through unrelated words.
+            if !*is_prose && tokens.len() > 1 {
+                for (abbreviation, phrase) in PHRASE_ABBREVIATIONS {
+                    let same_phrase = tokens.iter().map(String::as_str).eq(phrase.iter().copied());
+                    if same_phrase && group.iter().any(|word| word.as_str() == *abbreviation) {
+                        let points = weight.saturating_add(60);
+                        best = Some(best.map_or(points, |old: u16| old.max(points)));
+                    }
+                }
+            }
+            for (index, candidate) in tokens.iter().enumerate() {
+                if *is_prose && index >= SKILL_DESCRIPTION_WORDS {
+                    continue;
+                }
+                for alternative in group {
+                    if let Some(bonus) = token_bonus(alternative, candidate, *allow_substring) {
+                        let points = weight.saturating_add(bonus);
+                        best = Some(best.map_or(points, |old: u16| old.max(points)));
+                    }
+                }
+            }
+        }
+        total = total.saturating_add(best?);
+    }
+    if let PaletteAction::OpenDocs(path) = item.action
+        && DOC_INTENT_PRIORITIES.iter().any(|(intent, priority_path)| {
+            path == *priority_path && query.groups().iter().flatten().any(|token| token == intent)
+        })
+    {
+        total = total.saturating_add(400);
     }
     Some(total)
 }
 
-/// Score one text field. The first token char has to START a word: that is
-/// what turns a phrase into separate questions instead of one long blur of
-/// stray letters read out of any keyword string (#2461). When no word starts
-/// with the token, a full contiguous run still counts, ranked lowest: "ção"
-/// lives mid-word in "Configuração" and is exactly what a user types when
-/// the start of the word is not the part they remember.
-fn match_from(query: &str, text: &str, weight: u16) -> Option<u16> {
-    if text.is_empty() {
-        return None;
+/// Exact short app words are allowed. Other short words must grow to four
+/// characters before they can abbreviate the start of a candidate word.
+fn token_bonus(query: &str, candidate: &str, allow_substring: bool) -> Option<u16> {
+    if query == candidate {
+        let chars = query.chars().count();
+        return (chars >= MIN_EXACT_CHARS || SHORT_TOKENS.contains(&query)).then_some(200);
     }
-    let needle: Vec<char> = query
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .flat_map(|c| c.to_lowercase())
-        .collect();
-    if needle.is_empty() {
-        return Some(0);
+    if query.chars().count() >= MIN_PREFIX_CHARS
+        && candidate.chars().count() >= MIN_PREFIX_CHARS
+        && candidate.starts_with(query)
+    {
+        return Some(80);
     }
-    let hay: Vec<char> = text.chars().flat_map(|c| c.to_lowercase()).collect();
-    // The mid-word last resort: a whole run of the token, in order, ranked
-    // lowest. Single chars get it too: the old substring matcher found "a"
-    // mid-word in "beta" and the count test pins that, so the anchor never
-    // narrows a query below what the card answered before (#2482).
-    let contiguous: Option<usize> = hay
-        .windows(needle.len())
-        .position(|w| w == needle.as_slice());
-    let mut score: i32 = 0;
-    let mut hi = 0;
-    let mut last_hit: Option<usize> = None;
-    for (ni, want) in needle.iter().enumerate() {
-        let found = if ni == 0 {
-            // The first char must START a word: scan every occurrence. When
-            // no word-start hit exists at all, the contiguous run is the
-            // honest fallback, accepted mid-word and scored low by the normal
-            // scoring below. The fallback is taken OUTSIDE the hunt: feeding
-            // its position back into a hunt that had just rejected that same
-            // spot looped forever on "ção" in "Configuração" (the fallback
-            // always sits behind the scan cursor by definition, since the
-            // cursor only advanced past rejected word starts).
-            let mut from = 0usize;
-            let mut word_start_hit = None;
-            while let Some(p) = hay[from..].iter().position(|c| c == want) {
-                let pos = p + from;
-                let starts_word = pos == 0 || !hay[pos - 1].is_alphanumeric();
-                if starts_word {
-                    word_start_hit = Some(pos);
-                    break;
-                }
-                from = pos + 1;
-            }
-            match word_start_hit {
-                Some(p) => p,
-                None => contiguous?,
-            }
-        } else {
-            // Later chars have no anchoring job: first hit at or after the
-            // previous one wins.
-            hay[hi..].iter().position(|c| c == want)? + hi
-        };
-        let at_word_start = found == 0 || !hay[found - 1].is_alphanumeric();
-        let consecutive = last_hit.is_some_and(|last| last + 1 == found);
-        score += if at_word_start {
-            8
-        } else if consecutive {
-            4
-        } else {
-            1
-        };
-        // A gap costs, but never enough to reject a real match.
-        if let Some(last) = last_hit {
-            score -= ((found - last - 1) as i32).min(6);
-        }
-        if ni == 0 && found == 0 {
-            score += 10;
-        }
-        last_hit = Some(found);
-        hi = found + 1;
+    if allow_substring && query.chars().count() >= 4 && candidate.contains(query) {
+        return Some(50);
     }
-    // A whole-title prefix is the best answer there is.
-    let prefix: Vec<char> = hay.iter().take(needle.len()).copied().collect();
-    if prefix == needle {
-        score += 12;
-    }
-    let scaled = (score.max(0) as u16).saturating_mul(weight);
-    Some(scaled)
+    bounded_abbreviation(query, candidate).then_some(25)
 }
 
+fn bounded_abbreviation(query: &str, candidate: &str) -> bool {
+    if query.chars().count() < 4 || query == candidate {
+        return false;
+    }
+    if query.chars().next() != candidate.chars().next() {
+        return false;
+    }
+    let mut remaining = candidate.chars();
+    query
+        .chars()
+        .all(|needle| remaining.by_ref().any(|character| character == needle))
+}
 /// One ranked row, ready to paint.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct PaletteRow {
@@ -1227,6 +1236,8 @@ impl PaletteState {
     }
 
     pub fn visible(&self) -> Vec<PaletteRow> {
+        let normalized = NormalizedQuery::parse(&self.query);
+        let idle = self.query.trim().is_empty();
         let mut rows: Vec<PaletteRow> = self
             .items
             .iter()
@@ -1235,6 +1246,10 @@ impl PaletteState {
                 // empty, so the whole rail prints until typing narrows it
                 // (#2482).
                 if self.pick.is_some() && item.kind != PaletteKind::Session {
+                    return None;
+                }
+                // Help-key knowledge is searchable, not part of the idle menu.
+                if idle && item.kind == PaletteKind::Help {
                     return None;
                 }
                 // A pressed chip drops every row of another kind (#2491).
@@ -1255,12 +1270,11 @@ impl PaletteState {
                         PickFor::Favorite => PaletteAction::FavoriteToggle(id),
                     };
                 }
-                score(&self.query, &item).map(|score| PaletteRow { item, score })
+                score_normalized(&normalized, &item).map(|score| PaletteRow { item, score })
             })
             .collect();
         // Which kind rank decides: the typed card ranks actions first, the
         // idle card leads with destinations (#2491).
-        let idle = self.query.trim().is_empty();
         let kind_rank = |k: PaletteKind| if idle { k.idle_rank() } else { k.rank() };
         rows.sort_by(|a, b| {
             b.score
@@ -1283,16 +1297,13 @@ impl PaletteState {
                     && matches!(row.item.title.as_str(), "/brain" | "/compact"))
             });
         }
+        // Only a genuine miss offers Ask Crab. Useful local answers stand on
+        // their own; a fresh session still receives the exact original text,
+        // not normalized tokens (#2482, #2553).
+        let offer_ask =
+            rows.is_empty() && !idle && self.pick.is_none() && self.kind_filter.is_none();
         rows.truncate(MAX_ROWS);
-        // A real query that matched nothing still deserves an answer: one row
-        // that starts a fresh session carrying the typed text (#2482). The
-        // roast rides along as the subtitle, so the miss keeps its sense of
-        // humour while doing something useful.
-        if rows.is_empty()
-            && !self.query.trim().is_empty()
-            && self.pick.is_none()
-            && self.kind_filter.is_none()
-        {
+        if offer_ask {
             let query = self.query.clone();
             rows.push(PaletteRow {
                 item: PaletteItem {
@@ -1300,6 +1311,7 @@ impl PaletteState {
                     subtitle: roast(&query).to_string(),
                     kind: PaletteKind::Ask,
                     keywords: String::new(),
+                    description: String::new(),
                     action: PaletteAction::Ask(query),
                 },
                 score: 0,
@@ -1349,6 +1361,253 @@ mod tests {
         PaletteItem::new(title, "", kind, PaletteAction::OpenSurface(Surface::Help))
     }
 
+    fn action(action: PaletteAction) -> PaletteItem {
+        crate::ui_core::actions::items()
+            .into_iter()
+            .find(|item| item.action == action)
+            .expect("shared action")
+    }
+
+    /// The real catalog shape, with deterministic sessions and skills instead
+    /// of reading the developer's skill directory or conversation database.
+    fn realistic_items(client: crate::ui_core::help_keys::HelpClient) -> Vec<PaletteItem> {
+        let mut items: Vec<PaletteItem> = crate::ui_core::commands::SLASH_COMMANDS
+            .iter()
+            .filter(|cmd| !is_surface_command(cmd.name))
+            .map(|cmd| {
+                PaletteItem::new(
+                    cmd.name,
+                    cmd.description,
+                    PaletteKind::Command,
+                    PaletteAction::RunSlash(cmd.name),
+                )
+                .with_keywords(keywords_for(cmd.name))
+            })
+            .collect();
+        items.extend(surface_items());
+        items.extend(crate::ui_core::help_keys::seeker_items(client));
+        items.extend(crate::ui_core::docs::items());
+        items.extend(channel_items());
+        items.extend(crate::ui_core::actions::items());
+        for (name, description) in [
+            (
+                "/drop-release",
+                "Research draft publish release commits contributors changelog notes version assets then change theme and open sidebar",
+            ),
+            (
+                "/mutation-test-verify",
+                "Mutation test Rust changes plant anchored mutants run scoped tests before merge then change theme and open sidebar",
+            ),
+        ] {
+            items.push(
+                PaletteItem::new(
+                    name,
+                    description,
+                    PaletteKind::Skill,
+                    PaletteAction::RunSkill(name.to_string()),
+                )
+                .with_keywords("skill workflow recipe")
+                .with_description(description),
+            );
+        }
+        for (id, title) in [
+            (1, "git status"),
+            (2, "Theme rollout"),
+            (3, "Sidebar copy review"),
+            (4, "Telegram setup"),
+        ] {
+            items.push(PaletteItem::new(
+                title,
+                "2026-11-05 12:00",
+                PaletteKind::Session,
+                PaletteAction::OpenSession(id),
+            ));
+        }
+        items
+    }
+
+    fn realistic_rows(
+        client: crate::ui_core::help_keys::HelpClient,
+        query: &str,
+    ) -> Vec<PaletteRow> {
+        let mut state = PaletteState::new(realistic_items(client));
+        state.insert_text(query);
+        state.visible()
+    }
+
+    fn realistic_actions(
+        client: crate::ui_core::help_keys::HelpClient,
+        query: &str,
+    ) -> Vec<PaletteAction> {
+        realistic_rows(client, query)
+            .into_iter()
+            .map(|row| row.item.action)
+            .collect()
+    }
+
+    fn assert_realistic_destinations(rows: &[PaletteRow], query: &str, theme: bool) {
+        let (surface, help, docs) = if theme {
+            (
+                PaletteAction::OpenSurface(Surface::Themes),
+                "/help Themes: preview and keep a theme",
+                PaletteAction::OpenDocs("/features/themes.html"),
+            )
+        } else {
+            (
+                PaletteAction::OpenSurface(Surface::Sessions),
+                "/help List sessions",
+                PaletteAction::OpenDocs("/features/sessions.html"),
+            )
+        };
+        assert!(
+            rows.iter().any(|row| row.item.action == surface),
+            "{query} missed {surface:?}: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.item.title == help),
+            "{query} missed {help}: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.item.action == docs),
+            "{query} missed {docs:?}: {rows:?}"
+        );
+        assert!(
+            rows.iter().all(|row| row.item.kind != PaletteKind::Skill),
+            "{query} leaked skill prose: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn realistic_theme_queries_keep_surface_help_and_docs() {
+        for client in [
+            crate::ui_core::help_keys::HelpClient::Tui,
+            crate::ui_core::help_keys::HelpClient::Gui,
+        ] {
+            for query in [
+                "/theme",
+                "themes",
+                "appearance",
+                "How do I change themes?",
+                "change theme/appearance",
+                "open theme",
+                "\"change themes!\"",
+            ] {
+                let rows = realistic_rows(client, query);
+                assert_eq!(
+                    rows.first().map(|row| &row.item.action),
+                    Some(&PaletteAction::OpenSurface(Surface::Themes)),
+                    "{client:?} ranked the wrong row for {query}: {rows:?}"
+                );
+                assert_realistic_destinations(&rows, query, true);
+            }
+        }
+    }
+
+    #[test]
+    fn realistic_sidebar_queries_put_actions_first_and_keep_destinations() {
+        for client in [
+            crate::ui_core::help_keys::HelpClient::Tui,
+            crate::ui_core::help_keys::HelpClient::Gui,
+        ] {
+            for (query, expected) in [
+                ("open sidebar", PaletteAction::OpenSidebar),
+                ("close sidebar", PaletteAction::CloseSidebar),
+                ("\"close, sidebar!\"", PaletteAction::CloseSidebar),
+            ] {
+                let rows = realistic_rows(client, query);
+                assert_eq!(
+                    rows.first().map(|row| &row.item.action),
+                    Some(&expected),
+                    "{client:?} ranked the wrong row for {query}: {rows:?}"
+                );
+                assert_realistic_destinations(&rows, query, false);
+            }
+
+            let rows = realistic_rows(client, "open/close sidebar");
+            let open = rows
+                .iter()
+                .position(|row| row.item.action == PaletteAction::OpenSidebar)
+                .expect("open action");
+            let close = rows
+                .iter()
+                .position(|row| row.item.action == PaletteAction::CloseSidebar)
+                .expect("close action");
+            let surface = rows
+                .iter()
+                .position(|row| row.item.action == PaletteAction::OpenSurface(Surface::Sessions))
+                .expect("sessions surface");
+            assert!(open.max(close) < surface, "actions must lead: {rows:?}");
+            assert_realistic_destinations(&rows, "open/close sidebar", false);
+        }
+    }
+
+    #[test]
+    fn realistic_aliases_plurals_channels_and_direct_names_work() {
+        for client in [
+            crate::ui_core::help_keys::HelpClient::Tui,
+            crate::ui_core::help_keys::HelpClient::Gui,
+        ] {
+            assert_eq!(
+                realistic_actions(client, "command"),
+                realistic_actions(client, "commands"),
+                "{client:?} split singular and plural commands"
+            );
+            for (query, expected) in [
+                ("terminal voice", PaletteAction::RunSlash("/whisper")),
+                ("gst", PaletteAction::OpenSession(1)),
+                (
+                    "trbl",
+                    PaletteAction::OpenDocs("/getting-started/troubleshooting.html"),
+                ),
+                ("/whisper", PaletteAction::RunSlash("/whisper")),
+                (
+                    "/drop-release",
+                    PaletteAction::RunSkill("/drop-release".to_string()),
+                ),
+                (
+                    "/mutation-test-verify",
+                    PaletteAction::RunSkill("/mutation-test-verify".to_string()),
+                ),
+            ] {
+                assert_eq!(
+                    realistic_actions(client, query).first(),
+                    Some(&expected),
+                    "{client:?} missed {query}"
+                );
+            }
+            for channel in Channel::ALL {
+                let rows = realistic_rows(client, channel.name());
+                assert_eq!(
+                    rows.first().map(|row| &row.item.action),
+                    Some(&PaletteAction::SetupChannel(*channel)),
+                    "{client:?} ranked {} wrong: {rows:?}",
+                    channel.name()
+                );
+                assert!(
+                    rows.iter()
+                        .any(|row| row.item.action == PaletteAction::OpenDocs(channel.doc_path())),
+                    "{client:?} missed {} docs: {rows:?}",
+                    channel.name()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn realistic_genuine_miss_preserves_exact_ask_text() {
+        let query = "  xyzzy \"quux\" /not-a-real-command?  ";
+        for client in [
+            crate::ui_core::help_keys::HelpClient::Tui,
+            crate::ui_core::help_keys::HelpClient::Gui,
+        ] {
+            let rows = realistic_rows(client, query);
+            assert_eq!(rows.len(), 1, "{client:?}: {rows:?}");
+            assert_eq!(rows[0].item.kind, PaletteKind::Ask);
+            assert_eq!(rows[0].item.title, query);
+            assert_eq!(rows[0].item.action, PaletteAction::Ask(query.to_string()));
+        }
+    }
+
     /// The whole point of the keyword table: the user types the word for the
     /// job, not the name of the command (#2458).
     #[test]
@@ -1381,37 +1640,127 @@ mod tests {
         }
     }
 
-    /// A real name match beats a keyword match. Typing `/he` must not put
-    /// `/whisper` on top because its keywords mention "help".
+    /// A real name match beats a keyword match, even when the other row has
+    /// the same exact word buried in its metadata.
     #[test]
     fn a_name_match_outranks_a_keyword_match() {
-        let state = PaletteState::new(vec![command("/help"), command("/whisper")]);
-        let mut state = state;
-        state.type_char('h');
-        state.type_char('e');
+        let mut state = PaletteState::new(vec![
+            command("/help"),
+            command("/whisper").with_keywords("help"),
+        ]);
+        state.insert_text("help");
         assert_eq!(
             state.selected().map(|row| row.item.action),
             Some(PaletteAction::RunSlash("/help"))
         );
     }
 
-    /// Acronyms count, which is what makes the card faster than scrolling a
-    /// list of names.
+    /// Prefixes and bounded abbreviations stay inside one candidate word.
+    /// An explicit phrase alias may join words, but arbitrary letters cannot.
     #[test]
-    fn initials_match_a_multi_word_title() {
+    fn prefixes_aliases_and_abbreviations_stay_bounded() {
         let target = item("git status", PaletteKind::Surface);
-        assert!(score("gst", &target).is_some(), "gst must find git status");
+        assert!(score("stat", &target).is_some(), "stat finds status");
+        assert!(score("gst", &target).is_some(), "gst is a declared alias");
         assert!(
-            score("zzz", &target).is_none(),
-            "a query with no letters in order must not match"
+            score("gts", &target).is_none(),
+            "arbitrary letters cannot cross git and status"
         );
-        // Spread matches score below an exact prefix.
+        assert!(score("zzz", &target).is_none());
+
+        let troubleshooting = item("Troubleshooting", PaletteKind::Docs);
+        assert!(score("trbl", &troubleshooting).is_some());
+        assert!(score("tblr", &troubleshooting).is_none());
+
         let exact = item("theme", PaletteKind::Command);
-        let spread = item("tiger hunt echo", PaletteKind::Command);
+        assert!(score("them", &exact).is_some(), "a prefix still works");
         assert!(
-            score("the", &exact).unwrap() > score("the", &spread).unwrap(),
-            "a prefix must outscore a spread match"
+            score("the", &exact).is_none(),
+            "a short non-vocabulary fragment is too weak"
         );
+    }
+
+    /// Conversational phrasing, plurals, aliases and command punctuation all
+    /// reach the same real destination without changing Ask Crab's text.
+    #[test]
+    fn natural_theme_queries_reach_the_theme_surface() {
+        for query in [
+            "/theme",
+            "theme",
+            "themes",
+            "appearance",
+            "How do I change themes?",
+            "change theme/appearance",
+        ] {
+            let mut state = PaletteState::new(surface_items());
+            state.insert_text(query);
+            let rows = state.visible();
+            assert_eq!(
+                rows.first().map(|row| &row.item.action),
+                Some(&PaletteAction::OpenSurface(Surface::Themes)),
+                "{query}"
+            );
+            assert!(
+                rows.iter().all(|row| row.item.kind != PaletteKind::Ask),
+                "a useful local answer is not a miss: {query}"
+            );
+        }
+    }
+
+    /// Skill prose is not a second keyword dump. It needs two query groups,
+    /// stays inside twelve words, and cannot outrank a real skill title.
+    #[test]
+    fn skill_description_matching_is_bounded() {
+        let related = PaletteItem::new(
+            "/photos",
+            "photo tools",
+            PaletteKind::Skill,
+            PaletteAction::RunSkill("/photos".to_string()),
+        )
+        .with_description("change theme with a saved workflow");
+        assert!(score("change theme", &related).is_some());
+        assert!(score("theme", &related).is_none());
+
+        let unrelated = PaletteItem::new(
+            "/photos",
+            "photo tools",
+            PaletteKind::Skill,
+            PaletteAction::RunSkill("/photos".to_string()),
+        )
+        .with_description("change one two three four five six seven eight nine ten eleven theme");
+        assert!(score("change theme", &unrelated).is_none());
+
+        let titled = PaletteItem::new(
+            "/theme",
+            "photo tools",
+            PaletteKind::Skill,
+            PaletteAction::RunSkill("/theme".to_string()),
+        )
+        .with_description("change theme with a saved workflow");
+        assert!(score("change theme", &titled).unwrap() > score("change theme", &related).unwrap());
+    }
+
+    /// Subtitles carry useful names directly, without scanning prose across
+    /// the rest of the row.
+    #[test]
+    fn subtitles_are_searchable_fields() {
+        let row = PaletteItem::new(
+            "Unrelated",
+            "keyboard bindings",
+            PaletteKind::Docs,
+            PaletteAction::OpenDocs("/features/themes.html"),
+        );
+        assert!(score("keyboard", &row).is_some());
+        assert!(score("bindings", &row).is_some());
+        assert!(score("missing", &row).is_none());
+    }
+
+    /// Short exact app words work, while arbitrary short fragments do not.
+    #[test]
+    fn short_app_vocabulary_is_explicit() {
+        assert!(score("mc", &command("/mission-control")).is_some());
+        assert!(score("ctx", &command("/usage")).is_some());
+        assert!(score("zz", &item("zz", PaletteKind::Command)).is_none());
     }
 
     /// Order is a contract between the two frontends. Idle, the card is a
@@ -1443,13 +1792,39 @@ mod tests {
             item("alpha", PaletteKind::Session),
             item("alpha", PaletteKind::Command),
         ]);
-        state.type_char('a');
+        state.insert_text("alpha");
         let kinds: Vec<PaletteKind> = state
             .visible()
             .into_iter()
             .map(|row| row.item.kind)
             .collect();
         assert_eq!(kinds, vec![PaletteKind::Command, PaletteKind::Session]);
+    }
+
+    #[test]
+    fn help_rows_are_typed_only_and_rank_between_actions_and_docs() {
+        let mut state = PaletteState::new(vec![
+            item("alpha", PaletteKind::Docs),
+            item("alpha", PaletteKind::Help),
+            item("alpha", PaletteKind::Action),
+        ]);
+        let idle: Vec<PaletteKind> = state
+            .visible()
+            .into_iter()
+            .map(|row| row.item.kind)
+            .collect();
+        assert_eq!(idle, vec![PaletteKind::Action, PaletteKind::Docs]);
+
+        state.insert_text("alpha");
+        let typed: Vec<PaletteKind> = state
+            .visible()
+            .into_iter()
+            .map(|row| row.item.kind)
+            .collect();
+        assert_eq!(
+            typed,
+            vec![PaletteKind::Action, PaletteKind::Help, PaletteKind::Docs]
+        );
     }
 
     /// The idle suggestions hold for three seconds after the card opens,
@@ -1625,7 +2000,7 @@ mod tests {
     #[test]
     fn seeker_no_match_offers_a_new_session_carrying_the_query() {
         let mut state = PaletteState::new(vec![command("/whisper")]);
-        let query = "I want to set up a browser automation";
+        let query = "  I want to set up a browser automation?  ";
         for c in query.chars() {
             state.type_char(c);
         }
@@ -1636,21 +2011,21 @@ mod tests {
         assert_eq!(rows[0].item.action, PaletteAction::Ask(query.to_string()));
     }
 
-    /// A query with a real match never grows the ask row.
+    /// A useful local answer suppresses Ask Crab instead of adding noise.
     #[test]
-    fn seeker_no_match_row_stays_hidden_when_something_matches() {
+    fn seeker_local_match_does_not_offer_ask() {
         let mut state = PaletteState::new(vec![command("/whisper")]);
-        for c in "whisper".chars() {
-            state.type_char(c);
-        }
+        state.insert_text("  whisper  ");
         let rows = state.visible();
-        assert!(rows.iter().all(|row| row.item.kind != PaletteKind::Ask));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].item.kind, PaletteKind::Command);
+        assert_eq!(rows[0].item.action, PaletteAction::RunSlash("/whisper"));
     }
 
     /// The favorite row answers to the words a user types (#2487).
     #[test]
     fn seeker_favorite_row_answers_to_the_words() {
-        let row = favorite_item();
+        let row = action(PaletteAction::Favorite);
         assert_eq!(row.kind, PaletteKind::Favorite);
         assert_eq!(row.action, PaletteAction::Favorite);
         let mut state = PaletteState::new(vec![
@@ -1679,7 +2054,7 @@ mod tests {
             PaletteAction::OpenSession(2),
         )];
         let mut state = PaletteState::picking(PickFor::Favorite, sessions);
-        for c in "inv".chars() {
+        for c in "invo".chars() {
             state.type_char(c);
         }
         assert_eq!(
@@ -1693,7 +2068,7 @@ mod tests {
     /// else naming a session (#2482).
     #[test]
     fn seeker_create_topic_row_answers_to_the_words() {
-        let row = new_topic_item();
+        let row = action(PaletteAction::NewTopic);
         assert_eq!(row.kind, PaletteKind::NewTopic);
         assert_eq!(row.action, PaletteAction::NewTopic);
         let mut state = PaletteState::new(vec![
@@ -1737,7 +2112,7 @@ mod tests {
             2,
             "an empty field prints every conversation"
         );
-        for c in "inv".chars() {
+        for c in "invo".chars() {
             state.type_char(c);
         }
         assert_eq!(
@@ -1754,13 +2129,14 @@ mod tests {
         );
     }
 
-    /// Titles are matched character by character, so a multi-byte title is
-    /// scored instead of slicing a character in half.
+    /// Latin diacritics fold on both sides without slicing a character or
+    /// reviving weak mid-word matching.
     #[test]
     fn multi_byte_titles_are_safe() {
         let target = item("Configuração do projeto", PaletteKind::Session);
         assert!(score("config", &target).is_some());
-        assert!(score("ção", &target).is_some());
+        assert!(score("configuracao", &target).is_some());
+        assert!(score("ção", &target).is_none());
         assert!(score("zzz", &target).is_none());
     }
 
@@ -2105,6 +2481,11 @@ mod tests {
             Some(PaletteAction::OpenDocs("/features/cron-jobs.html")),
             "the single word automation is the cron page"
         );
+        assert_eq!(
+            armed("browser automation"),
+            Some(PaletteAction::OpenDocs("/features/browser.html")),
+            "naming the browser makes the more specific page win"
+        );
         let official = |path: &str| format!("{}{}", crate::ui_core::docs::DOCS_BASE, path);
         for path in [
             "/getting-started/troubleshooting.html",
@@ -2389,5 +2770,36 @@ mod tests {
         assert_eq!(state.query(), "");
         assert_eq!(state.caret(), 0);
         assert_eq!(state.selection(), None);
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn seeker_ranking_is_deterministic(query in "[A-Za-z0-9 /?.'-]{0,64}") {
+            let skill = PaletteItem::new(
+                "/photos",
+                "photo tools",
+                PaletteKind::Skill,
+                PaletteAction::RunSkill("/photos".to_string()),
+            )
+            .with_description("change theme with a saved workflow");
+            let mut state = PaletteState::new(vec![
+                command("/help"),
+                command("/mission-control"),
+                skill,
+                item("keyboard bindings", PaletteKind::Docs),
+            ]);
+            state.insert_text(&query);
+            let first = state.visible();
+            let second = state.visible();
+            assert_eq!(first, second);
+            if !query.trim().is_empty() {
+                if first.len() == 1 && first[0].item.kind == PaletteKind::Ask {
+                    assert_eq!(first[0].item.title, query);
+                    assert_eq!(first[0].item.action, PaletteAction::Ask(query.clone()));
+                } else {
+                    assert!(first.iter().all(|row| row.item.kind != PaletteKind::Ask));
+                }
+            }
+        }
     }
 }
