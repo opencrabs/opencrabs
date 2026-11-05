@@ -20,7 +20,7 @@ pub(crate) mod notice;
 pub(crate) mod palette;
 pub(crate) mod panes;
 mod plan_overlay;
-mod plan_widget;
+pub(crate) mod plan_widget;
 pub(crate) mod plan_window;
 pub(crate) mod profiles_dialog;
 mod projects;

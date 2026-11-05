@@ -578,6 +578,12 @@ pub struct App {
     /// Animation state
     pub animation_frame: usize,
 
+    /// Plan tasks whose completion has already been announced with a chime
+    /// (#2574). Plan documents are re-read from disk on every plan tool call,
+    /// so the same finished task arrives repeatedly; this set is what keeps
+    /// the sound once-per-completion instead of once-per-read.
+    pub(crate) announced_task_completions: std::collections::HashSet<uuid::Uuid>,
+
     /// Escape confirmation state (double-press to clear)
     pub(crate) escape_pending_at: Option<std::time::Instant>,
 
@@ -1085,6 +1091,7 @@ impl App {
             build_lines: Vec::new(),
             build_msg_idx: None,
             animation_frame: 0,
+            announced_task_completions: std::collections::HashSet::new(),
 
             escape_pending_at: None,
             ctrl_c_pending_at: None,
@@ -1421,6 +1428,45 @@ impl App {
     pub fn plan_document(&self) -> Option<&crate::tui::plan::PlanDocument> {
         self.pane_manager.focused_plan()
     }
+
+    /// Chime once for every plan task that settled since the last tick (#2574).
+    ///
+    /// Covers the focused plan and every pane's plan: a split can hold several
+    /// live checklists, and the pane that just finished a task is not
+    /// necessarily the one holding the keyboard. The config flag is read at the
+    /// moment of the chime, so flipping
+    /// `[agent] completion_notification_enabled` takes effect without a restart.
+    fn chime_settled_plan_tasks(&mut self) {
+        let mut plans: Vec<Option<&crate::tui::plan::PlanDocument>> =
+            vec![self.pane_manager.focused_plan()];
+        for id in self.pane_manager.pane_ids_in_order() {
+            if let Some(pane) = self.pane_manager.get(id) {
+                plans.push(pane.plan_document.as_ref());
+            }
+        }
+        let fresh = crate::utils::completion_sound::newly_resolved(
+            &mut self.announced_task_completions,
+            &plans,
+        );
+        if fresh == 0 {
+            return;
+        }
+        Self::play_task_chime();
+    }
+
+    /// The chime itself, honouring the operator's opt-in and the build feature.
+    #[cfg(feature = "notification-sound")]
+    fn play_task_chime() {
+        let enabled = crate::config::Config::load()
+            .map(|c| c.agent.completion_notification_enabled)
+            .unwrap_or(false);
+        if enabled {
+            crate::utils::completion_sound::play_completion_sound();
+        }
+    }
+
+    #[cfg(not(feature = "notification-sound"))]
+    fn play_task_chime() {}
 
     /// The focused pane's resolved plan JSON path.
     pub fn plan_file_path(&self) -> Option<&std::path::PathBuf> {
@@ -2415,6 +2461,12 @@ impl App {
                 // A screenshot may have landed since the last probe; its hint
                 // shares the notice slot inline in the input area (#1816).
                 self.refresh_clipboard_hint(false);
+
+                // A plan task that just settled gets its own chime (#2574).
+                // The tick is the right place: the plan file is written by
+                // the tool and re-read here, so no tool path has to know
+                // whether a sound is wanted.
+                self.chime_settled_plan_tasks();
             }
             TuiEvent::ToolApprovalRequested(request) => {
                 self.handle_approval_requested(request);

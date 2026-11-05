@@ -373,6 +373,7 @@ fn test_task_complexity_stars() {
         acceptance_criteria: vec![],
         status: TaskStatus::Pending,
         notes: None,
+        completed_at: None,
         retry_count: 0,
         verification: None,
         spec_check: None,

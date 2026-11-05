@@ -850,6 +850,7 @@ pub mod fullscreen_dialogs_test;
 pub mod help_responsive_test;
 pub mod pane_footer_test;
 pub mod pane_rotation_key_test;
+pub mod plan_task_completed_at_test;
 pub mod retry_send_label_test;
 pub mod tool_approval_hotkeys_test;
 pub mod tool_loop_rotation_rows_test;

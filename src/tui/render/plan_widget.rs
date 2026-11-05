@@ -2,6 +2,8 @@
 //!
 //! Renders a live-updating checklist of plan tasks above the input box.
 
+use chrono::{DateTime, Utc};
+
 use super::super::app::App;
 use super::plan_window::{current_task_index, pick_visible_window};
 use super::theme::{self, Role};
@@ -20,6 +22,9 @@ pub(super) fn render_plan_checklist(f: &mut Frame, app: &App, area: Rect) {
         Some(p) => p,
         None => return,
     };
+    // One clock reading for the whole list: every settled row is aged against
+    // the same instant, so a redraw cannot make two rows disagree by a frame.
+    let now = Utc::now();
 
     if area.height == 0 {
         return;
@@ -125,7 +130,9 @@ pub(super) fn render_plan_checklist(f: &mut Frame, app: &App, area: Rect) {
     for task in &visible {
         let icon = crate::tui::plan::status_mark(&task.status).to_string();
         let color = match &task.status {
-            TaskStatus::Completed | TaskStatus::Skipped => theme::role(Role::TealMuted),
+            TaskStatus::Completed | TaskStatus::Skipped => {
+                theme::role(settled_task_role(task.completed_at, now))
+            }
             TaskStatus::InProgress => theme::role(Role::Accent),
             TaskStatus::Failed => theme::role(Role::Error),
             TaskStatus::Blocked(_) | TaskStatus::Pending => theme::role(Role::GrayDim),
@@ -161,4 +168,36 @@ pub(super) fn render_plan_checklist(f: &mut Frame, app: &App, area: Rect) {
 
     let paragraph = Paragraph::new(lines).block(block);
     f.render_widget(paragraph, area);
+}
+
+/// How brightly a settled task is drawn, by how long ago it settled (#2574).
+///
+/// A finished row used to snap straight to one muted colour, so a checklist
+/// gave no sense of motion: the task the agent had just closed looked exactly
+/// like one closed an hour earlier. The ramp starts bright, then falls away in
+/// steps over the first minute, which the 100ms TUI tick renders as a slow
+/// dim rather than a jump. Discrete palette roles, not blended RGB, so every
+/// theme keeps its own contrast.
+///
+/// `None` means the age is unknown (a plan written before the field existed):
+/// it lands on the settled colour those plans always had, never on "just now".
+pub(crate) fn settled_task_role(completed_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> Role {
+    let Some(completed_at) = completed_at else {
+        return Role::TealMuted;
+    };
+    let age = now.signed_duration_since(completed_at);
+    // A stamp in the future (clock skew across a restore) is not an age we can
+    // read, so it takes the legacy colour instead of pretending to be fresh.
+    if age.num_seconds() < 0 {
+        return Role::TealMuted;
+    }
+    if age.num_seconds() < 4 {
+        Role::TealCalm
+    } else if age.num_seconds() < 15 {
+        Role::TealMuted
+    } else if age.num_seconds() < 60 {
+        Role::GrayMuted
+    } else {
+        Role::GrayDim
+    }
 }

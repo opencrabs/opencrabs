@@ -10,7 +10,11 @@
 //!   `ProgressEvent::PlanCompleted` for every surface, and only the TUI turns
 //!   that fact into audio.
 
-use crate::tui::plan::{PlanDocument, PlanStatus};
+use std::collections::HashSet;
+
+use uuid::Uuid;
+
+use crate::tui::plan::{PlanDocument, PlanStatus, TaskStatus};
 
 /// The only asset this module plays: the notification chime the owner picked.
 #[cfg(feature = "notification-sound")]
@@ -58,4 +62,41 @@ fn play_blocking() -> Result<(), String> {
     sink.append(source);
     sink.sleep_until_end();
     Ok(())
+}
+
+/// Task ids that have settled (Completed or Skipped) in `plan`.
+///
+/// The per-TASK chime needs a set, not a count: a plan reload can land twice
+/// for one completion (the tool rewrites the file, the pane re-reads it), and
+/// a count would chime on every read. A set makes "already announced" a fact
+/// about which task, not how many.
+pub fn resolved_task_ids(plan: Option<&PlanDocument>) -> HashSet<Uuid> {
+    let Some(plan) = plan else {
+        return HashSet::new();
+    };
+    plan.tasks
+        .iter()
+        .filter(|t| matches!(t.status, TaskStatus::Completed | TaskStatus::Skipped))
+        .map(|t| t.id)
+        .collect()
+}
+
+/// How many tasks in `plans` settled that `seen` had not recorded yet, adding
+/// them to `seen` as it goes (#2574).
+///
+/// Pure on purpose: the TUI calls it from its tick with the focused plan plus
+/// every pane plan, and the chime decision is testable without an audio
+/// device. Freshly loaded plans whose tasks were already done when the plan
+/// first appeared count as new once, which is the honest reading: the operator
+/// never heard about them.
+pub fn newly_resolved(seen: &mut HashSet<Uuid>, plans: &[Option<&PlanDocument>]) -> usize {
+    let mut fresh = 0;
+    for plan in plans {
+        for id in resolved_task_ids(*plan) {
+            if seen.insert(id) {
+                fresh += 1;
+            }
+        }
+    }
+    fresh
 }

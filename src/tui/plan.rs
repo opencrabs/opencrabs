@@ -739,6 +739,18 @@ pub struct PlanTask {
     #[serde(default)]
     pub notes: Option<String>,
 
+    /// When this task reached a terminal state (Completed or Skipped), in UTC.
+    ///
+    /// The checklist dims a finished task a little more the longer it has
+    /// been done, so the renderer needs an age, not just a status: without
+    /// this, every completed row in a long plan looked identically stale and
+    /// the task the agent had just finished was impossible to spot (#2574).
+    /// `None` on a pending or in-progress task, and on every plan written
+    /// before this field existed, which the dim ramp treats as "old" rather
+    /// than "just now".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<DateTime<Utc>>,
+
     /// Times this task was restarted from Failed state; feeds the Ralph
     /// loop iteration cap in the plan tool (mechanical, model cannot skip it).
     #[serde(default)]
@@ -926,6 +938,7 @@ impl PlanTask {
             acceptance_criteria: Vec::new(),
             status: TaskStatus::Pending,
             notes: None,
+            completed_at: None,
             retry_count: 0,
             verification: None,
             spec_check: None,
@@ -941,12 +954,16 @@ impl PlanTask {
             self.retry_count += 1;
         }
         self.status = TaskStatus::InProgress;
+        // A restarted task is live again, so any earlier completion stamp
+        // would make it read as finished work.
+        self.completed_at = None;
     }
 
     /// Complete the task
     pub fn complete(&mut self, notes: Option<String>) {
         self.status = TaskStatus::Completed;
         self.notes = notes;
+        self.completed_at = Some(Utc::now());
     }
 
     /// Mark task as failed
@@ -966,6 +983,7 @@ impl PlanTask {
         if let Some(r) = reason {
             self.notes = Some(r);
         }
+        self.completed_at = Some(Utc::now());
     }
 
     /// Get complexity stars (1-5)
