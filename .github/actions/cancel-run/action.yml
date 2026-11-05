@@ -1,0 +1,61 @@
+name: Cancel run on failure
+description: >
+  Cancel the rest of this workflow run as soon as one job fails.
+
+  GitHub has no cross-job fail-fast. `strategy.fail-fast` applies only inside
+  a single matrix, so two independent legs keep burning runners after a
+  sibling dies (#2595). The fan-in `abort` job cannot do it either: `needs`
+  holds it until every listed job has finished, which is after the run is
+  already over. The only place a run can be cancelled early is inside the job
+  that just failed, so every failure-capable job in `ci.yml` ends with this
+  step.
+
+  The step always exits 0. The job has already failed, so a refused or failed
+  cancel must not mask that outcome or turn one failure into two.
+
+inputs:
+  token:
+    description: "Token carrying `actions: write`. Fork PRs receive a read-only token whatever the workflow asks for."
+    required: true
+  run-id:
+    description: Run to cancel, normally ${{ github.run_id }}.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Cancel this run
+      shell: bash
+      env:
+        CANCEL_TOKEN: ${{ inputs.token }}
+        REPO: ${{ github.repository }}
+        RUN_ID: ${{ inputs.run-id }}
+      run: |
+        set -uo pipefail
+        if [ -z "${RUN_ID}" ]; then
+          echo "::warning::cancel-run: empty run id, nothing to cancel"
+          exit 0
+        fi
+        body=$(mktemp)
+        code=$(curl -sS -o "$body" -w '%{http_code}' -X POST \
+          -H "Authorization: Bearer ${CANCEL_TOKEN}" \
+          -H "Accept: application/vnd.github+json" \
+          -H "X-GitHub-Api-Version: 2022-11-28" \
+          "https://api.github.com/repos/${REPO}/actions/runs/${RUN_ID}/cancel" 2>/dev/null) || code=000
+        case "$code" in
+          202)
+            echo "cancel-run: cancellation requested for run ${RUN_ID}"
+            ;;
+          403|404)
+            echo "::notice::cancel-run: not permitted (HTTP ${code}); running jobs finish on their own (fork PRs get a read-only token)"
+            ;;
+          409)
+            echo "::notice::cancel-run: run ${RUN_ID} already finished"
+            ;;
+          *)
+            echo "::warning::cancel-run: unexpected HTTP ${code}"
+            head -c 300 "$body" || true
+            echo
+            ;;
+        esac
+        exit 0
