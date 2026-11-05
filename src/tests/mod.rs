@@ -493,6 +493,13 @@ pub mod release_gate_test;
 pub mod reload_phantom_blocked_test;
 pub mod reload_quoted_markers_test;
 pub mod remote_pairing_test;
+pub mod remote_route_client_test;
+pub mod remote_route_store_test;
+pub mod remote_routes_test;
+pub mod remote_scopes_test;
+pub mod remote_state_lock_test;
+#[cfg(unix)]
+pub mod remote_tunnel_test;
 pub mod repetition_fenced_code_test;
 pub mod repetition_test;
 pub mod rsi_disposition_test;

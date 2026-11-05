@@ -1,4 +1,7 @@
-use super::*;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use crate::remote::tunnel::*;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
