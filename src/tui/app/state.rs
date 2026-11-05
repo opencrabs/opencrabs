@@ -2125,32 +2125,23 @@ impl App {
                         } else {
                             wizard.ps.supports_model_fetch() && !wizard.ps.api_key_input.is_empty()
                         };
-                        if should_fetch {
-                            let provider_idx = wizard.ps.selected_provider;
-                            // Real key: typed, else saved from config; never the
-                            // EXISTING_KEY_SENTINEL placeholder that 401'd custom
-                            // providers whose key lives in keys.toml (#656).
-                            let api_key = wizard.ps.effective_api_key();
-                            let base_url =
-                                if wizard.ps.is_custom() && !wizard.ps.base_url.is_empty() {
-                                    Some(wizard.ps.base_url.clone())
-                                } else {
-                                    None
-                                };
+                        if should_fetch
+                            && let Some(request) =
+                                crate::ui_core::model_selector::FetchRequest::from_selector(
+                                    &wizard.ps,
+                                )
+                        {
+                            let provider_index = request.provider_index;
+                            let generation = wizard.model_fetch_lifecycle.begin(&request);
                             wizard.ps.models_fetching = true;
                             let sender = self.event_sender();
                             tokio::spawn(async move {
-                                let models = super::onboarding::fetch_provider_models(
-                                    provider_idx,
-                                    api_key.as_deref(),
-                                    None,
-                                    None,
-                                    None,
-                                    base_url.as_deref(),
-                                    None,
-                                )
-                                .await;
-                                let _ = sender.send(TuiEvent::OnboardingModelsFetched(models));
+                                let outcome = crate::ui_core::model_selector::fetch(request).await;
+                                let _ = sender.send(TuiEvent::OnboardingModelsFetched {
+                                    generation,
+                                    provider_index,
+                                    outcome,
+                                });
                             });
                         }
                     }
@@ -3104,21 +3095,33 @@ impl App {
                 }
             }
 
-            TuiEvent::OnboardingModelsFetched(models) => {
+            TuiEvent::OnboardingModelsFetched {
+                generation,
+                provider_index,
+                outcome,
+            } => {
                 if let Some(ref mut wizard) = self.onboarding {
-                    wizard.ps.models_fetching = false;
-                    if !models.is_empty() {
-                        wizard.ps.models = models;
-                        wizard.ps.resolve_selected_model_index();
-                    } else {
-                        // Fetch returned empty — fall back to static PROVIDERS models
-                        let provider = wizard.ps.current_provider();
-                        if !provider.models.is_empty() {
-                            wizard.ps.models =
-                                provider.models.iter().map(|s| s.to_string()).collect();
-                            wizard.ps.resolve_selected_model_index();
-                        }
+                    if provider_index != wizard.ps.selected_provider
+                        || wizard
+                            .model_fetch_lifecycle
+                            .finish(generation, provider_index, outcome.clone())
+                            .is_none()
+                    {
+                        return Ok(());
                     }
+                    wizard.ps.models_fetching = false;
+                    wizard.ps.models = if outcome.models.is_empty() {
+                        wizard
+                            .ps
+                            .current_provider()
+                            .models
+                            .iter()
+                            .map(|s| s.to_string())
+                            .collect()
+                    } else {
+                        outcome.models
+                    };
+                    wizard.ps.resolve_selected_model_index();
                 }
             }
             TuiEvent::GitHubDeviceCode(code) => {
@@ -3143,22 +3146,24 @@ impl App {
                     wizard.auth_field = super::onboarding::AuthField::Model;
                     wizard.ps.models.clear();
                     wizard.ps.selected_model = 0;
-                    // Trigger model fetch using the OAuth token
-                    let token = oauth_token.clone();
-                    let sender = self.event_sender();
-                    tokio::spawn(async move {
-                        let models = super::onboarding::fetch_provider_models(
-                            2,
-                            Some(&token),
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                        )
-                        .await;
-                        let _ = sender.send(TuiEvent::OnboardingModelsFetched(models));
-                    });
+                    if let Some(request) = crate::ui_core::model_selector::FetchRequest::from_selector_and_api_key_for_provider(
+                        &wizard.ps,
+                        "github",
+                        Some(oauth_token.clone()),
+                    ) {
+                        let provider_index = request.provider_index;
+                        let generation = wizard.model_fetch_lifecycle.begin(&request);
+                        wizard.ps.models_fetching = true;
+                        let sender = self.event_sender();
+                        tokio::spawn(async move {
+                            let outcome = crate::ui_core::model_selector::fetch(request).await;
+                            let _ = sender.send(TuiEvent::OnboardingModelsFetched {
+                                generation,
+                                provider_index,
+                                outcome,
+                            });
+                        });
+                    }
                 }
             }
             TuiEvent::GitHubOAuthError(err) => {
@@ -3186,15 +3191,22 @@ impl App {
                     wizard.ps.selected_model = 0;
                     // Enable the provider in config
                     let _ = crate::config::Config::write_key("providers.codex", "enabled", "true");
-                    // Trigger model fetch
-                    let sender = self.event_sender();
-                    tokio::spawn(async move {
-                        let models = super::onboarding::fetch_provider_models(
-                            2, None, None, None, None, None, None,
-                        )
-                        .await;
-                        let _ = sender.send(TuiEvent::OnboardingModelsFetched(models));
-                    });
+                    if let Some(request) =
+                        crate::ui_core::model_selector::FetchRequest::from_selector(&wizard.ps)
+                    {
+                        let provider_index = request.provider_index;
+                        let generation = wizard.model_fetch_lifecycle.begin(&request);
+                        wizard.ps.models_fetching = true;
+                        let sender = self.event_sender();
+                        tokio::spawn(async move {
+                            let outcome = crate::ui_core::model_selector::fetch(request).await;
+                            let _ = sender.send(TuiEvent::OnboardingModelsFetched {
+                                generation,
+                                provider_index,
+                                outcome,
+                            });
+                        });
+                    }
                 }
             }
             TuiEvent::CodexOAuthError(err) => {

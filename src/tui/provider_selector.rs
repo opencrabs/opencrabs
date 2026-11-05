@@ -3,8 +3,8 @@
 //! State and live request behavior live in `ui_core::model_selector`.
 
 pub use crate::ui_core::model_selector::{
-    CUSTOM_INSTANCES_START, CUSTOM_PROVIDER_IDX, EXISTING_KEY_SENTINEL, PROVIDERS, ProviderInfo,
-    ProviderSelectorState, index_of_provider,
+    CUSTOM_INSTANCES_START, CUSTOM_PROVIDER_IDX, EXISTING_KEY_SENTINEL, FetchLifecycle,
+    FetchOutcome, FetchRequest, PROVIDERS, ProviderInfo, ProviderSelectorState, index_of_provider,
 };
 
 /// Map an API model id to a human-readable display label.
