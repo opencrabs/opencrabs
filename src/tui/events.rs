@@ -727,8 +727,20 @@ pub mod keys {
         key_matches(event, KeyCode::Char('x'), KeyModifiers::CONTROL)
     }
 
-    /// Tab — cycle focus to next pane (only when split mode is active)
-    pub fn is_focus_next_pane(event: &KeyEvent) -> bool {
-        event.code == KeyCode::Tab && event.modifiers.is_empty()
+    /// Alt+Tab — rotate the caret to the next pane, clockwise (#2580).
+    ///
+    /// `Tab` on its own is not this: it accepts the emoji picker and the
+    /// follow-up suggestion, so binding rotation to it made the two fight for
+    /// the same keystroke. Alt distinguishes them at the parser level.
+    pub fn is_pane_rotate_next(event: &KeyEvent) -> bool {
+        key_matches(event, KeyCode::Tab, KeyModifiers::ALT)
+    }
+
+    /// Alt+Shift+Tab — rotate the caret to the previous pane, anticlockwise
+    /// (#2579). Terminals that fold shift into the glyph report it as
+    /// `BackTab`, so both spellings count.
+    pub fn is_pane_rotate_prev(event: &KeyEvent) -> bool {
+        key_matches(event, KeyCode::Tab, KeyModifiers::ALT | KeyModifiers::SHIFT)
+            || key_matches(event, KeyCode::BackTab, KeyModifiers::ALT)
     }
 }

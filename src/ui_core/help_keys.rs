@@ -288,10 +288,17 @@ pub const ROWS: &[HelpRow] = &[
     ),
     row(
         HelpSection::Chat,
-        "tab",
-        "Tab",
-        Some("tab"),
-        "Switch pane: next gets the caret",
+        "alt+tab",
+        "Alt+Tab",
+        Some("alt-tab"),
+        "Rotate panes clockwise",
+    ),
+    row(
+        HelpSection::Chat,
+        "alt+shift+tab",
+        "Alt+Shift+Tab",
+        Some("alt-shift-tab"),
+        "Rotate panes anticlockwise",
     ),
     row(
         HelpSection::Chat,

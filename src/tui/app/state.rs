@@ -4205,7 +4205,16 @@ impl App {
             }
             return Ok(());
         }
-        if keys::is_focus_next_pane(&event)
+        // Alt rotates the caret between panes: Alt+Tab clockwise, Alt+Shift+Tab
+        // anticlockwise (#2580, #2579). Tab alone is left to its own action.
+        let rotate = if keys::is_pane_rotate_next(&event) {
+            Some(true)
+        } else if keys::is_pane_rotate_prev(&event) {
+            Some(false)
+        } else {
+            None
+        };
+        if let Some(clockwise) = rotate
             && self.pane_manager.is_split()
             && self.mode == AppMode::Chat
         {
@@ -4216,7 +4225,11 @@ impl App {
                 &mut self.cursor_position,
                 &mut self.input_history_index,
             );
-            self.pane_manager.focus_next();
+            if clockwise {
+                self.pane_manager.focus_next();
+            } else {
+                self.pane_manager.focus_prev();
+            }
             self.pane_manager.adopt_input(
                 &mut self.input_buffer,
                 &mut self.cursor_position,
