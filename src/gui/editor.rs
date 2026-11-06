@@ -229,6 +229,11 @@ pub struct Editor {
     input_history: Vec<String>,
     input_history_index: Option<usize>,
     input_history_stash: String,
+    /// How far Up has walked back through the queued messages, newest first,
+    /// and the draft it covered, so Down returns to what the user was typing
+    /// (#2629).
+    recall_depth: Option<usize>,
+    recall_draft: String,
     /// Files attached to the next message. They live here, not in the window
     /// state, because the send action is what consumes them: the editor is
     /// the only place that can append the markers atomically with clearing
@@ -298,6 +303,8 @@ impl Editor {
             input_history: Vec::new(),
             input_history_index: None,
             input_history_stash: String::new(),
+            recall_depth: None,
+            recall_draft: String::new(),
             attachments: Vec::new(),
             placeholder: "Message OpenCrabs…".into(),
             selected_range: 0..0,
@@ -618,18 +625,46 @@ impl Editor {
         rows
     }
 
+    /// Forget the recall: the message it was holding has been sent, so the
+    /// next Up starts again at the newest queued one (#2629).
+    pub fn clear_recall(&mut self) {
+        self.recall_depth = None;
+        self.recall_draft.clear();
+        crate::agent_bridge::queue_recall_hold(None);
+    }
+
+    /// The hint an empty field shows. It belongs to the window's state, not to
+    /// the field's: what the composer can do depends on whether a turn runs and
+    /// what is queued, and the editor sees neither (#2630).
+    pub fn set_placeholder(&mut self, hint: SharedString, cx: &mut Context<Self>) {
+        if self.placeholder != hint {
+            self.placeholder = hint;
+            cx.notify();
+        }
+    }
+
     /// Vertical movement runs over visual rows, so a wrapped paragraph behaves
     /// like the lines the reader sees. At the top row Up goes to the very
     /// start, and at the bottom row Down goes to the very end.
     fn up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
-        // Up in an empty composer takes the newest queued message back to edit (#2441).
-        if self.content.is_empty()
-            && let Some(text) = crate::agent_bridge::queue_recall_last()
+        // Up walks the queue back one message at a time: newest first, then the
+        // one before it, so five queued messages are five edits instead of one
+        // (#2629). The first step stashes the draft it covered, and the queue
+        // itself is untouched until the edit is sent.
+        let next = self.recall_depth.map_or(0, |depth| depth + 1);
+        if (self.content.is_empty() || self.recall_depth.is_some())
+            && let Some(msg) = crate::agent_bridge::queue_recall_at(next)
         {
-            self.content = text;
+            if self.recall_depth.is_none() {
+                self.recall_draft = std::mem::take(&mut self.content);
+            }
+            self.recall_depth = Some(next);
+            crate::agent_bridge::queue_recall_hold(Some(msg.display_text.clone()));
+            self.content = msg.display_text;
             let end = self.content.len();
             self.selected_range = end..end;
             self.selection_reversed = false;
+            self.marked_range = None;
             cx.notify();
             return;
         }
@@ -666,6 +701,26 @@ impl Editor {
             return;
         }
         if self.step_emoji_popup(1, cx) {
+            return;
+        }
+        // Down is Up's way back out of a recall: the next message newer, then
+        // the draft the first Up covered (#2629).
+        if let Some(depth) = self.recall_depth {
+            let recalled = depth
+                .checked_sub(1)
+                .and_then(crate::agent_bridge::queue_recall_at);
+            let text = match &recalled {
+                Some(msg) => msg.display_text.clone(),
+                None => std::mem::take(&mut self.recall_draft),
+            };
+            self.recall_depth = recalled.as_ref().map(|_| depth - 1);
+            crate::agent_bridge::queue_recall_hold(recalled.map(|msg| msg.display_text));
+            self.content = text;
+            let end = self.content.len();
+            self.selected_range = end..end;
+            self.selection_reversed = false;
+            self.marked_range = None;
+            cx.notify();
             return;
         }
         let rows = self.visual_rows();

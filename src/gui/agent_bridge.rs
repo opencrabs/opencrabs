@@ -923,21 +923,86 @@ pub fn queue_snapshot(session_id: Uuid) -> Vec<QueuedUserMessage> {
     queue().get(&session_id).cloned().unwrap_or_default()
 }
 
-/// Take everything waiting for `session_id`, so it is sent once.
+/// Take everything waiting for `session_id`, so it is sent once. A recall hold
+/// names a slot in this queue, so it goes with it (#2629).
 pub fn queue_take(session_id: Uuid) -> Vec<QueuedUserMessage> {
+    queue_recall_hold(None);
     queue().remove(&session_id).unwrap_or_default()
 }
 
-/// Up in an empty composer: take the newest queued message back for editing.
-pub fn queue_recall_last() -> Option<String> {
+/// Which slot `depth` names in a queue of `len`, counting back from the
+/// newest. `None` once Up walks past the head (#2629).
+fn recall_index(len: usize, depth: usize) -> Option<usize> {
+    len.checked_sub(depth + 1)
+}
+
+/// The queued message `depth` places back from the newest, left where it is.
+///
+/// Recall used to pop the tail, so only the newest message was ever editable
+/// and the rest were unreachable until the turn ended (#2629). It reads
+/// instead: the queue keeps every message, and the edit lands back in its own
+/// slot when it is sent again.
+pub fn queue_recall_at(depth: usize) -> Option<QueuedUserMessage> {
     let session = (*COMPOSER_SESSION.lock().ok()?)?;
-    let mut map = queue();
-    let entry = map.get_mut(&session)?;
-    let last = entry.pop()?;
-    if entry.is_empty() {
-        map.remove(&session);
+    let snapshot = queue_snapshot(session);
+    let index = recall_index(snapshot.len(), depth)?;
+    snapshot.get(index).cloned()
+}
+
+/// Which queued message the composer is holding, by the text it went in with,
+/// so the send path can put an edit back where it came from instead of
+/// appending a second copy (#2629).
+///
+/// A position would be wrong: a background report landing while the user edits
+/// pushes every slot one down, and the send would replace a message they never
+/// touched.
+static RECALL_HELD: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Remember (or forget) the queued message the focused composer went back to.
+pub fn queue_recall_hold(text: Option<String>) {
+    if let Ok(mut held) = RECALL_HELD.lock() {
+        *held = text;
     }
-    Some(last.display_text)
+}
+
+/// The text the focused composer recalled, if it is editing a queued message.
+pub fn queue_recall_held() -> Option<String> {
+    RECALL_HELD
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
+/// Send a recalled message: `Some(edited)` replaces the queued one in its own
+/// slot, `None` drops it because the turn it was queued behind is over and
+/// this text is what is running now.
+///
+/// The slot is found by text, and a message that left the queue while the user
+/// was editing is queued again as an edited copy: their words are never
+/// silently dropped (#2629).
+pub fn queue_recall_commit(session_id: Uuid, original: &str, edited: Option<QueuedUserMessage>) {
+    let mut replaced = false;
+    {
+        let mut map = queue();
+        if let Some(entry) = map.get_mut(&session_id)
+            && let Some(index) = entry.iter().rposition(|m| m.display_text == original)
+        {
+            match edited.clone() {
+                Some(msg) => entry[index] = msg,
+                None => {
+                    entry.remove(index);
+                }
+            }
+            replaced = true;
+            if entry.is_empty() {
+                map.remove(&session_id);
+            }
+        }
+    }
+    if !replaced && let Some(msg) = edited {
+        queue_push(session_id, msg);
+    }
+    queue_recall_hold(None);
 }
 
 /// Point the composer at `session_id`, so recall and the strip agree with it.
@@ -1318,5 +1383,82 @@ async fn run_text_command(
                 "{name} is dispatched by the window, not the bridge."
             ))]
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Up walks the whole queue, newest first (#2629). Recall used to pop the
+    /// tail, which made the older messages unreachable for the whole turn.
+    #[test]
+    fn up_recalls_the_queue_one_message_at_a_time() {
+        // One test for the queue's recall path: `COMPOSER_SESSION` and `QUEUE`
+        // are process-wide, so two tests here would race on them.
+        let session = Uuid::from_u128(0x2629_0001);
+        let other = Uuid::from_u128(0x2629_0002);
+
+        for text in ["one", "two", "three"] {
+            queue_push(session, QueuedUserMessage::plain(text.to_string()));
+        }
+        // A completion for another session must not enter this queue.
+        queue_push(other, QueuedUserMessage::plain("elsewhere".to_string()));
+
+        set_composer_session(Some(session));
+        let walked: Vec<String> = (0..)
+            .map_while(|depth| queue_recall_at(depth).map(|msg| msg.display_text))
+            .collect();
+        assert_eq!(
+            walked,
+            vec!["three".to_string(), "two".to_string(), "one".to_string()],
+            "Up walks from the newest to the oldest"
+        );
+        assert_eq!(
+            queue_snapshot(session).len(),
+            3,
+            "walking the queue leaves every message in it, so an edit is not a removal"
+        );
+
+        // Sending the edited middle message replaces it where it stands.
+        queue_recall_hold(Some("two".to_string()));
+        queue_recall_commit(
+            session,
+            "two",
+            Some(QueuedUserMessage::plain("two edited".to_string())),
+        );
+        let left: Vec<String> = queue_snapshot(session)
+            .iter()
+            .map(|msg| msg.display_text.clone())
+            .collect();
+        assert_eq!(
+            left,
+            vec![
+                "one".to_string(),
+                "two edited".to_string(),
+                "three".to_string()
+            ],
+            "an edit lands in its own slot instead of appending a copy"
+        );
+        assert!(queue_recall_held().is_none(), "the hold ends with the send");
+
+        // A message that left the queue while it was being edited is queued
+        // again rather than dropped.
+        queue_recall_commit(
+            session,
+            "gone",
+            Some(QueuedUserMessage::plain("rescued".to_string())),
+        );
+        assert_eq!(
+            queue_snapshot(session)
+                .last()
+                .map(|m| m.display_text.clone()),
+            Some("rescued".to_string()),
+            "typed words are never silently dropped"
+        );
+
+        let _ = queue_take(session);
+        let _ = queue_take(other);
+        set_composer_session(None);
     }
 }

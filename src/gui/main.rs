@@ -748,10 +748,9 @@ struct Dashboard {
     /// The running turn's cancellation token, so Esc twice stops it the way
     /// the TUI's second Esc does. `None` when no turn is in flight.
     cancel: Option<tokio_util::sync::CancellationToken>,
-    /// When the last Esc landed. A second Esc inside the window cancels the
-    /// turn; a lone Esc is ignored, because Esc is also how a user clears a
-    /// selection.
-    esc_at: Option<std::time::Instant>,
+    /// The hint last painted on the composers, so a tick only touches them when
+    /// the state actually changed (#2630).
+    hint_painted: Option<SharedString>,
     /// Whether the queue strip is showing every message or only its head.
     /// A queue of five rows pushes the conversation off the screen, so past
     /// two messages the strip folds and a click opens it (#2629).
@@ -971,6 +970,7 @@ impl Dashboard {
         // a restart no longer lands on whatever the rail listed first (#2444).
         remember_open_session(id);
         agent_bridge::set_composer_session(Some(id));
+        agent_bridge::queue_recall_hold(None);
         self.transcript.error = None;
         self.transcript.turns = Vec::new();
         self.transcript.hidden = 0;
@@ -1714,6 +1714,14 @@ impl Dashboard {
         self.pane_focus.or(self.transcript.session)
     }
 
+    /// Point recall at the composer that has the caret, and forget any recall
+    /// the previous one held: a queued slot belongs to its own session's queue,
+    /// so an edit must never land in another pane's message (#2629).
+    fn sync_composer_session(&mut self) {
+        agent_bridge::set_composer_session(self.focused_pane());
+        agent_bridge::queue_recall_hold(None);
+    }
+
     /// The composer the keyboard owns (#2610): the focused pane's own field,
     /// or the window's when the chat leaf holds the caret.
     ///
@@ -1775,6 +1783,7 @@ impl Dashboard {
         self.pane_states.remove(&session);
         self.split_drag = None;
         self.pane_focus = None;
+        self.sync_composer_session();
         if self.transcript.session == Some(session) {
             self.open_session(absorbed, cx);
         } else {
@@ -1833,6 +1842,7 @@ impl Dashboard {
         // A receipt in the daily log, so "Tab did nothing" can be told apart
         // from "Tab moved the caret and the header did not show it".
         logging::debug(&format!("pane focus -> {:?}", self.pane_focus));
+        self.sync_composer_session();
         // The keyboard walks with the caret (#2610). Without this the split
         // highlighted the new pane while every keystroke still landed in the
         // chat leaf's field, so the chord appeared to rotate exactly once.
@@ -1865,6 +1875,7 @@ impl Dashboard {
         // The pane just picked is the one the caret and ctrl+x land on, so a
         // split opens ready to act on what was clicked (#2474).
         self.pane_focus = Some(id);
+        self.sync_composer_session();
         self.refocus_screen();
         let split = self
             .panes
@@ -2156,7 +2167,7 @@ impl Dashboard {
         cx.notify();
     }
 
-    /// `/stop`: abort the turn in flight, the same effect as Esc Esc and the
+    /// `/stop`: abort the turn in flight, the same effect as Esc and the
     /// same wording. The pane stops claiming a turn is running the moment the
     /// user asks, and the service's own failure event lands afterwards.
     fn stop_turn(&mut self, cx: &mut Context<Self>) {
@@ -3780,11 +3791,25 @@ impl Dashboard {
             // now instead of queuing behind work the user is not looking at
             // (#2616).
             match self.transcript.session {
-                Some(sid) => {
-                    agent_bridge::queue_push(sid, agent_bridge::PendingMessage::plain(text))
-                }
+                // A message the user pulled out with Up goes back into the slot
+                // it came from, so editing the queue never grows a duplicate of
+                // the line they just fixed (#2629).
+                Some(sid) => match agent_bridge::queue_recall_held() {
+                    Some(original) => agent_bridge::queue_recall_commit(
+                        sid,
+                        &original,
+                        Some(agent_bridge::PendingMessage::plain(text)),
+                    ),
+                    None => {
+                        agent_bridge::queue_push(sid, agent_bridge::PendingMessage::plain(text))
+                    }
+                },
                 None => self.unsent.push(agent_bridge::PendingMessage::plain(text)),
             }
+            self.clear_recall(cx);
+            // The composer now says a message is waiting on the turn, the
+            // moment it is queued rather than on the next turn event (#2630).
+            self.sync_composer_hint(cx);
             cx.notify();
             return;
         }
@@ -3792,6 +3817,7 @@ impl Dashboard {
             // Still booting: keep the message, it fires on Ready. The queue
             // strip is where the user sees it.
             self.unsent.push(agent_bridge::PendingMessage::plain(text));
+            self.sync_composer_hint(cx);
             cx.notify();
             return;
         };
@@ -3810,7 +3836,14 @@ impl Dashboard {
         // The finished turn must add one to the persisted count before the
         // live copy may be dropped (see `reload_transcript`).
         self.settle_expect = Some(self.transcript.turns.len() + 1);
+        // A recalled message is being sent right now, so it leaves the queue
+        // instead of going out again when the turn ends (#2629).
+        if let Some(original) = agent_bridge::queue_recall_held() {
+            agent_bridge::queue_recall_commit(sid, &original, None);
+            self.clear_recall(cx);
+        }
         self.busy = true;
+        self.sync_composer_hint(cx);
         let cancel = tokio_util::sync::CancellationToken::new();
         self.cancel = Some(cancel.clone());
         // Attachments are tracked against the session the same way the TUI
@@ -3885,6 +3918,7 @@ impl Dashboard {
                     if self.transcript.session.is_none() {
                         self.new_session(cx);
                     }
+                    self.sync_composer_hint(cx);
                     self.drain_pending(cx);
                 }
                 agent_bridge::TurnEvent::SessionCreated(id) => {
@@ -4282,6 +4316,9 @@ impl Dashboard {
         }
         // A finished turn is the moment the queue drains: before this it only
         // drained on `Ready`, so a message typed while busy never went out.
+        // The hint follows the turn and the queue, including a report that
+        // landed mid-turn, so it is repainted on every event batch (#2630).
+        self.sync_composer_hint(cx);
         if !self.busy {
             self.cancel = None;
             self.drain_pending(cx);
@@ -4382,6 +4419,7 @@ impl Dashboard {
         self.settle_retries = 0;
         self.settle_expect = Some(self.transcript.turns.len() + 1);
         self.busy = true;
+        self.sync_composer_hint(cx);
         let cancel = tokio_util::sync::CancellationToken::new();
         self.cancel = Some(cancel.clone());
         let attached = editor::marker_paths(&context_text);
@@ -4396,6 +4434,54 @@ impl Dashboard {
             agent_bridge::spawn_track_files(self.db_path.clone(), session_id, attached);
         }
         cx.notify();
+    }
+
+    /// What the composer says about the state it is in: nothing running, a turn
+    /// running, a queue waiting on it, or a queue already on its way. The words
+    /// live under the caret because that is where the user is typing, and the
+    /// queue card is a list, not an instruction manual (#2630).
+    fn composer_hint(&self) -> SharedString {
+        composer_hint_for(
+            self.live_owner.busy_for(self.busy, self.transcript.session),
+            self.queued_for_strip().len(),
+        )
+    }
+
+    /// Paint the hint on every composer: the focused field and each split
+    /// pane's own, so a pane that takes the keyboard already says the right
+    /// thing. Only a real state change touches them (#2630).
+    fn sync_composer_hint(&mut self, cx: &mut Context<Self>) {
+        let hint = self.composer_hint();
+        if self.hint_painted.as_ref() == Some(&hint) {
+            return;
+        }
+        self.hint_painted = Some(hint.clone());
+        self.editor
+            .update(cx, |ed, cx| ed.set_placeholder(hint.clone(), cx));
+        let panes: Vec<_> = self
+            .pane_states
+            .values()
+            .map(|pane| pane.editor.clone())
+            .collect();
+        for editor in panes {
+            editor.update(cx, |ed, cx| ed.set_placeholder(hint.clone(), cx));
+        }
+    }
+
+    /// Drop every composer's recall after its message was sent: the next Up
+    /// starts again at the newest queued one, not at a slot that just left
+    /// (#2629). Every field, like the hint, because a split pane's composer
+    /// can be the one holding it.
+    fn clear_recall(&mut self, cx: &mut Context<Self>) {
+        self.editor.update(cx, |ed, _| ed.clear_recall());
+        let panes: Vec<_> = self
+            .pane_states
+            .values()
+            .map(|pane| pane.editor.clone())
+            .collect();
+        for editor in panes {
+            editor.update(cx, |ed, _| ed.clear_recall());
+        }
     }
 
     /// What the strip shows, oldest first: the text waiting on the open
@@ -4449,6 +4535,7 @@ impl Dashboard {
             self.settle_retries = 0;
             self.settle_expect = Some(self.transcript.turns.len() + 1);
             self.busy = true;
+            self.sync_composer_hint(cx);
             let cancel = tokio_util::sync::CancellationToken::new();
             self.cancel = Some(cancel.clone());
             let attached = editor::marker_paths(&joined.context_text);
@@ -5617,7 +5704,6 @@ impl Dashboard {
                 return;
             }
             if !self.live_owner.busy_for(self.busy, self.transcript.session) {
-                self.esc_at = None;
                 // Idle Esc hands the keyboard back. The rail's mode is the
                 // only thing Esc owns here, and Tab is what arms it. The old
                 // blur bridge existed only because focus never moved off the
@@ -5631,28 +5717,36 @@ impl Dashboard {
                 cx.notify();
                 return;
             }
-            let now = std::time::Instant::now();
-            // Second Esc within 3s aborts, the TUI's own window.
-            let armed = self
-                .esc_at
-                .is_some_and(|t| now.duration_since(t).as_millis() < 3000);
-            if armed {
-                self.esc_at = None;
-                if let Some(cancel) = self.cancel.take() {
-                    cancel.cancel();
-                }
-                // Same wording and immediate release as `abort_active_turn`:
-                // the pane stops claiming a turn is running the moment the
-                // user asked it to stop, and the service's own Failed event
-                // lands afterwards.
-                self.busy = false;
-                self.live.thinking = false;
-                self.live.notices.push("Operation cancelled.".to_string());
-                logging::info("turn cancelled by Esc Esc");
-            } else {
-                self.esc_at = Some(now);
-                self.live.notices.push("esc again to stop".to_string());
+            // One Esc stops the turn, and the queue becomes the next turn. The
+            // old two-press window existed because nothing flushed the queue on
+            // a stop, so a single press left the user watching a process they
+            // had already asked to kill with their typed text stranded behind
+            // it (#2631).
+            if let Some(cancel) = self.cancel.take() {
+                cancel.cancel();
             }
+            // Same wording and immediate release as `abort_active_turn`: the
+            // pane stops claiming a turn is running the moment the user asked
+            // it to stop, and the service's own Failed event lands afterwards.
+            self.busy = false;
+            self.live.thinking = false;
+            self.cancel = None;
+            let waiting = self.queued_for_strip().len();
+            if waiting > 0 {
+                // The send itself waits for the cancellation to be
+                // acknowledged: a second `spawn_turn` on a session whose cancel
+                // is still unwinding would run two turns into one
+                // conversation. The turn's own event drains the queue (see the
+                // post-batch `drain_pending`), which is milliseconds after the
+                // stop (#2631).
+                self.live.notices.push(format!(
+                    "Operation cancelled. Sending the {waiting} queued."
+                ));
+            } else {
+                self.live.notices.push("Operation cancelled.".to_string());
+            }
+            logging::info("turn cancelled by Esc");
+            self.sync_composer_hint(cx);
             cx.notify();
             return;
         }
@@ -5663,9 +5757,6 @@ impl Dashboard {
             if matches!(key, "pageup" | "pagedown") {
                 let page = px(f32::from(window.viewport_size().height) * 0.8);
                 let dy = if key == "pagedown" { -page } else { page };
-                // The page keys act on the pane Tab moved the caret to, so a
-                // split scrolls the session the accent is on rather than the
-                // chat underneath it (#2475).
                 // The page keys act on the pane the caret is on, so a split
                 // scrolls the transcript the accent names rather than the
                 // chat underneath it (#2475, #2472).
@@ -9321,7 +9412,7 @@ fn main() {
                         settle_retries: 0,
                         busy: false,
                         cancel: None,
-                        esc_at: None,
+                        hint_painted: None,
                         queue_expanded: false,
                         unsent: Vec::new(),
                         agent_error: None,
@@ -10568,10 +10659,7 @@ fn queue_strip(queued: &[agent_bridge::PendingMessage], expanded: bool) -> Div {
             div()
                 .text_xs()
                 .text_color(rgb(palette::current().amber))
-                .child(SharedString::from(format!(
-                    "queued {} · sent between tool calls · ↑ recalls them newest first",
-                    queued.len()
-                ))),
+                .child(SharedString::from(format!("queued {}", queued.len()))),
         );
     for (i, m) in queued.iter().take(shown).enumerate() {
         let text = m.display_text.lines().next().unwrap_or_default();
@@ -10599,6 +10687,20 @@ fn queue_strip(queued: &[agent_bridge::PendingMessage], expanded: bool) -> Div {
         );
     }
     col
+}
+
+/// The composer's hint line for a state. Grey and quiet, it names the keys
+/// that work right now: stopping the turn, recalling a queued message, and
+/// queueing another (#2630).
+fn composer_hint_for(busy: bool, queued: usize) -> SharedString {
+    match (busy, queued) {
+        (true, 0) => SharedString::from("esc stops the turn · typing here queues the message"),
+        (true, n) => SharedString::from(format!(
+            "queued {n} · ↑ recalls the newest · esc stops the turn and sends them"
+        )),
+        (false, 0) => SharedString::from("Message OpenCrabs…"),
+        (false, n) => SharedString::from(format!("{n} queued · sending now")),
+    }
 }
 
 /// How many queued messages stay on screen. Two, until the user opens the
@@ -12796,8 +12898,8 @@ mod tests {
             production
                 .matches("self.live_owner.busy_for(self.busy, self.transcript.session)")
                 .count(),
-            4,
-            "both draw paths, the send button and Esc report the owning session's busy state"
+            5,
+            "both draw paths, the send button, Esc and the composer hint report the owning session's busy state"
         );
         // A turn that finished in a conversation the user left drops its card
         // on both the success and the failure path.
@@ -13006,6 +13108,110 @@ mod tests {
                 "div()\n                        .flex()\n                        .flex_col()\n                        .flex_1()\n                        .min_w_0()\n                        .min_h_0()\n                        .child(body)"
             ),
             "the body is the child that shrinks, and it can"
+        );
+    }
+
+    /// The composer's hint names the keys that work in the state on screen, so
+    /// the queue's instructions sit under the caret instead of in the card
+    /// (#2630).
+    #[test]
+    fn the_composer_hint_names_the_queue_while_a_turn_runs() {
+        assert_eq!(
+            composer_hint_for(false, 0).as_ref(),
+            "Message OpenCrabs…",
+            "an idle composer keeps its own prompt"
+        );
+        let running = composer_hint_for(true, 0);
+        assert!(
+            running.contains("esc") && running.contains("queues"),
+            "a running turn says Esc stops it and Enter queues: {running}"
+        );
+        let queued = composer_hint_for(true, 2);
+        assert!(
+            queued.contains("queued 2"),
+            "the count is on screen: {queued}"
+        );
+        assert!(
+            queued.contains('↑') && queued.contains("esc"),
+            "Up edits a queued message and Esc flushes it: {queued}"
+        );
+    }
+
+    /// A hint is a placeholder, never a control: with anything typed the field
+    /// shows the draft and the hint is gone (#2630).
+    #[test]
+    fn the_hint_never_survives_a_draft() {
+        let editor = include_str!("editor.rs");
+        assert!(
+            editor.contains("let display = if empty { placeholder } else { content.clone() };"),
+            "the field paints the placeholder only while it is empty"
+        );
+        assert!(
+            editor.contains("hsla_from(palette::current().text_faint)"),
+            "the hint is the faint colour, not the text colour"
+        );
+        assert_eq!(
+            composer_hint_for(false, 0).as_ref(),
+            "Message OpenCrabs…",
+            "an empty idle field keeps the product's own prompt"
+        );
+    }
+
+    /// One Esc stops the turn and hands the queue to the next one: the branch
+    /// cancels, reads idle at once, and the post-batch drain sends what is
+    /// queued as the cancellation is acknowledged (#2631).
+    #[test]
+    fn esc_cancels_the_turn_and_sends_the_queue() {
+        let src = include_str!("main.rs");
+        let production = src
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .expect("production source before the test module");
+        let branch = production
+            .split("// One Esc stops the turn, and the queue becomes the next turn.")
+            .nth(1)
+            .and_then(|rest| rest.split("// Page keys scroll the transcript").next())
+            .expect("the Esc branch for a running turn");
+        assert!(branch.contains("cancel.cancel()"), "Esc cancels the turn");
+        assert!(
+            branch.contains("self.busy = false;"),
+            "the pane stops claiming a turn is running the moment Esc lands"
+        );
+        assert!(
+            branch.contains("Sending the {waiting} queued."),
+            "the stop says the queue is next"
+        );
+        assert!(
+            !branch.contains("self.spawn_turn("),
+            "no second turn starts while the cancel is still unwinding"
+        );
+        assert!(
+            production.contains("if !self.busy {\n            self.cancel = None;\n            self.drain_pending(cx);"),
+            "the turn's own event drains the queue once the cancel is acknowledged"
+        );
+    }
+
+    /// With nothing queued Esc is only a stop: the wording stays the plain
+    /// cancellation and the drain finds nothing to send (#2631).
+    #[test]
+    fn esc_with_no_queue_only_cancels() {
+        let src = include_str!("main.rs");
+        let production = src
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .expect("production source before the test module");
+        assert!(
+            production.contains("self.live.notices.push(\"Operation cancelled.\".to_string());"),
+            "an empty queue keeps the plain wording"
+        );
+        let drain = production
+            .split("    fn drain_pending(")
+            .nth(1)
+            .and_then(|rest| rest.split("    /// Create a conversation").next())
+            .expect("drain_pending");
+        assert!(
+            drain.contains("if waiting.is_empty() {\n            return;\n        }"),
+            "an empty queue sends nothing"
         );
     }
 
