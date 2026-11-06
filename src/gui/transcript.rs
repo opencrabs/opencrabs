@@ -667,6 +667,14 @@ pub async fn load_recent(
     }
 }
 
+/// A model-switch receipt used to be persisted with the user role. Draw the
+/// legacy rows as the harness warning they are, so an old chat does not keep
+/// them in user bubbles after the writer is fixed.
+fn is_model_change_notice(content: &str) -> bool {
+    let text = content.trim();
+    text.starts_with("[Model changed to ") && text.ends_with(']')
+}
+
 /// Expand ONE stored row into its renderable blocks. Mirrors
 /// `TuiApp::expand_message` (`tui/app/messaging.rs`): compaction markers are
 /// context and never shown; tool ledgers become `Tools` blocks; reasoning
@@ -689,8 +697,13 @@ fn row_blocks(m: &Message) -> Vec<Block> {
         return blocks;
     }
     if m.role != "assistant" {
+        let role = if m.role == "user" && is_model_change_notice(&m.content) {
+            "system"
+        } else {
+            m.role.as_str()
+        };
         blocks.push(Block::Msg {
-            role: m.role.clone(),
+            role: role.to_string(),
             content: m.content.clone(),
             time: stamp(m),
             placeholder: false,

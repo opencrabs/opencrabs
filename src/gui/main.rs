@@ -683,6 +683,12 @@ struct Dashboard {
     /// The provider the models screen's list marks. A click sets it and moves
     /// the model cursor to that provider's first visible model.
     models_provider: Option<String>,
+    /// The session that opened the picker. A split pane owns its own model,
+    /// so the picker must apply and answer in this session, not the window.
+    models_session: Option<Uuid>,
+    /// The session whose switch is in flight. A second Enter while this is
+    /// set is ignored, so one pick cannot write the same confirmation twice.
+    models_switching: Option<Uuid>,
     /// Shared request lifecycle and pending providers. Static rows are only a
     /// fallback; every configured provider gets a live discovery request.
     models_fetch: Option<std::sync::mpsc::Receiver<(u64, model_fetch::FetchOutcome)>>,
@@ -1506,7 +1512,7 @@ impl Dashboard {
             find::Surface::Usage => self.toggle_usage(cx),
             find::Surface::Files => self.toggle_files(cx),
             find::Surface::Themes => self.toggle_themes(cx),
-            find::Surface::Models => self.open_models(None, cx),
+            find::Surface::Models => self.open_models(None, self.focused_pane(), cx),
             find::Surface::Sessions => self.toggle_rail(cx),
             find::Surface::Help => self.toggle_help(cx),
             find::Surface::Skills => self.open_skills(cx),
@@ -1514,7 +1520,7 @@ impl Dashboard {
             // the same door as typing it, never the model.
             find::Surface::Profiles => {
                 if let Some(outcome) = commands::parse_command("/profiles") {
-                    self.run_command(outcome, cx);
+                    self.run_command(outcome, self.focused_pane(), cx);
                 }
             }
             find::Surface::MissionControl => self.open_mission_control(cx),
@@ -1569,7 +1575,12 @@ impl Dashboard {
     /// through to the agent: a command the window cannot run gets one line,
     /// because a model asked to answer `/usage` writes a paragraph about
     /// usage instead of opening the ledger (#2374).
-    fn run_command(&mut self, outcome: commands::Outcome, cx: &mut Context<Self>) {
+    fn run_command(
+        &mut self,
+        outcome: commands::Outcome,
+        session: Option<Uuid>,
+        cx: &mut Context<Self>,
+    ) {
         // The pair has to travel with the action: `/models openai/gpt-5` is a
         // switch, a bare `/models` is the picker, and dropping the argument
         // would silently turn one into the other.
@@ -1606,7 +1617,7 @@ impl Dashboard {
             commands::GuiAction::NewSession => self.new_session(cx),
             commands::GuiAction::StopTurn => self.stop_turn(cx),
             commands::GuiAction::OpenSessions => self.toggle_rail(cx),
-            commands::GuiAction::OpenModels => self.open_models(arg, cx),
+            commands::GuiAction::OpenModels => self.open_models(arg, session, cx),
             commands::GuiAction::OpenSkills => self.open_skills(cx),
             commands::GuiAction::OpenOnboard(name) => self.open_onboard(name, arg, cx),
             commands::GuiAction::Text(command) => self.run_text_command(command, arg, cx),
@@ -2201,10 +2212,24 @@ impl Dashboard {
     /// `/models` with no argument opens the picker. With an argument it is the
     /// switch the terminal performs, and no screen opens: the reply is the
     /// answer, exactly like the terminal's.
-    fn open_models(&mut self, arg: Option<String>, cx: &mut Context<Self>) {
-        // The catalogue is read once, here, so a frame never walks it.
-        let current =
-            agent_bridge::bridge().map(|b| (b.service.provider_name(), b.service.provider_model()));
+    fn open_models(
+        &mut self,
+        arg: Option<String>,
+        session: Option<Uuid>,
+        cx: &mut Context<Self>,
+    ) {
+        let target = session.or_else(|| self.focused_pane());
+        self.models_session = target;
+        // The catalogue is read once, here, so a frame never walks it. A pane
+        // carries its own pair, so the picker marks that pair rather than the
+        // window's when the command came from a split.
+        let current = agent_bridge::bridge().map(|b| match target {
+            Some(sid) => (
+                b.service.provider_name_for_session(sid),
+                b.service.provider_model_for_session(sid),
+            ),
+            None => (b.service.provider_name(), b.service.provider_model()),
+        });
         self.reset_model_picker(current, None);
         if let Some(arg) = arg {
             self.switch_model(arg, cx);
@@ -2443,7 +2468,11 @@ impl Dashboard {
                                 }
                             })
                         } else {
-                            agent_bridge::bridge().map(|bridge| bridge.service.provider_name())
+                            let target = self.models_session.or(self.transcript.session);
+                            agent_bridge::bridge().map(|bridge| match target {
+                                Some(sid) => bridge.service.provider_name_for_session(sid),
+                                None => bridge.service.provider_name(),
+                            })
                         };
                         models::manual_pair(
                             &self.models_query,
@@ -2859,6 +2888,18 @@ impl Dashboard {
         cx.notify();
     }
 
+    /// Put a one-line answer in the conversation that owns it, so a pane never
+    /// reads a switch receipt meant for the window chat.
+    fn push_session_notice(&mut self, session: Uuid, line: String) {
+        if self.transcript.session == Some(session) {
+            self.live.notices.push(line);
+        } else if let Some(pane) = self.pane_states.get_mut(&session) {
+            pane.live.notices.push(line);
+        } else {
+            self.live.notices.push(line);
+        }
+    }
+
     /// Ask the service to switch. The answer arrives as an event on the UI
     /// thread, because a switch can do network work per candidate.
     fn switch_model(&mut self, arg: String, cx: &mut Context<Self>) {
@@ -2868,7 +2909,7 @@ impl Dashboard {
             Some(row) => row.pair(),
             None => arg,
         };
-        let Some(session) = self.transcript.session else {
+        let Some(session) = self.models_session.or_else(|| self.focused_pane()) else {
             self.live.notices.push(
                 "No conversation is open, so there is nothing to switch. Type /new first."
                     .to_string(),
@@ -2876,13 +2917,21 @@ impl Dashboard {
             cx.notify();
             return;
         };
+        // One pick, one switch. Enter can repeat faster than the provider
+        // handshake, and every repeat used to persist another confirmation.
+        if self.models_switching.is_some() {
+            logging::debug("model switch already in flight");
+            return;
+        }
         let Some(bridge) = agent_bridge::bridge() else {
-            self.live
-                .notices
-                .push("The agent is still starting. Try again in a moment.".to_string());
+            self.push_session_notice(
+                session,
+                "The agent is still starting. Try again in a moment.".to_string(),
+            );
             cx.notify();
             return;
         };
+        self.models_switching = Some(session);
         agent_bridge::spawn_switch_model(bridge.service.clone(), session, pair, self.sink.clone());
         cx.notify();
     }
@@ -3528,7 +3577,7 @@ impl Dashboard {
             // it wrote move to that pane, so a split never answers in the
             // wrong leaf (#2614).
             let before = self.live.notices.len();
-            self.run_command(outcome, cx);
+            self.run_command(outcome, Some(session), cx);
             if Some(session) != self.transcript.session
                 && let Some(pane) = self.pane_states.get_mut(&session)
             {
@@ -3750,7 +3799,7 @@ impl Dashboard {
         // user reaches for when the agent is offline. A line that starts with
         // a slash never becomes a turn (#2374).
         if let Some(outcome) = commands::parse_command(&text) {
-            self.run_command(outcome, cx);
+            self.run_command(outcome, self.transcript.session, cx);
             return;
         }
         // `!cmd` runs a shell command here, not a turn, as the terminal does (#2437).
@@ -4011,17 +4060,42 @@ impl Dashboard {
                     self.agent_error = Some(e.clone());
                     self.live.notices.push(format!("agent offline: {e}"));
                 }
-                agent_bridge::TurnEvent::ModelSwitched(line) => {
+                agent_bridge::TurnEvent::ModelSwitched { session, line } => {
+                    if self.models_switching.take() != Some(session) {
+                        logging::debug("stale model switch completion ignored");
+                        continue;
+                    }
                     logging::info(&format!("model switched: {line}"));
-                    self.live.notices.push(line);
+                    self.push_session_notice(session, line);
                     // The rail row carries the pair the service answers with,
                     // so a switch is only real once the row is re-read.
                     self.refresh_rail(cx);
+                    // A pick is a commitment: apply it, say so once, and put
+                    // the user back in the conversation that asked. A stale
+                    // completion never closes a different screen.
+                    if self.screen == Screen::Models && self.models_session == Some(session) {
+                        self.screen = Screen::Chat;
+                        if self.transcript.session == Some(session) {
+                            self.pane_focus = None;
+                        } else if self
+                            .panes
+                            .as_ref()
+                            .is_some_and(|tree| tree.contains(session))
+                        {
+                            self.pane_focus = Some(session);
+                        }
+                        self.sync_composer_session();
+                        self.refocus_screen();
+                    }
                     cx.notify();
                 }
-                agent_bridge::TurnEvent::ModelSwitchFailed(e) => {
-                    logging::error(&format!("model switch: {e}"));
-                    self.live.notices.push(format!("model switch: {e}"));
+                agent_bridge::TurnEvent::ModelSwitchFailed { session, error } => {
+                    if self.models_switching.take() != Some(session) {
+                        logging::debug("stale model switch failure ignored");
+                        continue;
+                    }
+                    logging::error(&format!("model switch: {error}"));
+                    self.push_session_notice(session, format!("model switch: {error}"));
                     cx.notify();
                 }
                 agent_bridge::TurnEvent::BrainReady(line) => {
@@ -8129,10 +8203,16 @@ impl Render for Dashboard {
                 // step prints under its title. Read once: the picker needs the
                 // provider for an unknown id, and the header needs both.
                 let live = agent_bridge::bridge().map(|bridge| {
-                    (
-                        bridge.service.provider_name(),
-                        bridge.service.provider_model(),
-                    )
+                    match self.models_session.or(self.transcript.session) {
+                        Some(sid) => (
+                            bridge.service.provider_name_for_session(sid),
+                            bridge.service.provider_model_for_session(sid),
+                        ),
+                        None => (
+                            bridge.service.provider_name(),
+                            bridge.service.provider_model(),
+                        ),
+                    }
                 });
                 let pair = live
                     .as_ref()
@@ -8911,7 +8991,11 @@ impl Render for Dashboard {
             let confirm = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
                 if second {
                     this.update_prompt = None;
-                    this.run_command(commands::Outcome::Run(commands::GuiAction::Evolve), cx);
+                    this.run_command(
+                        commands::Outcome::Run(commands::GuiAction::Evolve),
+                        this.transcript.session,
+                        cx,
+                    );
                 } else {
                     this.update_prompt = Some(true);
                 }
@@ -9382,6 +9466,8 @@ fn main() {
                         models_query: String::new(),
                         models_index: 0,
                         models_provider: None,
+                        models_session: None,
+                        models_switching: None,
                         models_fetch: None,
                         models_fetch_lifecycle:
                             opencrabs::ui_core::model_selector::FetchLifecycle::default(),

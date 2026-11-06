@@ -98,10 +98,12 @@ pub enum TurnEvent {
     },
     /// Bootstrap itself died; carries the error text.
     BootstrapFailed(String),
-    /// A model switch finished; carries the line the terminal prints for it.
-    ModelSwitched(String),
-    /// A model switch could not be attempted; carries the reason.
-    ModelSwitchFailed(String),
+    /// A model switch finished; carries the session that asked and the line
+    /// the terminal prints for it.
+    ModelSwitched { session: Uuid, line: String },
+    /// A model switch could not be attempted; carries the session that asked
+    /// and the reason.
+    ModelSwitchFailed { session: Uuid, error: String },
     /// A text command answered off the UI thread; the line goes to the
     /// notices (#2469).
     CommandReply(String),
@@ -1046,17 +1048,26 @@ pub fn spawn_switch_model(
             {
                 Ok(rt) => rt,
                 Err(e) => {
-                    let _ = sink.send(TurnEvent::ModelSwitchFailed(format!("switch runtime: {e}")));
+                    let _ = sink.send(TurnEvent::ModelSwitchFailed {
+                        session: session_id,
+                        error: format!("switch runtime: {e}"),
+                    });
                     return;
                 }
             };
             let line = runtime.block_on(opencrabs::channels::commands::direct_model_switch(
                 &service, session_id, &pair,
             ));
-            let _ = sink.send(TurnEvent::ModelSwitched(line));
+            let _ = sink.send(TurnEvent::ModelSwitched {
+                session: session_id,
+                line,
+            });
         });
     if let Err(e) = spawned {
-        let _ = error_sink.send(TurnEvent::ModelSwitchFailed(format!("switch thread: {e}")));
+        let _ = error_sink.send(TurnEvent::ModelSwitchFailed {
+            session: session_id,
+            error: format!("switch thread: {e}"),
+        });
     }
 }
 
