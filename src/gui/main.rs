@@ -182,6 +182,13 @@ struct SplitPane {
     /// The token that cancels THIS pane's turn, so `/stop` in one leaf leaves
     /// the other running.
     cancel: Option<tokio_util::sync::CancellationToken>,
+    /// This pane's own drag-to-copy state (#2623). A pane transcript is built
+    /// with `ViewHooks::default()`, which leaves `drag: None`, so every pane
+    /// had no anchor, no highlight and no release handler: the gesture was
+    /// dead the moment a second pane existed. It cannot share the window's
+    /// either, because the row text is stored by ordinal and two panes plus
+    /// the window all count rows from zero.
+    copy_drag: Rc<CopyDrag>,
 }
 
 /// The ledger path, unchanged: `config.database.path`, with the same
@@ -1777,6 +1784,16 @@ impl Dashboard {
             editor::EditorEvent::Preview(path) => this.open_preview(path.clone(), cx),
         })
         .detach();
+        // The pane's own drag-to-copy (#2623). The transcript cannot reach a
+        // composer, so the pane's editor is the one that says "Copied to
+        // clipboard" once a dragged range lands (#2587).
+        let pane_copy = Rc::new(CopyDrag::default());
+        {
+            let editor = pane_editor.downgrade();
+            pane_copy.set_copied_listener(Rc::new(move |cx: &mut App| {
+                let _ = editor.update(cx, |editor, cx| editor.show_copied(cx));
+            }));
+        }
         // The pane's plan lives wherever its session is bound, which is a DB
         // read; the same lookup the window's strip uses, resolved once here.
         agent_bridge::spawn_plan_path(self.db_path.clone(), id, self.sink.clone());
@@ -1795,6 +1812,7 @@ impl Dashboard {
                 live: transcript::LiveTurn::default(),
                 busy: false,
                 cancel: None,
+                copy_drag: pane_copy,
             },
         );
         // Paint the pane now, with its header, rather than waiting for the
@@ -11255,7 +11273,13 @@ fn pane_element(
                                 ctx.content
                             },
                             HashMap::new(),
-                            transcript::ViewHooks::default(),
+                            transcript::ViewHooks {
+                                // The pane's own drag-to-copy (#2623): the
+                                // gesture was dead in every split because this
+                                // was `default()`, which leaves `drag: None`.
+                                drag: Some(pane.copy_drag.clone()),
+                                ..Default::default()
+                            },
                         ))
                         .into_any_element(),
                     None => div().into_any_element(),
@@ -12377,6 +12401,48 @@ mod tests {
         // A new turn takes the card for its own session.
         assert!(production.contains("self.live_owner.begin(sid)"));
         assert!(production.contains("self.live_owner.begin(session_id)"));
+    }
+
+    #[test]
+    fn every_pane_owns_its_drag_to_copy_state() {
+        // #2623: a pane transcript was built with `ViewHooks::default()`,
+        // which leaves `drag: None`, so dragging over a split pane selected
+        // nothing and copied nothing. The window's state cannot be shared:
+        // row text is stored by ordinal, and two panes plus the window all
+        // count rows from zero.
+        let src = include_str!("main.rs");
+        let pane = src
+            .split("fn pane_element(")
+            .nth(1)
+            .and_then(|rest| rest.split("\nfn ").next())
+            .expect("pane element");
+        assert!(
+            !pane.contains("ViewHooks::default()"),
+            "a pane must hand its transcript a drag state"
+        );
+        assert!(
+            pane.contains("drag: Some(pane.copy_drag.clone())"),
+            "the pane's own drag state is wired to its transcript"
+        );
+        let state = src
+            .split("struct SplitPane {")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}").next())
+            .expect("split pane");
+        assert!(
+            state.contains("copy_drag: Rc<CopyDrag>"),
+            "each pane carries its own drag state"
+        );
+        // The pane's composer is the one that acknowledges the copy, because
+        // the transcript cannot reach an editor (#2587).
+        assert!(
+            src.contains("pane_copy.set_copied_listener"),
+            "the pane's own composer says the copy landed"
+        );
+        assert!(
+            src.contains("pane_editor.downgrade()"),
+            "the listener targets the pane's editor"
+        );
     }
 
     #[test]
