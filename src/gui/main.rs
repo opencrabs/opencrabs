@@ -13387,22 +13387,18 @@ mod tests {
         let mut stashed: std::collections::HashMap<uuid::Uuid, super::StashedTurn> =
             std::collections::HashMap::new();
         let mut live = super::transcript::LiveTurn::default();
-        let mut busy = false;
-        let mut cancel: Option<tokio_util::sync::CancellationToken> = None;
-        let mut settle_expect: Option<usize> = None;
-        let mut settle_retries: u8 = 0;
-        let mut ctx_tokens: Option<u32> = None;
+        let mut busy = true;
+        let mut cancel: Option<tokio_util::sync::CancellationToken> =
+            Some(tokio_util::sync::CancellationToken::new());
+        let mut settle_expect: Option<usize> = Some(7);
+        let mut settle_retries: u8 = 2;
+        let mut ctx_tokens: Option<u32> = Some(1_234);
 
         // A turn running in conversation A, with every piece of state the
         // card needs to look alive.
         live.begin("ask A".to_string());
         live.thinking = true;
         live.tokens = 42;
-        busy = true;
-        cancel = Some(tokio_util::sync::CancellationToken::new());
-        settle_expect = Some(7);
-        settle_retries = 2;
-        ctx_tokens = Some(1_234);
 
         super::swap_visible_turn(
             &mut stashed,
