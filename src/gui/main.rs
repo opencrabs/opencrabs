@@ -73,6 +73,7 @@ use opencrabs::ui_core::commands as slash;
 // so both clients print the same rows in the same order (#2458). Named `find`
 // because `palette` here is the window's colour table.
 use opencrabs::ui_core::card::{CARD_RADIUS, glass_fill};
+use opencrabs::ui_core::live_owner::LiveOwner;
 use opencrabs::ui_core::palette::{
     self as find, Channel, PaletteAction, PaletteItem, PaletteKind, PaletteState,
 };
@@ -716,6 +717,10 @@ struct Dashboard {
     /// as the transcript's last entry and clears once the DB holds the rows,
     /// so a slow or silent turn never looks like an empty conversation.
     live: transcript::LiveTurn,
+    /// Which conversation owns `live` and `busy` (#2616). The window can open
+    /// another session while a turn runs, and neither the card nor the busy
+    /// flag may follow the switch.
+    live_owner: LiveOwner,
     /// Reload attempts made while waiting for the turn's rows to persist.
     /// Bounded, so a write that never lands cannot spin the fetch loop.
     settle_retries: u8,
@@ -1005,7 +1010,7 @@ impl Dashboard {
     fn toggle_newest_turn(&mut self, cx: &mut Context<Self>) {
         // A turn in flight owns the chord: the card on screen is the live one,
         // so ctrl+o opens or folds IT, the way it opens a settled turn (#2442).
-        if !self.live.is_empty() {
+        if self.live_owner.owns_live(self.transcript.session) && !self.live.is_empty() {
             self.transcript.live_expanded = !self.transcript.live_expanded;
             cx.notify();
             return;
@@ -3638,10 +3643,13 @@ impl Dashboard {
             cx.notify();
             return;
         }
-        if self.busy {
+        if self.live_owner.busy_for(self.busy, self.transcript.session) {
             // The message joins the session's queue, which the agent drains
             // between tool calls, the terminal's own path (#2441). With no
-            // session open it waits in the window's own list.
+            // session open it waits in the window's own list. A turn running
+            // in another conversation is not this one's: the text goes out
+            // now instead of queuing behind work the user is not looking at
+            // (#2616).
             match self.transcript.session {
                 Some(sid) => {
                     agent_bridge::queue_push(sid, agent_bridge::PendingMessage::plain(text))
@@ -3667,6 +3675,7 @@ impl Dashboard {
             return;
         };
         self.live.begin(text.clone());
+        self.live_owner.begin(sid);
         self.transcript.live_expanded = false;
         self.settle_retries = 0;
         // The finished turn must add one to the persisted count before the
@@ -3718,6 +3727,9 @@ impl Dashboard {
             // A split leaf runs its own turn (#2614), so its progress paints
             // into that leaf's card. A sub-agent's session has no leaf and is
             // dropped here rather than painted into somebody else's pane.
+            // This filter is also what keeps one conversation's tool rows off
+            // another's card (#2616): only the session on screen reaches the
+            // window's live turn below.
             if let agent_bridge::TurnEvent::ProgressFor(sid, progress) = &ev
                 && self.transcript.session != Some(*sid)
             {
@@ -3804,6 +3816,7 @@ impl Dashboard {
                         self.transcript.session = None;
                         self.transcript.turns.clear();
                         self.live.clear();
+                        self.live_owner.clear();
                         self.busy = false;
                         // The files screen of a deleted session has nothing
                         // left to list: back to the chat, never a ghost list.
@@ -4025,6 +4038,14 @@ impl Dashboard {
                     // belongs to that leaf, so the window's footer and its
                     // conversation are left exactly where the user put them.
                     if self.transcript.session != Some(session) {
+                        // The card belongs to a conversation the user left:
+                        // drop it here so returning to that session reads the
+                        // rows from the DB instead of a stale live copy
+                        // (#2616).
+                        self.live_owner.settle(session);
+                        if !self.live_owner.owns_live(self.transcript.session) {
+                            self.live.clear();
+                        }
                         self.settle_pane(session, tokens_per_second, cx);
                         continue;
                     }
@@ -4075,6 +4096,12 @@ impl Dashboard {
                 }
                 agent_bridge::TurnEvent::Failed { session, text } => {
                     if self.transcript.session != Some(session) {
+                        // Same as Done: a failure for a session the user left
+                        // must not leave rows or a busy flag behind (#2616).
+                        self.live_owner.settle(session);
+                        if !self.live_owner.owns_live(self.transcript.session) {
+                            self.live.clear();
+                        }
                         self.fail_pane(session, text, cx);
                         continue;
                     }
@@ -4215,6 +4242,7 @@ impl Dashboard {
             return;
         };
         self.live.begin(display_text);
+        self.live_owner.begin(session_id);
         self.transcript.live_expanded = false;
         self.settle_retries = 0;
         self.settle_expect = Some(self.transcript.turns.len() + 1);
@@ -4267,6 +4295,7 @@ impl Dashboard {
         msgs.extend(agent_bridge::queue_take(sid));
         if let Some(joined) = agent_bridge::PendingMessage::join(&msgs) {
             self.live.begin(joined.display_text.clone());
+            self.live_owner.begin(sid);
             self.transcript.live_expanded = false;
             self.settle_retries = 0;
             self.settle_expect = Some(self.transcript.turns.len() + 1);
@@ -4917,6 +4946,7 @@ impl Dashboard {
                             // recorded at `Done` (#2324).
                             this.attach_pending_metrics(sid);
                             this.live.clear();
+                            this.live_owner.clear();
                             this.settle_expect = None;
                             this.settle_retries = 0;
                         } else if attempt < SETTLE_ATTEMPTS {
@@ -5404,12 +5434,14 @@ impl Dashboard {
                 self.onboard_escape(cx);
                 return;
             }
-            if !self.busy {
+            if !self.live_owner.busy_for(self.busy, self.transcript.session) {
                 self.esc_at = None;
                 // Idle Esc hands the keyboard back. The rail's mode is the
                 // only thing Esc owns here, and Tab is what arms it. The old
                 // blur bridge existed only because focus never moved off the
-                // composer (#2351, #2454).
+                // composer (#2351, #2454). A turn running in another
+                // conversation counts as idle here: Esc must never cancel work
+                // the user cannot see (#2616).
                 if self.rail_focused {
                     self.rail_focused = false;
                     self.refocus_screen();
@@ -6154,7 +6186,13 @@ impl Render for Dashboard {
         // to open its own file (#2395).
         let mut attachment_handlers: std::collections::HashMap<String, transcript::ClickHandler> =
             std::collections::HashMap::new();
-        for key in transcript::attachment_paths_with_live(&self.transcript, &self.live) {
+        for key in transcript::attachment_paths_with_live(
+            &self.transcript,
+            visible_live(
+                &self.live,
+                self.live_owner.owns_live(self.transcript.session),
+            ),
+        ) {
             let path = std::path::PathBuf::from(key.clone());
             let handler = cx.listener(move |this, _ev, _window, cx| {
                 this.open_preview(path.clone(), cx);
@@ -6220,8 +6258,11 @@ impl Render for Dashboard {
                 let primary = transcript::view(
                     &self.transcript,
                     &self.transcript_scroll,
-                    &self.live,
-                    self.busy,
+                    visible_live(
+                        &self.live,
+                        self.live_owner.owns_live(self.transcript.session),
+                    ),
+                    self.live_owner.busy_for(self.busy, self.transcript.session),
                     measure,
                     fold_handlers,
                     transcript::ViewHooks {
@@ -8097,8 +8138,11 @@ impl Render for Dashboard {
                     .child(transcript::view(
                         &self.transcript,
                         &self.transcript_scroll,
-                        &self.live,
-                        self.busy,
+                        visible_live(
+                            &self.live,
+                            self.live_owner.owns_live(self.transcript.session),
+                        ),
+                        self.live_owner.busy_for(self.busy, self.transcript.session),
                         primary_width,
                         fold_handlers,
                         transcript::ViewHooks {
@@ -9016,6 +9060,7 @@ fn main() {
                         sink: agent_sink,
                         agent_ready: false,
                         live: transcript::LiveTurn::default(),
+                        live_owner: LiveOwner::default(),
                         settle_expect: None,
                         settle_retries: 0,
                         busy: false,
@@ -10397,6 +10442,21 @@ fn command_popup_view(names: &[&'static str], selected: usize) -> Div {
                 names.len()
             ))),
     )
+}
+
+/// The live card the window may paint (#2616).
+///
+/// The window holds ONE live turn, but it can open any conversation while a
+/// turn runs in another. Only the session that owns the card paints it: a
+/// switch shows an empty card, and coming back to the session that sent the
+/// turn finds it again instead of losing it.
+fn visible_live<'a>(live: &'a transcript::LiveTurn, owned: bool) -> &'a transcript::LiveTurn {
+    static EMPTY: std::sync::OnceLock<transcript::LiveTurn> = std::sync::OnceLock::new();
+    if owned {
+        live
+    } else {
+        EMPTY.get_or_init(transcript::LiveTurn::default)
+    }
 }
 
 /// The running detached command, above the input.
@@ -12275,6 +12335,48 @@ mod tests {
         let src = include_str!("main.rs");
         let chord = ["\"d\" if ev.keystroke.modifiers", ".control"].concat();
         assert!(src.contains(&chord), "ctrl+d must be bound on the rail");
+    }
+
+    #[test]
+    fn the_live_card_paints_only_for_the_session_that_owns_it() {
+        // #2616: the window keeps ONE live turn but can open any number of
+        // conversations. Handing `&self.live` to the view unconditionally is
+        // what made a turn in session A show its tool block in session B, so
+        // every paint goes through the owner check and the busy flag follows
+        // the same rule.
+        let src = include_str!("main.rs");
+        let production = src
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .expect("production source before the test module");
+        assert_eq!(
+            production.matches("visible_live(").count(),
+            3,
+            "the card, its attachments and the split secondary all read the owner"
+        );
+        assert!(
+            production.contains("self.live_owner.owns_live(self.transcript.session)"),
+            "the paint path asks the owner"
+        );
+        assert_eq!(
+            production
+                .matches("self.live_owner.busy_for(self.busy, self.transcript.session)")
+                .count(),
+            4,
+            "both draw paths, the send button and Esc report the owning session's busy state"
+        );
+        // A turn that finished in a conversation the user left drops its card
+        // on both the success and the failure path.
+        assert_eq!(
+            production
+                .matches("self.live_owner.settle(session);")
+                .count(),
+            2,
+            "Done and Failed both settle the owner"
+        );
+        // A new turn takes the card for its own session.
+        assert!(production.contains("self.live_owner.begin(sid)"));
+        assert!(production.contains("self.live_owner.begin(session_id)"));
     }
 
     #[test]
