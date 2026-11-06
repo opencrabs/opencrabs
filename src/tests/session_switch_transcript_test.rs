@@ -65,6 +65,7 @@ fn live(role: &str, content: &str, at: i64) -> DisplayMessage {
 
 fn persisted(session_id: Uuid, sequence: i32, role: &str, content: &str, at: i64) -> Message {
     Message {
+        forward: None,
         id: Uuid::new_v4(),
         session_id,
         role: role.to_string(),

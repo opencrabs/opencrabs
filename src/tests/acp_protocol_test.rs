@@ -223,6 +223,7 @@ fn modes_payload_names_current() {
 #[test]
 fn replay_updates_maps_reasoning_blocked_and_text_segments() {
     let msg = Message {
+        forward: None,
         id: Uuid::new_v4(),
         session_id: Uuid::new_v4(),
         role: "assistant".into(),

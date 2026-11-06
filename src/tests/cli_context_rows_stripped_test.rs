@@ -19,6 +19,7 @@ use crate::db::models::Message as DbMessage;
 
 fn row(role: &str, content: &str, thinking: Option<&str>) -> DbMessage {
     DbMessage {
+        forward: None,
         id: Uuid::new_v4(),
         session_id: Uuid::new_v4(),
         role: role.to_string(),

@@ -165,6 +165,10 @@ pub(crate) const MIGRATION_SQL: &[&str] = &[
     include_str!("../migrations/20261101000001_add_session_topics.sql"),
     include_str!("../migrations/20261102000001_add_topic_icon.sql"),
     include_str!("../migrations/20261103000001_add_topics_collapsed.sql"),
+    // #2608: forward provenance on transcript rows. Four nullable ALTER TABLE
+    // ADD COLUMN entries plus one index, all NULL by design on existing rows,
+    // so no heal pass is needed. Appended last per the list invariant above.
+    include_str!("../migrations/20261105000001_add_message_forward_provenance.sql"),
 ];
 
 pub(crate) fn build_migrations() -> Migrations<'static> {

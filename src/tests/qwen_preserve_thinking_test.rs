@@ -106,6 +106,7 @@ fn hoist_is_a_noop_without_markers() {
 
 fn assistant_row(content: &str) -> DbMessage {
     DbMessage {
+        forward: None,
         id: Uuid::new_v4(),
         session_id: Uuid::new_v4(),
         role: "assistant".to_string(),
