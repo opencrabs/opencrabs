@@ -4070,6 +4070,19 @@ impl Dashboard {
                     // The rail row carries the pair the service answers with,
                     // so a switch is only real once the row is re-read.
                     self.refresh_rail(cx);
+                    // The gauge is denominated in the pair that serves the
+                    // session now. `ctx_max` used to be recomputed only on
+                    // `Ready` and on open, so a switch left the old provider's
+                    // window on screen: the number was the one thing that
+                    // would have proved the pick landed, and it never moved.
+                    // The last prompt size came from the old provider's
+                    // tokenizer, so it goes with it (#2644).
+                    if self.transcript.session == Some(session)
+                        && let Some(b) = agent_bridge::bridge()
+                    {
+                        self.ctx_max = b.service.context_limit_for_session(session);
+                        self.ctx_tokens = None;
+                    }
                     // A pick is a commitment: apply it, say so once, and put
                     // the user back in the conversation that asked. A stale
                     // completion never closes a different screen.
