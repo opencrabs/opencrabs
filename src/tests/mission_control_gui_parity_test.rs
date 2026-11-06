@@ -139,7 +139,7 @@ fn mc_line_rows_render_through_the_flex_row_truncate_shape() {
     let flat = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
     let panel = flat(between(GUI_MAIN, "fn mc_panel(", "fn mc_inbox_panel"));
     assert!(panel.contains(
-        "McRow::Line(line, _) => { cell = cell . flex () . flex_row () . child( text( line , Size::Xs , color ) . flex_1 () . min_w_0 () . truncate () ); }"
+        "McRow::Line(line, _) => { cell = cell .flex() .flex_row() .child(text(line, Size::Xs, color).flex_1().min_w_0().truncate()); }"
     ));
     assert!(
         !GUI_MAIN.contains(".text_xs().truncate().child("),
