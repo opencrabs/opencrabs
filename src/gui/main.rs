@@ -752,8 +752,17 @@ struct Dashboard {
     /// turn; a lone Esc is ignored, because Esc is also how a user clears a
     /// selection.
     esc_at: Option<std::time::Instant>,
-    /// Messages typed while busy; joined and sent when the turn completes.
-    queued: Vec<agent_bridge::PendingMessage>,
+    /// Whether the queue strip is showing every message or only its head.
+    /// A queue of five rows pushes the conversation off the screen, so past
+    /// two messages the strip folds and a click opens it (#2629).
+    queue_expanded: bool,
+    /// Text typed before there is a conversation to key it to: while the agent
+    /// stack is still booting, or before the first session exists. Everything
+    /// else waits in `agent_bridge`'s per-session queue, the one the agent
+    /// itself drains between tool calls. Keeping a second list here meant the
+    /// strip could show five messages the agent could not see, so they never
+    /// went out (#2629).
+    unsent: Vec<agent_bridge::PendingMessage>,
     /// Set when the agent stack failed to come up; sends are refused.
     agent_error: Option<String>,
     /// Prompt tokens the provider last reported (`ProgressEvent::TokenCount`
@@ -3774,7 +3783,7 @@ impl Dashboard {
                 Some(sid) => {
                     agent_bridge::queue_push(sid, agent_bridge::PendingMessage::plain(text))
                 }
-                None => self.queued.push(agent_bridge::PendingMessage::plain(text)),
+                None => self.unsent.push(agent_bridge::PendingMessage::plain(text)),
             }
             cx.notify();
             return;
@@ -3782,7 +3791,7 @@ impl Dashboard {
         let Some(bridge) = agent_bridge::bridge() else {
             // Still booting: keep the message, it fires on Ready. The queue
             // strip is where the user sees it.
-            self.queued.push(agent_bridge::PendingMessage::plain(text));
+            self.unsent.push(agent_bridge::PendingMessage::plain(text));
             cx.notify();
             return;
         };
@@ -3790,7 +3799,7 @@ impl Dashboard {
         // is nothing to write into, so one is created and the text waits in
         // the queue rather than vanishing into a session nobody is looking at.
         let Some(sid) = self.transcript.session else {
-            self.queued.push(agent_bridge::PendingMessage::plain(text));
+            self.unsent.push(agent_bridge::PendingMessage::plain(text));
             self.new_session(cx);
             return;
         };
@@ -4253,13 +4262,15 @@ impl Dashboard {
                             self.transcript.session
                         ));
                     } else if self.busy {
-                        // Queue it behind the running turn rather than
-                        // interrupting it: `QueuedUserMessage::join` keeps the
-                        // system half out of what the user "said" (#765).
-                        self.queued.push(agent_bridge::PendingMessage::system(
-                            context_text,
-                            display_text,
-                        ));
+                        // Queue it against the session the task belongs to, in
+                        // the store the agent drains, so it goes out between
+                        // tool calls instead of waiting for the turn to end
+                        // (#2629). `QueuedUserMessage::join` keeps the system
+                        // half out of what the user "said" (#765).
+                        agent_bridge::queue_push(
+                            session_id,
+                            agent_bridge::PendingMessage::system(context_text, display_text),
+                        );
                     } else {
                         self.resume_finished_task(session_id, context_text, display_text, cx);
                     }
@@ -4357,10 +4368,12 @@ impl Dashboard {
         cx: &mut Context<Self>,
     ) {
         let Some(bridge) = agent_bridge::bridge() else {
-            self.queued.push(agent_bridge::PendingMessage::system(
-                context_text,
-                display_text,
-            ));
+            // Still booting: key it to the session it finished on, so it
+            // resumes when the stack is ready (#2629).
+            agent_bridge::queue_push(
+                session_id,
+                agent_bridge::PendingMessage::system(context_text, display_text),
+            );
             return;
         };
         self.live.begin(display_text);
@@ -4385,10 +4398,11 @@ impl Dashboard {
         cx.notify();
     }
 
-    /// Send everything queued while busy, joined into one turn.
-    /// What the strip shows: the window's own list, then the session's queue.
+    /// What the strip shows, oldest first: the text waiting on the open
+    /// session, then anything typed before a session existed. One store backs
+    /// both, so what the user reads is exactly what will send (#2629).
     fn queued_for_strip(&self) -> Vec<agent_bridge::PendingMessage> {
-        let mut out = self.queued.clone();
+        let mut out = self.unsent.clone();
         if let Some(sid) = self.transcript.session {
             out.extend(agent_bridge::queue_snapshot(sid));
         }
@@ -4396,15 +4410,29 @@ impl Dashboard {
     }
 
     fn drain_pending(&mut self, cx: &mut Context<Self>) {
-        let waiting_in_store = self
-            .transcript
-            .session
-            .is_some_and(|sid| !agent_bridge::queue_snapshot(sid).is_empty());
-        if (self.queued.is_empty() && !waiting_in_store) || self.busy {
+        if self.busy {
+            return;
+        }
+        // Boot text has no session to live in yet. It joins the open one here,
+        // so there is never a second list the agent cannot see (#2629).
+        if let Some(sid) = self.transcript.session
+            && !self.unsent.is_empty()
+        {
+            for msg in std::mem::take(&mut self.unsent) {
+                agent_bridge::queue_push(sid, msg);
+            }
+        }
+        let waiting = match self.transcript.session {
+            Some(sid) => agent_bridge::queue_snapshot(sid),
+            None => self.unsent.clone(),
+        };
+        if waiting.is_empty() {
             return;
         }
         let Some(bridge) = agent_bridge::bridge() else {
-            self.queued.clear();
+            // Still booting: keep the text. Clearing it here dropped whatever
+            // the user typed whenever the window polled before the stack came
+            // up (#2629).
             return;
         };
         // No open conversation: keep the queue and open one. The queue drains
@@ -4413,8 +4441,7 @@ impl Dashboard {
             self.new_session(cx);
             return;
         };
-        let mut msgs = std::mem::take(&mut self.queued);
-        msgs.extend(agent_bridge::queue_take(sid));
+        let msgs = agent_bridge::queue_take(sid);
         if let Some(joined) = agent_bridge::PendingMessage::join(&msgs) {
             self.live.begin(joined.display_text.clone());
             self.live_owner.begin(sid);
@@ -5970,10 +5997,26 @@ impl Dashboard {
                 // a split pane is a fraction of the window, and the full
                 // checklist clipped mid-word and pushed its header past the
                 // pane's edge.
+                // How much plan this pane can read (#2624): a wall of panes
+                // keeps a bar, a pair keeps the running task and the next one
+                // or two. The width comes from the tree, so a narrow column
+                // compacts even when there are only two panes.
+                let share = self
+                    .panes
+                    .as_ref()
+                    .and_then(|tree| tree.leaf_width_share(*session))
+                    .unwrap_or(1.0);
+                let pane_width = if share < 1.0 {
+                    split_pane_width(content, false, share)
+                } else {
+                    content
+                };
+                let density = plan_strip::pane_density(count, pane_width);
+                let expanded = self.plan_expanded.contains(session);
                 let (plan_view, queued, editor) = if is_chat {
                     self.plan.refresh();
                     (
-                        self.plan.compact_view(),
+                        self.plan.pane_view(density, expanded),
                         self.queued_for_strip(),
                         self.editor.clone(),
                     )
@@ -5982,7 +6025,7 @@ impl Dashboard {
                         Some(pane) => {
                             pane.plan.refresh();
                             (
-                                pane.plan.compact_view(),
+                                pane.plan.pane_view(density, expanded),
                                 agent_bridge::queue_snapshot(*session),
                                 pane.editor.clone(),
                             )
@@ -5992,10 +6035,40 @@ impl Dashboard {
                 };
                 let mut col = div().flex().flex_col().flex_none().gap_2();
                 if let Some(view) = plan_view {
-                    col = col.child(view);
+                    // A click trades the conversation's room for the whole
+                    // checklist, per pane (#2624). The handler stops the event
+                    // so the press does not also hand the leaf the keyboard.
+                    let plan_session = *session;
+                    col = col.child(
+                        view.id(SharedString::from(format!("plan-strip-{plan_session}")))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _ev: &MouseDownEvent, _window, cx| {
+                                    cx.stop_propagation();
+                                    this.toggle_pane_plan(plan_session, cx);
+                                }),
+                            ),
+                    );
                 }
                 if !queued.is_empty() {
-                    col = col.child(queue_strip(&queued));
+                    let strip_session = *session;
+                    // Only a folded queue is worth a click, so a two-message
+                    // list does not react to a stray tap (#2629).
+                    let folds = queued.len() > 2;
+                    col = col.child(
+                        queue_strip(&queued, self.queue_expanded)
+                            .id(SharedString::from(format!("queue-strip-{strip_session}")))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this: &mut Self, _, _, cx| {
+                                    cx.stop_propagation();
+                                    if folds {
+                                        this.queue_expanded = !this.queue_expanded;
+                                        cx.notify();
+                                    }
+                                }),
+                            ),
+                    );
                 }
                 if let Some(label) = self.running_tasks_label_for(*session) {
                     col = col.child(task_strip(label));
@@ -8414,7 +8487,18 @@ impl Render for Dashboard {
                     let waiting = self.queued_for_strip();
                     if !waiting.is_empty() {
                         col = col.child(central(
-                            queue_strip(&waiting).into_any_element(),
+                            queue_strip(&waiting, self.queue_expanded)
+                                .id("queue-strip-chat")
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this: &mut Self, _, _, cx| {
+                                        if this.queued_for_strip().len() > 2 {
+                                            this.queue_expanded = !this.queue_expanded;
+                                            cx.notify();
+                                        }
+                                    }),
+                                )
+                                .into_any_element(),
                             centred_chat,
                             chat_measure_px,
                         ));
@@ -9238,7 +9322,8 @@ fn main() {
                         busy: false,
                         cancel: None,
                         esc_at: None,
-                        queued: Vec::new(),
+                        queue_expanded: false,
+                        unsent: Vec::new(),
                         agent_error: None,
                         ctx_tokens: None,
                         ctx_max: 0,
@@ -10465,7 +10550,13 @@ fn mc_relative_time(ts: Option<chrono::DateTime<chrono::Utc>>) -> String {
 /// The queued messages, above the input where the user can see what will go
 /// out next. Same shape as the TUI's pending list: one line per message, the
 /// count in the header, and a word on when they send.
-fn queue_strip(queued: &[agent_bridge::PendingMessage]) -> Div {
+///
+/// Past two messages the list folds to its head and the rest is a count, so a
+/// busy session cannot push the conversation off the screen; `expanded` is the
+/// click that opens it (#2629).
+fn queue_strip(queued: &[agent_bridge::PendingMessage], expanded: bool) -> Div {
+    let folded = !expanded && queued.len() > 2;
+    let shown = queue_rows(queued.len(), expanded);
     let mut col = div()
         .flex()
         .flex_col()
@@ -10478,11 +10569,11 @@ fn queue_strip(queued: &[agent_bridge::PendingMessage]) -> Div {
                 .text_xs()
                 .text_color(rgb(palette::current().amber))
                 .child(SharedString::from(format!(
-                    "queued {} · sent between tool calls · ↑ edits the last",
+                    "queued {} · sent between tool calls · ↑ recalls them newest first",
                     queued.len()
                 ))),
         );
-    for (i, m) in queued.iter().take(4).enumerate() {
+    for (i, m) in queued.iter().take(shown).enumerate() {
         let text = m.display_text.lines().next().unwrap_or_default();
         let mut chars = text.chars();
         let short: String = chars.by_ref().take(96).collect();
@@ -10494,7 +10585,26 @@ fn queue_strip(queued: &[agent_bridge::PendingMessage]) -> Div {
                 .child(SharedString::from(format!("{}. {short}{suffix}", i + 1))),
         );
     }
+    if queued.len() > shown {
+        let rest = queued.len() - shown;
+        col = col.child(
+            div()
+                .text_xs()
+                .text_color(rgb(palette::current().text_muted))
+                .child(SharedString::from(if folded {
+                    format!("… {rest} more · click to expand")
+                } else {
+                    format!("… {rest} more")
+                })),
+        );
+    }
     col
+}
+
+/// How many queued messages stay on screen. Two, until the user opens the
+/// fold, so a burst of background reports never owns the window (#2629).
+fn queue_rows(len: usize, expanded: bool) -> usize {
+    if expanded || len <= 2 { len } else { 2 }
 }
 
 /// Which slice of the list the popup paints.
@@ -12855,17 +12965,58 @@ mod tests {
             .and_then(|rest| rest.split("\n    fn ").next())
             .expect("panes body");
         assert!(
-            body.contains("self.plan.compact_view()"),
+            body.contains("self.plan.pane_view(density, expanded)"),
             "the chat leaf in a split draws the compact strip"
         );
         assert!(
-            body.contains("pane.plan.compact_view()"),
+            body.contains("pane.plan.pane_view(density, expanded)"),
             "every pane draws the compact strip"
+        );
+        assert!(
+            body.contains("plan_strip::pane_density(count, pane_width)"),
+            "the shape follows the pane count and the pane's own width"
+        );
+        assert!(
+            body.contains("toggle_pane_plan"),
+            "a click expands the checklist for that pane alone"
         );
         assert!(
             !body.contains(".plan.view()"),
             "no split pane draws the full checklist"
         );
+    }
+
+    #[test]
+    fn every_pane_keeps_its_strips_at_their_own_height() {
+        // #2624: the transcript takes the slack and the strips keep their
+        // height. Without this the plan card was squeezed to zero in a short
+        // pane, which is why it only ever vanished in a split.
+        let src = include_str!("main.rs");
+        let body = src
+            .split("fn pane_element(")
+            .nth(1)
+            .and_then(|rest| rest.split("\nfn ").next())
+            .expect("pane element");
+        assert!(
+            body.contains(".flex_none().min_w_0().child(chrome)"),
+            "the chrome stack is not shrinkable"
+        );
+        assert!(
+            body.contains(
+                "div()\n                        .flex()\n                        .flex_col()\n                        .flex_1()\n                        .min_w_0()\n                        .min_h_0()\n                        .child(body)"
+            ),
+            "the body is the child that shrinks, and it can"
+        );
+    }
+
+    /// The queue keeps to two rows until the user opens it, so a burst of
+    /// background reports cannot own the conversation's column (#2629).
+    #[test]
+    fn the_queue_strip_folds_to_two_rows_until_it_is_opened() {
+        assert_eq!(queue_rows(0, false), 0);
+        assert_eq!(queue_rows(2, false), 2);
+        assert_eq!(queue_rows(5, false), 2);
+        assert_eq!(queue_rows(5, true), 5);
     }
 
     #[test]
