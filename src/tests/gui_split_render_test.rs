@@ -632,3 +632,56 @@ fn typing_is_not_written_to_the_log_keystroke_by_keystroke() {
         "the predicate decides before the line is written"
     );
 }
+
+#[test]
+fn a_pane_send_stays_in_its_own_leaf() {
+    let send = flat(
+        GUI_MAIN
+            .split("fn send_from_pane(")
+            .nth(1)
+            .expect("the pane send is defined")
+            .split("\n    fn ")
+            .next()
+            .expect("the send has a body"),
+    );
+    assert!(
+        !send.contains("open_session("),
+        "a send must not adopt the window's chat: that closes a leaf and the pane vanishes (#2614)"
+    );
+    assert!(
+        send.contains("pane.busy = true"),
+        "the panel that was typed in is the one that runs the turn"
+    );
+    // The call is reflowed across lines by rustfmt, so the argument list is
+    // matched as text rather than as one unbroken line.
+    assert!(
+        send.contains("spawn_turn(") && send.contains("bridge.service.clone(), session,"),
+        "the turn runs against the pane's session, not the window's"
+    );
+}
+
+#[test]
+fn a_pane_turn_settles_its_own_leaf() {
+    let poll = flat(
+        GUI_MAIN
+            .split("fn poll(")
+            .nth(1)
+            .expect("the poll loop is defined")
+            .split("\n    fn ")
+            .next()
+            .expect("the poll loop has a body"),
+    );
+    assert!(
+        poll.contains("self.settle_pane(session, tokens_per_second, cx);"),
+        "a finished pane turn settles that pane, so the window's conversation never moves"
+    );
+    assert!(
+        poll.contains("self.fold_pane_progress("),
+        "a pane's stream paints into its own card"
+    );
+    let walk = flat(pane_element());
+    assert!(
+        walk.contains("&pane.live,"),
+        "the leaf draws its own live turn instead of an empty one"
+    );
+}

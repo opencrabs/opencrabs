@@ -172,6 +172,15 @@ struct SplitPane {
     /// Which session the strip's path was resolved for, so the DB lookup runs
     /// once per pane rather than once per frame.
     plan_for: Option<Uuid>,
+    /// The turn this pane is running (#2614). A leaf owns its own stream, so
+    /// sending here never repaints the window's conversation.
+    live: transcript::LiveTurn,
+    /// Whether this pane's turn is in flight: its composer takes a queue
+    /// instead of starting a second one, exactly as the window does.
+    busy: bool,
+    /// The token that cancels THIS pane's turn, so `/stop` in one leaf leaves
+    /// the other running.
+    cancel: Option<tokio_util::sync::CancellationToken>,
 }
 
 /// The ledger path, unchanged: `config.database.path`, with the same
@@ -1778,6 +1787,9 @@ impl Dashboard {
                 editor: pane_editor,
                 plan: plan_strip::PlanStripState::default(),
                 plan_for: Some(id),
+                live: transcript::LiveTurn::default(),
+                busy: false,
+                cancel: None,
             },
         );
         // Paint the pane now, with its header, rather than waiting for the
@@ -2014,6 +2026,20 @@ impl Dashboard {
     /// same wording. The pane stops claiming a turn is running the moment the
     /// user asks, and the service's own failure event lands afterwards.
     fn stop_turn(&mut self, cx: &mut Context<Self>) {
+        // A split leaf runs its own turn, so `/stop` reaches the pane the
+        // keyboard is on before it reports nothing to stop (#2614).
+        if let Some(id) = self.pane_focus
+            && let Some(pane) = self.pane_states.get_mut(&id)
+            && let Some(cancel) = pane.cancel.take()
+        {
+            cancel.cancel();
+            pane.busy = false;
+            pane.live.thinking = false;
+            pane.live.notices.push("Operation cancelled.".to_string());
+            logging::info("pane turn cancelled by /stop");
+            cx.notify();
+            return;
+        }
         let Some(cancel) = self.cancel.take() else {
             self.live.notices.push("Nothing is running.".to_string());
             cx.notify();
@@ -3344,10 +3370,228 @@ impl Dashboard {
     }
 
     fn send_from_pane(&mut self, session: Uuid, text: String, cx: &mut Context<Self>) {
-        if self.transcript.session != Some(session) {
-            self.open_session(session, cx);
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            return;
         }
-        self.send_message(text, cx);
+        // A slash line is a screen command: `/help`, `/models` and `/sessions`
+        // read and write the window's own chrome, so they run there and the
+        // leaf is left where it is. A prompt is the pane's own turn (#2614).
+        if let Some(outcome) = commands::parse_command(&text) {
+            // Commands act on the window's chrome, but the reply belongs to
+            // the field it was typed in: after the command runs, the notices
+            // it wrote move to that pane, so a split never answers in the
+            // wrong leaf (#2614).
+            let before = self.live.notices.len();
+            self.run_command(outcome, cx);
+            if Some(session) != self.transcript.session
+                && let Some(pane) = self.pane_states.get_mut(&session)
+            {
+                let split_at = before.min(self.live.notices.len());
+                let moved: Vec<String> = self.live.notices.split_off(split_at);
+                pane.live.notices.extend(moved);
+            }
+            cx.notify();
+            return;
+        }
+        if let Some(cmd) = opencrabs::ui_core::bang::bang_command(&text) {
+            if let Some(pane) = self.pane_states.get_mut(&session) {
+                pane.live.notices.push(format!("! {cmd}"));
+            }
+            bang::spawn(cmd.to_string(), self.sink.clone());
+            cx.notify();
+            return;
+        }
+        if let Some(err) = self.agent_error.clone() {
+            if let Some(pane) = self.pane_states.get_mut(&session) {
+                pane.live.notices.push(format!("agent offline: {err}"));
+            }
+            cx.notify();
+            return;
+        }
+        // One turn per leaf: a second send while this pane is working joins
+        // the session's queue, the terminal's own path (#2441).
+        let Some(pane_busy) = self.pane_states.get(&session).map(|p| p.busy) else {
+            return;
+        };
+        if pane_busy {
+            agent_bridge::queue_push(session, agent_bridge::PendingMessage::plain(text));
+            cx.notify();
+            return;
+        }
+        let Some(bridge) = agent_bridge::bridge() else {
+            agent_bridge::queue_push(session, agent_bridge::PendingMessage::plain(text));
+            cx.notify();
+            return;
+        };
+        let cancel = tokio_util::sync::CancellationToken::new();
+        if let Some(pane) = self.pane_states.get_mut(&session) {
+            pane.live = transcript::LiveTurn::default();
+            pane.live.begin(text.clone());
+            pane.transcript.live_expanded = false;
+            pane.busy = true;
+            pane.cancel = Some(cancel.clone());
+            pane.scroll.scroll_to_bottom();
+        }
+        // Attachments are tracked against the pane's session, so the file
+        // lands in that conversation's artifacts, exactly as the window's does.
+        let attached = editor::marker_paths(&text);
+        agent_bridge::spawn_turn(
+            bridge.service.clone(),
+            session,
+            text,
+            self.sink.clone(),
+            cancel,
+        );
+        if !attached.is_empty() {
+            agent_bridge::spawn_track_files(self.db_path.clone(), session, attached);
+        }
+        cx.notify();
+    }
+
+    /// The progress of a pane's own turn, folded into that leaf's card
+    /// (#2614). The window's live state is untouched: a split shows two turns
+    /// streaming at once without either one bleeding into the other.
+    fn fold_pane_progress(
+        &mut self,
+        session: Uuid,
+        progress: opencrabs::brain::agent::ProgressEvent,
+        cx: &mut Context<Self>,
+    ) {
+        use opencrabs::brain::agent::ProgressEvent;
+        let Some(pane) = self.pane_states.get_mut(&session) else {
+            return;
+        };
+        let live = &mut pane.live;
+        match progress {
+            ProgressEvent::Thinking => live.thinking = true,
+            ProgressEvent::StreamingChunk { text } => {
+                live.thinking = false;
+                live.note_chunk(&text);
+            }
+            ProgressEvent::IntermediateText { text, reasoning } => {
+                live.thinking = false;
+                if let Some(reasoning) = reasoning {
+                    live.push_reasoning(&reasoning);
+                }
+                live.push_narration(&text);
+            }
+            ProgressEvent::ToolStarted {
+                tool_name,
+                tool_input,
+                ..
+            } => {
+                live.thinking = false;
+                let description =
+                    opencrabs::tui::app::App::format_tool_description(&tool_name, &tool_input);
+                live.push_tool(transcript::ToolCall::running(tool_name, description));
+            }
+            ProgressEvent::ToolCompleted {
+                tool_name, success, ..
+            } => {
+                let open = live
+                    .tools
+                    .iter_mut()
+                    .rev()
+                    .find(|c| !c.done && c.name == tool_name && c.task_id.is_none());
+                match open {
+                    Some(call) => {
+                        call.done = true;
+                        call.success = success;
+                    }
+                    None => live.push_tool(transcript::ToolCall {
+                        name: tool_name.clone(),
+                        description: tool_name,
+                        success,
+                        done: true,
+                        task_id: None,
+                    }),
+                }
+            }
+            ProgressEvent::DetachedTaskStarted { task_id, label } => {
+                live.thinking = false;
+                live.push_tool(transcript::ToolCall::detached(task_id, label));
+            }
+            ProgressEvent::DetachedTaskFinished {
+                task_id, success, ..
+            } => {
+                if let Some(call) = live
+                    .tools
+                    .iter_mut()
+                    .rev()
+                    .find(|c| c.task_id.as_deref() == Some(task_id.as_str()))
+                {
+                    call.done = true;
+                    call.success = success;
+                }
+            }
+            ProgressEvent::QueuedUserMessage { text } => live.injected.push(text),
+            _ => {}
+        }
+        pane.scroll.scroll_to_bottom();
+        cx.notify();
+    }
+
+    /// The pane's turn finished: its own card settles and its rows come back
+    /// from the DB, so the window's conversation never moves (#2614).
+    fn settle_pane(
+        &mut self,
+        session: Uuid,
+        tokens_per_second: Option<f64>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pane) = self.pane_states.get_mut(&session) else {
+            return;
+        };
+        pane.live.finalize(tokens_per_second);
+        pane.live.thinking = false;
+        pane.busy = false;
+        pane.cancel = None;
+        pane.scroll.scroll_to_bottom();
+        cx.notify();
+        self.reload_pane(session, cx);
+    }
+
+    /// The pane's turn failed: the reason lands in that leaf's notices instead
+    /// of the window's (#2614).
+    fn fail_pane(&mut self, session: Uuid, text: String, cx: &mut Context<Self>) {
+        let Some(pane) = self.pane_states.get_mut(&session) else {
+            return;
+        };
+        pane.live.notices.push(text);
+        pane.live.thinking = false;
+        pane.busy = false;
+        pane.cancel = None;
+        cx.notify();
+    }
+
+    /// Re-read one pane's rows from the ledger, the same read `add_pane` makes
+    /// when it first draws the leaf (#2614).
+    fn reload_pane(&mut self, session: Uuid, cx: &mut Context<Self>) {
+        let db_path = self.db_path.clone();
+        cx.spawn(async move |this, cx| {
+            let result = transcript::load_recent(db_path, session).await;
+            this.update(cx, |this, cx| {
+                if let Some(pane) = this.pane_states.get_mut(&session) {
+                    match result {
+                        Ok((rows, total)) => {
+                            let (hidden, turns) =
+                                transcript::turns_with_metrics(&rows, total, &this.turn_metrics);
+                            pane.transcript.hidden = hidden;
+                            pane.transcript.turns = turns;
+                            // The persisted row is on screen: the live copy
+                            // retires, exactly as the window's does.
+                            pane.live.clear();
+                        }
+                        Err(e) => pane.transcript.error = Some(e.into()),
+                    }
+                    pane.scroll.scroll_to_bottom();
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn send_message(&mut self, text: String, cx: &mut Context<Self>) {
@@ -3462,19 +3706,22 @@ impl Dashboard {
             // what advances the spinner frame and the `(5s ...)` clock. The
             // old early return froze the line between chunks, which read as
             // "nothing is happening" on a slow provider.
-            if self.busy {
+            // A pane runs its own turn too (#2614), and its spinner, clock
+            // and token counter advance on the same repaint.
+            if self.busy || self.pane_states.values().any(|pane| pane.busy) {
                 cx.notify();
             }
             return;
         }
         let mut reload: Option<Uuid> = None;
         for ev in events {
-            // Sub-agents run their own sessions: their tool rows, tokens and
-            // notices belong to a conversation the user is not reading, so
-            // they are dropped here rather than painted into this pane.
-            if let agent_bridge::TurnEvent::ProgressFor(sid, _) = &ev
+            // A split leaf runs its own turn (#2614), so its progress paints
+            // into that leaf's card. A sub-agent's session has no leaf and is
+            // dropped here rather than painted into somebody else's pane.
+            if let agent_bridge::TurnEvent::ProgressFor(sid, progress) = &ev
                 && self.transcript.session != Some(*sid)
             {
+                self.fold_pane_progress(*sid, progress.clone(), cx);
                 continue;
             }
             match ev {
@@ -3769,10 +4016,18 @@ impl Dashboard {
                 // nothing to draw live yet.
                 agent_bridge::TurnEvent::ProgressFor(_, _) => {}
                 agent_bridge::TurnEvent::Done {
+                    session,
                     content,
                     context_tokens,
                     tokens_per_second,
                 } => {
+                    // A split pane runs its own turn (#2614): the answer
+                    // belongs to that leaf, so the window's footer and its
+                    // conversation are left exactly where the user put them.
+                    if self.transcript.session != Some(session) {
+                        self.settle_pane(session, tokens_per_second, cx);
+                        continue;
+                    }
                     // The provider's own prompt size for the call that just
                     // answered: the honest number for the ctx footer, not an
                     // estimate of what we think we sent.
@@ -3818,8 +4073,12 @@ impl Dashboard {
                     ));
                     reload = self.transcript.session;
                 }
-                agent_bridge::TurnEvent::Failed(msg) => {
-                    self.live.notices.push(msg);
+                agent_bridge::TurnEvent::Failed { session, text } => {
+                    if self.transcript.session != Some(session) {
+                        self.fail_pane(session, text, cx);
+                        continue;
+                    }
+                    self.live.notices.push(text);
                     // A failed turn has no ctx or rate to report; a stale
                     // record would land on whatever turn shows up next.
                     self.pending_metrics = None;
@@ -10928,7 +11187,7 @@ fn pane_element(
                         .child(transcript::view(
                             &pane.transcript,
                             &pane.scroll,
-                            &LiveTurn::default(),
+                            &pane.live,
                             false,
                             if width_share < 1.0 {
                                 split_pane_width(ctx.content, false, width_share)
