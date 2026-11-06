@@ -100,7 +100,6 @@ use uuid::Uuid;
 use opencrabs::brain::mission_control::{McActivity, McAnalytics, McInboxItem, McScheduleItem};
 use opencrabs::config::Config;
 use opencrabs::tui::app::mission_control::log_viewer::LogViewerState;
-use opencrabs::tui::render::format_token_count_raw;
 use opencrabs::ui_core::keys::{UiKey, is_typing_key};
 use opencrabs::ui_core::usage::data::Period;
 use opencrabs::ui_core::usage::input::{self, DashboardState, UsageKeyOutcome};
@@ -6405,10 +6404,10 @@ impl Render for Dashboard {
                         .child(body)
                         .into_any_element(),
                     {
-                        // Key hints left, ctx budget right: the TUI's own footer
-                        // split (`tui::render::input` draws the counter as the
-                        // input box's right-side title).
-                        let (ctx_label, ctx_color) = ctx_footer(self.ctx_tokens, self.ctx_max);
+                        // Key hints left, identity right. The ctx budget used
+                        // to sit at the right edge too, and it was the same
+                        // number the tool block's own footer already carries:
+                        // read twice, on every turn (#2631).
                         // Who is answering, from where, on what branch, and how
                         // fast: the same fields the TUI's footer carries.
                         let (provider, model) = match agent_bridge::bridge() {
@@ -10660,35 +10659,6 @@ fn git_branch(dir: &std::path::Path) -> Option<String> {
     if name.is_empty() { None } else { Some(name) }
 }
 
-/// The TUI's ctx counter, rebuilt for the footer: same numbers, same
-/// grammar (`ctx: 12K/200K (6%)`) and the same colour thresholds, so the
-/// desktop window cannot drift from the terminal (`tui::render::input`).
-///
-/// `None` (no answer yet) or an unknown window draws a dash, exactly like
-/// the TUI's placeholder, instead of a percentage of nothing.
-fn ctx_footer(used: Option<u32>, max: u32) -> (String, u32) {
-    let Some(used) = used.filter(|_| max > 0) else {
-        return ("ctx: -".to_string(), palette::current().text_faint);
-    };
-    let pct = (used as f64 / max as f64) * 100.0;
-    let color = if pct > 80.0 {
-        palette::current().red
-    } else if pct > 60.0 {
-        palette::current().amber
-    } else {
-        palette::current().teal
-    };
-    (
-        format!(
-            "ctx: {}/{} ({:.0}%)",
-            format_token_count_raw(used as i64),
-            format_token_count_raw(max as i64),
-            pct
-        ),
-        color,
-    )
-}
-
 /// The key reference, painted over everything else (#2320).
 ///
 /// Rows come from `ui_core::help_keys`, the table the terminal's `/help`
@@ -12851,41 +12821,6 @@ mod tests {
             "the row is one line"
         );
         assert!(footer.contains(".truncate()"), "the text ellipsizes");
-    }
-
-    #[test]
-    fn the_ctx_counter_speaks_the_tui_grammar() {
-        assert_eq!(ctx_footer(Some(12_000), 200_000).0, "ctx: 12K/200K (6%)");
-        assert_eq!(
-            ctx_footer(Some(140_000), 1_000_000).0,
-            "ctx: 140K/1.0M (14%)"
-        );
-    }
-
-    #[test]
-    fn the_ctx_counter_colours_at_the_tui_thresholds() {
-        // Same boundaries as `tui::render::input`: >80 red, >60 amber, else
-        // teal. Below 60 stays calm so a healthy turn does not shout.
-        assert_eq!(ctx_footer(Some(10_000), 200_000).1, palette::current().teal);
-        assert_eq!(
-            ctx_footer(Some(130_000), 200_000).1,
-            palette::current().amber
-        );
-        assert_eq!(ctx_footer(Some(170_000), 200_000).1, palette::current().red);
-    }
-
-    #[test]
-    fn a_budget_with_no_sample_stays_a_dash() {
-        // Nothing measured, or no known window: never "0%" and never a
-        // counter for a conversation that has not run a turn yet.
-        assert_eq!(
-            ctx_footer(None, 200_000),
-            ("ctx: -".to_string(), palette::current().text_faint)
-        );
-        assert_eq!(
-            ctx_footer(Some(900), 0),
-            ("ctx: -".to_string(), palette::current().text_faint)
-        );
     }
 
     #[test]
