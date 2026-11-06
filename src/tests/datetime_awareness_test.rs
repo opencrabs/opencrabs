@@ -22,7 +22,10 @@ async fn subagent_or_worker_turn_ingress_carries_time_marker() {
     assert!(augmented.starts_with("[Current time: "));
     assert!(augmented.contains("UTC"));
     assert!(augmented.contains("user:"));
-    assert!(augmented.ends_with(prompt));
+    // The marker is prepended; the plan reminder and MEMORY.md recall ride
+    // after the message (#799), so what must survive is the message itself,
+    // not the tail position.
+    assert!(augmented.contains(prompt));
 }
 
 #[test]
