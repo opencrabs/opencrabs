@@ -600,3 +600,20 @@ fn the_keyboard_follows_the_caret_between_panes() {
         "the composer target resolves the focused pane's own field"
     );
 }
+
+#[test]
+fn a_pane_wears_a_ring_and_the_unfocused_ones_are_drawn_back() {
+    let walk = flat(pane_element());
+    assert!(
+        walk.contains("border_color(rgb(focus_ring_color(focused)))"),
+        "the leaf that owns the keyboard wears the accent ring"
+    );
+    assert!(
+        walk.contains("UNFOCUSED_PANE_OPACITY"),
+        "a pane that does not own the keyboard reads as disabled"
+    );
+    assert!(
+        walk.contains("this.refocus_screen();"),
+        "clicking a pane takes the keyboard, not only the dim composer"
+    );
+}

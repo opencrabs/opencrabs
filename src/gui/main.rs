@@ -10611,11 +10611,7 @@ fn pane_header(
     // title colour (#2475). A one-pixel rule in the panel colour read as
     // nothing on both themes, which is why the band is two pixels and the
     // unfocused header sits on the same contrast as the divider.
-    let rule_color = if focused {
-        palette::current().accent
-    } else {
-        split_rule_color()
-    };
+    let rule_color = focus_ring_color(focused);
     let header_bg = if focused {
         palette::current().panel_hi
     } else {
@@ -10668,6 +10664,13 @@ const SPLIT_DIVIDER_PX: f32 = 2.0;
 /// and takes the pointer, because a two pixel target is a pixel hunt.
 const SPLIT_HANDLE_PX: f32 = 12.0;
 
+/// How far a pane is drawn back while another one owns the keyboard (#2612).
+///
+/// It has to read as "disabled" at a glance without hiding the transcript: at
+/// 0.62 the body text still parses, and the accent ring on the live pane is
+/// unmistakable beside it.
+const UNFOCUSED_PANE_OPACITY: f32 = 0.62;
+
 /// The chord that opens a split (#2438, #2471): `ctrl-shift-pipe` puts the
 /// panes side by side and `ctrl-shift-underscore` stacks them.
 ///
@@ -10707,6 +10710,20 @@ fn rotation_chord(ks: &gpui::Keystroke) -> Option<split::PaneRotation> {
 /// `panel_hi` sat within a few points of the background on the light ones.
 fn split_rule_color() -> u32 {
     palette::current().text_faint
+}
+
+/// The ring around a pane (#2612): the accent for the leaf that owns the
+/// keyboard, the divider colour for the rest.
+///
+/// Both states carry the same width, so moving the caret never shifts a row.
+/// The unfocused ring is not decoration: it is what keeps a dimmed pane
+/// readable as a pane instead of as a hole in the window.
+fn focus_ring_color(focused: bool) -> u32 {
+    if focused {
+        palette::current().accent
+    } else {
+        split_rule_color()
+    }
 }
 
 /// What one pane may plan its rows against (#2473, #2476). Side by side the
@@ -10946,6 +10963,17 @@ fn pane_element(
                 .flex_1()
                 .min_w_0()
                 .min_h_0()
+                // The leaf that owns the keyboard wears the accent all the way
+                // round, and the leaves that do not are drawn back so a split
+                // reads as one live pane beside disabled ones (#2612). Same
+                // border width on both states, so focus never shifts a row.
+                .rounded(px(CARD_RADIUS))
+                .border_1()
+                .border_color(rgb(focus_ring_color(focused)))
+                .when(!focused, |d| d.opacity(UNFOCUSED_PANE_OPACITY))
+                .when(interactive, |d| {
+                    d.on_mouse_down(MouseButton::Left, take_keyboard)
+                })
                 .child(pane_header(
                     SharedString::from(format!("pane-close-{session}")),
                     title,
