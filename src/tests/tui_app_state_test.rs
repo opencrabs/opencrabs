@@ -5,6 +5,7 @@ use uuid::Uuid;
 #[test]
 fn test_display_message_from_db_message() {
     let msg = Message {
+        forward: None,
         id: Uuid::new_v4(),
         session_id: Uuid::new_v4(),
         role: "user".to_string(),
@@ -29,6 +30,7 @@ fn test_display_message_from_db_message() {
 #[test]
 fn test_display_message_thinking_from_db() {
     let msg = Message {
+        forward: None,
         id: Uuid::new_v4(),
         session_id: Uuid::new_v4(),
         role: "assistant".to_string(),

@@ -67,9 +67,15 @@ pub enum TuiEvent {
     },
 
     /// Agent completed response
+    ///
+    /// `response` is boxed to keep this variant small: `AgentResponse` carries
+    /// a full `Message` in `completed_plan`, which made `TuiEvent` large enough
+    /// to trip `clippy::large_enum_variant` once `Message` grew the forward
+    /// provenance field (#2608). Boxing the payload is the canonical fix —
+    /// the event is moved through an mpsc channel, never stored en masse.
     ResponseComplete {
         session_id: Uuid,
-        response: AgentResponse,
+        response: Box<AgentResponse>,
     },
 
     /// An error occurred

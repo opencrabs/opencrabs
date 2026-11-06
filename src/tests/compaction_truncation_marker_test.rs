@@ -73,6 +73,7 @@ fn trigger_wording_rides_both_variants() {
 #[test]
 fn loader_anchors_on_a_truncation_marker() {
     let row = |content: &str| crate::db::models::Message {
+        forward: None,
         id: uuid::Uuid::new_v4(),
         session_id: uuid::Uuid::nil(),
         role: "user".to_string(),
@@ -113,6 +114,7 @@ fn loader_anchors_on_a_truncation_marker() {
 #[test]
 fn loader_ignores_an_assistant_row_quoting_the_marker() {
     let row = |role: &str, content: &str| crate::db::models::Message {
+        forward: None,
         id: uuid::Uuid::new_v4(),
         session_id: uuid::Uuid::nil(),
         role: role.to_string(),
@@ -170,6 +172,7 @@ fn loader_ignores_an_assistant_row_quoting_the_marker() {
 #[test]
 fn loader_ignores_a_user_row_quoting_the_marker_mid_text() {
     let row = |content: &str| crate::db::models::Message {
+        forward: None,
         id: uuid::Uuid::new_v4(),
         session_id: uuid::Uuid::nil(),
         role: "user".to_string(),

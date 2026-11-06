@@ -251,6 +251,88 @@ pub struct Message {
     /// START and updated in place, so its `created_at` matches the triggering
     /// user message and any timestamp subtraction collapses to zero.
     pub duration_secs: Option<i64>,
+    /// Where a forwarded copy came from (#2608). `None` for every row the
+    /// user typed or the agent wrote; `Some` only on rows that were copied
+    /// out of another session.
+    ///
+    /// Boxed on purpose: provenance is rare, and paying its 72 bytes on every
+    /// message grew `AgentResponse`, which tripped `clippy::large_enum_variant`
+    /// on `TuiEvent::ResponseComplete` (#2608).
+    pub forward: Option<Box<ForwardProvenance>>,
+}
+
+/// The provenance of one forwarded row (#2608).
+///
+/// A forward is a copy, so the destination keeps its own row and carries a
+/// frozen description of where it came from. The label is stored, not joined:
+/// renaming the source session later must not rewrite what the reader saw
+/// when the message arrived.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForwardProvenance {
+    /// The session the message was copied out of.
+    pub from_session: Uuid,
+    /// The row it was copied from.
+    pub from_message: Uuid,
+    /// The source session's name, frozen at forward time.
+    pub label: String,
+    /// Shared by every row of one multi-select forward, so the renderer
+    /// draws one header and one accent bar over N rows.
+    pub batch: Uuid,
+}
+
+/// Read the forward provenance off a row, if any. Each column is optional on
+/// its own so a partially-written row loads as no provenance instead of
+/// failing the whole transcript (#2608).
+fn forward_from_columns(row: &rusqlite::Row) -> Option<Box<ForwardProvenance>> {
+    let from_session = uuid_col(row, "forwarded_from_session").ok()?;
+    let from_message = uuid_col(row, "forwarded_from_message").ok()?;
+    let batch = uuid_col(row, "forward_batch_id").ok()?;
+    let label: Option<String> = row.get("forwarded_from_label").ok().flatten();
+    Some(Box::new(ForwardProvenance {
+        from_session,
+        from_message,
+        label: label.unwrap_or_default(),
+        batch,
+    }))
+}
+
+/// The rows one forward writes into the destination session (#2608).
+///
+/// Pure, so the two rules that decide whether a forward is safe to read are
+/// pinned by test rather than by the SQL around them:
+///
+/// 1. Every copied row lands as `role = "user"`. Keeping the source role would
+///    make the destination's next agent turn read another conversation's
+///    answer as its own prior output, which silently corrupts that session.
+/// 2. Nothing about the source turn rides along: no cost, tokens, cache
+///    counters or duration, because those belong to the turn that produced
+///    them, not to the session that received the copy.
+pub fn forwarded_rows(
+    source: &[Message],
+    target: Uuid,
+    first_sequence: i32,
+    label: &str,
+    batch: Uuid,
+) -> Vec<Message> {
+    source
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let mut row = Message::new(
+                target,
+                "user".to_string(),
+                m.content.clone(),
+                first_sequence + i as i32,
+            );
+            row.forward = Some(Box::new(ForwardProvenance {
+                from_session: m.session_id,
+                from_message: m.id,
+                label: label.to_string(),
+                batch,
+            }));
+            row
+        })
+        .collect()
 }
 
 impl Message {
@@ -270,6 +352,7 @@ impl Message {
             thinking: row.get("thinking").ok().flatten(),
             // `.ok()` so rows from before the column existed still load.
             duration_secs: row.get("duration_secs").ok().flatten(),
+            forward: forward_from_columns(row),
         })
     }
 
@@ -289,6 +372,7 @@ impl Message {
             cache_read_tokens: None,
             thinking: None,
             duration_secs: None,
+            forward: None,
         }
     }
 }

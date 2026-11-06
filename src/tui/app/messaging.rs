@@ -3554,7 +3554,7 @@ impl App {
                         tracing::info!("[agent_task] OK — sending ResponseComplete");
                         if let Err(e) = event_sender.send(TuiEvent::ResponseComplete {
                             session_id,
-                            response,
+                            response: Box::new(response),
                         }) {
                             tracing::error!("[agent_task] FAILED to send ResponseComplete: {}", e);
                         }
@@ -3652,7 +3652,7 @@ impl App {
                 Ok(response) => {
                     let _ = event_sender.send(TuiEvent::ResponseComplete {
                         session_id,
-                        response,
+                        response: Box::new(response),
                     });
                 }
                 Err(e) => {

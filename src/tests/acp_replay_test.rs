@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 
 fn msg(role: &str, content: &str, thinking: Option<&str>) -> Message {
     Message {
+        forward: None,
         id: uuid::Uuid::new_v4(),
         session_id: uuid::Uuid::new_v4(),
         role: role.to_string(),

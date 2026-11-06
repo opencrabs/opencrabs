@@ -355,7 +355,7 @@ pub(crate) async fn resume_delivery_task(
             let outcome = if channel == "tui" {
                 match ev_tx.send(TuiEvent::ResponseComplete {
                     session_id,
-                    response,
+                    response: Box::new(response),
                 }) {
                     Ok(()) => ResumeSendOutcome::SurfacedTui,
                     Err(_) => ResumeSendOutcome::SendFailed,

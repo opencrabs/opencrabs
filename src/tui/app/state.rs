@@ -1628,7 +1628,7 @@ impl App {
                     Ok(response) => {
                         let _ = event_sender.send(TuiEvent::ResponseComplete {
                             session_id,
-                            response,
+                            response: Box::new(response),
                         });
                     }
                     Err(e) => {
@@ -2389,7 +2389,7 @@ impl App {
             } => {
                 if self.is_current_session(session_id) {
                     if self.is_processing {
-                        self.complete_response(response).await?;
+                        self.complete_response(*response).await?;
                     } else {
                         // Session was cancelled (Esc×2) — agent finished after cancel.
                         // Reload from DB to pick up any final content the agent wrote
