@@ -55,6 +55,13 @@ async fn split_and_open_picker(app: &mut App, dir: &std::path::Path) {
     app.file_picker_current_dir = dir.to_path_buf();
 }
 
+fn alt_tab() -> crossterm::event::KeyEvent {
+    crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Tab,
+        crossterm::event::KeyModifiers::ALT,
+    )
+}
+
 fn key(code: crossterm::event::KeyCode) -> crossterm::event::KeyEvent {
     crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE)
 }
@@ -126,23 +133,22 @@ async fn tab_select_returns_to_chat_before_persistence_completes_ordering() {
 }
 
 #[tokio::test]
-async fn tab_still_cycles_panes_when_chat_is_split() {
-    // The #2494 pane-cycling behaviour must survive the #2526 guard:
-    // in Chat mode on a split layout, Tab still moves pane focus.
+async fn alt_tab_cycles_panes_when_chat_is_split() {
+    // Pane rotation moved off bare Tab onto Alt+Tab (#2580), because Tab is
+    // also the follow-up suggestion and emoji picker accept. The #2494 rule
+    // that a split Chat keeps cycling panes still holds, now on Alt+Tab.
     let mut app = app().await;
     app.pane_manager.split(SplitDirection::Horizontal);
     let ids = app.pane_manager.pane_ids_in_order();
     assert_eq!(ids.len(), 2);
     let before = app.pane_manager.focused_pane().map(|p| p.id);
 
-    app.handle_key_event(key(crossterm::event::KeyCode::Tab))
-        .await
-        .unwrap();
+    app.handle_key_event(alt_tab()).await.unwrap();
 
     assert_eq!(app.mode, AppMode::Chat);
     assert_ne!(
         app.pane_manager.focused_pane().map(|p| p.id),
         before,
-        "Tab in split Chat mode must still cycle pane focus (#2494)"
+        "Alt+Tab in split Chat mode must still cycle pane focus (#2494, #2580)"
     );
 }
