@@ -4201,8 +4201,8 @@ impl Dashboard {
         self.running_tasks_label_for(session)
     }
 
-    /// The same roster for ANY session, not just the open conversation: the
-    /// pane footers report each panel's own detached commands (#2593).
+    /// The same roster for ANY session, not just the open conversation, so every
+    /// pane prints its own detached commands above its composer (#2593).
     fn running_tasks_label_for(&self, session: Uuid) -> Option<String> {
         let bridge = agent_bridge::bridge()?;
         let mgr = bridge.service.background_manager()?;
@@ -4215,10 +4215,11 @@ impl Dashboard {
     }
 
     /// One pane's footer text (#2593): pane index, whether that session is
-    /// mid-turn, who is answering it, the detached commands it is waiting on,
-    /// and its plan progress. Resolved here, once per frame, because it reads
-    /// the bridge and the plan state, neither of which belongs in a draw pass
-    /// per pane.
+    /// mid-turn, who is answering it, and its plan progress. The detached
+    /// commands ride the strip above the composer instead, so the one-line
+    /// footer never grows past the pane. Resolved here, once per frame,
+    /// because it reads the bridge and the plan state, neither of which
+    /// belongs in a draw pass per pane.
     fn pane_footer_text(&self, session: Uuid, index: usize, count: usize) -> String {
         let mut parts: Vec<String> = Vec::new();
         if count > 1 {
@@ -4236,9 +4237,10 @@ impl Dashboard {
                 parts.push(format!("{provider} / {label}"));
             }
         }
-        if let Some(roster) = self.running_tasks_label_for(session) {
-            parts.push(format!("⏳ {roster}"));
-        }
+        // The detached commands are NOT repeated here: each pane prints its
+        // own strip above the composer, right-aligned in the palette's cyan
+        // (#2617). Printing the same label a second time in a one-line footer
+        // made it run past the pane's edge and over its neighbour.
         if self.plan_for == Some(session)
             && let Some(progress) = self.plan.progress_label()
         {
@@ -10500,15 +10502,19 @@ fn visible_live<'a>(live: &'a transcript::LiveTurn, owned: bool) -> &'a transcri
 ///
 /// Same formatter as the TUI (`tui::render::background`), so the two surfaces
 /// cannot disagree about what a running task looks like. No border and no
-/// percentage width: it sits in the column flow and disappears when idle.
+/// percentage width: it sits in the column flow and disappears when idle. It
+/// aligns to the chat's right edge and prints in the palette's cyan, which is
+/// where the owner reads a background job (#2617).
 fn task_strip(text: String) -> Div {
     div()
         .flex()
         .flex_row()
         .items_center()
+        .justify_end()
+        .w_full()
         .gap_2()
         .text_xs()
-        .text_color(rgb(palette::current().amber))
+        .text_color(rgb(palette::current().teal))
         .child(SharedString::from(format!("⏳ {text}")))
 }
 
@@ -12464,6 +12470,29 @@ mod tests {
     }
 
     #[test]
+    fn the_running_task_strip_sits_right_in_teal() {
+        // #2617: the strip reads the same on both surfaces, and the GUI parks
+        // it above the composer on the chat's right edge in the palette's
+        // cyan. Left-aligned amber was neither.
+        let src = include_str!("main.rs");
+        let strip = src
+            .split("fn task_strip(")
+            .nth(1)
+            .and_then(|rest| rest.split("\nfn ").next())
+            .expect("task strip");
+        assert!(strip.contains(".justify_end()"), "the strip sits right");
+        assert!(strip.contains(".w_full()"), "the row owns the column width");
+        assert!(
+            strip.contains("palette::current().teal"),
+            "a running job reads cyan"
+        );
+        assert!(
+            !strip.contains("palette::current().amber"),
+            "amber is not the running colour"
+        );
+    }
+
+    #[test]
     fn every_pane_owns_its_drag_to_copy_state() {
         // #2623: a pane transcript was built with `ViewHooks::default()`,
         // which leaves `drag: None`, so dragging over a split pane selected
@@ -12547,6 +12576,23 @@ mod tests {
         let only = Uuid::new_v4();
         assert_eq!(resolve_split_focus(&[only], Some(only), Some(only)), None);
         assert_eq!(resolve_split_focus(&[], Some(only), Some(only)), None);
+    }
+
+    #[test]
+    fn the_pane_footer_never_repeats_the_running_task_strip() {
+        // #2620: the strip above the composer is the single source (#2617).
+        // Printing the roster again in the one-line footer ran it past the
+        // pane's edge and over its neighbour.
+        let src = include_str!("main.rs");
+        let footer = src
+            .split("fn pane_footer_text(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .expect("pane footer text");
+        assert!(
+            !footer.contains('\u{23f3}') && !footer.contains('\u{231b}'),
+            "the footer carries no task strip"
+        );
     }
 
     #[test]
