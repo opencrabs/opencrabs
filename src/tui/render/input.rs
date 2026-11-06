@@ -1002,7 +1002,11 @@ pub(super) fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
     // active fallback with the primary's stale pick after a sticky fallback.
     let (provider_str, model_str) = status_provider_model(app);
 
-    // Working directory — collapse $HOME to ~, then truncate if still long
+    // Working directory — collapse $HOME to ~. How much width it may spend
+    // is decided below, once the policy chip's cost is known: the bar is a
+    // single line and the chip is rendered last, so budgeting only the
+    // directory (and letting the branch suffix run free) is what pushed the
+    // approval indicator off the right edge (#2652).
     let raw_dir = app.working_directory.to_string_lossy();
     let home_dir = dirs::home_dir()
         .map(|h| h.to_string_lossy().to_string())
@@ -1011,15 +1015,6 @@ pub(super) fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
         format!("~{}", &raw_dir[home_dir.len()..])
     } else {
         raw_dir.to_string()
-    };
-    let short_dir = if short_dir.len() > 40 {
-        let mut start = short_dir.len().saturating_sub(37);
-        while start > 0 && !short_dir.is_char_boundary(start) {
-            start -= 1;
-        }
-        format!("...{}", &short_dir[start..])
-    } else {
-        short_dir
     };
     // Git branch suffix: when the working directory sits inside a git
     // repo, render `(branch)` as a separate cyan span after the dir.
@@ -1047,6 +1042,22 @@ pub(super) fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
     let (policy_text, policy_role) = status_policy(app);
     let policy_color = theme::role(policy_role);
 
+    // Width budget for the directory and the branch suffix that follows it.
+    //
+    // Reserve what the fixed fields and the policy chip cost, then split the
+    // remainder between the two: the branch keeps its tail (the last segment
+    // is the distinctive part, and a `feat/x` name reads better truncated at
+    // the front), the directory keeps its tail, and neither can starve the
+    // chip (#2652). 12 columns are held back for the optional tok/s field.
+    let reserve = sep_text.len() + policy_text.chars().count() + 12;
+    let left_fixed = session_text.chars().count() + provider_model_text.chars().count();
+    let budget = (area.width as usize).saturating_sub(left_fixed + reserve);
+    let branch_text = git_branch
+        .as_ref()
+        .map(|b| fit_tail(&format!(" ({b})"), budget.min(28)));
+    let branch_len = branch_text.as_ref().map(|b| b.chars().count()).unwrap_or(0);
+    let short_dir = fit_tail(&short_dir, budget.saturating_sub(branch_len).max(12));
+
     let mut spans = vec![
         Span::styled(
             session_text,
@@ -1058,9 +1069,9 @@ pub(super) fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
         ),
         Span::styled(short_dir, Style::default().fg(theme::role(Role::BlueSlate))),
     ];
-    if let Some(ref branch) = git_branch {
+    if let Some(branch) = branch_text {
         spans.push(Span::styled(
-            format!(" ({branch})"),
+            branch,
             Style::default().fg(theme::role(Role::AccentTeal)),
         ));
     }
@@ -1126,6 +1137,24 @@ pub(super) fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
     let line = Line::from(spans);
     let para = Paragraph::new(line).alignment(Alignment::Left);
     f.render_widget(para, area);
+}
+
+/// Keep the tail of `s`, prefixed with `...` when it must be shortened.
+///
+/// Tail, not head: a path's last segments and a branch's last segments are
+/// what identify them, so `...encrabs-msg-forward` says more than
+/// `~/Development/open...`. Counted in chars, never bytes, so a non-ASCII
+/// path cannot be cut mid-codepoint (#2652).
+fn fit_tail(s: &str, max: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max {
+        return s.to_string();
+    }
+    if max <= 3 {
+        return chars[..max].iter().collect();
+    }
+    let start = chars.len() - (max - 3);
+    format!("...{}", chars[start..].iter().collect::<String>())
 }
 
 /// Provider and model for a status line, from one coherent source.
