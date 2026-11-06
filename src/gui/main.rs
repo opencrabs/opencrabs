@@ -24,6 +24,7 @@
 //! for a session other than the open one is logged, not resumed: the window
 //! runs one conversation at a time.
 
+mod accent;
 mod agent_bridge;
 mod attachment_view;
 mod bang;
@@ -98,6 +99,8 @@ use uuid::Uuid;
 
 use opencrabs::brain::mission_control::{McActivity, McAnalytics, McInboxItem, McScheduleItem};
 use opencrabs::config::Config;
+use opencrabs::config::GuiTheme;
+use opencrabs::config::gui_theme;
 use opencrabs::tui::app::mission_control::log_viewer::LogViewerState;
 use opencrabs::tui::render::format_token_count_raw;
 use opencrabs::ui_core::keys::{UiKey, is_typing_key};
@@ -121,8 +124,6 @@ enum Screen {
     Chat,
     Usage,
     Files,
-    /// The themes screen (ctrl+shift+t): preview a theme, keep it or restore.
-    Themes,
     /// The model picker: every pair the terminal offers, the live one marked.
     Models,
     /// The onboarding wizard, full screen: the same steps, the same writes.
@@ -355,11 +356,6 @@ const RAIL_MAX_REM: f32 = 32.0;
 /// once typing stops; the next key brings it back (#2531). The window and the
 /// terminal share one rule, so this aliases the engine's constant.
 const CARET_IDLE_AFTER: std::time::Duration = opencrabs::ui_core::palette::CARET_IDLE_AFTER;
-
-/// The side panel beside a previewing screen (`themes-sidebar`), plus the
-/// `gap_3` between it and the transcript. The transcript is planned against
-/// what is left, so its tiles never run under the panel.
-const THEMES_PANEL_WIDTH: f32 = 260.0;
 
 /// Which messaging channels the config says are live: enabled and carrying the
 /// credential that channel needs. Read once when Seeker opens, so the hint says
@@ -643,16 +639,25 @@ struct Dashboard {
     topic_rename: Option<uuid::Uuid>,
     /// The read-only info panel for a topic, while it is open (#2304).
     topic_info: Option<sessions::TopicInfo>,
-    /// The palette the window had when the themes screen opened. Esc puts it
-    /// back, so a preview is never kept by accident.
-    themes_origin: Option<palette::Palette>,
-    /// The theme the themes screen is previewing, if the user has clicked one.
-    themes_pick: Option<String>,
-    /// The row the keyboard is standing on in the themes sidebar, and every
-    /// theme this visit has already previewed, oldest first. The history is
-    /// how a good preview is found again without hunting the list.
-    themes_index: usize,
-    themes_history: Vec<String>,
+    /// The theme modal's accent, as hue/saturation/value so a drag keeps its
+    /// precision instead of round-tripping through 8-bit channels (#2619).
+    themes_hue: f32,
+    themes_sat: f32,
+    themes_val: f32,
+    /// Whether the theme modal is open. It is an overlay, not a screen: the
+    /// window behind it keeps showing whatever it showed, so the choice is
+    /// made against real content (#2619).
+    themes_open: bool,
+    /// The card the keyboard is standing on: 0 orgn, 1 light, 2 custom, 3 auto.
+    themes_card: usize,
+    /// Which accent control the pointer is dragging, if any.
+    themes_drag: Option<accent::Drag>,
+    /// The wheel's box in window coordinates, recorded at paint time so a
+    /// press can be turned into a hue (#2619).
+    themes_wheel: std::rc::Rc<std::cell::RefCell<Option<[f32; 4]>>>,
+    /// The saturation and brightness tracks' boxes, recorded the same way.
+    themes_sat_track: std::rc::Rc<std::cell::RefCell<Option<[f32; 4]>>>,
+    themes_val_track: std::rc::Rc<std::cell::RefCell<Option<[f32; 4]>>>,
     /// The /cd picker's browse state (#2527): the directory on screen, its
     /// subdirectories read at open and on every descend, the row the
     /// keyboard stands on, and whether dotfile directories are listed.
@@ -755,23 +760,6 @@ struct Dashboard {
     /// the TUI. `None` outside a git tree, which the footer shows as a dash
     /// rather than a made-up name.
     branch: Option<String>,
-}
-
-/// How many previews the themes sidebar's history strip keeps. A trail, not a
-/// second list: enough to step back a few times, short enough to stay quiet.
-const THEMES_HISTORY_LEN: usize = 6;
-
-/// Record a preview in the history strip.
-///
-/// Newest goes last so the strip reads oldest to newest, the same theme never
-/// appears twice (previewing it again moves it forward), and the trailing end
-/// is dropped once the trail is full.
-fn remember_preview(history: &mut Vec<String>, name: &str) {
-    history.retain(|seen| seen != name);
-    history.push(name.to_string());
-    while history.len() > THEMES_HISTORY_LEN {
-        history.remove(0);
-    }
 }
 
 /// Apply sidebar visibility without letting a closed rail retain keyboard
@@ -1027,6 +1015,12 @@ impl Dashboard {
     /// derived from this one list, so an opener cannot forget to move focus
     /// and a closer cannot forget to hand it back (#2454, #2455).
     fn open_overlays(&self) -> Vec<OverlayId> {
+        // The theme modal owns the keyboard on every screen, including the
+        // non-chat ones: it is the topmost surface while it is open, so
+        // nothing behind it may answer a key (#2619).
+        if self.themes_open {
+            return vec![OverlayId::Themes];
+        }
         // A full screen is its own surface: the rail and the chat overlays are
         // not drawn over it, so nothing below can own a key there.
         if self.screen != Screen::Chat {
@@ -1529,9 +1523,9 @@ impl Dashboard {
         };
         match action {
             commands::GuiAction::OpenThemes => {
-                // The toggle closes it, so ask first: `/theme` on the themes
-                // screen must not throw the preview away.
-                if self.screen != Screen::Themes {
+                // The toggle closes it, so ask first: `/theme` on the open
+                // modal must not reopen it behind itself.
+                if !self.themes_open {
                     self.toggle_themes(cx);
                 }
             }
@@ -2767,7 +2761,6 @@ impl Dashboard {
                 self.onboard = None;
                 self.screen = Screen::Usage;
             }
-            Screen::Themes => self.close_themes(true, cx),
             // The skills list is a full screen too: ctrl+shift+u leaves it for
             // the ledger, the same as any other screen.
             Screen::Skills => self.screen = Screen::Usage,
@@ -3047,41 +3040,325 @@ impl Dashboard {
         .detach();
     }
 
-    /// ctrl+shift+t: the themes screen. Opening it remembers the palette the
-    /// window shows now; closing it without keeping restores that palette.
+    /// ctrl+shift+t: the theme modal (#2619). It opens over the conversation,
+    /// centred, so the choice is made against real content. Picking a card
+    /// saves it at once, the way Telegram's theme picker does; there is no
+    /// draft to keep or discard.
     fn toggle_themes(&mut self, cx: &mut Context<Self>) {
-        if self.screen == Screen::Themes {
-            self.close_themes(true, cx);
+        if self.themes_open {
+            self.close_themes(cx);
             return;
         }
-        self.themes_origin = Some(palette::current());
-        self.themes_pick = None;
-        // The keyboard starts at the top of the list; the row that is already
-        // in force is marked as selected, so the eye finds it either way.
-        self.themes_index = 0;
-        self.themes_history.clear();
-        self.rail_actions = None;
-        self.screen = Screen::Themes;
-        // The window's root takes the keyboard, not the composer: on this
-        // screen the arrows walk the list and Enter previews, so a stale
-        // editor focus would send a message instead.
-        self.refocus_screen();
+        // The wheel opens on the accent in force, so a second visit starts
+        // where the first left off.
+        let accent = palette::saved_mode()
+            .1
+            .as_deref()
+            .and_then(gui_theme::parse_accent)
+            .unwrap_or(gui_theme::DEFAULT_ACCENT);
+        let (hue, sat, val) = gui_theme::rgb_to_hsv(accent);
+        self.themes_hue = hue;
+        self.themes_sat = sat.max(0.25);
+        self.themes_val = val.max(0.35);
+        self.themes_card = match palette::saved_mode().0 {
+            GuiTheme::Orgn => 0,
+            GuiTheme::Light => 1,
+            GuiTheme::Custom => 2,
+            GuiTheme::Auto => 3,
+        };
+        self.themes_drag = None;
+        self.themes_open = true;
+        // The window's root takes the keyboard, not the composer: the modal
+        // owns the arrows and Enter, so a stale editor focus would send a
+        // message instead.
+        self.refocus_overlay();
         cx.notify();
     }
 
-    /// Leave the themes screen. `restore` puts back the palette from before
-    /// the screen opened: Esc and the toggle use it, Keep does not.
-    fn close_themes(&mut self, restore: bool, cx: &mut Context<Self>) {
-        if let Some(origin) = self.themes_origin.take()
-            && restore
-        {
-            palette::restore(origin);
-        }
-        self.themes_pick = None;
-        self.themes_history.clear();
-        self.screen = Screen::Chat;
-        self.refocus_screen();
+    /// Leave the theme modal. A pick was already saved, so closing only puts
+    /// the screen back; a card the arrows merely previewed is undone here, so
+    /// the window never keeps a theme the config does not hold.
+    fn close_themes(&mut self, cx: &mut Context<Self>) {
+        self.themes_drag = None;
+        self.themes_open = false;
+        palette::adopt(palette::saved());
+        self.refocus_overlay();
         cx.notify();
+    }
+
+    /// The accent the wheel is painting right now.
+    fn themes_accent(&self) -> u32 {
+        gui_theme::hsv_to_rgb(self.themes_hue, self.themes_sat, self.themes_val)
+    }
+
+    /// The modal's own keys. The arrows walk the four cards without writing
+    /// anything, so the window repaints in the card under the keyboard and the
+    /// choice is made by looking. Enter saves the card it stands on; Escape
+    /// closes and leaves the saved theme alone. Every other key is swallowed,
+    /// because the window behind the modal is not listening (#2619).
+    fn theme_modal_key(&mut self, ks: &gpui::Keystroke, cx: &mut Context<Self>) {
+        const CARDS: [GuiTheme; 4] = [
+            GuiTheme::Orgn,
+            GuiTheme::Light,
+            GuiTheme::Custom,
+            GuiTheme::Auto,
+        ];
+        match ks.key.as_str() {
+            "escape" => self.close_themes(cx),
+            "left" | "up" => {
+                self.themes_card = (self.themes_card + 3) % 4;
+                let card = CARDS[self.themes_card];
+                self.preview_card(card, cx);
+            }
+            "right" | "down" | "tab" => {
+                self.themes_card = (self.themes_card + 1) % 4;
+                let card = CARDS[self.themes_card];
+                self.preview_card(card, cx);
+            }
+            "enter" => {
+                let card = CARDS[self.themes_card.min(3)];
+                self.pick_theme(card, cx);
+                // Custom is the only card with something left to do under it:
+                // the wheel edits the accent, so picking it keeps the modal.
+                if card != GuiTheme::Custom {
+                    self.close_themes(cx);
+                } else {
+                    cx.notify();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Repaint the window in a card's theme without saving it. The arrows walk
+    /// the four cards this way, so the choice is made by looking; nothing is
+    /// written until a pick, and closing puts the saved theme back.
+    fn preview_card(&mut self, mode: GuiTheme, cx: &mut Context<Self>) {
+        let accent = if mode == GuiTheme::Custom {
+            Some(gui_theme::format_accent(self.themes_accent()))
+        } else {
+            palette::saved_mode().1
+        };
+        palette::adopt(gui_theme::resolve(
+            mode,
+            palette::system_is_dark(),
+            accent.as_deref(),
+        ));
+        cx.notify();
+    }
+
+    /// Turn a point in window coordinates into the accent control under it and
+    /// start dragging it. A press that lands on none of them is ignored, so a
+    /// click on the card's padding does not move the colour.
+    fn themes_press_at(&mut self, x: f32, y: f32) -> bool {
+        let boxed = |area: &std::rc::Rc<std::cell::RefCell<Option<[f32; 4]>>>| *area.borrow();
+        if let Some(bounds) = boxed(&self.themes_wheel)
+            && let Some(hit) = accent::wheel_hit(bounds, x, y)
+        {
+            self.themes_hue = hit.hue;
+            // Past the rim the drag pins to full saturation instead of
+            // wrapping, so a fast flick outward keeps the colour it had.
+            self.themes_sat = hit.saturation;
+            self.themes_drag = Some(accent::Drag::Wheel);
+            return true;
+        }
+        if let Some(bounds) = boxed(&self.themes_sat_track)
+            && accent::inside(bounds, x, y, accent::SLACK)
+        {
+            self.themes_sat = accent::slider_value(bounds, x);
+            self.themes_drag = Some(accent::Drag::Saturation);
+            return true;
+        }
+        if let Some(bounds) = boxed(&self.themes_val_track)
+            && accent::inside(bounds, x, y, accent::SLACK)
+        {
+            self.themes_val = accent::slider_value(bounds, x);
+            self.themes_drag = Some(accent::Drag::Value);
+            return true;
+        }
+        false
+    }
+
+    /// Move the control a drag already holds. The pointer is followed even
+    /// once it leaves the painted box, the way a slider normally behaves, so a
+    /// fast drag cannot drop the value halfway.
+    fn themes_drag_to(&mut self, x: f32, y: f32) -> bool {
+        let drag = match self.themes_drag {
+            Some(drag) => drag,
+            None => return false,
+        };
+        match drag {
+            accent::Drag::Wheel => {
+                // A wheel is polar, so a drag reads the angle from wherever the
+                // pointer went and pins the saturation at the rim.
+                if let Some(hit) = (*self.themes_wheel.borrow())
+                    .and_then(|bounds| accent::wheel_drag(bounds, x, y))
+                {
+                    self.themes_hue = hit.hue;
+                    self.themes_sat = hit.saturation;
+                }
+                true
+            }
+            accent::Drag::Saturation => {
+                if let Some(bounds) = *self.themes_sat_track.borrow() {
+                    self.themes_sat = accent::slider_value(bounds, x);
+                }
+                true
+            }
+            accent::Drag::Value => {
+                if let Some(bounds) = *self.themes_val_track.borrow() {
+                    self.themes_val = accent::slider_value(bounds, x);
+                }
+                true
+            }
+        }
+    }
+
+    /// Pick a card: apply the theme and save it in one step (#2619).
+    fn pick_theme(&mut self, mode: GuiTheme, cx: &mut Context<Self>) {
+        let hex = gui_theme::format_accent(self.themes_accent());
+        let name = match mode {
+            GuiTheme::Orgn => "orgn",
+            GuiTheme::Light => "light",
+            GuiTheme::Custom => "custom",
+            GuiTheme::Auto => "auto",
+        };
+        match Config::write_key_string("gui", "theme", name) {
+            Ok(()) => logging::info(&format!("themes: kept '{name}' as [gui] theme")),
+            Err(e) => logging::error(&format!("themes: could not save '{name}': {e}")),
+        }
+        // Only `custom` carries an accent; the other three keep whatever was
+        // saved, so switching away and back does not lose the wheel's colour.
+        let accent = if mode == GuiTheme::Custom {
+            match Config::write_key_string("gui", "custom_accent", &hex) {
+                Ok(()) => logging::info(&format!("themes: kept accent {hex}")),
+                Err(e) => logging::error(&format!("themes: could not save accent {hex}: {e}")),
+            }
+            Some(hex)
+        } else {
+            palette::saved_mode().1
+        };
+        palette::remember_mode(mode, accent.clone());
+        palette::adopt(gui_theme::resolve(
+            mode,
+            palette::system_is_dark(),
+            accent.as_deref(),
+        ));
+        cx.notify();
+    }
+
+    /// Repaint the window with the accent the wheel is showing, without
+    /// saving it: a drag paints live, and the save lands on release.
+    fn preview_accent(&mut self, cx: &mut Context<Self>) {
+        let hex = gui_theme::format_accent(self.themes_accent());
+        palette::preview(GuiTheme::Custom, Some(&hex));
+        cx.notify();
+    }
+
+    /// Save the accent a drag settled on (#2619). A release with no drag under
+    /// it is not a save: it is a click that missed every control.
+    fn keep_accent(&mut self, cx: &mut Context<Self>) {
+        if self.themes_drag.is_none() {
+            return;
+        }
+        self.themes_drag = None;
+        let hex = gui_theme::format_accent(self.themes_accent());
+        match Config::write_key_string("gui", "custom_accent", &hex) {
+            Ok(()) => logging::info(&format!("themes: kept accent {hex}")),
+            Err(e) => logging::error(&format!("themes: could not save accent {hex}: {e}")),
+        }
+        // The wheel only shows under `custom`, so the mode in force is the one
+        // to keep; the accent rides along with it.
+        palette::remember_mode(palette::saved_mode().0, Some(hex));
+        cx.notify();
+    }
+
+    /// The theme modal itself: a centred card over the window, the shape of
+    /// Telegram's picker. A card applies and saves on the click, so there is no
+    /// Keep button; Escape and a click on the scrim close it. Custom keeps the
+    /// modal open, because the wheel beneath the cards is the point of picking
+    /// it (#2619).
+    ///
+    /// It is attached last in the root's paint order, so while it is open it is
+    /// the surface the user is looking at and the only one the pointer reaches.
+    fn themes_modal(&self, cx: &mut Context<Self>) -> AnyElement {
+        let saved = palette::saved_mode().0;
+        let accent = palette::current().accent;
+        let mut cards: Vec<Stateful<Div>> = Vec::with_capacity(themes_view::CARDS.len());
+        for (index, &(mode, label, hint)) in themes_view::CARDS.iter().enumerate() {
+            let pick = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
+                this.themes_card = index;
+                this.pick_theme(mode, cx);
+                // Custom needs the wheel, so its click leaves the modal
+                // standing; the other three are complete on their own.
+                if mode != GuiTheme::Custom {
+                    this.close_themes(cx);
+                }
+            });
+            cards.push(
+                themes_view::card(mode, label, hint, self.themes_card == index, accent)
+                    .on_click(pick),
+            );
+        }
+        // The wheel is the only draggable thing in the window: a press seeds
+        // the hue and the drag repaints live, with the save landing on release,
+        // so a drag never writes the config once per frame.
+        let press = cx.listener(|this, ev: &MouseDownEvent, _window, cx| {
+            let x = f32::from(ev.position.x);
+            let y = f32::from(ev.position.y);
+            if this.themes_press_at(x, y) {
+                this.preview_accent(cx);
+            }
+        });
+        let slide = cx.listener(|this, ev: &MouseMoveEvent, _window, cx| {
+            let x = f32::from(ev.position.x);
+            let y = f32::from(ev.position.y);
+            if this.themes_drag_to(x, y) {
+                this.preview_accent(cx);
+            }
+        });
+        let release = cx.listener(|this, _ev: &MouseUpEvent, _window, cx| {
+            this.keep_accent(cx);
+        });
+        // A drag that ends outside the row still saves: `keep_accent` ignores a
+        // release with no drag under it.
+        let release_out = cx.listener(|this, _ev: &MouseUpEvent, _window, cx| {
+            this.keep_accent(cx);
+        });
+        let accent_row = (saved == GuiTheme::Custom).then(|| {
+            let areas = themes_view::AccentAreas {
+                wheel: self.themes_wheel.clone(),
+                saturation: self.themes_sat_track.clone(),
+                value: self.themes_val_track.clone(),
+            };
+            let hex = gui_theme::format_accent(self.themes_accent());
+            let shown = palette::current();
+            div()
+                .id("theme-accent-row")
+                .on_mouse_down(MouseButton::Left, press)
+                .on_mouse_move(slide)
+                .on_mouse_up(MouseButton::Left, release)
+                .on_mouse_up_out(MouseButton::Left, release_out)
+                .child(themes_view::accent_row(
+                    self.themes_hue,
+                    self.themes_sat,
+                    self.themes_val,
+                    &hex,
+                    shown,
+                    areas,
+                ))
+                .into_any_element()
+        });
+        let dismiss = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+            this.close_themes(cx);
+        });
+        themes_view::modal(
+            cards,
+            accent_row,
+            "A click saves the card at once; the arrows walk them and Enter picks.",
+            dismiss,
+        )
+        .into_any_element()
     }
 
     /// `/cd` with no argument: the directory picker screen (#2527). The
@@ -3167,41 +3444,6 @@ impl Dashboard {
         self.cd_show_hidden = !self.cd_show_hidden;
         self.cd_selected = 0;
         self.cd_entries = cd_entries_for(&self.cd_dir, self.cd_show_hidden);
-        cx.notify();
-    }
-
-    /// A row click or Enter on the highlighted row: show the theme on the window,
-    /// without saving it. The preview is remembered in the history list so the
-    /// same theme can be walked back to.
-    fn preview_theme(&mut self, name: String, cx: &mut Context<Self>) {
-        palette::preview(&name);
-        remember_preview(&mut self.themes_history, &name);
-        self.themes_pick = Some(name);
-        cx.notify();
-    }
-
-    /// Keep: save the previewed theme under the key for the system appearance
-    /// the window is showing right now. Writes `[gui] dark_theme` or
-    /// `[gui] light_theme`, so the other appearance keeps its own choice.
-    fn keep_theme(&mut self, cx: &mut Context<Self>) {
-        let Some(name) = self.themes_pick.clone() else {
-            self.close_themes(true, cx);
-            return;
-        };
-        let key = if palette::system_is_dark() {
-            "dark_theme"
-        } else {
-            "light_theme"
-        };
-        match Config::write_key_string("gui", key, &name) {
-            Ok(()) => logging::info(&format!("themes: kept '{name}' as [gui] {key}")),
-            Err(e) => logging::error(&format!("themes: could not save '{name}': {e}")),
-        }
-        self.themes_origin = None;
-        self.themes_pick = None;
-        self.themes_history.clear();
-        self.screen = Screen::Chat;
-        self.refocus_screen();
         cx.notify();
     }
 
@@ -4967,6 +5209,18 @@ impl Dashboard {
     }
 
     fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // The theme modal owns every key while it is open, on every screen: it
+        // is the topmost surface, so nothing under it may answer a keystroke,
+        // the composer's arrows and Enter included (#2619).
+        if self.themes_open {
+            let ks = &ev.keystroke;
+            if ks.modifiers.control && ks.modifiers.shift && ks.key == "t" {
+                self.close_themes(cx);
+                return;
+            }
+            self.theme_modal_key(ks, cx);
+            return;
+        }
         // The Seeker card owns every key while it is up, and the chord that
         // opens it sits ahead of every other reader: one field that finds a
         // conversation, a command or a surface is only useful if the composer
@@ -5376,13 +5630,6 @@ impl Dashboard {
                 self.apply_screen_action(action, cx);
                 return;
             }
-            // Esc on the themes screen is a cancel: the palette from before
-            // the screen opened comes back, and nothing is saved. It stays out
-            // of the table because the themes screen belongs to another lane.
-            if self.screen == Screen::Themes {
-                self.close_themes(true, cx);
-                return;
-            }
             // Esc on the models screen leaves it and changes nothing: the
             // picker is a list, not a commitment.
             if self.screen == Screen::Models || self.screen == Screen::Skills {
@@ -5574,41 +5821,6 @@ impl Dashboard {
                 self.screen = Screen::Chat;
                 cx.notify();
             }
-            return;
-        }
-        // The themes screen is a narrow sidebar over the conversation, so its
-        // keys belong to the list: up and down walk the highlight, Enter
-        // previews the highlighted row, and a click does the same thing with
-        // the mouse. Esc restores the palette from before, handled above with
-        // the overlays it belongs to.
-        if self.screen == Screen::Themes {
-            let names = themes_view::names();
-            let last = names.len().saturating_sub(1);
-            match ev.keystroke.key.as_str() {
-                // The arrows walk the list and preview the theme they stand
-                // on, so a theme is judged without an Enter (#2404).
-                "up" | "down" => {
-                    let index = if ev.keystroke.key == "down" {
-                        (self.themes_index + 1).min(last)
-                    } else {
-                        self.themes_index.saturating_sub(1)
-                    };
-                    self.themes_index = index;
-                    if let Some(name) = names.get(index).copied() {
-                        self.preview_theme(name.to_string(), cx);
-                    }
-                }
-                // Enter applies the highlighted theme: the same keep as the
-                // Keep button, so the choice is saved to [gui] (#2415).
-                "enter" => {
-                    if let Some(name) = names.get(self.themes_index.min(last)).copied() {
-                        self.preview_theme(name.to_string(), cx);
-                        self.keep_theme(cx);
-                    }
-                }
-                _ => {}
-            }
-            cx.notify();
             return;
         }
         // The model picker is a live-filtered list: arrows walk the visible
@@ -6103,7 +6315,6 @@ impl Render for Dashboard {
                 env!("CARGO_PKG_VERSION")
             ),
             Screen::Files => "OpenCrabs \u{b7} files".to_string(),
-            Screen::Themes => "OpenCrabs \u{b7} themes".to_string(),
             Screen::Models => "OpenCrabs \u{b7} models".to_string(),
             Screen::Skills => "OpenCrabs \u{b7} skills".to_string(),
             Screen::DirectoryPicker => "OpenCrabs \u{b7} directory".to_string(),
@@ -6207,6 +6418,9 @@ impl Render for Dashboard {
         let centred_chat = chat_measure_px < primary_width;
 
         let (middle, footer): (AnyElement, AnyElement) = match self.screen {
+            // The theme modal is an overlay over the conversation, not a
+            // screen of its own (#2619): the chat draws as usual and the
+            // modal is attached at the root, above the panes.
             Screen::Chat => {
                 // The chat is the primary pane, and a split draws its session
                 // beside or below it (#2438). Two panes share the content
@@ -7914,215 +8128,6 @@ impl Render for Dashboard {
                     ));
                 (scroller.into_any_element(), footer.into_any_element())
             }
-            Screen::Themes => {
-                // The list is a sidebar, not a takeover: the conversation stays
-                // on screen and the preview repaints the whole window around
-                // it, so a theme is judged against real content. The rows are
-                // compact, the one the arrows stand on is marked, and only a
-                // click or Enter previews, so walking the list never flashes.
-                let shown = palette::current();
-                let picked = self.themes_pick.clone();
-                let names = themes_view::names();
-                let current = self.themes_index.min(names.len().saturating_sub(1));
-                let mut list = div().flex().flex_col().gap_1();
-                for (index, name) in names.iter().enumerate() {
-                    let selected = picked.as_deref() == Some(*name);
-                    let pick = name.to_string();
-                    list = list.child(themes_view::row(name, selected, index == current).on_click(
-                        cx.listener(move |this, _ev, _window, cx| {
-                            this.themes_index = index;
-                            this.preview_theme(pick.clone(), cx);
-                        }),
-                    ));
-                }
-                let scroller = div()
-                    .id("themes-body")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .child(list);
-                let header = div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .w_full()
-                    .pb_2()
-                    .border_b_1()
-                    .border_color(rgb(shown.track))
-                    .child(text("Themes", Size::Sm, shown.text))
-                    .child(div().text_xs().text_color(rgb(shown.text_muted)).child(
-                        SharedString::from(format!("{}/{}", current + 1, names.len())),
-                    ));
-                let mut panel = div()
-                    .id("themes-sidebar")
-                    .w(px(248.0))
-                    .flex_shrink_0()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .p_3()
-                    .rounded(px(CARD_RADIUS))
-                    .border_1()
-                    .border_color(rgb(shown.panel_hi))
-                    .bg(glass_fill(shown.panel))
-                    .child(header)
-                    .child(scroller);
-                // The trail of previews this visit, newest first and never
-                // the one on screen: the row above is the step back.
-                let earlier: Vec<String> = self
-                    .themes_history
-                    .iter()
-                    .rev()
-                    .filter(|name| Some(name.as_str()) != picked.as_deref())
-                    .take(4)
-                    .cloned()
-                    .collect();
-                if !earlier.is_empty() {
-                    let mut history = div().flex().flex_col().gap_1();
-                    for name in earlier {
-                        let pick = name.clone();
-                        history = history.child(themes_view::history_row(&name).on_click(
-                            cx.listener(move |this, _ev, _window, cx| {
-                                this.preview_theme(pick.clone(), cx);
-                            }),
-                        ));
-                    }
-                    panel = panel
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(shown.text_faint))
-                                .child("preview history"),
-                        )
-                        .child(history);
-                }
-                let keep = cx.listener(|this, _ev: &ClickEvent, _window, cx| this.keep_theme(cx));
-                panel = panel.child(
-                    div()
-                        .id("themes-keep")
-                        .flex()
-                        .justify_center()
-                        .px_3()
-                        .py_1()
-                        .rounded(px(CARD_RADIUS))
-                        .bg(rgb(shown.panel_hi))
-                        .border_1()
-                        .border_color(rgb(shown.accent))
-                        .text_color(rgb(shown.text))
-                        .cursor_pointer()
-                        .on_click(keep)
-                        .child("Keep"),
-                );
-                let hint = match &picked {
-                    Some(name) => format!(
-                        "previewing {name} · keep saves it for the {} system appearance · esc restores",
-                        if palette::system_is_dark() {
-                            "dark"
-                        } else {
-                            "light"
-                        }
-                    ),
-                    None => "arrows walk the list · enter previews · esc restores".to_string(),
-                };
-                // The footer names a newer release and opens the update dialog (#2406).
-                let update_hint = self.update_available.clone().map(|version| {
-                    let ask = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
-                        this.update_prompt = Some(false);
-                        cx.notify();
-                    });
-                    div()
-                        .id("update-hint")
-                        .text_xs()
-                        .text_color(rgb(shown.accent))
-                        .cursor_pointer()
-                        .on_click(ask)
-                        .child(SharedString::from(format!(
-                            "v{version} available · run /evolve to update"
-                        )))
-                });
-                let footer = div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .w_full()
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(shown.text_muted))
-                            .child(SharedString::from(hint)),
-                    )
-                    .children(update_hint);
-                let preview_width = pane_width - THEMES_PANEL_WIDTH;
-                let chat_share = self
-                    .panes
-                    .as_ref()
-                    .zip(self.transcript.session)
-                    .and_then(|(tree, id)| tree.leaf_width_share(id))
-                    .unwrap_or(1.0);
-                let primary_width = if chat_share < 1.0 {
-                    split_pane_width(preview_width, false, chat_share)
-                } else {
-                    preview_width
-                };
-                // A right press on the conversation opens the same card the
-                // `...` draws (#2480); a left press anywhere in it closes the
-                // card, the way clicking off a menu dismisses it.
-                let ask_menu = cx.listener(|this, _ev: &MouseDownEvent, _window, cx| {
-                    cx.stop_propagation();
-                    if this.transcript.session.is_some() {
-                        this.topic_menu = this.transcript.session;
-                        cx.notify();
-                    }
-                });
-                // A left press in the conversation closes the card. The card
-                // is the column's sibling, not this element's child, so its
-                // own clicks never reach this listener and picking an item
-                // still works.
-                let dismiss_menu = cx.listener(|this, _ev: &MouseDownEvent, _window, cx| {
-                    if this.topic_menu.take().is_some() {
-                        cx.notify();
-                    }
-                });
-                let primary = div()
-                    .id("chat-body")
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_w_0()
-                    .min_h_0()
-                    .on_mouse_down(MouseButton::Right, ask_menu)
-                    .on_mouse_down(MouseButton::Left, dismiss_menu)
-                    .child(transcript::view(
-                        &self.transcript,
-                        &self.transcript_scroll,
-                        &self.live,
-                        self.busy,
-                        primary_width,
-                        fold_handlers,
-                        transcript::ViewHooks {
-                            attachments: attachment_handlers,
-                            drag: Some(self.copy_drag.clone()),
-                            ctx_used: self.ctx_tokens,
-                            ctx_max: self.ctx_max,
-                            live_click: Some(live_click.clone()),
-                        },
-                    ));
-                // The preview draws the same panes, but never resizes them:
-                // its boxes are narrower than the real ones, so the dividers
-                // there do not take the pointer (#2438, #2472).
-                let body = self.panes_body(primary.into_any_element(), preview_width, false, cx);
-                let middle = div()
-                    .flex()
-                    .flex_row()
-                    .flex_1()
-                    .min_h_0()
-                    .gap_3()
-                    .child(body)
-                    .child(panel);
-                (middle.into_any_element(), footer.into_any_element())
-            }
         };
 
         // The input box and the live turn panel belong to the chat screen.
@@ -8264,7 +8269,6 @@ impl Render for Dashboard {
             }
             Screen::Usage => right.child(footer),
             Screen::Files => right.child(footer),
-            Screen::Themes => right.child(footer),
             Screen::Models => right.child(footer),
             Screen::Skills => right.child(footer),
             Screen::DirectoryPicker => right.child(footer),
@@ -8637,6 +8641,12 @@ impl Render for Dashboard {
                 find::channel_hint(state.query(), &self.finder_channels),
             ));
         }
+        // The theme modal is attached last, so it paints over every other
+        // surface: while it is open it is what the user is looking at, and the
+        // scrim is what the pointer meets (#2619).
+        if self.themes_open {
+            root = root.child(self.themes_modal(cx));
+        }
         root
     }
 }
@@ -8980,10 +8990,15 @@ fn main() {
                         ),
                         topic_rename: None,
                         topic_info: None,
-                        themes_origin: None,
-                        themes_pick: None,
-                        themes_index: 0,
-                        themes_history: Vec::new(),
+                        themes_hue: 24.47,
+                        themes_sat: 0.91,
+                        themes_val: 0.84,
+                        themes_open: false,
+                        themes_card: 3,
+                        themes_drag: None,
+                        themes_wheel: std::rc::Rc::new(std::cell::RefCell::new(None)),
+                        themes_sat_track: std::rc::Rc::new(std::cell::RefCell::new(None)),
+                        themes_val_track: std::rc::Rc::new(std::cell::RefCell::new(None)),
                         cd_dir: std::env::current_dir().unwrap_or_default(),
                         cd_entries: Vec::new(),
                         cd_selected: 0,
@@ -11827,10 +11842,7 @@ fn cd_entries_for(dir: &std::path::Path, show_hidden: bool) -> Vec<std::path::Pa
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        CHAT_MEASURE_PX, THEMES_HISTORY_LEN, cd_entries_for, pick_initial_session,
-        remember_open_session, remember_preview,
-    };
+    use super::{CHAT_MEASURE_PX, cd_entries_for, pick_initial_session, remember_open_session};
 
     /// The conversation caps at a readable measure in a single pane, and any
     /// pane narrower than the cap draws at its own width (#2586).
@@ -12105,66 +12117,51 @@ mod tests {
         );
     }
 
-    /// The themes sidebar keeps a short trail of what was previewed: newest
-    /// last, no duplicates, and never longer than the strip is meant to be.
-    /// Re-previewing an earlier theme moves it forward instead of listing it
-    /// twice, which is what makes the trail walkable.
+    /// The theme modal is a centred overlay over the conversation: a scrim
+    /// that dismisses, four cards, and no Keep button, because a pick saves at
+    /// once. The sidebar, its row helper and its preview history went with the
+    /// screen that hosted them (#2619).
+    ///
+    /// A source scan, because the rule is about wiring: the modal needs a
+    /// window and a click to exercise.
     #[test]
-    fn themes_preview_history_is_newest_last_unique_and_capped() {
-        let mut history: Vec<String> = Vec::new();
-        remember_preview(&mut history, "dark");
-        remember_preview(&mut history, "light");
-        assert_eq!(history, vec!["dark".to_string(), "light".to_string()]);
+    fn theme_modal_is_centred_and_saves_on_the_pick() {
+        let src = include_str!("main.rs");
+        let view = include_str!("themes_view.rs");
+        // The scrim lives with the modal it belongs to; the wiring that
+        // opens it lives with the dashboard.
+        let scrim = [".id(\"theme-modal-", "scrim\")"].concat();
+        let modal = ["themes_view::", "modal("].concat();
+        let card = [
+            "themes_view::card(mode, label, hint, self.themes_card == ",
+            "index, accent)",
+        ]
+        .concat();
+        let cards = [
+            "for (index, &(mode, label, hint)) in themes_view::CARDS",
+            ".iter().enumerate()",
+        ]
+        .concat();
+        let close = [".id(\"theme-modal-", "close\")"].concat();
+        assert!(view.contains(&scrim), "the scrim is what dismisses");
+        assert!(
+            view.contains(&close),
+            "the header carries a close control, as the README says"
+        );
+        assert!(src.contains(&modal), "the modal is built in one place");
+        assert!(src.contains(&card), "a card is drawn from the pick table");
+        assert!(src.contains(&cards), "four cards, and only four");
 
-        // The same theme again moves to the end, no second row.
-        remember_preview(&mut history, "dark");
-        assert_eq!(history, vec!["light".to_string(), "dark".to_string()]);
-
-        for name in ["a", "b", "c", "d", "e", "f"] {
-            remember_preview(&mut history, name);
+        // The sidebar is gone, and so is the draft-and-keep flow it carried.
+        for gone in [
+            [".id(\"themes-", "sidebar\")"].concat(),
+            ["themes_view::", "row("].concat(),
+            ["themes_view::history_", "row"].concat(),
+            [".id(\"themes-", "keep\")"].concat(),
+            ["remember_", "preview"].concat(),
+        ] {
+            assert!(!src.contains(&gone), "leftover: {gone}");
         }
-        assert_eq!(history.len(), THEMES_HISTORY_LEN);
-        assert_eq!(history.last().map(String::as_str), Some("f"));
-        assert!(!history.iter().any(|seen| seen == "dark"));
-    }
-
-    /// #2543: the rail keeps a four-pixel drag target but paints only the
-    /// same one-pixel theme hairline used below the chat title.
-    #[test]
-    fn rail_splitter_paints_a_hairline_inside_its_drag_target() {
-        let src = include_str!("main.rs");
-        let splitter = src
-            .split("fn splitter(")
-            .nth(1)
-            .and_then(|rest| rest.split("/// The conversation").next())
-            .expect("rail splitter renderer");
-        assert!(splitter.contains(".w(px(4.0))"));
-        assert!(splitter.contains(".w(px(1.0))"));
-        assert!(splitter.contains("topic_tabs::separator_color()"));
-        assert!(splitter.contains(".on_mouse_down(MouseButton::Left, grab)"));
-        assert!(!splitter.contains(".bg(rgb(palette::current().panel_hi))"));
-    }
-
-    /// The themes screen paints the conversation next to a sidebar, so a
-    /// preview is judged against real content and no row is reachable only by
-    /// mouse: arrows and Enter run through the same handler as a click.
-    #[test]
-    fn themes_screen_draws_a_sidebar_beside_the_conversation() {
-        let src = include_str!("main.rs");
-        assert!(src.contains(".id(\"themes-sidebar\")"));
-        assert!(src.contains("themes_view::row(name, selected, index == current)"));
-        assert!(src.contains("themes_view::history_row"));
-        assert!(src.contains("\"enter\" => {"));
-        assert!(src.contains(".id(\"themes-keep\")"));
-        assert!(src.contains(".child(text(\"Themes\", Size::Sm, shown.text))"));
-        assert!(src.contains(".rounded(px(CARD_RADIUS))"));
-        assert!(src.contains(".child(\"Keep\")"));
-        let header = src
-            .split("let header = div()")
-            .find(|block| block.contains("text(\"Themes\""))
-            .expect("themes header");
-        assert!(header.contains(".border_b_1()"));
-        assert!(header.contains(".border_color(rgb(shown.track))"));
     }
 
     /// One dialog, one delete path. The bridge that erases the row has exactly

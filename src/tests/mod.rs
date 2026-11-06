@@ -355,6 +355,8 @@ pub mod goal_driver_line_test;
 pub mod goal_judge_test;
 pub mod goal_manage_test;
 pub mod group_history_test;
+pub mod gui_accent_test;
+pub mod gui_accent_wheel_test;
 pub mod gui_chat_menu_2480_test;
 pub mod gui_debug_config_test;
 pub mod gui_depth_test;

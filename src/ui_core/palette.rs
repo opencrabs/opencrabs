@@ -1450,7 +1450,7 @@ mod tests {
         let (surface, help, docs) = if theme {
             (
                 PaletteAction::OpenSurface(Surface::Themes),
-                "/help Themes: preview and keep a theme",
+                "/help Themes: choose the palette",
                 PaletteAction::OpenDocs("/features/themes.html"),
             )
         } else {

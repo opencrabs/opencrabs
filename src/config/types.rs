@@ -2545,18 +2545,33 @@ impl MemoryConfig {
     }
 }
 
-/// Desktop window options (`[gui]`). Each key names a theme, built-in or user.
-/// Unset keys use the window's own defaults: the built-in dark palette and
-/// Alucard for light.
+/// The desktop window's colour theme (#2619).
+///
+/// `Orgn` is the window's own dark palette, `Light` its native light palette,
+/// `Custom` paints the saved accent on whichever base the system asks for,
+/// and `Auto` follows the system with no accent override. `Auto` is the
+/// default, so a first install tracks the system appearance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum GuiTheme {
+    Orgn,
+    Light,
+    Custom,
+    #[default]
+    Auto,
+}
+
+/// Desktop window options (`[gui]`).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct GuiConfig {
-    /// Theme while the system is dark. Unset means the built-in dark palette.
+    /// Which of the four themes the window draws. Unset means `auto`.
     #[serde(default)]
-    pub dark_theme: Option<String>,
+    pub theme: GuiTheme,
 
-    /// Theme while the system is light. Unset means Alucard.
+    /// The accent `custom` paints, as `#RRGGBB`. Unset or unparsable means the
+    /// palette's own accent.
     #[serde(default)]
-    pub light_theme: Option<String>,
+    pub custom_accent: Option<String>,
 
     /// Where the topic tab row sits: `top`, `left`, `bottom` or `right`.
     /// Unset or unknown means top.
