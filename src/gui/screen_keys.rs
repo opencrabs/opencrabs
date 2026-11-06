@@ -123,6 +123,8 @@ pub enum OverlayId {
     Help,
     /// The delete confirmation.
     ConfirmDelete,
+    /// A warning that stopped a pick and waits on its one answer.
+    Warning,
     /// A file preview, which covers the window.
     Preview,
     /// One row's slide out action strip.
