@@ -31,6 +31,7 @@ use gpui::{
 };
 
 use unicode_segmentation::UnicodeSegmentation;
+use uuid::Uuid;
 
 actions!(
     editor,
@@ -220,6 +221,18 @@ pub enum EditorEvent {
     Preview(std::path::PathBuf),
 }
 
+/// A queue walk the composer is holding: the messages Up took out of one
+/// session's queue, in the order it took them, and the draft the first Up
+/// covered. Taking them is the point: a message the user pulled out to edit
+/// must not still be queued, or the drain would send the original while they
+/// edit a copy (#2637).
+struct Recall {
+    session: Uuid,
+    /// Newest taken first. The last entry is the one in the field.
+    entries: Vec<crate::agent_bridge::PendingMessage>,
+    draft: String,
+}
+
 /// The editor view. Ranges internal to this struct are utf8; every value
 /// crossing the `EntityInputHandler` boundary is utf16, per the contract.
 pub struct Editor {
@@ -229,6 +242,11 @@ pub struct Editor {
     input_history: Vec<String>,
     input_history_index: Option<usize>,
     input_history_stash: String,
+    /// The queued messages Up pulled out of the queue to edit, newest taken
+    /// first, and the draft the walk covered. The last entry is what the field
+    /// shows. They are OUT of the queue while they are here, so a recall the
+    /// user decides not to send is never sent behind their back (#2637).
+    recall: Option<Recall>,
     /// Files attached to the next message. They live here, not in the window
     /// state, because the send action is what consumes them: the editor is
     /// the only place that can append the markers atomically with clearing
@@ -284,6 +302,11 @@ pub const NOTICE_TTL: Duration = Duration::from_secs(2);
 /// The terminal prints these same words on its input border.
 pub const COPIED_NOTICE: &str = "Copied to clipboard";
 
+/// What the composer says when a stop before the first token handed the
+/// message back (#2635). The text is in the field again, so the line does not
+/// have to explain where it went.
+pub const STOPPED_NOTICE: &str = "Stopped, message back in the composer";
+
 /// True once a notice has outlived the TTL. Pure, so the expiry rule stays a
 /// test instead of a wall-clock guess.
 pub fn notice_expired(shown_at: Instant, now: Instant, ttl: Duration) -> bool {
@@ -298,6 +321,7 @@ impl Editor {
             input_history: Vec::new(),
             input_history_index: None,
             input_history_stash: String::new(),
+            recall: None,
             attachments: Vec::new(),
             placeholder: "Message OpenCrabs…".into(),
             selected_range: 0..0,
@@ -341,6 +365,29 @@ impl Editor {
             });
         })
         .detach();
+    }
+
+    /// A stop took the message back: say it where the text just reappeared
+    /// (#2635). Same transient line the copy receipt uses.
+    pub fn show_returned(&mut self, cx: &mut Context<Self>) {
+        self.show_notice(STOPPED_NOTICE, cx);
+    }
+
+    /// Put the text an abandoned turn was carrying back in the field, caret
+    /// at the end, ready to edit (#2635). The caller only does this when the
+    /// draft is empty, so nothing the user typed since is overwritten.
+    pub fn restore_draft(&mut self, text: String, cx: &mut Context<Self>) {
+        // A recall belongs to the queue, not to this hand-back: whatever it
+        // still held goes back to wait there.
+        self.give_back_recall(false);
+        self.content = text;
+        let end = self.content.len();
+        self.selected_range = end..end;
+        self.selection_reversed = false;
+        self.marked_range = None;
+        self.command_dismissed = false;
+        self.emoji_dismissed = false;
+        cx.notify();
     }
 
     /// A drag-copied range reached the clipboard, so say so and let the line
@@ -618,18 +665,80 @@ impl Editor {
         rows
     }
 
+    /// Everything the recall still holds, for the caller to put back in the
+    /// queue it came from.
+    ///
+    /// `keep_current` is for the send path: the message in the field is the one
+    /// going out, so it leaves with the send, while the ones the walk took
+    /// before it go back to wait, because the user never consumed them
+    /// (#2637).
+    pub fn release_recall(
+        &mut self,
+        keep_current: bool,
+    ) -> Option<(Uuid, Vec<crate::agent_bridge::PendingMessage>)> {
+        let mut recall = self.recall.take()?;
+        if keep_current {
+            recall.entries.pop();
+        }
+        // The walk took the run newest first; a queue is appended to, so it
+        // takes them back oldest first or the order they were written in
+        // comes back inverted.
+        recall.entries.reverse();
+        Some((recall.session, recall.entries))
+    }
+
+    /// Put a recall's messages back in their own queue.
+    fn give_back_recall(&mut self, keep_current: bool) {
+        if let Some((session, entries)) = self.release_recall(keep_current) {
+            for msg in entries {
+                crate::agent_bridge::queue_recall_return(session, msg);
+            }
+        }
+    }
+
+    /// The hint an empty field shows. It belongs to the window's state, not to
+    /// the field's: what the composer can do depends on whether a turn runs and
+    /// what is queued, and the editor sees neither (#2630).
+    pub fn set_placeholder(&mut self, hint: SharedString, cx: &mut Context<Self>) {
+        if self.placeholder != hint {
+            self.placeholder = hint;
+            cx.notify();
+        }
+    }
+
     /// Vertical movement runs over visual rows, so a wrapped paragraph behaves
     /// like the lines the reader sees. At the top row Up goes to the very
     /// start, and at the bottom row Down goes to the very end.
     fn up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
-        // Up in an empty composer takes the newest queued message back to edit (#2441).
-        if self.content.is_empty()
-            && let Some(text) = crate::agent_bridge::queue_recall_last()
+        // Up walks the queue back one message at a time: newest first, then the
+        // one before it, so five queued messages are five edits instead of one
+        // (#2629). Each step TAKES its message out of the queue: leaving the
+        // original behind meant a message the user pulled out and decided not
+        // to send still went out when the turn ended, while the strip kept
+        // calling it queued (#2637).
+        if (self.content.is_empty() || self.recall.is_some())
+            && let Some((session, msg)) = crate::agent_bridge::queue_recall_take()
         {
-            self.content = text;
+            // A walk belongs to the session it started in: a recall from
+            // another conversation goes back to wait before this one starts.
+            if self
+                .recall
+                .as_ref()
+                .is_some_and(|recall| recall.session != session)
+            {
+                self.give_back_recall(false);
+            }
+            let recall = self.recall.get_or_insert_with(|| Recall {
+                session,
+                entries: Vec::new(),
+                draft: std::mem::take(&mut self.content),
+            });
+            recall.entries.push(msg.clone());
+            self.content = msg.display_text;
             let end = self.content.len();
             self.selected_range = end..end;
             self.selection_reversed = false;
+            self.marked_range = None;
             cx.notify();
             return;
         }
@@ -666,6 +775,33 @@ impl Editor {
             return;
         }
         if self.step_emoji_popup(1, cx) {
+            return;
+        }
+        // Down is Up's way back out of a recall: the message on screen goes
+        // back into its queue, edits and all, and the next newer one, then the
+        // draft the first Up covered, takes its place (#2637).
+        if self.recall.is_some() {
+            let mut recall = self.recall.take().expect("a recall is active");
+            if let Some(mut msg) = recall.entries.pop() {
+                let original = msg.display_text.clone();
+                if msg.context_text == original {
+                    msg.context_text = self.content.clone();
+                }
+                msg.display_text = self.content.clone();
+                crate::agent_bridge::queue_recall_return(recall.session, msg);
+            }
+            match recall.entries.last() {
+                Some(msg) => {
+                    self.content = msg.display_text.clone();
+                    self.recall = Some(recall);
+                }
+                None => self.content = std::mem::take(&mut recall.draft),
+            }
+            let end = self.content.len();
+            self.selected_range = end..end;
+            self.selection_reversed = false;
+            self.marked_range = None;
+            cx.notify();
             return;
         }
         let rows = self.visual_rows();
@@ -1322,7 +1458,14 @@ impl Element for EditorElement {
             None => placeholder,
         };
         let style = window.text_style();
-        let font_size = style.font_size.to_pixels(window.rem_size());
+        // The hint is a whisper, not a message: painted smaller than the text
+        // it stands in for, so a queue's keys never shout over the
+        // conversation the way full-size words did (#2630).
+        let font_size = if empty {
+            style.font_size.to_pixels(window.rem_size()) * HINT_SCALE
+        } else {
+            style.font_size.to_pixels(window.rem_size())
+        };
         let line_height = window.line_height();
         // The field never widens past its own bounds: wrap to exactly the
         // width the parent handed us, which is what makes a resize reflow.
@@ -1921,6 +2064,10 @@ fn line_col(content: &str, offset: usize) -> (usize, usize) {
 /// (#2479). The TUI prints the same notice with its own key; here the field's
 /// own binding is `cmd-v`.
 const CLIPBOARD_IMAGE_HINT: &str = "\u{1f4cb} Image in clipboard - \u{2318}V to paste";
+
+/// The hint paints at this fraction of the composer's own text size. A full
+/// size line of key names read as a second paragraph above the caret (#2630).
+const HINT_SCALE: f32 = 0.8;
 
 /// The file extension a clipboard image format maps to. `png` covers the
 /// screenshot case; the rest are the formats a browser can hand over.

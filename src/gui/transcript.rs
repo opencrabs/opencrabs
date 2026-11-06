@@ -186,8 +186,16 @@ pub struct TurnMetrics {
     pub ctx_used: u32,
     /// The conversation's context window at the time.
     pub ctx_max: u32,
-    /// Provider-reported output rate; `None` when it could not be measured.
+    /// Provider-reported output rate for the turn; `None` when it could not be
+    /// measured. This is the turn's own rate, not the session's live one the
+    /// status bar prints (#2632).
     pub tps: Option<f64>,
+    /// How many calls the turn made, counted the way the live card counts
+    /// them. A persisted row can lose its ledger (the tool-only rows prove
+    /// it), and the settled card then claimed a turn did no work at all. This
+    /// is the number the user watched, so it is the floor the card prints
+    /// (#2632).
+    pub tool_calls: usize,
 }
 
 impl TurnMetrics {
@@ -205,8 +213,14 @@ impl TurnMetrics {
 /// question and the answer stay, the working-out hides behind a header line.
 pub struct Turn {
     /// `\u{2713} 4 steps \u{b7} 9 tool calls \u{b7} 1m 20s`, or `None` for a turn
-    /// that did no work (a plain question and answer earns no header).
+    /// that did no work (a plain question and answer earns no card at all).
+    /// The card's head prints its own verdict and its footer prints the numbers
+    /// (#2632), so this string is the marker that the turn worked and the
+    /// terminal's own wording, kept for the TUI-shaped readers and the tests.
     pub header: Option<String>,
+    /// What the turn did: its calls, failures and wall time. The footer prints
+    /// these next to the ctx budget, the way the live card does (#2632).
+    pub summary: TurnSummary,
     /// The turn's own ctx and rate, when this process settled it and still
     /// remembers. Drawn after the header, in the Telegram card's wording.
     pub metrics: Option<TurnMetrics>,
@@ -313,6 +327,19 @@ impl LiveTurn {
             && self.tools.is_empty()
             && self.entries.is_empty()
             && self.notices.is_empty()
+            && self.injected.is_empty()
+            && self.settled.is_none()
+    }
+
+    /// The model has not said anything yet: no reasoning, no text, no tool
+    /// call, no queued message taken. A stop inside that window can hand the
+    /// question back to the composer, because there is no answer to lose
+    /// (#2635).
+    pub fn untouched(&self) -> bool {
+        self.stream.is_empty()
+            && self.reasoning.is_empty()
+            && self.tools.is_empty()
+            && self.entries.is_empty()
             && self.injected.is_empty()
             && self.settled.is_none()
     }
@@ -667,6 +694,14 @@ pub async fn load_recent(
     }
 }
 
+/// A model-switch receipt used to be persisted with the user role. Draw the
+/// legacy rows as the harness warning they are, so an old chat does not keep
+/// them in user bubbles after the writer is fixed.
+fn is_model_change_notice(content: &str) -> bool {
+    let text = content.trim();
+    text.starts_with("[Model changed to ") && text.ends_with(']')
+}
+
 /// Expand ONE stored row into its renderable blocks. Mirrors
 /// `TuiApp::expand_message` (`tui/app/messaging.rs`): compaction markers are
 /// context and never shown; tool ledgers become `Tools` blocks; reasoning
@@ -689,8 +724,13 @@ fn row_blocks(m: &Message) -> Vec<Block> {
         return blocks;
     }
     if m.role != "assistant" {
+        let role = if m.role == "user" && is_model_change_notice(&m.content) {
+            "system"
+        } else {
+            m.role.as_str()
+        };
         blocks.push(Block::Msg {
-            role: m.role.clone(),
+            role: role.to_string(),
             content: m.content.clone(),
             time: stamp(m),
             placeholder: false,
@@ -808,6 +848,10 @@ pub fn turns_with_metrics(
             } if role == "assistant" && !*placeholder && !content.trim().is_empty() => Some(i),
             _ => None,
         });
+        // The turn's anchor and remembered numbers are read before the
+        // summary so the tally the live card showed can floor it (#2632).
+        let anchor = format!("{}@{}", rows[s].role, rows[s].created_at.timestamp());
+        let metrics = metrics.get(&anchor).copied();
         let mut summary = TurnSummary::default();
         for b in &blocks {
             match b {
@@ -829,6 +873,12 @@ pub fn turns_with_metrics(
         } else if let (Some(first), Some(last)) = (rows.get(s), rows.get(e - 1)) {
             summary.duration_secs = (last.created_at - first.created_at).num_seconds().max(0);
         }
+        // A persisted row that lost its ledger must not erase the calls the
+        // user watched in flight: the settled card keeps the live count
+        // (#2632).
+        if let Some(m) = metrics {
+            summary.tool_calls = summary.tool_calls.max(m.tool_calls);
+        }
         // Steps are the rows the fold actually hides, never the turn's row
         // count: the question and the answer are never folded away.
         let steps = (0..blocks.len())
@@ -839,10 +889,9 @@ pub fn turns_with_metrics(
             Block::Tools { calls } => calls.last().map(|c| (c.description.clone(), c.success)),
             _ => None,
         });
-        let anchor = format!("{}@{}", rows[s].role, rows[s].created_at.timestamp());
-        let metrics = metrics.get(&anchor).copied();
         out.push(Turn {
             header,
+            summary,
             metrics,
             preview,
             anchor,
@@ -1446,46 +1495,31 @@ fn fold_cell(folded: usize, side: f32) -> AnyElement {
 }
 
 /// A thinking block: dim, italic, collapsed to a bounded preview so a long
-/// reasoning run cannot take over the pane.
+/// reasoning run cannot take over the pane. It draws as plain rows, never as a
+/// box of its own: a nested surface rounder than the card that holds it read as
+/// a second widget inside the first, and the caption above the rows said only
+/// what the italic type already says (#2639, #2640).
 fn thinking_block(content: &str, full: bool) -> Div {
-    div()
-        .flex()
-        .flex_col()
-        .gap_0p5()
-        .p_3()
-        .bg(glass_fill(palette::current().panel))
-        .rounded(px(CARD_RADIUS))
-        .border_1()
-        .border_color(rgb(palette::current().panel_hi))
-        .child(
-            div()
-                .text_xs()
-                .text_color(rgb(palette::current().text_muted))
-                .child("· thinking ·"),
-        )
-        .child(
-            div()
-                .text_xs()
-                .italic()
-                .text_color(rgb(palette::current().text_muted))
-                .child(SharedString::from(if full {
-                    content.trim().to_string()
-                } else {
-                    fit(content.trim(), 600)
-                })),
-        )
+    div().flex().flex_col().gap_0p5().min_w_0().child(
+        div()
+            .text_xs()
+            .italic()
+            .min_w_0()
+            .text_color(rgb(palette::current().text_muted))
+            .child(SharedString::from(if full {
+                content.trim().to_string()
+            } else {
+                fit(content.trim(), 600)
+            })),
+    )
 }
 
 /// A tool ledger: each call with its status mark. The turn header already
-/// counts the calls, so the expanded body does not repeat the count.
+/// counts the calls, so the expanded body does not repeat the count. Every call
+/// is a row in one list, with no panel of its own: a fill and a radius rounder
+/// than the card around it turned three bash calls into three widgets (#2639).
 fn tools_block(calls: &[ToolCall]) -> Div {
-    let mut col = div()
-        .flex()
-        .flex_col()
-        .gap_0p5()
-        .p_3()
-        .rounded(px(CARD_RADIUS))
-        .bg(glass_fill(palette::current().panel_hi));
+    let mut col = div().flex().flex_col().gap_0p5().min_w_0();
     for call in calls {
         let (mark, color) = tool_mark(call);
         col = col.child(
@@ -1535,51 +1569,74 @@ fn fold_chevron(folded: bool) -> &'static str {
     if folded { "\u{25B8}" } else { "\u{25BE}" }
 }
 
-/// One turn's fold header: the TUI's own summary line, a chevron that says
-/// whether the body is open, and, while folded, the last call as a preview so
-/// a collapsed turn still says what it did.
-fn fold_header(turn: &Turn, folded: bool) -> Option<Stateful<Div>> {
-    let base = turn.header.as_ref()?;
-    let row = div()
+/// The card a settled turn draws, the live card's own frame (#2632): one
+/// rounded box holding the head row, the working-out rows when the turn is
+/// open, and the footer that keeps the count, the ctx and the clock after the
+/// turn ends. `None` for a turn that did no work, which earns no card (#758).
+fn settled_card(turn: &Turn, folded: bool, body: Vec<AnyElement>) -> Option<Stateful<Div>> {
+    turn.header.as_ref()?;
+    let (glyph, verb) = settled_verdict(turn.summary);
+    let failed = glyph == "\u{274c}";
+    let accent = if failed {
+        palette::current().red
+    } else {
+        palette::current().accent
+    };
+    let head = div()
         .flex()
         .flex_row()
+        .items_center()
         .gap_1()
+        .w_full()
+        .min_w_0()
+        .px_2()
+        .pt_1()
+        .pb_1()
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(palette::current().text_muted))
+                .child(SharedString::from(glyph)),
+        )
+        .child(
+            div()
+                .text_xs()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_color(rgb(accent))
+                .child(SharedString::from(verb)),
+        )
         .child(
             div()
                 .text_xs()
                 .text_color(rgb(palette::current().text_muted))
                 .child(SharedString::from(fold_chevron(folded))),
-        )
-        .child(
-            div()
-                .text_xs()
-                .font_weight(gpui::FontWeight::BOLD)
-                .text_color(rgb(palette::current().teal))
-                .child(SharedString::from(base.clone())),
         );
-    // The ctx budget and the rate live in `turn_footer` below, never here: a
-    // header says what the turn was, a footer says what it cost, which is the
-    // split Telegram and the TUI already use (#2442).
-    let mut col = div()
-        .id(SharedString::from(format!("fold-{}", turn.anchor)))
+    let mut card = div()
+        .id(SharedString::from(format!("card-{}", turn.anchor)))
         .flex()
         .flex_col()
-        .gap_0p5()
-        .px_3()
-        .py_2()
+        .w_full()
+        .min_w_0()
+        .flex_shrink_0()
+        .rounded(px(MESSAGE_RADIUS))
+        .border_1()
+        .border_color(rgb(palette::current().panel_hi))
         .bg(glass_fill(palette::current().panel))
-        .rounded(px(CARD_RADIUS))
         .cursor_pointer()
-        .hover(|d| d.bg(rgb(palette::current().panel)))
-        .child(row);
+        .hover(|d| d.bg(rgb(palette::current().panel_hi)))
+        .child(head);
     if folded && let Some((description, success)) = &turn.preview {
         let color = if *success {
             palette::current().text_muted
         } else {
             palette::current().red
         };
-        col = col.child(
+        card = card.child(
             div()
+                .px_2()
+                .pb_1()
                 .text_xs()
                 .italic()
                 .text_color(rgb(color))
@@ -1589,28 +1646,78 @@ fn fold_header(turn: &Turn, folded: bool) -> Option<Stateful<Div>> {
                 ))),
         );
     }
-    Some(col)
+    if !body.is_empty() {
+        card = card.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_0p5()
+                .px_2()
+                .pb_1()
+                .min_w_0()
+                .overflow_hidden()
+                .children(body),
+        );
+    }
+    if let Some(footer) = turn_footer_text(turn) {
+        card = card.child(
+            div()
+                .px_2()
+                .pb_1()
+                .text_xs()
+                .text_color(rgb(palette::current().text_muted))
+                .child(SharedString::from(footer)),
+        );
+    }
+    Some(card)
 }
 
-/// One settled turn's footer: the ctx budget and the rate it ran at, in the
-/// Telegram footer's own wording (#2324 D2). It is drawn BELOW the turn's last
-/// block, so the header names the turn and the footer states its cost (#2442).
-/// `None` when this process holds no metrics for the turn.
-fn turn_footer(turn: &Turn) -> Option<Div> {
-    let segment = turn_footer_text(turn)?;
-    Some(
-        div()
-            .px_2()
-            .text_xs()
-            .text_color(rgb(palette::current().text_muted))
-            .child(SharedString::from(segment)),
-    )
+/// The verdict a settled turn's head carries: the Telegram flow block's own
+/// pair (#480), which is what the live card becomes on `Done`. One word, never
+/// a step count the reader has to total (#2632).
+fn settled_verdict(summary: TurnSummary) -> (&'static str, &'static str) {
+    if summary.failed > 0 || summary.has_error {
+        ("\u{274c}", "Failed")
+    } else {
+        ("\u{2705}", "Finished")
+    }
 }
 
-/// The footer's words, as drawn, so a test reads the same string the pane
-/// paints instead of inferring it (#2442).
+/// One settled turn's footer, wording and order taken from the Telegram flow
+/// footer (#2632): the calls it made, what they cost in context, and the
+/// clock. The live card prints the same line before the turn settles, so
+/// finishing changes the verb and nothing else (#2638). The clock and the ctx
+/// segment are dropped when this process has no record for the turn instead of
+/// borrowing the session's current number (#2324 D3).
 fn turn_footer_text(turn: &Turn) -> Option<String> {
-    turn.metrics.as_ref().and_then(|m| m.segment())
+    let summary = turn.summary;
+    let mut parts: Vec<String> = Vec::new();
+    if summary.tool_calls > 0 {
+        parts.push(tool_count_label(summary.tool_calls));
+    }
+    if summary.failed > 0 {
+        parts.push(format!("{} failed", summary.failed));
+    }
+    if let Some(segment) = turn.metrics.as_ref().and_then(|m| m.segment()) {
+        parts.push(segment);
+    }
+    if summary.duration_secs > 0 {
+        parts.push(clock_glyph(summary.duration_secs.max(0) as u64));
+    }
+    (!parts.is_empty()).then(|| parts.join(" \u{b7} "))
+}
+
+/// `\u{23f1} M:SS`, the clock that closes every Telegram flow footer (ADR
+/// 0005 Decision 13). `flow_chrome::clock_glyph` is `pub(crate)` in the library
+/// crate and this file builds the `opencrabs-gui` binary, the same reason
+/// `activity_glyph` is local (#2632).
+fn clock_glyph(secs: u64) -> String {
+    let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
+    if h > 0 {
+        format!("\u{23f1} {h}:{m:02}:{s:02}")
+    } else {
+        format!("\u{23f1} {m}:{s:02}")
+    }
 }
 
 /// One drawn line of the card's body, in the order it happened. Pure data, so
@@ -1697,6 +1804,10 @@ fn live_card_body(live: &LiveTurn) -> Div {
 /// used to draw a ledger, then a status line BELOW it, then a bare reasoning
 /// line, which is what made a busy turn read as a wall of rows with the
 /// summary underneath them.
+///
+/// The corners are the message radius, not the card radius (#2618): this card
+/// becomes the message row once the turn persists, so it must not be rounder
+/// than the row it turns into.
 fn live_card(live: &LiveTurn, expanded: bool, ctx: (Option<u32>, u32)) -> Stateful<Div> {
     let frame = if live.settled.is_some() {
         "\u{2705}".to_string()
@@ -1755,7 +1866,7 @@ fn live_card(live: &LiveTurn, expanded: bool, ctx: (Option<u32>, u32)) -> Statef
         .w_full()
         .min_w_0()
         .flex_shrink_0()
-        .rounded(px(CARD_RADIUS))
+        .rounded(px(MESSAGE_RADIUS))
         .border_1()
         .border_color(rgb(palette::current().panel_hi))
         .bg(glass_fill(palette::current().panel))
@@ -1797,7 +1908,9 @@ fn live_card_footer(live: &LiveTurn, ctx: (Option<u32>, u32)) -> Option<String> 
     }
     let elapsed = live.elapsed_secs();
     if elapsed > 0 {
-        parts.push(format!("{elapsed}s"));
+        // The same clock the settled card prints, so finishing changes the
+        // verdict and nothing else (#2632/#2638).
+        parts.push(clock_glyph(elapsed));
     }
     (!parts.is_empty()).then(|| parts.join(" \u{b7} "))
 }
@@ -1833,7 +1946,10 @@ fn block_view(
 
 /// The TUI's spinner frames, in its own order
 /// (`tui/render/chat.rs`), so the crab blinks at the same cadence.
-const SPINNER_FRAMES: [&str; 10] = [
+///
+/// The sessions rail reads the same list (`rail_activity::frame`), so a row
+/// and the turn card it reports blink in phase instead of at two tempos.
+pub(crate) const SPINNER_FRAMES: [&str; 10] = [
     "\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283c}", "\u{2834}", "\u{2826}", "\u{2827}",
     "\u{2807}", "\u{280f}",
 ];
@@ -2420,26 +2536,19 @@ pub fn view(
         let newest = ti == last;
         let folded = !state.expanded.contains(&turn.anchor);
         let full = state.details.contains(&turn.anchor);
-        // The header sits above the turn's first non-user row, as in the TUI.
+        // The card's head sits above the turn's first non-user row, as in the
+        // TUI (#759). Everything the turn did goes inside that same box, so a
+        // settled turn keeps the shape it had while it ran (#2632): the
+        // question above the card, the working-out in it, the answer below.
         let header_at = match turn.blocks.first() {
             Some(Block::Msg { role, .. }) if role == "user" => 1,
             _ => 0,
         };
-        let mut drew_header = false;
+        let carded = turn.header.is_some();
+        let mut pre: Vec<AnyElement> = Vec::new();
+        let mut body: Vec<AnyElement> = Vec::new();
+        let mut post: Vec<AnyElement> = Vec::new();
         for (i, block) in turn.blocks.iter().enumerate() {
-            if i == header_at
-                && let Some(header) = fold_header(turn, folded)
-            {
-                // The listener is per turn and used exactly here, so it is
-                // taken out of the map instead of cloned.
-                col = col.child(match handlers.remove(&turn.anchor) {
-                    Some(click) => {
-                        header.on_click(move |event, window, cx| click(event, window, cx))
-                    }
-                    None => header,
-                });
-                drew_header = true;
-            }
             // A folded turn hides its working-out; the running turn's answer
             // is not shown twice because the stream owns it until it settles.
             if folded && !visible_when_folded(block, turn.final_idx, i) {
@@ -2458,7 +2567,7 @@ pub fn view(
             }
             let text = block_text(block);
             let mut selectable = None;
-            let child = match &drag {
+            let child: Div = match &drag {
                 Some(d) if !text.trim().is_empty() => {
                     let ordinal = {
                         let mut texts = d.texts.borrow_mut();
@@ -2479,22 +2588,36 @@ pub fn view(
                     _ => block_view(block, content_width, &attachment_handlers, None),
                 },
             };
-            col = match (&drag, selectable) {
-                (Some(d), Some(ordinal)) => col.child(selectable_row(d, ordinal, child)),
-                _ => col.child(child),
+            // A dragged row needs its own element id for the selection
+            // handlers, so that arm is a stateful wrapper and the other is the
+            // plain block. Everything below only appends the row, so both arms
+            // meet as one element type (#2632).
+            let child = match (&drag, selectable) {
+                (Some(d), Some(ordinal)) => selectable_row(d, ordinal, child).into_any_element(),
+                _ => child.into_any_element(),
             };
+            // Working-out rows ride inside the card; conversation rows keep
+            // their place around it (#2632).
+            if !carded {
+                col = col.child(child);
+            } else if i < header_at {
+                pre.push(child.into_any_element());
+            } else if folded || matches!(block, Block::Msg { .. }) {
+                post.push(child.into_any_element());
+            } else {
+                body.push(child.into_any_element());
+            }
         }
-        if !drew_header && let Some(header) = fold_header(turn, folded) {
+        col = col.children(pre);
+        if carded && let Some(card) = settled_card(turn, folded, body) {
+            // The listener is per turn and used exactly here, so it is taken
+            // out of the map instead of cloned.
             col = col.child(match handlers.remove(&turn.anchor) {
-                Some(click) => header.on_click(move |event, window, cx| click(event, window, cx)),
-                None => header,
+                Some(click) => card.on_click(move |event, window, cx| click(event, window, cx)),
+                None => card,
             });
         }
-        // The metrics sit under the turn's last block, folded or open, so the
-        // header stays a name and the footer stays a cost (#2442).
-        if let Some(footer) = turn_footer(turn) {
-            col = col.child(footer);
-        }
+        col = col.children(post);
     }
     if !live.is_empty() {
         col = col.child(live_view(
@@ -2788,6 +2911,11 @@ mod tests {
     /// #2571: only the message surface gets the tighter corner. The shared card
     /// and Seeker radii keep their values, so no other panel, table, ledger,
     /// composer, sidebar or plan strip moves with the chat change.
+    ///
+    /// #2618: the live card is the same surface, painted before the turn
+    /// persists, so it takes the message radius too. The settled card it turns
+    /// into keeps it, or the corner visibly jumps the moment a turn finishes.
+    /// Three uses, all the message surface.
     #[test]
     fn only_the_message_surface_uses_the_tighter_radius() {
         let src = include_str!("transcript.rs");
@@ -2798,12 +2926,14 @@ mod tests {
         assert_eq!(MESSAGE_RADIUS, 12.0);
         assert_eq!(CARD_RADIUS, 24.0);
         assert_eq!(opencrabs::ui_core::card::SEEKER_RADIUS, 32.0);
-        // The token is declared once and applied once: in the bubble. Every
-        // other rounded surface in this file still reads CARD_RADIUS. Count on
-        // the production half only: this file includes itself, so the literals
-        // in this test would otherwise match themselves.
+        // The token is declared once and applied where a message is painted:
+        // the settled bubble, the settled card and the live card that becomes
+        // it. Every other rounded surface in this file still reads
+        // CARD_RADIUS. Count on the production half only: this file includes
+        // itself, so the literals in this test would otherwise match
+        // themselves.
         let production = src
-            .split("#[cfg(test)]")
+            .split("\n#[cfg(test)]\nmod tests")
             .next()
             .expect("production source before the test module");
         assert_eq!(production.matches("const MESSAGE_RADIUS").count(), 1);
@@ -2812,8 +2942,30 @@ mod tests {
             .filter(|line| line.contains("px(MESSAGE_RADIUS)"))
             .count();
         assert_eq!(
-            message_radius_uses, 1,
-            "only the bubble applies the message radius, found {message_radius_uses} uses"
+            message_radius_uses, 3,
+            "the bubble, the settled card and the live card apply the message radius, found {message_radius_uses} uses"
+        );
+        let settled = production
+            .split("fn settled_card(")
+            .nth(1)
+            .and_then(|rest| rest.split("fn live_card(").next())
+            .expect("settled turn card body");
+        assert!(
+            settled.contains(".rounded(px(MESSAGE_RADIUS))"),
+            "the settled card keeps the radius the live card painted"
+        );
+        let live = production
+            .split("fn live_card(")
+            .nth(1)
+            .and_then(|rest| rest.split("fn live_card_footer(").next())
+            .expect("live card body");
+        assert!(
+            live.contains(".rounded(px(MESSAGE_RADIUS))"),
+            "the live card takes the message radius"
+        );
+        assert!(
+            !live.contains(".rounded(px(CARD_RADIUS))"),
+            "the live card must not keep the pudgy card radius"
         );
         let cell = src
             .split("fn attachment_cell(")
@@ -2823,6 +2975,39 @@ mod tests {
         assert!(
             cell.contains(".rounded(px(CARD_RADIUS))"),
             "attachment tiles keep the card radius"
+        );
+    }
+
+    /// #2639: the working-out rows are rows, not boxes. The panels nested a
+    /// card-radius (24) surface inside a card that draws the message radius
+    /// (12), so the inner corners were twice as round as the outer ones, and
+    /// every ledger painted its own fill on top of the card's.
+    #[test]
+    fn the_working_out_rows_draw_no_inner_panel() {
+        let src = include_str!("transcript.rs");
+        let production = src
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .expect("production source before the test module");
+        for (name, end) in [
+            ("fn thinking_block(", "/// A tool ledger:"),
+            ("fn tools_block(", "/// One call's status mark"),
+        ] {
+            let body = production
+                .split(name)
+                .nth(1)
+                .and_then(|rest| rest.split(end).next())
+                .unwrap_or_else(|| panic!("{name} body"));
+            for forbidden in [".rounded(", ".bg(", ".border_", ".p_3()"] {
+                assert!(
+                    !body.contains(forbidden),
+                    "{name} must not draw {forbidden}: the card owns the frame"
+                );
+            }
+        }
+        assert!(
+            !production.contains("\u{b7} thinking \u{b7}"),
+            "the reasoning block lost its caption"
         );
     }
 
@@ -3393,6 +3578,7 @@ mod tests {
                 ctx_used: 68_000,
                 ctx_max: 200_000,
                 tps: Some(58.0),
+                tool_calls: 0,
             },
         );
         let (_, mut turns) = turns_with_metrics(&rows, 2, &known);
@@ -3407,14 +3593,52 @@ mod tests {
         );
     }
 
+    /// #2632: a persisted row that lost its ledger must not turn the settled
+    /// card into "this turn did nothing". What the live card counted is the
+    /// floor, so finishing changes the verb and never the numbers.
+    #[test]
+    fn a_row_that_lost_its_ledger_keeps_the_live_tally() {
+        let mut rows = [
+            row("user", "check the logs", 1),
+            row("assistant", "All clear.", 2),
+        ];
+        // The clock is part of the same footer, so the turn carries one.
+        rows[1].duration_secs = Some(1);
+        let (_, plain) = turns(&rows, 2);
+        let anchor = plain[0].anchor.clone();
+
+        let mut known: HashMap<String, TurnMetrics> = HashMap::new();
+        known.insert(
+            anchor,
+            TurnMetrics {
+                ctx_used: 53_000,
+                ctx_max: 200_000,
+                tps: Some(31.0),
+                tool_calls: 4,
+            },
+        );
+        let (_, mut turns) = turns_with_metrics(&rows, 2, &known);
+        let turn = turns.pop().expect("one turn");
+        assert_eq!(
+            turn.summary.tool_calls, 4,
+            "a row with no ledger still knows how many calls the turn made"
+        );
+        assert_eq!(
+            turn_footer_text(&turn).as_deref(),
+            Some("4 tool calls \u{b7} ctx: 53K/200K 26% | 31 tok/s \u{b7} \u{23f1} 0:01"),
+            "the settled footer prints the live card's numbers, not fewer"
+        );
+    }
+
     /// A provider that reports no rate still gets the honest half: ctx only,
-    /// never a fabricated tok/s.
+    /// never a fabricated tok/s (#2632).
     #[test]
     fn a_turn_without_a_rate_prints_ctx_only() {
         let metrics = TurnMetrics {
             ctx_used: 12_000,
             ctx_max: 200_000,
             tps: None,
+            tool_calls: 0,
         };
         assert_eq!(metrics.segment().as_deref(), Some("ctx: 12K/200K 6%"));
     }
@@ -3933,10 +4157,11 @@ mod tests {
         );
     }
 
-    /// #2442: the ctx budget rides the footer. In the header it crowded the
-    /// turn's name, and the header is the only line a folded turn shows.
+    /// #2632: the settled card prints the live card's footer, in the live
+    /// card's own words, so finishing changes the verb and nothing else. The
+    /// header stays a name, never a cost (#2442).
     #[test]
-    fn the_ctx_budget_rides_the_footer_not_the_header() {
+    fn the_settled_card_keeps_the_live_cards_footer() {
         let mut live = LiveTurn::default();
         live.begin("go".into());
         live.push_tool(ToolCall::running("bash".into(), "bash: ls".into()));
@@ -3948,56 +4173,54 @@ mod tests {
             "the header must stay ctx free: {lead}"
         );
 
-        // The settled card's footer too, and the header that lost it.
+        // Settled: same segment, plus the count it made and the clock it took,
+        // and a head that states the verdict instead of the step tally.
         let turn = Turn {
             header: Some("\u{2705} 1 step \u{b7} 1 tool call".into()),
+            summary: TurnSummary {
+                tool_calls: 1,
+                duration_secs: 24,
+                ..Default::default()
+            },
             metrics: Some(TurnMetrics {
                 ctx_used: 72_000,
                 ctx_max: 200_000,
                 tps: Some(58.0),
+                tool_calls: 1,
             }),
             preview: None,
             anchor: "a".into(),
             blocks: Vec::new(),
             final_idx: None,
         };
-        let text = turn_footer_text(&turn).expect("the footer carries the segment");
-        assert!(text.contains("ctx: 72K/200K 36%"), "got {text}");
+        assert_eq!(
+            turn_footer_text(&turn).as_deref(),
+            Some("1 tool call \u{b7} ctx: 72K/200K 36% | 58 tok/s \u{b7} \u{23f1} 0:24"),
+            "the footer is the live card's line, settled: calls, ctx, its own rate, clock"
+        );
+        assert_eq!(
+            settled_verdict(turn.summary),
+            ("\u{2705}", "Finished"),
+            "a clean turn says Finished, not its step count"
+        );
         assert!(
             !turn.header.as_deref().unwrap_or_default().contains("ctx:"),
             "the header never carries ctx"
         );
-
-        // And `fold_header` itself no longer builds a segment: the pin reads the
-        // function's own source, so a later edit that puts it back fails here.
-        // The slice stops at fold_header's own closing brace, so it covers that
-        // body and not the doc comment below it, which talks about the footer.
-        const SRC: &str = include_str!("transcript.rs");
-        let (_, after) = SRC
-            .split_once(["fn fold_", "header(turn"].concat().as_str())
-            .expect("fold_header exists");
-        let (header_src, _) = after.split_once("\n}\n").expect("fold_header ends");
-        assert!(
-            !header_src.contains(["m", "etrics"].concat().as_str()),
-            "the fold header must not read the turn's metrics"
-        );
-        assert!(
-            !header_src.contains("ctx:"),
-            "the fold header must not paint the ctx segment"
-        );
     }
 
-    /// #2442: a settled turn keeps its cost under the body, folded or open, and
-    /// a turn this process never measured claims no number at all.
+    /// #2632: a turn this process never measured claims no ctx, no rate and no
+    /// clock rather than borrowing the session's current numbers (#2324 D3).
     #[test]
-    fn a_turn_footer_carries_the_metrics_once_the_turn_settles() {
+    fn a_turn_with_no_record_claims_no_numbers() {
         let measured = Turn {
             header: Some("\u{2705} 2 steps".into()),
-            metrics: Some(TurnMetrics {
-                ctx_used: 68_000,
-                ctx_max: 200_000,
-                tps: None,
-            }),
+            summary: TurnSummary {
+                tool_calls: 2,
+                duration_secs: 0,
+                ..Default::default()
+            },
+            metrics: None,
             preview: None,
             anchor: "b".into(),
             blocks: Vec::new(),
@@ -4005,11 +4228,12 @@ mod tests {
         };
         assert_eq!(
             turn_footer_text(&measured).as_deref(),
-            Some("ctx: 68K/200K 34%"),
-            "the footer states the budget the turn ran with"
+            Some("2 tool calls"),
+            "the count it knows, nothing it does not"
         );
         let unmeasured = Turn {
             header: Some("x".into()),
+            summary: TurnSummary::default(),
             metrics: None,
             preview: None,
             anchor: "c".into(),
@@ -4020,6 +4244,16 @@ mod tests {
             turn_footer_text(&unmeasured).is_none(),
             "no record, no number"
         );
+        assert_eq!(
+            settled_verdict(TurnSummary {
+                failed: 1,
+                ..Default::default()
+            }),
+            ("\u{274c}", "Failed"),
+            "one failed call and the head says Failed"
+        );
+        assert_eq!(clock_glyph(9), "\u{23f1} 0:09", "the clock pads seconds");
+        assert_eq!(clock_glyph(3_725), "\u{23f1} 1:02:05", "and rolls hours");
     }
 
     /// #2442: the live card is the only block now, so the pane never grows a

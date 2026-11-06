@@ -128,3 +128,21 @@ fn mc_phantoms_empty_breakdown_uses_the_panel_empty_state() {
     assert!(panel.contains("mc_phantoms_rows(a, shown)"));
     assert!(panel.contains("\"No phantoms detected.\""));
 }
+
+#[test]
+fn mc_line_rows_render_through_the_flex_row_truncate_shape() {
+    // A truncated text element inside a plain width-full block div is measured
+    // once at the grid's flex-basis zero and stays an ellipsis forever
+    // (#2642, gpui caches nowrap layout on wrap_width). The working shape is
+    // the one the label/value arm already used: flex row, then a growing,
+    // shrinkable text child. Pin both halves so neither can regress.
+    let flat = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let panel = flat(&between(GUI_MAIN, "fn mc_panel(", "fn mc_inbox_panel"));
+    assert!(panel.contains(
+        "McRow::Line(line, _) => { cell = cell . flex () . flex_row () . child( text( line , Size::Xs , color ) . flex_1 () . min_w_0 () . truncate () ); }"
+    ));
+    assert!(
+        !GUI_MAIN.contains(".text_xs().truncate().child("),
+        "the block-div truncate shape is back in main.rs"
+    );
+}

@@ -43,6 +43,7 @@ mod onboard;
 mod palette;
 mod plan_strip;
 mod preview;
+mod rail_activity;
 mod screen_keys;
 mod sessions;
 mod skills_view;
@@ -102,7 +103,6 @@ use opencrabs::config::Config;
 use opencrabs::config::GuiTheme;
 use opencrabs::config::gui_theme;
 use opencrabs::tui::app::mission_control::log_viewer::LogViewerState;
-use opencrabs::tui::render::format_token_count_raw;
 use opencrabs::ui_core::keys::{UiKey, is_typing_key};
 use opencrabs::ui_core::usage::data::Period;
 use opencrabs::ui_core::usage::input::{self, DashboardState, UsageKeyOutcome};
@@ -182,6 +182,13 @@ struct SplitPane {
     /// The token that cancels THIS pane's turn, so `/stop` in one leaf leaves
     /// the other running.
     cancel: Option<tokio_util::sync::CancellationToken>,
+    /// This pane's own drag-to-copy state (#2623). A pane transcript is built
+    /// with `ViewHooks::default()`, which leaves `drag: None`, so every pane
+    /// had no anchor, no highlight and no release handler: the gesture was
+    /// dead the moment a second pane existed. It cannot share the window's
+    /// either, because the row text is stored by ordinal and two panes plus
+    /// the window all count rows from zero.
+    copy_drag: Rc<CopyDrag>,
 }
 
 /// The ledger path, unchanged: `config.database.path`, with the same
@@ -439,6 +446,22 @@ fn channel_chip_line_from(names: &[String]) -> Option<SharedString> {
     channel_status::status_line(&borrowed, &channel_ownership()).map(SharedString::from)
 }
 
+/// A running turn parked under the conversation that owns it (#2616).
+///
+/// The window paints one conversation at a time, and every session may be
+/// mid-turn on its own. Turn state therefore travels with the session:
+/// switching conversations parks the card, its cancel handle, the reload
+/// handshake and the last prompt size here, and coming back puts them on
+/// screen again. Entries exist only while a turn is in flight, so a profile
+/// with thousands of conversations costs nothing.
+struct StashedTurn {
+    live: transcript::LiveTurn,
+    cancel: Option<tokio_util::sync::CancellationToken>,
+    settle_expect: Option<usize>,
+    settle_retries: u8,
+    ctx_tokens: Option<u32>,
+}
+
 /// The phase 1 window. Every string on screen is real data or the real error.
 struct Dashboard {
     /// Which pane the right side draws: chat by default, usage on ctrl+u.
@@ -535,6 +558,18 @@ struct Dashboard {
     db_path: std::path::PathBuf,
     /// The session rail's live state.
     sessions: sessions::SessionsState,
+    /// Which rail rows have work in flight, and which plans wait (#2636).
+    /// Memory only: the open turn and each split leaf already keep their own
+    /// `busy`, so this holds the one thing nothing else records, a session
+    /// streaming with no pane of its own.
+    rail: rail_activity::RailActivity,
+    /// The id to plan-file index behind each row's badge, with its mtime cache.
+    rail_index: rail_activity::PlanIndex,
+    /// The plans the owner has already opened, so their rings stop (#2636).
+    rail_seen: rail_activity::SeenPlans,
+    /// The one monotonic origin every rail animation reads, so all rows blink
+    /// on the same frame instead of one clock each.
+    rail_clock: std::time::Instant,
     /// Rail width in rem, moved by the splitter's drag. Never below
     /// `RAIL_MIN_REM`: dragging past it closes the rail instead, and ctrl+s
     /// brings it back at the last width.
@@ -681,6 +716,12 @@ struct Dashboard {
     /// The provider the models screen's list marks. A click sets it and moves
     /// the model cursor to that provider's first visible model.
     models_provider: Option<String>,
+    /// The session that opened the picker. A split pane owns its own model,
+    /// so the picker must apply and answer in this session, not the window.
+    models_session: Option<Uuid>,
+    /// The session whose switch is in flight. A second Enter while this is
+    /// set is ignored, so one pick cannot write the same confirmation twice.
+    models_switching: Option<Uuid>,
     /// Shared request lifecycle and pending providers. Static rows are only a
     /// fallback; every configured provider gets a live discovery request.
     models_fetch: Option<std::sync::mpsc::Receiver<(u64, model_fetch::FetchOutcome)>>,
@@ -704,6 +745,11 @@ struct Dashboard {
     /// Which session the strip's path was resolved for, so the DB lookup runs
     /// once per selection rather than once per frame.
     plan_for: Option<Uuid>,
+    /// Panes whose plan strip the user expanded (#2624). A pane opens at the
+    /// density its pane count and width allow, and a click on the card trades
+    /// the conversation's room for the checklist, per pane, so expanding one
+    /// leaf never grows the card in the others.
+    plan_expanded: std::collections::HashSet<Uuid>,
     /// The selected session's transcript and its scroll handle, so a fresh
     /// load can open at the bottom where the conversation ends.
     transcript: transcript::TranscriptState,
@@ -726,6 +772,11 @@ struct Dashboard {
     /// as the transcript's last entry and clears once the DB holds the rows,
     /// so a slow or silent turn never looks like an empty conversation.
     live: transcript::LiveTurn,
+    /// Turns running in conversations the window is not painting (#2616).
+    /// Keyed by the session that owns each one, so a switch parks the turn on
+    /// screen and restores the destination's, and the window never has to
+    /// guess which conversation a card belongs to.
+    stashed: std::collections::HashMap<Uuid, StashedTurn>,
     /// Reload attempts made while waiting for the turn's rows to persist.
     /// Bounded, so a write that never lands cannot spin the fetch loop.
     settle_retries: u8,
@@ -737,12 +788,20 @@ struct Dashboard {
     /// The running turn's cancellation token, so Esc twice stops it the way
     /// the TUI's second Esc does. `None` when no turn is in flight.
     cancel: Option<tokio_util::sync::CancellationToken>,
-    /// When the last Esc landed. A second Esc inside the window cancels the
-    /// turn; a lone Esc is ignored, because Esc is also how a user clears a
-    /// selection.
-    esc_at: Option<std::time::Instant>,
-    /// Messages typed while busy; joined and sent when the turn completes.
-    queued: Vec<agent_bridge::PendingMessage>,
+    /// The hint last painted on the composers, so a tick only touches them when
+    /// the state actually changed (#2630).
+    hint_painted: Option<SharedString>,
+    /// Whether the queue strip is showing every message or only its head.
+    /// A queue of five rows pushes the conversation off the screen, so past
+    /// two messages the strip folds and a click opens it (#2629).
+    queue_expanded: bool,
+    /// Text typed before there is a conversation to key it to: while the agent
+    /// stack is still booting, or before the first session exists. Everything
+    /// else waits in `agent_bridge`'s per-session queue, the one the agent
+    /// itself drains between tool calls. Keeping a second list here meant the
+    /// strip could show five messages the agent could not see, so they never
+    /// went out (#2629).
+    unsent: Vec<agent_bridge::PendingMessage>,
     /// Set when the agent stack failed to come up; sends are refused.
     agent_error: Option<String>,
     /// Prompt tokens the provider last reported (`ProgressEvent::TokenCount`
@@ -757,10 +816,11 @@ struct Dashboard {
     /// window forgets instead of showing the session's current number as if
     /// it belonged to an old turn.
     turn_metrics: HashMap<String, transcript::TurnMetrics>,
-    /// Metrics for the turn that just settled, waiting for its rows to land
-    /// so the anchor they get keyed by exists. Session-tagged: a reload for
-    /// another conversation must not claim them.
-    pending_metrics: Option<(Uuid, transcript::TurnMetrics)>,
+    /// Metrics for the turns that just settled, waiting for their rows to land
+    /// so the anchor they get keyed by exists. Keyed by session, one slot each:
+    /// a reload for another conversation must not claim them, and a split can
+    /// settle two panes before either reload comes back (#2632).
+    pending_metrics: HashMap<Uuid, transcript::TurnMetrics>,
     /// The checkout's branch, read once at startup: the footer's own field in
     /// the TUI. `None` outside a git tree, which the footer shows as a dash
     /// rather than a made-up name.
@@ -910,20 +970,38 @@ impl Dashboard {
         let switched = self.transcript.session != Some(id);
         self.sessions.selected = Some(id);
         if switched {
-            // A different conversation has its own budget and its own last
-            // prompt size; carrying the previous one over would show a
-            // counter for a session the user is not reading.
-            self.ctx_tokens = None;
+            // The turn on screen belongs to the conversation being left. A
+            // turn still running there is parked under it, and the
+            // destination's own turn (or an empty slot) comes on screen, so
+            // neither the spinner nor the ctx counter follows the switch
+            // (#2616). Runs before `transcript.session` moves: the previous
+            // id is the key the parked turn is stored under.
+            swap_visible_turn(
+                &mut self.stashed,
+                self.transcript.session,
+                id,
+                &mut self.live,
+                &mut self.busy,
+                &mut self.cancel,
+                &mut self.settle_expect,
+                &mut self.settle_retries,
+                &mut self.ctx_tokens,
+            );
             // Metrics belong to the turn they settled, never to the session
             // the user just switched to.
-            self.pending_metrics = None;
+            self.pending_metrics.clear();
             if let Some(b) = agent_bridge::bridge() {
                 self.ctx_max = b.service.context_limit_for_session(id);
             }
-            // The queue belongs to the conversation on screen: a message
-            // typed for one session must never be drained into another
-            // (#2441), and it must not sit waiting on one the user left.
-            self.queued.clear();
+            // A queue walk belongs to the conversation it started in too, so
+            // its messages go back to wait instead of vanishing with the old
+            // draft (#2637).
+            let returned = self.editor.update(cx, |ed, _| ed.release_recall(false));
+            if let Some((session, msgs)) = returned {
+                for msg in msgs {
+                    agent_bridge::queue_recall_return(session, msg);
+                }
+            }
             // The draft and its attachments belong to the conversation they
             // were typed in (#2481).
             self.editor.update(cx, |ed, cx| ed.begin_conversation(cx));
@@ -950,6 +1028,15 @@ impl Dashboard {
     /// so the screen and the session can never disagree.
     fn open_session(&mut self, id: Uuid, cx: &mut Context<Self>) {
         self.begin_conversation(id, cx);
+        // Opening a conversation is reading its plan: the rail's ring stops
+        // here, not at paint, so a repaint can never be mistaken for a read and
+        // a ring never clears itself just because the row scrolled past.
+        if let Some(evidence) = self
+            .rail_index
+            .evidence(id, false, std::time::Instant::now())
+        {
+            self.rail_seen.mark(id, evidence.stamp);
+        }
         self.screen = Screen::Chat;
         let db_path = self.db_path.clone();
         cx.spawn(async move |this, cx| {
@@ -1479,7 +1566,7 @@ impl Dashboard {
             find::Surface::Usage => self.toggle_usage(cx),
             find::Surface::Files => self.toggle_files(cx),
             find::Surface::Themes => self.toggle_themes(cx),
-            find::Surface::Models => self.open_models(None, cx),
+            find::Surface::Models => self.open_models(None, self.focused_pane(), cx),
             find::Surface::Sessions => self.toggle_rail(cx),
             find::Surface::Help => self.toggle_help(cx),
             find::Surface::Skills => self.open_skills(cx),
@@ -1487,7 +1574,7 @@ impl Dashboard {
             // the same door as typing it, never the model.
             find::Surface::Profiles => {
                 if let Some(outcome) = commands::parse_command("/profiles") {
-                    self.run_command(outcome, cx);
+                    self.run_command(outcome, self.focused_pane(), cx);
                 }
             }
             find::Surface::MissionControl => self.open_mission_control(cx),
@@ -1542,7 +1629,12 @@ impl Dashboard {
     /// through to the agent: a command the window cannot run gets one line,
     /// because a model asked to answer `/usage` writes a paragraph about
     /// usage instead of opening the ledger (#2374).
-    fn run_command(&mut self, outcome: commands::Outcome, cx: &mut Context<Self>) {
+    fn run_command(
+        &mut self,
+        outcome: commands::Outcome,
+        session: Option<Uuid>,
+        cx: &mut Context<Self>,
+    ) {
         // The pair has to travel with the action: `/models openai/gpt-5` is a
         // switch, a bare `/models` is the picker, and dropping the argument
         // would silently turn one into the other.
@@ -1579,7 +1671,7 @@ impl Dashboard {
             commands::GuiAction::NewSession => self.new_session(cx),
             commands::GuiAction::StopTurn => self.stop_turn(cx),
             commands::GuiAction::OpenSessions => self.toggle_rail(cx),
-            commands::GuiAction::OpenModels => self.open_models(arg, cx),
+            commands::GuiAction::OpenModels => self.open_models(arg, session, cx),
             commands::GuiAction::OpenSkills => self.open_skills(cx),
             commands::GuiAction::OpenOnboard(name) => self.open_onboard(name, arg, cx),
             commands::GuiAction::Text(command) => self.run_text_command(command, arg, cx),
@@ -1624,11 +1716,52 @@ impl Dashboard {
             Some(target)
         };
         self.rail_focused = true;
-        self.sessions.cursor = self.transcript.session;
+        // The picker's cursor starts on the pane being split, not on the
+        // chat's row: with the caret in a right-hand pane, the chat's row is
+        // a different session and the list opened pointing somewhere else
+        // (#2625).
+        self.sessions.cursor = Some(target);
         // Focus goes to the window, not the composer, so the sidebar keys and the
         // dialog's N and Esc reach it while the split waits.
         self.refocus = Some(FocusTarget::Root);
         cx.notify();
+    }
+
+    /// Split the pane holding the caret and put `id` in the new slot (#2625).
+    ///
+    /// The rail's row menu used to open the row and then start a pick, which
+    /// had two faults: `open_session` moves the chat leaf to the clicked row,
+    /// so the split grew from the window's first pane instead of the pane
+    /// being read, and for a session the tree did not hold yet the leaf reset
+    /// in `adopt_chat_leaf` threw the split away entirely. Choosing the menu
+    /// entry already named the session, so the pick is answered here and the
+    /// second step is skipped.
+    fn split_row(&mut self, id: Uuid, layout: Layout, cx: &mut Context<Self>) {
+        let chat = self.transcript.session;
+        if self.panes.is_none()
+            && let Some(chat) = chat
+        {
+            self.panes = Some(PaneTree::leaf(chat));
+        }
+        let target = self.focused_pane();
+        let target = target.filter(|it| self.panes.as_ref().is_some_and(|tree| tree.contains(*it)));
+        let Some(target) = target else {
+            self.live
+                .notices
+                .push("Open a session before splitting it.".to_string());
+            cx.notify();
+            return;
+        };
+        if Some(id) == chat || self.panes.as_ref().is_some_and(|tree| tree.contains(id)) {
+            self.live
+                .notices
+                .push("That session is already open in a pane.".to_string());
+            cx.notify();
+            return;
+        }
+        self.split_pick = Some(layout);
+        self.split_target = Some(target);
+        self.choose_split(id, cx);
     }
 
     /// Esc during the pick: the split is dropped and the chat keeps focus.
@@ -1646,6 +1779,13 @@ impl Dashboard {
         self.pane_focus.or(self.transcript.session)
     }
 
+    /// Point recall at the composer that has the caret. A recall keeps the
+    /// session it took its messages from, so moving the caret cannot land an
+    /// edit in another pane's queue (#2629/#2637).
+    fn sync_composer_session(&mut self) {
+        agent_bridge::set_composer_session(self.focused_pane());
+    }
+
     /// The composer the keyboard owns (#2610): the focused pane's own field,
     /// or the window's when the chat leaf holds the caret.
     ///
@@ -1654,14 +1794,39 @@ impl Dashboard {
     /// at the window's editor while a pane owns the caret puts the text and
     /// the attachment chips into a field the split never draws.
     fn composer_entity(&self) -> Entity<editor::Editor> {
-        match self.pane_focus {
-            Some(id) if Some(id) != self.transcript.session => self
+        match self.split_focus() {
+            Some(id) if Some(id) == self.transcript.session => self.editor.clone(),
+            Some(id) => self
                 .pane_states
                 .get(&id)
                 .map(|pane| pane.editor.clone())
                 .unwrap_or_else(|| self.editor.clone()),
-            _ => self.editor.clone(),
+            None => self.editor.clone(),
         }
+    }
+
+    /// The leaf that owns the keyboard in the split, `None` meaning the chat
+    /// leaf. Resolved through [`resolve_split_focus`] so the rules can be
+    /// tested without a window.
+    fn split_focus(&self) -> Option<Uuid> {
+        let leaves = self
+            .panes
+            .as_ref()
+            .map(|tree| tree.leaves())
+            .unwrap_or_default();
+        resolve_split_focus(&leaves, self.pane_focus, self.transcript.session)
+    }
+
+    /// Expand or collapse one pane's plan strip (#2624). The choice is per
+    /// leaf: a pane in a wall of eight opens on its bar, and the one the user
+    /// is reading trades room for the whole checklist without touching the
+    /// others. The chat leaf keys on its own session, the same id every other
+    /// pane uses, so the two cannot collide.
+    fn toggle_pane_plan(&mut self, session: Uuid, cx: &mut Context<Self>) {
+        if !self.plan_expanded.remove(&session) {
+            self.plan_expanded.insert(session);
+        }
+        cx.notify();
     }
 
     /// Close one pane and hand its space to its neighbour (#2438, #2472).
@@ -1682,6 +1847,7 @@ impl Dashboard {
         self.pane_states.remove(&session);
         self.split_drag = None;
         self.pane_focus = None;
+        self.sync_composer_session();
         if self.transcript.session == Some(session) {
             self.open_session(absorbed, cx);
         } else {
@@ -1740,6 +1906,7 @@ impl Dashboard {
         // A receipt in the daily log, so "Tab did nothing" can be told apart
         // from "Tab moved the caret and the header did not show it".
         logging::debug(&format!("pane focus -> {:?}", self.pane_focus));
+        self.sync_composer_session();
         // The keyboard walks with the caret (#2610). Without this the split
         // highlighted the new pane while every keystroke still landed in the
         // chat leaf's field, so the chord appeared to rotate exactly once.
@@ -1772,6 +1939,7 @@ impl Dashboard {
         // The pane just picked is the one the caret and ctrl+x land on, so a
         // split opens ready to act on what was clicked (#2474).
         self.pane_focus = Some(id);
+        self.sync_composer_session();
         self.refocus_screen();
         let split = self
             .panes
@@ -1802,6 +1970,16 @@ impl Dashboard {
             editor::EditorEvent::Preview(path) => this.open_preview(path.clone(), cx),
         })
         .detach();
+        // The pane's own drag-to-copy (#2623). The transcript cannot reach a
+        // composer, so the pane's editor is the one that says "Copied to
+        // clipboard" once a dragged range lands (#2587).
+        let pane_copy = Rc::new(CopyDrag::default());
+        {
+            let editor = pane_editor.downgrade();
+            pane_copy.set_copied_listener(Rc::new(move |cx: &mut App| {
+                let _ = editor.update(cx, |editor, cx| editor.show_copied(cx));
+            }));
+        }
         // The pane's plan lives wherever its session is bound, which is a DB
         // read; the same lookup the window's strip uses, resolved once here.
         agent_bridge::spawn_plan_path(self.db_path.clone(), id, self.sink.clone());
@@ -1820,6 +1998,7 @@ impl Dashboard {
                 live: transcript::LiveTurn::default(),
                 busy: false,
                 cancel: None,
+                copy_drag: pane_copy,
             },
         );
         // Paint the pane now, with its header, rather than waiting for the
@@ -2052,7 +2231,7 @@ impl Dashboard {
         cx.notify();
     }
 
-    /// `/stop`: abort the turn in flight, the same effect as Esc Esc and the
+    /// `/stop`: abort the turn in flight, the same effect as Esc and the
     /// same wording. The pane stops claiming a turn is running the moment the
     /// user asks, and the service's own failure event lands afterwards.
     fn stop_turn(&mut self, cx: &mut Context<Self>) {
@@ -2086,10 +2265,19 @@ impl Dashboard {
     /// `/models` with no argument opens the picker. With an argument it is the
     /// switch the terminal performs, and no screen opens: the reply is the
     /// answer, exactly like the terminal's.
-    fn open_models(&mut self, arg: Option<String>, cx: &mut Context<Self>) {
-        // The catalogue is read once, here, so a frame never walks it.
-        let current =
-            agent_bridge::bridge().map(|b| (b.service.provider_name(), b.service.provider_model()));
+    fn open_models(&mut self, arg: Option<String>, session: Option<Uuid>, cx: &mut Context<Self>) {
+        let target = session.or_else(|| self.focused_pane());
+        self.models_session = target;
+        // The catalogue is read once, here, so a frame never walks it. A pane
+        // carries its own pair, so the picker marks that pair rather than the
+        // window's when the command came from a split.
+        let current = agent_bridge::bridge().map(|b| match target {
+            Some(sid) => (
+                b.service.provider_name_for_session(sid),
+                b.service.provider_model_for_session(sid),
+            ),
+            None => (b.service.provider_name(), b.service.provider_model()),
+        });
         self.reset_model_picker(current, None);
         if let Some(arg) = arg {
             self.switch_model(arg, cx);
@@ -2328,7 +2516,11 @@ impl Dashboard {
                                 }
                             })
                         } else {
-                            agent_bridge::bridge().map(|bridge| bridge.service.provider_name())
+                            let target = self.models_session.or(self.transcript.session);
+                            agent_bridge::bridge().map(|bridge| match target {
+                                Some(sid) => bridge.service.provider_name_for_session(sid),
+                                None => bridge.service.provider_name(),
+                            })
                         };
                         models::manual_pair(
                             &self.models_query,
@@ -2744,6 +2936,18 @@ impl Dashboard {
         cx.notify();
     }
 
+    /// Put a one-line answer in the conversation that owns it, so a pane never
+    /// reads a switch receipt meant for the window chat.
+    fn push_session_notice(&mut self, session: Uuid, line: String) {
+        if self.transcript.session == Some(session) {
+            self.live.notices.push(line);
+        } else if let Some(pane) = self.pane_states.get_mut(&session) {
+            pane.live.notices.push(line);
+        } else {
+            self.live.notices.push(line);
+        }
+    }
+
     /// Ask the service to switch. The answer arrives as an event on the UI
     /// thread, because a switch can do network work per candidate.
     fn switch_model(&mut self, arg: String, cx: &mut Context<Self>) {
@@ -2753,7 +2957,7 @@ impl Dashboard {
             Some(row) => row.pair(),
             None => arg,
         };
-        let Some(session) = self.transcript.session else {
+        let Some(session) = self.models_session.or_else(|| self.focused_pane()) else {
             self.live.notices.push(
                 "No conversation is open, so there is nothing to switch. Type /new first."
                     .to_string(),
@@ -2761,13 +2965,21 @@ impl Dashboard {
             cx.notify();
             return;
         };
+        // One pick, one switch. Enter can repeat faster than the provider
+        // handshake, and every repeat used to persist another confirmation.
+        if self.models_switching.is_some() {
+            logging::debug("model switch already in flight");
+            return;
+        }
         let Some(bridge) = agent_bridge::bridge() else {
-            self.live
-                .notices
-                .push("The agent is still starting. Try again in a moment.".to_string());
+            self.push_session_notice(
+                session,
+                "The agent is still starting. Try again in a moment.".to_string(),
+            );
             cx.notify();
             return;
         };
+        self.models_switching = Some(session);
         agent_bridge::spawn_switch_model(bridge.service.clone(), session, pair, self.sink.clone());
         cx.notify();
     }
@@ -3661,7 +3873,7 @@ impl Dashboard {
             // it wrote move to that pane, so a split never answers in the
             // wrong leaf (#2614).
             let before = self.live.notices.len();
-            self.run_command(outcome, cx);
+            self.run_command(outcome, Some(session), cx);
             if Some(session) != self.transcript.session
                 && let Some(pane) = self.pane_states.get_mut(&session)
             {
@@ -3736,78 +3948,29 @@ impl Dashboard {
         progress: opencrabs::brain::agent::ProgressEvent,
         cx: &mut Context<Self>,
     ) {
-        use opencrabs::brain::agent::ProgressEvent;
-        let Some(pane) = self.pane_states.get_mut(&session) else {
+        if let Some(pane) = self.pane_states.get_mut(&session) {
+            fold_live(&mut pane.live, progress);
+            pane.scroll.scroll_to_bottom();
+            cx.notify();
             return;
-        };
-        let live = &mut pane.live;
-        match progress {
-            ProgressEvent::Thinking => live.thinking = true,
-            ProgressEvent::StreamingChunk { text } => {
-                live.thinking = false;
-                live.note_chunk(&text);
-            }
-            ProgressEvent::IntermediateText { text, reasoning } => {
-                live.thinking = false;
-                if let Some(reasoning) = reasoning {
-                    live.push_reasoning(&reasoning);
-                }
-                live.push_narration(&text);
-            }
-            ProgressEvent::ToolStarted {
-                tool_name,
-                tool_input,
-                ..
-            } => {
-                live.thinking = false;
-                let description =
-                    opencrabs::tui::app::App::format_tool_description(&tool_name, &tool_input);
-                live.push_tool(transcript::ToolCall::running(tool_name, description));
-            }
-            ProgressEvent::ToolCompleted {
-                tool_name, success, ..
-            } => {
-                let open = live
-                    .tools
-                    .iter_mut()
-                    .rev()
-                    .find(|c| !c.done && c.name == tool_name && c.task_id.is_none());
-                match open {
-                    Some(call) => {
-                        call.done = true;
-                        call.success = success;
-                    }
-                    None => live.push_tool(transcript::ToolCall {
-                        name: tool_name.clone(),
-                        description: tool_name,
-                        success,
-                        done: true,
-                        task_id: None,
-                    }),
-                }
-            }
-            ProgressEvent::DetachedTaskStarted { task_id, label } => {
-                live.thinking = false;
-                live.push_tool(transcript::ToolCall::detached(task_id, label));
-            }
-            ProgressEvent::DetachedTaskFinished {
-                task_id, success, ..
-            } => {
-                if let Some(call) = live
-                    .tools
-                    .iter_mut()
-                    .rev()
-                    .find(|c| c.task_id.as_deref() == Some(task_id.as_str()))
-                {
-                    call.done = true;
-                    call.success = success;
-                }
-            }
-            ProgressEvent::QueuedUserMessage { text } => live.injected.push(text),
-            _ => {}
         }
-        pane.scroll.scroll_to_bottom();
-        cx.notify();
+        // A conversation the user switched away from keeps its turn in the
+        // stash (#2616). Feeding the card there is what stops it freezing at
+        // the frame the switch left: opening it again shows the tool rows and
+        // the counter the turn actually reached, not a stale snapshot.
+        if let Some(turn) = self.stashed.get_mut(&session) {
+            fold_live(&mut turn.live, progress);
+            cx.notify();
+            return;
+        }
+        // A session with no leaf is what a sub-agent looks like: its
+        // progress arrives with its own id and there is no pane to fold it
+        // into. The event is the only trace of that turn the window holds,
+        // so the rail records it here instead of dropping it (#2636). A
+        // repeat does not repaint: only the first sighting changes a row.
+        if self.rail.observe_stream(session) {
+            cx.notify();
+        }
     }
 
     /// The pane's turn finished: its own card settles and its rows come back
@@ -3818,14 +3981,29 @@ impl Dashboard {
         tokens_per_second: Option<f64>,
         cx: &mut Context<Self>,
     ) {
-        let Some(pane) = self.pane_states.get_mut(&session) else {
-            return;
+        let calls = {
+            let Some(pane) = self.pane_states.get_mut(&session) else {
+                return;
+            };
+            pane.live.finalize(tokens_per_second);
+            pane.live.thinking = false;
+            pane.busy = false;
+            pane.cancel = None;
+            pane.scroll.scroll_to_bottom();
+            pane.live.tools.len()
         };
-        pane.live.finalize(tokens_per_second);
-        pane.live.thinking = false;
-        pane.busy = false;
-        pane.cancel = None;
-        pane.scroll.scroll_to_bottom();
+        // The leaf's card keeps the numbers it showed in flight, the same ones
+        // the window's card keeps (#2632): the ctx budget every pane shares,
+        // and the calls this leaf made.
+        self.pending_metrics.insert(
+            session,
+            transcript::TurnMetrics {
+                ctx_used: self.ctx_tokens.unwrap_or(0),
+                ctx_max: self.ctx_max,
+                tps: tokens_per_second,
+                tool_calls: calls,
+            },
+        );
         cx.notify();
         self.reload_pane(session, cx);
     }
@@ -3849,21 +4027,29 @@ impl Dashboard {
         let db_path = self.db_path.clone();
         cx.spawn(async move |this, cx| {
             let result = transcript::load_recent(db_path, session).await;
-            this.update(cx, |this, cx| {
-                if let Some(pane) = this.pane_states.get_mut(&session) {
-                    match result {
-                        Ok((rows, total)) => {
-                            let (hidden, turns) =
-                                transcript::turns_with_metrics(&rows, total, &this.turn_metrics);
-                            pane.transcript.hidden = hidden;
-                            pane.transcript.turns = turns;
-                            // The persisted row is on screen: the live copy
-                            // retires, exactly as the window's does.
-                            pane.live.clear();
-                        }
-                        Err(e) => pane.transcript.error = Some(e.into()),
+            this.update(cx, |this, cx| match result {
+                Ok((rows, total)) => {
+                    let (hidden, turns) =
+                        transcript::turns_with_metrics(&rows, total, &this.turn_metrics);
+                    // The turn this leaf's card was watching has landed, so it
+                    // takes the numbers it showed in flight before the rows are
+                    // drawn (#2632).
+                    let turns = this.claim_pane_metrics(session, turns);
+                    if let Some(pane) = this.pane_states.get_mut(&session) {
+                        pane.transcript.hidden = hidden;
+                        pane.transcript.turns = turns;
+                        // The persisted row is on screen: the live copy
+                        // retires, exactly as the window's does.
+                        pane.live.clear();
+                        pane.scroll.scroll_to_bottom();
                     }
-                    pane.scroll.scroll_to_bottom();
+                    cx.notify();
+                }
+                Err(e) => {
+                    if let Some(pane) = this.pane_states.get_mut(&session) {
+                        pane.transcript.error = Some(e.into());
+                        pane.scroll.scroll_to_bottom();
+                    }
                     cx.notify();
                 }
             })
@@ -3877,13 +4063,17 @@ impl Dashboard {
         if text.is_empty() {
             return;
         }
+        // The composer the text came from: when it sends a recalled message,
+        // that message leaves the queue with the text while the rest of its
+        // walk goes back to wait (#2637).
+        let sent_from = self.composer_entity();
         // Commands are read before every other gate, because the two that
         // matter most are needed exactly when the window is busy or broken:
         // `/stop` has nothing to stop on an idle window, and `/help` is what a
         // user reaches for when the agent is offline. A line that starts with
         // a slash never becomes a turn (#2374).
         if let Some(outcome) = commands::parse_command(&text) {
-            self.run_command(outcome, cx);
+            self.run_command(outcome, self.transcript.session, cx);
             return;
         }
         // `!cmd` runs a shell command here, not a turn, as the terminal does (#2437).
@@ -3919,20 +4109,31 @@ impl Dashboard {
         if self.busy {
             // The message joins the session's queue, which the agent drains
             // between tool calls, the terminal's own path (#2441). With no
-            // session open it waits in the window's own list.
+            // session open it waits in the window's own list. Busy is read
+            // for the conversation on screen, so work running in another one
+            // never queues this text behind it (#2616).
+            // Up already took the recalled message out of the queue (#2637),
+            // so this text is simply queued behind the turn. The messages the
+            // walk took before it go back to wait when the recall is released
+            // below, after this one, which is the order they were queued in.
             match self.transcript.session {
                 Some(sid) => {
                     agent_bridge::queue_push(sid, agent_bridge::PendingMessage::plain(text))
                 }
-                None => self.queued.push(agent_bridge::PendingMessage::plain(text)),
+                None => self.unsent.push(agent_bridge::PendingMessage::plain(text)),
             }
+            self.finish_recall(&sent_from, cx);
+            // The composer now says a message is waiting on the turn, the
+            // moment it is queued rather than on the next turn event (#2630).
+            self.sync_composer_hint(cx);
             cx.notify();
             return;
         }
         let Some(bridge) = agent_bridge::bridge() else {
             // Still booting: keep the message, it fires on Ready. The queue
             // strip is where the user sees it.
-            self.queued.push(agent_bridge::PendingMessage::plain(text));
+            self.unsent.push(agent_bridge::PendingMessage::plain(text));
+            self.sync_composer_hint(cx);
             cx.notify();
             return;
         };
@@ -3940,7 +4141,7 @@ impl Dashboard {
         // is nothing to write into, so one is created and the text waits in
         // the queue rather than vanishing into a session nobody is looking at.
         let Some(sid) = self.transcript.session else {
-            self.queued.push(agent_bridge::PendingMessage::plain(text));
+            self.unsent.push(agent_bridge::PendingMessage::plain(text));
             self.new_session(cx);
             return;
         };
@@ -3950,7 +4151,12 @@ impl Dashboard {
         // The finished turn must add one to the persisted count before the
         // live copy may be dropped (see `reload_transcript`).
         self.settle_expect = Some(self.transcript.turns.len() + 1);
+        // A recalled message is the turn's own text now, so it leaves the
+        // queue with it; the messages the walk took before it go back to wait
+        // (#2637).
+        self.finish_recall(&sent_from, cx);
         self.busy = true;
+        self.sync_composer_hint(cx);
         let cancel = tokio_util::sync::CancellationToken::new();
         self.cancel = Some(cancel.clone());
         // Attachments are tracked against the session the same way the TUI
@@ -3985,8 +4191,16 @@ impl Dashboard {
             // old early return froze the line between chunks, which read as
             // "nothing is happening" on a slow provider.
             // A pane runs its own turn too (#2614), and its spinner, clock
-            // and token counter advance on the same repaint.
-            if self.busy || self.pane_states.values().any(|pane| pane.busy) {
+            // and token counter advance on the same repaint. So does a rail row
+            // with work in flight, and a plan waiting for approval keeps
+            // pulsing its ring until the owner opens it (#2636).
+            if self.busy
+                || self.pane_states.values().any(|pane| pane.busy)
+                || self
+                    .rail_activity_map()
+                    .values()
+                    .any(|row| row.badge.is_some() || row.ring)
+            {
                 cx.notify();
             }
             return;
@@ -3996,6 +4210,9 @@ impl Dashboard {
             // A split leaf runs its own turn (#2614), so its progress paints
             // into that leaf's card. A sub-agent's session has no leaf and is
             // dropped here rather than painted into somebody else's pane.
+            // This filter is also what keeps one conversation's tool rows off
+            // another's card (#2616): only the session on screen reaches the
+            // window's live turn below.
             if let agent_bridge::TurnEvent::ProgressFor(sid, progress) = &ev
                 && self.transcript.session != Some(*sid)
             {
@@ -4022,6 +4239,7 @@ impl Dashboard {
                     if self.transcript.session.is_none() {
                         self.new_session(cx);
                     }
+                    self.sync_composer_hint(cx);
                     self.drain_pending(cx);
                 }
                 agent_bridge::TurnEvent::SessionCreated(id) => {
@@ -4082,6 +4300,9 @@ impl Dashboard {
                         self.transcript.session = None;
                         self.transcript.turns.clear();
                         self.live.clear();
+                        // The deleted conversation's turn, if one ran there,
+                        // goes with it: the row it belonged to is gone.
+                        self.stashed.remove(&id);
                         self.busy = false;
                         // The files screen of a deleted session has nothing
                         // left to list: back to the chat, never a ghost list.
@@ -4113,17 +4334,55 @@ impl Dashboard {
                     self.agent_error = Some(e.clone());
                     self.live.notices.push(format!("agent offline: {e}"));
                 }
-                agent_bridge::TurnEvent::ModelSwitched(line) => {
+                agent_bridge::TurnEvent::ModelSwitched { session, line } => {
+                    if self.models_switching.take() != Some(session) {
+                        logging::debug("stale model switch completion ignored");
+                        continue;
+                    }
                     logging::info(&format!("model switched: {line}"));
-                    self.live.notices.push(line);
+                    self.push_session_notice(session, line);
                     // The rail row carries the pair the service answers with,
                     // so a switch is only real once the row is re-read.
                     self.refresh_rail(cx);
+                    // The gauge is denominated in the pair that serves the
+                    // session now. `ctx_max` used to be recomputed only on
+                    // `Ready` and on open, so a switch left the old provider's
+                    // window on screen: the number was the one thing that
+                    // would have proved the pick landed, and it never moved.
+                    // The last prompt size came from the old provider's
+                    // tokenizer, so it goes with it (#2644).
+                    if self.transcript.session == Some(session)
+                        && let Some(b) = agent_bridge::bridge()
+                    {
+                        self.ctx_max = b.service.context_limit_for_session(session);
+                        self.ctx_tokens = None;
+                    }
+                    // A pick is a commitment: apply it, say so once, and put
+                    // the user back in the conversation that asked. A stale
+                    // completion never closes a different screen.
+                    if self.screen == Screen::Models && self.models_session == Some(session) {
+                        self.screen = Screen::Chat;
+                        if self.transcript.session == Some(session) {
+                            self.pane_focus = None;
+                        } else if self
+                            .panes
+                            .as_ref()
+                            .is_some_and(|tree| tree.contains(session))
+                        {
+                            self.pane_focus = Some(session);
+                        }
+                        self.sync_composer_session();
+                        self.refocus_screen();
+                    }
                     cx.notify();
                 }
-                agent_bridge::TurnEvent::ModelSwitchFailed(e) => {
-                    logging::error(&format!("model switch: {e}"));
-                    self.live.notices.push(format!("model switch: {e}"));
+                agent_bridge::TurnEvent::ModelSwitchFailed { session, error } => {
+                    if self.models_switching.take() != Some(session) {
+                        logging::debug("stale model switch failure ignored");
+                        continue;
+                    }
+                    logging::error(&format!("model switch: {error}"));
+                    self.push_session_notice(session, format!("model switch: {error}"));
                     cx.notify();
                 }
                 agent_bridge::TurnEvent::BrainReady(line) => {
@@ -4303,7 +4562,19 @@ impl Dashboard {
                     // belongs to that leaf, so the window's footer and its
                     // conversation are left exactly where the user put them.
                     if self.transcript.session != Some(session) {
+                        // The turn finished in a conversation that is not on
+                        // screen: its parked card retires here, and the rows
+                        // in the ledger are what drawing that session reads
+                        // when the user opens it again (#2616). A split pane's
+                        // own turn settles in its leaf.
+                        self.stashed.remove(&session);
                         self.settle_pane(session, tokens_per_second, cx);
+                        // A sub-agent's turn ends the same way and has no pane
+                        // to settle (#2636). Clearing is idempotent, so a leaf
+                        // that was never recorded costs nothing.
+                        if self.rail.clear(session) {
+                            cx.notify();
+                        }
                         continue;
                     }
                     // The provider's own prompt size for the call that just
@@ -4314,14 +4585,15 @@ impl Dashboard {
                     // card can print what the turn cost instead of whatever
                     // the session's budget reads later (#2324).
                     if let Some(sid) = self.transcript.session {
-                        self.pending_metrics = Some((
+                        self.pending_metrics.insert(
                             sid,
                             transcript::TurnMetrics {
                                 ctx_used: context_tokens,
                                 ctx_max: self.ctx_max,
                                 tps: tokens_per_second,
+                                tool_calls: self.live.tools.len(),
                             },
-                        ));
+                        );
                     }
                     // Freeze the turn's rate on the same measure every other
                     // surface uses: the service's own tokens_per_second when
@@ -4353,16 +4625,75 @@ impl Dashboard {
                 }
                 agent_bridge::TurnEvent::Failed { session, text } => {
                     if self.transcript.session != Some(session) {
+                        // Same as Done: a failure for a conversation that is
+                        // not on screen retires its parked card and leaves the
+                        // visible turn untouched (#2616).
+                        self.stashed.remove(&session);
                         self.fail_pane(session, text, cx);
+                        // A failed sub-agent turn is still a finished turn, so
+                        // its rail badge has to go with it (#2636).
+                        if self.rail.clear(session) {
+                            cx.notify();
+                        }
                         continue;
                     }
-                    self.live.notices.push(text);
+                    // A card a stop already took back has no line to write on:
+                    // the cancellation landing afterwards is the echo of the
+                    // stop, not news (#2635).
+                    if !self.live.is_empty() {
+                        self.live.notices.push(text);
+                    }
                     // A failed turn has no ctx or rate to report; a stale
                     // record would land on whatever turn shows up next.
-                    self.pending_metrics = None;
+                    self.pending_metrics.remove(&session);
                     self.busy = false;
                     self.live.thinking = false;
                     reload = self.transcript.session;
+                }
+                agent_bridge::TurnEvent::TurnReverted { session } => {
+                    // The stopped turn's rows are deleted and its question is
+                    // back in the composer, so the transcript must stop drawing
+                    // the bubble the user just took back (#2635).
+                    if self.transcript.session == Some(session) {
+                        reload = Some(session);
+                    }
+                }
+                agent_bridge::TurnEvent::TurnResumed {
+                    session,
+                    user_message,
+                    cancel,
+                } => {
+                    // The last process died inside this turn and it runs again
+                    // now (#2627). The card has to say so from the first frame:
+                    // a recovered turn that painted into a window believing it
+                    // was idle would look exactly like the work being lost.
+                    if self.transcript.session == Some(session) {
+                        self.live = transcript::LiveTurn::default();
+                        self.live.begin(user_message);
+                        self.busy = true;
+                        self.cancel = Some(cancel);
+                        // No reload here on purpose: the turn's rows are
+                        // already in the ledger and a reload landing now would
+                        // fight the card it is about to fill.
+                    } else {
+                        // Recovered in a conversation nobody is looking at: it
+                        // parks under its own session, which is where a switch
+                        // brings it back whole (#2616).
+                        let mut live = transcript::LiveTurn::default();
+                        live.begin(user_message);
+                        self.stashed.insert(
+                            session,
+                            StashedTurn {
+                                live,
+                                cancel: Some(cancel),
+                                settle_expect: None,
+                                settle_retries: 0,
+                                ctx_tokens: None,
+                            },
+                        );
+                    }
+                    self.refresh_rail(cx);
+                    cx.notify();
                 }
                 agent_bridge::TurnEvent::BackgroundTaskDone {
                     session_id,
@@ -4384,13 +4715,15 @@ impl Dashboard {
                             self.transcript.session
                         ));
                     } else if self.busy {
-                        // Queue it behind the running turn rather than
-                        // interrupting it: `QueuedUserMessage::join` keeps the
-                        // system half out of what the user "said" (#765).
-                        self.queued.push(agent_bridge::PendingMessage::system(
-                            context_text,
-                            display_text,
-                        ));
+                        // Queue it against the session the task belongs to, in
+                        // the store the agent drains, so it goes out between
+                        // tool calls instead of waiting for the turn to end
+                        // (#2629). `QueuedUserMessage::join` keeps the system
+                        // half out of what the user "said" (#765).
+                        agent_bridge::queue_push(
+                            session_id,
+                            agent_bridge::PendingMessage::system(context_text, display_text),
+                        );
                     } else {
                         self.resume_finished_task(session_id, context_text, display_text, cx);
                     }
@@ -4402,6 +4735,9 @@ impl Dashboard {
         }
         // A finished turn is the moment the queue drains: before this it only
         // drained on `Ready`, so a message typed while busy never went out.
+        // The hint follows the turn and the queue, including a report that
+        // landed mid-turn, so it is repainted on every event batch (#2630).
+        self.sync_composer_hint(cx);
         if !self.busy {
             self.cancel = None;
             self.drain_pending(cx);
@@ -4421,8 +4757,8 @@ impl Dashboard {
         self.running_tasks_label_for(session)
     }
 
-    /// The same roster for ANY session, not just the open conversation: the
-    /// pane footers report each panel's own detached commands (#2593).
+    /// The same roster for ANY session, not just the open conversation, so every
+    /// pane prints its own detached commands above its composer (#2593).
     fn running_tasks_label_for(&self, session: Uuid) -> Option<String> {
         let bridge = agent_bridge::bridge()?;
         let mgr = bridge.service.background_manager()?;
@@ -4434,11 +4770,44 @@ impl Dashboard {
         opencrabs::tui::render::format_background_tasks(&tasks, opencrabs::tui::render::LABEL_CHARS)
     }
 
+    /// The rail's badges for every row it is about to draw (#2636).
+    ///
+    /// Resolved in one pass before the rows are built: the plan index needs
+    /// `&mut self` and the row iterator holds `&self`, so the two cannot
+    /// interleave. Evidence is cached by mtime, so this costs one `stat` per
+    /// session that has a plan file and nothing for the rest.
+    fn rail_activity_map(&mut self) -> HashMap<Uuid, rail_activity::RowState> {
+        let rows: Vec<Uuid> = self.sessions.ordered().map(|s| s.id).collect();
+        // The sweep throttle reads a moving clock; the animations read the
+        // window's fixed origin. Two different questions, two clocks.
+        let now = std::time::Instant::now();
+        // One bridge lookup for the whole pass, not one per row: a detached
+        // command outlives its turn, so it is the only trace that session still
+        // has work in flight (#762).
+        let manager = agent_bridge::bridge().and_then(|b| b.service.background_manager());
+        let mut map = HashMap::with_capacity(rows.len());
+        for id in rows {
+            let live = self.rail.is_live(
+                id,
+                // The window runs one turn at a time, so only the open session
+                // can be mid-turn there; split leaves keep their own flag.
+                self.busy && self.transcript.session == Some(id),
+                self.pane_states.get(&id).is_some_and(|pane| pane.busy),
+                manager.as_ref().is_some_and(|mgr| mgr.running_for(id) > 0),
+            );
+            let plan = self.rail_index.evidence(id, live, now);
+            let seen = plan.is_some_and(|evidence| self.rail_seen.is_seen(id, evidence.stamp));
+            map.insert(id, rail_activity::row_state(live, plan, seen));
+        }
+        map
+    }
+
     /// One pane's footer text (#2593): pane index, whether that session is
-    /// mid-turn, who is answering it, the detached commands it is waiting on,
-    /// and its plan progress. Resolved here, once per frame, because it reads
-    /// the bridge and the plan state, neither of which belongs in a draw pass
-    /// per pane.
+    /// mid-turn, who is answering it, and its plan progress. The detached
+    /// commands ride the strip above the composer instead, so the one-line
+    /// footer never grows past the pane. Resolved here, once per frame,
+    /// because it reads the bridge and the plan state, neither of which
+    /// belongs in a draw pass per pane.
     fn pane_footer_text(&self, session: Uuid, index: usize, count: usize) -> String {
         let mut parts: Vec<String> = Vec::new();
         if count > 1 {
@@ -4456,9 +4825,10 @@ impl Dashboard {
                 parts.push(format!("{provider} / {label}"));
             }
         }
-        if let Some(roster) = self.running_tasks_label_for(session) {
-            parts.push(format!("⏳ {roster}"));
-        }
+        // The detached commands are NOT repeated here: each pane prints its
+        // own strip above the composer, right-aligned in the palette's cyan
+        // (#2617). Printing the same label a second time in a one-line footer
+        // made it run past the pane's edge and over its neighbour.
         if self.plan_for == Some(session)
             && let Some(progress) = self.plan.progress_label()
         {
@@ -4486,10 +4856,12 @@ impl Dashboard {
         cx: &mut Context<Self>,
     ) {
         let Some(bridge) = agent_bridge::bridge() else {
-            self.queued.push(agent_bridge::PendingMessage::system(
-                context_text,
-                display_text,
-            ));
+            // Still booting: key it to the session it finished on, so it
+            // resumes when the stack is ready (#2629).
+            agent_bridge::queue_push(
+                session_id,
+                agent_bridge::PendingMessage::system(context_text, display_text),
+            );
             return;
         };
         self.live.begin(display_text);
@@ -4497,6 +4869,7 @@ impl Dashboard {
         self.settle_retries = 0;
         self.settle_expect = Some(self.transcript.turns.len() + 1);
         self.busy = true;
+        self.sync_composer_hint(cx);
         let cancel = tokio_util::sync::CancellationToken::new();
         self.cancel = Some(cancel.clone());
         let attached = editor::marker_paths(&context_text);
@@ -4513,10 +4886,58 @@ impl Dashboard {
         cx.notify();
     }
 
-    /// Send everything queued while busy, joined into one turn.
-    /// What the strip shows: the window's own list, then the session's queue.
+    /// What the composer says about the state it is in: nothing running, a turn
+    /// running, a queue waiting on it, or a queue already on its way. The words
+    /// live under the caret because that is where the user is typing, and the
+    /// queue card is a list, not an instruction manual (#2630).
+    fn composer_hint(&self) -> SharedString {
+        composer_hint_for(self.busy, self.queued_for_strip().len())
+    }
+
+    /// Paint the hint on every composer: the focused field and each split
+    /// pane's own, so a pane that takes the keyboard already says the right
+    /// thing. Only a real state change touches them (#2630).
+    fn sync_composer_hint(&mut self, cx: &mut Context<Self>) {
+        let hint = self.composer_hint();
+        if self.hint_painted.as_ref() == Some(&hint) {
+            return;
+        }
+        self.hint_painted = Some(hint.clone());
+        self.editor
+            .update(cx, |ed, cx| ed.set_placeholder(hint.clone(), cx));
+        let panes: Vec<_> = self
+            .pane_states
+            .values()
+            .map(|pane| pane.editor.clone())
+            .collect();
+        for editor in panes {
+            editor.update(cx, |ed, cx| ed.set_placeholder(hint.clone(), cx));
+        }
+    }
+
+    /// A composer just sent its field. The message it shows is the one going
+    /// out, so it stays out of the queue; every message its walk took before
+    /// it goes back to wait, because the user never consumed it. Other
+    /// composers release their whole recall (#2637).
+    fn finish_recall(&mut self, sent: &Entity<editor::Editor>, cx: &mut Context<Self>) {
+        let mut editors = vec![self.editor.clone()];
+        editors.extend(self.pane_states.values().map(|pane| pane.editor.clone()));
+        for editor in editors {
+            let keep = editor.entity_id() == sent.entity_id();
+            let returned = editor.update(cx, |ed, _| ed.release_recall(keep));
+            if let Some((session, msgs)) = returned {
+                for msg in msgs {
+                    agent_bridge::queue_recall_return(session, msg);
+                }
+            }
+        }
+    }
+
+    /// What the strip shows, oldest first: the text waiting on the open
+    /// session, then anything typed before a session existed. One store backs
+    /// both, so what the user reads is exactly what will send (#2629).
     fn queued_for_strip(&self) -> Vec<agent_bridge::PendingMessage> {
-        let mut out = self.queued.clone();
+        let mut out = self.unsent.clone();
         if let Some(sid) = self.transcript.session {
             out.extend(agent_bridge::queue_snapshot(sid));
         }
@@ -4524,15 +4945,29 @@ impl Dashboard {
     }
 
     fn drain_pending(&mut self, cx: &mut Context<Self>) {
-        let waiting_in_store = self
-            .transcript
-            .session
-            .is_some_and(|sid| !agent_bridge::queue_snapshot(sid).is_empty());
-        if (self.queued.is_empty() && !waiting_in_store) || self.busy {
+        if self.busy {
+            return;
+        }
+        // Boot text has no session to live in yet. It joins the open one here,
+        // so there is never a second list the agent cannot see (#2629).
+        if let Some(sid) = self.transcript.session
+            && !self.unsent.is_empty()
+        {
+            for msg in std::mem::take(&mut self.unsent) {
+                agent_bridge::queue_push(sid, msg);
+            }
+        }
+        let waiting = match self.transcript.session {
+            Some(sid) => agent_bridge::queue_snapshot(sid),
+            None => self.unsent.clone(),
+        };
+        if waiting.is_empty() {
             return;
         }
         let Some(bridge) = agent_bridge::bridge() else {
-            self.queued.clear();
+            // Still booting: keep the text. Clearing it here dropped whatever
+            // the user typed whenever the window polled before the stack came
+            // up (#2629).
             return;
         };
         // No open conversation: keep the queue and open one. The queue drains
@@ -4541,14 +4976,14 @@ impl Dashboard {
             self.new_session(cx);
             return;
         };
-        let mut msgs = std::mem::take(&mut self.queued);
-        msgs.extend(agent_bridge::queue_take(sid));
+        let msgs = agent_bridge::queue_take(sid);
         if let Some(joined) = agent_bridge::PendingMessage::join(&msgs) {
             self.live.begin(joined.display_text.clone());
             self.transcript.live_expanded = false;
             self.settle_retries = 0;
             self.settle_expect = Some(self.transcript.turns.len() + 1);
             self.busy = true;
+            self.sync_composer_hint(cx);
             let cancel = tokio_util::sync::CancellationToken::new();
             self.cancel = Some(cancel.clone());
             let attached = editor::marker_paths(&joined.context_text);
@@ -4573,11 +5008,24 @@ impl Dashboard {
         // Same inheritance rule as the TUI: the row carries the provider and
         // model the service is actually answering with, so a later read of
         // the session cannot report a model that never ran.
+        //
+        // It inherits the pair from the conversation on screen, not from the
+        // global slot. The global slot follows the config `enabled` flags and
+        // every config reload swaps it (agent_bridge provider_hook), so
+        // reading it here started each new conversation on a provider the
+        // user had already switched away from (#2643).
+        let active = self.focused_pane();
         let (provider, model) = match agent_bridge::bridge() {
-            Some(b) => (
-                Some(b.service.provider_name()),
-                Some(b.service.provider_model()),
-            ),
+            Some(b) => match active {
+                Some(sid) => (
+                    Some(b.service.provider_name_for_session(sid)),
+                    Some(b.service.provider_model_for_session(sid)),
+                ),
+                None => (
+                    Some(b.service.provider_name()),
+                    Some(b.service.provider_model()),
+                ),
+            },
             None => (None, None),
         };
         agent_bridge::spawn_create_session(
@@ -5210,12 +5658,24 @@ impl Dashboard {
                         let landed = expect.is_none_or(|want| turns.len() >= want);
                         this.transcript.hidden = hidden;
                         this.transcript.turns = turns;
+                        // A turn that is still running owns the live card.
+                        // Reading the conversation under it (a boot resume, or
+                        // opening a session mid-turn) must not wipe the card
+                        // the work is painting into (#2627).
+                        let in_flight = this.busy;
                         if landed {
                             // The rows are in: the newest turn is the one
                             // that just answered, so it can claim the metrics
                             // recorded at `Done` (#2324).
-                            this.attach_pending_metrics(sid);
-                            this.live.clear();
+                            if !in_flight {
+                                this.attach_pending_metrics(sid);
+                                this.live.clear();
+                            }
+                            this.settle_expect = None;
+                            this.settle_retries = 0;
+                        } else if in_flight {
+                            // Short of the count while a turn is running is not
+                            // a missed write, it is a turn still writing.
                             this.settle_expect = None;
                             this.settle_retries = 0;
                         } else if attempt < SETTLE_ATTEMPTS {
@@ -5251,18 +5711,42 @@ impl Dashboard {
     /// the map is what carries the numbers onto a later reload of the same
     /// conversation.
     fn attach_pending_metrics(&mut self, sid: Uuid) {
-        let Some((session, metrics)) = self.pending_metrics else {
+        let Some(metrics) = self.pending_metrics.remove(&sid) else {
             return;
         };
-        if session != sid {
-            return;
-        }
-        self.pending_metrics = None;
         let Some(turn) = self.transcript.turns.last_mut() else {
             return;
         };
         turn.metrics = Some(metrics);
-        self.turn_metrics.insert(turn.anchor.clone(), metrics);
+        // The persisted row can carry no ledger at all, and the card must not
+        // claim the turn did nothing (#2632).
+        turn.summary.tool_calls = turn.summary.tool_calls.max(metrics.tool_calls);
+        let anchor = turn.anchor.clone();
+        self.turn_metrics.insert(anchor.clone(), metrics);
+        // The card the user was watching keeps its rows once it settles
+        // (#2632): a turn that folds its ledger away the moment it finishes
+        // reads as if the work never happened. The chevron still folds it, and
+        // older turns keep the terminal's folded default.
+        self.transcript.expanded.insert(anchor);
+    }
+
+    /// Give a freshly loaded pane the numbers its turn recorded at settle: the
+    /// last turn of those rows is the one that just answered, and the anchor it
+    /// landed under is what keeps the numbers on a later reload (#2632).
+    fn claim_pane_metrics(
+        &mut self,
+        session: Uuid,
+        mut turns: Vec<transcript::Turn>,
+    ) -> Vec<transcript::Turn> {
+        let Some(metrics) = self.pending_metrics.remove(&session) else {
+            return turns;
+        };
+        if let Some(turn) = turns.last_mut() {
+            turn.metrics = Some(metrics);
+            turn.summary.tool_calls = turn.summary.tool_calls.max(metrics.tool_calls);
+            self.turn_metrics.insert(turn.anchor.clone(), metrics);
+        }
+        turns
     }
 
     fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -5721,11 +6205,12 @@ impl Dashboard {
                 return;
             }
             if !self.busy {
-                self.esc_at = None;
                 // Idle Esc hands the keyboard back. The rail's mode is the
                 // only thing Esc owns here, and Tab is what arms it. The old
                 // blur bridge existed only because focus never moved off the
-                // composer (#2351, #2454).
+                // composer (#2351, #2454). A turn running in another
+                // conversation counts as idle here: Esc must never cancel work
+                // the user cannot see (#2616).
                 if self.rail_focused {
                     self.rail_focused = false;
                     self.refocus_screen();
@@ -5733,28 +6218,73 @@ impl Dashboard {
                 cx.notify();
                 return;
             }
-            let now = std::time::Instant::now();
-            // Second Esc within 3s aborts, the TUI's own window.
-            let armed = self
-                .esc_at
-                .is_some_and(|t| now.duration_since(t).as_millis() < 3000);
-            if armed {
-                self.esc_at = None;
-                if let Some(cancel) = self.cancel.take() {
-                    cancel.cancel();
+            // One Esc stops the turn, and the queue becomes the next turn. The
+            // old two-press window existed because nothing flushed the queue on
+            // a stop, so a single press left the user watching a process they
+            // had already asked to kill with their typed text stranded behind
+            // it (#2631).
+            //
+            // A stop that beats the first token takes the message back
+            // (#2635): the turn never reached the conversation, so the text
+            // belongs in the composer to be corrected and sent again instead of
+            // sitting in a chat that will never answer it, and the rows the
+            // turn opened are deleted rather than redrawn.
+            let mut returned = false;
+            if let Some(sid) = self.transcript.session
+                && self.busy
+                && self.live.untouched()
+            {
+                let composer = self.composer_entity();
+                // Only into an empty field: anything typed since the send is
+                // the user's, and taking the question back must never cost it.
+                // One condition, not two nested ones: the take has to run only
+                // on an empty field, and clippy reads the nesting as a mistake
+                // rather than the guard it is (#2641).
+                if composer.read(cx).content.trim().is_empty()
+                    && let Some(text) = self.live.user.take()
+                {
+                    composer.update(cx, |editor, cx| {
+                        editor.restore_draft(text, cx);
+                        editor.show_returned(cx);
+                    });
+                    if let Some(bridge) = agent_bridge::bridge() {
+                        agent_bridge::spawn_undo_last_turn(
+                            bridge.service.clone(),
+                            sid,
+                            self.sink.clone(),
+                        );
+                    }
+                    self.live.clear();
+                    returned = true;
                 }
-                // Same wording and immediate release as `abort_active_turn`:
-                // the pane stops claiming a turn is running the moment the
-                // user asked it to stop, and the service's own Failed event
-                // lands afterwards.
-                self.busy = false;
-                self.live.thinking = false;
-                self.live.notices.push("Operation cancelled.".to_string());
-                logging::info("turn cancelled by Esc Esc");
-            } else {
-                self.esc_at = Some(now);
-                self.live.notices.push("esc again to stop".to_string());
             }
+            if let Some(cancel) = self.cancel.take() {
+                cancel.cancel();
+            }
+            // Same wording and immediate release as `abort_active_turn`: the
+            // pane stops claiming a turn is running the moment the user asked
+            // it to stop, and the service's own Failed event lands afterwards.
+            self.busy = false;
+            self.live.thinking = false;
+            self.cancel = None;
+            let waiting = self.queued_for_strip().len();
+            if waiting > 0 {
+                // The send itself waits for the cancellation to be
+                // acknowledged: a second `spawn_turn` on a session whose cancel
+                // is still unwinding would run two turns into one
+                // conversation. The turn's own event drains the queue (see the
+                // post-batch `drain_pending`), which is milliseconds after the
+                // stop (#2631).
+                self.live.notices.push(format!(
+                    "Operation cancelled. Sending the {waiting} queued."
+                ));
+            } else if !returned {
+                // A handed-back message already says so in the composer, so
+                // the notice would be the second time the user is told.
+                self.live.notices.push("Operation cancelled.".to_string());
+            }
+            logging::info("turn cancelled by Esc");
+            self.sync_composer_hint(cx);
             cx.notify();
             return;
         }
@@ -5765,9 +6295,6 @@ impl Dashboard {
             if matches!(key, "pageup" | "pagedown") {
                 let page = px(f32::from(window.viewport_size().height) * 0.8);
                 let dy = if key == "pagedown" { -page } else { page };
-                // The page keys act on the pane Tab moved the caret to, so a
-                // split scrolls the session the accent is on rather than the
-                // chat underneath it (#2475).
                 // The page keys act on the pane the caret is on, so a split
                 // scrolls the transcript the accent names rather than the
                 // chat underneath it (#2475, #2472).
@@ -6035,6 +6562,9 @@ impl Dashboard {
         // string per leaf instead of touching the bridge or the plan file.
         let leaves = tree.leaves();
         let count = leaves.len();
+        // One owner for the keyboard, resolved the same way the drop handler
+        // and the caret resolve it (#2620).
+        let focus = self.split_focus();
         let mut footers: HashMap<Uuid, SharedString> = HashMap::new();
         for (i, session) in leaves.iter().enumerate() {
             footers.insert(
@@ -6052,15 +6582,35 @@ impl Dashboard {
             for session in &leaves {
                 let is_chat = Some(*session) == self.transcript.session;
                 let focused = if is_chat {
-                    self.pane_focus.is_none()
+                    focus.is_none()
                 } else {
-                    self.pane_focus == Some(*session)
+                    focus == Some(*session)
                 };
                 // Each pane's plan and queue, read from that pane's session.
+                // The plan is the terminal's three-line pane strip (#2622):
+                // a split pane is a fraction of the window, and the full
+                // checklist clipped mid-word and pushed its header past the
+                // pane's edge.
+                // How much plan this pane can read (#2624): a wall of panes
+                // keeps a bar, a pair keeps the running task and the next one
+                // or two. The width comes from the tree, so a narrow column
+                // compacts even when there are only two panes.
+                let share = self
+                    .panes
+                    .as_ref()
+                    .and_then(|tree| tree.leaf_width_share(*session))
+                    .unwrap_or(1.0);
+                let pane_width = if share < 1.0 {
+                    split_pane_width(content, false, share)
+                } else {
+                    content
+                };
+                let density = plan_strip::pane_density(count, pane_width);
+                let expanded = self.plan_expanded.contains(session);
                 let (plan_view, queued, editor) = if is_chat {
                     self.plan.refresh();
                     (
-                        self.plan.view(),
+                        self.plan.pane_view(density, expanded),
                         self.queued_for_strip(),
                         self.editor.clone(),
                     )
@@ -6069,7 +6619,7 @@ impl Dashboard {
                         Some(pane) => {
                             pane.plan.refresh();
                             (
-                                pane.plan.view(),
+                                pane.plan.pane_view(density, expanded),
                                 agent_bridge::queue_snapshot(*session),
                                 pane.editor.clone(),
                             )
@@ -6079,10 +6629,40 @@ impl Dashboard {
                 };
                 let mut col = div().flex().flex_col().flex_none().gap_2();
                 if let Some(view) = plan_view {
-                    col = col.child(view);
+                    // A click trades the conversation's room for the whole
+                    // checklist, per pane (#2624). The handler stops the event
+                    // so the press does not also hand the leaf the keyboard.
+                    let plan_session = *session;
+                    col = col.child(
+                        view.id(SharedString::from(format!("plan-strip-{plan_session}")))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _ev: &MouseDownEvent, _window, cx| {
+                                    cx.stop_propagation();
+                                    this.toggle_pane_plan(plan_session, cx);
+                                }),
+                            ),
+                    );
                 }
                 if !queued.is_empty() {
-                    col = col.child(queue_strip(&queued));
+                    let strip_session = *session;
+                    // Only a folded queue is worth a click, so a two-message
+                    // list does not react to a stray tap (#2629).
+                    let folds = queued.len() > 2;
+                    col = col.child(
+                        queue_strip(&queued, self.queue_expanded)
+                            .id(SharedString::from(format!("queue-strip-{strip_session}")))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this: &mut Self, _, _, cx| {
+                                    cx.stop_propagation();
+                                    if folds {
+                                        this.queue_expanded = !this.queue_expanded;
+                                        cx.notify();
+                                    }
+                                }),
+                            ),
+                    );
                 }
                 if let Some(label) = self.running_tasks_label_for(*session) {
                     col = col.child(task_strip(label));
@@ -6122,7 +6702,10 @@ impl Dashboard {
             chat_session: self.transcript.session,
             chat_title: title,
             states: &self.pane_states,
-            focus: self.pane_focus,
+            // The resolved owner, not the raw id: a stale `pane_focus` named a
+            // leaf the tree no longer holds, so every leaf read as unfocused,
+            // drew dim, and painted no ring (#2620).
+            focus,
             content,
             areas: &self.split_areas,
             entity: cx.entity().downgrade(),
@@ -6184,7 +6767,11 @@ impl Render for Dashboard {
 
         // The rail's rows: each carries its own click listener, built in its
         // own loop turn so the `&mut cx` borrow stays legal.
-        let mut rail_rows = Vec::with_capacity(self.sessions.items.len());
+        let mut rail_rows: Vec<AnyElement> = Vec::with_capacity(self.sessions.items.len());
+        // What every row says about work in flight (#2636), resolved once
+        // before the loop: the index needs `&mut self` and the row iterator
+        // holds `&self`.
+        let activity = self.rail_activity_map();
         // Pinned rows first, the rest untouched: the TUI's own order.
         for s in self.sessions.ordered() {
             let id = s.id;
@@ -6258,12 +6845,10 @@ impl Render for Dashboard {
                                     this.start_topic_draft(cx);
                                 }
                                 sessions::MenuKind::SplitSide => {
-                                    this.open_session(id, cx);
-                                    this.begin_split(Layout::Side, cx);
+                                    this.split_row(id, Layout::Side, cx)
                                 }
                                 sessions::MenuKind::SplitStack => {
-                                    this.open_session(id, cx);
-                                    this.begin_split(Layout::Stack, cx);
+                                    this.split_row(id, Layout::Stack, cx)
                                 }
                                 sessions::MenuKind::Delete => this.request_delete(id, cx),
                             }
@@ -6277,12 +6862,19 @@ impl Render for Dashboard {
             };
             let indented = self.sessions.is_indented(id);
             let closed = self.sessions.is_closed(id);
+            // One glyph cell, from the window's shared clock, so a list of
+            // busy rows blinks as one spinner instead of ten (#2636).
+            let state = activity.get(&id).copied().unwrap_or_default();
+            let badge = state
+                .badge
+                .map(|_| rail_activity::frame(self.rail_clock.elapsed()));
             let flags = sessions::RowFlags {
                 selected,
                 cursored,
                 favorited: favorite,
                 indented,
                 closed,
+                badge,
             };
             let r = sessions::row(s, flags, action, menu);
             // The press starts the slide and closes any other row's strip.
@@ -6317,7 +6909,20 @@ impl Render for Dashboard {
             });
             let r = r.on_mouse_down(MouseButton::Right, ask_menu);
             let r = r.on_mouse_down(MouseButton::Left, press);
-            rail_rows.push(sessions::on_click(r, handler));
+            // A plan waiting for approval rings its row until it is opened.
+            // The border lives on this wrapper, never inside `sessions::row`:
+            // the row stays the square, edge-to-edge tile #2540 pins, and the
+            // ring is a frame around it rather than a card. Wrapped after the
+            // click is attached, so the row keeps the handlers it was built
+            // with and only gains a frame.
+            rail_rows.push(
+                rail_activity::ring(
+                    sessions::on_click(r, handler),
+                    state.ring,
+                    self.rail_clock.elapsed(),
+                )
+                .into_any_element(),
+            );
         }
         // The channel chip (#2452): quiet notice plus the one action, drawn
         // at the end of the rail only while a configured channel has no
@@ -6434,7 +7039,13 @@ impl Render for Dashboard {
         // to open its own file (#2395).
         let mut attachment_handlers: std::collections::HashMap<String, transcript::ClickHandler> =
             std::collections::HashMap::new();
-        for key in transcript::attachment_paths_with_live(&self.transcript, &self.live) {
+        for key in transcript::attachment_paths_with_live(
+            &self.transcript,
+            // The window holds exactly the visible conversation's turn: it was
+            // parked and handed back by `swap_visible_turn`, so a live card
+            // here always belongs to the session on screen (#2616).
+            &self.live,
+        ) {
             let path = std::path::PathBuf::from(key.clone());
             let handler = cx.listener(move |this, _ev, _window, cx| {
                 this.open_preview(path.clone(), cx);
@@ -6476,11 +7087,10 @@ impl Render for Dashboard {
         };
         // A single pane draws the conversation at a readable measure and
         // centres it; a split window is exempt and keeps every pane at the span
-        // the tree hands it (#2586).
-        let split_window = self
-            .panes
-            .as_ref()
-            .is_some_and(|tree| tree.leaves().len() >= 2);
+        // the tree hands it (#2586). The count is resolved once: it also
+        // decides whether the window footer row draws at all (#2641).
+        let pane_count = self.panes.as_ref().map_or(1, |tree| tree.leaves().len());
+        let split_window = pane_count > 1;
         let chat_measure_px = chat_measure(primary_width, split_window);
         // Only a pane wider than the measure is wrapped, and a split pane is
         // never wrapped: its measure is already its own width.
@@ -6503,6 +7113,9 @@ impl Render for Dashboard {
                 let primary = transcript::view(
                     &self.transcript,
                     &self.transcript_scroll,
+                    // The visible conversation's turn, never another's: the
+                    // window keeps exactly one and swaps them on a switch
+                    // (#2616).
                     &self.live,
                     self.busy,
                     measure,
@@ -6534,15 +7147,36 @@ impl Render for Dashboard {
                         .gap_2()
                         .child(body)
                         .into_any_element(),
-                    {
-                        // Key hints left, ctx budget right: the TUI's own footer
-                        // split (`tui::render::input` draws the counter as the
-                        // input box's right-side title).
-                        let (ctx_label, ctx_color) = ctx_footer(self.ctx_tokens, self.ctx_max);
+                    if window_footer_yields(pane_count) {
+                        // A split draws one footer per pane (#2593), so the
+                        // window row stands down and yields its height, the way
+                        // the terminal's status bar does (#2575, #2641). Two
+                        // rows printed the model twice, and the window one
+                        // could only ever name the chat's pair while the pane
+                        // above it named another.
+                        div().into_any_element()
+                    } else {
+                        // Key hints left, identity right. The ctx budget used
+                        // to sit at the right edge too, and it was the same
+                        // number the tool block's own footer already carries:
+                        // read twice, on every turn (#2631).
                         // Who is answering, from where, on what branch, and how
                         // fast: the same fields the TUI's footer carries.
+                        // The open conversation's own pair, not the window's
+                        // bootstrap provider: a pick pins the model per
+                        // session, so the global slot never moves and this row
+                        // kept naming the pair it started with (#2634).
                         let (provider, model) = match agent_bridge::bridge() {
-                            Some(b) => (b.service.provider_name(), b.service.provider_model()),
+                            Some(b) => match self.transcript.session {
+                                Some(sid) => {
+                                    let (provider, model) =
+                                        b.service.provider_pair_for_session(sid);
+                                    let label =
+                                        model.rsplit('/').next().unwrap_or(&model).to_string();
+                                    (provider, label)
+                                }
+                                None => (b.service.provider_name(), b.service.provider_model()),
+                            },
                             None => ("-".to_string(), "-".to_string()),
                         };
                         // The session name leads, as in the TUI footer. The row
@@ -6585,13 +7219,6 @@ impl Render for Dashboard {
                                     .text_xs()
                                     .text_color(rgb(palette::current().text_faint))
                                     .child(SharedString::from(identity)),
-                            )
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .text_xs()
-                                    .text_color(rgb(ctx_color))
-                                    .child(SharedString::from(ctx_label)),
                             )
                             .into_any_element()
                     },
@@ -8051,10 +8678,16 @@ impl Render for Dashboard {
                 // step prints under its title. Read once: the picker needs the
                 // provider for an unknown id, and the header needs both.
                 let live = agent_bridge::bridge().map(|bridge| {
-                    (
-                        bridge.service.provider_name(),
-                        bridge.service.provider_model(),
-                    )
+                    match self.models_session.or(self.transcript.session) {
+                        Some(sid) => (
+                            bridge.service.provider_name_for_session(sid),
+                            bridge.service.provider_model_for_session(sid),
+                        ),
+                        None => (
+                            bridge.service.provider_name(),
+                            bridge.service.provider_model(),
+                        ),
+                    }
                 });
                 let pair = live
                     .as_ref()
@@ -8288,7 +8921,18 @@ impl Render for Dashboard {
                     let waiting = self.queued_for_strip();
                     if !waiting.is_empty() {
                         col = col.child(central(
-                            queue_strip(&waiting).into_any_element(),
+                            queue_strip(&waiting, self.queue_expanded)
+                                .id("queue-strip-chat")
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this: &mut Self, _, _, cx| {
+                                        if this.queued_for_strip().len() > 2 {
+                                            this.queue_expanded = !this.queue_expanded;
+                                            cx.notify();
+                                        }
+                                    }),
+                                )
+                                .into_any_element(),
                             centred_chat,
                             chat_measure_px,
                         ));
@@ -8609,7 +9253,11 @@ impl Render for Dashboard {
             let confirm = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
                 if second {
                     this.update_prompt = None;
-                    this.run_command(commands::Outcome::Run(commands::GuiAction::Evolve), cx);
+                    this.run_command(
+                        commands::Outcome::Run(commands::GuiAction::Evolve),
+                        this.transcript.session,
+                        cx,
+                    );
                 } else {
                     this.update_prompt = Some(true);
                 }
@@ -9035,6 +9683,12 @@ fn main() {
                         rem: BASE_REM,
                         db_path: db_path.clone(),
                         sessions: sessions_state,
+                        rail: rail_activity::RailActivity::default(),
+                        rail_index: rail_activity::PlanIndex::default(),
+                        rail_seen: rail_activity::SeenPlans::load(Some(
+                            opencrabs::config::opencrabs_home().join("rail_seen.json"),
+                        )),
+                        rail_clock: std::time::Instant::now(),
                         rail_width: RAIL_DEFAULT_REM,
                         rail_open: true,
                         rail_focused: false,
@@ -9091,6 +9745,8 @@ fn main() {
                         models_query: String::new(),
                         models_index: 0,
                         models_provider: None,
+                        models_session: None,
+                        models_switching: None,
                         models_fetch: None,
                         models_fetch_lifecycle:
                             opencrabs::ui_core::model_selector::FetchLifecycle::default(),
@@ -9104,6 +9760,7 @@ fn main() {
                         onboard: None,
                         plan: plan_strip::PlanStripState::default(),
                         plan_for: None,
+                        plan_expanded: std::collections::HashSet::new(),
                         transcript: transcript::TranscriptState {
                             session: initial_session,
                             ..Default::default()
@@ -9115,17 +9772,19 @@ fn main() {
                         sink: agent_sink,
                         agent_ready: false,
                         live: transcript::LiveTurn::default(),
+                        stashed: HashMap::new(),
                         settle_expect: None,
                         settle_retries: 0,
                         busy: false,
                         cancel: None,
-                        esc_at: None,
-                        queued: Vec::new(),
+                        hint_painted: None,
+                        queue_expanded: false,
+                        unsent: Vec::new(),
                         agent_error: None,
                         ctx_tokens: None,
                         ctx_max: 0,
                         turn_metrics: HashMap::new(),
-                        pending_metrics: None,
+                        pending_metrics: HashMap::new(),
                         branch: git_branch(&opencrabs::utils::cwd::launch_cwd()),
                     }
                 });
@@ -9341,7 +10000,18 @@ fn mc_panel(
             cell = cell.bg(rgb(shown.selection)).rounded(px(4.0)).px_1();
         }
         match row {
-            McRow::Line(line, _) => cell = cell.text_xs().truncate().child(line),
+            // A line is laid out through an explicit flex row with a growing,
+            // shrinkable text child (#2642): a truncated text element inside a
+            // plain width-full block div is measured once at the grid's
+            // flex-basis zero and stays an ellipsis forever (gpui caches the
+            // nowrap layout on wrap_width, which never changes here). The
+            // label/value arm below already uses this shape and renders.
+            McRow::Line(line, _) => {
+                cell = cell
+                    .flex()
+                    .flex_row()
+                    .child(text(line, Size::Xs, color).flex_1().min_w_0().truncate());
+            }
             McRow::Pair(label, value, _) => {
                 cell = cell
                     .flex()
@@ -9613,9 +10283,10 @@ fn mc_flakiest_panel(
     )
 }
 
-/// Rows for the phantom card. A totals-only line can ellipsize into three
-/// dots under the header, so an empty model breakdown stays empty and lets
-/// the shared panel render its empty state instead.
+/// Rows for the phantom card. An empty model breakdown stays empty and lets
+/// the shared panel render its empty state instead. (#2642 fixed the line
+/// rows that used to ellipsize into three dots under the header; this guard
+/// is about the data, not the rendering.)
 fn mc_phantoms_rows(a: &McAnalytics, shown: palette::Palette) -> Vec<McRow> {
     if a.phantom.by_model.is_empty() {
         return Vec::new();
@@ -10347,7 +11018,13 @@ fn mc_relative_time(ts: Option<chrono::DateTime<chrono::Utc>>) -> String {
 /// The queued messages, above the input where the user can see what will go
 /// out next. Same shape as the TUI's pending list: one line per message, the
 /// count in the header, and a word on when they send.
-fn queue_strip(queued: &[agent_bridge::PendingMessage]) -> Div {
+///
+/// Past two messages the list folds to its head and the rest is a count, so a
+/// busy session cannot push the conversation off the screen; `expanded` is the
+/// click that opens it (#2629).
+fn queue_strip(queued: &[agent_bridge::PendingMessage], expanded: bool) -> Div {
+    let folded = !expanded && queued.len() > 2;
+    let shown = queue_rows(queued.len(), expanded);
     let mut col = div()
         .flex()
         .flex_col()
@@ -10359,12 +11036,9 @@ fn queue_strip(queued: &[agent_bridge::PendingMessage]) -> Div {
             div()
                 .text_xs()
                 .text_color(rgb(palette::current().amber))
-                .child(SharedString::from(format!(
-                    "queued {} · sent between tool calls · ↑ edits the last",
-                    queued.len()
-                ))),
+                .child(SharedString::from(format!("queued {}", queued.len()))),
         );
-    for (i, m) in queued.iter().take(4).enumerate() {
+    for (i, m) in queued.iter().take(shown).enumerate() {
         let text = m.display_text.lines().next().unwrap_or_default();
         let mut chars = text.chars();
         let short: String = chars.by_ref().take(96).collect();
@@ -10376,7 +11050,38 @@ fn queue_strip(queued: &[agent_bridge::PendingMessage]) -> Div {
                 .child(SharedString::from(format!("{}. {short}{suffix}", i + 1))),
         );
     }
+    if queued.len() > shown {
+        let rest = queued.len() - shown;
+        col = col.child(
+            div()
+                .text_xs()
+                .text_color(rgb(palette::current().text_muted))
+                .child(SharedString::from(if folded {
+                    format!("… {rest} more · click to expand")
+                } else {
+                    format!("… {rest} more")
+                })),
+        );
+    }
     col
+}
+
+/// The composer's hint line for a state. Grey and quiet, it names the keys
+/// that work right now: stopping the turn, recalling a queued message, and
+/// queueing another (#2630).
+fn composer_hint_for(busy: bool, queued: usize) -> SharedString {
+    match (busy, queued) {
+        (true, 0) => SharedString::from("esc stops · typing queues"),
+        (true, n) => SharedString::from(format!("queued {n} · ↑ recalls · esc stops")),
+        (false, 0) => SharedString::from("Message OpenCrabs…"),
+        (false, n) => SharedString::from(format!("{n} queued · sending now")),
+    }
+}
+
+/// How many queued messages stay on screen. Two, until the user opens the
+/// fold, so a burst of background reports never owns the window (#2629).
+fn queue_rows(len: usize, expanded: bool) -> usize {
+    if expanded || len <= 2 { len } else { 2 }
 }
 
 /// Which slice of the list the popup paints.
@@ -10498,20 +11203,170 @@ fn command_popup_view(names: &[&'static str], selected: usize) -> Div {
     )
 }
 
+/// Fold one progress event into a live card.
+///
+/// Free because two owners draw the same card: a split leaf's pane (#2614) and
+/// a turn parked under a conversation the user switched away from (#2616). The
+/// fold has to be identical for both or the card would tell a different story
+/// depending on where the session happens to be sitting.
+fn fold_live(live: &mut transcript::LiveTurn, progress: opencrabs::brain::agent::ProgressEvent) {
+    use opencrabs::brain::agent::ProgressEvent;
+    match progress {
+        ProgressEvent::Thinking => live.thinking = true,
+        ProgressEvent::StreamingChunk { text } => {
+            live.thinking = false;
+            live.note_chunk(&text);
+        }
+        ProgressEvent::IntermediateText { text, reasoning } => {
+            live.thinking = false;
+            if let Some(reasoning) = reasoning {
+                live.push_reasoning(&reasoning);
+            }
+            live.push_narration(&text);
+        }
+        ProgressEvent::ToolStarted {
+            tool_name,
+            tool_input,
+            ..
+        } => {
+            live.thinking = false;
+            let description =
+                opencrabs::tui::app::App::format_tool_description(&tool_name, &tool_input);
+            live.push_tool(transcript::ToolCall::running(tool_name, description));
+        }
+        ProgressEvent::ToolCompleted {
+            tool_name, success, ..
+        } => {
+            let open = live
+                .tools
+                .iter_mut()
+                .rev()
+                .find(|c| !c.done && c.name == tool_name && c.task_id.is_none());
+            match open {
+                Some(call) => {
+                    call.done = true;
+                    call.success = success;
+                }
+                None => live.push_tool(transcript::ToolCall {
+                    name: tool_name.clone(),
+                    description: tool_name,
+                    success,
+                    done: true,
+                    task_id: None,
+                }),
+            }
+        }
+        ProgressEvent::DetachedTaskStarted { task_id, label } => {
+            live.thinking = false;
+            live.push_tool(transcript::ToolCall::detached(task_id, label));
+        }
+        ProgressEvent::DetachedTaskFinished {
+            task_id, success, ..
+        } => {
+            if let Some(call) = live
+                .tools
+                .iter_mut()
+                .rev()
+                .find(|c| c.task_id.as_deref() == Some(task_id.as_str()))
+            {
+                call.done = true;
+                call.success = success;
+            }
+        }
+        ProgressEvent::QueuedUserMessage { text } => live.injected.push(text),
+        _ => {}
+    }
+}
+
+/// Park the turn on screen under `from` and bring back the one `to` owns.
+///
+/// The window paints one conversation at a time, but every session may be
+/// running a turn of its own. State moves with the session instead of the
+/// window: the outgoing turn is stored whole (card, cancel handle, reload
+/// handshake, prompt size) and the incoming one restored, so neither the
+/// spinner nor the counters jump to a conversation that never sent anything
+/// (#2616). A session with nothing in flight gets an empty slot, which is
+/// what makes a switch to an idle conversation paint as idle.
+#[allow(clippy::too_many_arguments)]
+fn swap_visible_turn(
+    stashed: &mut std::collections::HashMap<Uuid, StashedTurn>,
+    from: Option<Uuid>,
+    to: Uuid,
+    live: &mut transcript::LiveTurn,
+    busy: &mut bool,
+    cancel: &mut Option<tokio_util::sync::CancellationToken>,
+    settle_expect: &mut Option<usize>,
+    settle_retries: &mut u8,
+    ctx_tokens: &mut Option<u32>,
+) {
+    if from == Some(to) {
+        return;
+    }
+    if let Some(from) = from
+        && *busy
+    {
+        stashed.insert(
+            from,
+            StashedTurn {
+                live: std::mem::take(live),
+                cancel: cancel.take(),
+                settle_expect: settle_expect.take(),
+                settle_retries: std::mem::take(settle_retries),
+                ctx_tokens: ctx_tokens.take(),
+            },
+        );
+    }
+    match stashed.remove(&to) {
+        Some(turn) => {
+            *live = turn.live;
+            *cancel = turn.cancel;
+            *settle_expect = turn.settle_expect;
+            *settle_retries = turn.settle_retries;
+            *ctx_tokens = turn.ctx_tokens;
+            *busy = true;
+        }
+        None => {
+            *live = transcript::LiveTurn::default();
+            *cancel = None;
+            *settle_expect = None;
+            *settle_retries = 0;
+            *ctx_tokens = None;
+            *busy = false;
+        }
+    }
+}
+
 /// The running detached command, above the input.
 ///
 /// Same formatter as the TUI (`tui::render::background`), so the two surfaces
 /// cannot disagree about what a running task looks like. No border and no
-/// percentage width: it sits in the column flow and disappears when idle.
+/// percentage width: it sits in the column flow and disappears when idle. It
+/// aligns to the chat's right edge and prints in the palette's cyan, which is
+/// where the owner reads a background job (#2617).
+///
+/// The right alignment is not the whole row: the label keeps a gutter and a
+/// clip, so in a narrow pane it stops at the pane's padding instead of
+/// touching the border, and a long command ellipsizes instead of painting
+/// over the neighbouring leaf (#2622).
 fn task_strip(text: String) -> Div {
     div()
         .flex()
         .flex_row()
         .items_center()
+        .justify_end()
+        .w_full()
+        .min_w_0()
         .gap_2()
+        .px_2()
         .text_xs()
-        .text_color(rgb(palette::current().amber))
-        .child(SharedString::from(format!("⏳ {text}")))
+        .text_color(rgb(palette::current().teal))
+        .child(
+            div()
+                .min_w_0()
+                .overflow_hidden()
+                .truncate()
+                .child(SharedString::from(format!("⏳ {text}"))),
+        )
 }
 
 /// The footer's identity line: who is answering, from where, on what branch,
@@ -10553,35 +11408,6 @@ fn git_branch(dir: &std::path::Path) -> Option<String> {
     }
     let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if name.is_empty() { None } else { Some(name) }
-}
-
-/// The TUI's ctx counter, rebuilt for the footer: same numbers, same
-/// grammar (`ctx: 12K/200K (6%)`) and the same colour thresholds, so the
-/// desktop window cannot drift from the terminal (`tui::render::input`).
-///
-/// `None` (no answer yet) or an unknown window draws a dash, exactly like
-/// the TUI's placeholder, instead of a percentage of nothing.
-fn ctx_footer(used: Option<u32>, max: u32) -> (String, u32) {
-    let Some(used) = used.filter(|_| max > 0) else {
-        return ("ctx: -".to_string(), palette::current().text_faint);
-    };
-    let pct = (used as f64 / max as f64) * 100.0;
-    let color = if pct > 80.0 {
-        palette::current().red
-    } else if pct > 60.0 {
-        palette::current().amber
-    } else {
-        palette::current().teal
-    };
-    (
-        format!(
-            "ctx: {}/{} ({:.0}%)",
-            format_token_count_raw(used as i64),
-            format_token_count_raw(max as i64),
-            pct
-        ),
-        color,
-    )
 }
 
 /// The key reference, painted over everything else (#2320).
@@ -10880,6 +11706,67 @@ fn update_prompt_overlay(
         .child(panel)
 }
 
+/// The leaf that owns the keyboard in a split, `None` meaning the chat leaf.
+///
+/// `pane_focus` can name a pane the tree no longer holds: a closed leaf, a
+/// session moved into the chat, a split that came back with one leaf. Read
+/// literally, that id made EVERY leaf take the unfocused branch, so the split
+/// drew a dim placeholder in every pane and no frame painted a real field at
+/// all. A file dropped then landed in the window's editor, which nothing was
+/// drawing, so the drop looked ignored (#2620).
+///
+/// A single leaf is never a split and the chat owns the keyboard, so the id is
+/// not consulted at all. A live id names its own leaf, with the chat leaf
+/// reading as `None` the way it does everywhere else. A stale id hands the
+/// keyboard back to the chat when the chat is in the tree, and to the first
+/// surviving leaf when it is not, so the window always draws one real composer
+/// and one real drop target.
+fn resolve_split_focus(
+    leaves: &[Uuid],
+    pane_focus: Option<Uuid>,
+    chat: Option<Uuid>,
+) -> Option<Uuid> {
+    if leaves.len() < 2 {
+        return None;
+    }
+    if let Some(id) = pane_focus.filter(|id| leaves.contains(id)) {
+        return (Some(id) != chat).then_some(id);
+    }
+    if chat.is_some_and(|id| leaves.contains(&id)) {
+        None
+    } else {
+        leaves.first().copied()
+    }
+}
+
+/// Whether the window-level footer row stands down (#2641). A split hands
+/// that row to each pane, exactly as the terminal's status bar yields its
+/// height in split view (#2575), so two footers never stack and the
+/// window-wide pair can never contradict the pair the pane above is running.
+fn window_footer_yields(pane_count: usize) -> bool {
+    pane_count > 1
+}
+
+#[cfg(test)]
+mod window_footer_tests {
+    use super::window_footer_yields;
+
+    /// The window keeps its footer while it is one pane: the row is the only
+    /// place the pair, the path and the branch are named.
+    #[test]
+    fn one_pane_keeps_the_window_footer() {
+        assert!(!window_footer_yields(1));
+    }
+
+    /// Two panes or more hand the row to the panes: each one already names its
+    /// own pair, so the window row would only print a second, staler model.
+    #[test]
+    fn a_split_yields_the_window_footer() {
+        assert!(window_footer_yields(2));
+        assert!(window_footer_yields(4));
+    }
+}
+
 /// A pane's status row at its bottom edge (#2593): the fields the window
 /// footer carries window-wide, scoped to the pane's own session. Unfocused
 /// panes draw it muted and the focused one in the accent, so feedback stays
@@ -10900,14 +11787,22 @@ fn pane_footer(id: SharedString, text: Option<SharedString>, focused: bool) -> A
         .flex_row()
         .flex_none()
         .items_center()
+        // One line, and only one line: a long model name, roster or plan
+        // label clipped the text at the window's edge and painted the rest
+        // over the neighbouring pane. The row now clips and the text
+        // ellipsizes inside it (#2620).
+        .min_w_0()
+        .max_w_full()
+        .overflow_hidden()
         .gap_2()
         .px_2()
         .py_1()
         .text_xs()
+        .whitespace_nowrap()
         .text_color(rgb(color))
         .border_t_1()
         .border_color(rgb(split_rule_color()))
-        .child(text)
+        .child(div().min_w_0().overflow_hidden().truncate().child(text))
         .into_any_element()
 }
 
@@ -11294,7 +12189,13 @@ fn pane_element(
                                 ctx.content
                             },
                             HashMap::new(),
-                            transcript::ViewHooks::default(),
+                            transcript::ViewHooks {
+                                // The pane's own drag-to-copy (#2623): the
+                                // gesture was dead in every split because this
+                                // was `default()`, which leaves `drag: None`.
+                                drag: Some(pane.copy_drag.clone()),
+                                ..Default::default()
+                            },
                         ))
                         .into_any_element(),
                     None => div().into_any_element(),
@@ -11346,12 +12247,27 @@ fn pane_element(
                     focused,
                     close,
                 ))
-                .child(body);
+                // The transcript takes the slack, the strips and the composer
+                // below it keep their height (#2624). Without the wrapper the
+                // conversation's own min height won the shrink and the plan
+                // strip was squeezed to nothing in a short pane, while the
+                // composer survived because its field has a min size: the plan
+                // card vanished exactly where the panes got small.
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w_0()
+                        .min_h_0()
+                        .child(body),
+                );
             // The pane's own plan, queue and composer sit between its
             // transcript and its footer, where the window-level ones sit in
-            // an unsplit window (#2530).
+            // an unsplit window (#2530). `flex_none` keeps every one of them
+            // at its own height: a shrinkable stack lost its top rows first.
             if let Some(chrome) = ctx.chrome.remove(session) {
-                node = node.child(chrome);
+                node = node.child(div().flex().flex_col().flex_none().min_w_0().child(chrome));
             }
             node.child(pane_footer(
                 SharedString::from(format!("pane-footer-{session}")),
@@ -12456,39 +13372,582 @@ mod tests {
         assert!(src.contains(&chord), "ctrl+d must be bound on the rail");
     }
 
+    /// A conversation's turn belongs to that conversation, not to the window.
+    ///
+    /// #2616: the window keeps ONE live turn, so switching away used to throw
+    /// it out and a running turn went dark the moment the user looked at
+    /// another chat: no spinner, no tool block, counters frozen. Parking the
+    /// turn under its own session and handing it back on the way in is what
+    /// makes the card survive a switch.
     #[test]
-    fn the_ctx_counter_speaks_the_tui_grammar() {
-        assert_eq!(ctx_footer(Some(12_000), 200_000).0, "ctx: 12K/200K (6%)");
+    fn a_turn_travels_with_its_session_across_a_switch() {
+        let a = uuid::Uuid::new_v4();
+        let b = uuid::Uuid::new_v4();
+
+        let mut stashed: std::collections::HashMap<uuid::Uuid, super::StashedTurn> =
+            std::collections::HashMap::new();
+        let mut live = super::transcript::LiveTurn::default();
+        let mut busy = false;
+        let mut cancel: Option<tokio_util::sync::CancellationToken> = None;
+        let mut settle_expect: Option<usize> = None;
+        let mut settle_retries: u8 = 0;
+        let mut ctx_tokens: Option<u32> = None;
+
+        // A turn running in conversation A, with every piece of state the
+        // card needs to look alive.
+        live.begin("ask A".to_string());
+        live.thinking = true;
+        live.tokens = 42;
+        busy = true;
+        cancel = Some(tokio_util::sync::CancellationToken::new());
+        settle_expect = Some(7);
+        settle_retries = 2;
+        ctx_tokens = Some(1_234);
+
+        super::swap_visible_turn(
+            &mut stashed,
+            Some(a),
+            b,
+            &mut live,
+            &mut busy,
+            &mut cancel,
+            &mut settle_expect,
+            &mut settle_retries,
+            &mut ctx_tokens,
+        );
+
         assert_eq!(
-            ctx_footer(Some(140_000), 1_000_000).0,
-            "ctx: 140K/1.0M (14%)"
+            stashed.len(),
+            1,
+            "the running turn is parked under its own session, never dropped"
+        );
+        assert_eq!(stashed[&a].live.user.as_deref(), Some("ask A"));
+        assert!(
+            stashed[&a].live.thinking,
+            "the spinner keeps its state while parked"
+        );
+        assert_eq!(stashed[&a].live.tokens, 42, "the counter survives a switch");
+        assert!(
+            stashed[&a].cancel.is_some(),
+            "the parked turn keeps its cancel token"
+        );
+        assert_eq!(stashed[&a].settle_expect, Some(7));
+        assert!(!busy, "the conversation now on screen is idle");
+        assert!(live.user.is_none(), "B never inherits A's card");
+        assert_eq!(ctx_tokens, None, "nor A's context counter");
+
+        // B runs its own turn, then the user goes back to A.
+        live.begin("ask B".to_string());
+        busy = true;
+        super::swap_visible_turn(
+            &mut stashed,
+            Some(b),
+            a,
+            &mut live,
+            &mut busy,
+            &mut cancel,
+            &mut settle_expect,
+            &mut settle_retries,
+            &mut ctx_tokens,
+        );
+
+        assert_eq!(
+            live.user.as_deref(),
+            Some("ask A"),
+            "A's card comes back, so its tool block and counters keep ticking"
+        );
+        assert!(live.thinking);
+        assert_eq!(live.tokens, 42);
+        assert!(busy, "A is still running");
+        assert!(cancel.is_some(), "A's cancel token came back with it");
+        assert_eq!(settle_expect, Some(7));
+        assert_eq!(settle_retries, 2);
+        assert_eq!(ctx_tokens, Some(1_234));
+        assert_eq!(stashed.len(), 1);
+        assert_eq!(
+            stashed[&b].live.user.as_deref(),
+            Some("ask B"),
+            "B's turn was parked on the way out"
+        );
+
+        // Opening the conversation already on screen is not a switch: nothing
+        // is parked and the running turn is left alone.
+        super::swap_visible_turn(
+            &mut stashed,
+            Some(a),
+            a,
+            &mut live,
+            &mut busy,
+            &mut cancel,
+            &mut settle_expect,
+            &mut settle_retries,
+            &mut ctx_tokens,
+        );
+        assert_eq!(stashed.len(), 1, "a no-op switch parks nothing");
+        assert_eq!(live.user.as_deref(), Some("ask A"));
+        assert!(busy);
+    }
+
+    /// The window keeps exactly one live turn, so every paint hands it over
+    /// directly: no owner check can disagree with what is on screen, because
+    /// the swap already did the deciding (#2616).
+    #[test]
+    fn every_paint_hands_over_the_turn_the_window_holds() {
+        let src = include_str!("main.rs");
+        let production = src
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .expect("production source before the test module");
+        assert!(
+            !production.contains("live_owner"),
+            "ownership is the parking map's job now, not a parallel ledger"
+        );
+        assert!(
+            !production.contains("visible_live("),
+            "the paint path no longer gate-keeps the card"
+        );
+        // The transcript takes the visible turn by reference, not as an
+        // Option: the window keeps exactly one and swaps it on a switch
+        // (#2616). All three paint paths hand it over.
+        assert_eq!(
+            production.matches("&self.live,").count(),
+            3,
+            "the card, its attachments and the split secondary all paint it"
+        );
+        assert_eq!(
+            production.matches("swap_visible_turn(").count(),
+            2,
+            "one definition, one caller: opening a conversation"
+        );
+        // A turn that finishes in a conversation the user left retires its
+        // parked card on both the success and the failure path.
+        assert_eq!(
+            production.matches("self.stashed.remove(&session);").count(),
+            2,
+            "Done and Failed both drop the parked card"
+        );
+    }
+
+    /// A turn recovered at boot is a turn like any other, and it is painted on
+    /// the conversation that owns it (#2627): on screen it takes the window's
+    /// card, off screen it parks under its session (#2616), so switching to it
+    /// shows the recovered work instead of an idle pane.
+    #[test]
+    fn a_resumed_turn_streams_into_its_pane() {
+        let src = include_str!("main.rs");
+        let arm = src
+            .split("agent_bridge::TurnEvent::TurnResumed {")
+            .nth(1)
+            .expect("the resumed-turn arm");
+        let arm = arm
+            .split("agent_bridge::TurnEvent::BackgroundTaskDone")
+            .next()
+            .expect("the end of the arm");
+        assert!(
+            arm.contains("self.live.begin(user_message)"),
+            "the card names the message the killed process was answering"
+        );
+        assert!(arm.contains("self.busy = true"), "a recovered turn is busy");
+        assert!(
+            arm.contains("self.cancel = Some(cancel)"),
+            "stop has to end a recovered turn too"
+        );
+        assert!(
+            arm.contains("self.stashed.insert("),
+            "an off-screen recovery parks under its own session"
+        );
+        assert!(
+            !arm.contains("reload = Some(session)"),
+            "a reload landing on a running turn would wipe its card"
         );
     }
 
     #[test]
-    fn the_ctx_counter_colours_at_the_tui_thresholds() {
-        // Same boundaries as `tui::render::input`: >80 red, >60 amber, else
-        // teal. Below 60 stays calm so a healthy turn does not shout.
-        assert_eq!(ctx_footer(Some(10_000), 200_000).1, palette::current().teal);
-        assert_eq!(
-            ctx_footer(Some(130_000), 200_000).1,
-            palette::current().amber
+    fn the_running_task_strip_sits_right_in_teal() {
+        // #2617: the strip reads the same on both surfaces, and the GUI parks
+        // it above the composer on the chat's right edge in the palette's
+        // cyan. Left-aligned amber was neither.
+        let src = include_str!("main.rs");
+        let strip = src
+            .split("fn task_strip(")
+            .nth(1)
+            .and_then(|rest| rest.split("\nfn ").next())
+            .expect("task strip");
+        assert!(strip.contains(".justify_end()"), "the strip sits right");
+        assert!(strip.contains(".w_full()"), "the row owns the column width");
+        assert!(
+            strip.contains("palette::current().teal"),
+            "a running job reads cyan"
         );
-        assert_eq!(ctx_footer(Some(170_000), 200_000).1, palette::current().red);
+        assert!(
+            !strip.contains("palette::current().amber"),
+            "amber is not the running colour"
+        );
     }
 
     #[test]
-    fn a_budget_with_no_sample_stays_a_dash() {
-        // Nothing measured, or no known window: never "0%" and never a
-        // counter for a conversation that has not run a turn yet.
+    fn the_running_task_strip_keeps_a_gutter_in_a_narrow_pane() {
+        // #2622: full width is not the whole story. The label keeps a gutter
+        // and a clip, so it stops at the pane's padding instead of touching
+        // the border, and a long command truncates instead of painting over
+        // the neighbouring leaf.
+        let src = include_str!("main.rs");
+        let strip = src
+            .split("fn task_strip(")
+            .nth(1)
+            .and_then(|rest| rest.split("\nfn ").next())
+            .expect("task strip");
+        assert!(strip.contains(".px_2()"), "the strip keeps a gutter");
+        assert!(strip.contains(".truncate()"), "a long label ellipsizes");
+        assert!(strip.contains(".min_w_0()"), "the label may shrink");
+    }
+
+    #[test]
+    fn every_pane_owns_its_drag_to_copy_state() {
+        // #2623: a pane transcript was built with `ViewHooks::default()`,
+        // which leaves `drag: None`, so dragging over a split pane selected
+        // nothing and copied nothing. The window's state cannot be shared:
+        // row text is stored by ordinal, and two panes plus the window all
+        // count rows from zero.
+        let src = include_str!("main.rs");
+        let pane = src
+            .split("fn pane_element(")
+            .nth(1)
+            .and_then(|rest| rest.split("\nfn ").next())
+            .expect("pane element");
+        assert!(
+            !pane.contains("ViewHooks::default()"),
+            "a pane must hand its transcript a drag state"
+        );
+        assert!(
+            pane.contains("drag: Some(pane.copy_drag.clone())"),
+            "the pane's own drag state is wired to its transcript"
+        );
+        let state = src
+            .split("struct SplitPane {")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}").next())
+            .expect("split pane");
+        assert!(
+            state.contains("copy_drag: Rc<CopyDrag>"),
+            "each pane carries its own drag state"
+        );
+        // The pane's composer is the one that acknowledges the copy, because
+        // the transcript cannot reach an editor (#2587).
+        assert!(
+            src.contains("pane_copy.set_copied_listener"),
+            "the pane's own composer says the copy landed"
+        );
+        assert!(
+            src.contains("pane_editor.downgrade()"),
+            "the listener targets the pane's editor"
+        );
+    }
+
+    /// The body of `fn name(` up to the next item at the same indent.
+    fn fn_body(src: &'static str, name: &str) -> &'static str {
+        src.split(&format!("fn {name}("))
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .unwrap_or_else(|| panic!("{name} not found"))
+    }
+
+    #[test]
+    fn a_row_menu_split_grows_from_the_focused_pane() {
+        // #2625: the row menu named the session, so opening it as the chat
+        // first and then asking again grew the split from the first pane.
+        let src = include_str!("main.rs");
+        let menu = fn_body(src, "render")
+            .split("sessions::MenuKind::SplitSide")
+            .nth(1)
+            .and_then(|rest| rest.split("MenuKind::Delete").next())
+            .expect("the split arms");
+        assert!(
+            menu.contains("this.split_row(id, Layout::Side, cx)"),
+            "a side split from a row answers the pick with that row"
+        );
+        assert!(
+            menu.contains("this.split_row(id, Layout::Stack, cx)"),
+            "a stack split does the same"
+        );
+        assert!(
+            !menu.contains("open_session(id, cx)"),
+            "opening the row first moved the chat leaf and flattened the tree"
+        );
+        let split_row = fn_body(src, "split_row");
+        assert!(
+            split_row.contains("self.focused_pane()"),
+            "the pane being split is the one holding the caret"
+        );
+        assert!(
+            split_row.contains("self.choose_split(id, cx)"),
+            "the row already answered the pick"
+        );
+    }
+
+    #[test]
+    fn the_split_picker_starts_on_the_pane_being_split() {
+        // #2625: the picker's cursor was the chat's row, so with the caret in
+        // a right-hand pane the list opened on the wrong session.
+        let src = include_str!("main.rs");
+        let body = fn_body(src, "begin_split");
+        assert!(
+            body.contains("self.sessions.cursor = Some(target);"),
+            "the cursor starts on the pane being split"
+        );
+        assert!(
+            !body.contains("self.sessions.cursor = self.transcript.session;"),
+            "the chat's row is not the pane being split"
+        );
+    }
+
+    #[test]
+    fn a_split_pane_draws_the_plans_density_shape() {
+        // #2622, #2624: a pane is a fraction of the window, so its plan is
+        // the density shape (`plan_strip::pane_view`), never the six-row
+        // checklist that clipped mid-word there, and never a shrinkable card
+        // that a short pane squeezed out of sight.
+        let src = include_str!("main.rs");
+        let body = src
+            .split("fn panes_body(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .expect("panes body");
+        assert!(
+            body.contains("self.plan.pane_view(density, expanded)"),
+            "the chat leaf in a split draws the compact strip"
+        );
+        assert!(
+            body.contains("pane.plan.pane_view(density, expanded)"),
+            "every pane draws the compact strip"
+        );
+        assert!(
+            body.contains("plan_strip::pane_density(count, pane_width)"),
+            "the shape follows the pane count and the pane's own width"
+        );
+        assert!(
+            body.contains("toggle_pane_plan"),
+            "a click expands the checklist for that pane alone"
+        );
+        assert!(
+            !body.contains(".plan.view()"),
+            "no split pane draws the full checklist"
+        );
+    }
+
+    #[test]
+    fn every_pane_keeps_its_strips_at_their_own_height() {
+        // #2624: the transcript takes the slack and the strips keep their
+        // height. Without this the plan card was squeezed to zero in a short
+        // pane, which is why it only ever vanished in a split.
+        let src = include_str!("main.rs");
+        let body = src
+            .split("fn pane_element(")
+            .nth(1)
+            .and_then(|rest| rest.split("\nfn ").next())
+            .expect("pane element");
+        assert!(
+            body.contains(".flex_none().min_w_0().child(chrome)"),
+            "the chrome stack is not shrinkable"
+        );
+        assert!(
+            body.contains(
+                "div()\n                        .flex()\n                        .flex_col()\n                        .flex_1()\n                        .min_w_0()\n                        .min_h_0()\n                        .child(body)"
+            ),
+            "the body is the child that shrinks, and it can"
+        );
+    }
+
+    /// The composer's hint names the keys that work in the state on screen, so
+    /// the queue's instructions sit under the caret instead of in the card
+    /// (#2630).
+    #[test]
+    fn the_composer_hint_names_the_queue_while_a_turn_runs() {
         assert_eq!(
-            ctx_footer(None, 200_000),
-            ("ctx: -".to_string(), palette::current().text_faint)
+            composer_hint_for(false, 0).as_ref(),
+            "Message OpenCrabs…",
+            "an idle composer keeps its own prompt"
+        );
+        let running = composer_hint_for(true, 0);
+        assert!(
+            running.contains("esc") && running.contains("queues"),
+            "a running turn says Esc stops it and Enter queues: {running}"
+        );
+        let queued = composer_hint_for(true, 2);
+        assert!(
+            queued.contains("queued 2"),
+            "the count is on screen: {queued}"
+        );
+        assert!(
+            queued.contains('↑') && queued.contains("esc"),
+            "Up edits a queued message and Esc flushes it: {queued}"
+        );
+    }
+
+    /// A hint is a placeholder, never a control: with anything typed the field
+    /// shows the draft and the hint is gone (#2630).
+    #[test]
+    fn the_hint_never_survives_a_draft() {
+        let editor = include_str!("editor.rs");
+        assert!(
+            editor.contains("let display = if empty { placeholder } else { content.clone() };"),
+            "the field paints the placeholder only while it is empty"
+        );
+        assert!(
+            editor.contains("hsla_from(palette::current().text_faint)"),
+            "the hint is the faint colour, not the text colour"
         );
         assert_eq!(
-            ctx_footer(Some(900), 0),
-            ("ctx: -".to_string(), palette::current().text_faint)
+            composer_hint_for(false, 0).as_ref(),
+            "Message OpenCrabs…",
+            "an empty idle field keeps the product's own prompt"
         );
+    }
+
+    /// One Esc stops the turn and hands the queue to the next one: the branch
+    /// cancels, reads idle at once, and the post-batch drain sends what is
+    /// queued as the cancellation is acknowledged (#2631).
+    #[test]
+    fn esc_cancels_the_turn_and_sends_the_queue() {
+        let src = include_str!("main.rs");
+        let production = src
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .expect("production source before the test module");
+        let branch = production
+            .split("// One Esc stops the turn, and the queue becomes the next turn.")
+            .nth(1)
+            .and_then(|rest| rest.split("// Page keys scroll the transcript").next())
+            .expect("the Esc branch for a running turn");
+        assert!(branch.contains("cancel.cancel()"), "Esc cancels the turn");
+        assert!(
+            branch.contains("self.busy = false;"),
+            "the pane stops claiming a turn is running the moment Esc lands"
+        );
+        assert!(
+            branch.contains("Sending the {waiting} queued."),
+            "the stop says the queue is next"
+        );
+        assert!(
+            !branch.contains("self.spawn_turn("),
+            "no second turn starts while the cancel is still unwinding"
+        );
+        assert!(
+            production.contains("if !self.busy {\n            self.cancel = None;\n            self.drain_pending(cx);"),
+            "the turn's own event drains the queue once the cancel is acknowledged"
+        );
+    }
+
+    /// With nothing queued Esc is only a stop: the wording stays the plain
+    /// cancellation and the drain finds nothing to send (#2631).
+    #[test]
+    fn esc_with_no_queue_only_cancels() {
+        let src = include_str!("main.rs");
+        let production = src
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .expect("production source before the test module");
+        assert!(
+            production.contains("self.live.notices.push(\"Operation cancelled.\".to_string());"),
+            "an empty queue keeps the plain wording"
+        );
+        let drain = production
+            .split("    fn drain_pending(")
+            .nth(1)
+            .and_then(|rest| rest.split("    /// Create a conversation").next())
+            .expect("drain_pending");
+        assert!(
+            drain.contains("if waiting.is_empty() {\n            return;\n        }"),
+            "an empty queue sends nothing"
+        );
+    }
+
+    /// The queue keeps to two rows until the user opens it, so a burst of
+    /// background reports cannot own the conversation's column (#2629).
+    #[test]
+    fn the_queue_strip_folds_to_two_rows_until_it_is_opened() {
+        assert_eq!(queue_rows(0, false), 0);
+        assert_eq!(queue_rows(2, false), 2);
+        assert_eq!(queue_rows(5, false), 2);
+        assert_eq!(queue_rows(5, true), 5);
+    }
+
+    #[test]
+    fn a_stale_pane_focus_hands_the_keyboard_back_to_the_chat() {
+        // #2620: the id outlives the leaf it names. Read literally it marked
+        // every pane unfocused, so no frame painted a composer and a Finder
+        // drop had nothing to land in.
+        let chat = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let leaves = [chat, other];
+        assert_eq!(
+            resolve_split_focus(&leaves, Some(Uuid::new_v4()), Some(chat)),
+            None,
+            "a stale id falls back to the chat leaf"
+        );
+        assert_eq!(
+            resolve_split_focus(&leaves, Some(other), Some(chat)),
+            Some(other),
+            "a live id keeps the pane holding the caret"
+        );
+        assert_eq!(
+            resolve_split_focus(&leaves, Some(chat), Some(chat)),
+            None,
+            "the chat leaf names itself None"
+        );
+    }
+
+    #[test]
+    fn a_stale_pane_focus_picks_a_surviving_leaf_when_the_chat_is_gone() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let leaves = [a, b];
+        assert_eq!(
+            resolve_split_focus(&leaves, Some(Uuid::new_v4()), None),
+            Some(a),
+            "the first surviving leaf owns the keyboard"
+        );
+    }
+
+    #[test]
+    fn one_leaf_is_never_a_split() {
+        let only = Uuid::new_v4();
+        assert_eq!(resolve_split_focus(&[only], Some(only), Some(only)), None);
+        assert_eq!(resolve_split_focus(&[], Some(only), Some(only)), None);
+    }
+
+    #[test]
+    fn the_pane_footer_never_repeats_the_running_task_strip() {
+        // #2620: the strip above the composer is the single source (#2617).
+        // Printing the roster again in the one-line footer ran it past the
+        // pane's edge and over its neighbour.
+        let src = include_str!("main.rs");
+        let footer = src
+            .split("fn pane_footer_text(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .expect("pane footer text");
+        assert!(
+            !footer.contains('\u{23f3}') && !footer.contains('\u{231b}'),
+            "the footer carries no task strip"
+        );
+    }
+
+    #[test]
+    fn the_pane_footer_clips_instead_of_overflowing() {
+        let src = include_str!("main.rs");
+        let footer = src
+            .split("fn pane_footer(id: SharedString")
+            .nth(1)
+            .and_then(|rest| rest.split("\n/// ").next())
+            .expect("pane footer");
+        assert!(footer.contains(".max_w_full()"), "the row is bounded");
+        assert!(footer.contains(".overflow_hidden()"), "the row clips");
+        assert!(
+            footer.contains(".whitespace_nowrap()"),
+            "the row is one line"
+        );
+        assert!(footer.contains(".truncate()"), "the text ellipsizes");
     }
 
     #[test]

@@ -306,11 +306,9 @@ pub(crate) async fn resume_delivery_task(
         None
     };
 
-    let prompt = "[System: A restart just occurred while you were \
-        processing a request. Read the conversation context and continue \
-        where you left off naturally. Do not mention the restart or \
-        any interruption — just pick up seamlessly.]"
-        .to_string();
+    // One wording for every surface (#2627): the window resumes the same
+    // way the terminal does, so the text lives on the recovery module.
+    let prompt = crate::brain::agent::service::restart_recovery::CONTINUATION_PROMPT.to_string();
 
     match agent
         .resume_interrupted_turn(

@@ -41,7 +41,7 @@ pub use feedback_ledger::FeedbackLedgerRepository;
 pub use file::FileRepository;
 pub use message::MessageRepository;
 pub use pending_followup::{FollowupHost, PendingFollowup, PendingFollowupRepository};
-pub use pending_request::PendingRequestRepository;
+pub use pending_request::{PendingRequest, PendingRequestRepository};
 pub use plan_card::{PlanCard, PlanCardRepository};
 pub use project::ProjectRepository;
 pub use recent_paths::RecentPathsRepository;
