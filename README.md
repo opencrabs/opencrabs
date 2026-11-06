@@ -721,13 +721,27 @@ A launch opens the conversation you were last in, on both surfaces, because the 
 
 Opening the window claims the profile the way the terminal does: whichever surface is running owns it, GUI, TUI or daemon, one at a time. The window therefore serves the channels and runs the scheduled jobs, so Telegram, Discord, Slack, WhatsApp and Trello answer while only the window is open, a scheduled job fires on time, and a key rotation or an allowlist edit reaches the running bots without a restart. A background instance holding the profile is shut down on start, exactly as the terminal already preempts the daemon, and the transcript names the process it took over.
 
+#### Theme modal
+
+`ctrl+shift+t` or `/theme` opens a centered card over the conversation, not a sidebar: four preview cards in the shape of Telegram's picker. A click on a card applies and saves it immediately, so there is no Keep button, and `esc`, the close line or a click on the scrim closes the card without undoing the choice. The arrows walk the four cards and Enter applies, so the picker works without a mouse.
+
+| Mode | What it draws |
+|---|---|
+| **Orgn** | the window's own dark palette, unchanged, and it stays dark when the system changes |
+| **Light** | a native light palette: warm off-white canvas, gentle panels, charcoal text, burnt-orange accent |
+| **Custom** | the system's base plus your accent, edited on a hue wheel (angle picks the hue, distance the saturation) with saturation and brightness tracks beside it; the drag paints live and the accent is saved when you let go |
+| **Auto** | Orgn while the system is dark, Light while it is light, and it keeps following later changes |
+
+`Auto` is the default, so a first install matches the system appearance. The choice lands in `[gui] theme = "orgn" | "light" | "custom" | "auto"` and the custom accent in `[gui] custom_accent = "#RRGGBB"`. The window owns this small model now: the old `[gui] dark_theme` and `[gui] light_theme` catalog keys are ignored, because the desktop client no longer converts TUI themes. The terminal is untouched: `[tui.theme]`, the presets, the curated pack and your own `~/.opencrabs/themes/*.toml` all behave as they did.
+
 #### Every command answers on the window
 
 The window runs the terminal's whole slash-command surface, not a subset. All 33 commands in the [Chat Mode](#chat-mode) table answer here, and two tests hold the line: `no_command_is_left_without_a_screen` walks every name the terminal offers and fails the build if one lands on "no screen for it", and `support_separates_missing_from_unknown` fails if a name is neither answered nor recognised. A command that owns a screen opens it full width, `esc` goes back to the chat. The rest answer in the transcript through the engine's own entry point, so a plan approved on the window is the same plan object the terminal approves, and `/cd` moves this session's directory through the same shared applier the terminal calls, never another session's.
 
 | Where it answers | Commands | What you get |
 |------------------|----------|--------------|
-| Full-window screen | `/usage` `/themes` `/models` `/sessions` `/skills` `/mission-control` `/onboard` | the screen itself |
+| Centered modal | `/theme` | four preview cards over the conversation; a pick saves at once |
+| Full-window screen | `/usage` `/models` `/sessions` `/skills` `/mission-control` `/onboard` | the screen itself |
 | Setup wizard, opened at its step | `/workspace` `/channels` `/voice` `/image` `/daemon` `/brain` `/doctor` | the same steps and the same writes as the terminal |
 | One line in the transcript | `/compact` `/clear` `/rtk` `/plan` `/show-plan` `/execute` `/discard` `/approve` `/cd` `/goal` `/profiles` `/restart` `/whisper` `/cowork` | what happened, in words; no model turn is spent |
 | Chat control | `/new` `/stop` `/help` `/evolve` `/exit` | a new conversation, an aborted turn, the key list, the update, quit |
