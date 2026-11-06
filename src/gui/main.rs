@@ -3706,23 +3706,10 @@ impl Dashboard {
         progress: opencrabs::brain::agent::ProgressEvent,
         cx: &mut Context<Self>,
     ) {
-<<<<<<< Updated upstream
-        use opencrabs::brain::agent::ProgressEvent;
-        let Some(pane) = self.pane_states.get_mut(&session) else {
-            // A session with no leaf is what a sub-agent looks like: its
-            // progress arrives with its own id and there is no pane to fold it
-            // into. The event is the only trace of that turn the window holds,
-            // so the rail records it here instead of dropping it (#2636). A
-            // repeat does not repaint: only the first sighting changes a row.
-            if self.rail.observe_stream(session) {
-                cx.notify();
-            }
-=======
         if let Some(pane) = self.pane_states.get_mut(&session) {
             fold_live(&mut pane.live, progress);
             pane.scroll.scroll_to_bottom();
             cx.notify();
->>>>>>> Stashed changes
             return;
         }
         // A conversation the user switched away from keeps its turn in the
@@ -3731,6 +3718,15 @@ impl Dashboard {
         // the counter the turn actually reached, not a stale snapshot.
         if let Some(turn) = self.stashed.get_mut(&session) {
             fold_live(&mut turn.live, progress);
+            cx.notify();
+            return;
+        }
+        // A session with no leaf is what a sub-agent looks like: its
+        // progress arrives with its own id and there is no pane to fold it
+        // into. The event is the only trace of that turn the window holds,
+        // so the rail records it here instead of dropping it (#2636). A
+        // repeat does not repaint: only the first sighting changes a row.
+        if self.rail.observe_stream(session) {
             cx.notify();
         }
     }
