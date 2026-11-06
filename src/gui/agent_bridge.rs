@@ -46,7 +46,10 @@ pub enum TurnEvent {
     ProgressFor(Uuid, ProgressEvent),
     /// The turn finished; carries the final response content and the
     /// context size the provider reported for it (the footer's ctx budget).
+    /// The session travels with it: a split pane runs its own turn, and the
+    /// window has to know which leaf to settle (#2614).
     Done {
+        session: Uuid,
         content: String,
         /// Prompt tokens the model saw on the final call. Same number the
         /// TUI reads from `response.context_tokens`.
@@ -57,8 +60,9 @@ pub enum TurnEvent {
         /// path could not measure it.
         tokens_per_second: Option<f64>,
     },
-    /// The turn failed; carries the user-facing message the channels use.
-    Failed(String),
+    /// The turn failed; carries the user-facing message the channels use
+    /// and the session it belonged to, for the same reason as `Done` (#2614).
+    Failed { session: Uuid, text: String },
     /// A detached background task finished: the resumed-turn payload, not a UI
     /// notice. The row it settles is drawn and closed by the progress events;
     /// this is what tells the agent the command it backgrounded is done.
@@ -803,7 +807,10 @@ pub fn spawn_turn(
             {
                 Ok(rt) => rt,
                 Err(e) => {
-                    let _ = sink.send(TurnEvent::Failed(format!("turn runtime: {e}")));
+                    let _ = sink.send(TurnEvent::Failed {
+                        session: session_id,
+                        text: format!("turn runtime: {e}"),
+                    });
                     return;
                 }
             };
@@ -814,6 +821,7 @@ pub fn spawn_turn(
                 {
                     Ok(response) => {
                         let _ = sink.send(TurnEvent::Done {
+                            session: session_id,
                             content: response.content,
                             context_tokens: response.context_tokens,
                             tokens_per_second: response.tokens_per_second,
@@ -821,13 +829,19 @@ pub fn spawn_turn(
                     }
                     Err(e) => {
                         let msg = opencrabs::brain::agent::format_user_error(&e);
-                        let _ = sink.send(TurnEvent::Failed(msg));
+                        let _ = sink.send(TurnEvent::Failed {
+                            session: session_id,
+                            text: msg,
+                        });
                     }
                 }
             });
         });
     if let Err(e) = spawned {
-        let _ = sink.send(TurnEvent::Failed(format!("turn thread spawn: {e}")));
+        let _ = sink.send(TurnEvent::Failed {
+            session: session_id,
+            text: format!("turn thread spawn: {e}"),
+        });
     }
 }
 

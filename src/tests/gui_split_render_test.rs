@@ -54,17 +54,6 @@ fn pane_element() -> &'static str {
         .expect("the walk comes before the pick overlay")
 }
 
-/// The Tab branch that cycles the panes, from its condition to the call.
-fn tab_arm() -> &'static str {
-    GUI_MAIN
-        .split("if ev.keystroke.key == \"tab\"")
-        .nth(1)
-        .expect("the pane Tab branch exists")
-        .split("self.cycle_pane_focus(cx);")
-        .next()
-        .expect("the branch cycles the panes")
-}
-
 /// The body that draws the chat screen's pane tree (#2530): where each pane's
 /// own plan, queue and composer are built before the walk paints them.
 fn panes_body() -> &'static str {
@@ -193,8 +182,8 @@ fn the_focused_pane_wears_a_band_under_its_header() {
         "the band under the header is thick enough to read"
     );
     assert!(
-        header.contains("split_rule_color()"),
-        "the unfocused header sits on the same contrast as the divider"
+        header.contains("focus_ring_color(focused)"),
+        "the unfocused header sits on the same contrast as the divider, and the live one on the accent"
     );
 }
 
@@ -314,32 +303,67 @@ fn the_divider_resizes_both_panes() {
 }
 
 #[test]
-fn tab_moves_the_caret_between_the_panes() {
+fn alt_tab_rotates_the_panes_and_bare_tab_does_not() {
     let keys = on_key();
-    // A split opens holding the caret, but until Tab moved it the other pane
-    // was only reachable by mouse, so ctrl+x could not target it (#2475).
-    let cycle = keys
-        .find("self.cycle_pane_focus(cx);")
-        .expect("Tab cycles the panes while a split is open");
+    // A split opens holding the caret, and the chord is the only way to move
+    // it: bare Tab belongs to the emoji picker, the follow-up suggestion and
+    // the rail (#2580, #2579).
+    let rotate = keys
+        .find("if let Some(rotation) = rotation_chord(ks) {")
+        .expect("the window answers the rotation chord");
     let rail = keys
         .find("self.rail_focused = !self.rail_focused;")
         .expect("Tab still walks to the rail");
     assert!(
-        cycle < rail,
-        "the tree claims Tab before the rail does, so a live split keeps the key"
+        rotate < rail,
+        "the chord is read before the rail, so it works from the composer too"
     );
     assert!(
-        flat(tab_arm()).contains(".is_some_and(|tree| tree.leaves().len() > 1)")
-            && flat(tab_arm()).contains("&& !self.editor.read(cx).list_open()"),
-        "nothing cycles panes with no tree, and an open list keeps Tab"
+        !keys.contains("self.cycle_pane_focus(cx);"),
+        "bare Tab no longer cycles the panes"
+    );
+    let arm = keys
+        .split("if let Some(rotation) = rotation_chord(ks) {")
+        .nth(1)
+        .expect("the rotation arm has a body")
+        .split("return;")
+        .next()
+        .expect("the arm returns once it has moved the caret");
+    assert!(
+        flat(arm)
+            .contains("self.cycle_pane_focus(rotation == split::PaneRotation::Clockwise, cx);"),
+        "the arm hands the direction to the caret instead of always going forward"
+    );
+    let helper = GUI_MAIN
+        .split("fn rotation_chord(")
+        .nth(1)
+        .expect("the chord is read in one place")
+        .split("\n}\n")
+        .next()
+        .expect("the helper has a body");
+    assert!(
+        flat(helper).contains("ks.modifiers.alt,")
+            && flat(helper).contains("ks.modifiers.control,")
+            && flat(helper).contains("ks.modifiers.platform,")
+            && flat(helper).contains("ks.modifiers.shift,"),
+        "alt is required and the other modifiers are handed over so they can be refused"
     );
     let cycle_fn = GUI_MAIN
         .split("fn cycle_pane_focus(")
         .nth(1)
-        .expect("cycle_pane_focus is defined");
+        .expect("cycle_pane_focus is defined")
+        .split("\n    fn ")
+        .next()
+        .expect("the caret fn has a body");
+    // The slice starts after the name, so the parameters are checked as the
+    // remainder rather than with the prefix this split just consumed.
     assert!(
-        cycle_fn.contains("let next = leaves[(at + 1) % leaves.len()];"),
-        "the caret walks the leaves in the order they are drawn, and two presses return it"
+        cycle_fn.starts_with("&mut self, clockwise: bool, cx: &mut Context<Self>) {"),
+        "the caret knows which way to walk"
+    );
+    assert!(
+        flat(cycle_fn).contains("split::rotated_index(at, leaves.len(), rotation)"),
+        "the wraparound lives in the core, where it is tested without a window"
     );
     assert!(
         cycle_fn.contains("self.pane_focus = if Some(next) == self.transcript.session {"),
@@ -517,5 +541,147 @@ fn a_leaf_draws_its_chrome_above_its_own_footer() {
     assert!(
         chrome_at < footer_at,
         "the composer and plan sit above the footer row"
+    );
+}
+
+/// The drop listener that turns a Finder drag into composer chips (#2610).
+fn drop_handler() -> &'static str {
+    GUI_MAIN
+        .split(".on_drop::<ExternalPaths>(")
+        .nth(1)
+        .expect("the window takes drops")
+        .split(".on_mouse_up(")
+        .next()
+        .expect("the drop comes before the mouse-up handler")
+}
+
+/// The rotation, from its signature to the next method on the window.
+fn cycle_pane_focus() -> &'static str {
+    GUI_MAIN
+        .split("fn cycle_pane_focus(")
+        .nth(1)
+        .expect("the rotation is defined")
+        .split("\n    fn ")
+        .next()
+        .expect("the rotation has a body")
+}
+
+#[test]
+fn a_dropped_file_belongs_to_the_focused_pane() {
+    let drop = flat(drop_handler());
+    assert!(
+        drop.contains("this.composer_entity()"),
+        "the chip goes to the composer the keyboard owns, not the window's"
+    );
+    assert!(
+        !drop.contains("this.editor.update"),
+        "the window's editor is the chat leaf's field, which a split may not draw"
+    );
+}
+
+#[test]
+fn the_keyboard_follows_the_caret_between_panes() {
+    let cycle = flat(cycle_pane_focus());
+    assert!(
+        cycle.contains("self.refocus_screen();"),
+        "rotating the caret moves the keyboard with it, or the next chord lands in the old field"
+    );
+    let composer_target = flat(
+        GUI_MAIN
+            .split("FocusTarget::Composer => {")
+            .nth(1)
+            .expect("the window aims the composer")
+            .split("FocusTarget::Root")
+            .next()
+            .expect("the root arm follows the composer arm"),
+    );
+    assert!(
+        composer_target.contains("self.composer_entity()"),
+        "the composer target resolves the focused pane's own field"
+    );
+}
+
+#[test]
+fn a_pane_wears_a_ring_and_the_unfocused_ones_are_drawn_back() {
+    let walk = flat(pane_element());
+    assert!(
+        walk.contains("border_color(rgb(focus_ring_color(focused)))"),
+        "the leaf that owns the keyboard wears the accent ring"
+    );
+    assert!(
+        walk.contains("UNFOCUSED_PANE_OPACITY"),
+        "a pane that does not own the keyboard reads as disabled"
+    );
+    assert!(
+        walk.contains("this.refocus_screen();"),
+        "clicking a pane takes the keyboard, not only the dim composer"
+    );
+}
+
+#[test]
+fn typing_is_not_written_to_the_log_keystroke_by_keystroke() {
+    let handler = flat(on_key());
+    let gate_at = handler
+        .find("is_typing_key(&ev.keystroke.key, m.control, m.platform, m.alt)")
+        .expect("the log gate asks the shared predicate whether the key is text");
+    let log_at = handler
+        .find("logging::debug(&format!(")
+        .expect("the key line is still there for chords");
+    assert!(
+        gate_at < log_at,
+        "the predicate decides before the line is written"
+    );
+}
+
+#[test]
+fn a_pane_send_stays_in_its_own_leaf() {
+    let send = flat(
+        GUI_MAIN
+            .split("fn send_from_pane(")
+            .nth(1)
+            .expect("the pane send is defined")
+            .split("\n    fn ")
+            .next()
+            .expect("the send has a body"),
+    );
+    assert!(
+        !send.contains("open_session("),
+        "a send must not adopt the window's chat: that closes a leaf and the pane vanishes (#2614)"
+    );
+    assert!(
+        send.contains("pane.busy = true"),
+        "the panel that was typed in is the one that runs the turn"
+    );
+    // The call is reflowed across lines by rustfmt, so the argument list is
+    // matched as text rather than as one unbroken line.
+    assert!(
+        send.contains("spawn_turn(") && send.contains("bridge.service.clone(), session,"),
+        "the turn runs against the pane's session, not the window's"
+    );
+}
+
+#[test]
+fn a_pane_turn_settles_its_own_leaf() {
+    let poll = flat(
+        GUI_MAIN
+            .split("fn poll(")
+            .nth(1)
+            .expect("the poll loop is defined")
+            .split("\n    fn ")
+            .next()
+            .expect("the poll loop has a body"),
+    );
+    assert!(
+        poll.contains("self.settle_pane(session, tokens_per_second, cx);"),
+        "a finished pane turn settles that pane, so the window's conversation never moves"
+    );
+    assert!(
+        poll.contains("self.fold_pane_progress("),
+        "a pane's stream paints into its own card"
+    );
+    let walk = flat(pane_element());
+    assert!(
+        walk.contains("&pane.live,"),
+        "the leaf draws its own live turn instead of an empty one"
     );
 }
