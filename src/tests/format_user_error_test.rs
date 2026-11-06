@@ -164,6 +164,7 @@ fn tool_loop_produces_loop_message_with_models_remedy() {
     );
 }
 
+#[test]
 fn repetition_loop_works_without_diagnostic_suffix() {
     let err = AgentError::Provider(ProviderError::AnnouncementLoop(
         "near-identical announcements repeated within the turn".to_string(),
