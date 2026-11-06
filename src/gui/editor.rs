@@ -289,6 +289,11 @@ pub const NOTICE_TTL: Duration = Duration::from_secs(2);
 /// The terminal prints these same words on its input border.
 pub const COPIED_NOTICE: &str = "Copied to clipboard";
 
+/// What the composer says when a stop before the first token handed the
+/// message back (#2635). The text is in the field again, so the line does not
+/// have to explain where it went.
+pub const STOPPED_NOTICE: &str = "Stopped, message back in the composer";
+
 /// True once a notice has outlived the TTL. Pure, so the expiry rule stays a
 /// test instead of a wall-clock guess.
 pub fn notice_expired(shown_at: Instant, now: Instant, ttl: Duration) -> bool {
@@ -348,6 +353,30 @@ impl Editor {
             });
         })
         .detach();
+    }
+
+    /// A stop took the message back: say it where the text just reappeared
+    /// (#2635). Same transient line the copy receipt uses.
+    pub fn show_returned(&mut self, cx: &mut Context<Self>) {
+        self.show_notice(STOPPED_NOTICE, cx);
+    }
+
+    /// Put the text an abandoned turn was carrying back in the field, caret
+    /// at the end, ready to edit (#2635). The caller only does this when the
+    /// draft is empty, so nothing the user typed since is overwritten.
+    pub fn restore_draft(&mut self, text: String, cx: &mut Context<Self>) {
+        // A recall belongs to the queue, not to this hand-back.
+        self.recall_depth = None;
+        self.recall_draft.clear();
+        crate::agent_bridge::queue_recall_hold(None);
+        self.content = text;
+        let end = self.content.len();
+        self.selected_range = end..end;
+        self.selection_reversed = false;
+        self.marked_range = None;
+        self.command_dismissed = false;
+        self.emoji_dismissed = false;
+        cx.notify();
     }
 
     /// A drag-copied range reached the clipboard, so say so and let the line

@@ -104,6 +104,9 @@ pub enum TurnEvent {
     /// A model switch could not be attempted; carries the session that asked
     /// and the reason.
     ModelSwitchFailed { session: Uuid, error: String },
+    /// A stopped turn's rows are gone: reload the conversation without the
+    /// user bubble that was handed back to the composer (#2635).
+    TurnReverted { session: Uuid },
     /// A text command answered off the UI thread; the line goes to the
     /// notices (#2469).
     CommandReply(String),
@@ -1068,6 +1071,73 @@ pub fn spawn_switch_model(
             session: session_id,
             error: format!("switch thread: {e}"),
         });
+    }
+}
+
+/// Delete the rows a turn wrote before it was stopped (#2635).
+///
+/// A turn persists its `user` row and an empty `assistant` placeholder at the
+/// moment it starts, before the provider is even asked. A stop that beats the
+/// first token hands that text back to the composer, so leaving those rows
+/// would redraw the bubble the user just took back on the next reload. The
+/// trailing pair is cut only when it is the pair the turn opened: a finished
+/// turn, or anything a tool wrote, stops the walk.
+pub fn spawn_undo_last_turn(service: Arc<AgentService>, session_id: Uuid, sink: EventSink) {
+    let done_sink = sink.clone();
+    let spawned = std::thread::Builder::new()
+        .stack_size(4 * 1024 * 1024)
+        .name("gui-turn-undo".into())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    crate::logging::error(&format!("turn undo runtime: {e}"));
+                    let _ = done_sink.send(TurnEvent::TurnReverted { session: session_id });
+                    return;
+                }
+            };
+            runtime.block_on(async move {
+                let messages =
+                    opencrabs::services::MessageService::new(service.context().clone());
+                let rows = match messages.list_messages_for_session(session_id).await {
+                    Ok(rows) => rows,
+                    Err(e) => {
+                        crate::logging::error(&format!("turn undo read: {e}"));
+                        return;
+                    }
+                };
+                // Newest first: the placeholder, then the question it echoed.
+                let Some(placeholder) = rows.last() else {
+                    return;
+                };
+                if placeholder.role != "assistant" || !placeholder.content.trim().is_empty() {
+                    // The turn had already answered, or wrote nothing yet. An
+                    // answer that landed between the stop and this thread is
+                    // the user's: only the empty placeholder is ever cut.
+                    return;
+                }
+                if let Err(e) = messages.delete_message(placeholder.id).await {
+                    crate::logging::error(&format!("turn undo assistant row: {e}"));
+                    return;
+                }
+                let Some(question) = rows.get(rows.len().saturating_sub(2)) else {
+                    let _ = done_sink.send(TurnEvent::TurnReverted { session: session_id });
+                    return;
+                };
+                if question.role == "user"
+                    && let Err(e) = messages.delete_message(question.id).await
+                {
+                    crate::logging::error(&format!("turn undo user row: {e}"));
+                }
+                let _ = done_sink.send(TurnEvent::TurnReverted { session: session_id });
+            });
+        });
+    if let Err(e) = spawned {
+        crate::logging::error(&format!("turn undo thread: {e}"));
+        let _ = sink.send(TurnEvent::TurnReverted { session: session_id });
     }
 }
 

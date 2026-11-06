@@ -4342,13 +4342,26 @@ impl Dashboard {
                         self.fail_pane(session, text, cx);
                         continue;
                     }
-                    self.live.notices.push(text);
+                    // A card a stop already took back has no line to write on:
+                    // the cancellation landing afterwards is the echo of the
+                    // stop, not news (#2635).
+                    if !self.live.is_empty() {
+                        self.live.notices.push(text);
+                    }
                     // A failed turn has no ctx or rate to report; a stale
                     // record would land on whatever turn shows up next.
                     self.pending_metrics = None;
                     self.busy = false;
                     self.live.thinking = false;
                     reload = self.transcript.session;
+                }
+                agent_bridge::TurnEvent::TurnReverted { session } => {
+                    // The stopped turn's rows are deleted and its question is
+                    // back in the composer, so the transcript must stop drawing
+                    // the bubble the user just took back (#2635).
+                    if self.transcript.session == Some(session) {
+                        reload = Some(session);
+                    }
                 }
                 agent_bridge::TurnEvent::BackgroundTaskDone {
                     session_id,
@@ -5796,6 +5809,39 @@ impl Dashboard {
             // a stop, so a single press left the user watching a process they
             // had already asked to kill with their typed text stranded behind
             // it (#2631).
+            //
+            // A stop that beats the first token takes the message back
+            // (#2635): the turn never reached the conversation, so the text
+            // belongs in the composer to be corrected and sent again instead of
+            // sitting in a chat that will never answer it, and the rows the
+            // turn opened are deleted rather than redrawn.
+            let mut returned = false;
+            if let Some(sid) = self.transcript.session
+                && self.live_owner.owns_live(Some(sid))
+                && self.live.untouched()
+            {
+                let composer = self.composer_entity();
+                // Only into an empty field: anything typed since the send is
+                // the user's, and taking the question back must never cost it.
+                let free = composer.read(cx).content.trim().is_empty();
+                if free {
+                    if let Some(text) = self.live.user.take() {
+                        composer.update(cx, |editor, cx| {
+                            editor.restore_draft(text, cx);
+                            editor.show_returned(cx);
+                        });
+                        if let Some(bridge) = agent_bridge::bridge() {
+                            agent_bridge::spawn_undo_last_turn(
+                                bridge.service.clone(),
+                                sid,
+                                self.sink.clone(),
+                            );
+                        }
+                        self.live.clear();
+                        returned = true;
+                    }
+                }
+            }
             if let Some(cancel) = self.cancel.take() {
                 cancel.cancel();
             }
@@ -5816,7 +5862,9 @@ impl Dashboard {
                 self.live.notices.push(format!(
                     "Operation cancelled. Sending the {waiting} queued."
                 ));
-            } else {
+            } else if !returned {
+                // A handed-back message already says so in the composer, so
+                // the notice would be the second time the user is told.
                 self.live.notices.push("Operation cancelled.".to_string());
             }
             logging::info("turn cancelled by Esc");

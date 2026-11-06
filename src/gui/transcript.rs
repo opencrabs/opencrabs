@@ -317,6 +317,19 @@ impl LiveTurn {
             && self.settled.is_none()
     }
 
+    /// The model has not said anything yet: no reasoning, no text, no tool
+    /// call, no queued message taken. A stop inside that window can hand the
+    /// question back to the composer, because there is no answer to lose
+    /// (#2635).
+    pub fn untouched(&self) -> bool {
+        self.stream.is_empty()
+            && self.reasoning.is_empty()
+            && self.tools.is_empty()
+            && self.entries.is_empty()
+            && self.injected.is_empty()
+            && self.settled.is_none()
+    }
+
     /// Start a fresh turn: the previous one is gone, so only the question
     /// carries over. Notices go with it, or a stale "agent offline" would
     /// outlive the failure it described.
