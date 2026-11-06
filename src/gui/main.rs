@@ -706,6 +706,11 @@ struct Dashboard {
     /// Which session the strip's path was resolved for, so the DB lookup runs
     /// once per selection rather than once per frame.
     plan_for: Option<Uuid>,
+    /// Panes whose plan strip the user expanded (#2624). A pane opens at the
+    /// density its pane count and width allow, and a click on the card trades
+    /// the conversation's room for the checklist, per pane, so expanding one
+    /// leaf never grows the card in the others.
+    plan_expanded: std::collections::HashSet<Uuid>,
     /// The selected session's transcript and its scroll handle, so a fresh
     /// load can open at the bottom where the conversation ends.
     transcript: transcript::TranscriptState,
@@ -943,10 +948,6 @@ impl Dashboard {
             if let Some(b) = agent_bridge::bridge() {
                 self.ctx_max = b.service.context_limit_for_session(id);
             }
-            // The queue belongs to the conversation on screen: a message
-            // typed for one session must never be drained into another
-            // (#2441), and it must not sit waiting on one the user left.
-            self.queued.clear();
             // The draft and its attachments belong to the conversation they
             // were typed in (#2481).
             self.editor.update(cx, |ed, cx| ed.begin_conversation(cx));
@@ -1641,11 +1642,52 @@ impl Dashboard {
             Some(target)
         };
         self.rail_focused = true;
-        self.sessions.cursor = self.transcript.session;
+        // The picker's cursor starts on the pane being split, not on the
+        // chat's row: with the caret in a right-hand pane, the chat's row is
+        // a different session and the list opened pointing somewhere else
+        // (#2625).
+        self.sessions.cursor = Some(target);
         // Focus goes to the window, not the composer, so the sidebar keys and the
         // dialog's N and Esc reach it while the split waits.
         self.refocus = Some(FocusTarget::Root);
         cx.notify();
+    }
+
+    /// Split the pane holding the caret and put `id` in the new slot (#2625).
+    ///
+    /// The rail's row menu used to open the row and then start a pick, which
+    /// had two faults: `open_session` moves the chat leaf to the clicked row,
+    /// so the split grew from the window's first pane instead of the pane
+    /// being read, and for a session the tree did not hold yet the leaf reset
+    /// in `adopt_chat_leaf` threw the split away entirely. Choosing the menu
+    /// entry already named the session, so the pick is answered here and the
+    /// second step is skipped.
+    fn split_row(&mut self, id: Uuid, layout: Layout, cx: &mut Context<Self>) {
+        let chat = self.transcript.session;
+        if self.panes.is_none()
+            && let Some(chat) = chat
+        {
+            self.panes = Some(PaneTree::leaf(chat));
+        }
+        let target = self.focused_pane();
+        let target = target.filter(|it| self.panes.as_ref().is_some_and(|tree| tree.contains(*it)));
+        let Some(target) = target else {
+            self.live
+                .notices
+                .push("Open a session before splitting it.".to_string());
+            cx.notify();
+            return;
+        };
+        if Some(id) == chat || self.panes.as_ref().is_some_and(|tree| tree.contains(id)) {
+            self.live
+                .notices
+                .push("That session is already open in a pane.".to_string());
+            cx.notify();
+            return;
+        }
+        self.split_pick = Some(layout);
+        self.split_target = Some(target);
+        self.choose_split(id, cx);
     }
 
     /// Esc during the pick: the split is dropped and the chat keeps focus.
@@ -1692,6 +1734,18 @@ impl Dashboard {
             .map(|tree| tree.leaves())
             .unwrap_or_default();
         resolve_split_focus(&leaves, self.pane_focus, self.transcript.session)
+    }
+
+    /// Expand or collapse one pane's plan strip (#2624). The choice is per
+    /// leaf: a pane in a wall of eight opens on its bar, and the one the user
+    /// is reading trades room for the whole checklist without touching the
+    /// others. The chat leaf keys on its own session, the same id every other
+    /// pane uses, so the two cannot collide.
+    fn toggle_pane_plan(&mut self, session: Uuid, cx: &mut Context<Self>) {
+        if !self.plan_expanded.remove(&session) {
+            self.plan_expanded.insert(session);
+        }
+        cx.notify();
     }
 
     /// Close one pane and hand its space to its neighbour (#2438, #2472).
@@ -6120,12 +6174,10 @@ impl Render for Dashboard {
                                     this.start_topic_draft(cx);
                                 }
                                 sessions::MenuKind::SplitSide => {
-                                    this.open_session(id, cx);
-                                    this.begin_split(Layout::Side, cx);
+                                    this.split_row(id, Layout::Side, cx)
                                 }
                                 sessions::MenuKind::SplitStack => {
-                                    this.open_session(id, cx);
-                                    this.begin_split(Layout::Stack, cx);
+                                    this.split_row(id, Layout::Stack, cx)
                                 }
                                 sessions::MenuKind::Delete => this.request_delete(id, cx),
                             }
@@ -6454,13 +6506,6 @@ impl Render for Dashboard {
                                     .text_xs()
                                     .text_color(rgb(palette::current().text_faint))
                                     .child(SharedString::from(identity)),
-                            )
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .text_xs()
-                                    .text_color(rgb(ctx_color))
-                                    .child(SharedString::from(ctx_label)),
                             )
                             .into_any_element()
                     },
@@ -9175,6 +9220,7 @@ fn main() {
                         onboard: None,
                         plan: plan_strip::PlanStripState::default(),
                         plan_for: None,
+                        plan_expanded: std::collections::HashSet::new(),
                         transcript: transcript::TranscriptState {
                             session: initial_session,
                             ..Default::default()
@@ -10576,7 +10622,7 @@ fn command_popup_view(names: &[&'static str], selected: usize) -> Div {
 /// turn runs in another. Only the session that owns the card paints it: a
 /// switch shows an empty card, and coming back to the session that sent the
 /// turn finds it again instead of losing it.
-fn visible_live<'a>(live: &'a transcript::LiveTurn, owned: bool) -> &'a transcript::LiveTurn {
+fn visible_live(live: &transcript::LiveTurn, owned: bool) -> &transcript::LiveTurn {
     static EMPTY: std::sync::OnceLock<transcript::LiveTurn> = std::sync::OnceLock::new();
     if owned {
         live
@@ -11468,12 +11514,27 @@ fn pane_element(
                     focused,
                     close,
                 ))
-                .child(body);
+                // The transcript takes the slack, the strips and the composer
+                // below it keep their height (#2624). Without the wrapper the
+                // conversation's own min height won the shrink and the plan
+                // strip was squeezed to nothing in a short pane, while the
+                // composer survived because its field has a min size: the plan
+                // card vanished exactly where the panes got small.
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w_0()
+                        .min_h_0()
+                        .child(body),
+                );
             // The pane's own plan, queue and composer sit between its
             // transcript and its footer, where the window-level ones sit in
-            // an unsplit window (#2530).
+            // an unsplit window (#2530). `flex_none` keeps every one of them
+            // at its own height: a shrinkable stack lost its top rows first.
             if let Some(chrome) = ctx.chrome.remove(session) {
-                node = node.child(chrome);
+                node = node.child(div().flex().flex_col().flex_none().min_w_0().child(chrome));
             }
             node.child(pane_footer(
                 SharedString::from(format!("pane-footer-{session}")),
@@ -12608,8 +12669,12 @@ mod tests {
             .split("\n#[cfg(test)]\nmod tests")
             .next()
             .expect("production source before the test module");
+        // Three call sites; the definition counts too now that its lifetimes
+        // are elided, so the check subtracts it rather than pinning a number
+        // that moves with a signature tidy-up.
         assert_eq!(
-            production.matches("visible_live(").count(),
+            production.matches("visible_live(").count()
+                - production.matches("fn visible_live(").count(),
             3,
             "the card, its attachments and the split secondary all read the owner"
         );
@@ -12720,11 +12785,69 @@ mod tests {
         );
     }
 
+    /// The body of `fn name(` up to the next item at the same indent.
+    fn fn_body(src: &'static str, name: &str) -> &'static str {
+        src.split(&format!("fn {name}("))
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .unwrap_or_else(|| panic!("{name} not found"))
+    }
+
     #[test]
-    fn a_split_pane_draws_the_terminals_compact_plan_strip() {
-        // #2622: a pane is a fraction of the window, so its plan is the
-        // terminal's three-line strip (`tui::render::panes::pane_strip_lines`),
-        // never the six-row checklist that clipped mid-word there.
+    fn a_row_menu_split_grows_from_the_focused_pane() {
+        // #2625: the row menu named the session, so opening it as the chat
+        // first and then asking again grew the split from the first pane.
+        let src = include_str!("main.rs");
+        let menu = fn_body(src, "render")
+            .split("sessions::MenuKind::SplitSide")
+            .nth(1)
+            .and_then(|rest| rest.split("MenuKind::Delete").next())
+            .expect("the split arms");
+        assert!(
+            menu.contains("this.split_row(id, Layout::Side, cx)"),
+            "a side split from a row answers the pick with that row"
+        );
+        assert!(
+            menu.contains("this.split_row(id, Layout::Stack, cx)"),
+            "a stack split does the same"
+        );
+        assert!(
+            !menu.contains("open_session(id, cx)"),
+            "opening the row first moved the chat leaf and flattened the tree"
+        );
+        let split_row = fn_body(src, "split_row");
+        assert!(
+            split_row.contains("self.focused_pane()"),
+            "the pane being split is the one holding the caret"
+        );
+        assert!(
+            split_row.contains("self.choose_split(id, cx)"),
+            "the row already answered the pick"
+        );
+    }
+
+    #[test]
+    fn the_split_picker_starts_on_the_pane_being_split() {
+        // #2625: the picker's cursor was the chat's row, so with the caret in
+        // a right-hand pane the list opened on the wrong session.
+        let src = include_str!("main.rs");
+        let body = fn_body(src, "begin_split");
+        assert!(
+            body.contains("self.sessions.cursor = Some(target);"),
+            "the cursor starts on the pane being split"
+        );
+        assert!(
+            !body.contains("self.sessions.cursor = self.transcript.session;"),
+            "the chat's row is not the pane being split"
+        );
+    }
+
+    #[test]
+    fn a_split_pane_draws_the_plans_density_shape() {
+        // #2622, #2624: a pane is a fraction of the window, so its plan is
+        // the density shape (`plan_strip::pane_view`), never the six-row
+        // checklist that clipped mid-word there, and never a shrinkable card
+        // that a short pane squeezed out of sight.
         let src = include_str!("main.rs");
         let body = src
             .split("fn panes_body(")
