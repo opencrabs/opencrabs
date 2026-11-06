@@ -543,3 +543,60 @@ fn a_leaf_draws_its_chrome_above_its_own_footer() {
         "the composer and plan sit above the footer row"
     );
 }
+
+/// The drop listener that turns a Finder drag into composer chips (#2610).
+fn drop_handler() -> &'static str {
+    GUI_MAIN
+        .split(".on_drop::<ExternalPaths>(")
+        .nth(1)
+        .expect("the window takes drops")
+        .split(".on_mouse_up(")
+        .next()
+        .expect("the drop comes before the mouse-up handler")
+}
+
+/// The rotation, from its signature to the next method on the window.
+fn cycle_pane_focus() -> &'static str {
+    GUI_MAIN
+        .split("fn cycle_pane_focus(")
+        .nth(1)
+        .expect("the rotation is defined")
+        .split("\n    fn ")
+        .next()
+        .expect("the rotation has a body")
+}
+
+#[test]
+fn a_dropped_file_belongs_to_the_focused_pane() {
+    let drop = flat(drop_handler());
+    assert!(
+        drop.contains("this.composer_entity()"),
+        "the chip goes to the composer the keyboard owns, not the window's"
+    );
+    assert!(
+        !drop.contains("this.editor.update"),
+        "the window's editor is the chat leaf's field, which a split may not draw"
+    );
+}
+
+#[test]
+fn the_keyboard_follows_the_caret_between_panes() {
+    let cycle = flat(cycle_pane_focus());
+    assert!(
+        cycle.contains("self.refocus_screen();"),
+        "rotating the caret moves the keyboard with it, or the next chord lands in the old field"
+    );
+    let composer_target = flat(
+        GUI_MAIN
+            .split("FocusTarget::Composer => {")
+            .nth(1)
+            .expect("the window aims the composer")
+            .split("FocusTarget::Root")
+            .next()
+            .expect("the root arm follows the composer arm"),
+    );
+    assert!(
+        composer_target.contains("self.composer_entity()"),
+        "the composer target resolves the focused pane's own field"
+    );
+}

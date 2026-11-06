@@ -1607,6 +1607,24 @@ impl Dashboard {
         self.pane_focus.or(self.transcript.session)
     }
 
+    /// The composer the keyboard owns (#2610): the focused pane's own field,
+    /// or the window's when the chat leaf holds the caret.
+    ///
+    /// A split draws one real field per leaf, so anything that aims the
+    /// keyboard or hands the composer a file resolves the leaf first. Aiming
+    /// at the window's editor while a pane owns the caret puts the text and
+    /// the attachment chips into a field the split never draws.
+    fn composer_entity(&self) -> Entity<editor::Editor> {
+        match self.pane_focus {
+            Some(id) if Some(id) != self.transcript.session => self
+                .pane_states
+                .get(&id)
+                .map(|pane| pane.editor.clone())
+                .unwrap_or_else(|| self.editor.clone()),
+            _ => self.editor.clone(),
+        }
+    }
+
     /// Close one pane and hand its space to its neighbour (#2438, #2472).
     /// Closing the chat itself moves the window to the first survivor, whose
     /// leaf takes the chat's place, so the panes that remain keep the slots
@@ -1683,6 +1701,10 @@ impl Dashboard {
         // A receipt in the daily log, so "Tab did nothing" can be told apart
         // from "Tab moved the caret and the header did not show it".
         logging::debug(&format!("pane focus -> {:?}", self.pane_focus));
+        // The keyboard walks with the caret (#2610). Without this the split
+        // highlighted the new pane while every keystroke still landed in the
+        // chat leaf's field, so the chord appeared to rotate exactly once.
+        self.refocus_screen();
         cx.notify();
     }
 
@@ -5055,9 +5077,12 @@ impl Dashboard {
             // The command list lives inside the composer, so with it open Esc
             // closes the list and keeps the draft: the terminal's behaviour,
             // and the nearest thing answers first.
-            let spelling = self.editor.read(cx).list_open();
+            // The list belongs to whichever field opened it, so Esc closes the
+            // focused pane's list rather than the chat's under it (#2614).
+            let owner = self.composer_entity();
+            let spelling = owner.read(cx).list_open();
             if spelling {
-                self.editor.update(cx, |editor, cx| {
+                owner.update(cx, |editor, cx| {
                     editor.dismiss_command_popup(cx);
                     editor.dismiss_emoji_popup(cx);
                 });
@@ -5520,17 +5545,18 @@ impl Dashboard {
                 // split uses.
                 let composer: AnyElement = if focused {
                     // The popups that hang over the input travel with it: a
-                    // split must not lose the slash list or the emoji panel
-                    // (#2530).
+                    // split must not lose the slash list or the emoji panel,
+                    // and they read the field of the pane that owns the
+                    // keyboard, not the chat underneath it (#2530, #2610).
                     let mut cell = div().flex().flex_col().flex_none().gap_2();
-                    if is_chat
-                        && self.topic_draft.is_none()
-                        && let Some((names, selected)) = self.editor.read(cx).command_popup()
+                    let slash_popup = editor.read(cx).command_popup();
+                    let emoji_popup = editor.read(cx).emoji_popup();
+                    if self.topic_draft.is_none()
+                        && let Some((names, selected)) = slash_popup
                     {
                         cell = cell.child(command_popup_view(&names, selected));
-                    } else if is_chat
-                        && self.topic_draft.is_none()
-                        && let Some((items, selected)) = self.editor.read(cx).emoji_popup()
+                    } else if self.topic_draft.is_none()
+                        && let Some((items, selected)) = emoji_popup
                     {
                         cell = cell.child(emoji_popup_view(&items, selected));
                     }
@@ -5578,7 +5604,13 @@ impl Render for Dashboard {
         // screen is the frame that can be typed into.
         if let Some(target) = self.refocus.take() {
             match target {
-                FocusTarget::Composer => window.focus(&self.editor.read(cx).focus_handle),
+                FocusTarget::Composer => {
+                    // The keyboard follows the pane, not the window (#2610):
+                    // a rotated caret that left focus on the chat leaf typed
+                    // into a field the split was not drawing.
+                    let composer = self.composer_entity();
+                    window.focus(&composer.read(cx).focus_handle);
+                }
                 FocusTarget::Root => window.focus(&self.focus),
             }
         }
@@ -8071,7 +8103,10 @@ impl Render for Dashboard {
             .on_drop::<ExternalPaths>(cx.listener(|this, ev: &ExternalPaths, window, cx| {
                 let paths = ev.paths().to_vec();
                 this.drag_seen = None;
-                let added = this.editor.update(cx, |editor, cx| {
+                // A dropped file belongs to the composer the keyboard owns,
+                // which in a split is the focused pane's own field (#2610).
+                let composer = this.composer_entity();
+                let added = composer.update(cx, |editor, cx| {
                     let added = editor.attach_paths(paths);
                     if added > 0 {
                         cx.notify();
@@ -10887,6 +10922,23 @@ fn pane_element(
             let close = move |_ev: &ClickEvent, _window: &mut Window, cx: &mut App| {
                 let _ = weak.update(cx, |this, cx| this.close_pane(close_session, cx));
             };
+            // Clicking anywhere in a pane takes the keyboard, not only the dim
+            // composer (#2610). The pane under the pointer is the pane the next
+            // keystroke belongs to, and a click that only highlighted a row
+            // left the caret where it was.
+            let reach = ctx.entity.clone();
+            let reach_session = *session;
+            let take_keyboard = move |_ev: &MouseDownEvent, _window: &mut Window, cx: &mut App| {
+                let next = if is_chat { None } else { Some(reach_session) };
+                let _ = reach.update(cx, |this, cx| {
+                    if this.pane_focus != next {
+                        this.pane_focus = next;
+                        this.refocus_screen();
+                        cx.notify();
+                    }
+                });
+            };
+            let interactive = ctx.interactive;
             let mut node = div()
                 .id(SharedString::from(format!("pane-{session}")))
                 .flex()
