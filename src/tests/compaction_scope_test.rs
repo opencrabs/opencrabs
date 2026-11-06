@@ -37,6 +37,7 @@ fn text_of(msg: &Message) -> String {
 /// BEGINNING with the marker prefix).
 fn db_row(content: String) -> crate::db::models::Message {
     crate::db::models::Message {
+        forward: None,
         id: uuid::Uuid::new_v4(),
         session_id: uuid::Uuid::nil(),
         role: "user".to_string(),

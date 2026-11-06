@@ -6,6 +6,10 @@
 
 const GUI_MAIN: &str = include_str!("../gui/main.rs");
 const SESSIONS: &str = include_str!("../gui/sessions.rs");
+// The card, its item and the popover moved out of the session rail so the
+// transcript can draw its own message menu without depending on it (#2613).
+// One builder still serves every menu; only its address changed.
+const MENU: &str = include_str!("../gui/menu.rs");
 
 /// The icons vanished because the map started empty and only filled after a
 /// close or a create. The rows were in the database the whole time; nothing
@@ -54,13 +58,22 @@ async fn boot_reads_the_icon_rows_instead_of_starting_with_an_empty_map() {
 /// and the strip no longer has one to grow.
 #[test]
 fn the_menu_floats_as_a_card_and_the_strip_nothing_grows_from() {
-    assert!(
-        SESSIONS.contains("pub fn menu_card("),
+    assert_eq!(
+        MENU.matches("pub fn menu_card(").count(),
+        1,
         "one card builder serves the rail menu and the chat menu"
     );
     assert!(
-        SESSIONS.contains("menu_card(\"rail-context-menu\""),
+        MENU.contains("menu_card(\"rail-context-menu\""),
         "the rail menu keeps its card"
+    );
+    // The move is mechanical: the rail still imports the primitives under the
+    // same names, so nothing in that module learned a new address (#2613).
+    assert!(
+        SESSIONS.contains(
+            "pub use crate::menu::{MenuEntry, MenuKind, menu_card, menu_item, menu_popover};"
+        ),
+        "the rail re-exports the moved primitives unchanged"
     );
     assert!(
         GUI_MAIN.contains("sessions::menu_card(\"chat-menu\""),

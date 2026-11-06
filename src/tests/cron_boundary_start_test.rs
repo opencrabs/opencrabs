@@ -33,6 +33,7 @@ fn execute_job_body() -> &'static str {
 
 fn row(seq: i32, role: &str, content: &str) -> crate::db::models::Message {
     crate::db::models::Message {
+        forward: None,
         id: uuid::Uuid::new_v4(),
         session_id: uuid::Uuid::nil(),
         role: role.to_string(),

@@ -121,6 +121,8 @@ impl MessageService {
             cache_read_tokens: None,
             thinking: None,
             duration_secs: None,
+            // A row written by a turn is never a forward (#2608).
+            forward: None,
         };
 
         match repo.create(&message).await {
@@ -172,6 +174,8 @@ impl MessageService {
             cache_read_tokens: None,
             thinking: None,
             duration_secs: None,
+            // A row written by a turn is never a forward (#2608).
+            forward: None,
         };
 
         repo.create(&message)

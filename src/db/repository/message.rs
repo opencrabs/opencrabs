@@ -160,28 +160,7 @@ impl MessageRepository {
             .await
             .context("Failed to get connection")?
             .interact(move |conn| {
-                conn.execute(
-                    "INSERT INTO messages (id, session_id, role, content, sequence,
-                                         created_at, token_count, cost, input_tokens,
-                                         cache_creation_tokens, cache_read_tokens, thinking,
-                                         duration_secs)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-                    params![
-                        m.id.to_string(),
-                        m.session_id.to_string(),
-                        m.role,
-                        m.content,
-                        m.sequence,
-                        m.created_at.timestamp(),
-                        m.token_count,
-                        m.cost,
-                        m.input_tokens,
-                        m.cache_creation_tokens,
-                        m.cache_read_tokens,
-                        m.thinking,
-                        m.duration_secs,
-                    ],
-                )?;
+                insert_message(conn, &m)?;
 
                 // Touch session's updated_at so /sessions sorts by last interaction
                 conn.execute(
@@ -199,6 +178,74 @@ impl MessageRepository {
             message.session_id
         );
         Ok(())
+    }
+
+    /// Copy rows from one session into another as a single forward batch
+    /// (#2608).
+    ///
+    /// The copy is written contiguously at the end of the destination's
+    /// sequence so the forwarded rows read as one block, and every row shares
+    /// one batch id so the renderer draws one header over them. Nothing here
+    /// triggers a turn: a forward delivers, it does not prompt.
+    ///
+    /// Refused before any write when the selection is empty, when its rows do
+    /// not all come from one session, or when the destination is that same
+    /// session. A forward into the source would duplicate rows the reader
+    /// already has in front of them.
+    pub async fn forward(
+        &self,
+        source: &[Message],
+        target: Uuid,
+        label: &str,
+    ) -> Result<Vec<Uuid>> {
+        let Some(first) = source.first() else {
+            anyhow::bail!("forward: nothing selected");
+        };
+        let from = first.session_id;
+        if source.iter().any(|m| m.session_id != from) {
+            anyhow::bail!("forward: the selection spans more than one session");
+        }
+        if from == target {
+            anyhow::bail!("forward: the destination is the source session");
+        }
+
+        let source = source.to_vec();
+        let label = label.to_string();
+        let batch = Uuid::new_v4();
+        let target_key = target.to_string();
+
+        self.pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                let tx = conn.transaction()?;
+                // The destination's own tail, so the block lands after
+                // whatever the reader already had.
+                let tail: i32 = tx
+                    .prepare_cached(
+                        "SELECT COALESCE(MAX(sequence), -1) FROM messages WHERE session_id = ?1",
+                    )?
+                    .query_row(params![target_key], |r| r.get(0))?;
+                let rows =
+                    crate::db::models::forwarded_rows(&source, target, tail + 1, &label, batch);
+                let mut ids = Vec::with_capacity(rows.len());
+                for row in &rows {
+                    insert_message(&tx, row)?;
+                    ids.push(row.id);
+                }
+                // One touch, not one per row: the session sorts by recency and
+                // a batch arrives at a single moment.
+                tx.execute(
+                    "UPDATE sessions SET updated_at = strftime('%s', 'now') WHERE id = ?1",
+                    params![target_key],
+                )?;
+                tx.commit()?;
+                Ok::<Vec<Uuid>, rusqlite::Error>(ids)
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to forward messages")
     }
 
     /// Update an existing message
@@ -660,4 +707,38 @@ impl<T> OptionalExt<T> for rusqlite::Result<T> {
             Err(e) => Err(e),
         }
     }
+}
+
+/// Write one row, provenance columns included. Shared by [`MessageRepository::create`]
+/// and [`MessageRepository::forward`] so the column list has exactly one
+/// definition and a new column cannot land in one path but not the other.
+fn insert_message(conn: &rusqlite::Connection, m: &Message) -> rusqlite::Result<usize> {
+    conn.execute(
+        "INSERT INTO messages (id, session_id, role, content, sequence,
+                             created_at, token_count, cost, input_tokens,
+                             cache_creation_tokens, cache_read_tokens, thinking,
+                             duration_secs, forwarded_from_session,
+                             forwarded_from_message, forwarded_from_label,
+                             forward_batch_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+        params![
+            m.id.to_string(),
+            m.session_id.to_string(),
+            m.role,
+            m.content,
+            m.sequence,
+            m.created_at.timestamp(),
+            m.token_count,
+            m.cost,
+            m.input_tokens,
+            m.cache_creation_tokens,
+            m.cache_read_tokens,
+            m.thinking,
+            m.duration_secs,
+            m.forward.as_ref().map(|f| f.from_session.to_string()),
+            m.forward.as_ref().map(|f| f.from_message.to_string()),
+            m.forward.as_ref().map(|f| f.label.clone()),
+            m.forward.as_ref().map(|f| f.batch.to_string()),
+        ],
+    )
 }

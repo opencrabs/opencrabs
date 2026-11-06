@@ -25,6 +25,7 @@ use uuid::Uuid;
 
 fn assistant_db_row(content: &str, thinking: Option<&str>) -> DbMessage {
     DbMessage {
+        forward: None,
         id: Uuid::new_v4(),
         session_id: Uuid::new_v4(),
         role: "assistant".to_string(),
@@ -114,6 +115,7 @@ fn from_db_messages_skips_thinking_on_user_rows() {
     // User rows should never get a Thinking block even if the column has a value —
     // only the assistant has reasoning.
     let row = DbMessage {
+        forward: None,
         id: Uuid::new_v4(),
         session_id,
         role: "user".to_string(),
