@@ -173,9 +173,14 @@ fn create_topic_walks_the_begin_conversation_door() {
         .next()
         .expect("begin_conversation body");
     for reset in [
-        "self.ctx_tokens = None;",
-        "self.pending_metrics = None;",
-        "self.queued.clear();",
+        // #2616 parks a running turn's ctx counter under its own session, so
+        // the door swaps the counter through `swap_visible_turn` instead of
+        // nulling it.
+        "&mut self.ctx_tokens,",
+        "self.pending_metrics.clear();",
+        // #2637 returns a recalled queue walk to the conversation it started
+        // in instead of clearing it.
+        "ed.release_recall(false)",
         "ed.begin_conversation(cx)",
     ] {
         assert!(
