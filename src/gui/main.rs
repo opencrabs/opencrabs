@@ -4547,9 +4547,12 @@ impl Dashboard {
         for id in rows {
             let live = self.rail.is_live(
                 id,
-                // The window runs one turn at a time, so only the open session
-                // can be mid-turn there; split leaves keep their own flag.
-                self.busy && self.transcript.session == Some(id),
+                // The open session's turn, plus any turn parked under its own
+                // session: a switched-away turn keeps running, so its rail row
+                // must keep its spinner instead of claiming idle work (#2616).
+                // Split leaves keep their own flag.
+                (self.busy && self.transcript.session == Some(id))
+                    || self.stashed.contains_key(&id),
                 self.pane_states.get(&id).is_some_and(|pane| pane.busy),
                 manager.as_ref().is_some_and(|mgr| mgr.running_for(id) > 0),
             );
