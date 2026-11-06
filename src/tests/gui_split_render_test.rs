@@ -617,3 +617,18 @@ fn a_pane_wears_a_ring_and_the_unfocused_ones_are_drawn_back() {
         "clicking a pane takes the keyboard, not only the dim composer"
     );
 }
+
+#[test]
+fn typing_is_not_written_to_the_log_keystroke_by_keystroke() {
+    let handler = flat(on_key());
+    let gate_at = handler
+        .find("is_typing_key(&ev.keystroke.key, m.control, m.platform, m.alt)")
+        .expect("the log gate asks the shared predicate whether the key is text");
+    let log_at = handler
+        .find("logging::debug(&format!(")
+        .expect("the key line is still there for chords");
+    assert!(
+        gate_at < log_at,
+        "the predicate decides before the line is written"
+    );
+}

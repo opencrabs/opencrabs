@@ -100,7 +100,7 @@ use opencrabs::brain::mission_control::{McActivity, McAnalytics, McInboxItem, Mc
 use opencrabs::config::Config;
 use opencrabs::tui::app::mission_control::log_viewer::LogViewerState;
 use opencrabs::tui::render::format_token_count_raw;
-use opencrabs::ui_core::keys::UiKey;
+use opencrabs::ui_core::keys::{UiKey, is_typing_key};
 use opencrabs::ui_core::usage::data::Period;
 use opencrabs::ui_core::usage::input::{self, DashboardState, UsageKeyOutcome};
 use opencrabs::ui_core::usage::loader::usage_view;
@@ -4806,16 +4806,24 @@ impl Dashboard {
         // reached this handler from one that reached it and matched nothing
         // (#2356).
         let screen_action = screen_chord(&ev.keystroke.key, mods, self.screen);
-        logging::debug(&format!(
-            "key {:?} screen={:?} action={} ctrl={} cmd={} shift={} alt={}",
-            ev.keystroke.key,
-            self.screen,
-            action_label(screen_action),
-            m.control,
-            m.platform,
-            m.shift,
-            m.alt
-        ));
+        // One line per keystroke is what tells a chord that never fired from
+        // one that never arrived (#2356), so chords and named keys keep it. A
+        // typed character answers neither question, and logging it turned the
+        // daily log into a keystroke recorder (#2611).
+        if screen_action.is_some()
+            || !is_typing_key(&ev.keystroke.key, m.control, m.platform, m.alt)
+        {
+            logging::debug(&format!(
+                "key {:?} screen={:?} action={} ctrl={} cmd={} shift={} alt={}",
+                ev.keystroke.key,
+                self.screen,
+                action_label(screen_action),
+                m.control,
+                m.platform,
+                m.shift,
+                m.alt
+            ));
+        }
         // The screen chords are answered by one pure table and they must work
         // while typing, so they sit before the editor focus gate: the editor
         // only claims IME escapes, and these keys belong to the window.
