@@ -36,6 +36,7 @@ mod icon;
 mod layout_store;
 mod logging;
 mod markdown;
+mod menu;
 mod mission_control;
 mod model_fetch;
 mod model_picker;
@@ -61,8 +62,10 @@ use crate::screen_keys::{
     keyboard_owner, screen_chord,
 };
 use crate::theme::{BASE_REM, Size, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP, text};
+use opencrabs::db::models::Message;
 use opencrabs::ui_core::actions;
 use opencrabs::ui_core::channel_status;
+use opencrabs::ui_core::message_select::{MessageAction, Selection};
 use opencrabs::ui_core::model_layout;
 use opencrabs::ui_core::model_selector::{FetchRequest, ProviderSelectorState};
 use opencrabs::ui_core::pane_tree::PaneTree;
@@ -365,6 +368,11 @@ const RAIL_MAX_REM: f32 = 32.0;
 /// terminal share one rule, so this aliases the engine's constant.
 const CARET_IDLE_AFTER: std::time::Duration = opencrabs::ui_core::palette::CARET_IDLE_AFTER;
 
+/// How many destinations the forward picker lists at once (#2608). The rail
+/// can hold hundreds of sessions; the picker is a bar, not a list, so it shows
+/// the head of the match and the query narrows from there.
+const FORWARD_PICKER_ROWS: usize = 6;
+
 /// Which messaging channels the config says are live: enabled and carrying the
 /// credential that channel needs. Read once when Seeker opens, so the hint says
 /// "not set up" only when that is true (#2462).
@@ -615,6 +623,21 @@ struct Dashboard {
     split_pick: Option<Layout>,
     /// A split's new session is being created, so the created row fills the pane.
     split_creating: bool,
+    /// The row whose message menu is open (#2613). One at a time, like the
+    /// rail's: opening another closes the first.
+    msg_menu: Option<Uuid>,
+    /// Select mode (#2613). The picks live in the model, keyed by message id,
+    /// so a scroll or a refresh never drops one; `is_active` is what the
+    /// selection bar answers to.
+    msg_select: Selection<Uuid>,
+    /// A forward waiting for its destination (#2608): the rows picked when
+    /// Forward was pressed. `Some` swaps the composer for the session picker.
+    forward_pick: Option<Vec<Message>>,
+    /// The destination picker's query, typed into the bar itself.
+    forward_query: String,
+    /// The destination the picker points at, so the arrows walk it and Enter
+    /// takes it. `None` falls back to the first match.
+    forward_cursor: Option<Uuid>,
     /// The icon picked for the topic being named; None means the default (#2414).
     topic_draft_icon: Option<String>,
     /// The Help Center body's scroll position, so the arrows can move it (#2407).
@@ -1155,7 +1178,16 @@ impl Dashboard {
         agent_bridge::set_composer_session(Some(id));
         self.transcript.error = None;
         self.transcript.turns = Vec::new();
+        self.transcript.rows = Vec::new();
         self.transcript.hidden = 0;
+        // A menu or a pick belongs to the rows that were on screen: keeping
+        // either across a conversation switch would act on another chat's
+        // messages, so both are dropped here with the rows (#2613, #2608).
+        self.msg_menu = None;
+        self.msg_select.cancel();
+        self.forward_pick = None;
+        self.forward_query.clear();
+        self.forward_cursor = None;
     }
 
     /// Open one conversation: select it in the rail, switch the right pane to
@@ -1200,6 +1232,7 @@ impl Dashboard {
                                 transcript::turns_with_metrics(&rows, total, &this.turn_metrics);
                             this.transcript.hidden = hidden;
                             this.transcript.turns = turns;
+                            this.transcript.rows = rows;
                         }
                         Err(e) => this.transcript.error = Some(e.into()),
                     }
@@ -2198,6 +2231,7 @@ impl Dashboard {
                                 transcript::turns_with_metrics(&rows, total, &this.turn_metrics);
                             pane.transcript.hidden = hidden;
                             pane.transcript.turns = turns;
+                            pane.transcript.rows = rows;
                         }
                         Err(e) => pane.transcript.error = Some(e.into()),
                     }
@@ -6022,6 +6056,557 @@ impl Dashboard {
         .detach();
     }
 
+    /// The bar that stands where the composer stands in select mode (#2613):
+    /// how many rows are picked, Forward, and Cancel. It borrows the
+    /// composer's box so the swap reads as one surface changing state, not a
+    /// second panel appearing.
+    fn select_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let palette = palette::current();
+        let count = self.msg_select.count();
+        let cancel = cx.listener(|this, _ev, _window, cx| {
+            cx.stop_propagation();
+            this.msg_select_cancel(cx);
+        });
+        let forward = cx.listener(|this, _ev, _window, cx| {
+            cx.stop_propagation();
+            // A count of zero forwards nothing, so the click is refused where
+            // it happens rather than opening an empty picker.
+            if this.msg_select.is_empty() {
+                return;
+            }
+            this.msg_forward_begin(cx);
+        });
+        // Copy applies to the same set Forward would take (#2613): the bar is
+        // the bulk-action surface, so it carries both bulk actions.
+        let copy = cx.listener(|this, _ev, _window, cx| {
+            cx.stop_propagation();
+            if this.msg_select.is_empty() {
+                return;
+            }
+            this.msg_copy_picks(cx);
+        });
+        let armed = count > 0;
+        div()
+            .id("message-select-bar")
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .w_full()
+            .px_3()
+            .py_2()
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(palette.panel_hi))
+            .bg(rgb(palette.panel))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(palette.text_normal))
+                    .child(SharedString::from(if count == 1 {
+                        "1 message selected".to_string()
+                    } else {
+                        format!("{count} messages selected")
+                    })),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id("message-select-copy")
+                            .px_3()
+                            .py_1()
+                            .rounded_md()
+                            .text_sm()
+                            .when(armed, |d| {
+                                d.cursor_pointer()
+                                    .bg(rgb(palette.panel_hi))
+                                    .text_color(rgb(palette.text_normal))
+                                    .hover(|d| d.bg(rgb(palette.track)))
+                            })
+                            .when(!armed, |d| d.text_color(rgb(palette.text_faint)))
+                            .child(SharedString::from("Copy"))
+                            .on_click(copy),
+                    )
+                    .child(
+                        div()
+                            .id("message-select-cancel")
+                            .px_3()
+                            .py_1()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .text_sm()
+                            .text_color(rgb(palette.text_muted))
+                            .hover(|d| d.bg(rgb(palette.panel_hi)))
+                            .child(SharedString::from("Cancel"))
+                            .on_click(cancel),
+                    )
+                    .child(
+                        div()
+                            .id("message-select-forward")
+                            .px_3()
+                            .py_1()
+                            .rounded_md()
+                            .text_sm()
+                            .when(armed, |d| {
+                                d.cursor_pointer()
+                                    .bg(rgb(palette.teal))
+                                    .text_color(rgb(palette.bg))
+                                    .hover(|d| d.opacity(0.9))
+                            })
+                            .when(!armed, |d| {
+                                d.bg(rgb(palette.track)).text_color(rgb(palette.text_faint))
+                            })
+                            .child(SharedString::from("Forward"))
+                            .on_click(forward),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// The destination picker (#2608): the rows that will be forwarded, the
+    /// query field, and the sessions a forward can land in. It replaces the
+    /// composer so the choice is made where a message would have been typed.
+    fn forward_picker(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let palette = palette::current();
+        let count = self.forward_pick.as_ref().map_or(0, Vec::len);
+        let targets = self.forward_destinations();
+        let cancel = cx.listener(|this, _ev, _window, cx| {
+            cx.stop_propagation();
+            this.forward_cancel(cx);
+        });
+        let mut rows: Vec<AnyElement> = Vec::new();
+        for (id, label) in targets.iter().take(FORWARD_PICKER_ROWS) {
+            let target = *id;
+            let picked = self.forward_cursor == Some(target);
+            let pick = cx.listener(move |this, _ev, _window, cx| {
+                cx.stop_propagation();
+                this.forward_into(target, cx);
+            });
+            rows.push(
+                div()
+                    .id(SharedString::from(format!("forward-to-{id}")))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .w_full()
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_sm()
+                    .when(picked, |d| d.bg(rgb(palette.selection)))
+                    .hover(|d| d.bg(rgb(palette.panel_hi)))
+                    .child(SharedString::from(label.clone()))
+                    .child(div().text_xs().text_color(rgb(palette.text_faint)).child(
+                        SharedString::from(target.to_string().chars().take(8).collect::<String>()),
+                    ))
+                    .on_click(pick)
+                    .into_any_element(),
+            );
+        }
+        let empty = if targets.is_empty() {
+            Some(
+                div()
+                    .text_sm()
+                    .text_color(rgb(palette.text_faint))
+                    .child(SharedString::from("No session to forward to")),
+            )
+        } else {
+            None
+        };
+        div()
+            .id("message-forward-picker")
+            .flex()
+            .flex_col()
+            .gap_2()
+            .w_full()
+            .px_3()
+            .py_2()
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(palette.panel_hi))
+            .bg(rgb(palette.panel))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .child(div().text_sm().text_color(rgb(palette.text_normal)).child(
+                        SharedString::from(match count {
+                            1 => "Forward 1 message to".to_string(),
+                            n => format!("Forward {n} messages to"),
+                        }),
+                    ))
+                    .child(
+                        div()
+                            .id("message-forward-cancel")
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .text_sm()
+                            .text_color(rgb(palette.text_muted))
+                            .hover(|d| d.bg(rgb(palette.panel_hi)))
+                            .child(SharedString::from("Cancel"))
+                            .on_click(cancel),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .bg(rgb(palette.track))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(if self.forward_query.is_empty() {
+                                palette.text_faint
+                            } else {
+                                palette.text
+                            }))
+                            .child(SharedString::from(if self.forward_query.is_empty() {
+                                "Type to filter sessions".to_string()
+                            } else {
+                                self.forward_query.clone()
+                            })),
+                    ),
+            )
+            .children(empty)
+            .children(rows)
+            .into_any_element()
+    }
+
+    /// The rail's own label for a session (#2608): the topic name outranks the
+    /// stored one, resolved by the same helper the rail paints with, so a
+    /// forward names the source the way the user sees it.
+    fn session_label(&self, id: Uuid) -> String {
+        let stored = self
+            .sessions
+            .items
+            .iter()
+            .find(|s| s.id == id)
+            .and_then(|s| s.title.as_deref());
+        rail::rail_title(
+            stored,
+            self.sessions.topic_titles.get(&id).map(String::as_str),
+        )
+    }
+
+    /// The session the rows being forwarded came from (#2608).
+    fn forward_source(&self) -> Option<Uuid> {
+        self.forward_pick
+            .as_ref()
+            .and_then(|rows| rows.first())
+            .map(|m| m.session_id)
+    }
+
+    /// The sessions a forward can land in, in the rail's own order: every row
+    /// the user can see except the source, minus closed sessions that refuse
+    /// turns, narrowed by the picker's query. A forward into the chat it came
+    /// from is not a forward, so the source is never offered.
+    fn forward_destinations(&self) -> Vec<(Uuid, String)> {
+        let source = self.forward_source();
+        let query = self.forward_query.trim().to_lowercase();
+        self.sessions
+            .ordered()
+            .filter(|s| Some(s.id) != source && !self.sessions.is_closed(s.id))
+            .map(|s| (s.id, self.session_label(s.id)))
+            .filter(|(id, label)| {
+                query.is_empty()
+                    || label.to_lowercase().contains(&query)
+                    || id.to_string().starts_with(&query)
+            })
+            .collect()
+    }
+
+    /// Open the message menu on a stored row (#2613).
+    fn msg_menu_open(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        // One menu at a time: the rail's open menu closes, and so does any
+        // other row's.
+        self.sessions.close_rail_menu();
+        self.msg_menu = Some(id);
+        cx.notify();
+    }
+
+    /// Copy one stored row's text (#2613). Selection-aware, as the issue asks:
+    /// with rows picked this copies the whole selection in transcript order,
+    /// and with nothing picked it copies the row the menu was opened on.
+    fn msg_copy(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        let texts: Vec<String> = if self.msg_select.is_empty() {
+            self.transcript
+                .rows
+                .iter()
+                .filter(|m| m.id == id)
+                .map(|m| m.content.clone())
+                .collect()
+        } else {
+            self.msg_picked_rows()
+                .into_iter()
+                .map(|m| m.content)
+                .collect()
+        };
+        self.copy_texts(&texts, cx);
+        self.msg_menu = None;
+        cx.notify();
+    }
+
+    /// Join rows the way the drag selector joins them and put the result on the
+    /// clipboard, so a copied selection and a copied drag read the same (#2613).
+    fn copy_texts(&mut self, texts: &[String], cx: &mut Context<Self>) {
+        if texts.is_empty() {
+            return;
+        }
+        if let Some(text) = opencrabs::ui_core::copy_select::copied_text(texts, 0, texts.len() - 1)
+        {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+    }
+
+    /// The selection bar's Copy (#2613): every picked row, transcript order.
+    fn msg_copy_picks(&mut self, cx: &mut Context<Self>) {
+        let texts: Vec<String> = self
+            .msg_picked_rows()
+            .into_iter()
+            .map(|m| m.content)
+            .collect();
+        self.copy_texts(&texts, cx);
+    }
+
+    /// The items a row's menu shows (#2613), resolved once per frame. Only
+    /// the actions that work end to end are listed: a menu entry with nothing
+    /// behind it is worse than an absent one.
+    fn msg_menu_items(
+        &self,
+        id: Uuid,
+        cx: &mut Context<Self>,
+    ) -> Vec<(String, transcript::ClickHandler)> {
+        let mut items: Vec<(String, transcript::ClickHandler)> = Vec::new();
+        let copy = cx.listener(move |this, _ev, _window, cx| {
+            cx.stop_propagation();
+            this.msg_copy(id, cx);
+        });
+        items.push((MessageAction::CopyText.label().to_string(), Rc::new(copy)));
+        // Forward needs somewhere to go: with no other session on the rail the
+        // item would open an empty picker, so it is left out instead.
+        if !self.forward_destinations_for(id).is_empty() {
+            let forward = cx.listener(move |this, _ev, _window, cx| {
+                cx.stop_propagation();
+                this.msg_forward_one(id, cx);
+            });
+            items.push((MessageAction::Forward.label().to_string(), Rc::new(forward)));
+        }
+        let select = cx.listener(move |this, _ev, _window, cx| {
+            cx.stop_propagation();
+            this.msg_select_row(id, cx);
+        });
+        items.push((MessageAction::Select.label().to_string(), Rc::new(select)));
+        items
+    }
+
+    /// Whether a forward of `id` has a destination at all (#2608). The menu
+    /// asks before offering Forward, and it asks about the row's own session,
+    /// not about whatever pick happens to be open.
+    fn forward_destinations_for(&self, id: Uuid) -> Vec<(Uuid, String)> {
+        let Some(source) = self
+            .transcript
+            .rows
+            .iter()
+            .find(|m| m.id == id)
+            .map(|m| m.session_id)
+        else {
+            return Vec::new();
+        };
+        self.sessions
+            .ordered()
+            .filter(|s| s.id != source && !self.sessions.is_closed(s.id))
+            .map(|s| (s.id, self.session_label(s.id)))
+            .collect()
+    }
+
+    /// Toggle one row in select mode (#2613). A shift-click extends from the
+    /// anchor instead, the same gesture the transcript's text selection uses
+    /// for a run of rows.
+    fn msg_toggle(&mut self, id: Uuid, shift: bool, cx: &mut Context<Self>) {
+        if !self.msg_select.is_active() {
+            self.msg_select.begin();
+        }
+        let order: Vec<Uuid> = self.transcript.message_ids();
+        if shift {
+            self.msg_select.extend(&order, &id);
+        } else {
+            self.msg_select.toggle(id);
+        }
+        self.msg_menu = None;
+        cx.notify();
+    }
+
+    /// "Select" from a row's menu: enter select mode with that row picked, so
+    /// a run of rows starts at the one the user pointed at.
+    fn msg_select_row(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        self.msg_select.begin();
+        self.msg_select.toggle(id);
+        self.msg_menu = None;
+        cx.notify();
+    }
+
+    /// Leave select mode and drop the picks (#2613).
+    fn msg_select_cancel(&mut self, cx: &mut Context<Self>) {
+        self.msg_select.cancel();
+        self.msg_menu = None;
+        cx.notify();
+    }
+
+    /// The rows the current picks stand for, in transcript order (#2608).
+    /// Order matters: the destination reads them the way the source showed
+    /// them, not the order they happened to be clicked.
+    fn msg_picked_rows(&self) -> Vec<Message> {
+        let order: Vec<Uuid> = self.transcript.message_ids();
+        self.msg_select
+            .picked_in_order(&order)
+            .into_iter()
+            .filter_map(|id| self.transcript.rows.iter().find(|m| m.id == id).cloned())
+            .collect()
+    }
+
+    /// "Forward" on a single row: pick it and go straight to the destination
+    /// picker, so one message does not need select mode first (#2613).
+    fn msg_forward_one(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        // A single-row forward never enters select mode: there is nothing to
+        // count, so the bar would be a step with one option.
+        let rows: Vec<Message> = self
+            .transcript
+            .rows
+            .iter()
+            .filter(|m| m.id == id)
+            .cloned()
+            .collect();
+        self.msg_menu = None;
+        self.forward_open(rows, cx);
+    }
+
+    /// Forward the picks: open the destination picker, or say why it cannot
+    /// open (#2608).
+    fn msg_forward_begin(&mut self, cx: &mut Context<Self>) {
+        let rows = self.msg_picked_rows();
+        self.forward_open(rows, cx);
+    }
+
+    /// Hand the rows to the picker. The composer is swapped for it, so the
+    /// destination is chosen where a message would have been typed.
+    fn forward_open(&mut self, rows: Vec<Message>, cx: &mut Context<Self>) {
+        if rows.is_empty() {
+            return;
+        }
+        self.forward_pick = Some(rows);
+        self.forward_query.clear();
+        self.forward_cursor = self.forward_destinations().first().map(|(id, _)| *id);
+        self.msg_menu = None;
+        cx.notify();
+    }
+
+    /// Back out of the picker, keeping the picks: the user who opened it by
+    /// mistake lands back in select mode with the same rows still chosen.
+    fn forward_cancel(&mut self, cx: &mut Context<Self>) {
+        self.forward_pick = None;
+        self.forward_query.clear();
+        self.forward_cursor = None;
+        cx.notify();
+    }
+
+    /// Walk the destination list (#2608), wrapping nowhere: the ends clamp,
+    /// like the rail's cursor.
+    fn forward_step(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let targets: Vec<Uuid> = self
+            .forward_destinations()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        if targets.is_empty() {
+            self.forward_cursor = None;
+            cx.notify();
+            return;
+        }
+        let at = self
+            .forward_cursor
+            .and_then(|id| targets.iter().position(|t| *t == id));
+        let next = match (at, delta.signum()) {
+            (Some(ix), 1) => (ix + 1).min(targets.len() - 1),
+            (Some(ix), -1) => ix.saturating_sub(1),
+            (None, 1) => 0,
+            _ => targets.len() - 1,
+        };
+        self.forward_cursor = Some(targets[next]);
+        cx.notify();
+    }
+
+    /// Write the rows into the destination (#2608): a click on a row, or Enter
+    /// on the picker's cursor.
+    fn forward_commit(&mut self, cx: &mut Context<Self>) {
+        let Some(target) = self
+            .forward_cursor
+            .or_else(|| self.forward_destinations().first().map(|(id, _)| *id))
+        else {
+            return;
+        };
+        self.forward_into(target, cx);
+    }
+
+    /// Copy the picked rows into `target`. The write runs off the UI thread;
+    /// the destination is only written to, never prompted, so a forward can
+    /// never start a turn the user did not ask for.
+    fn forward_into(&mut self, target: Uuid, cx: &mut Context<Self>) {
+        let Some(rows) = self.forward_pick.clone() else {
+            return;
+        };
+        let Some(source) = self.forward_source() else {
+            return;
+        };
+        if target == source {
+            return;
+        }
+        let label = self.session_label(source);
+        let db_path = self.db_path.clone();
+        self.forward_pick = None;
+        self.forward_query.clear();
+        self.forward_cursor = None;
+        self.msg_select.cancel();
+        self.msg_menu = None;
+        cx.spawn(async move |this, cx| {
+            let result = transcript::forward_rows(db_path, rows, target, label).await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(landed) => {
+                        // A forward into the chat on screen has to show up:
+                        // the rows are written, so a reload finds them. Any
+                        // other destination is announced only, because the
+                        // window runs one conversation at a time.
+                        if this.transcript.session == Some(target) {
+                            this.reload_transcript(target, cx);
+                        }
+                        logging::info(&format!("forward: {landed} row(s) into {target}"));
+                    }
+                    Err(e) => logging::error(&format!("forward into {target}: {e}")),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Refetch the turn's session transcript from the DB, and drop the live
     /// turn only once the persisted rows are actually there.
     ///
@@ -6054,6 +6639,10 @@ impl Dashboard {
                         // opening a session mid-turn) must not wipe the card
                         // the work is painting into (#2627).
                         let in_flight = this.busy;
+                        // The ordered ids the selection resolves its ranges and
+                        // its copy order against, which the visible turns alone
+                        // cannot answer once they are folded (#2613).
+                        this.transcript.rows = rows;
                         if landed {
                             // The rows are in: the newest turn is the one
                             // that just answered, so it can claim the metrics
@@ -6199,6 +6788,63 @@ impl Dashboard {
                     }
                     _ => {}
                 }
+            }
+            // The forward picker owns the keyboard while it is open (#2608):
+            // the destination is narrowed by typing, the arrows walk it, Enter
+            // takes it and Esc backs out to the picks it came from. It sits
+            // this early for the same reason the split pick does: the
+            // composer underneath must not answer a key meant for the bar.
+            if self.forward_pick.is_some() {
+                match ks.key.as_str() {
+                    "escape" => self.forward_cancel(cx),
+                    "enter" => self.forward_commit(cx),
+                    "backspace" => {
+                        self.forward_query.pop();
+                        self.forward_cursor =
+                            self.forward_destinations().first().map(|(id, _)| *id);
+                        cx.notify();
+                    }
+                    "up" | "down" => {
+                        let delta = if ks.key == "down" { 1 } else { -1 };
+                        self.forward_step(delta, cx);
+                    }
+                    _ => {
+                        if !ks.modifiers.control
+                            && !ks.modifiers.platform
+                            && !ks.modifiers.alt
+                            && let Some(ch) = ks.key_char.as_ref().and_then(|s| s.chars().next())
+                            && !ch.is_control()
+                        {
+                            self.forward_query.push(ch);
+                            self.forward_cursor =
+                                self.forward_destinations().first().map(|(id, _)| *id);
+                            cx.notify();
+                        }
+                    }
+                }
+                return;
+            }
+            // Select mode (#2613): Esc leaves it, Enter forwards the picks.
+            // Every other key falls through, so the window's chords keep
+            // answering while the selection bar replaces the composer.
+            if self.msg_select.is_active() {
+                match ks.key.as_str() {
+                    "escape" => {
+                        self.msg_select_cancel(cx);
+                        return;
+                    }
+                    "enter" => {
+                        self.msg_forward_begin(cx);
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+            // A row's menu closes on Esc, exactly like the rail's (#2613).
+            if self.msg_menu.is_some() && ks.key == "escape" {
+                self.msg_menu = None;
+                cx.notify();
+                return;
             }
             // ctrl+x closes the pane holding the caret, the same chord the
             // terminal answers (#2474). It sits ahead of the composer so the
@@ -7109,24 +7755,39 @@ impl Dashboard {
                 // others show the draft they hold, dimmed and inert, which is
                 // the same "disabled while unfocused" language the rest of the
                 // split uses.
+                // Select mode and the forward picker both stand where the
+                // composer stands (#2613, #2608): they are answers to the
+                // conversation, not a second panel, and the composer has
+                // nothing to say while either is up. Only the chat pane draws
+                // them: one selection belongs to one conversation.
+                // The picker outranks the bar: it is opened from select mode
+                // and the picks are still live under it, so the bar would
+                // otherwise keep the slot the destination is chosen in.
                 let composer: AnyElement = if focused {
-                    // The popups that hang over the input travel with it: a
-                    // split must not lose the slash list or the emoji panel,
-                    // and they read the field of the pane that owns the
-                    // keyboard, not the chat underneath it (#2530, #2610).
-                    let mut cell = div().flex().flex_col().flex_none().gap_2();
-                    let slash_popup = editor.read(cx).command_popup();
-                    let emoji_popup = editor.read(cx).emoji_popup();
-                    if self.topic_draft.is_none()
-                        && let Some((names, selected)) = slash_popup
-                    {
-                        cell = cell.child(command_popup_view(&names, selected));
-                    } else if self.topic_draft.is_none()
-                        && let Some((items, selected)) = emoji_popup
-                    {
-                        cell = cell.child(emoji_popup_view(&items, selected));
+                    if is_chat && self.forward_pick.is_some() {
+                        self.forward_picker(cx)
+                    } else if is_chat && self.msg_select.is_active() {
+                        self.select_bar(cx)
+                    } else {
+                        // The popups that hang over the input travel with it:
+                        // a split must not lose the slash list or the emoji
+                        // panel, and they read the field of the pane that owns
+                        // the keyboard, not the chat underneath it (#2530,
+                        // #2610).
+                        let mut cell = div().flex().flex_col().flex_none().gap_2();
+                        let slash_popup = editor.read(cx).command_popup();
+                        let emoji_popup = editor.read(cx).emoji_popup();
+                        if self.topic_draft.is_none()
+                            && let Some((names, selected)) = slash_popup
+                        {
+                            cell = cell.child(command_popup_view(&names, selected));
+                        } else if self.topic_draft.is_none()
+                            && let Some((items, selected)) = emoji_popup
+                        {
+                            cell = cell.child(emoji_popup_view(&items, selected));
+                        }
+                        cell.child(editor).into_any_element()
                     }
-                    cell.child(editor).into_any_element()
                 } else {
                     let draft = editor.read(cx).content.clone();
                     pane_composer_dim(draft, *session, is_chat, cx.entity().downgrade())
@@ -7341,6 +8002,9 @@ impl Render for Dashboard {
                 // A left press on the rail dismisses a context menu: the
                 // press is elsewhere, so the menu goes with it (#2354).
                 this.sessions.close_rail_menu();
+                // Same rule for a transcript row's menu (#2613): the rail is
+                // outside the transcript, so the press closes it too.
+                this.msg_menu = None;
                 cx.notify();
             });
             let handler = cx.listener(move |this, _ev, _window, cx| {
@@ -7518,6 +8182,52 @@ impl Render for Dashboard {
             attachment_handlers.insert(key, std::rc::Rc::new(handler));
         }
 
+        // One hook per stored row (#2613): a right press opens that row's
+        // menu, and while select mode is on a left click toggles it. Minted
+        // per frame like the tiles above, because only this `cx` can build a
+        // listener and each row has to answer for itself.
+        let msg_order: Vec<Uuid> = self.transcript.message_ids();
+        let select_on = self.msg_select.is_active();
+        let msg_picked: std::collections::HashSet<Uuid> = msg_order
+            .iter()
+            .copied()
+            .filter(|id| self.msg_select.contains(id))
+            .collect();
+        let mut message_click: std::collections::HashMap<Uuid, transcript::ClickHandler> =
+            std::collections::HashMap::new();
+        let mut message_press: std::collections::HashMap<Uuid, transcript::PressHandler> =
+            std::collections::HashMap::new();
+        for id in &msg_order {
+            let id = *id;
+            if select_on {
+                let handler = cx.listener(move |this, ev: &ClickEvent, _window, cx| {
+                    this.msg_toggle(id, ev.modifiers().shift, cx);
+                });
+                message_click.insert(id, std::rc::Rc::new(handler));
+            }
+            let handler = cx.listener(move |this, _ev: &MouseDownEvent, _window, cx| {
+                cx.stop_propagation();
+                this.msg_menu_open(id, cx);
+            });
+            message_press.insert(id, std::rc::Rc::new(handler));
+        }
+        // The open menu, resolved once: its items are the same list whatever
+        // pane draws the transcript.
+        let message_menu = self.msg_menu.map(|id| transcript::MessageMenu {
+            id,
+            items: self.msg_menu_items(id, cx),
+        });
+        // A left press anywhere in the transcript dismisses the message menu
+        // (#2613): the press is elsewhere, so the menu goes with it, the same
+        // rule the rail applies to its own menu (#2354). The card and the rows
+        // stop this from firing on their own presses.
+        let msg_dismiss: transcript::PressHandler =
+            Rc::new(cx.listener(|this, _ev: &MouseDownEvent, _window, cx| {
+                if this.msg_menu.take().is_some() {
+                    cx.notify();
+                }
+            }));
+
         // The transcript plans its attachment tiles from the width the pane
         // actually has, read from the live viewport rather than a constant, so
         // a row can never be planned wider than the box it is drawn into
@@ -7591,6 +8301,11 @@ impl Render for Dashboard {
                         ctx_used: self.ctx_tokens,
                         ctx_max: self.ctx_max,
                         live_click: Some(live_click.clone()),
+                        message_click: message_click.clone(),
+                        message_press: message_press.clone(),
+                        message_menu: message_menu.clone(),
+                        selection: select_on.then(|| msg_picked.clone()),
+                        menu_dismiss: Some(msg_dismiss.clone()),
                     },
                 )
                 .into_any_element();
@@ -10203,6 +10918,11 @@ fn main() {
                         copy_drag,
                         split_pick: None,
                         split_creating: false,
+                        msg_menu: None,
+                        msg_select: Selection::new(),
+                        forward_pick: None,
+                        forward_query: String::new(),
+                        forward_cursor: None,
                         topic_draft_icon: None,
                         help_scroll: ScrollHandle::new(),
                         dragging_rail: false,

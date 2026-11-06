@@ -145,8 +145,45 @@ pub fn settle_detached(
 /// `Fn`, so a tile forwards through a small closure of its own.
 pub type ClickHandler = std::rc::Rc<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 
+/// A right press on a row. Minted by the window for the same reason as
+/// [`ClickHandler`]: only the owning view can build one (#2613).
+pub type PressHandler = std::rc::Rc<dyn Fn(&gpui::MouseDownEvent, &mut Window, &mut App) + 'static>;
+
+/// The open message menu (#2613): the row it belongs to and its resolved
+/// items. The window mints each pick, because the actions live on the window's
+/// own state; the transcript only draws the card over the row that asked.
+#[derive(Clone)]
+pub struct MessageMenu {
+    pub id: uuid::Uuid,
+    pub items: Vec<(String, ClickHandler)>,
+}
+
 /// A rendered piece of the conversation. The TUI's `DisplayMessage` kinds,
 /// narrowed to what the gui pane draws.
+/// What a forwarded row shows above its text (#2608): the source session's
+/// name, frozen when the copy was written, and whether this row opens the
+/// batch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ForwardMark {
+    pub label: String,
+    /// Every row of one multi-select forward shares it.
+    pub batch: uuid::Uuid,
+    /// The batch's first row carries the header; the rest only continue the
+    /// accent bar, so N rows read as one block instead of N stacked headers.
+    pub first: bool,
+}
+
+/// The line above a forwarded block. Pure, so the wording is pinned by test
+/// rather than by the div that draws it.
+pub fn forward_header(label: &str) -> String {
+    let label = label.trim();
+    if label.is_empty() {
+        "Forwarded message".to_string()
+    } else {
+        format!("Forwarded from {label}")
+    }
+}
+
 pub enum Block {
     /// A user or assistant text turn; assistant content renders markdown.
     Msg {
@@ -157,6 +194,13 @@ pub enum Block {
         /// structure, not text the model wrote, so it must never be promoted
         /// to the turn's final answer and left exposed by the fold.
         placeholder: bool,
+        /// The stored row this block came from, so a click on it can name the
+        /// message instead of a position that shifts as history loads
+        /// (#2608). `None` for the live turn, whose row is not written yet.
+        message_id: Option<uuid::Uuid>,
+        /// Set on a forwarded copy: who forwarded it and whether it opens a
+        /// batch (#2608).
+        forward: Option<ForwardMark>,
     },
     /// Model thinking or intermediate narration, dim and collapsed.
     Thinking { content: String },
@@ -602,6 +646,10 @@ pub struct TranscriptState {
     pub live_expanded: bool,
     /// Set when the fetch failed; the pane says why instead of lying empty.
     pub error: Option<SharedString>,
+    /// The stored rows the turns were built from. Kept so a forward can copy
+    /// the picked messages themselves, not the blocks they were rendered as
+    /// (#2608): a block carries text, not the row's id or provenance.
+    pub rows: Vec<Message>,
 }
 
 impl TranscriptState {
@@ -609,6 +657,13 @@ impl TranscriptState {
     /// ctrl+o toggles the newest turn only.
     pub fn newest_anchor(&self) -> Option<&str> {
         self.turns.last().map(|t| t.anchor.as_str())
+    }
+
+    /// The ids of every stored row on screen, so the window can mint a click
+    /// and a right-press listener per row (#2613). Live rows carry no id and
+    /// are absent by construction: they are not selectable.
+    pub fn message_ids(&self) -> Vec<uuid::Uuid> {
+        self.rows.iter().map(|m| m.id).collect()
     }
 
     /// Every anchor on screen, so the caller can mint one click listener each.
@@ -702,6 +757,48 @@ fn is_model_change_notice(content: &str) -> bool {
     text.starts_with("[Model changed to ") && text.ends_with(']')
 }
 
+/// Write the picked rows into another session (#2608), off the UI thread the
+/// same way [`load_recent`] reads them: a std thread carrying its own tokio
+/// runtime, so the window's executor never blocks on the pool.
+///
+/// The label names the source, and it is the source's own title as the rail
+/// shows it. Returns how many rows landed.
+pub async fn forward_rows(
+    db_path: std::path::PathBuf,
+    source: Vec<Message>,
+    target: uuid::Uuid,
+    label: String,
+) -> Result<usize, String> {
+    let (tx, rx) = futures::channel::oneshot::channel::<Result<usize, String>>();
+    let spawned = std::thread::Builder::new()
+        .name("transcript-forward".into())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let result = match runtime {
+                Ok(rt) => rt
+                    .block_on(async {
+                        let db = Database::connect(&db_path).await?;
+                        let repo = MessageRepository::new(db.pool().clone());
+                        let ids = repo.forward(&source, target, &label).await?;
+                        Ok::<_, anyhow::Error>(ids.len())
+                    })
+                    .map_err(|e| format!("{e:#}")),
+                Err(e) => Err(format!("tokio runtime failed: {e}")),
+            };
+            let _ = tx.send(result);
+        });
+    match spawned {
+        Ok(_) => match rx.await {
+            Ok(result) => result,
+            Err(_) => Err("forward thread dropped its result".into()),
+        },
+        Err(e) => Err(format!("forward thread failed to spawn: {e}")),
+    }
+}
+
 /// Expand ONE stored row into its renderable blocks. Mirrors
 /// `TuiApp::expand_message` (`tui/app/messaging.rs`): compaction markers are
 /// context and never shown; tool ledgers become `Tools` blocks; reasoning
@@ -709,7 +806,7 @@ fn is_model_change_notice(content: &str) -> bool {
 /// `Msg`. The `before[..ledger.start]` slices are byte-indexed but the scanner
 /// only reports marker offsets it verified sit on line starts, so every offset
 /// it returns is a char boundary (#1587 grammar).
-fn row_blocks(m: &Message) -> Vec<Block> {
+fn row_blocks(m: &Message, forward: Option<ForwardMark>) -> Vec<Block> {
     let mut blocks: Vec<Block> = Vec::new();
     if m.role == PLAN_COMPLETED_ROLE {
         if let Some(payload) = CompletedPlanPayload::from_message(m) {
@@ -734,6 +831,8 @@ fn row_blocks(m: &Message) -> Vec<Block> {
             content: m.content.clone(),
             time: stamp(m),
             placeholder: false,
+            message_id: Some(m.id),
+            forward,
         });
         return blocks;
     }
@@ -753,6 +852,8 @@ fn row_blocks(m: &Message) -> Vec<Block> {
             content: m.content.clone(),
             time: stamp(m),
             placeholder: false,
+            message_id: Some(m.id),
+            forward,
         });
         return blocks;
     }
@@ -793,6 +894,8 @@ fn row_blocks(m: &Message) -> Vec<Block> {
                 content: "\u{b7} (tool calls only)".into(),
                 time: stamp(m),
                 placeholder: true,
+                message_id: Some(m.id),
+                forward: None,
             },
         );
     }
@@ -823,7 +926,14 @@ pub fn turns_with_metrics(
     let mut bounds: Vec<(usize, usize)> = Vec::new();
     let mut start = 0usize;
     for (i, m) in rows.iter().enumerate() {
-        if m.role == "user" && i > start {
+        // A forwarded row is stored as `user` so the destination's next turn
+        // never reads another session's answer as its own output, but it must
+        // not open a turn of its own: every row of one batch belongs to the
+        // same block, under one header (#2608).
+        let continues_batch = i > 0
+            && m.forward.is_some()
+            && m.forward.as_ref().map(|f| f.batch) == rows[i - 1].forward.as_ref().map(|f| f.batch);
+        if m.role == "user" && i > start && !continues_batch {
             bounds.push((start, i));
             start = i;
         }
@@ -831,10 +941,19 @@ pub fn turns_with_metrics(
     bounds.push((start, rows.len()));
 
     let mut out = Vec::with_capacity(bounds.len());
+    // A forward batch is contiguous, so the row that opens it is the one whose
+    // batch differs from the row before (#2608).
+    let mut prev_batch: Option<uuid::Uuid> = None;
     for (s, e) in bounds {
         let mut blocks: Vec<Block> = Vec::new();
         for m in &rows[s..e] {
-            blocks.extend(row_blocks(m));
+            let mark = m.forward.as_ref().map(|f| ForwardMark {
+                label: f.label.clone(),
+                batch: f.batch,
+                first: prev_batch != Some(f.batch),
+            });
+            prev_batch = m.forward.as_ref().map(|f| f.batch);
+            blocks.extend(row_blocks(m, mark));
         }
         // The final answer: the LAST assistant block that carries real text.
         // The "(tool calls only)" filler is excluded, exactly as the TUI's
@@ -946,6 +1065,8 @@ fn push_text(blocks: &mut Vec<Block>, region: &str) {
                         content: t.to_string(),
                         time: String::new(),
                         placeholder: false,
+                        message_id: None,
+                        forward: None,
                     });
                 }
             }
@@ -1206,6 +1327,12 @@ const MESSAGE_PAD_Y: f32 = 12.0;
 /// column of chat reads as conversation and not as a stack of panels. This
 /// token belongs to the message bubble alone and never reaches `CARD_RADIUS`
 /// or `SEEKER_RADIUS` (#2571).
+/// A forwarded copy gets a bar, not a bubble (#2608): the bar is what tells a
+/// reader at a glance that this text came from somewhere else, and 3px is thin
+/// enough to sit inside the row without pushing the text off its rhythm.
+const FORWARD_BAR_WIDTH: f32 = 3.0;
+/// The gap between that bar and the forwarded text.
+const FORWARD_BAR_GAP: f32 = 12.0;
 const MESSAGE_RADIUS: f32 = 12.0;
 const USER_TEXT_SIZE: f32 = 16.0;
 const PLAIN_TEXT_SIZE: f32 = 13.0;
@@ -1337,6 +1464,53 @@ fn bubble(
                 selection,
             )
         });
+    }
+    if !paths.is_empty() {
+        col = col.child(history_attachments(&paths, attachment_width, handlers));
+    }
+    col
+}
+
+/// A forwarded copy (#2608): an accent bar down the left edge instead of a
+/// bubble, the source named above the text, and the batch's later rows
+/// continuing the same bar without repeating the header. That is the Telegram
+/// shape the owner asked for, and it is what makes a forward distinguishable
+/// from something the reader typed into this session.
+fn forward_block(
+    mark: &ForwardMark,
+    content: &str,
+    _time: &str,
+    content_width: f32,
+    handlers: &HashMap<String, ClickHandler>,
+    selection: Option<&SelectionContext>,
+) -> Div {
+    let paths = marker_paths(content);
+    let text = strip_markers(content);
+    let attachment_width = (content_width - 2.0 * MESSAGE_PAD_X).max(0.0);
+    let mut col = div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .min_w_0()
+        .flex_shrink_0()
+        .pl(px(FORWARD_BAR_GAP))
+        .pr(px(MESSAGE_PAD_X))
+        .py(px(MESSAGE_PAD_Y))
+        .border_l(px(FORWARD_BAR_WIDTH))
+        .border_color(rgb(palette::current().accent));
+    // The header names the source once per batch. Repeating it on every row
+    // would turn a five-message forward into five stacked labels.
+    if mark.first {
+        col = col.child(
+            div()
+                .text_xs()
+                .font_weight(gpui::FontWeight::BOLD)
+                .text_color(rgb(palette::current().teal))
+                .child(SharedString::from(forward_header(&mark.label))),
+        );
+    }
+    if !text.trim().is_empty() {
+        col = col.child(plain_block(&text, PLAIN_TEXT_SIZE, selection));
     }
     if !paths.is_empty() {
         col = col.child(history_attachments(&paths, attachment_width, handlers));
@@ -1994,6 +2168,12 @@ fn block_view(
 ) -> Div {
     match block {
         Block::Msg {
+            content,
+            time,
+            forward: Some(mark),
+            ..
+        } => forward_block(mark, content, time, content_width, handlers, selection),
+        Block::Msg {
             role,
             content,
             time,
@@ -2154,6 +2334,8 @@ fn live_view(
             content: user.clone(),
             time: live_time(live.sent_at),
             placeholder: false,
+            message_id: None,
+            forward: None,
         };
         // A live turn stays on screen often enough, and for long enough, that
         // its text has to copy like any other: while the transcript is short of
@@ -2181,6 +2363,8 @@ fn live_view(
             content: text.clone(),
             time: live_time(live.sent_at),
             placeholder: false,
+            message_id: None,
+            forward: None,
         };
         col = col.child(match live_block(drag, &block, content_width, handlers) {
             Some(row) => row,
@@ -2204,6 +2388,8 @@ fn live_view(
             content: answer.to_string(),
             time: live_time(live.answer_at.or(live.sent_at)),
             placeholder: false,
+            message_id: None,
+            forward: None,
         };
         col = col.child(match live_block(drag, &block, content_width, handlers) {
             Some(row) => row,
@@ -2464,9 +2650,118 @@ pub(crate) fn selectable_styled_text(
     })
 }
 
+/// One stored message row: its own menu anchor and select-mode checkbox
+/// (#2613).
+///
+/// The row is `relative` because the menu card is an absolutely positioned
+/// child of it: the card belongs to the row that opened it, so it moves with
+/// the scroll instead of floating over the pane at a stale offset.
+fn message_row(
+    id: uuid::Uuid,
+    child: Div,
+    click: Option<&ClickHandler>,
+    press: Option<&PressHandler>,
+    menu: &Option<MessageMenu>,
+    picked: Option<bool>,
+) -> Stateful<Div> {
+    let mut row = div()
+        .id(SharedString::from(format!("msg-{id}")))
+        .relative()
+        .flex()
+        .flex_row()
+        .items_start()
+        .gap_1()
+        .w_full()
+        .rounded_sm();
+    if let Some(on) = picked {
+        // A pick box, not a tint: the drag selector already owns background
+        // tint on these rows, and two selection languages on one row would
+        // read as one state with two meanings.
+        row = row.child(
+            div()
+                .flex_none()
+                .w(rems(1.1))
+                .pt(px(2.0))
+                .text_color(rgb(if on {
+                    palette::current().teal
+                } else {
+                    palette::current().text_faint
+                }))
+                .child(SharedString::from(if on { "\u{2611}" } else { "\u{2610}" })),
+        );
+    }
+    // The body is stateful so the row can carry its own click listener: gpui
+    // hangs `on_click` off a stateful element, not a bare `Div`.
+    let mut body = div()
+        .id(SharedString::from(format!("msg-body-{id}")))
+        .flex_1()
+        .min_w_0()
+        .child(child);
+    if let Some(handler) = click {
+        let handler = handler.clone();
+        body = body
+            .cursor_pointer()
+            .on_click(move |ev, window, app| handler(ev, window, app));
+    }
+    if let Some(handler) = press {
+        let handler = handler.clone();
+        body = body.on_mouse_down(MouseButton::Right, move |ev, window, app| {
+            handler(ev, window, app);
+        });
+    }
+    row = row.child(body);
+    // The card is the last child so it paints over the row it belongs to.
+    if let Some(open) = menu.as_ref().filter(|m| m.id == id) {
+        row = row.child(message_menu_card(&open.items));
+    }
+    row
+}
+
+/// The menu card itself: one row per resolved item, drawn over the message it
+/// belongs to. It reuses the rail's card so the two menus are one surface, and
+/// only the id and the anchor differ.
+fn message_menu_card(items: &[(String, ClickHandler)]) -> AnyElement {
+    let palette = palette::current();
+    let rows: Vec<Stateful<Div>> = items
+        .iter()
+        .map(|(label, pick)| {
+            let pick = pick.clone();
+            div()
+                .id(SharedString::from(format!("msg-menu-{label}")))
+                .px_2()
+                .py_1()
+                .rounded_sm()
+                .cursor_pointer()
+                .text_sm()
+                .text_color(rgb(palette.text))
+                .hover(|d| d.bg(rgb(palette.selection)))
+                .child(SharedString::from(label.clone()))
+                .on_click(move |ev, window, app| pick(ev, window, app))
+        })
+        .collect();
+    // The card swallows a left press so the window's click-outside dismiss
+    // (#2613) does not remove it before its own item's click lands: the pick
+    // fires on mouse-up, the dismiss on mouse-down.
+    let card = crate::menu::menu_card("message-context-menu", rows);
+    div()
+        .id("message-context-menu-card")
+        .on_mouse_down(gpui::MouseButton::Left, |_ev, _window, cx| {
+            cx.stop_propagation();
+        })
+        .child(card)
+        .absolute()
+        .right_2()
+        .top_1()
+        .into_any_element()
+}
+
 /// A row that takes part in a drag. Text segments provide exact offsets; these
 /// row handlers preserve selection over padding and non-text blocks.
-fn selectable_row(drag: &Rc<CopyDrag>, ordinal: usize, child: Div) -> Stateful<Div> {
+fn selectable_row<E: gpui::IntoElement>(
+    drag: &Rc<CopyDrag>,
+    ordinal: usize,
+    child: E,
+) -> Stateful<Div> {
     let selected = drag
         .range()
         .is_some_and(|(lo, hi)| (lo..=hi).contains(&ordinal));
@@ -2552,6 +2847,19 @@ fn block_text(block: &Block) -> String {
 pub struct ViewHooks {
     pub attachments: HashMap<String, ClickHandler>,
     pub drag: Option<Rc<CopyDrag>>,
+    /// Left click per stored message row, keyed by message id. Select mode
+    /// mints one per row so a click toggles it; outside the mode the map is
+    /// empty and every row stays inert (#2613).
+    pub message_click: HashMap<uuid::Uuid, ClickHandler>,
+    /// Right press per stored message row: opens the message menu (#2613).
+    pub message_press: HashMap<uuid::Uuid, PressHandler>,
+    /// The row whose menu is open, with its items. `None` closes it.
+    pub message_menu: Option<MessageMenu>,
+    /// The picked rows while select mode is on, or `None` when it is off.
+    pub selection: Option<HashSet<uuid::Uuid>>,
+    /// A left press on the transcript's own background, so an open message
+    /// menu closes on a click outside it (#2613).
+    pub menu_dismiss: Option<PressHandler>,
     /// The session's ctx budget, so the live card's footer can carry it the way
     /// the Telegram footer does (#2442).
     pub ctx_used: Option<u32>,
@@ -2576,6 +2884,11 @@ pub fn view(
         ctx_used,
         ctx_max,
         live_click,
+        message_click,
+        message_press,
+        message_menu,
+        selection: selected,
+        menu_dismiss,
     } = hooks;
     if let Some(d) = &drag {
         d.texts.borrow_mut().clear();
@@ -2591,6 +2904,14 @@ pub fn view(
         .gap_2()
         .p_2()
         .bg(rgb(palette::current().bg));
+    // A press on the transcript's background closes the open message menu
+    // (#2613). Rows that handle their own press and the menu card itself stop
+    // the event before it reaches here, so this only fires for a click outside.
+    if let Some(dismiss) = menu_dismiss {
+        col = col.on_mouse_down(MouseButton::Left, move |ev, window, cx| {
+            dismiss(ev, window, cx);
+        });
+    }
 
     if state.session.is_none() {
         col = col.child(
@@ -2687,24 +3008,50 @@ pub fn view(
                     _ => block_view(block, content_width, &attachment_handlers, None),
                 },
             };
-            // A dragged row needs its own element id for the selection
-            // handlers, so that arm is a stateful wrapper and the other is the
-            // plain block. Everything below only appends the row, so both arms
-            // meet as one element type (#2632).
-            let child = match (&drag, selectable) {
-                (Some(d), Some(ordinal)) => selectable_row(d, ordinal, child).into_any_element(),
-                _ => child.into_any_element(),
+            // A stored row carries its own menu anchor and pick box (#2613).
+            // While select mode is on the row is not wrapped for drag-to-copy:
+            // a click there toggles the row, and two gestures competing for
+            // the same press would make both unreliable.
+            let child: AnyElement = match block {
+                Block::Msg {
+                    message_id: Some(id),
+                    ..
+                } => {
+                    let picked = selected.as_ref().map(|picks| picks.contains(id));
+                    let row = message_row(
+                        *id,
+                        child,
+                        message_click.get(id),
+                        message_press.get(id),
+                        &message_menu,
+                        picked,
+                    )
+                    .into_any_element();
+                    match (&drag, selectable, picked) {
+                        (_, _, Some(_)) => row,
+                        (Some(d), Some(ordinal), None) => {
+                            selectable_row(d, ordinal, row).into_any_element()
+                        }
+                        _ => row,
+                    }
+                }
+                _ => match (&drag, selectable) {
+                    (Some(d), Some(ordinal)) => {
+                        selectable_row(d, ordinal, child).into_any_element()
+                    }
+                    _ => child.into_any_element(),
+                },
             };
             // Working-out rows ride inside the card; conversation rows keep
             // their place around it (#2632).
             if !carded {
                 col = col.child(child);
             } else if i < header_at {
-                pre.push(child.into_any_element());
+                pre.push(child);
             } else if folded || matches!(block, Block::Msg { .. }) {
-                post.push(child.into_any_element());
+                post.push(child);
             } else {
-                body.push(child.into_any_element());
+                body.push(child);
             }
         }
         col = col.children(pre);
@@ -3278,13 +3625,13 @@ mod tests {
             "{\"secret\":\"GUI-PLAN-JSON-SENTINEL\"}",
             2,
         );
-        assert!(row_blocks(&malformed).is_empty());
+        assert!(row_blocks(&malformed, None).is_empty());
 
         let mut unsupported = completed_history_row(3, 2);
         unsupported.content = unsupported
             .content
             .replace("\"version\":1", "\"version\":2");
-        assert!(row_blocks(&unsupported).is_empty());
+        assert!(row_blocks(&unsupported, None).is_empty());
 
         let blocks = flat(&[row("user", "question", 1), malformed], 2);
         assert_eq!(blocks.len(), 1, "only the ordinary user row remains");
@@ -4508,5 +4855,98 @@ mod tests {
             !SRC.contains(["d.", "write_to_clipboard(app);"].concat().as_str()),
             "no caller writes the clipboard without clearing the selection"
         );
+    }
+    fn forwarded_row(content: &str, sequence: i32, batch: uuid::Uuid, label: &str) -> Message {
+        let mut m = row("user", content, sequence);
+        m.id = uuid::Uuid::new_v4();
+        m.session_id = uuid::Uuid::new_v4();
+        m.forward = Some(Box::new(opencrabs::db::models::ForwardProvenance {
+            from_session: uuid::Uuid::new_v4(),
+            from_message: uuid::Uuid::new_v4(),
+            label: label.to_string(),
+            batch,
+        }));
+        m
+    }
+
+    #[test]
+    fn one_forward_batch_is_one_turn_with_one_header() {
+        let batch = uuid::Uuid::new_v4();
+        let rows = vec![
+            forwarded_row("picked one", 0, batch, "Release planning"),
+            forwarded_row("picked two", 1, batch, "Release planning"),
+            forwarded_row("picked three", 2, batch, "Release planning"),
+        ];
+        let (_, turns) = turns(&rows, 3);
+        assert_eq!(turns.len(), 1, "a batch must not open one turn per row");
+        let marks: Vec<&ForwardMark> = turns[0]
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Msg { forward, .. } => forward.as_ref(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(marks.len(), 3);
+        assert_eq!(
+            marks.iter().filter(|m| m.first).count(),
+            1,
+            "exactly one row of the batch carries the header"
+        );
+        assert!(marks[0].first, "the header sits on the batch's first row");
+    }
+
+    #[test]
+    fn two_separate_forwards_are_two_batches() {
+        let first = uuid::Uuid::new_v4();
+        let second = uuid::Uuid::new_v4();
+        let rows = vec![
+            forwarded_row("a", 0, first, "Session A"),
+            forwarded_row("b", 1, first, "Session A"),
+            forwarded_row("c", 2, second, "Session B"),
+        ];
+        let (_, turns) = turns(&rows, 3);
+        assert_eq!(turns.len(), 2);
+        let headers: Vec<String> = turns
+            .iter()
+            .flat_map(|t| t.blocks.iter())
+            .filter_map(|b| match b {
+                Block::Msg {
+                    forward: Some(mark),
+                    ..
+                } if mark.first => Some(forward_header(&mark.label)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            headers,
+            vec!["Forwarded from Session A", "Forwarded from Session B"]
+        );
+    }
+
+    #[test]
+    fn a_forwarded_row_is_stored_as_a_user_row_so_the_turn_never_reads_it_as_its_own() {
+        let batch = uuid::Uuid::new_v4();
+        let rows = vec![forwarded_row(
+            "answer copied from elsewhere",
+            0,
+            batch,
+            "Other",
+        )];
+        let (_, turns) = turns(&rows, 1);
+        let block = &turns[0].blocks[0];
+        assert!(
+            matches!(block, Block::Msg { role, .. } if role == "user"),
+            "a forwarded copy is user content, not assistant output"
+        );
+    }
+
+    #[test]
+    fn the_forward_header_names_the_source_and_falls_back_when_unnamed() {
+        assert_eq!(
+            forward_header("Release planning"),
+            "Forwarded from Release planning"
+        );
+        assert_eq!(forward_header("   "), "Forwarded message");
     }
 }

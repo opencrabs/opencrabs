@@ -24,6 +24,11 @@ use opencrabs::db::models::Session;
 use opencrabs::db::repository::session::{SessionListOptions, SessionRepository};
 use opencrabs::db::repository::session_favorites::SessionFavoritesRepository;
 
+// The menu primitives moved to `menu.rs` (#2613) so the transcript can draw
+// its own context menu without depending on the session rail. Re-exported
+// here because every rail call site still says `sessions::menu_*`.
+pub use crate::menu::{MenuEntry, MenuKind, menu_card, menu_item, menu_popover};
+
 /// The rail's live state, owned by the window's view.
 #[derive(Default)]
 pub struct SessionsState {
@@ -1034,59 +1039,6 @@ pub fn rail_menu_entries(favorited: bool, topics_enabled: bool) -> Vec<MenuEntry
         label: "Delete",
     });
     entries
-}
-
-/// One row of the context menu: a label and a full-height hit target.
-pub fn menu_item(label: &'static str) -> Stateful<Div> {
-    div()
-        .id(SharedString::from(format!("rail-menu-{label}")))
-        .px_2()
-        .py_1()
-        .rounded_sm()
-        .cursor_pointer()
-        .text_sm()
-        .text_color(rgb(palette::current().text))
-        .hover(|d| d.bg(rgb(palette::current().selection)))
-        .child(SharedString::from(label))
-}
-
-/// A menu's card: the bordered, shadowed column every context menu is drawn
-/// on (#2384, #2480).
-///
-/// The caller owns the id and the placement, because two menus live on
-/// different anchors: the rail's card pins itself to the row that opened it,
-/// and the chat's pins itself under the conversation's `...`.
-pub fn menu_card(id: &'static str, items: Vec<Stateful<Div>>) -> Stateful<Div> {
-    // A solid card over the rows: it occludes so nothing beneath it paints
-    // through or takes a click, with a border and shadow so it reads as a
-    // layer above the list rather than another row in it.
-    let mut menu = div()
-        .id(id)
-        .occlude()
-        .min_w(rems(9.0))
-        .flex()
-        .flex_col()
-        .gap_0p5()
-        .p_1()
-        .rounded_sm()
-        .border_1()
-        .border_color(rgb(palette::current().panel_hi))
-        .bg(rgb(palette::current().panel))
-        .shadow_md();
-    for item in items {
-        menu = menu.child(item);
-    }
-    menu
-}
-
-/// The rail row's context menu: [`menu_card`] absolute inside the row, which
-/// is relative, so it tracks the row through rail scrolls without
-/// window-coordinate math.
-pub fn menu_popover(items: Vec<Stateful<Div>>) -> Stateful<Div> {
-    menu_card("rail-context-menu", items)
-        .absolute()
-        .right_1()
-        .top_1()
 }
 
 /// What a rail row shows about its session right now. Grouped so the row
