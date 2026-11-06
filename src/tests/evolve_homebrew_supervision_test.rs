@@ -42,13 +42,18 @@ fn stub(dir: &Path, name: &str, body: &str) -> String {
 async fn a_child_that_outlives_its_budget_is_killed_not_left_running() {
     let dir = tempfile::tempdir().unwrap();
     let marker = dir.path().join("ticks");
-    // 2000 laps at 0.05s is 100s of work. The budget is 300ms.
+    // The budget is deliberately generous: the child cannot prove it ran until
+    // the OS has spawned `sh` and executed its first statement, and spawn
+    // latency is not bounded on a loaded host. Racing that measured scheduling
+    // pressure instead of supervision (#2653).
+    const BUDGET_MS: u64 = 1500;
+    // 2000 laps at 0.05s is 100s of work, far past any budget.
     let script = format!(
         "i=0; while [ $i -lt 2000 ]; do i=$((i+1)); echo $i >> {}; sleep 0.05; done",
         marker.display()
     );
     let started = std::time::Instant::now();
-    let outcome = run_bounded("sh", &["-c", &script], Duration::from_millis(300))
+    let outcome = run_bounded("sh", &["-c", &script], Duration::from_millis(BUDGET_MS))
         .await
         .expect("`sh` spawns on every unix CI host, so a failure here is not a result");
     let elapsed = started.elapsed();
@@ -62,19 +67,28 @@ async fn a_child_that_outlives_its_budget_is_killed_not_left_running() {
         "the budget ended the wait, not the child's own 100s loop: {elapsed:?}"
     );
 
-    // The kill has to be real, not an abandoned future. An orphan would still be
-    // ticking the marker: ~36 lines by the end of this window, 2000 in total.
+    // The kill has to be real, not an abandoned future. Measure GROWTH after the
+    // budget rather than an absolute count: a killed child freezes the marker
+    // while an orphan keeps appending ~30 lines per 1.5s at this lap time.
+    let count = || {
+        std::fs::read_to_string(&marker)
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .count()
+    };
+    let at_budget = count();
     tokio::time::sleep(Duration::from_millis(1500)).await;
-    let ticks = std::fs::read_to_string(&marker).unwrap_or_default();
-    let n = ticks.lines().filter(|l| !l.trim().is_empty()).count();
+    let after_window = count();
     assert!(
-        n >= 1,
-        "the child ran at all before the budget expired (saw {n} ticks)"
+        at_budget >= 1,
+        "the child ran at all before the budget expired (saw {at_budget} ticks)"
     );
     assert!(
-        n < 20,
-        "the child was killed rather than orphaned, but the marker reached {n} ticks \
-         after a 300ms budget (an orphan passes 2000)"
+        after_window - at_budget <= 5,
+        "the child was killed rather than orphaned: the marker grew from {at_budget} to \
+         {after_window} ticks after a {BUDGET_MS}ms budget (an orphan adds ~30 per \
+         1.5s and reaches 2000)"
     );
 }
 
