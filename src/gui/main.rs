@@ -1636,14 +1636,27 @@ impl Dashboard {
     /// at the window's editor while a pane owns the caret puts the text and
     /// the attachment chips into a field the split never draws.
     fn composer_entity(&self) -> Entity<editor::Editor> {
-        match self.pane_focus {
-            Some(id) if Some(id) != self.transcript.session => self
+        match self.split_focus() {
+            Some(id) if Some(id) == self.transcript.session => self.editor.clone(),
+            Some(id) => self
                 .pane_states
                 .get(&id)
                 .map(|pane| pane.editor.clone())
                 .unwrap_or_else(|| self.editor.clone()),
-            _ => self.editor.clone(),
+            None => self.editor.clone(),
         }
+    }
+
+    /// The leaf that owns the keyboard in the split, `None` meaning the chat
+    /// leaf. Resolved through [`resolve_split_focus`] so the rules can be
+    /// tested without a window.
+    fn split_focus(&self) -> Option<Uuid> {
+        let leaves = self
+            .panes
+            .as_ref()
+            .map(|tree| tree.leaves())
+            .unwrap_or_default();
+        resolve_split_focus(&leaves, self.pane_focus, self.transcript.session)
     }
 
     /// Close one pane and hand its space to its neighbour (#2438, #2472).
@@ -5804,6 +5817,9 @@ impl Dashboard {
         // string per leaf instead of touching the bridge or the plan file.
         let leaves = tree.leaves();
         let count = leaves.len();
+        // One owner for the keyboard, resolved the same way the drop handler
+        // and the caret resolve it (#2620).
+        let focus = self.split_focus();
         let mut footers: HashMap<Uuid, SharedString> = HashMap::new();
         for (i, session) in leaves.iter().enumerate() {
             footers.insert(
@@ -5821,9 +5837,9 @@ impl Dashboard {
             for session in &leaves {
                 let is_chat = Some(*session) == self.transcript.session;
                 let focused = if is_chat {
-                    self.pane_focus.is_none()
+                    focus.is_none()
                 } else {
-                    self.pane_focus == Some(*session)
+                    focus == Some(*session)
                 };
                 // Each pane's plan and queue, read from that pane's session.
                 let (plan_view, queued, editor) = if is_chat {
@@ -5891,7 +5907,10 @@ impl Dashboard {
             chat_session: self.transcript.session,
             chat_title: title,
             states: &self.pane_states,
-            focus: self.pane_focus,
+            // The resolved owner, not the raw id: a stale `pane_focus` named a
+            // leaf the tree no longer holds, so every leaf read as unfocused,
+            // drew dim, and painted no ring (#2620).
+            focus,
             content,
             areas: &self.split_areas,
             entity: cx.entity().downgrade(),
@@ -10859,6 +10878,39 @@ fn update_prompt_overlay(
         .child(panel)
 }
 
+/// The leaf that owns the keyboard in a split, `None` meaning the chat leaf.
+///
+/// `pane_focus` can name a pane the tree no longer holds: a closed leaf, a
+/// session moved into the chat, a split that came back with one leaf. Read
+/// literally, that id made EVERY leaf take the unfocused branch, so the split
+/// drew a dim placeholder in every pane and no frame painted a real field at
+/// all. A file dropped then landed in the window's editor, which nothing was
+/// drawing, so the drop looked ignored (#2620).
+///
+/// A single leaf is never a split and the chat owns the keyboard, so the id is
+/// not consulted at all. A live id names its own leaf, with the chat leaf
+/// reading as `None` the way it does everywhere else. A stale id hands the
+/// keyboard back to the chat when the chat is in the tree, and to the first
+/// surviving leaf when it is not, so the window always draws one real composer
+/// and one real drop target.
+fn resolve_split_focus(
+    leaves: &[Uuid],
+    pane_focus: Option<Uuid>,
+    chat: Option<Uuid>,
+) -> Option<Uuid> {
+    if leaves.len() < 2 {
+        return None;
+    }
+    if let Some(id) = pane_focus.filter(|id| leaves.contains(id)) {
+        return (Some(id) != chat).then_some(id);
+    }
+    if chat.is_some_and(|id| leaves.contains(&id)) {
+        None
+    } else {
+        leaves.first().copied()
+    }
+}
+
 /// A pane's status row at its bottom edge (#2593): the fields the window
 /// footer carries window-wide, scoped to the pane's own session. Unfocused
 /// panes draw it muted and the focused one in the accent, so feedback stays
@@ -10879,14 +10931,22 @@ fn pane_footer(id: SharedString, text: Option<SharedString>, focused: bool) -> A
         .flex_row()
         .flex_none()
         .items_center()
+        // One line, and only one line: a long model name, roster or plan
+        // label clipped the text at the window's edge and painted the rest
+        // over the neighbouring pane. The row now clips and the text
+        // ellipsizes inside it (#2620).
+        .min_w_0()
+        .max_w_full()
+        .overflow_hidden()
         .gap_2()
         .px_2()
         .py_1()
         .text_xs()
+        .whitespace_nowrap()
         .text_color(rgb(color))
         .border_t_1()
         .border_color(rgb(split_rule_color()))
-        .child(text)
+        .child(div().min_w_0().overflow_hidden().truncate().child(text))
         .into_any_element()
 }
 
@@ -12445,6 +12505,66 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_stale_pane_focus_hands_the_keyboard_back_to_the_chat() {
+        // #2620: the id outlives the leaf it names. Read literally it marked
+        // every pane unfocused, so no frame painted a composer and a Finder
+        // drop had nothing to land in.
+        let chat = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let leaves = [chat, other];
+        assert_eq!(
+            resolve_split_focus(&leaves, Some(Uuid::new_v4()), Some(chat)),
+            None,
+            "a stale id falls back to the chat leaf"
+        );
+        assert_eq!(
+            resolve_split_focus(&leaves, Some(other), Some(chat)),
+            Some(other),
+            "a live id keeps the pane holding the caret"
+        );
+        assert_eq!(
+            resolve_split_focus(&leaves, Some(chat), Some(chat)),
+            None,
+            "the chat leaf names itself None"
+        );
+    }
+
+    #[test]
+    fn a_stale_pane_focus_picks_a_surviving_leaf_when_the_chat_is_gone() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let leaves = [a, b];
+        assert_eq!(
+            resolve_split_focus(&leaves, Some(Uuid::new_v4()), None),
+            Some(a),
+            "the first surviving leaf owns the keyboard"
+        );
+    }
+
+    #[test]
+    fn one_leaf_is_never_a_split() {
+        let only = Uuid::new_v4();
+        assert_eq!(resolve_split_focus(&[only], Some(only), Some(only)), None);
+        assert_eq!(resolve_split_focus(&[], Some(only), Some(only)), None);
+    }
+
+    #[test]
+    fn the_pane_footer_clips_instead_of_overflowing() {
+        let src = include_str!("main.rs");
+        let footer = src
+            .split("fn pane_footer(id: SharedString")
+            .nth(1)
+            .and_then(|rest| rest.split("\n/// ").next())
+            .expect("pane footer");
+        assert!(footer.contains(".max_w_full()"), "the row is bounded");
+        assert!(footer.contains(".overflow_hidden()"), "the row clips");
+        assert!(
+            footer.contains(".whitespace_nowrap()"),
+            "the row is one line"
+        );
+        assert!(footer.contains(".truncate()"), "the text ellipsizes");
+    }
     #[test]
     fn the_ctx_counter_speaks_the_tui_grammar() {
         assert_eq!(ctx_footer(Some(12_000), 200_000).0, "ctx: 12K/200K (6%)");
