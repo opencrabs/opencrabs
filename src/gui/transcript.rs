@@ -1833,7 +1833,10 @@ fn block_view(
 
 /// The TUI's spinner frames, in its own order
 /// (`tui/render/chat.rs`), so the crab blinks at the same cadence.
-const SPINNER_FRAMES: [&str; 10] = [
+///
+/// The sessions rail reads the same list (`rail_activity::frame`), so a row
+/// and the turn card it reports blink in phase instead of at two tempos.
+pub(crate) const SPINNER_FRAMES: [&str; 10] = [
     "\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283c}", "\u{2834}", "\u{2826}", "\u{2827}",
     "\u{2807}", "\u{280f}",
 ];

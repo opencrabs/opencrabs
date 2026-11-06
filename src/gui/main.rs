@@ -42,6 +42,7 @@ mod onboard;
 mod palette;
 mod plan_strip;
 mod preview;
+mod rail_activity;
 mod screen_keys;
 mod sessions;
 mod skills_view;
@@ -539,6 +540,18 @@ struct Dashboard {
     db_path: std::path::PathBuf,
     /// The session rail's live state.
     sessions: sessions::SessionsState,
+    /// Which rail rows have work in flight, and which plans wait (#2636).
+    /// Memory only: the open turn and each split leaf already keep their own
+    /// `busy`, so this holds the one thing nothing else records, a session
+    /// streaming with no pane of its own.
+    rail: rail_activity::RailActivity,
+    /// The id to plan-file index behind each row's badge, with its mtime cache.
+    rail_index: rail_activity::PlanIndex,
+    /// The plans the owner has already opened, so their rings stop (#2636).
+    rail_seen: rail_activity::SeenPlans,
+    /// The one monotonic origin every rail animation reads, so all rows blink
+    /// on the same frame instead of one clock each.
+    rail_clock: std::time::Instant,
     /// Rail width in rem, moved by the splitter's drag. Never below
     /// `RAIL_MIN_REM`: dragging past it closes the rail instead, and ctrl+s
     /// brings it back at the last width.
@@ -962,6 +975,15 @@ impl Dashboard {
     /// so the screen and the session can never disagree.
     fn open_session(&mut self, id: Uuid, cx: &mut Context<Self>) {
         self.begin_conversation(id, cx);
+        // Opening a conversation is reading its plan: the rail's ring stops
+        // here, not at paint, so a repaint can never be mistaken for a read and
+        // a ring never clears itself just because the row scrolled past.
+        if let Some(evidence) = self
+            .rail_index
+            .evidence(id, false, std::time::Instant::now())
+        {
+            self.rail_seen.mark(id, evidence.stamp);
+        }
         self.screen = Screen::Chat;
         let db_path = self.db_path.clone();
         cx.spawn(async move |this, cx| {
@@ -3496,6 +3518,14 @@ impl Dashboard {
     ) {
         use opencrabs::brain::agent::ProgressEvent;
         let Some(pane) = self.pane_states.get_mut(&session) else {
+            // A session with no leaf is what a sub-agent looks like: its
+            // progress arrives with its own id and there is no pane to fold it
+            // into. The event is the only trace of that turn the window holds,
+            // so the rail records it here instead of dropping it (#2636). A
+            // repeat does not repaint: only the first sighting changes a row.
+            if self.rail.observe_stream(session) {
+                cx.notify();
+            }
             return;
         };
         let live = &mut pane.live;
@@ -3743,8 +3773,16 @@ impl Dashboard {
             // old early return froze the line between chunks, which read as
             // "nothing is happening" on a slow provider.
             // A pane runs its own turn too (#2614), and its spinner, clock
-            // and token counter advance on the same repaint.
-            if self.busy || self.pane_states.values().any(|pane| pane.busy) {
+            // and token counter advance on the same repaint. So does a rail row
+            // with work in flight, and a plan waiting for approval keeps
+            // pulsing its ring until the owner opens it (#2636).
+            if self.busy
+                || self.pane_states.values().any(|pane| pane.busy)
+                || self
+                    .rail_activity_map()
+                    .values()
+                    .any(|row| row.badge.is_some() || row.ring)
+            {
                 cx.notify();
             }
             return;
@@ -4062,6 +4100,12 @@ impl Dashboard {
                     // conversation are left exactly where the user put them.
                     if self.transcript.session != Some(session) {
                         self.settle_pane(session, tokens_per_second, cx);
+                        // A sub-agent's turn ends the same way and has no pane
+                        // to settle (#2636). Clearing is idempotent, so a leaf
+                        // that was never recorded costs nothing.
+                        if self.rail.clear(session) {
+                            cx.notify();
+                        }
                         continue;
                     }
                     // The provider's own prompt size for the call that just
@@ -4112,6 +4156,11 @@ impl Dashboard {
                 agent_bridge::TurnEvent::Failed { session, text } => {
                     if self.transcript.session != Some(session) {
                         self.fail_pane(session, text, cx);
+                        // A failed sub-agent turn is still a finished turn, so
+                        // its rail badge has to go with it (#2636).
+                        if self.rail.clear(session) {
+                            cx.notify();
+                        }
                         continue;
                     }
                     self.live.notices.push(text);
@@ -4190,6 +4239,38 @@ impl Dashboard {
             .map(|t| (t.label, t.started.elapsed().as_secs()))
             .collect();
         opencrabs::tui::render::format_background_tasks(&tasks, opencrabs::tui::render::LABEL_CHARS)
+    }
+
+    /// The rail's badges for every row it is about to draw (#2636).
+    ///
+    /// Resolved in one pass before the rows are built: the plan index needs
+    /// `&mut self` and the row iterator holds `&self`, so the two cannot
+    /// interleave. Evidence is cached by mtime, so this costs one `stat` per
+    /// session that has a plan file and nothing for the rest.
+    fn rail_activity_map(&mut self) -> HashMap<Uuid, rail_activity::RowState> {
+        let rows: Vec<Uuid> = self.sessions.ordered().map(|s| s.id).collect();
+        // The sweep throttle reads a moving clock; the animations read the
+        // window's fixed origin. Two different questions, two clocks.
+        let now = std::time::Instant::now();
+        // One bridge lookup for the whole pass, not one per row: a detached
+        // command outlives its turn, so it is the only trace that session still
+        // has work in flight (#762).
+        let manager = agent_bridge::bridge().and_then(|b| b.service.background_manager());
+        let mut map = HashMap::with_capacity(rows.len());
+        for id in rows {
+            let live = self.rail.is_live(
+                id,
+                // The window runs one turn at a time, so only the open session
+                // can be mid-turn there; split leaves keep their own flag.
+                self.busy && self.transcript.session == Some(id),
+                self.pane_states.get(&id).is_some_and(|pane| pane.busy),
+                manager.as_ref().is_some_and(|mgr| mgr.running_for(id) > 0),
+            );
+            let plan = self.rail_index.evidence(id, live, now);
+            let seen = plan.is_some_and(|evidence| self.rail_seen.is_seen(id, evidence.stamp));
+            map.insert(id, rail_activity::row_state(live, plan, seen));
+        }
+        map
     }
 
     /// One pane's footer text (#2593): pane index, whether that session is
@@ -5972,7 +6053,11 @@ impl Render for Dashboard {
 
         // The rail's rows: each carries its own click listener, built in its
         // own loop turn so the `&mut cx` borrow stays legal.
-        let mut rail_rows = Vec::with_capacity(self.sessions.items.len());
+        let mut rail_rows: Vec<AnyElement> = Vec::with_capacity(self.sessions.items.len());
+        // What every row says about work in flight (#2636), resolved once
+        // before the loop: the index needs `&mut self` and the row iterator
+        // holds `&self`.
+        let activity = self.rail_activity_map();
         // Pinned rows first, the rest untouched: the TUI's own order.
         for s in self.sessions.ordered() {
             let id = s.id;
@@ -6065,12 +6150,19 @@ impl Render for Dashboard {
             };
             let indented = self.sessions.is_indented(id);
             let closed = self.sessions.is_closed(id);
+            // One glyph cell, from the window's shared clock, so a list of
+            // busy rows blinks as one spinner instead of ten (#2636).
+            let state = activity.get(&id).copied().unwrap_or_default();
+            let badge = state
+                .badge
+                .map(|_| rail_activity::frame(self.rail_clock.elapsed()));
             let flags = sessions::RowFlags {
                 selected,
                 cursored,
                 favorited: favorite,
                 indented,
                 closed,
+                badge,
             };
             let r = sessions::row(s, flags, action, menu);
             // The press starts the slide and closes any other row's strip.
@@ -6105,7 +6197,20 @@ impl Render for Dashboard {
             });
             let r = r.on_mouse_down(MouseButton::Right, ask_menu);
             let r = r.on_mouse_down(MouseButton::Left, press);
-            rail_rows.push(sessions::on_click(r, handler));
+            // A plan waiting for approval rings its row until it is opened.
+            // The border lives on this wrapper, never inside `sessions::row`:
+            // the row stays the square, edge-to-edge tile #2540 pins, and the
+            // ring is a frame around it rather than a card. Wrapped after the
+            // click is attached, so the row keeps the handlers it was built
+            // with and only gains a frame.
+            rail_rows.push(
+                rail_activity::ring(
+                    sessions::on_click(r, handler),
+                    state.ring,
+                    self.rail_clock.elapsed(),
+                )
+                .into_any_element(),
+            );
         }
         // The channel chip (#2452): quiet notice plus the one action, drawn
         // at the end of the rail only while a configured channel has no
@@ -9025,6 +9130,12 @@ fn main() {
                         rem: BASE_REM,
                         db_path: db_path.clone(),
                         sessions: sessions_state,
+                        rail: rail_activity::RailActivity::default(),
+                        rail_index: rail_activity::PlanIndex::default(),
+                        rail_seen: rail_activity::SeenPlans::load(Some(
+                            opencrabs::config::opencrabs_home().join("rail_seen.json"),
+                        )),
+                        rail_clock: std::time::Instant::now(),
                         rail_width: RAIL_DEFAULT_REM,
                         rail_open: true,
                         rail_focused: false,
