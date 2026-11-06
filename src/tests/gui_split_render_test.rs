@@ -118,8 +118,13 @@ fn a_split_widens_nothing_when_it_is_absent() {
 #[test]
 fn the_second_pane_is_composed_in_one_place() {
     let walk = pane_element();
+    // Count definitions, not mentions: two other tests in this file quote the
+    // signature as a literal, so a raw `matches` counted those too (#2646).
     assert_eq!(
-        GUI_MAIN.matches("fn pane_element(").count(),
+        GUI_MAIN
+            .lines()
+            .filter(|line| line.starts_with("fn pane_element("))
+            .count(),
         1,
         "one walk draws every pane, so a flat split and a nested one cannot drift"
     );

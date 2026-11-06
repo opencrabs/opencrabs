@@ -966,6 +966,14 @@ fn finish_boot_resume(pending: &std::sync::atomic::AtomicUsize, sink: &EventSink
     let _ = sink.send(TurnEvent::CommandReply(line));
 }
 
+/// The eight characters of a session id a person could match against a search,
+/// taken by iterator rather than by slicing a `str` at a byte offset: the site
+/// is new code, and the byte-slice ratchet counts any new slice, so taking the
+/// characters says out loud what a slice only assumes about the formatter.
+fn short_session(id: Uuid) -> String {
+    id.simple().to_string().chars().take(8).collect()
+}
+
 /// Resume the turns the last process died in the middle of (#2627).
 ///
 /// The window has written `pending_requests` on every turn since it gained
@@ -1093,7 +1101,7 @@ async fn boot_resume(service: Arc<AgentService>, pool: opencrabs::db::Pool, sink
                 context_text: message,
                 display_text: format!(
                     "⚠️ A push-initiated turn was interrupted by a restart, re-delivering it (session {})",
-                    &session_id.simple().to_string()[..8]
+                    short_session(session_id)
                 ),
                 origin: opencrabs::brain::agent::PushOrigin::Recovery,
                 bg_meta: None,
