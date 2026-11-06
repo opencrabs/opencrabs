@@ -4789,9 +4789,12 @@ impl Dashboard {
         for id in rows {
             let live = self.rail.is_live(
                 id,
-                // The window runs one turn at a time, so only the open session
-                // can be mid-turn there; split leaves keep their own flag.
-                self.busy && self.transcript.session == Some(id),
+                // The open session's turn, plus any turn parked under its own
+                // session: a switched-away turn keeps running, so its rail row
+                // must keep its spinner instead of claiming idle work (#2616).
+                // Split leaves keep their own flag.
+                (self.busy && self.transcript.session == Some(id))
+                    || self.stashed.contains_key(&id),
                 self.pane_states.get(&id).is_some_and(|pane| pane.busy),
                 manager.as_ref().is_some_and(|mgr| mgr.running_for(id) > 0),
             );
@@ -13387,18 +13390,19 @@ mod tests {
         let mut stashed: std::collections::HashMap<uuid::Uuid, super::StashedTurn> =
             std::collections::HashMap::new();
         let mut live = super::transcript::LiveTurn::default();
-        let mut busy = true;
-        let mut cancel: Option<tokio_util::sync::CancellationToken> =
-            Some(tokio_util::sync::CancellationToken::new());
-        let mut settle_expect: Option<usize> = Some(7);
-        let mut settle_retries: u8 = 2;
-        let mut ctx_tokens: Option<u32> = Some(1_234);
 
         // A turn running in conversation A, with every piece of state the
-        // card needs to look alive.
+        // card needs to look alive. Declared already carrying it, so the test
+        // reads as the turn it describes and never as a blank that is filled
+        // in later.
         live.begin("ask A".to_string());
         live.thinking = true;
         live.tokens = 42;
+        let mut busy = true;
+        let mut cancel = Some(tokio_util::sync::CancellationToken::new());
+        let mut settle_expect: Option<usize> = Some(7);
+        let mut settle_retries: u8 = 2;
+        let mut ctx_tokens: Option<u32> = Some(1_234);
 
         super::swap_visible_turn(
             &mut stashed,

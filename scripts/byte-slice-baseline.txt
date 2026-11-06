@@ -391,7 +391,6 @@
 1	src/cron/scheduler.rs	text[start..break_at]
 1	src/cron/scheduler.rs	text[start..end]
 1	src/db/repository/tool_execution.rs	tool_name[..tool_name.len().min(80)]
-1	src/gui/agent_bridge.rs	session_id.simple().to_string()[..8]
 1	src/logging/panic_record.rs	backtrace[..end]
 1	src/logging/reader.rs	text[i + 1..]
 1	src/memory/chunker.rs	content[bounds[search_start_char]..bounds[end]]
