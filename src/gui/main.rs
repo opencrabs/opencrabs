@@ -4647,11 +4647,24 @@ impl Dashboard {
         // Same inheritance rule as the TUI: the row carries the provider and
         // model the service is actually answering with, so a later read of
         // the session cannot report a model that never ran.
+        //
+        // It inherits the pair from the conversation on screen, not from the
+        // global slot. The global slot follows the config `enabled` flags and
+        // every config reload swaps it (agent_bridge provider_hook), so
+        // reading it here started each new conversation on a provider the
+        // user had already switched away from (#2643).
+        let active = self.focused_pane();
         let (provider, model) = match agent_bridge::bridge() {
-            Some(b) => (
-                Some(b.service.provider_name()),
-                Some(b.service.provider_model()),
-            ),
+            Some(b) => match active {
+                Some(sid) => (
+                    Some(b.service.provider_name_for_session(sid)),
+                    Some(b.service.provider_model_for_session(sid)),
+                ),
+                None => (
+                    Some(b.service.provider_name()),
+                    Some(b.service.provider_model()),
+                ),
+            },
             None => (None, None),
         };
         agent_bridge::spawn_create_session(
