@@ -13504,11 +13504,15 @@ mod tests {
         );
         // The transcript takes the visible turn by reference, not as an
         // Option: the window keeps exactly one and swaps it on a switch
-        // (#2616). All three paint paths hand it over.
+        // (#2616). Both remaining handovers belong to the window chat: the
+        // attachment-tile scan and the body that paints it. A split pane
+        // paints from its own `SplitPane::live`, and the third window
+        // handover was the Themes preview leaf the centered modal replaced
+        // (#2619).
         assert_eq!(
             production.matches("&self.live,").count(),
-            3,
-            "the card, its attachments and the split secondary all paint it"
+            2,
+            "the attachment scan and the chat body both paint the window's turn"
         );
         assert_eq!(
             production.matches("swap_visible_turn(").count(),

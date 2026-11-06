@@ -172,10 +172,14 @@ fn create_topic_walks_the_begin_conversation_door() {
         .split("\n    }")
         .next()
         .expect("begin_conversation body");
+    // #2616: the turn, its cancel handle and the ctx count follow their own
+    // session now, so the door hands them to the swap instead of zeroing the
+    // window's. The queue is returned to its conversation rather than
+    // cleared (#2637).
     for reset in [
-        "self.ctx_tokens = None;",
-        "self.pending_metrics = None;",
-        "self.queued.clear();",
+        "&mut self.ctx_tokens,",
+        "&mut self.cancel,",
+        "self.pending_metrics.clear();",
         "ed.begin_conversation(cx)",
     ] {
         assert!(
