@@ -66,6 +66,21 @@ struct Overlapped {
 /// since a range lock there succeeds iff no other handle holds it, and file
 /// size is irrelevant (ranges past EOF are lockable).
 const SENTINEL_OFFSET_LOW: u32 = 1 << 20;
+/// Length of the sentinel range: from the 1 MiB offset up to, but not
+/// including, the maximal byte offset. `start + length` must stay a real
+/// end offset: the maximal `u32::MAX/u32::MAX` length instead wraps the
+/// end around *below* the start (`0x10_0000 + 0xFFFF_FFFF_FFFF_FFFF` mod
+/// 2^64 is `0xF_FFFF`), which describes an empty range, and an empty range
+/// overlaps nothing -- so every `exclusive` would succeed and the lock
+/// would not exclude at all (#1863). MSDN documents that the locking
+/// process's own second handle must be refused, so the range has to be
+/// real, not merely non-crashing.
+const SENTINEL_LEN: u64 = u64::MAX - SENTINEL_OFFSET_LOW as u64;
+const SENTINEL_LEN_LOW: u32 = SENTINEL_LEN as u32;
+const SENTINEL_LEN_HIGH: u32 = (SENTINEL_LEN >> 32) as u32;
+/// Compile-time proof the sentinel range never wraps: start + length must
+/// land exactly on the maximal offset, not past it.
+const _: () = assert!(SENTINEL_OFFSET_LOW as u64 + SENTINEL_LEN == u64::MAX);
 
 impl Overlapped {
     fn sentinel() -> Self {
@@ -182,9 +197,9 @@ pub fn creation_ticks_of(pid: u32) -> Option<u64> {
 pub fn exclusive(handle: RawHandle, nb: bool) -> LockOutcome {
     let ov = Overlapped::sentinel();
     let flags = LOCKFILE_EXCLUSIVE_LOCK | if nb { LOCKFILE_FAIL_IMMEDIATELY } else { 0 };
-    // Sentinel range [1 MiB, +16 EB): contends exactly like a whole-file
+    // Sentinel range [1 MiB, u64::MAX): contends exactly like a whole-file
     // flock while leaving the offset-0 stamp readable (see module docs).
-    let ok = unsafe { LockFileEx(handle, flags, 0, u32::MAX, u32::MAX, &ov) };
+    let ok = unsafe { LockFileEx(handle, flags, 0, SENTINEL_LEN_LOW, SENTINEL_LEN_HIGH, &ov) };
     if ok != 0 {
         return LockOutcome::Acquired;
     }
@@ -201,7 +216,7 @@ pub fn exclusive(handle: RawHandle, nb: bool) -> LockOutcome {
 /// exists so a caller can see the error when the release itself fails.
 pub fn unlock(handle: RawHandle) -> io::Result<()> {
     let ov = Overlapped::sentinel();
-    if unsafe { UnlockFileEx(handle, 0, u32::MAX, u32::MAX, &ov) } != 0 {
+    if unsafe { UnlockFileEx(handle, 0, SENTINEL_LEN_LOW, SENTINEL_LEN_HIGH, &ov) } != 0 {
         Ok(())
     } else {
         Err(io::Error::last_os_error())
