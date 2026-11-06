@@ -2,8 +2,8 @@
 
 use crate::ui_core::split::{
     EVEN_SHARE, Layout, MIN_PANE_PX, PANE_BODY_FLOOR, PANE_CHROME_ROWS, PANE_FOOTER_ROWS,
-    PANE_INPUT_ROWS, PANE_STRIP_MAX, PANE_STRIP_MIN, chord_layout, pane_rows, pane_rows_with,
-    pane_strip_height, share_after_drag,
+    PANE_INPUT_ROWS, PANE_STRIP_MAX, PANE_STRIP_MIN, PaneRotation, chord_layout, pane_rows,
+    pane_rows_with, pane_strip_height, rotated_index, rotation_chord, share_after_drag,
 };
 
 #[test]
@@ -190,4 +190,64 @@ fn pane_footer_yields_before_the_transcript_floor() {
     let taller = pane_rows_with(too_short + PANE_FOOTER_ROWS, 0, 0);
     assert_eq!(taller.footer, PANE_FOOTER_ROWS);
     assert_eq!(fits.inner(), too_short - PANE_CHROME_ROWS);
+}
+
+#[test]
+fn alt_tab_rotates_clockwise_and_alt_shift_tab_back() {
+    assert_eq!(
+        rotation_chord("tab", true, false, false, false),
+        Some(PaneRotation::Clockwise)
+    );
+    assert_eq!(
+        rotation_chord("tab", true, false, false, true),
+        Some(PaneRotation::Anticlockwise)
+    );
+}
+
+#[test]
+fn a_shifted_tab_spelled_backtab_still_rotates_anticlockwise() {
+    // Terminals fold shift into the key and hand over `BackTab`, so both
+    // spellings mean the same thing (#2579).
+    assert_eq!(
+        rotation_chord("backtab", true, false, false, false),
+        Some(PaneRotation::Anticlockwise)
+    );
+    assert_eq!(
+        rotation_chord("backtab", true, false, false, true),
+        Some(PaneRotation::Anticlockwise)
+    );
+}
+
+#[test]
+fn tab_alone_and_the_other_modifiers_are_refused() {
+    // Bare Tab belongs to the emoji picker, the follow-up suggestion and the
+    // rail, which is the whole reason the chord carries Alt (#2580).
+    assert_eq!(rotation_chord("tab", false, false, false, false), None);
+    // cmd+alt+tab is the window manager's and ctrl+alt+tab stays free.
+    assert_eq!(rotation_chord("tab", true, false, true, false), None);
+    assert_eq!(rotation_chord("tab", true, true, false, false), None);
+    // Any other key with Alt is not this chord.
+    assert_eq!(rotation_chord("x", true, false, false, false), None);
+}
+
+#[test]
+fn a_rotation_wraps_both_ways() {
+    assert_eq!(rotated_index(0, 3, PaneRotation::Clockwise), Some(1));
+    assert_eq!(rotated_index(2, 3, PaneRotation::Clockwise), Some(0));
+    assert_eq!(rotated_index(0, 3, PaneRotation::Anticlockwise), Some(2));
+    assert_eq!(rotated_index(1, 3, PaneRotation::Anticlockwise), Some(0));
+    // Two presses return the caret in a two-pane split whichever way it went.
+    assert_eq!(rotated_index(1, 2, PaneRotation::Clockwise), Some(0));
+    assert_eq!(rotated_index(0, 2, PaneRotation::Anticlockwise), Some(1));
+}
+
+#[test]
+fn a_single_leaf_has_nowhere_to_rotate() {
+    // One pane is not a split, so the chord must leave the key alone rather
+    // than moving the caret onto the pane it is already on.
+    assert_eq!(rotated_index(0, 1, PaneRotation::Clockwise), None);
+    assert_eq!(rotated_index(0, 1, PaneRotation::Anticlockwise), None);
+    // An index outside the tree is refused instead of wrapped into a pane the
+    // user never saw.
+    assert_eq!(rotated_index(5, 3, PaneRotation::Clockwise), None);
 }

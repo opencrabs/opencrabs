@@ -66,7 +66,7 @@ use opencrabs::ui_core::pane_tree::PaneTree;
 use opencrabs::ui_core::rail;
 use opencrabs::ui_core::split::{self, Layout};
 use opencrabs::ui_core::topic_bar;
-use transcript::{CopyDrag, LiveTurn, TranscriptState};
+use transcript::{CopyDrag, TranscriptState};
 // The terminal's own command table, shared rather than copied.
 use opencrabs::ui_core::commands as slash;
 // The Seeker engine: ranking, keywords and state, shared with the terminal
@@ -1641,24 +1641,38 @@ impl Dashboard {
         }
     }
 
-    /// Tab moves the caret between the panes in the order they are drawn, so
-    /// the accent follows the layout the eye reads (#2475, #2472). With one
-    /// pane there is nothing to switch to, so the rail keeps the key as it
-    /// always did. The pane holding the caret wears the accent in its header
-    /// and takes the page keys.
-    fn cycle_pane_focus(&mut self, cx: &mut Context<Self>) {
+    /// Alt+Tab walks the caret to the next pane and Alt+Shift+Tab to the
+    /// previous one (#2580, #2579). Tab alone keeps every job it already had:
+    /// accepting the emoji picker and the follow-up suggestion, and walking to
+    /// the rail. Binding rotation to the bare key made those two fight for one
+    /// keystroke, which is why the terminal moved to Alt and the window
+    /// followed here.
+    ///
+    /// The leaves are visited in the order they are drawn, so the accent
+    /// follows the layout the eye reads (#2475, #2472). With one pane there is
+    /// nothing to switch to, so the key keeps whatever it did. The pane
+    /// holding the caret wears the accent in its header and takes the page
+    /// keys.
+    fn cycle_pane_focus(&mut self, clockwise: bool, cx: &mut Context<Self>) {
         let Some(tree) = self.panes.as_ref() else {
             return;
         };
         let leaves = tree.leaves();
-        if leaves.len() < 2 {
-            return;
-        }
         let at = self
             .focused_pane()
             .and_then(|id| leaves.iter().position(|leaf| *leaf == id))
             .unwrap_or(0);
-        let next = leaves[(at + 1) % leaves.len()];
+        let rotation = if clockwise {
+            split::PaneRotation::Clockwise
+        } else {
+            split::PaneRotation::Anticlockwise
+        };
+        // The wraparound lives in the core, where it is tested without a
+        // window (#2580).
+        let Some(index) = split::rotated_index(at, leaves.len(), rotation) else {
+            return;
+        };
+        let next = leaves[index];
         // The chat's own leaf is the pane the caret reaches as `None`, which
         // is how every other surface already names it.
         self.pane_focus = if Some(next) == self.transcript.session {
@@ -4698,6 +4712,14 @@ impl Dashboard {
                 self.begin_split(layout, cx);
                 return;
             }
+            // Alt+Tab rotates the caret between the panes and Alt+Shift+Tab
+            // the other way (#2580, #2579). It runs ahead of the composer gate
+            // so the chord works with the caret in the composer, and ahead of
+            // bare Tab, which keeps its own jobs.
+            if let Some(rotation) = rotation_chord(ks) {
+                self.cycle_pane_focus(rotation == split::PaneRotation::Clockwise, cx);
+                return;
+            }
             if self.split_pick.is_some() {
                 match ks.key.as_str() {
                     "escape" => {
@@ -5167,25 +5189,6 @@ impl Dashboard {
             window.set_rem_size(px(self.rem));
             logging::debug(&format!("zoom -> {:.2}x", self.rem / BASE_REM));
             cx.notify();
-            return;
-        }
-        // Tab moves the caret between the two panes while a split is open, so
-        // the accent follows the keyboard instead of staying where the split
-        // started (#2475). It runs ahead of the rail and of the composer gate
-        // for the same reason: a live split owns Tab while it exists. An open
-        // emoji or command list keeps the key, the way it already did (#2417).
-        if ev.keystroke.key == "tab"
-            && !ev.keystroke.modifiers.control
-            && !ev.keystroke.modifiers.platform
-            && !ev.keystroke.modifiers.alt
-            && self.screen == Screen::Chat
-            && self
-                .panes
-                .as_ref()
-                .is_some_and(|tree| tree.leaves().len() > 1)
-            && !self.editor.read(cx).list_open()
-        {
-            self.cycle_pane_focus(cx);
             return;
         }
         // Tab moves the keyboard between the composer and the rail. It runs before
@@ -10643,6 +10646,23 @@ fn split_chord(ks: &gpui::Keystroke) -> Option<split::Layout> {
         &ks.key,
         ks.key_char.as_deref(),
         ks.modifiers.control,
+        ks.modifiers.shift,
+    )
+}
+
+/// The chord that rotates the panes (#2580, #2579): `alt+tab` clockwise and
+/// `alt+shift+tab` anticlockwise.
+///
+/// The window reads it through here rather than inline so the rule stays in
+/// one place, [`split::rotation_chord`], where `ctrl+alt+tab` and
+/// `cmd+alt+tab` are refused and a shifted tab spelled `backtab` is still
+/// accepted.
+fn rotation_chord(ks: &gpui::Keystroke) -> Option<split::PaneRotation> {
+    split::rotation_chord(
+        &ks.key,
+        ks.modifiers.alt,
+        ks.modifiers.control,
+        ks.modifiers.platform,
         ks.modifiers.shift,
     )
 }

@@ -82,6 +82,60 @@ pub fn chord_layout(
     }
 }
 
+/// Which way a rotation chord walks the caret between the panes (#2580, #2579).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaneRotation {
+    /// `alt+tab`: the next pane, in the order the eye reads.
+    Clockwise,
+    /// `alt+shift+tab`: the pane before it.
+    Anticlockwise,
+}
+
+/// The rotation chord for a keystroke, or None (#2580, #2579).
+///
+/// Alt is the whole point of the chord. `Tab` alone belongs to the emoji
+/// picker, the follow-up suggestion and the rail, so rotating on it made the
+/// two fight for one keystroke in the window while the terminal had already
+/// moved to Alt (#2580). Control and the platform key are refused as well, so
+/// `cmd+alt+tab` stays the window manager's and `ctrl+alt+tab` stays free
+/// instead of rotating by accident.
+///
+/// Shift is read from the modifier, and a shifted tab is also accepted as
+/// `backtab`, because that is the spelling a terminal hands over once shift
+/// has been folded into the key.
+pub fn rotation_chord(
+    key: &str,
+    alt: bool,
+    control: bool,
+    platform: bool,
+    shift: bool,
+) -> Option<PaneRotation> {
+    if !alt || control || platform {
+        return None;
+    }
+    match (key, shift) {
+        ("tab", false) => Some(PaneRotation::Clockwise),
+        ("tab", true) | ("backtab", _) => Some(PaneRotation::Anticlockwise),
+        _ => None,
+    }
+}
+
+/// The leaf a rotation lands on (#2580, #2579).
+///
+/// `at` is the leaf the caret holds now and `len` how many leaves the tree
+/// draws. A single leaf has nowhere to go, which is how the window tells a
+/// live split from a full-width pane, and an `at` outside the tree is refused
+/// rather than wrapped into a pane the user never saw.
+pub fn rotated_index(at: usize, len: usize, rotation: PaneRotation) -> Option<usize> {
+    if len < 2 || at >= len {
+        return None;
+    }
+    Some(match rotation {
+        PaneRotation::Clockwise => (at + 1) % len,
+        PaneRotation::Anticlockwise => (at + len - 1) % len,
+    })
+}
+
 /// Rows every pane spends on its own chrome: the top and bottom border.
 pub const PANE_CHROME_ROWS: u16 = 2;
 
