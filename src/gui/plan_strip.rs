@@ -139,10 +139,17 @@ impl PlanStripState {
         // `flex_none` on the card itself: inside a pane the transcript above
         // it takes `flex_1`, and a shrinkable card was squeezed to zero height
         // in a short pane while its composer survived (#2624).
+        //
+        // `w_full` is what makes the rows legible at all (#2624): a column
+        // sized from its own content contains truncating text, so the text was
+        // measured against the width it was about to define. gpui resolved
+        // that circle by giving every line one character of room, which is why
+        // a split pane showed a wide card of nothing but ellipses.
         let mut col: Div = div()
             .flex()
             .flex_col()
             .flex_none()
+            .w_full()
             .gap_1()
             .px_2()
             .py_1()
@@ -157,6 +164,7 @@ impl PlanStripState {
             };
             col = col.child(
                 div()
+                    .w_full()
                     .min_w_0()
                     .overflow_hidden()
                     .truncate()
@@ -518,6 +526,34 @@ mod tests {
             plan.tasks[i].status = TaskStatus::InProgress;
         }
         plan
+    }
+
+    /// #2624: the pane card was a wide box of ellipses in a split. A column
+    /// sized from its own content contains truncating text, so gpui measured
+    /// each line against the width it was about to define and gave it one
+    /// character. The card and every line take the pane's width instead.
+    #[test]
+    fn the_pane_card_takes_the_panes_width() {
+        const SRC: &str = include_str!("plan_strip.rs");
+        let body = SRC
+            .split_once("pub fn pane_view(")
+            .expect("pane_view exists")
+            .1
+            .split_once("/// How much of a plan one pane shows")
+            .expect("pane_view ends")
+            .0;
+        assert!(
+            body.contains(".w_full()"),
+            "the pane card must own its width, not derive it from the text it truncates"
+        );
+        let row = body
+            .split_once("col = col.child(")
+            .expect("pane rows are built in a loop")
+            .1;
+        assert!(
+            row.contains(".w_full()") && row.contains(".truncate()"),
+            "each line takes the card's width and clips there"
+        );
     }
 
     #[test]

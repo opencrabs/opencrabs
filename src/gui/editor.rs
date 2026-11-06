@@ -31,6 +31,7 @@ use gpui::{
 };
 
 use unicode_segmentation::UnicodeSegmentation;
+use uuid::Uuid;
 
 actions!(
     editor,
@@ -220,6 +221,18 @@ pub enum EditorEvent {
     Preview(std::path::PathBuf),
 }
 
+/// A queue walk the composer is holding: the messages Up took out of one
+/// session's queue, in the order it took them, and the draft the first Up
+/// covered. Taking them is the point: a message the user pulled out to edit
+/// must not still be queued, or the drain would send the original while they
+/// edit a copy (#2637).
+struct Recall {
+    session: Uuid,
+    /// Newest taken first. The last entry is the one in the field.
+    entries: Vec<crate::agent_bridge::PendingMessage>,
+    draft: String,
+}
+
 /// The editor view. Ranges internal to this struct are utf8; every value
 /// crossing the `EntityInputHandler` boundary is utf16, per the contract.
 pub struct Editor {
@@ -229,11 +242,11 @@ pub struct Editor {
     input_history: Vec<String>,
     input_history_index: Option<usize>,
     input_history_stash: String,
-    /// How far Up has walked back through the queued messages, newest first,
-    /// and the draft it covered, so Down returns to what the user was typing
-    /// (#2629).
-    recall_depth: Option<usize>,
-    recall_draft: String,
+    /// The queued messages Up pulled out of the queue to edit, newest taken
+    /// first, and the draft the walk covered. The last entry is what the field
+    /// shows. They are OUT of the queue while they are here, so a recall the
+    /// user decides not to send is never sent behind their back (#2637).
+    recall: Option<Recall>,
     /// Files attached to the next message. They live here, not in the window
     /// state, because the send action is what consumes them: the editor is
     /// the only place that can append the markers atomically with clearing
@@ -308,8 +321,7 @@ impl Editor {
             input_history: Vec::new(),
             input_history_index: None,
             input_history_stash: String::new(),
-            recall_depth: None,
-            recall_draft: String::new(),
+            recall: None,
             attachments: Vec::new(),
             placeholder: "Message OpenCrabs…".into(),
             selected_range: 0..0,
@@ -365,10 +377,9 @@ impl Editor {
     /// at the end, ready to edit (#2635). The caller only does this when the
     /// draft is empty, so nothing the user typed since is overwritten.
     pub fn restore_draft(&mut self, text: String, cx: &mut Context<Self>) {
-        // A recall belongs to the queue, not to this hand-back.
-        self.recall_depth = None;
-        self.recall_draft.clear();
-        crate::agent_bridge::queue_recall_hold(None);
+        // A recall belongs to the queue, not to this hand-back: whatever it
+        // still held goes back to wait there.
+        self.give_back_recall(false);
         self.content = text;
         let end = self.content.len();
         self.selected_range = end..end;
@@ -654,12 +665,35 @@ impl Editor {
         rows
     }
 
-    /// Forget the recall: the message it was holding has been sent, so the
-    /// next Up starts again at the newest queued one (#2629).
-    pub fn clear_recall(&mut self) {
-        self.recall_depth = None;
-        self.recall_draft.clear();
-        crate::agent_bridge::queue_recall_hold(None);
+    /// Everything the recall still holds, for the caller to put back in the
+    /// queue it came from.
+    ///
+    /// `keep_current` is for the send path: the message in the field is the one
+    /// going out, so it leaves with the send, while the ones the walk took
+    /// before it go back to wait, because the user never consumed them
+    /// (#2637).
+    pub fn release_recall(
+        &mut self,
+        keep_current: bool,
+    ) -> Option<(Uuid, Vec<crate::agent_bridge::PendingMessage>)> {
+        let mut recall = self.recall.take()?;
+        if keep_current {
+            recall.entries.pop();
+        }
+        // The walk took the run newest first; a queue is appended to, so it
+        // takes them back oldest first or the order they were written in
+        // comes back inverted.
+        recall.entries.reverse();
+        Some((recall.session, recall.entries))
+    }
+
+    /// Put a recall's messages back in their own queue.
+    fn give_back_recall(&mut self, keep_current: bool) {
+        if let Some((session, entries)) = self.release_recall(keep_current) {
+            for msg in entries {
+                crate::agent_bridge::queue_recall_return(session, msg);
+            }
+        }
     }
 
     /// The hint an empty field shows. It belongs to the window's state, not to
@@ -678,17 +712,28 @@ impl Editor {
     fn up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
         // Up walks the queue back one message at a time: newest first, then the
         // one before it, so five queued messages are five edits instead of one
-        // (#2629). The first step stashes the draft it covered, and the queue
-        // itself is untouched until the edit is sent.
-        let next = self.recall_depth.map_or(0, |depth| depth + 1);
-        if (self.content.is_empty() || self.recall_depth.is_some())
-            && let Some(msg) = crate::agent_bridge::queue_recall_at(next)
+        // (#2629). Each step TAKES its message out of the queue: leaving the
+        // original behind meant a message the user pulled out and decided not
+        // to send still went out when the turn ended, while the strip kept
+        // calling it queued (#2637).
+        if (self.content.is_empty() || self.recall.is_some())
+            && let Some((session, msg)) = crate::agent_bridge::queue_recall_take()
         {
-            if self.recall_depth.is_none() {
-                self.recall_draft = std::mem::take(&mut self.content);
+            // A walk belongs to the session it started in: a recall from
+            // another conversation goes back to wait before this one starts.
+            if self
+                .recall
+                .as_ref()
+                .is_some_and(|recall| recall.session != session)
+            {
+                self.give_back_recall(false);
             }
-            self.recall_depth = Some(next);
-            crate::agent_bridge::queue_recall_hold(Some(msg.display_text.clone()));
+            let recall = self.recall.get_or_insert_with(|| Recall {
+                session,
+                entries: Vec::new(),
+                draft: std::mem::take(&mut self.content),
+            });
+            recall.entries.push(msg.clone());
             self.content = msg.display_text;
             let end = self.content.len();
             self.selected_range = end..end;
@@ -732,19 +777,26 @@ impl Editor {
         if self.step_emoji_popup(1, cx) {
             return;
         }
-        // Down is Up's way back out of a recall: the next message newer, then
-        // the draft the first Up covered (#2629).
-        if let Some(depth) = self.recall_depth {
-            let recalled = depth
-                .checked_sub(1)
-                .and_then(crate::agent_bridge::queue_recall_at);
-            let text = match &recalled {
-                Some(msg) => msg.display_text.clone(),
-                None => std::mem::take(&mut self.recall_draft),
-            };
-            self.recall_depth = recalled.as_ref().map(|_| depth - 1);
-            crate::agent_bridge::queue_recall_hold(recalled.map(|msg| msg.display_text));
-            self.content = text;
+        // Down is Up's way back out of a recall: the message on screen goes
+        // back into its queue, edits and all, and the next newer one, then the
+        // draft the first Up covered, takes its place (#2637).
+        if self.recall.is_some() {
+            let mut recall = self.recall.take().expect("a recall is active");
+            if let Some(mut msg) = recall.entries.pop() {
+                let original = msg.display_text.clone();
+                if msg.context_text == original {
+                    msg.context_text = self.content.clone();
+                }
+                msg.display_text = self.content.clone();
+                crate::agent_bridge::queue_recall_return(recall.session, msg);
+            }
+            match recall.entries.last() {
+                Some(msg) => {
+                    self.content = msg.display_text.clone();
+                    self.recall = Some(recall);
+                }
+                None => self.content = std::mem::take(&mut recall.draft),
+            }
             let end = self.content.len();
             self.selected_range = end..end;
             self.selection_reversed = false;
@@ -1406,7 +1458,14 @@ impl Element for EditorElement {
             None => placeholder,
         };
         let style = window.text_style();
-        let font_size = style.font_size.to_pixels(window.rem_size());
+        // The hint is a whisper, not a message: painted smaller than the text
+        // it stands in for, so a queue's keys never shout over the
+        // conversation the way full-size words did (#2630).
+        let font_size = if empty {
+            style.font_size.to_pixels(window.rem_size()) * HINT_SCALE
+        } else {
+            style.font_size.to_pixels(window.rem_size())
+        };
         let line_height = window.line_height();
         // The field never widens past its own bounds: wrap to exactly the
         // width the parent handed us, which is what makes a resize reflow.
@@ -2005,6 +2064,10 @@ fn line_col(content: &str, offset: usize) -> (usize, usize) {
 /// (#2479). The TUI prints the same notice with its own key; here the field's
 /// own binding is `cmd-v`.
 const CLIPBOARD_IMAGE_HINT: &str = "\u{1f4cb} Image in clipboard - \u{2318}V to paste";
+
+/// The hint paints at this fraction of the composer's own text size. A full
+/// size line of key names read as a second paragraph above the caret (#2630).
+const HINT_SCALE: f32 = 0.8;
 
 /// The file extension a clipboard image format maps to. `png` covers the
 /// screenshot case; the rest are the formats a browser can hand over.

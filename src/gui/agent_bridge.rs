@@ -107,6 +107,17 @@ pub enum TurnEvent {
     /// A stopped turn's rows are gone: reload the conversation without the
     /// user bubble that was handed back to the composer (#2635).
     TurnReverted { session: Uuid },
+    /// A turn the previous process died in the middle of is running again
+    /// (#2627). The message travels with it because the card has to show what
+    /// is being answered, and the cancel handle because a resumed turn is a
+    /// turn: the stop button has to be able to end it.
+    TurnResumed {
+        session: Uuid,
+        /// The message the killed process was answering.
+        user_message: String,
+        /// The handle that stops it, exactly like one the composer started.
+        cancel: tokio_util::sync::CancellationToken,
+    },
     /// A text command answered off the UI thread; the line goes to the
     /// notices (#2469).
     CommandReply(String),
@@ -490,9 +501,18 @@ async fn build(config: Config, sink: EventSink) -> Result<AgentBridge, String> {
     // static does not collide with a running TUI.
     opencrabs::brain::agent::service::register_local_route(enqueue);
 
-    Ok(AgentBridge {
+    let bridge = AgentBridge {
         service: Arc::new(service),
-    })
+    };
+
+    // Pick up the turns the last process died inside (#2627). Every turn the
+    // window runs writes `pending_requests`, but nothing read the table back,
+    // so a window closed mid-tool came up idle while the terminal on the same
+    // ledger carried on. Detached: the scan is a DB round trip and the resumes
+    // are their own threads, so the window is usable while they start.
+    spawn_boot_resume(bridge.service.clone(), db.pool().clone(), sink.clone());
+
+    Ok(bridge)
 }
 
 /// Create one conversation in the shared ledger and report its id back.
@@ -850,6 +870,281 @@ pub fn spawn_turn(
     }
 }
 
+/// Re-run one interrupted turn on a 4 MB thread (#2627).
+///
+/// `resume_interrupted_turn`, not `send_message_with_tools_and_mode`: a resume
+/// is a one-shot recovery and must never re-track itself. If this turn is
+/// interrupted too (a stop, another crash) the session has already been
+/// cleared from `pending_requests`, so it cannot resume forever (#729).
+fn spawn_resume(
+    service: Arc<AgentService>,
+    session_id: Uuid,
+    content: String,
+    sink: EventSink,
+    cancel: tokio_util::sync::CancellationToken,
+    pending: Arc<std::sync::atomic::AtomicUsize>,
+) {
+    let thread_sink = sink.clone();
+    let thread_pending = pending.clone();
+    let spawned = std::thread::Builder::new()
+        .stack_size(4 * 1024 * 1024)
+        .name("gui-agent-resume".into())
+        .spawn(move || {
+            let sink = thread_sink;
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    let _ = sink.send(TurnEvent::Failed {
+                        session: session_id,
+                        text: format!("resume runtime: {e}"),
+                    });
+                    finish_boot_resume(&thread_pending, &sink);
+                    return;
+                }
+            };
+            let turn_sink = sink.clone();
+            runtime.block_on(async move {
+                match service
+                    .resume_interrupted_turn(
+                        session_id,
+                        content,
+                        None,
+                        Some(cancel),
+                        None,
+                        None,
+                        "tui",
+                        None,
+                    )
+                    .await
+                {
+                    Ok(response) => {
+                        opencrabs::brain::agent::service::boot_report::record_delivered();
+                        let _ = turn_sink.send(TurnEvent::Done {
+                            session: session_id,
+                            content: response.content,
+                            context_tokens: response.context_tokens,
+                            tokens_per_second: response.tokens_per_second,
+                        });
+                    }
+                    Err(e) => {
+                        opencrabs::brain::agent::service::boot_report::record_failed();
+                        let msg = opencrabs::brain::agent::format_user_error(&e);
+                        let _ = turn_sink.send(TurnEvent::Failed {
+                            session: session_id,
+                            text: msg,
+                        });
+                    }
+                }
+            });
+            finish_boot_resume(&thread_pending, &sink);
+        });
+    if let Err(e) = spawned {
+        // A thread that never started must still resolve the boot line, or the
+        // summary is never emitted at all.
+        crate::logging::error(&format!("resume thread spawn failed: {e}"));
+        finish_boot_resume(&pending, &sink);
+    }
+}
+
+/// Resolve the boot accounting once the last dispatched resume is done.
+///
+/// The summary is only worth reading after every resume has answered, because
+/// that is when `delivered` and `failed` are final. Emitting it at dispatch
+/// time would print a row of zeros and look like nothing came back.
+fn finish_boot_resume(pending: &std::sync::atomic::AtomicUsize, sink: &EventSink) {
+    use std::sync::atomic::Ordering;
+    if pending.fetch_sub(1, Ordering::AcqRel) != 1 {
+        return;
+    }
+    // Reached only when at least one resume was dispatched, so the line always
+    // names work that came back and is worth putting on screen.
+    let line = opencrabs::brain::agent::service::boot_report::summary_line();
+    crate::logging::info(&line);
+    let _ = sink.send(TurnEvent::CommandReply(line));
+}
+
+/// Resume the turns the last process died in the middle of (#2627).
+///
+/// The window has written `pending_requests` on every turn since it gained
+/// tools: `spawn_turn` goes through the same tracked path the terminal uses.
+/// Nothing ever read the table back, so closing or killing the window mid-tool
+/// lost the work while the TUI picked the same rows up on its next launch.
+///
+/// This is that read: the ledger is scanned once at boot, cleared before any
+/// resume starts (a crash mid-resume must not replay the same session on the
+/// next launch), and each distinct session is re-run from the message the row
+/// carries. A `system` row is a push turn killed mid-tool: replaying the LLM
+/// turn could double-execute the side effect, so it is re-delivered through the
+/// wake path instead, exactly as the terminal does (#12).
+pub fn spawn_boot_resume(service: Arc<AgentService>, pool: opencrabs::db::Pool, sink: EventSink) {
+    let spawned = std::thread::Builder::new()
+        .stack_size(4 * 1024 * 1024)
+        .name("gui-boot-resume".into())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    crate::logging::error(&format!("boot resume runtime: {e}"));
+                    return;
+                }
+            };
+            runtime.block_on(boot_resume(service, pool, sink));
+        });
+    if let Err(e) = spawned {
+        crate::logging::error(&format!("boot resume thread spawn: {e}"));
+    }
+}
+
+/// What a boot scan found, already split into the work it implies.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct BootPlan {
+    /// Every session a surviving row names, duplicates included: the summary
+    /// counts rows, because that is what the previous process lost track of.
+    interrupted: Vec<Uuid>,
+    /// Sessions to re-run from the message their row carries.
+    resumes: Vec<(Uuid, String)>,
+    /// Sessions whose push has to be re-delivered instead of replayed (#12).
+    pushes: Vec<(Uuid, String)>,
+}
+
+/// Split the surviving rows into the work boot will do, one entry per session.
+///
+/// Pure and separate on purpose: this is the whole decision, and it can be
+/// checked without a database, a provider or a window. The ledger may hold
+/// several rows for one session (a retried turn, a push that landed inside a
+/// turn), and replaying one session per row would run the same turn two or
+/// three times. Rows arrive oldest first, so the FIRST one for a session wins:
+/// it is the turn that was actually running when the process died.
+fn boot_plan(requests: &[opencrabs::db::PendingRequest]) -> BootPlan {
+    let mut plan = BootPlan::default();
+    let mut seen: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+    for req in requests {
+        let Ok(session_id) = Uuid::parse_str(&req.session_id) else {
+            // An unusable id names no session, so it is skipped rather than
+            // guessed at.
+            continue;
+        };
+        plan.interrupted.push(session_id);
+        if !seen.insert(session_id) {
+            continue;
+        }
+        if req.origin == "system" {
+            plan.pushes.push((session_id, req.user_message.clone()));
+        } else {
+            plan.resumes.push((session_id, req.user_message.clone()));
+        }
+    }
+    plan
+}
+
+/// The scan half of [`spawn_boot_resume`], on the caller's runtime.
+async fn boot_resume(service: Arc<AgentService>, pool: opencrabs::db::Pool, sink: EventSink) {
+    use opencrabs::brain::agent::service::boot_report;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let pending_repo = opencrabs::db::PendingRequestRepository::new(pool.clone());
+    // A table that cannot take a row means nothing in this run survives the
+    // next restart, and an empty scan is then blindness, not health (#1401).
+    if let Err(e) = pending_repo.probe().await {
+        crate::logging::warn(&format!(
+            "restart recovery DISABLED for this run: {e:#}. Interrupted turns will not be resumed after the next restart."
+        ));
+        boot_report::record_tracking_disabled(format!("{e:#}"));
+        return;
+    }
+    let requests = match pending_repo.get_interrupted().await {
+        Ok(requests) => requests,
+        Err(e) => {
+            crate::logging::error(&format!("boot resume: pending scan failed: {e:#}"));
+            return;
+        }
+    };
+    if requests.is_empty() {
+        crate::logging::info(&boot_report::summary_line());
+        return;
+    }
+    // Cleared before the first resume runs: these rows are about to be worked
+    // off, and a crash in the middle must not queue them again forever (#729).
+    if let Err(e) = pending_repo.clear_all().await {
+        crate::logging::warn(&format!("boot resume: clearing the ledger failed: {e:#}"));
+    }
+
+    let sessions = opencrabs::db::SessionRepository::new(pool);
+    // What the scan decided, decided once and testable on its own: the async
+    // half below only carries it out.
+    let plan = boot_plan(&requests);
+    for session_id in &plan.interrupted {
+        boot_report::record_interrupted(*session_id);
+    }
+    let pending = Arc::new(AtomicUsize::new(0));
+    for (session_id, message) in plan.pushes {
+        // A push turn killed mid-tool: re-deliver the push, never replay the
+        // tool call it was inside (#12). The window's local route claims it,
+        // so it lands as a completion rather than waiting for a channel.
+        opencrabs::brain::agent::service::restart_recovery::deliver_or_park(
+            session_id,
+            QueuedUserMessage {
+                context_text: message,
+                display_text: format!(
+                    "⚠️ A push-initiated turn was interrupted by a restart, re-delivering it (session {})",
+                    &session_id.simple().to_string()[..8]
+                ),
+                origin: opencrabs::brain::agent::PushOrigin::Recovery,
+                bg_meta: None,
+            },
+        );
+    }
+    for (session_id, user_message) in plan.resumes {
+        boot_report::record_resumed(session_id);
+        // The session's own working directory, restored per session and never
+        // through the global, so two resumes in different repos cannot clobber
+        // each other (#703, #2007).
+        if let Ok(Some(session)) = sessions.find_by_id(session_id).await
+            && let Some(dir) = session.working_directory.as_deref()
+        {
+            let path = PathBuf::from(dir);
+            if path.is_dir() {
+                service.set_session_only_working_directory(session_id, path);
+            }
+        }
+        let cancel = tokio_util::sync::CancellationToken::new();
+        // The card first: the window has to know this conversation is busy
+        // before the first chunk arrives, or the turn paints into a window
+        // that believes it is idle.
+        let _ = sink.send(TurnEvent::TurnResumed {
+            session: session_id,
+            user_message: user_message.clone(),
+            cancel: cancel.clone(),
+        });
+        pending.fetch_add(1, Ordering::AcqRel);
+        // The continuation prompt, not the row's own text: the turn picks up
+        // from the context already in the session, and replaying the request
+        // would run it twice (#2627, same rule as the terminal at
+        // `resume_delivery.rs`).
+        spawn_resume(
+            service.clone(),
+            session_id,
+            opencrabs::brain::agent::service::restart_recovery::CONTINUATION_PROMPT.to_string(),
+            sink.clone(),
+            cancel,
+            pending.clone(),
+        );
+    }
+    if pending.load(Ordering::Acquire) == 0 {
+        // Only push rows were found (or the ids were unusable): nothing was
+        // dispatched, so nothing will ever call the completion.
+        let line = boot_report::summary_line();
+        crate::logging::info(&line);
+        let _ = sink.send(TurnEvent::CommandReply(line));
+    }
+}
+
 /// The service-global progress forwarder: every `(session, event)` pair
 /// lands in `sink` for the UI to drain. Installed on the builder inside
 /// `build` (the builder consumes self, so there is no post-hoc setter).
@@ -928,86 +1223,37 @@ pub fn queue_snapshot(session_id: Uuid) -> Vec<QueuedUserMessage> {
     queue().get(&session_id).cloned().unwrap_or_default()
 }
 
-/// Take everything waiting for `session_id`, so it is sent once. A recall hold
-/// names a slot in this queue, so it goes with it (#2629).
+/// Take everything waiting for `session_id`, so it is sent once. A message a
+/// composer has pulled out to edit is no longer in the queue (#2637), so the
+/// drain can never send a recall behind the user's back.
 pub fn queue_take(session_id: Uuid) -> Vec<QueuedUserMessage> {
-    queue_recall_hold(None);
     queue().remove(&session_id).unwrap_or_default()
 }
 
-/// Which slot `depth` names in a queue of `len`, counting back from the
-/// newest. `None` once Up walks past the head (#2629).
-fn recall_index(len: usize, depth: usize) -> Option<usize> {
-    len.checked_sub(depth + 1)
-}
-
-/// The queued message `depth` places back from the newest, left where it is.
+/// The newest message waiting for the composer's session, taken out of the
+/// queue.
 ///
-/// Recall used to pop the tail, so only the newest message was ever editable
-/// and the rest were unreachable until the turn ended (#2629). It reads
-/// instead: the queue keeps every message, and the edit lands back in its own
-/// slot when it is sent again.
-pub fn queue_recall_at(depth: usize) -> Option<QueuedUserMessage> {
+/// Recall used to read the queue and leave the message in it (#2629), so the
+/// original was still there to be sent while the user edited a copy: pulling a
+/// message out and then deciding not to send it did not stop it from going out,
+/// and the strip kept naming it as queued (#2637). Up now takes it. What the
+/// composer holds belongs to the composer; only sending puts it back.
+pub fn queue_recall_take() -> Option<(Uuid, QueuedUserMessage)> {
     let session = (*COMPOSER_SESSION.lock().ok()?)?;
-    let snapshot = queue_snapshot(session);
-    let index = recall_index(snapshot.len(), depth)?;
-    snapshot.get(index).cloned()
+    let mut map = queue();
+    let entry = map.get_mut(&session)?;
+    let msg = entry.pop()?;
+    if entry.is_empty() {
+        map.remove(&session);
+    }
+    Some((session, msg))
 }
 
-/// Which queued message the composer is holding, by the text it went in with,
-/// so the send path can put an edit back where it came from instead of
-/// appending a second copy (#2629).
-///
-/// A position would be wrong: a background report landing while the user edits
-/// pushes every slot one down, and the send would replace a message they never
-/// touched.
-static RECALL_HELD: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
-
-/// Remember (or forget) the queued message the focused composer went back to.
-pub fn queue_recall_hold(text: Option<String>) {
-    if let Ok(mut held) = RECALL_HELD.lock() {
-        *held = text;
-    }
-}
-
-/// The text the focused composer recalled, if it is editing a queued message.
-pub fn queue_recall_held() -> Option<String> {
-    RECALL_HELD
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clone()
-}
-
-/// Send a recalled message: `Some(edited)` replaces the queued one in its own
-/// slot, `None` drops it because the turn it was queued behind is over and
-/// this text is what is running now.
-///
-/// The slot is found by text, and a message that left the queue while the user
-/// was editing is queued again as an edited copy: their words are never
-/// silently dropped (#2629).
-pub fn queue_recall_commit(session_id: Uuid, original: &str, edited: Option<QueuedUserMessage>) {
-    let mut replaced = false;
-    {
-        let mut map = queue();
-        if let Some(entry) = map.get_mut(&session_id)
-            && let Some(index) = entry.iter().rposition(|m| m.display_text == original)
-        {
-            match edited.clone() {
-                Some(msg) => entry[index] = msg,
-                None => {
-                    entry.remove(index);
-                }
-            }
-            replaced = true;
-            if entry.is_empty() {
-                map.remove(&session_id);
-            }
-        }
-    }
-    if !replaced && let Some(msg) = edited {
-        queue_push(session_id, msg);
-    }
-    queue_recall_hold(None);
+/// Put a message the composer took for editing back where it waited. Walking
+/// down past a recall returns it to its own session's queue, edits and all, so
+/// nothing that was queued is lost by looking at it (#2637).
+pub fn queue_recall_return(session_id: Uuid, msg: QueuedUserMessage) {
+    queue_push(session_id, msg);
 }
 
 /// Point the composer at `session_id`, so recall and the strip agree with it.
@@ -1095,13 +1341,14 @@ pub fn spawn_undo_last_turn(service: Arc<AgentService>, session_id: Uuid, sink: 
                 Ok(rt) => rt,
                 Err(e) => {
                     crate::logging::error(&format!("turn undo runtime: {e}"));
-                    let _ = done_sink.send(TurnEvent::TurnReverted { session: session_id });
+                    let _ = done_sink.send(TurnEvent::TurnReverted {
+                        session: session_id,
+                    });
                     return;
                 }
             };
             runtime.block_on(async move {
-                let messages =
-                    opencrabs::services::MessageService::new(service.context().clone());
+                let messages = opencrabs::services::MessageService::new(service.context().clone());
                 let rows = match messages.list_messages_for_session(session_id).await {
                     Ok(rows) => rows,
                     Err(e) => {
@@ -1124,7 +1371,9 @@ pub fn spawn_undo_last_turn(service: Arc<AgentService>, session_id: Uuid, sink: 
                     return;
                 }
                 let Some(question) = rows.get(rows.len().saturating_sub(2)) else {
-                    let _ = done_sink.send(TurnEvent::TurnReverted { session: session_id });
+                    let _ = done_sink.send(TurnEvent::TurnReverted {
+                        session: session_id,
+                    });
                     return;
                 };
                 if question.role == "user"
@@ -1132,12 +1381,16 @@ pub fn spawn_undo_last_turn(service: Arc<AgentService>, session_id: Uuid, sink: 
                 {
                     crate::logging::error(&format!("turn undo user row: {e}"));
                 }
-                let _ = done_sink.send(TurnEvent::TurnReverted { session: session_id });
+                let _ = done_sink.send(TurnEvent::TurnReverted {
+                    session: session_id,
+                });
             });
         });
     if let Err(e) = spawned {
         crate::logging::error(&format!("turn undo thread: {e}"));
-        let _ = sink.send(TurnEvent::TurnReverted { session: session_id });
+        let _ = sink.send(TurnEvent::TurnReverted {
+            session: session_id,
+        });
     }
 }
 
@@ -1471,10 +1724,11 @@ async fn run_text_command(
 mod tests {
     use super::*;
 
-    /// Up walks the whole queue, newest first (#2629). Recall used to pop the
-    /// tail, which made the older messages unreachable for the whole turn.
+    /// Up walks the whole queue, newest first (#2629), and takes each message
+    /// out of it: a recall the user abandons must not be sent when the turn
+    /// ends (#2637).
     #[test]
-    fn up_recalls_the_queue_one_message_at_a_time() {
+    fn up_takes_the_queue_one_message_at_a_time() {
         // One test for the queue's recall path: `COMPOSER_SESSION` and `QUEUE`
         // are process-wide, so two tests here would race on them.
         let session = Uuid::from_u128(0x2629_0001);
@@ -1487,59 +1741,130 @@ mod tests {
         queue_push(other, QueuedUserMessage::plain("elsewhere".to_string()));
 
         set_composer_session(Some(session));
-        let walked: Vec<String> = (0..)
-            .map_while(|depth| queue_recall_at(depth).map(|msg| msg.display_text))
-            .collect();
+        let mut walked: Vec<String> = Vec::new();
+        while let Some((from, msg)) = queue_recall_take() {
+            assert_eq!(from, session, "a recall never reaches another session");
+            walked.push(msg.display_text);
+        }
         assert_eq!(
             walked,
             vec!["three".to_string(), "two".to_string(), "one".to_string()],
             "Up walks from the newest to the oldest"
         );
+        assert!(
+            queue_snapshot(session).is_empty(),
+            "a message the composer holds is no longer queued, so nothing can send it behind the user"
+        );
         assert_eq!(
-            queue_snapshot(session).len(),
-            3,
-            "walking the queue leaves every message in it, so an edit is not a removal"
+            queue_snapshot(other).len(),
+            1,
+            "taking this session's queue leaves another session's alone"
         );
 
-        // Sending the edited middle message replaces it where it stands.
-        queue_recall_hold(Some("two".to_string()));
-        queue_recall_commit(
-            session,
-            "two",
-            Some(QueuedUserMessage::plain("two edited".to_string())),
-        );
+        // Walking away from a recall puts it back, in the order it was taken.
+        queue_recall_return(session, QueuedUserMessage::plain("two".to_string()));
+        queue_recall_return(session, QueuedUserMessage::plain("three".to_string()));
         let left: Vec<String> = queue_snapshot(session)
             .iter()
             .map(|msg| msg.display_text.clone())
             .collect();
         assert_eq!(
             left,
-            vec![
-                "one".to_string(),
-                "two edited".to_string(),
-                "three".to_string()
-            ],
-            "an edit lands in its own slot instead of appending a copy"
-        );
-        assert!(queue_recall_held().is_none(), "the hold ends with the send");
-
-        // A message that left the queue while it was being edited is queued
-        // again rather than dropped.
-        queue_recall_commit(
-            session,
-            "gone",
-            Some(QueuedUserMessage::plain("rescued".to_string())),
-        );
-        assert_eq!(
-            queue_snapshot(session)
-                .last()
-                .map(|m| m.display_text.clone()),
-            Some("rescued".to_string()),
-            "typed words are never silently dropped"
+            vec!["two".to_string(), "three".to_string()],
+            "a returned message waits in its own queue again"
         );
 
         let _ = queue_take(session);
         let _ = queue_take(other);
         set_composer_session(None);
+    }
+
+    /// Boot picks up exactly the work the killed process was in the middle of,
+    /// once per session, and never replays a push as a tool turn (#2627).
+    #[test]
+    fn the_window_boot_resumes_an_interrupted_turn() {
+        fn row(session: Uuid, message: &str, origin: &str) -> opencrabs::db::PendingRequest {
+            opencrabs::db::PendingRequest {
+                id: Uuid::new_v4().to_string(),
+                session_id: session.to_string(),
+                user_message: message.to_string(),
+                channel: "tui".to_string(),
+                channel_chat_id: None,
+                channel_thread_id: None,
+                channel_message_id: None,
+                origin: origin.to_string(),
+            }
+        }
+        let a = Uuid::from_u128(0x2627_0001);
+        let b = Uuid::from_u128(0x2627_0002);
+        let c = Uuid::from_u128(0x2627_0003);
+
+        let plan = boot_plan(&[
+            row(a, "build it", "user"),
+            row(a, "build it again", "user"),
+            row(b, "why is CI red", "user"),
+            row(c, "background job finished", "system"),
+        ]);
+
+        assert_eq!(
+            plan.interrupted.len(),
+            4,
+            "every surviving row is interrupted work, duplicates included"
+        );
+        assert_eq!(
+            plan.resumes,
+            vec![
+                (a, "build it".to_string()),
+                (b, "why is CI red".to_string()),
+            ],
+            "one resume per session, from the row that was running first"
+        );
+        assert_eq!(
+            plan.pushes,
+            vec![(c, "background job finished".to_string())],
+            "a push row is re-delivered, never replayed as a tool turn (#12)"
+        );
+
+        // An unusable id names no session and is skipped, not guessed at.
+        let mut broken = row(a, "orphan", "user");
+        broken.session_id = "not-a-uuid".to_string();
+        assert!(
+            boot_plan(&[broken]).resumes.is_empty(),
+            "a row whose id is not a UUID names no session"
+        );
+
+        let src = include_str!("agent_bridge.rs");
+        let scan = src
+            .split("async fn boot_resume(")
+            .nth(1)
+            .expect("the boot scan");
+        let scan = scan
+            .split("/// The service-global progress forwarder")
+            .next()
+            .expect("the end of the scan");
+        assert!(scan.contains("get_interrupted()"), "boot reads the ledger");
+        let clear = scan.find("clear_all()").expect("the ledger is cleared");
+        let dispatch = scan.find("spawn_resume(").expect("the resume is spawned");
+        assert!(
+            clear < dispatch,
+            "rows are cleared before any resume runs, or a crash mid-resume replays them (#729)"
+        );
+
+        let resume = src
+            .split("fn spawn_resume(")
+            .nth(1)
+            .expect("the resume runner");
+        assert!(
+            resume.contains("resume_interrupted_turn("),
+            "a resume goes through the untracked path"
+        );
+        assert!(
+            !resume.contains("send_message_with_tools_and_mode("),
+            "a resume that re-tracked itself would resume forever (#729)"
+        );
+        assert!(
+            src.contains("spawn_boot_resume(bridge.service.clone()"),
+            "the window's boot actually runs the scan"
+        );
     }
 }

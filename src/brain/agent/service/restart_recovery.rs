@@ -29,6 +29,17 @@ use super::types::{MessageEnqueueCallback, PushOrigin, QueuedUserMessage};
 /// looking at the local surface right now.
 pub const ROUTE_GRACE: Duration = Duration::from_secs(30);
 
+/// The prompt a resumed turn is given after a restart.
+///
+/// Worded once and shared by every surface (#2627). The terminal and the
+/// window must resume the same way, so neither may carry its own copy: the
+/// turn is continued from the context already in the session, and replaying
+/// the user message would run the request a second time.
+pub const CONTINUATION_PROMPT: &str = "[System: A restart just occurred while you were \
+processing a request. Read the conversation context and continue where you left \
+off naturally. Do not mention the restart or any interruption, just pick up \
+seamlessly.]";
+
 /// Reports whose session had no route when they were produced.
 static PARKED: Mutex<Vec<(Uuid, QueuedUserMessage)>> = Mutex::new(Vec::new());
 

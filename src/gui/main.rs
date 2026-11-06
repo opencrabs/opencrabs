@@ -42,6 +42,7 @@ mod onboard;
 mod palette;
 mod plan_strip;
 mod preview;
+mod rail_activity;
 mod screen_keys;
 mod sessions;
 mod skills_view;
@@ -73,7 +74,6 @@ use opencrabs::ui_core::commands as slash;
 // so both clients print the same rows in the same order (#2458). Named `find`
 // because `palette` here is the window's colour table.
 use opencrabs::ui_core::card::{CARD_RADIUS, glass_fill};
-use opencrabs::ui_core::live_owner::LiveOwner;
 use opencrabs::ui_core::palette::{
     self as find, Channel, PaletteAction, PaletteItem, PaletteKind, PaletteState,
 };
@@ -450,6 +450,22 @@ fn channel_chip_line_from(names: &[String]) -> Option<SharedString> {
     channel_status::status_line(&borrowed, &channel_ownership()).map(SharedString::from)
 }
 
+/// A running turn parked under the conversation that owns it (#2616).
+///
+/// The window paints one conversation at a time, and every session may be
+/// mid-turn on its own. Turn state therefore travels with the session:
+/// switching conversations parks the card, its cancel handle, the reload
+/// handshake and the last prompt size here, and coming back puts them on
+/// screen again. Entries exist only while a turn is in flight, so a profile
+/// with thousands of conversations costs nothing.
+struct StashedTurn {
+    live: transcript::LiveTurn,
+    cancel: Option<tokio_util::sync::CancellationToken>,
+    settle_expect: Option<usize>,
+    settle_retries: u8,
+    ctx_tokens: Option<u32>,
+}
+
 /// The phase 1 window. Every string on screen is real data or the real error.
 struct Dashboard {
     /// Which pane the right side draws: chat by default, usage on ctrl+u.
@@ -546,6 +562,18 @@ struct Dashboard {
     db_path: std::path::PathBuf,
     /// The session rail's live state.
     sessions: sessions::SessionsState,
+    /// Which rail rows have work in flight, and which plans wait (#2636).
+    /// Memory only: the open turn and each split leaf already keep their own
+    /// `busy`, so this holds the one thing nothing else records, a session
+    /// streaming with no pane of its own.
+    rail: rail_activity::RailActivity,
+    /// The id to plan-file index behind each row's badge, with its mtime cache.
+    rail_index: rail_activity::PlanIndex,
+    /// The plans the owner has already opened, so their rings stop (#2636).
+    rail_seen: rail_activity::SeenPlans,
+    /// The one monotonic origin every rail animation reads, so all rows blink
+    /// on the same frame instead of one clock each.
+    rail_clock: std::time::Instant,
     /// Rail width in rem, moved by the splitter's drag. Never below
     /// `RAIL_MIN_REM`: dragging past it closes the rail instead, and ctrl+s
     /// brings it back at the last width.
@@ -739,10 +767,11 @@ struct Dashboard {
     /// as the transcript's last entry and clears once the DB holds the rows,
     /// so a slow or silent turn never looks like an empty conversation.
     live: transcript::LiveTurn,
-    /// Which conversation owns `live` and `busy` (#2616). The window can open
-    /// another session while a turn runs, and neither the card nor the busy
-    /// flag may follow the switch.
-    live_owner: LiveOwner,
+    /// Turns running in conversations the window is not painting (#2616).
+    /// Keyed by the session that owns each one, so a switch parks the turn on
+    /// screen and restores the destination's, and the window never has to
+    /// guess which conversation a card belongs to.
+    stashed: std::collections::HashMap<Uuid, StashedTurn>,
     /// Reload attempts made while waiting for the turn's rows to persist.
     /// Bounded, so a write that never lands cannot spin the fetch loop.
     settle_retries: u8,
@@ -782,10 +811,11 @@ struct Dashboard {
     /// window forgets instead of showing the session's current number as if
     /// it belonged to an old turn.
     turn_metrics: HashMap<String, transcript::TurnMetrics>,
-    /// Metrics for the turn that just settled, waiting for its rows to land
-    /// so the anchor they get keyed by exists. Session-tagged: a reload for
-    /// another conversation must not claim them.
-    pending_metrics: Option<(Uuid, transcript::TurnMetrics)>,
+    /// Metrics for the turns that just settled, waiting for their rows to land
+    /// so the anchor they get keyed by exists. Keyed by session, one slot each:
+    /// a reload for another conversation must not claim them, and a split can
+    /// settle two panes before either reload comes back (#2632).
+    pending_metrics: HashMap<Uuid, transcript::TurnMetrics>,
     /// The checkout's branch, read once at startup: the footer's own field in
     /// the TUI. `None` outside a git tree, which the footer shows as a dash
     /// rather than a made-up name.
@@ -952,15 +982,37 @@ impl Dashboard {
         let switched = self.transcript.session != Some(id);
         self.sessions.selected = Some(id);
         if switched {
-            // A different conversation has its own budget and its own last
-            // prompt size; carrying the previous one over would show a
-            // counter for a session the user is not reading.
-            self.ctx_tokens = None;
+            // The turn on screen belongs to the conversation being left. A
+            // turn still running there is parked under it, and the
+            // destination's own turn (or an empty slot) comes on screen, so
+            // neither the spinner nor the ctx counter follows the switch
+            // (#2616). Runs before `transcript.session` moves: the previous
+            // id is the key the parked turn is stored under.
+            swap_visible_turn(
+                &mut self.stashed,
+                self.transcript.session,
+                id,
+                &mut self.live,
+                &mut self.busy,
+                &mut self.cancel,
+                &mut self.settle_expect,
+                &mut self.settle_retries,
+                &mut self.ctx_tokens,
+            );
             // Metrics belong to the turn they settled, never to the session
             // the user just switched to.
-            self.pending_metrics = None;
+            self.pending_metrics.clear();
             if let Some(b) = agent_bridge::bridge() {
                 self.ctx_max = b.service.context_limit_for_session(id);
+            }
+            // A queue walk belongs to the conversation it started in too, so
+            // its messages go back to wait instead of vanishing with the old
+            // draft (#2637).
+            let returned = self.editor.update(cx, |ed, _| ed.release_recall(false));
+            if let Some((session, msgs)) = returned {
+                for msg in msgs {
+                    agent_bridge::queue_recall_return(session, msg);
+                }
             }
             // The draft and its attachments belong to the conversation they
             // were typed in (#2481).
@@ -976,7 +1028,6 @@ impl Dashboard {
         // a restart no longer lands on whatever the rail listed first (#2444).
         remember_open_session(id);
         agent_bridge::set_composer_session(Some(id));
-        agent_bridge::queue_recall_hold(None);
         self.transcript.error = None;
         self.transcript.turns = Vec::new();
         self.transcript.hidden = 0;
@@ -989,6 +1040,15 @@ impl Dashboard {
     /// so the screen and the session can never disagree.
     fn open_session(&mut self, id: Uuid, cx: &mut Context<Self>) {
         self.begin_conversation(id, cx);
+        // Opening a conversation is reading its plan: the rail's ring stops
+        // here, not at paint, so a repaint can never be mistaken for a read and
+        // a ring never clears itself just because the row scrolled past.
+        if let Some(evidence) = self
+            .rail_index
+            .evidence(id, false, std::time::Instant::now())
+        {
+            self.rail_seen.mark(id, evidence.stamp);
+        }
         self.screen = Screen::Chat;
         let db_path = self.db_path.clone();
         cx.spawn(async move |this, cx| {
@@ -1037,7 +1097,7 @@ impl Dashboard {
     fn toggle_newest_turn(&mut self, cx: &mut Context<Self>) {
         // A turn in flight owns the chord: the card on screen is the live one,
         // so ctrl+o opens or folds IT, the way it opens a settled turn (#2442).
-        if self.live_owner.owns_live(self.transcript.session) && !self.live.is_empty() {
+        if !self.live.is_empty() {
             self.transcript.live_expanded = !self.transcript.live_expanded;
             cx.notify();
             return;
@@ -1725,12 +1785,11 @@ impl Dashboard {
         self.pane_focus.or(self.transcript.session)
     }
 
-    /// Point recall at the composer that has the caret, and forget any recall
-    /// the previous one held: a queued slot belongs to its own session's queue,
-    /// so an edit must never land in another pane's message (#2629).
+    /// Point recall at the composer that has the caret. A recall keeps the
+    /// session it took its messages from, so moving the caret cannot land an
+    /// edit in another pane's queue (#2629/#2637).
     fn sync_composer_session(&mut self) {
         agent_bridge::set_composer_session(self.focused_pane());
-        agent_bridge::queue_recall_hold(None);
     }
 
     /// The composer the keyboard owns (#2610): the focused pane's own field,
@@ -2212,12 +2271,7 @@ impl Dashboard {
     /// `/models` with no argument opens the picker. With an argument it is the
     /// switch the terminal performs, and no screen opens: the reply is the
     /// answer, exactly like the terminal's.
-    fn open_models(
-        &mut self,
-        arg: Option<String>,
-        session: Option<Uuid>,
-        cx: &mut Context<Self>,
-    ) {
+    fn open_models(&mut self, arg: Option<String>, session: Option<Uuid>, cx: &mut Context<Self>) {
         let target = session.or_else(|| self.focused_pane());
         self.models_session = target;
         // The catalogue is read once, here, so a frame never walks it. A pane
@@ -3652,78 +3706,33 @@ impl Dashboard {
         progress: opencrabs::brain::agent::ProgressEvent,
         cx: &mut Context<Self>,
     ) {
+<<<<<<< Updated upstream
         use opencrabs::brain::agent::ProgressEvent;
         let Some(pane) = self.pane_states.get_mut(&session) else {
+            // A session with no leaf is what a sub-agent looks like: its
+            // progress arrives with its own id and there is no pane to fold it
+            // into. The event is the only trace of that turn the window holds,
+            // so the rail records it here instead of dropping it (#2636). A
+            // repeat does not repaint: only the first sighting changes a row.
+            if self.rail.observe_stream(session) {
+                cx.notify();
+            }
+=======
+        if let Some(pane) = self.pane_states.get_mut(&session) {
+            fold_live(&mut pane.live, progress);
+            pane.scroll.scroll_to_bottom();
+            cx.notify();
+>>>>>>> Stashed changes
             return;
-        };
-        let live = &mut pane.live;
-        match progress {
-            ProgressEvent::Thinking => live.thinking = true,
-            ProgressEvent::StreamingChunk { text } => {
-                live.thinking = false;
-                live.note_chunk(&text);
-            }
-            ProgressEvent::IntermediateText { text, reasoning } => {
-                live.thinking = false;
-                if let Some(reasoning) = reasoning {
-                    live.push_reasoning(&reasoning);
-                }
-                live.push_narration(&text);
-            }
-            ProgressEvent::ToolStarted {
-                tool_name,
-                tool_input,
-                ..
-            } => {
-                live.thinking = false;
-                let description =
-                    opencrabs::tui::app::App::format_tool_description(&tool_name, &tool_input);
-                live.push_tool(transcript::ToolCall::running(tool_name, description));
-            }
-            ProgressEvent::ToolCompleted {
-                tool_name, success, ..
-            } => {
-                let open = live
-                    .tools
-                    .iter_mut()
-                    .rev()
-                    .find(|c| !c.done && c.name == tool_name && c.task_id.is_none());
-                match open {
-                    Some(call) => {
-                        call.done = true;
-                        call.success = success;
-                    }
-                    None => live.push_tool(transcript::ToolCall {
-                        name: tool_name.clone(),
-                        description: tool_name,
-                        success,
-                        done: true,
-                        task_id: None,
-                    }),
-                }
-            }
-            ProgressEvent::DetachedTaskStarted { task_id, label } => {
-                live.thinking = false;
-                live.push_tool(transcript::ToolCall::detached(task_id, label));
-            }
-            ProgressEvent::DetachedTaskFinished {
-                task_id, success, ..
-            } => {
-                if let Some(call) = live
-                    .tools
-                    .iter_mut()
-                    .rev()
-                    .find(|c| c.task_id.as_deref() == Some(task_id.as_str()))
-                {
-                    call.done = true;
-                    call.success = success;
-                }
-            }
-            ProgressEvent::QueuedUserMessage { text } => live.injected.push(text),
-            _ => {}
         }
-        pane.scroll.scroll_to_bottom();
-        cx.notify();
+        // A conversation the user switched away from keeps its turn in the
+        // stash (#2616). Feeding the card there is what stops it freezing at
+        // the frame the switch left: opening it again shows the tool rows and
+        // the counter the turn actually reached, not a stale snapshot.
+        if let Some(turn) = self.stashed.get_mut(&session) {
+            fold_live(&mut turn.live, progress);
+            cx.notify();
+        }
     }
 
     /// The pane's turn finished: its own card settles and its rows come back
@@ -3734,14 +3743,29 @@ impl Dashboard {
         tokens_per_second: Option<f64>,
         cx: &mut Context<Self>,
     ) {
-        let Some(pane) = self.pane_states.get_mut(&session) else {
-            return;
+        let calls = {
+            let Some(pane) = self.pane_states.get_mut(&session) else {
+                return;
+            };
+            pane.live.finalize(tokens_per_second);
+            pane.live.thinking = false;
+            pane.busy = false;
+            pane.cancel = None;
+            pane.scroll.scroll_to_bottom();
+            pane.live.tools.len()
         };
-        pane.live.finalize(tokens_per_second);
-        pane.live.thinking = false;
-        pane.busy = false;
-        pane.cancel = None;
-        pane.scroll.scroll_to_bottom();
+        // The leaf's card keeps the numbers it showed in flight, the same ones
+        // the window's card keeps (#2632): the ctx budget every pane shares,
+        // and the calls this leaf made.
+        self.pending_metrics.insert(
+            session,
+            transcript::TurnMetrics {
+                ctx_used: self.ctx_tokens.unwrap_or(0),
+                ctx_max: self.ctx_max,
+                tps: tokens_per_second,
+                tool_calls: calls,
+            },
+        );
         cx.notify();
         self.reload_pane(session, cx);
     }
@@ -3765,21 +3789,29 @@ impl Dashboard {
         let db_path = self.db_path.clone();
         cx.spawn(async move |this, cx| {
             let result = transcript::load_recent(db_path, session).await;
-            this.update(cx, |this, cx| {
-                if let Some(pane) = this.pane_states.get_mut(&session) {
-                    match result {
-                        Ok((rows, total)) => {
-                            let (hidden, turns) =
-                                transcript::turns_with_metrics(&rows, total, &this.turn_metrics);
-                            pane.transcript.hidden = hidden;
-                            pane.transcript.turns = turns;
-                            // The persisted row is on screen: the live copy
-                            // retires, exactly as the window's does.
-                            pane.live.clear();
-                        }
-                        Err(e) => pane.transcript.error = Some(e.into()),
+            this.update(cx, |this, cx| match result {
+                Ok((rows, total)) => {
+                    let (hidden, turns) =
+                        transcript::turns_with_metrics(&rows, total, &this.turn_metrics);
+                    // The turn this leaf's card was watching has landed, so it
+                    // takes the numbers it showed in flight before the rows are
+                    // drawn (#2632).
+                    let turns = this.claim_pane_metrics(session, turns);
+                    if let Some(pane) = this.pane_states.get_mut(&session) {
+                        pane.transcript.hidden = hidden;
+                        pane.transcript.turns = turns;
+                        // The persisted row is on screen: the live copy
+                        // retires, exactly as the window's does.
+                        pane.live.clear();
+                        pane.scroll.scroll_to_bottom();
                     }
-                    pane.scroll.scroll_to_bottom();
+                    cx.notify();
+                }
+                Err(e) => {
+                    if let Some(pane) = this.pane_states.get_mut(&session) {
+                        pane.transcript.error = Some(e.into());
+                        pane.scroll.scroll_to_bottom();
+                    }
                     cx.notify();
                 }
             })
@@ -3793,6 +3825,10 @@ impl Dashboard {
         if text.is_empty() {
             return;
         }
+        // The composer the text came from: when it sends a recalled message,
+        // that message leaves the queue with the text while the rest of its
+        // walk goes back to wait (#2637).
+        let sent_from = self.composer_entity();
         // Commands are read before every other gate, because the two that
         // matter most are needed exactly when the window is busy or broken:
         // `/stop` has nothing to stop on an idle window, and `/help` is what a
@@ -3832,30 +3868,23 @@ impl Dashboard {
             cx.notify();
             return;
         }
-        if self.live_owner.busy_for(self.busy, self.transcript.session) {
+        if self.busy {
             // The message joins the session's queue, which the agent drains
             // between tool calls, the terminal's own path (#2441). With no
-            // session open it waits in the window's own list. A turn running
-            // in another conversation is not this one's: the text goes out
-            // now instead of queuing behind work the user is not looking at
-            // (#2616).
+            // session open it waits in the window's own list. Busy is read
+            // for the conversation on screen, so work running in another one
+            // never queues this text behind it (#2616).
+            // Up already took the recalled message out of the queue (#2637),
+            // so this text is simply queued behind the turn. The messages the
+            // walk took before it go back to wait when the recall is released
+            // below, after this one, which is the order they were queued in.
             match self.transcript.session {
-                // A message the user pulled out with Up goes back into the slot
-                // it came from, so editing the queue never grows a duplicate of
-                // the line they just fixed (#2629).
-                Some(sid) => match agent_bridge::queue_recall_held() {
-                    Some(original) => agent_bridge::queue_recall_commit(
-                        sid,
-                        &original,
-                        Some(agent_bridge::PendingMessage::plain(text)),
-                    ),
-                    None => {
-                        agent_bridge::queue_push(sid, agent_bridge::PendingMessage::plain(text))
-                    }
-                },
+                Some(sid) => {
+                    agent_bridge::queue_push(sid, agent_bridge::PendingMessage::plain(text))
+                }
                 None => self.unsent.push(agent_bridge::PendingMessage::plain(text)),
             }
-            self.clear_recall(cx);
+            self.finish_recall(&sent_from, cx);
             // The composer now says a message is waiting on the turn, the
             // moment it is queued rather than on the next turn event (#2630).
             self.sync_composer_hint(cx);
@@ -3879,18 +3908,15 @@ impl Dashboard {
             return;
         };
         self.live.begin(text.clone());
-        self.live_owner.begin(sid);
         self.transcript.live_expanded = false;
         self.settle_retries = 0;
         // The finished turn must add one to the persisted count before the
         // live copy may be dropped (see `reload_transcript`).
         self.settle_expect = Some(self.transcript.turns.len() + 1);
-        // A recalled message is being sent right now, so it leaves the queue
-        // instead of going out again when the turn ends (#2629).
-        if let Some(original) = agent_bridge::queue_recall_held() {
-            agent_bridge::queue_recall_commit(sid, &original, None);
-            self.clear_recall(cx);
-        }
+        // A recalled message is the turn's own text now, so it leaves the
+        // queue with it; the messages the walk took before it go back to wait
+        // (#2637).
+        self.finish_recall(&sent_from, cx);
         self.busy = true;
         self.sync_composer_hint(cx);
         let cancel = tokio_util::sync::CancellationToken::new();
@@ -3927,8 +3953,16 @@ impl Dashboard {
             // old early return froze the line between chunks, which read as
             // "nothing is happening" on a slow provider.
             // A pane runs its own turn too (#2614), and its spinner, clock
-            // and token counter advance on the same repaint.
-            if self.busy || self.pane_states.values().any(|pane| pane.busy) {
+            // and token counter advance on the same repaint. So does a rail row
+            // with work in flight, and a plan waiting for approval keeps
+            // pulsing its ring until the owner opens it (#2636).
+            if self.busy
+                || self.pane_states.values().any(|pane| pane.busy)
+                || self
+                    .rail_activity_map()
+                    .values()
+                    .any(|row| row.badge.is_some() || row.ring)
+            {
                 cx.notify();
             }
             return;
@@ -4028,7 +4062,9 @@ impl Dashboard {
                         self.transcript.session = None;
                         self.transcript.turns.clear();
                         self.live.clear();
-                        self.live_owner.clear();
+                        // The deleted conversation's turn, if one ran there,
+                        // goes with it: the row it belonged to is gone.
+                        self.stashed.remove(&id);
                         self.busy = false;
                         // The files screen of a deleted session has nothing
                         // left to list: back to the chat, never a ghost list.
@@ -4288,15 +4324,19 @@ impl Dashboard {
                     // belongs to that leaf, so the window's footer and its
                     // conversation are left exactly where the user put them.
                     if self.transcript.session != Some(session) {
-                        // The card belongs to a conversation the user left:
-                        // drop it here so returning to that session reads the
-                        // rows from the DB instead of a stale live copy
-                        // (#2616).
-                        self.live_owner.settle(session);
-                        if !self.live_owner.owns_live(self.transcript.session) {
-                            self.live.clear();
-                        }
+                        // The turn finished in a conversation that is not on
+                        // screen: its parked card retires here, and the rows
+                        // in the ledger are what drawing that session reads
+                        // when the user opens it again (#2616). A split pane's
+                        // own turn settles in its leaf.
+                        self.stashed.remove(&session);
                         self.settle_pane(session, tokens_per_second, cx);
+                        // A sub-agent's turn ends the same way and has no pane
+                        // to settle (#2636). Clearing is idempotent, so a leaf
+                        // that was never recorded costs nothing.
+                        if self.rail.clear(session) {
+                            cx.notify();
+                        }
                         continue;
                     }
                     // The provider's own prompt size for the call that just
@@ -4307,14 +4347,15 @@ impl Dashboard {
                     // card can print what the turn cost instead of whatever
                     // the session's budget reads later (#2324).
                     if let Some(sid) = self.transcript.session {
-                        self.pending_metrics = Some((
+                        self.pending_metrics.insert(
                             sid,
                             transcript::TurnMetrics {
                                 ctx_used: context_tokens,
                                 ctx_max: self.ctx_max,
                                 tps: tokens_per_second,
+                                tool_calls: self.live.tools.len(),
                             },
-                        ));
+                        );
                     }
                     // Freeze the turn's rate on the same measure every other
                     // surface uses: the service's own tokens_per_second when
@@ -4346,13 +4387,16 @@ impl Dashboard {
                 }
                 agent_bridge::TurnEvent::Failed { session, text } => {
                     if self.transcript.session != Some(session) {
-                        // Same as Done: a failure for a session the user left
-                        // must not leave rows or a busy flag behind (#2616).
-                        self.live_owner.settle(session);
-                        if !self.live_owner.owns_live(self.transcript.session) {
-                            self.live.clear();
-                        }
+                        // Same as Done: a failure for a conversation that is
+                        // not on screen retires its parked card and leaves the
+                        // visible turn untouched (#2616).
+                        self.stashed.remove(&session);
                         self.fail_pane(session, text, cx);
+                        // A failed sub-agent turn is still a finished turn, so
+                        // its rail badge has to go with it (#2636).
+                        if self.rail.clear(session) {
+                            cx.notify();
+                        }
                         continue;
                     }
                     // A card a stop already took back has no line to write on:
@@ -4363,7 +4407,7 @@ impl Dashboard {
                     }
                     // A failed turn has no ctx or rate to report; a stale
                     // record would land on whatever turn shows up next.
-                    self.pending_metrics = None;
+                    self.pending_metrics.remove(&session);
                     self.busy = false;
                     self.live.thinking = false;
                     reload = self.transcript.session;
@@ -4375,6 +4419,43 @@ impl Dashboard {
                     if self.transcript.session == Some(session) {
                         reload = Some(session);
                     }
+                }
+                agent_bridge::TurnEvent::TurnResumed {
+                    session,
+                    user_message,
+                    cancel,
+                } => {
+                    // The last process died inside this turn and it runs again
+                    // now (#2627). The card has to say so from the first frame:
+                    // a recovered turn that painted into a window believing it
+                    // was idle would look exactly like the work being lost.
+                    if self.transcript.session == Some(session) {
+                        self.live = transcript::LiveTurn::default();
+                        self.live.begin(user_message);
+                        self.busy = true;
+                        self.cancel = Some(cancel);
+                        // No reload here on purpose: the turn's rows are
+                        // already in the ledger and a reload landing now would
+                        // fight the card it is about to fill.
+                    } else {
+                        // Recovered in a conversation nobody is looking at: it
+                        // parks under its own session, which is where a switch
+                        // brings it back whole (#2616).
+                        let mut live = transcript::LiveTurn::default();
+                        live.begin(user_message);
+                        self.stashed.insert(
+                            session,
+                            StashedTurn {
+                                live,
+                                cancel: Some(cancel),
+                                settle_expect: None,
+                                settle_retries: 0,
+                                ctx_tokens: None,
+                            },
+                        );
+                    }
+                    self.refresh_rail(cx);
+                    cx.notify();
                 }
                 agent_bridge::TurnEvent::BackgroundTaskDone {
                     session_id,
@@ -4451,6 +4532,38 @@ impl Dashboard {
         opencrabs::tui::render::format_background_tasks(&tasks, opencrabs::tui::render::LABEL_CHARS)
     }
 
+    /// The rail's badges for every row it is about to draw (#2636).
+    ///
+    /// Resolved in one pass before the rows are built: the plan index needs
+    /// `&mut self` and the row iterator holds `&self`, so the two cannot
+    /// interleave. Evidence is cached by mtime, so this costs one `stat` per
+    /// session that has a plan file and nothing for the rest.
+    fn rail_activity_map(&mut self) -> HashMap<Uuid, rail_activity::RowState> {
+        let rows: Vec<Uuid> = self.sessions.ordered().map(|s| s.id).collect();
+        // The sweep throttle reads a moving clock; the animations read the
+        // window's fixed origin. Two different questions, two clocks.
+        let now = std::time::Instant::now();
+        // One bridge lookup for the whole pass, not one per row: a detached
+        // command outlives its turn, so it is the only trace that session still
+        // has work in flight (#762).
+        let manager = agent_bridge::bridge().and_then(|b| b.service.background_manager());
+        let mut map = HashMap::with_capacity(rows.len());
+        for id in rows {
+            let live = self.rail.is_live(
+                id,
+                // The window runs one turn at a time, so only the open session
+                // can be mid-turn there; split leaves keep their own flag.
+                self.busy && self.transcript.session == Some(id),
+                self.pane_states.get(&id).is_some_and(|pane| pane.busy),
+                manager.as_ref().is_some_and(|mgr| mgr.running_for(id) > 0),
+            );
+            let plan = self.rail_index.evidence(id, live, now);
+            let seen = plan.is_some_and(|evidence| self.rail_seen.is_seen(id, evidence.stamp));
+            map.insert(id, rail_activity::row_state(live, plan, seen));
+        }
+        map
+    }
+
     /// One pane's footer text (#2593): pane index, whether that session is
     /// mid-turn, who is answering it, and its plan progress. The detached
     /// commands ride the strip above the composer instead, so the one-line
@@ -4514,7 +4627,6 @@ impl Dashboard {
             return;
         };
         self.live.begin(display_text);
-        self.live_owner.begin(session_id);
         self.transcript.live_expanded = false;
         self.settle_retries = 0;
         self.settle_expect = Some(self.transcript.turns.len() + 1);
@@ -4541,10 +4653,7 @@ impl Dashboard {
     /// live under the caret because that is where the user is typing, and the
     /// queue card is a list, not an instruction manual (#2630).
     fn composer_hint(&self) -> SharedString {
-        composer_hint_for(
-            self.live_owner.busy_for(self.busy, self.transcript.session),
-            self.queued_for_strip().len(),
-        )
+        composer_hint_for(self.busy, self.queued_for_strip().len())
     }
 
     /// Paint the hint on every composer: the focused field and each split
@@ -4568,19 +4677,21 @@ impl Dashboard {
         }
     }
 
-    /// Drop every composer's recall after its message was sent: the next Up
-    /// starts again at the newest queued one, not at a slot that just left
-    /// (#2629). Every field, like the hint, because a split pane's composer
-    /// can be the one holding it.
-    fn clear_recall(&mut self, cx: &mut Context<Self>) {
-        self.editor.update(cx, |ed, _| ed.clear_recall());
-        let panes: Vec<_> = self
-            .pane_states
-            .values()
-            .map(|pane| pane.editor.clone())
-            .collect();
-        for editor in panes {
-            editor.update(cx, |ed, _| ed.clear_recall());
+    /// A composer just sent its field. The message it shows is the one going
+    /// out, so it stays out of the queue; every message its walk took before
+    /// it goes back to wait, because the user never consumed it. Other
+    /// composers release their whole recall (#2637).
+    fn finish_recall(&mut self, sent: &Entity<editor::Editor>, cx: &mut Context<Self>) {
+        let mut editors = vec![self.editor.clone()];
+        editors.extend(self.pane_states.values().map(|pane| pane.editor.clone()));
+        for editor in editors {
+            let keep = editor.entity_id() == sent.entity_id();
+            let returned = editor.update(cx, |ed, _| ed.release_recall(keep));
+            if let Some((session, msgs)) = returned {
+                for msg in msgs {
+                    agent_bridge::queue_recall_return(session, msg);
+                }
+            }
         }
     }
 
@@ -4630,7 +4741,6 @@ impl Dashboard {
         let msgs = agent_bridge::queue_take(sid);
         if let Some(joined) = agent_bridge::PendingMessage::join(&msgs) {
             self.live.begin(joined.display_text.clone());
-            self.live_owner.begin(sid);
             self.transcript.live_expanded = false;
             self.settle_retries = 0;
             self.settle_expect = Some(self.transcript.turns.len() + 1);
@@ -5310,13 +5420,24 @@ impl Dashboard {
                         let landed = expect.is_none_or(|want| turns.len() >= want);
                         this.transcript.hidden = hidden;
                         this.transcript.turns = turns;
+                        // A turn that is still running owns the live card.
+                        // Reading the conversation under it (a boot resume, or
+                        // opening a session mid-turn) must not wipe the card
+                        // the work is painting into (#2627).
+                        let in_flight = this.busy;
                         if landed {
                             // The rows are in: the newest turn is the one
                             // that just answered, so it can claim the metrics
                             // recorded at `Done` (#2324).
-                            this.attach_pending_metrics(sid);
-                            this.live.clear();
-                            this.live_owner.clear();
+                            if !in_flight {
+                                this.attach_pending_metrics(sid);
+                                this.live.clear();
+                            }
+                            this.settle_expect = None;
+                            this.settle_retries = 0;
+                        } else if in_flight {
+                            // Short of the count while a turn is running is not
+                            // a missed write, it is a turn still writing.
                             this.settle_expect = None;
                             this.settle_retries = 0;
                         } else if attempt < SETTLE_ATTEMPTS {
@@ -5352,18 +5473,42 @@ impl Dashboard {
     /// the map is what carries the numbers onto a later reload of the same
     /// conversation.
     fn attach_pending_metrics(&mut self, sid: Uuid) {
-        let Some((session, metrics)) = self.pending_metrics else {
+        let Some(metrics) = self.pending_metrics.remove(&sid) else {
             return;
         };
-        if session != sid {
-            return;
-        }
-        self.pending_metrics = None;
         let Some(turn) = self.transcript.turns.last_mut() else {
             return;
         };
         turn.metrics = Some(metrics);
-        self.turn_metrics.insert(turn.anchor.clone(), metrics);
+        // The persisted row can carry no ledger at all, and the card must not
+        // claim the turn did nothing (#2632).
+        turn.summary.tool_calls = turn.summary.tool_calls.max(metrics.tool_calls);
+        let anchor = turn.anchor.clone();
+        self.turn_metrics.insert(anchor.clone(), metrics);
+        // The card the user was watching keeps its rows once it settles
+        // (#2632): a turn that folds its ledger away the moment it finishes
+        // reads as if the work never happened. The chevron still folds it, and
+        // older turns keep the terminal's folded default.
+        self.transcript.expanded.insert(anchor);
+    }
+
+    /// Give a freshly loaded pane the numbers its turn recorded at settle: the
+    /// last turn of those rows is the one that just answered, and the anchor it
+    /// landed under is what keeps the numbers on a later reload (#2632).
+    fn claim_pane_metrics(
+        &mut self,
+        session: Uuid,
+        mut turns: Vec<transcript::Turn>,
+    ) -> Vec<transcript::Turn> {
+        let Some(metrics) = self.pending_metrics.remove(&session) else {
+            return turns;
+        };
+        if let Some(turn) = turns.last_mut() {
+            turn.metrics = Some(metrics);
+            turn.summary.tool_calls = turn.summary.tool_calls.max(metrics.tool_calls);
+            self.turn_metrics.insert(turn.anchor.clone(), metrics);
+        }
+        turns
     }
 
     fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -5816,7 +5961,7 @@ impl Dashboard {
                 self.onboard_escape(cx);
                 return;
             }
-            if !self.live_owner.busy_for(self.busy, self.transcript.session) {
+            if !self.busy {
                 // Idle Esc hands the keyboard back. The rail's mode is the
                 // only thing Esc owns here, and Tab is what arms it. The old
                 // blur bridge existed only because focus never moved off the
@@ -5843,29 +5988,31 @@ impl Dashboard {
             // turn opened are deleted rather than redrawn.
             let mut returned = false;
             if let Some(sid) = self.transcript.session
-                && self.live_owner.owns_live(Some(sid))
+                && self.busy
                 && self.live.untouched()
             {
                 let composer = self.composer_entity();
                 // Only into an empty field: anything typed since the send is
                 // the user's, and taking the question back must never cost it.
-                let free = composer.read(cx).content.trim().is_empty();
-                if free {
-                    if let Some(text) = self.live.user.take() {
-                        composer.update(cx, |editor, cx| {
-                            editor.restore_draft(text, cx);
-                            editor.show_returned(cx);
-                        });
-                        if let Some(bridge) = agent_bridge::bridge() {
-                            agent_bridge::spawn_undo_last_turn(
-                                bridge.service.clone(),
-                                sid,
-                                self.sink.clone(),
-                            );
-                        }
-                        self.live.clear();
-                        returned = true;
+                // One condition, not two nested ones: the take has to run only
+                // on an empty field, and clippy reads the nesting as a mistake
+                // rather than the guard it is (#2641).
+                if composer.read(cx).content.trim().is_empty()
+                    && let Some(text) = self.live.user.take()
+                {
+                    composer.update(cx, |editor, cx| {
+                        editor.restore_draft(text, cx);
+                        editor.show_returned(cx);
+                    });
+                    if let Some(bridge) = agent_bridge::bridge() {
+                        agent_bridge::spawn_undo_last_turn(
+                            bridge.service.clone(),
+                            sid,
+                            self.sink.clone(),
+                        );
                     }
+                    self.live.clear();
+                    returned = true;
                 }
             }
             if let Some(cancel) = self.cancel.take() {
@@ -6412,7 +6559,11 @@ impl Render for Dashboard {
 
         // The rail's rows: each carries its own click listener, built in its
         // own loop turn so the `&mut cx` borrow stays legal.
-        let mut rail_rows = Vec::with_capacity(self.sessions.items.len());
+        let mut rail_rows: Vec<AnyElement> = Vec::with_capacity(self.sessions.items.len());
+        // What every row says about work in flight (#2636), resolved once
+        // before the loop: the index needs `&mut self` and the row iterator
+        // holds `&self`.
+        let activity = self.rail_activity_map();
         // Pinned rows first, the rest untouched: the TUI's own order.
         for s in self.sessions.ordered() {
             let id = s.id;
@@ -6503,12 +6654,19 @@ impl Render for Dashboard {
             };
             let indented = self.sessions.is_indented(id);
             let closed = self.sessions.is_closed(id);
+            // One glyph cell, from the window's shared clock, so a list of
+            // busy rows blinks as one spinner instead of ten (#2636).
+            let state = activity.get(&id).copied().unwrap_or_default();
+            let badge = state
+                .badge
+                .map(|_| rail_activity::frame(self.rail_clock.elapsed()));
             let flags = sessions::RowFlags {
                 selected,
                 cursored,
                 favorited: favorite,
                 indented,
                 closed,
+                badge,
             };
             let r = sessions::row(s, flags, action, menu);
             // The press starts the slide and closes any other row's strip.
@@ -6543,7 +6701,20 @@ impl Render for Dashboard {
             });
             let r = r.on_mouse_down(MouseButton::Right, ask_menu);
             let r = r.on_mouse_down(MouseButton::Left, press);
-            rail_rows.push(sessions::on_click(r, handler));
+            // A plan waiting for approval rings its row until it is opened.
+            // The border lives on this wrapper, never inside `sessions::row`:
+            // the row stays the square, edge-to-edge tile #2540 pins, and the
+            // ring is a frame around it rather than a card. Wrapped after the
+            // click is attached, so the row keeps the handlers it was built
+            // with and only gains a frame.
+            rail_rows.push(
+                rail_activity::ring(
+                    sessions::on_click(r, handler),
+                    state.ring,
+                    self.rail_clock.elapsed(),
+                )
+                .into_any_element(),
+            );
         }
         // The channel chip (#2452): quiet notice plus the one action, drawn
         // at the end of the rail only while a configured channel has no
@@ -6663,10 +6834,10 @@ impl Render for Dashboard {
             std::collections::HashMap::new();
         for key in transcript::attachment_paths_with_live(
             &self.transcript,
-            visible_live(
-                &self.live,
-                self.live_owner.owns_live(self.transcript.session),
-            ),
+            // The window holds exactly the visible conversation's turn: it was
+            // parked and handed back by `swap_visible_turn`, so a live card
+            // here always belongs to the session on screen (#2616).
+            &self.live,
         ) {
             let path = std::path::PathBuf::from(key.clone());
             let handler = cx.listener(move |this, _ev, _window, cx| {
@@ -6709,11 +6880,10 @@ impl Render for Dashboard {
         };
         // A single pane draws the conversation at a readable measure and
         // centres it; a split window is exempt and keeps every pane at the span
-        // the tree hands it (#2586).
-        let split_window = self
-            .panes
-            .as_ref()
-            .is_some_and(|tree| tree.leaves().len() >= 2);
+        // the tree hands it (#2586). The count is resolved once: it also
+        // decides whether the window footer row draws at all (#2641).
+        let pane_count = self.panes.as_ref().map_or(1, |tree| tree.leaves().len());
+        let split_window = pane_count > 1;
         let chat_measure_px = chat_measure(primary_width, split_window);
         // Only a pane wider than the measure is wrapped, and a split pane is
         // never wrapped: its measure is already its own width.
@@ -6733,11 +6903,11 @@ impl Render for Dashboard {
                 let primary = transcript::view(
                     &self.transcript,
                     &self.transcript_scroll,
-                    visible_live(
-                        &self.live,
-                        self.live_owner.owns_live(self.transcript.session),
-                    ),
-                    self.live_owner.busy_for(self.busy, self.transcript.session),
+                    // The visible conversation's turn, never another's: the
+                    // window keeps exactly one and swaps them on a switch
+                    // (#2616).
+                    &self.live,
+                    self.busy,
                     measure,
                     fold_handlers,
                     transcript::ViewHooks {
@@ -6767,7 +6937,15 @@ impl Render for Dashboard {
                         .gap_2()
                         .child(body)
                         .into_any_element(),
-                    {
+                    if window_footer_yields(pane_count) {
+                        // A split draws one footer per pane (#2593), so the
+                        // window row stands down and yields its height, the way
+                        // the terminal's status bar does (#2575, #2641). Two
+                        // rows printed the model twice, and the window one
+                        // could only ever name the chat's pair while the pane
+                        // above it named another.
+                        div().into_any_element()
+                    } else {
                         // Key hints left, identity right. The ctx budget used
                         // to sit at the right edge too, and it was the same
                         // number the tool block's own footer already carries:
@@ -8625,11 +8803,10 @@ impl Render for Dashboard {
                     .child(transcript::view(
                         &self.transcript,
                         &self.transcript_scroll,
-                        visible_live(
-                            &self.live,
-                            self.live_owner.owns_live(self.transcript.session),
-                        ),
-                        self.live_owner.busy_for(self.busy, self.transcript.session),
+                        // Same rule in the preview leaf: the live card it
+                        // paints is the visible conversation's own (#2616).
+                        &self.live,
+                        self.busy,
                         primary_width,
                         fold_handlers,
                         transcript::ViewHooks {
@@ -9502,6 +9679,12 @@ fn main() {
                         rem: BASE_REM,
                         db_path: db_path.clone(),
                         sessions: sessions_state,
+                        rail: rail_activity::RailActivity::default(),
+                        rail_index: rail_activity::PlanIndex::default(),
+                        rail_seen: rail_activity::SeenPlans::load(Some(
+                            opencrabs::config::opencrabs_home().join("rail_seen.json"),
+                        )),
+                        rail_clock: std::time::Instant::now(),
                         rail_width: RAIL_DEFAULT_REM,
                         rail_open: true,
                         rail_focused: false,
@@ -9580,7 +9763,7 @@ fn main() {
                         sink: agent_sink,
                         agent_ready: false,
                         live: transcript::LiveTurn::default(),
-                        live_owner: LiveOwner::default(),
+                        stashed: HashMap::new(),
                         settle_expect: None,
                         settle_retries: 0,
                         busy: false,
@@ -9592,7 +9775,7 @@ fn main() {
                         ctx_tokens: None,
                         ctx_max: 0,
                         turn_metrics: HashMap::new(),
-                        pending_metrics: None,
+                        pending_metrics: HashMap::new(),
                         branch: git_branch(&opencrabs::utils::cwd::launch_cwd()),
                     }
                 });
@@ -9808,7 +9991,18 @@ fn mc_panel(
             cell = cell.bg(rgb(shown.selection)).rounded(px(4.0)).px_1();
         }
         match row {
-            McRow::Line(line, _) => cell = cell.text_xs().truncate().child(line),
+            // A line is laid out through an explicit flex row with a growing,
+            // shrinkable text child (#2642): a truncated text element inside a
+            // plain width-full block div is measured once at the grid's
+            // flex-basis zero and stays an ellipsis forever (gpui caches the
+            // nowrap layout on wrap_width, which never changes here). The
+            // label/value arm below already uses this shape and renders.
+            McRow::Line(line, _) => {
+                cell = cell
+                    .flex()
+                    .flex_row()
+                    .child(text(line, Size::Xs, color).flex_1().min_w_0().truncate());
+            }
             McRow::Pair(label, value, _) => {
                 cell = cell
                     .flex()
@@ -10080,9 +10274,10 @@ fn mc_flakiest_panel(
     )
 }
 
-/// Rows for the phantom card. A totals-only line can ellipsize into three
-/// dots under the header, so an empty model breakdown stays empty and lets
-/// the shared panel render its empty state instead.
+/// Rows for the phantom card. An empty model breakdown stays empty and lets
+/// the shared panel render its empty state instead. (#2642 fixed the line
+/// rows that used to ellipsize into three dots under the header; this guard
+/// is about the data, not the rendering.)
 fn mc_phantoms_rows(a: &McAnalytics, shown: palette::Palette) -> Vec<McRow> {
     if a.phantom.by_model.is_empty() {
         return Vec::new();
@@ -10867,10 +11062,8 @@ fn queue_strip(queued: &[agent_bridge::PendingMessage], expanded: bool) -> Div {
 /// queueing another (#2630).
 fn composer_hint_for(busy: bool, queued: usize) -> SharedString {
     match (busy, queued) {
-        (true, 0) => SharedString::from("esc stops the turn · typing here queues the message"),
-        (true, n) => SharedString::from(format!(
-            "queued {n} · ↑ recalls the newest · esc stops the turn and sends them"
-        )),
+        (true, 0) => SharedString::from("esc stops · typing queues"),
+        (true, n) => SharedString::from(format!("queued {n} · ↑ recalls · esc stops")),
         (false, 0) => SharedString::from("Message OpenCrabs…"),
         (false, n) => SharedString::from(format!("{n} queued · sending now")),
     }
@@ -11001,18 +11194,136 @@ fn command_popup_view(names: &[&'static str], selected: usize) -> Div {
     )
 }
 
-/// The live card the window may paint (#2616).
+/// Fold one progress event into a live card.
 ///
-/// The window holds ONE live turn, but it can open any conversation while a
-/// turn runs in another. Only the session that owns the card paints it: a
-/// switch shows an empty card, and coming back to the session that sent the
-/// turn finds it again instead of losing it.
-fn visible_live(live: &transcript::LiveTurn, owned: bool) -> &transcript::LiveTurn {
-    static EMPTY: std::sync::OnceLock<transcript::LiveTurn> = std::sync::OnceLock::new();
-    if owned {
-        live
-    } else {
-        EMPTY.get_or_init(transcript::LiveTurn::default)
+/// Free because two owners draw the same card: a split leaf's pane (#2614) and
+/// a turn parked under a conversation the user switched away from (#2616). The
+/// fold has to be identical for both or the card would tell a different story
+/// depending on where the session happens to be sitting.
+fn fold_live(live: &mut transcript::LiveTurn, progress: opencrabs::brain::agent::ProgressEvent) {
+    use opencrabs::brain::agent::ProgressEvent;
+    match progress {
+        ProgressEvent::Thinking => live.thinking = true,
+        ProgressEvent::StreamingChunk { text } => {
+            live.thinking = false;
+            live.note_chunk(&text);
+        }
+        ProgressEvent::IntermediateText { text, reasoning } => {
+            live.thinking = false;
+            if let Some(reasoning) = reasoning {
+                live.push_reasoning(&reasoning);
+            }
+            live.push_narration(&text);
+        }
+        ProgressEvent::ToolStarted {
+            tool_name,
+            tool_input,
+            ..
+        } => {
+            live.thinking = false;
+            let description =
+                opencrabs::tui::app::App::format_tool_description(&tool_name, &tool_input);
+            live.push_tool(transcript::ToolCall::running(tool_name, description));
+        }
+        ProgressEvent::ToolCompleted {
+            tool_name, success, ..
+        } => {
+            let open = live
+                .tools
+                .iter_mut()
+                .rev()
+                .find(|c| !c.done && c.name == tool_name && c.task_id.is_none());
+            match open {
+                Some(call) => {
+                    call.done = true;
+                    call.success = success;
+                }
+                None => live.push_tool(transcript::ToolCall {
+                    name: tool_name.clone(),
+                    description: tool_name,
+                    success,
+                    done: true,
+                    task_id: None,
+                }),
+            }
+        }
+        ProgressEvent::DetachedTaskStarted { task_id, label } => {
+            live.thinking = false;
+            live.push_tool(transcript::ToolCall::detached(task_id, label));
+        }
+        ProgressEvent::DetachedTaskFinished {
+            task_id, success, ..
+        } => {
+            if let Some(call) = live
+                .tools
+                .iter_mut()
+                .rev()
+                .find(|c| c.task_id.as_deref() == Some(task_id.as_str()))
+            {
+                call.done = true;
+                call.success = success;
+            }
+        }
+        ProgressEvent::QueuedUserMessage { text } => live.injected.push(text),
+        _ => {}
+    }
+}
+
+/// Park the turn on screen under `from` and bring back the one `to` owns.
+///
+/// The window paints one conversation at a time, but every session may be
+/// running a turn of its own. State moves with the session instead of the
+/// window: the outgoing turn is stored whole (card, cancel handle, reload
+/// handshake, prompt size) and the incoming one restored, so neither the
+/// spinner nor the counters jump to a conversation that never sent anything
+/// (#2616). A session with nothing in flight gets an empty slot, which is
+/// what makes a switch to an idle conversation paint as idle.
+#[allow(clippy::too_many_arguments)]
+fn swap_visible_turn(
+    stashed: &mut std::collections::HashMap<Uuid, StashedTurn>,
+    from: Option<Uuid>,
+    to: Uuid,
+    live: &mut transcript::LiveTurn,
+    busy: &mut bool,
+    cancel: &mut Option<tokio_util::sync::CancellationToken>,
+    settle_expect: &mut Option<usize>,
+    settle_retries: &mut u8,
+    ctx_tokens: &mut Option<u32>,
+) {
+    if from == Some(to) {
+        return;
+    }
+    if let Some(from) = from
+        && *busy
+    {
+        stashed.insert(
+            from,
+            StashedTurn {
+                live: std::mem::take(live),
+                cancel: cancel.take(),
+                settle_expect: settle_expect.take(),
+                settle_retries: std::mem::take(settle_retries),
+                ctx_tokens: ctx_tokens.take(),
+            },
+        );
+    }
+    match stashed.remove(&to) {
+        Some(turn) => {
+            *live = turn.live;
+            *cancel = turn.cancel;
+            *settle_expect = turn.settle_expect;
+            *settle_retries = turn.settle_retries;
+            *ctx_tokens = turn.ctx_tokens;
+            *busy = true;
+        }
+        None => {
+            *live = transcript::LiveTurn::default();
+            *cancel = None;
+            *settle_expect = None;
+            *settle_retries = 0;
+            *ctx_tokens = None;
+            *busy = false;
+        }
     }
 }
 
@@ -11416,6 +11727,34 @@ fn resolve_split_focus(
         None
     } else {
         leaves.first().copied()
+    }
+}
+
+/// Whether the window-level footer row stands down (#2641). A split hands
+/// that row to each pane, exactly as the terminal's status bar yields its
+/// height in split view (#2575), so two footers never stack and the
+/// window-wide pair can never contradict the pair the pane above is running.
+fn window_footer_yields(pane_count: usize) -> bool {
+    pane_count > 1
+}
+
+#[cfg(test)]
+mod window_footer_tests {
+    use super::window_footer_yields;
+
+    /// The window keeps its footer while it is one pane: the row is the only
+    /// place the pair, the path and the branch are named.
+    #[test]
+    fn one_pane_keeps_the_window_footer() {
+        assert!(!window_footer_yields(1));
+    }
+
+    /// Two panes or more hand the row to the panes: each one already names its
+    /// own pair, so the window row would only print a second, staler model.
+    #[test]
+    fn a_split_yields_the_window_footer() {
+        assert!(window_footer_yields(2));
+        assert!(window_footer_yields(4));
     }
 }
 
@@ -13042,50 +13381,194 @@ mod tests {
         assert!(src.contains(&chord), "ctrl+d must be bound on the rail");
     }
 
+    /// A conversation's turn belongs to that conversation, not to the window.
+    ///
+    /// #2616: the window keeps ONE live turn, so switching away used to throw
+    /// it out and a running turn went dark the moment the user looked at
+    /// another chat: no spinner, no tool block, counters frozen. Parking the
+    /// turn under its own session and handing it back on the way in is what
+    /// makes the card survive a switch.
     #[test]
-    fn the_live_card_paints_only_for_the_session_that_owns_it() {
-        // #2616: the window keeps ONE live turn but can open any number of
-        // conversations. Handing `&self.live` to the view unconditionally is
-        // what made a turn in session A show its tool block in session B, so
-        // every paint goes through the owner check and the busy flag follows
-        // the same rule.
+    fn a_turn_travels_with_its_session_across_a_switch() {
+        let a = uuid::Uuid::new_v4();
+        let b = uuid::Uuid::new_v4();
+
+        let mut stashed: std::collections::HashMap<uuid::Uuid, super::StashedTurn> =
+            std::collections::HashMap::new();
+        let mut live = super::transcript::LiveTurn::default();
+        let mut busy = false;
+        let mut cancel: Option<tokio_util::sync::CancellationToken> = None;
+        let mut settle_expect: Option<usize> = None;
+        let mut settle_retries: u8 = 0;
+        let mut ctx_tokens: Option<u32> = None;
+
+        // A turn running in conversation A, with every piece of state the
+        // card needs to look alive.
+        live.begin("ask A".to_string());
+        live.thinking = true;
+        live.tokens = 42;
+        busy = true;
+        cancel = Some(tokio_util::sync::CancellationToken::new());
+        settle_expect = Some(7);
+        settle_retries = 2;
+        ctx_tokens = Some(1_234);
+
+        super::swap_visible_turn(
+            &mut stashed,
+            Some(a),
+            b,
+            &mut live,
+            &mut busy,
+            &mut cancel,
+            &mut settle_expect,
+            &mut settle_retries,
+            &mut ctx_tokens,
+        );
+
+        assert_eq!(
+            stashed.len(),
+            1,
+            "the running turn is parked under its own session, never dropped"
+        );
+        assert_eq!(stashed[&a].live.user.as_deref(), Some("ask A"));
+        assert!(
+            stashed[&a].live.thinking,
+            "the spinner keeps its state while parked"
+        );
+        assert_eq!(stashed[&a].live.tokens, 42, "the counter survives a switch");
+        assert!(
+            stashed[&a].cancel.is_some(),
+            "the parked turn keeps its cancel token"
+        );
+        assert_eq!(stashed[&a].settle_expect, Some(7));
+        assert!(!busy, "the conversation now on screen is idle");
+        assert!(live.user.is_none(), "B never inherits A's card");
+        assert_eq!(ctx_tokens, None, "nor A's context counter");
+
+        // B runs its own turn, then the user goes back to A.
+        live.begin("ask B".to_string());
+        busy = true;
+        super::swap_visible_turn(
+            &mut stashed,
+            Some(b),
+            a,
+            &mut live,
+            &mut busy,
+            &mut cancel,
+            &mut settle_expect,
+            &mut settle_retries,
+            &mut ctx_tokens,
+        );
+
+        assert_eq!(
+            live.user.as_deref(),
+            Some("ask A"),
+            "A's card comes back, so its tool block and counters keep ticking"
+        );
+        assert!(live.thinking);
+        assert_eq!(live.tokens, 42);
+        assert!(busy, "A is still running");
+        assert!(cancel.is_some(), "A's cancel token came back with it");
+        assert_eq!(settle_expect, Some(7));
+        assert_eq!(settle_retries, 2);
+        assert_eq!(ctx_tokens, Some(1_234));
+        assert_eq!(stashed.len(), 1);
+        assert_eq!(
+            stashed[&b].live.user.as_deref(),
+            Some("ask B"),
+            "B's turn was parked on the way out"
+        );
+
+        // Opening the conversation already on screen is not a switch: nothing
+        // is parked and the running turn is left alone.
+        super::swap_visible_turn(
+            &mut stashed,
+            Some(a),
+            a,
+            &mut live,
+            &mut busy,
+            &mut cancel,
+            &mut settle_expect,
+            &mut settle_retries,
+            &mut ctx_tokens,
+        );
+        assert_eq!(stashed.len(), 1, "a no-op switch parks nothing");
+        assert_eq!(live.user.as_deref(), Some("ask A"));
+        assert!(busy);
+    }
+
+    /// The window keeps exactly one live turn, so every paint hands it over
+    /// directly: no owner check can disagree with what is on screen, because
+    /// the swap already did the deciding (#2616).
+    #[test]
+    fn every_paint_hands_over_the_turn_the_window_holds() {
         let src = include_str!("main.rs");
         let production = src
             .split("\n#[cfg(test)]\nmod tests")
             .next()
             .expect("production source before the test module");
-        // Three call sites; the definition counts too now that its lifetimes
-        // are elided, so the check subtracts it rather than pinning a number
-        // that moves with a signature tidy-up.
-        assert_eq!(
-            production.matches("visible_live(").count()
-                - production.matches("fn visible_live(").count(),
-            3,
-            "the card, its attachments and the split secondary all read the owner"
+        assert!(
+            !production.contains("live_owner"),
+            "ownership is the parking map's job now, not a parallel ledger"
         );
         assert!(
-            production.contains("self.live_owner.owns_live(self.transcript.session)"),
-            "the paint path asks the owner"
+            !production.contains("visible_live("),
+            "the paint path no longer gate-keeps the card"
+        );
+        // The transcript takes the visible turn by reference, not as an
+        // Option: the window keeps exactly one and swaps it on a switch
+        // (#2616). All three paint paths hand it over.
+        assert_eq!(
+            production.matches("&self.live,").count(),
+            3,
+            "the card, its attachments and the split secondary all paint it"
         );
         assert_eq!(
-            production
-                .matches("self.live_owner.busy_for(self.busy, self.transcript.session)")
-                .count(),
-            5,
-            "both draw paths, the send button, Esc and the composer hint report the owning session's busy state"
-        );
-        // A turn that finished in a conversation the user left drops its card
-        // on both the success and the failure path.
-        assert_eq!(
-            production
-                .matches("self.live_owner.settle(session);")
-                .count(),
+            production.matches("swap_visible_turn(").count(),
             2,
-            "Done and Failed both settle the owner"
+            "one definition, one caller: opening a conversation"
         );
-        // A new turn takes the card for its own session.
-        assert!(production.contains("self.live_owner.begin(sid)"));
-        assert!(production.contains("self.live_owner.begin(session_id)"));
+        // A turn that finishes in a conversation the user left retires its
+        // parked card on both the success and the failure path.
+        assert_eq!(
+            production.matches("self.stashed.remove(&session);").count(),
+            2,
+            "Done and Failed both drop the parked card"
+        );
+    }
+
+    /// A turn recovered at boot is a turn like any other, and it is painted on
+    /// the conversation that owns it (#2627): on screen it takes the window's
+    /// card, off screen it parks under its session (#2616), so switching to it
+    /// shows the recovered work instead of an idle pane.
+    #[test]
+    fn a_resumed_turn_streams_into_its_pane() {
+        let src = include_str!("main.rs");
+        let arm = src
+            .split("agent_bridge::TurnEvent::TurnResumed {")
+            .nth(1)
+            .expect("the resumed-turn arm");
+        let arm = arm
+            .split("agent_bridge::TurnEvent::BackgroundTaskDone")
+            .next()
+            .expect("the end of the arm");
+        assert!(
+            arm.contains("self.live.begin(user_message)"),
+            "the card names the message the killed process was answering"
+        );
+        assert!(arm.contains("self.busy = true"), "a recovered turn is busy");
+        assert!(
+            arm.contains("self.cancel = Some(cancel)"),
+            "stop has to end a recovered turn too"
+        );
+        assert!(
+            arm.contains("self.stashed.insert("),
+            "an off-screen recovery parks under its own session"
+        );
+        assert!(
+            !arm.contains("reload = Some(session)"),
+            "a reload landing on a running turn would wipe its card"
+        );
     }
 
     #[test]

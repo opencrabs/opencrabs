@@ -19,7 +19,6 @@ pub mod docs;
 pub mod help_keys;
 pub mod input_history;
 pub mod keys;
-pub mod live_owner;
 pub mod model_layout;
 pub mod model_selector;
 pub mod palette;
@@ -38,7 +37,7 @@ mod purity_tests {
     //! break that silently at compile time for the GUI, never for us.
 
     /// Every source file in `ui_core`, with its contents.
-    fn sources() -> [(&'static str, &'static str); 33] {
+    fn sources() -> [(&'static str, &'static str); 32] {
         [
             ("ui_core/actions.rs", include_str!("actions.rs")),
             ("ui_core/bang.rs", include_str!("bang.rs")),
@@ -61,7 +60,6 @@ mod purity_tests {
             ("ui_core/help_keys.rs", include_str!("help_keys.rs")),
             ("ui_core/input_history.rs", include_str!("input_history.rs")),
             ("ui_core/keys.rs", include_str!("keys.rs")),
-            ("ui_core/live_owner.rs", include_str!("live_owner.rs")),
             ("ui_core/model_layout.rs", include_str!("model_layout.rs")),
             (
                 "ui_core/model_selector/mod.rs",

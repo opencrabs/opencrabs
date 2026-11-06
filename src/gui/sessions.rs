@@ -1003,6 +1003,10 @@ pub struct RowFlags {
     pub favorited: bool,
     pub indented: bool,
     pub closed: bool,
+    /// The spinner glyph for a row that has work in flight (#2636), or `None`.
+    /// The rail supplies the frame from its one shared clock; this module only
+    /// draws the cell, so it never owns a timer.
+    pub badge: Option<&'static str>,
 }
 
 pub fn row(
@@ -1017,6 +1021,7 @@ pub fn row(
         favorited,
         indented,
         closed,
+        badge,
     } = flags;
     let title_text = div()
         // A closed topic reads dimmed: still there, no longer taking work.
@@ -1050,7 +1055,12 @@ pub fn row(
                 .text_color(rgb(colour))
                 .child(SharedString::from(mark))
         })
-        .child(title_text);
+        .child(title_text)
+        // The activity glyph sits on the name's own line, pushed to the right
+        // edge (#2636): a sibling of the title block would have centred itself
+        // on the card instead. `flex_none` keeps the cell its width when a long
+        // title truncates.
+        .when_some(badge, |d, glyph| d.child(badge_cell(glyph)));
     // A grouped topic is a compact pin beneath its session. Its title stays
     // visible, while the repeated date and cost metadata belongs to full rows.
     let body = div()
@@ -1106,6 +1116,20 @@ pub fn row(
         row = row.child(deferred(menu).with_priority(1));
     }
     row
+}
+
+/// One glyph cell at the right edge of a row's name line (#2636).
+///
+/// Cyan, because that is the colour the running-work surfaces already use: the
+/// same hue as the task strip, so "busy" reads the same wherever it is drawn.
+fn badge_cell(glyph: &str) -> Div {
+    div()
+        .flex_none()
+        .ml_auto()
+        .pl_1()
+        .text_xs()
+        .text_color(rgb(palette::current().teal))
+        .child(SharedString::from(glyph.to_string()))
 }
 
 /// The quiet branch mark that makes a grouped topic read as a compact pin.
@@ -1218,7 +1242,9 @@ pub fn delete_button() -> Stateful<Div> {
 /// the scroll container needs an element id.
 pub fn rail(
     state: &SessionsState,
-    rows: Vec<Stateful<Div>>,
+    // Not `Stateful<Div>`: a row that waits on a plan is wrapped in the ring
+    // frame (#2636), so the slot has to accept a wrapper as well as a bare row.
+    rows: Vec<AnyElement>,
     width_rem: f32,
     scroll: &ScrollHandle,
     footer: Option<AnyElement>,
