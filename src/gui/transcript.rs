@@ -1697,6 +1697,10 @@ fn live_card_body(live: &LiveTurn) -> Div {
 /// used to draw a ledger, then a status line BELOW it, then a bare reasoning
 /// line, which is what made a busy turn read as a wall of rows with the
 /// summary underneath them.
+///
+/// The corners are the message radius, not the card radius (#2618): this card
+/// becomes the message row once the turn persists, so it must not be rounder
+/// than the row it turns into.
 fn live_card(live: &LiveTurn, expanded: bool, ctx: (Option<u32>, u32)) -> Stateful<Div> {
     let frame = if live.settled.is_some() {
         "\u{2705}".to_string()
@@ -1755,7 +1759,7 @@ fn live_card(live: &LiveTurn, expanded: bool, ctx: (Option<u32>, u32)) -> Statef
         .w_full()
         .min_w_0()
         .flex_shrink_0()
-        .rounded(px(CARD_RADIUS))
+        .rounded(px(MESSAGE_RADIUS))
         .border_1()
         .border_color(rgb(palette::current().panel_hi))
         .bg(glass_fill(palette::current().panel))
@@ -2788,6 +2792,9 @@ mod tests {
     /// #2571: only the message surface gets the tighter corner. The shared card
     /// and Seeker radii keep their values, so no other panel, table, ledger,
     /// composer, sidebar or plan strip moves with the chat change.
+    ///
+    /// #2618: the live card is the same surface, painted before the turn
+    /// persists, so it takes the message radius too. Two uses, both messages.
     #[test]
     fn only_the_message_surface_uses_the_tighter_radius() {
         let src = include_str!("transcript.rs");
@@ -2798,12 +2805,13 @@ mod tests {
         assert_eq!(MESSAGE_RADIUS, 12.0);
         assert_eq!(CARD_RADIUS, 24.0);
         assert_eq!(opencrabs::ui_core::card::SEEKER_RADIUS, 32.0);
-        // The token is declared once and applied once: in the bubble. Every
-        // other rounded surface in this file still reads CARD_RADIUS. Count on
-        // the production half only: this file includes itself, so the literals
-        // in this test would otherwise match themselves.
+        // The token is declared once and applied where a message is painted:
+        // the settled bubble and the live card that becomes it. Every other
+        // rounded surface in this file still reads CARD_RADIUS. Count on the
+        // production half only: this file includes itself, so the literals in
+        // this test would otherwise match themselves.
         let production = src
-            .split("#[cfg(test)]")
+            .split("\n#[cfg(test)]\nmod tests")
             .next()
             .expect("production source before the test module");
         assert_eq!(production.matches("const MESSAGE_RADIUS").count(), 1);
@@ -2812,8 +2820,21 @@ mod tests {
             .filter(|line| line.contains("px(MESSAGE_RADIUS)"))
             .count();
         assert_eq!(
-            message_radius_uses, 1,
-            "only the bubble applies the message radius, found {message_radius_uses} uses"
+            message_radius_uses, 2,
+            "the bubble and the live card apply the message radius, found {message_radius_uses} uses"
+        );
+        let live = production
+            .split("fn live_card(")
+            .nth(1)
+            .and_then(|rest| rest.split("fn live_card_footer(").next())
+            .expect("live card body");
+        assert!(
+            live.contains(".rounded(px(MESSAGE_RADIUS))"),
+            "the live card takes the message radius"
+        );
+        assert!(
+            !live.contains(".rounded(px(CARD_RADIUS))"),
+            "the live card must not keep the pudgy card radius"
         );
         let cell = src
             .split("fn attachment_cell(")
