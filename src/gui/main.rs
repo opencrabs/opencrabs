@@ -632,6 +632,11 @@ struct Dashboard {
     topic_menu: Option<uuid::Uuid>,
     /// The topic name being typed, while the name prompt is open (#2303).
     topic_draft: Option<String>,
+    /// The pick the window has to explain before it goes on (#2605): the
+    /// seeker's topic pick named a topic, and a topic cannot hold topics, so
+    /// this carries that row's title for the warning instead of opening a
+    /// prompt that would nest one under another.
+    topic_warning: Option<String>,
     /// Which side of the chat the topic row sits on (#2402).
     topic_edge: topic_tabs::Edge,
     /// The topic being renamed, while the prompt is open for a rename (#2304).
@@ -1054,6 +1059,9 @@ impl Dashboard {
         if self.confirm_delete.is_some() {
             open.push(OverlayId::ConfirmDelete);
         }
+        if self.topic_warning.is_some() {
+            open.push(OverlayId::Warning);
+        }
         if self.sessions.filter_active {
             open.push(OverlayId::RailFind);
         }
@@ -1409,10 +1417,38 @@ impl Dashboard {
                 cx.notify();
             }
             PaletteAction::NewTopicOn(id) => {
-                // The exact path the "New topic" menu item walks: the
-                // conversation on screen, then the draft dialog (#2482).
-                self.open_session(Uuid::from_u128(id), cx);
-                self.start_topic_draft(cx);
+                // The picker lists every conversation, topics included, so
+                // the pick means one of three things (#2604, #2605): a topic
+                // cannot hold topics, a conversation with them on opens the
+                // prompt, and one that never had them needs the flag written
+                // before the same prompt can open.
+                let id = Uuid::from_u128(id);
+                match topic_pick(
+                    self.sessions.parents.contains_key(&id),
+                    self.sessions.is_topic_enabled(id),
+                ) {
+                    TopicPick::Warn => {
+                        let title = self
+                            .sessions
+                            .items
+                            .iter()
+                            .find(|s| s.id == id)
+                            .and_then(|s| s.title.clone())
+                            .unwrap_or_else(|| "That row".to_string());
+                        self.topic_warning = Some(title);
+                        cx.notify();
+                    }
+                    TopicPick::Draft => {
+                        // The exact path the "New topic" menu item walks
+                        // (#2482).
+                        self.open_session(id, cx);
+                        self.start_topic_draft(cx);
+                    }
+                    TopicPick::EnableThenDraft => {
+                        self.open_session(id, cx);
+                        self.enable_topics_then(id, |this, cx| this.start_topic_draft(cx), cx);
+                    }
+                }
             }
             PaletteAction::Favorite => {
                 // Same card, same picker, different purpose: the pick pins
@@ -4579,6 +4615,21 @@ impl Dashboard {
     /// Turn topics on for a session from the rail menu (#2302). The write is
     /// durable: the flag is read back from the database, never kept only here.
     fn enable_topics(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        self.enable_topics_then(id, |_, _| {}, cx);
+    }
+
+    /// Turn topics on, then run `after` once the read-back has landed (#2604).
+    ///
+    /// The seeker's pick can name a conversation that never had topics on, and
+    /// a prompt opened before the flag reaches `sessions.topics` is dropped by
+    /// the same guard the rail menu never hits. `after` runs inside the update
+    /// that stores the read-back, so it cannot outrun the flag it depends on.
+    fn enable_topics_then(
+        &mut self,
+        id: Uuid,
+        after: impl FnOnce(&mut Self, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) {
         let db_path = self.db_path.clone();
         cx.spawn(async move |this, cx| {
             if let Err(e) = sessions::set_topics(db_path.clone(), id, true).await {
@@ -4593,7 +4644,10 @@ impl Dashboard {
             let result = sessions::load_topics(db_path).await;
             this.update(cx, |this, cx| {
                 match result {
-                    Ok(ids) => this.sessions.topics = ids.into_iter().collect(),
+                    Ok(ids) => {
+                        this.sessions.topics = ids.into_iter().collect();
+                        after(this, cx);
+                    }
                     Err(e) => logging::error(&format!("topics refresh: {e}")),
                 }
                 cx.notify();
@@ -4971,6 +5025,9 @@ impl Dashboard {
 
     fn start_topic_draft(&mut self, cx: &mut Context<Self>) {
         if !self.open_chat_topics_on() {
+            // Loud on purpose: this guard swallowed the seeker's pick with no
+            // trace, which made a working row look like a dead click (#2604).
+            logging::debug("topic draft: the open conversation has topics off");
             return;
         }
         self.topic_draft_icon = None;
@@ -5542,6 +5599,18 @@ impl Dashboard {
                 cx.notify();
                 return;
             }
+        }
+        // A warning that stopped a pick has one answer, so it owns the
+        // keyboard while it is up (#2605): Enter or Esc closes it, and every
+        // other keystroke is swallowed instead of reaching the card behind
+        // it.
+        if self.topic_warning.is_some() {
+            if matches!(ev.keystroke.key.as_str(), "enter" | "escape") {
+                self.topic_warning = None;
+                self.refocus_screen();
+            }
+            cx.notify();
+            return;
         }
         // The delete confirmation is a modal with two answers, so it owns
         // both keys while it is up: Enter confirms, Esc cancels, and every
@@ -8441,6 +8510,20 @@ impl Render for Dashboard {
             });
             root = root.child(confirm_delete_overlay(title, confirm, cancel));
         }
+        // A pick that named a topic says why no prompt opened (#2605). The
+        // card is the delete dialog's shape with one answer, so a stopped
+        // pick can never be mistaken for a progress notice.
+        if let Some(title) = self.topic_warning.clone() {
+            let dismiss = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                this.topic_warning = None;
+                this.refocus_screen();
+                cx.notify();
+            });
+            let body = format!(
+                "\"{title}\" is a topic, not a conversation. A topic cannot hold topics, so pick the conversation it sits under, then name the new topic."
+            );
+            root = root.child(warning_overlay(&body, dismiss));
+        }
         // A preview sits over both panes, and over everything else on the
         // window: it is where the user went to look at something, and the
         // transcript behind it must not take a click meant for it (#2395).
@@ -8982,6 +9065,7 @@ fn main() {
                         help_open: false,
                         topic_menu: None,
                         topic_draft: None,
+                        topic_warning: None,
                         topic_edge: topic_tabs::Edge::from_config(
                             Config::load()
                                 .ok()
@@ -11715,6 +11799,104 @@ fn help_overlay(view: &HelpView) -> impl IntoElement {
         .child(footer)
 }
 
+/// What the seeker's topic pick means (#2604, #2605). The window already
+/// holds both facts the answer needs, so the branch is testable without one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TopicPick {
+    /// The pick named a topic, and a topic cannot hold topics.
+    Warn,
+    /// The conversation has topics on, so the prompt can open.
+    Draft,
+    /// The conversation never had topics on: write the flag, read it back,
+    /// then open the prompt.
+    EnableThenDraft,
+}
+
+fn topic_pick(is_topic: bool, topics_enabled: bool) -> TopicPick {
+    if is_topic {
+        TopicPick::Warn
+    } else if topics_enabled {
+        TopicPick::Draft
+    } else {
+        TopicPick::EnableThenDraft
+    }
+}
+
+/// A warning the window has to say before it does anything else (#2605). The
+/// header bar names the app and the kind, so a card that stopped a pick is
+/// never read as a progress notice, and one button is the whole answer.
+fn warning_overlay(
+    body: &str,
+    dismiss: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let p = palette::current();
+    div()
+        .id("warning-scrim")
+        .occlude()
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(rgba(0x0a0a0acc))
+        .child(
+            div()
+                .id("warning-panel")
+                .occlude()
+                .flex()
+                .flex_col()
+                .w(rems(26.0))
+                .rounded(px(CARD_RADIUS))
+                .border_1()
+                .border_color(rgb(p.panel_hi))
+                .bg(glass_fill(p.panel))
+                .overflow_hidden()
+                .child(
+                    div()
+                        .id("warning-header")
+                        .px_4()
+                        .py_2()
+                        .border_b_1()
+                        .border_color(rgb(p.panel_hi))
+                        .bg(rgb(p.panel_hi))
+                        .text_sm()
+                        .text_color(rgb(p.warn))
+                        .child(SharedString::from("OpenCrabs - Warning")),
+                )
+                .child(
+                    div()
+                        .px_4()
+                        .py_3()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(p.text))
+                                .child(SharedString::from(body.to_string())),
+                        )
+                        .child(
+                            div().flex().flex_row().justify_end().child(
+                                div()
+                                    .id("warning-ok")
+                                    .px_3()
+                                    .py_1()
+                                    .rounded(px(4.0))
+                                    .text_xs()
+                                    .cursor_pointer()
+                                    .text_color(rgb(p.accent))
+                                    .hover(|d| d.bg(rgb(p.panel_hi)))
+                                    .on_click(dismiss)
+                                    .child(SharedString::from("ok")),
+                            ),
+                        ),
+                ),
+        )
+}
+
 /// The delete confirmation: a dim card over both panes naming the
 /// conversation, with the erase on its own button and nothing else. Every
 /// delete path routes here, so the conversation is never one mis-click or one
@@ -12436,6 +12618,40 @@ mod tests {
         assert!(
             src.contains("for (section, row) in help_rows()"),
             "the renderer must paint the list the test checks"
+        );
+    }
+
+    /// The seeker's pick has exactly three meanings, and none of them is a
+    /// silent drop (#2604, #2605).
+    #[test]
+    fn topic_pick_names_the_three_cases() {
+        assert_eq!(topic_pick(true, true), TopicPick::Warn);
+        assert_eq!(topic_pick(true, false), TopicPick::Warn);
+        assert_eq!(topic_pick(false, true), TopicPick::Draft);
+        assert_eq!(topic_pick(false, false), TopicPick::EnableThenDraft);
+    }
+
+    /// The arm must route all three cases: a warning, a prompt, and the flag
+    /// write that ends in the same prompt. The needles are split so the scan
+    /// cannot count its own source text.
+    #[test]
+    fn seeker_topic_pick_never_drops_silently() {
+        let src = include_str!("main.rs");
+        assert!(
+            src.contains(&["TopicPick::", "EnableThenDraft => {"].concat()),
+            "a conversation with topics off must take the enabling path"
+        );
+        assert!(
+            src.contains(&["self.enable_topics", "_then(id,"].concat()),
+            "the enabling path must write the flag before opening the prompt"
+        );
+        assert!(
+            src.contains(&["self.topic_warning = Some(", "title);"].concat()),
+            "a topic pick must arm the warning with the row it named"
+        );
+        assert!(
+            src.contains("OpenCrabs - Warning"),
+            "the warning carries the header bar the report asked for"
         );
     }
 
