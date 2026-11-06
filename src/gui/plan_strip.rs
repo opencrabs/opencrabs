@@ -120,13 +120,86 @@ impl PlanStripState {
             checklist(plan)
         })
     }
+
+    /// The three-line strip a split pane draws (#2622).
+    ///
+    /// The terminal's pane strip is the reference
+    /// (`tui::render::panes::pane_strip_lines`): the plan's name and count,
+    /// the bar with its percentage, and the task in flight. A pane holds a
+    /// fraction of the window, so the six-row checklist is not drawn there;
+    /// it clipped mid-word and pushed its header past the pane's edge.
+    pub fn compact_view(&self) -> Option<Div> {
+        let plan = self.doc.as_ref()?;
+        // Same rule as the full card: an Editing plan is a draft, not a
+        // checklist, so a split pane shows nothing rather than a lie.
+        if !matches!(plan.status, PlanStatus::Active) {
+            return None;
+        }
+        let mut col: Div = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .p_2()
+            .min_w_0()
+            .rounded(px(CARD_RADIUS))
+            .bg(glass_fill(palette::current().panel));
+        for (line, color) in compact_lines(plan).into_iter().zip(compact_colors()) {
+            col = col.child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .truncate()
+                    .text_xs()
+                    .text_color(rgb(color))
+                    .child(SharedString::from(line)),
+            );
+        }
+        Some(col)
+    }
 }
 
-/// The checklist body: header line, progress bar, then the visible tasks
-/// windowed around the running one so a long plan cannot push the editor off
-/// the screen. Six task rows is what fits above the editor at the default
-/// window height without squeezing the chat pane.
-fn checklist(plan: &PlanDocument) -> Div {
+/// The colours of the compact strip's three lines, in order: the name and the
+/// bar in the palette's cyan (the terminal draws the bar in its success
+/// colour, which is the same calm teal), the task in flight in muted ink.
+fn compact_colors() -> [u32; 3] {
+    [
+        palette::current().teal,
+        palette::current().teal,
+        palette::current().text_muted,
+    ]
+}
+
+/// The compact strip's three lines (#2622), split out of the view so the
+/// shape is testable without a frame. Same three facts the terminal puts in a
+/// pane, in the same order, and no checklist.
+fn compact_lines(plan: &PlanDocument) -> Vec<String> {
+    let (done, total, percent, bar) = progress(plan);
+    if total == 0 {
+        // Approved design still being seeded, or a seed that failed.
+        return vec![format!(
+            "📋 {} · checklist not seeded",
+            fit(&plan.title, 40)
+        )];
+    }
+    let running = match plan
+        .tasks
+        .iter()
+        .find(|t| matches!(t.status, TaskStatus::InProgress))
+    {
+        Some(task) => format!("▸ {}", fit(&task.title, 40)),
+        None if done == total => "✓ complete".to_string(),
+        None => "▸ waiting".to_string(),
+    };
+    vec![
+        format!("📋 {} · {done}/{total}", fit(&plan.title, 40)),
+        format!("{bar} {percent}%"),
+        running,
+    ]
+}
+
+/// `done`, `total`, the percentage and the ten-cell bar. One place, so the
+/// full card and the compact strip can never disagree about the same plan.
+fn progress(plan: &PlanDocument) -> (usize, usize, usize, String) {
     let total = plan.tasks.len();
     let done = plan
         .tasks
@@ -135,17 +208,35 @@ fn checklist(plan: &PlanDocument) -> Div {
         .count();
     let percent = (done * 100).checked_div(total).unwrap_or(0);
     let filled = (done * 10).checked_div(total).unwrap_or(0);
-    let bar: String = format!("{}{}", "█".repeat(filled), "░".repeat(10 - filled));
+    (
+        done,
+        total,
+        percent,
+        format!("{}{}", "█".repeat(filled), "░".repeat(10 - filled)),
+    )
+}
+
+/// The checklist body: header line, progress bar, then the visible tasks
+/// windowed around the running one so a long plan cannot push the editor off
+/// the screen. Six task rows is what fits above the editor at the default
+/// window height without squeezing the chat pane.
+fn checklist(plan: &PlanDocument) -> Div {
+    let (done, total, percent, bar) = progress(plan);
 
     let current = plan
         .tasks
         .iter()
         .position(|t| matches!(t.status, TaskStatus::InProgress));
+    // The header row fills the column (#2496): the title takes the slack and
+    // truncates, the metric group keeps its width at the trailing edge. Before
+    // this, the row packed to the left and left a dead band on the right, and
+    // a long title pushed the bar out of the card.
     let mut col = div()
         .flex()
         .flex_col()
         .gap_1()
         .p_3()
+        .min_w_0()
         .rounded(px(CARD_RADIUS))
         .bg(glass_fill(palette::current().panel))
         .child(
@@ -154,8 +245,14 @@ fn checklist(plan: &PlanDocument) -> Div {
                 .flex_row()
                 .items_center()
                 .gap_2()
+                .min_w_0()
+                .w_full()
                 .child(
                     div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .truncate()
                         .text_xs()
                         .text_color(rgb(palette::current().text_muted))
                         .child(SharedString::from(format!(
@@ -167,12 +264,14 @@ fn checklist(plan: &PlanDocument) -> Div {
                 )
                 .child(
                     div()
+                        .flex_none()
                         .text_xs()
                         .text_color(rgb(palette::current().teal))
                         .child(bar),
                 )
                 .child(
                     div()
+                        .flex_none()
                         .text_xs()
                         .text_color(rgb(palette::current().text_faint))
                         .child(SharedString::from(format!("{percent}%"))),
@@ -296,7 +395,63 @@ fn fit(s: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::visible_window;
+    use super::{compact_lines, visible_window};
+    use opencrabs::tui::plan::{PlanDocument, PlanStatus, PlanTask, TaskStatus, TaskType};
+
+    fn plan_with(tasks: usize, done: usize, running: Option<usize>) -> PlanDocument {
+        let mut plan = PlanDocument::new(uuid::Uuid::new_v4(), "Landing".to_string());
+        plan.status = PlanStatus::Active;
+        for i in 0..tasks {
+            let mut task = PlanTask::new(i + 1, format!("task {i}"), String::new(), TaskType::Edit);
+            if i < done {
+                task.status = TaskStatus::Completed;
+            }
+            plan.add_task(task);
+        }
+        if let Some(i) = running {
+            plan.tasks[i].status = TaskStatus::InProgress;
+        }
+        plan
+    }
+
+    #[test]
+    fn the_compact_strip_is_three_lines_like_the_terminal() {
+        // #2622: a split pane draws the terminal's three-line strip, never the
+        // six-row checklist that clipped mid-word in a narrow column.
+        let lines = compact_lines(&plan_with(8, 3, Some(4)));
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "📋 Landing · 3/8");
+        assert_eq!(lines[1], "███░░░░░░░ 37%");
+        assert_eq!(lines[2], "▸ task 4");
+    }
+
+    #[test]
+    fn the_compact_strip_names_the_idle_states() {
+        let complete = plan_with(4, 4, None);
+        assert_eq!(compact_lines(&complete)[2], "✓ complete");
+        let waiting = plan_with(4, 1, None);
+        assert_eq!(compact_lines(&waiting)[2], "▸ waiting");
+        let mut seed = PlanDocument::new(uuid::Uuid::new_v4(), "Landing".to_string());
+        seed.status = PlanStatus::Active;
+        let lines = compact_lines(&seed);
+        assert_eq!(lines.len(), 1, "a plan with no checklist is one line");
+        assert!(lines[0].contains("checklist not seeded"));
+    }
+
+    #[test]
+    fn the_compact_strip_truncates_a_long_title() {
+        // A pane can be narrow; the title gives way instead of pushing the
+        // count off the row.
+        let mut plan = plan_with(2, 1, None);
+        plan.title = "x".repeat(120);
+        let lines = compact_lines(&plan);
+        assert!(
+            lines[0].chars().count() <= 60,
+            "the title is cut, not the count: {}",
+            lines[0]
+        );
+        assert!(lines[0].ends_with("· 1/2"));
+    }
 
     #[test]
     fn window_centres_on_the_running_task_and_never_overruns() {
@@ -312,5 +467,25 @@ mod tests {
                 assert!(start + len <= total, "{total} {current:?} -> {start} {len}");
             }
         }
+    }
+
+    #[test]
+    fn the_checklist_header_gives_the_title_the_slack() {
+        // #2496: the header row packed to the left, so a wide card carried a
+        // dead band on the right and a long title pushed the bar out of it.
+        // The title takes the slack and truncates; the metrics keep their
+        // width at the trailing edge.
+        let src = include_str!("plan_strip.rs");
+        let body = src
+            .split("fn checklist(plan: &PlanDocument) -> Div {")
+            .nth(1)
+            .and_then(|rest| rest.split("\nfn ").next())
+            .expect("the checklist body");
+        assert!(body.contains(".flex_1()"), "the title takes the slack");
+        assert!(
+            body.contains(".flex_none()"),
+            "the metric group keeps its width"
+        );
+        assert!(body.contains(".truncate()"), "a long title is cut");
     }
 }

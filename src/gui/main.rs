@@ -5844,10 +5844,14 @@ impl Dashboard {
                     focus == Some(*session)
                 };
                 // Each pane's plan and queue, read from that pane's session.
+                // The plan is the terminal's three-line pane strip (#2622):
+                // a split pane is a fraction of the window, and the full
+                // checklist clipped mid-word and pushed its header past the
+                // pane's edge.
                 let (plan_view, queued, editor) = if is_chat {
                     self.plan.refresh();
                     (
-                        self.plan.view(),
+                        self.plan.compact_view(),
                         self.queued_for_strip(),
                         self.editor.clone(),
                     )
@@ -5856,7 +5860,7 @@ impl Dashboard {
                         Some(pane) => {
                             pane.plan.refresh();
                             (
-                                pane.plan.view(),
+                                pane.plan.compact_view(),
                                 agent_bridge::queue_snapshot(*session),
                                 pane.editor.clone(),
                             )
@@ -10505,6 +10509,11 @@ fn visible_live<'a>(live: &'a transcript::LiveTurn, owned: bool) -> &'a transcri
 /// percentage width: it sits in the column flow and disappears when idle. It
 /// aligns to the chat's right edge and prints in the palette's cyan, which is
 /// where the owner reads a background job (#2617).
+///
+/// The right alignment is not the whole row: the label keeps a gutter and a
+/// clip, so in a narrow pane it stops at the pane's padding instead of
+/// touching the border, and a long command ellipsizes instead of painting
+/// over the neighbouring leaf (#2622).
 fn task_strip(text: String) -> Div {
     div()
         .flex()
@@ -10512,10 +10521,18 @@ fn task_strip(text: String) -> Div {
         .items_center()
         .justify_end()
         .w_full()
+        .min_w_0()
         .gap_2()
+        .px_2()
         .text_xs()
         .text_color(rgb(palette::current().teal))
-        .child(SharedString::from(format!("⏳ {text}")))
+        .child(
+            div()
+                .min_w_0()
+                .overflow_hidden()
+                .truncate()
+                .child(SharedString::from(format!("⏳ {text}"))),
+        )
 }
 
 /// The footer's identity line: who is answering, from where, on what branch,
@@ -12493,6 +12510,23 @@ mod tests {
     }
 
     #[test]
+    fn the_running_task_strip_keeps_a_gutter_in_a_narrow_pane() {
+        // #2622: full width is not the whole story. The label keeps a gutter
+        // and a clip, so it stops at the pane's padding instead of touching
+        // the border, and a long command truncates instead of painting over
+        // the neighbouring leaf.
+        let src = include_str!("main.rs");
+        let strip = src
+            .split("fn task_strip(")
+            .nth(1)
+            .and_then(|rest| rest.split("\nfn ").next())
+            .expect("task strip");
+        assert!(strip.contains(".px_2()"), "the strip keeps a gutter");
+        assert!(strip.contains(".truncate()"), "a long label ellipsizes");
+        assert!(strip.contains(".min_w_0()"), "the label may shrink");
+    }
+
+    #[test]
     fn every_pane_owns_its_drag_to_copy_state() {
         // #2623: a pane transcript was built with `ViewHooks::default()`,
         // which leaves `drag: None`, so dragging over a split pane selected
@@ -12531,6 +12565,31 @@ mod tests {
         assert!(
             src.contains("pane_editor.downgrade()"),
             "the listener targets the pane's editor"
+        );
+    }
+
+    #[test]
+    fn a_split_pane_draws_the_terminals_compact_plan_strip() {
+        // #2622: a pane is a fraction of the window, so its plan is the
+        // terminal's three-line strip (`tui::render::panes::pane_strip_lines`),
+        // never the six-row checklist that clipped mid-word there.
+        let src = include_str!("main.rs");
+        let body = src
+            .split("fn panes_body(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .expect("panes body");
+        assert!(
+            body.contains("self.plan.compact_view()"),
+            "the chat leaf in a split draws the compact strip"
+        );
+        assert!(
+            body.contains("pane.plan.compact_view()"),
+            "every pane draws the compact strip"
+        );
+        assert!(
+            !body.contains(".plan.view()"),
+            "no split pane draws the full checklist"
         );
     }
 
@@ -12611,6 +12670,7 @@ mod tests {
         );
         assert!(footer.contains(".truncate()"), "the text ellipsizes");
     }
+
     #[test]
     fn the_ctx_counter_speaks_the_tui_grammar() {
         assert_eq!(ctx_footer(Some(12_000), 200_000).0, "ctx: 12K/200K (6%)");
