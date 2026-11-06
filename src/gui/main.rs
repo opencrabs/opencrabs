@@ -6700,8 +6700,21 @@ impl Render for Dashboard {
                         // read twice, on every turn (#2631).
                         // Who is answering, from where, on what branch, and how
                         // fast: the same fields the TUI's footer carries.
+                        // The open conversation's own pair, not the window's
+                        // bootstrap provider: a pick pins the model per
+                        // session, so the global slot never moves and this row
+                        // kept naming the pair it started with (#2634).
                         let (provider, model) = match agent_bridge::bridge() {
-                            Some(b) => (b.service.provider_name(), b.service.provider_model()),
+                            Some(b) => match self.transcript.session {
+                                Some(sid) => {
+                                    let (provider, model) =
+                                        b.service.provider_pair_for_session(sid);
+                                    let label =
+                                        model.rsplit('/').next().unwrap_or(&model).to_string();
+                                    (provider, label)
+                                }
+                                None => (b.service.provider_name(), b.service.provider_model()),
+                            },
                             None => ("-".to_string(), "-".to_string()),
                         };
                         // The session name leads, as in the TUI footer. The row
