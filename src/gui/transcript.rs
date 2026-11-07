@@ -4996,8 +4996,11 @@ mod tests {
     #[test]
     fn drag_copy_row_release_ends_the_drag_where_it_started() {
         const SRC: &str = include_str!("transcript.rs");
+        // Match the name alone, not the opening paren: the row builder is
+        // generic over its child, so `fn selectable_row(` never appears as a
+        // definition and the first match would be this very string literal.
         let (_, after) = SRC
-            .split_once("fn selectable_row(")
+            .split_once("fn selectable_row")
             .expect("the drag rows exist");
         let (row, _) = after.split_once("\n}\n").expect("the row builder ends");
         assert!(
