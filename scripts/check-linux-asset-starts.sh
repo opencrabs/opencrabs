@@ -61,12 +61,14 @@ esac
 #   libstdc++.so.6    -> libstdc++6
 #   libssl.so.3       -> libssl3t64   (on 24.04; the package is libssl3t64, and
 #                                      there is no libssl3 to install)
-# libasound is deliberately absent: it is not in the binary's NEEDED list, it is
-# opened at runtime for local speech-to-text, so its absence does not stop the
-# program from starting. Listing it here would have made this check fail on a
-# distribution where the package name differs, which is a false alarm about the
-# asset rather than a finding about it.
-runtime_packages="libgomp1 libstdc++6 libssl3t64"
+#   libasound.so.2    -> libasound2t64 (the completion chime opens a
+#                                      rodio::OutputStream, so ALSA is in the
+#                                      NEEDED list and the loader refuses to
+#                                      start without it. This file used to say
+#                                      libasound was opened lazily; the v0.5.15
+#                                      full-feature build proved otherwise and
+#                                      the run failed on exactly this.)
+runtime_packages="libgomp1 libstdc++6 libssl3t64 libasound2t64"
 
 # Fail closed. A skipped container test would leave the upload unguarded, which
 # is the state this script exists to end.

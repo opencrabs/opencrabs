@@ -21,6 +21,14 @@ on:
 permissions:
   contents: write
 
+# One dispatch at a time. Two runs publishing to the same rolling tag used to
+# delete each other's release mid-flight; a second dispatch now waits instead.
+# cancel-in-progress is false on purpose: a running build is expensive and a
+# newer commit does not make its artifacts wrong.
+concurrency:
+  group: prerelease-nightly
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -69,8 +77,17 @@ jobs:
           cp "$RTK_BIN" "target/${{ matrix.target }}/release/"
           chmod +x "target/${{ matrix.target }}/release/rtk"
 
+      # Both surfaces ship from here on: the TUI (`opencrabs`) and the desktop
+      # client (`opencrabs-gui`). `--all-features` has always compiled the GUI
+      # on every target; the archive step named one file, so the second binary
+      # was built and then thrown away. Stripping only the TUI was the visible
+      # half of the same omission.
       - name: Strip
-        run: strip target/${{ matrix.target }}/release/opencrabs
+        shell: bash
+        run: |
+          for b in opencrabs opencrabs-gui; do
+            strip "target/${{ matrix.target }}/release/$b"
+          done
 
       - name: Create archive
         shell: bash
@@ -79,7 +96,15 @@ jobs:
           VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
           ARCHIVE="opencrabs-v${VERSION}-pre-${SHA}-${{ matrix.asset_suffix }}"
           cd target/${{ matrix.target }}/release
-          tar czf "../../../${ARCHIVE}.tar.gz" opencrabs rtk
+          # A missing binary used to produce a smaller archive and no error.
+          # The GUI was lost exactly that way on every target.
+          for b in opencrabs opencrabs-gui rtk; do
+            if [ ! -f "$b" ]; then
+              echo "::error::$b was not built; refusing to publish a partial archive"
+              exit 1
+            fi
+          done
+          tar czf "../../../${ARCHIVE}.tar.gz" opencrabs opencrabs-gui rtk
 
       - name: Upload artifact
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
@@ -110,6 +135,13 @@ jobs:
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             asset_suffix: linux-arm64
+            # Thin LTO on this target only, for the reason release.yml gives:
+            # the fat-LTO link of the whole binary takes one rustc past 14.8 GB
+            # RSS on the hosted arm runner (16 GB, no real swap), the VM
+            # freezes, and GitHub kills it with exit 143 after 25 to 30 silent
+            # minutes. Run 41604279570 died exactly there. The amd64 runner
+            # squeaks through the same link, so it keeps the Cargo.toml profile.
+            release_lto: thin
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
@@ -123,6 +155,11 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
 
       - name: Build
+        shell: bash
+        env:
+          # Explicit `fat` everywhere else: it is the Cargo.toml value, and an
+          # empty string here would be parsed as an invalid lto setting.
+          CARGO_PROFILE_RELEASE_LTO: ${{ matrix.release_lto || 'fat' }}
         run: cargo build --locked --release --target ${{ matrix.target }} --all-features
 
       - name: Download RTK
@@ -139,8 +176,17 @@ jobs:
           cp "$RTK_BIN" "target/${{ matrix.target }}/release/"
           chmod +x "target/${{ matrix.target }}/release/rtk"
 
+      # Both surfaces ship from here on: the TUI (`opencrabs`) and the desktop
+      # client (`opencrabs-gui`). `--all-features` has always compiled the GUI
+      # on every target; the archive step named one file, so the second binary
+      # was built and then thrown away. Stripping only the TUI was the visible
+      # half of the same omission.
       - name: Strip
-        run: strip target/${{ matrix.target }}/release/opencrabs
+        shell: bash
+        run: |
+          for b in opencrabs opencrabs-gui; do
+            strip "target/${{ matrix.target }}/release/$b"
+          done
 
       # Same gate as the release workflow: assert the stripped artifact needs no
       # newer glibc than we promise, then prove it starts. A prerelease asset
@@ -162,8 +208,22 @@ jobs:
           SHA=$(git rev-parse --short HEAD)
           VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
           ARCHIVE="opencrabs-v${VERSION}-pre-${SHA}-${{ matrix.asset_suffix }}"
+          # A Linux desktop needs a menu entry and an icon next to the binary,
+          # or a file manager shows the generic exec glyph. Same two files the
+          # release workflow ships, copied before the cd below.
+          cp packaging/linux/opencrabs.desktop packaging/linux/opencrabs.png \
+            "target/${{ matrix.target }}/release/"
           cd target/${{ matrix.target }}/release
-          tar czf "../../../${ARCHIVE}.tar.gz" opencrabs rtk
+          # A missing binary used to produce a smaller archive and no error.
+          # The GUI was lost exactly that way on every target.
+          for b in opencrabs opencrabs-gui rtk opencrabs.desktop opencrabs.png; do
+            if [ ! -f "$b" ]; then
+              echo "::error::$b was not built; refusing to publish a partial archive"
+              exit 1
+            fi
+          done
+          tar czf "../../../${ARCHIVE}.tar.gz" opencrabs opencrabs-gui rtk \
+            opencrabs.desktop opencrabs.png
 
       # Same gate as the release workflow: the floor check above reads what the
       # binary asks for, this runs it on the distribution that floor names, out
@@ -229,6 +289,18 @@ jobs:
           RTK_BIN=$(find /tmp/rtk-extract -name "rtk.exe" | head -1)
           cp "$RTK_BIN" "target/x86_64-pc-windows-msvc/release/"
 
+      # App-local deployment of the MSVC runtime (#2257). The v0.5.15 exe
+      # imported VCRUNTIME140.dll, VCRUNTIME140_1.dll, MSVCP140.dll and
+      # VCOMP140.DLL and died before printing a line on any Windows without the
+      # vc_redist, which is most of them. A static CRT cannot fix it: llama.cpp
+      # ignores CMAKE_MSVC_RUNTIME_LIBRARY and rtk.exe is a prebuilt we cannot
+      # rebuild, so the four DLLs ride beside both exes instead.
+      - name: Stage the MSVC runtime (Windows)
+        shell: bash
+        run: |
+          ./scripts/stage-windows-runtime.sh --self-test
+          ./scripts/stage-windows-runtime.sh "target/x86_64-pc-windows-msvc/release"
+
       - name: Create archive
         shell: bash
         run: |
@@ -236,7 +308,33 @@ jobs:
           VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
           ARCHIVE="opencrabs-v${VERSION}-pre-${SHA}-windows-amd64"
           cd target/x86_64-pc-windows-msvc/release
-          7z a "../../../${ARCHIVE}.zip" opencrabs.exe rtk.exe
+          for b in opencrabs.exe opencrabs-gui.exe rtk.exe; do
+            if [ ! -f "$b" ]; then
+              echo "::error::$b was not built; refusing to publish a partial archive"
+              exit 1
+            fi
+          done
+          for d in msvcp140.dll vcruntime140.dll vcruntime140_1.dll vcomp140.dll; do
+            if [ ! -f "$d" ]; then
+              echo "::error::$d was not staged; the archive would not start on a clean Windows"
+              exit 1
+            fi
+          done
+          7z a "../../../${ARCHIVE}.zip" opencrabs.exe opencrabs-gui.exe rtk.exe \
+            msvcp140.dll vcruntime140.dll vcruntime140_1.dll vcomp140.dll
+
+      # Same gate as the release workflow (#2257): the runner has the vc_redist
+      # pre-installed, so "the exe starts here" proves nothing. The import table
+      # is the signal, and an import passes only when the DLL that satisfies it
+      # travels in the archive. rtk.exe and opencrabs-gui.exe are scanned too.
+      - name: Check the Windows archive carries every DLL it imports
+        shell: bash
+        run: |
+          SHA=$(git rev-parse --short HEAD)
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          archive="opencrabs-v${VERSION}-pre-${SHA}-windows-amd64.zip"
+          python scripts/check-pe-imports.py --self-test
+          python scripts/check-pe-imports.py "$archive"
 
       - name: Upload artifact
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
@@ -284,12 +382,20 @@ jobs:
           ${{ inputs.note }}
 
           ### What's included
-          - 5 platform binaries (linux-amd64, linux-arm64, macos-amd64, macos-arm64, windows-amd64)
+          - 5 platforms, each archive carrying BOTH binaries:
+            - \`opencrabs\`: the terminal client (TUI)
+            - \`opencrabs-gui\`: the desktop client
           - SHA256 checksums
           - RTK 0.40.0 bundled
 
           ### Install
-          Download the archive for your platform, extract, and run \`./opencrabs\`.
+          Download the archive for your platform, extract, then run \`./opencrabs\` for the
+          terminal client or \`./opencrabs-gui\` for the desktop client.
+
+          The desktop client is untested on Linux and Windows: it compiles there,
+          nobody has launched it yet. The terminal client is the surface that has
+          shipped and is the one to trust if the window misbehaves. The Linux GUI
+          needs a display server; the TUI needs none.
 
           ### Auto-update
           These builds are not available via \`/evolve\` (that pulls tagged releases). To install a pre-release binary manually, download and replace your existing binary.
@@ -299,14 +405,25 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Use a rolling 'nightly' tag — always points to the latest build
-          TAG="nightly"
-          # Delete old release if it exists (rolling pre-release)
-          if gh release view "$TAG" &>/dev/null; then
-            gh release delete "$TAG" --yes --cleanup-tag
+          # Use a rolling 'nightly' tag: it always points at the latest build.
+          #
+          # Create once, then upload over the top. The old sequence deleted the
+          # release and recreated it, so any failure between those two commands
+          # left the community with no download at all, and two dispatches could
+          # delete each other's assets. Neither can happen now: the release is
+          # only created when it is missing, and every asset is clobbered in
+          # place, which also keeps a platform that failed to rebuild serving
+          # its previous archive instead of vanishing.
+          if gh release view nightly >/dev/null 2>&1; then
+            gh release edit nightly \
+              --title "Pre-release (nightly)" \
+              --notes-file /tmp/prerelease_notes.md \
+              --prerelease
+          else
+            gh release create nightly \
+              --title "Pre-release (nightly)" \
+              --notes-file /tmp/prerelease_notes.md \
+              --prerelease \
+              --target "${{ github.sha }}"
           fi
-          gh release create "$TAG" \
-            --title "Pre-release (nightly)" \
-            --notes-file /tmp/prerelease_notes.md \
-            --prerelease \
-            release-assets/*
+          gh release upload --clobber nightly release-assets/*
