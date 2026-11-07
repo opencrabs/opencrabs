@@ -271,7 +271,7 @@ impl BackgroundTaskManager {
                 "Could not write detached status for {task_id}: {e}"
             );
         }
-        tokio::spawn(async move {
+        let waiter = async move {
             // Log the START as well as the finish. Only completions were
             // logged, so a task that never finished left no trace of having
             // begun, and reconstructing which commands got detached meant
@@ -449,7 +449,64 @@ impl BackgroundTaskManager {
                 }
                 super::session_routes::Delivery::Delivered => {}
             }
-        });
+        };
+        spawn_waiter(waiter);
+    }
+}
+
+/// The runtime a detached command's waiter lives on, created once for the
+/// process.
+///
+/// A detached command outlives the turn that started it by definition, so its
+/// waiter cannot live on the caller's runtime (#2676). The window runs every
+/// turn on a `current_thread` runtime it drops the moment the turn returns
+/// (`gui::agent_bridge::spawn_turn`), and the waiter went with it: `child.wait`
+/// was dropped mid-await, `kill_on_drop` killed the shell, the command's own
+/// children kept running orphaned, and the finalize never ran. The row,
+/// the status file and the DB record then read `Running` forever, which is the
+/// hourglass that never goes away.
+///
+/// One worker is enough: the waiter spends its life awaiting the child and the
+/// DB, never blocking on CPU. `enable_all` is required for the process driver,
+/// the timer that bounds the wait, and the DB's IO.
+static TASK_RUNTIME: std::sync::OnceLock<Option<tokio::runtime::Runtime>> =
+    std::sync::OnceLock::new();
+
+/// Spawn a detached command's waiter on the process-lifetime runtime.
+///
+/// Falls back to the caller's runtime only if the dedicated one cannot be
+/// built, which is a startup-level failure worth an error line: the fallback
+/// still runs the command, it just inherits the old "lives as long as the
+/// spawning turn" limitation.
+fn spawn_waiter<F>(future: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let runtime = TASK_RUNTIME.get_or_init(|| {
+        match tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .thread_name("opencrabs-detached")
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => Some(rt),
+            Err(e) => {
+                tracing::error!(
+                    target: "background_task",
+                    "Could not build the detached task runtime: {e}. Falling back to the \
+                     spawning runtime, where a completion can die with its turn."
+                );
+                None
+            }
+        }
+    });
+    match runtime {
+        Some(rt) => {
+            rt.spawn(future);
+        }
+        None => {
+            tokio::spawn(future);
+        }
     }
 }
 
