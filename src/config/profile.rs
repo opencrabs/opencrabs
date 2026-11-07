@@ -1819,13 +1819,19 @@ pub(crate) fn is_pid_alive(pid: u32) -> bool {
     }
     #[cfg(windows)]
     {
+        // `HANDLE` is a pointer, so the return type is `RawHandle` — the same
+        // shape `config::winlock` declares. Two declarations of the same Win32
+        // function with different types make rustc warn about a clashing
+        // declaration (`isize` vs `*mut c_void`), and a warning that is always
+        // there is a warning nobody reads.
+        use std::os::windows::io::RawHandle;
         unsafe extern "system" {
-            fn OpenProcess(dwDesiredAccess: u32, bInheritHandle: i32, dwProcessId: u32) -> isize;
-            fn CloseHandle(hObject: isize) -> i32;
+            fn OpenProcess(desired_access: u32, inherit: i32, pid: u32) -> RawHandle;
+            fn CloseHandle(object: RawHandle) -> i32;
         }
         const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
         let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
-        if handle == 0 {
+        if handle.is_null() {
             false
         } else {
             unsafe { CloseHandle(handle) };
