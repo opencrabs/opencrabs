@@ -27,6 +27,7 @@ pub mod pane_tree;
 pub mod plan_history;
 pub mod query;
 pub mod rail;
+pub mod scroll;
 pub mod split;
 pub mod topic_bar;
 pub mod usage;
@@ -38,7 +39,7 @@ mod purity_tests {
     //! break that silently at compile time for the GUI, never for us.
 
     /// Every source file in `ui_core`, with its contents.
-    fn sources() -> [(&'static str, &'static str); 33] {
+    fn sources() -> [(&'static str, &'static str); 34] {
         [
             ("ui_core/actions.rs", include_str!("actions.rs")),
             ("ui_core/bang.rs", include_str!("bang.rs")),
@@ -56,6 +57,7 @@ mod purity_tests {
             ("ui_core/query.rs", include_str!("query.rs")),
             ("ui_core/split.rs", include_str!("split.rs")),
             ("ui_core/rail.rs", include_str!("rail.rs")),
+            ("ui_core/scroll.rs", include_str!("scroll.rs")),
             ("ui_core/topic_bar.rs", include_str!("topic_bar.rs")),
             ("ui_core/commands.rs", include_str!("commands.rs")),
             ("ui_core/help_keys.rs", include_str!("help_keys.rs")),
