@@ -1896,7 +1896,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("down", Down, None),
         KeyBinding::new("alt-left", WordLeft, None),
         KeyBinding::new("alt-right", WordRight, None),
+        KeyBinding::new("ctrl-left", WordLeft, None),
+        KeyBinding::new("ctrl-right", WordRight, None),
         KeyBinding::new("alt-backspace", DeleteWordBack, None),
+        KeyBinding::new("ctrl-backspace", DeleteWordBack, None),
         KeyBinding::new("shift-left", SelectLeft, None),
         KeyBinding::new("shift-right", SelectRight, None),
         KeyBinding::new("cmd-a", SelectAll, None),
@@ -2154,6 +2157,31 @@ mod tests {
             .expect("editor key bindings");
         assert!(bindings.contains("KeyBinding::new(\"cmd-c\", Copy, None)"));
         assert!(bindings.contains("KeyBinding::new(\"ctrl-c\", Copy, None)"));
+    }
+
+    /// Word motion answers every chord the TUI documents: ctrl and alt on
+    /// both arrows, and ctrl or alt backspace deletes the word behind.
+    #[test]
+    fn word_chords_answer_ctrl_and_alt() {
+        let src = include_str!("editor.rs");
+        let bindings = src
+            .split("pub fn bind_keys(")
+            .nth(1)
+            .and_then(|rest| rest.split("// Line math").next())
+            .expect("editor key bindings");
+        for chord in [
+            "ctrl-left",
+            "alt-left",
+            "ctrl-right",
+            "alt-right",
+            "ctrl-backspace",
+            "alt-backspace",
+        ] {
+            assert!(
+                bindings.contains(&format!("KeyBinding::new(\"{chord}\"")),
+                "{chord} is not bound"
+            );
+        }
     }
 
     /// The single-line hint sits in the middle of the composer, with the
