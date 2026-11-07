@@ -70,6 +70,7 @@ use opencrabs::ui_core::model_layout;
 use opencrabs::ui_core::model_selector::{FetchRequest, ProviderSelectorState};
 use opencrabs::ui_core::pane_tree::{DropHalf, PaneTree, drop_half};
 use opencrabs::ui_core::rail;
+use opencrabs::ui_core::scroll::Follow;
 use opencrabs::ui_core::split::{self, Layout};
 use opencrabs::ui_core::topic_bar;
 use transcript::{CopyDrag, TranscriptState};
@@ -198,6 +199,9 @@ struct SplitPane {
     title: String,
     transcript: TranscriptState,
     scroll: ScrollHandle,
+    /// This pane's own bottom-follow state (#2685), per leaf like every other
+    /// piece of pane chrome.
+    follow: Follow,
     /// The pane's own composer (#2530). What is typed here stays with the pane
     /// it was typed into, so moving focus never carries a draft across.
     editor: Entity<editor::Editor>,
@@ -817,6 +821,10 @@ struct Dashboard {
     /// load can open at the bottom where the conversation ends.
     transcript: transcript::TranscriptState,
     transcript_scroll: ScrollHandle,
+    /// Whether the chat transcript keeps following its bottom (#2685). A one
+    /// shot snap could not: it is consumed by the next layout, and every row
+    /// that lands afterwards is out of view.
+    chat_follow: Follow,
     /// The rail's own scroll handle, so a cursor moved by the arrows can
     /// ask the next frame to bring its row into view (#2351).
     rail_scroll: ScrollHandle,
@@ -1227,6 +1235,70 @@ impl Dashboard {
         self.forward_pick = None;
         self.forward_query.clear();
         self.forward_cursor = None;
+    }
+
+    /// Keep the chat transcript on its newest row (#2685).
+    ///
+    /// The snap is judged from the reader's own place: a transcript pinned at
+    /// the bottom keeps following a turn as it streams, and one the reader
+    /// scrolled up stays where they put it. Content that grows moves the max
+    /// offset and leaves the offset alone, so growth can never be mistaken for
+    /// the reader leaving.
+    fn follow_chat(&mut self) {
+        let offset = self.transcript_scroll.offset().y.into();
+        let max = self.transcript_scroll.max_offset().height.into();
+        if self.chat_follow.update(offset, max) {
+            self.transcript_scroll.scroll_to_bottom();
+        }
+    }
+
+    /// The same for one pane's transcript (#2685).
+    fn follow_pane(&mut self, session: Uuid) {
+        if let Some(pane) = self.pane_states.get_mut(&session) {
+            let offset = pane.scroll.offset().y.into();
+            let max = pane.scroll.max_offset().height.into();
+            if pane.follow.update(offset, max) {
+                pane.scroll.scroll_to_bottom();
+            }
+        }
+    }
+
+    /// Switch one leaf to another conversation (#2686).
+    ///
+    /// A topic chip drawn inside a pane has to move that pane. The window door
+    /// (`open_session`) moves the chat leaf instead, so a click in a second
+    /// pane used to move a conversation the user was not reading and leave the
+    /// pane they were looking at untouched. The chat leaf and a session that
+    /// already sits on screen keep going through the window door, because that
+    /// path already closes a duplicate pane and moves the chat's own leaf.
+    fn open_topic_in_pane(&mut self, pane: Uuid, id: Uuid, cx: &mut Context<Self>) {
+        if Some(pane) == self.transcript.session || Some(id) == self.transcript.session {
+            self.open_session(id, cx);
+            return;
+        }
+        if self.panes.as_ref().is_some_and(|tree| tree.contains(id)) {
+            // Already on screen: hand it the keyboard instead of showing one
+            // conversation in two leaves.
+            self.pane_focus = Some(id);
+            self.sync_composer_session();
+            cx.notify();
+            return;
+        }
+        let renamed = self
+            .panes
+            .as_mut()
+            .is_some_and(|tree| tree.rename_leaf(pane, id));
+        if !renamed {
+            return;
+        }
+        // The pane's transcript, live turn, plan strip and editor all belong
+        // to the conversation that just left the leaf.
+        self.pane_states.remove(&pane);
+        self.open_pane_state(id, cx);
+        self.pane_focus = Some(id);
+        self.sync_composer_session();
+        self.persist_layout();
+        cx.notify();
     }
 
     /// Open one conversation: select it in the rail, switch the right pane to
@@ -2110,6 +2182,14 @@ impl Dashboard {
         if !self.plan_expanded.remove(&session) {
             self.plan_expanded.insert(session);
         }
+        // An expanded strip takes room from the transcript under it, and a
+        // viewport that shrinks must not leave the newest row clipped while
+        // the reader believes they are at the bottom (#2685, #2624).
+        if Some(session) == self.transcript.session {
+            self.chat_follow.rearm();
+        } else if let Some(pane) = self.pane_states.get_mut(&session) {
+            pane.follow.rearm();
+        }
         cx.notify();
     }
 
@@ -2246,6 +2326,7 @@ impl Dashboard {
                     ..Default::default()
                 },
                 scroll: ScrollHandle::new(),
+                follow: Follow::new(),
                 editor: pane_editor,
                 plan: plan_strip::PlanStripState::default(),
                 plan_for: Some(id),
@@ -5172,7 +5253,7 @@ impl Dashboard {
             self.cancel = None;
             self.drain_pending(cx);
         }
-        self.transcript_scroll.scroll_to_bottom();
+        self.follow_chat();
         cx.notify();
     }
 
@@ -5755,6 +5836,14 @@ impl Dashboard {
             .is_some_and(|id| self.sessions.is_topic_enabled(id))
     }
 
+    /// The session a new topic hangs under (#2686): the leaf that owns the
+    /// keyboard, or the chat leaf when the window is unsplit. A split used to
+    /// create the topic under `transcript.session` whatever pane was focused,
+    /// and refused outright when that leaf had topics off.
+    fn topic_parent(&self) -> Option<Uuid> {
+        self.split_focus().or(self.transcript.session)
+    }
+
     /// The chat's menu (#2480): what can be done to the conversation it
     /// belongs to. It opens from a right press on the conversation or on a
     /// topic tab; the header button that used to open it went with the title
@@ -5830,8 +5919,12 @@ impl Dashboard {
     /// (`vec![root]`), which put the session in the row of its own topics and
     /// made it read as a sibling. The name belongs to the card above, and
     /// `All` is the way back to it.
-    fn topic_tabs(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let Some(open) = self.transcript.session else {
+    ///
+    /// `pane` names the leaf the strip is drawn in, `None` for the unsplit
+    /// window (#2686). Every read and every click resolves against it, so a
+    /// pane's strip shows that pane's family and a click moves that pane.
+    fn topic_tabs(&self, pane: Option<Uuid>, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let Some(open) = pane.or(self.transcript.session) else {
             return Vec::new();
         };
         let root = self.sessions.parents.get(&open).copied().unwrap_or(open);
@@ -5871,7 +5964,10 @@ impl Dashboard {
                 let current = entry.is_open(root, open);
                 let click = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
                     cx.stop_propagation();
-                    this.open_session(id, cx);
+                    match pane {
+                        Some(leaf) => this.open_topic_in_pane(leaf, id, cx),
+                        None => this.open_session(id, cx),
+                    }
                 });
                 // A right press on a tab opens the same menu the `...` draws,
                 // for the session that tab stands for (#2480). Before this it
@@ -5931,7 +6027,10 @@ impl Dashboard {
     }
 
     fn start_topic_draft(&mut self, cx: &mut Context<Self>) {
-        if !self.open_chat_topics_on() {
+        let topics_on = self
+            .topic_parent()
+            .is_some_and(|id| self.sessions.is_topic_enabled(id));
+        if !topics_on {
             // Loud on purpose: this guard swallowed the seeker's pick with no
             // trace, which made a working row look like a dead click (#2604).
             logging::debug("topic draft: the open conversation has topics off");
@@ -5990,7 +6089,7 @@ impl Dashboard {
             cx.notify();
             return;
         }
-        let Some(parent) = self.transcript.session else {
+        let Some(parent) = self.topic_parent() else {
             return;
         };
         let db_path = self.db_path.clone();
@@ -7748,6 +7847,11 @@ impl Dashboard {
         // re-read. The themes preview draws the same tree without panes
         // owning the keyboard, so it keeps the shared chrome off.
         let mut chrome: HashMap<Uuid, AnyElement> = HashMap::new();
+        // One topic strip per pane, in that pane's own chrome (#2686): the
+        // strip used to resolve `self.transcript.session`, so every pane in a
+        // wall showed the chat leaf's topics and clicking one moved a
+        // conversation the user was not reading.
+        let mut tops: HashMap<Uuid, AnyElement> = HashMap::new();
         if interactive {
             for session in &leaves {
                 let is_chat = Some(*session) == self.transcript.session;
@@ -7756,6 +7860,27 @@ impl Dashboard {
                 } else {
                     focus == Some(*session)
                 };
+                // This pane's own topics, resolved from its own session
+                // (#2686). The root is the pane's parent when the pane holds
+                // a topic, so a pane showing a topic still lists its family,
+                // and the open chip is that pane's session rather than the
+                // chat's.
+                let pane_root = self
+                    .sessions
+                    .parents
+                    .get(session)
+                    .copied()
+                    .unwrap_or(*session);
+                if self.sessions.is_topic_enabled(pane_root) {
+                    let pane_key = session.to_string();
+                    let tabs = self.topic_tabs(Some(*session), cx);
+                    let toggle_edge = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                        cx.stop_propagation();
+                        this.cycle_topic_edge(cx);
+                    });
+                    let strip = topic_strip(&pane_key, topic_tabs::Edge::Top, toggle_edge, tabs);
+                    tops.insert(*session, strip.into_any_element());
+                }
                 // Each pane's plan and queue, read from that pane's session.
                 // The plan is the terminal's three-line pane strip (#2622):
                 // a split pane is a fraction of the window, and the full
@@ -7897,6 +8022,7 @@ impl Dashboard {
             interactive,
             footers: &footers,
             chrome: &mut chrome,
+            tops: &mut tops,
             drop: self.pane_drop,
         };
         let mut path = Vec::new();
@@ -7930,6 +8056,14 @@ impl Render for Dashboard {
                 }
                 FocusTarget::Root => window.focus(&self.focus),
             }
+        }
+        // Keep every transcript on its newest row (#2685). Run before the
+        // tree is built so the snap lands in this frame's layout, and judged
+        // from each viewport's own offset so a reader parked in history is
+        // never yanked back down.
+        self.follow_chat();
+        for session in self.panes.as_ref().map(|t| t.leaves()).unwrap_or_default() {
+            self.follow_pane(session);
         }
         // The rail is an overlay only while it holds the keys. A path that
         // focuses the composer directly (a drop, a pasted image, the
@@ -10115,17 +10249,27 @@ impl Render for Dashboard {
             .transcript
             .session
             .is_some_and(|id| self.sessions.parents.contains_key(&id));
-        if self.screen == Screen::Chat && (self.open_chat_topics_on() || is_topic) {
+        // A split draws the strip inside each pane (#2687): one window row
+        // above a wall of panes named the chat's topics over conversations
+        // that had none, and sat outside the box it described.
+        let split_draws_its_own = self
+            .panes
+            .as_ref()
+            .is_some_and(|tree| tree.leaves().len() > 1);
+        if self.screen == Screen::Chat
+            && !split_draws_its_own
+            && (self.open_chat_topics_on() || is_topic)
+        {
             // The tabs (#2400): the family's parent, then its topics. The
             // leading button moves the whole row to another side (#2402).
             // The `...` menu is NOT here any more (#2480): it lives at the
             // conversation's top right, over the chat it acts on.
-            let tabs = self.topic_tabs(cx);
+            let tabs = self.topic_tabs(None, cx);
             let toggle_edge = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
                 cx.stop_propagation();
                 this.cycle_topic_edge(cx);
             });
-            let strip = topic_strip(self.topic_edge, toggle_edge, tabs);
+            let strip = topic_strip("window", self.topic_edge, toggle_edge, tabs);
             topic_row = Some((self.topic_edge, strip.into_any_element()));
         }
         let mut right = div()
@@ -11082,6 +11226,7 @@ fn main() {
                             ..Default::default()
                         },
                         transcript_scroll: ScrollHandle::new(),
+                        chat_follow: Follow::new(),
                         rail_scroll: ScrollHandle::new(),
                         editor,
                         agent_rx,
@@ -12792,15 +12937,24 @@ fn help_rows() -> Vec<(
 /// chat's top right and floats over the transcript instead of growing this
 /// strip by five rows when it opens.
 fn topic_strip(
+    key: &str,
     edge: topic_tabs::Edge,
     toggle_edge: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     tabs: Vec<AnyElement>,
 ) -> Div {
+    // A split draws one strip per pane (#2687), so the control cannot carry a
+    // fixed id: two strips sharing one would share their hover state, and a
+    // hover in one pane would light the button in another.
+    let id = SharedString::from(format!("topic-edge-button-{key}"));
+    // The window's strip has always sat flush with the conversation's measure
+    // (#2590). A pane is a fraction of that width, so its strip keeps a small
+    // inset instead of the window's 24px.
+    let in_pane = key != "window";
     // The orientation control shares the topic cell's generous hit target.
     let control = topic_tabs::style(edge.is_vertical());
     let separator = topic_tabs::separator_color();
     let leading = div()
-        .id("topic-edge-button")
+        .id(id)
         .flex()
         .items_center()
         .justify_center()
@@ -12844,8 +12998,8 @@ fn topic_strip(
             .gap_2()
             .min_w_0()
             // Match the title hairline end to end without moving the tabs.
-            .mx(rems(-1.5))
-            .px_6()
+            .when(!in_pane, |d| d.mx(rems(-1.5)).px_6())
+            .when(in_pane, |d| d.px_2())
             .border_b_1()
             .border_color(separator)
             .child(leading)
@@ -13537,6 +13691,10 @@ struct PanesCtx<'a> {
     /// Where a dragged pane would land (#2683): the pane under the pointer and
     /// the half of it. Read by each leaf to draw its landing band.
     drop: Option<(Uuid, DropHalf)>,
+    /// Each pane's own topic strip (#2686, #2687), drawn between its header
+    /// and its conversation. Built in `panes_body` because a leaf has no
+    /// `Context` to run a click listener from.
+    tops: &'a mut HashMap<Uuid, AnyElement>,
 }
 
 /// Draw the pane tree (#2472). A leaf is one pane: its header, its ×, and the
@@ -13718,6 +13876,11 @@ fn pane_element(
                     *session,
                     close,
                 ))
+                // The pane's topics sit inside its box, under its name
+                // (#2687): a strip above the whole wall described the chat
+                // while the panes it hung over held something else.
+                .when_some(ctx.tops.remove(session), |d, top| {
+                    d.child(div().flex().flex_none().min_w_0().child(top))
                 })
                 // The transcript takes the slack, the strips and the composer
                 // below it keep their height (#2624). Without the wrapper the

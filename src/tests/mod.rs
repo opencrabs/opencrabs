@@ -368,6 +368,7 @@ pub mod gui_footer_title_test;
 pub mod gui_layout_test;
 pub mod gui_message_select_2613_test;
 pub mod gui_overlay_layer_test;
+pub mod gui_panes_follow_test;
 pub mod gui_rail_last_activity_test;
 pub mod gui_rail_letters_test;
 pub mod gui_sessions_rail_test;
