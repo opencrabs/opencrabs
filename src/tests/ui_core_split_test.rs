@@ -1,9 +1,10 @@
 //! The split-pane chord and layout rule (#2438).
 
 use crate::ui_core::split::{
-    EVEN_SHARE, Layout, MIN_PANE_PX, PANE_BODY_FLOOR, PANE_CHROME_ROWS, PANE_FOOTER_ROWS,
-    PANE_INPUT_ROWS, PANE_STRIP_MAX, PANE_STRIP_MIN, PaneRotation, chord_layout, pane_rows,
-    pane_rows_with, pane_strip_height, rotated_index, rotation_chord, share_after_drag,
+    EVEN_SHARE, Layout, MIN_PANE_PX, MIN_PANE_RATIO, PANE_BODY_FLOOR, PANE_CHROME_ROWS,
+    PANE_FOOTER_ROWS, PANE_INPUT_ROWS, PANE_STRIP_MAX, PANE_STRIP_MIN, PaneRotation, chord_layout,
+    pane_floor, pane_rows, pane_rows_with, pane_strip_height, rotated_index, rotation_chord,
+    share_after_drag,
 };
 
 #[test]
@@ -81,12 +82,29 @@ fn a_drag_stops_at_the_narrowest_usable_pane() {
 }
 
 #[test]
-fn a_pane_area_too_small_for_two_panes_keeps_the_split() {
-    // Two minimum panes do not fit, so there is no share to clamp into:
-    // holding the split is the only outcome that does not collapse a side.
-    assert_eq!(share_after_drag(0.6, 300.0, MIN_PANE_PX * 2.0), 0.6);
+fn a_narrow_pane_area_keeps_the_divider_movable() {
+    // #2684: two 240px panes exactly fill 480px, so the fixed floor pinned the
+    // share at 0.5 and the divider would not move at all. Past the point where
+    // 240px per pane fits inside the budget, the floor goes proportional so a
+    // narrow split still trades space.
+    let span = MIN_PANE_PX * 2.0;
+    let floor = MIN_PANE_RATIO;
+    assert!((pane_floor(span, 2) - floor).abs() < 1e-6);
+    assert!((share_after_drag(0.6, 300.0, span) - (1.0 - floor)).abs() < 1e-6);
+    assert!((share_after_drag(0.4, -300.0, span) - floor).abs() < 1e-6);
+    // A dead span still holds: there is nothing to drag inside nothing.
     assert_eq!(share_after_drag(0.6, 300.0, 0.0), 0.6);
     assert_eq!(share_after_drag(0.6, 300.0, f32::NAN), 0.6);
+}
+
+#[test]
+fn a_comfortable_pane_area_keeps_the_fixed_floor() {
+    // #2684: while 240px per pane fits, the pixel floor stays the honest
+    // number, so a drag still stops short of a strip.
+    assert_eq!(pane_floor(1000.0, 2), MIN_PANE_PX / 1000.0);
+    // Four panes in the same width cannot each hold 240px, so the floor is the
+    // proportional one instead of a frozen split.
+    assert_eq!(pane_floor(1000.0, 4), MIN_PANE_RATIO);
 }
 
 #[test]

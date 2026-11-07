@@ -4,7 +4,7 @@
 //! holds the shares. A tree of one leaf is the unsplit window, so today's
 //! plain chat is the base case, not a special one.
 
-use crate::ui_core::split::{Layout, MIN_PANE_PX};
+use crate::ui_core::split::{EVEN_SHARE, Layout, pane_floor};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use uuid::Uuid;
@@ -195,12 +195,14 @@ impl PaneTree {
         }
     }
 
-    /// Clamp every split's children so no pane can sit under
-    /// [`MIN_PANE_PX`] of its own span. `span` is this node's span along its
-    /// split axis in px; the root passes the pane area. A span too small to
-    /// hold every child at that minimum leaves the shares alone: shrinking
-    /// a pane below the floor would be the one outcome a resize must never
-    /// produce.
+    /// Clamp every split's children so no pane can sit under the pixel floor
+    /// of its own span (#2472, #2684). `span` is this node's span along its
+    /// split axis in px; the root passes the pane area. The floor is
+    /// [`pane_floor`]: the fixed [`crate::ui_core::split::MIN_PANE_PX`] while
+    /// the span can afford it, a proportional one when it cannot. A span too
+    /// small to hold every child at that minimum leaves the shares alone:
+    /// shrinking a pane below the floor would be the one outcome a resize
+    /// must never produce.
     pub fn normalize(&mut self, span: f32) {
         if !span.is_finite() || span <= 0.0 {
             return;
@@ -209,8 +211,12 @@ impl PaneTree {
             return;
         };
         normalize_shares(children);
-        if children.len() >= 2 && span > MIN_PANE_PX * children.len() as f32 {
-            clamp_floors(children, MIN_PANE_PX / span);
+        let floor = pane_floor(span, children.len());
+        // Below an even share the floor still leaves a range to trade in. At
+        // or above it every child already sits under the floor, and lifting
+        // them would be the only outcome a resize must never produce.
+        if children.len() >= 2 && floor < EVEN_SHARE {
+            clamp_floors(children, floor);
         }
         let child_spans: Vec<f32> = children.iter().map(|child| child.share() * span).collect();
         for (child, child_span) in children.iter_mut().zip(child_spans) {

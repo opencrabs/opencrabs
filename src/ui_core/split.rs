@@ -29,24 +29,56 @@ impl Layout {
 }
 
 /// The narrowest a pane may be dragged to, in px (#2476). Below this a pane
-/// stops being a transcript and becomes a strip, so the drag stops here.
+/// stops being a transcript and becomes a strip, so the drag stops here while
+/// the span can afford it.
 pub const MIN_PANE_PX: f32 = 240.0;
+
+/// The share a pane keeps when the span cannot afford [`MIN_PANE_PX`] panes
+/// (#2684). A fixed floor eats the whole range once the split gets narrow, so
+/// a four pane window froze the dividers exactly where tuning mattered. Ten
+/// percent per pane always leaves the pair a real range to trade in.
+pub const MIN_PANE_RATIO: f32 = 0.1;
+
+/// The share of the span the fixed floor may claim across every pane of a
+/// split before it gives way to [`MIN_PANE_RATIO`]. Below this the panes are
+/// still comfortable; above it a fixed floor would leave the drag nowhere to
+/// go.
+pub const FLOOR_BUDGET: f32 = 0.8;
 
 /// The share the panes start from: an even split (#2473, #2476).
 pub const EVEN_SHARE: f32 = 0.5;
 
-/// The first pane's share of the pane area after a drag step (#2476).
+/// The smallest share one pane of a `count` pane split may hold in `span` px
+/// (#2684).
+///
+/// While the fixed [`MIN_PANE_PX`] floor fits inside [`FLOOR_BUDGET`] it is
+/// the honest number: 240px is the width below which a pane stops being a
+/// transcript. Once the span cannot afford that, the floor becomes
+/// proportional, so a narrow split keeps a real range instead of freezing.
+pub fn pane_floor(span: f32, count: usize) -> f32 {
+    if !span.is_finite() || span <= 0.0 || count == 0 {
+        return MIN_PANE_RATIO;
+    }
+    let fixed = MIN_PANE_PX / span;
+    if fixed * count as f32 <= FLOOR_BUDGET && fixed < EVEN_SHARE {
+        fixed
+    } else {
+        MIN_PANE_RATIO
+    }
+}
+
+/// The first pane's share of the pane area after a drag step (#2476, #2684).
 ///
 /// `travelled` is how far the pointer moved along the drag axis in px and
 /// `span` is the pane area along that axis. The result is clamped so neither
-/// pane can be dragged under [`MIN_PANE_PX`], and an area too small to hold
-/// two panes at that minimum keeps the split where it was: collapsing a side
-/// would be the one outcome a resize must never produce.
+/// pane can be dragged under [`pane_floor`], which keeps a fixed 240px floor
+/// while the span can afford it and falls back to a proportional one when it
+/// cannot: a divider that refuses to move is worse than a narrow pane.
 pub fn share_after_drag(from_share: f32, travelled: f32, span: f32) -> f32 {
-    if !span.is_finite() || span <= MIN_PANE_PX * 2.0 {
+    if !span.is_finite() || span <= 0.0 {
         return from_share;
     }
-    let floor = MIN_PANE_PX / span;
+    let floor = pane_floor(span, 2);
     (from_share + travelled / span).clamp(floor, 1.0 - floor)
 }
 
