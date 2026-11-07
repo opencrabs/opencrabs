@@ -413,9 +413,16 @@ jobs:
           echo "RTK binary bundled at: $RELEASE_DIR/$(basename $RTK_BINARY)"
           ls -lh "$RELEASE_DIR/$(basename $RTK_BINARY)"
 
+      # Both surfaces ship: the terminal client and the desktop client. This
+      # step used to strip one file, which was the visible half of a bigger
+      # omission: the archive steps named one binary, so --all-features built
+      # opencrabs-gui on every target and every archive threw it away.
       - name: Strip binary (Unix)
         if: matrix.os != 'windows-latest'
-        run: strip target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+        shell: bash
+        run: |
+          strip "target/${{ matrix.target }}/release/${{ matrix.artifact_name }}"
+          strip "target/${{ matrix.target }}/release/opencrabs-gui"
 
       # The published asset is the only thing users ever run, so the floor gets
       # checked on that exact file, after strip, before it is archived. A binary
@@ -450,6 +457,7 @@ jobs:
         run: |
           ./scripts/package-macos-app.sh \
             --binary "target/${{ matrix.target }}/release/${{ matrix.artifact_name }}" \
+            --gui "target/${{ matrix.target }}/release/opencrabs-gui" \
             --rtk "target/${{ matrix.target }}/release/rtk" \
             --version "${{ steps.version.outputs.version }}" \
             --out dist
@@ -478,17 +486,36 @@ jobs:
             # The staged runtime rides next to both exes. The loader checks the
             # exe's own directory first, so this is what makes the archive
             # start on a Windows that never installed Visual Studio.
-            7z a ../../../${ASSET_NAME}.zip ${{ matrix.artifact_name }} rtk.exe \
+            7z a ../../../${ASSET_NAME}.zip ${{ matrix.artifact_name }} opencrabs-gui.exe rtk.exe \
               msvcp140.dll vcruntime140.dll vcruntime140_1.dll vcomp140.dll
           elif [[ "${{ matrix.asset_suffix }}" == macos-* ]]; then
-            tar czf "${ASSET_NAME}.tar.gz" -C dist OpenCrabs.app
+            # Both binaries at the archive root as well as inside the bundle, so
+            # a tester can run either one without going into Contents/MacOS.
+            # Hard links, not copies: tar stores the second occurrence as a
+            # link to the first, so the download carries the binaries once.
+            # Verified with tar 3.x: the listing shows "link to
+            # OpenCrabs.app/Contents/MacOS/opencrabs" and extraction restores
+            # two real files at the root.
+            # rm -f first: the darwin jobs run on a self-hosted Mac, so dist/
+            # survives between runs and ln refuses to overwrite.
+            rm -f dist/opencrabs dist/opencrabs-gui
+            ln "dist/OpenCrabs.app/Contents/MacOS/opencrabs" dist/opencrabs
+            ln "dist/OpenCrabs.app/Contents/MacOS/opencrabs-gui" dist/opencrabs-gui
+            tar czf "${ASSET_NAME}.tar.gz" -C dist OpenCrabs.app opencrabs opencrabs-gui
           else
             # A Linux desktop needs a menu entry and an icon next to the binary,
             # or a file manager shows the generic exec glyph.
             cp packaging/linux/opencrabs.desktop packaging/linux/opencrabs.png \
               target/${{ matrix.target }}/release/
             cd target/${{ matrix.target }}/release
-            tar czf ../../../${ASSET_NAME}.tar.gz ${{ matrix.artifact_name }} rtk \
+            # A missing binary used to produce a smaller archive and no error.
+            for b in ${{ matrix.artifact_name }} opencrabs-gui rtk opencrabs.desktop opencrabs.png; do
+              if [ ! -f "$b" ]; then
+                echo "::error::$b was not built; refusing to publish a partial archive"
+                exit 1
+              fi
+            done
+            tar czf ../../../${ASSET_NAME}.tar.gz ${{ matrix.artifact_name }} opencrabs-gui rtk \
               opencrabs.desktop opencrabs.png
           fi
 
