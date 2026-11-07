@@ -13980,11 +13980,12 @@ mod tests {
             "one definition, one caller: opening a conversation"
         );
         // A turn that finishes in a conversation the user left retires its
-        // parked card on both the success and the failure path.
+        // parked card on every terminal path: the success and failure arms,
+        // and the cancelled settle a stop produces instead of either (#2657).
         assert_eq!(
             production.matches("self.stashed.remove(&session);").count(),
-            2,
-            "Done and Failed both drop the parked card"
+            3,
+            "Done, Failed and Cancelled all drop the parked card"
         );
     }
 
