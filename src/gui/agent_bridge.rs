@@ -499,7 +499,27 @@ async fn build(config: Config, sink: EventSink) -> Result<AgentBridge, String> {
     // sub-agent reached from a tool carries no callback of its own and
     // resolves this instead (#1036). The window is its own process, so this
     // static does not collide with a running TUI.
+    let recovery_enqueue = enqueue.clone();
     opencrabs::brain::agent::service::register_local_route(enqueue);
+
+    // The same pass the terminal runs at boot (#2626). Detached commands and
+    // sub-agents die with the process, but their rows do not: without this the
+    // window left every row from the previous run unaccounted for, so nothing
+    // was reported into the session that owns it and the row survived to
+    // report again on the next boot. On the surface runtime rather than a
+    // thread of its own, because `recover` schedules its last-resort flush 30s
+    // out and a task belonging to a runtime that is dropped when a thread's
+    // `block_on` returns never runs.
+    tokio::spawn(async move {
+        let reported =
+            opencrabs::brain::agent::service::restart_recovery::recover(Some(recovery_enqueue))
+                .await;
+        // Logged with the count on every boot, zero included: a silent boot
+        // and a boot that never ran the pass read the same otherwise.
+        crate::logging::info(&format!(
+            "restart recovery: {reported} item(s) interrupted by a previous run"
+        ));
+    });
 
     let bridge = AgentBridge {
         service: Arc::new(service),
@@ -1873,6 +1893,42 @@ mod tests {
         assert!(
             src.contains("spawn_boot_resume(bridge.service.clone()"),
             "the window's boot actually runs the scan"
+        );
+    }
+
+    /// The window runs the recovery pass the terminal runs, or every detached
+    /// command from the previous process is left unaccounted for and reports
+    /// again on the next boot (#2626).
+    #[test]
+    fn the_window_boot_runs_the_restart_recovery_pass() {
+        let src = include_str!("agent_bridge.rs");
+        let boot = src
+            .split("pub async fn build(")
+            .nth(1)
+            .expect("the window's bootstrap");
+        let boot = boot
+            .split("/// Create one conversation in the shared ledger")
+            .next()
+            .expect("the end of the bootstrap");
+
+        let route = boot
+            .find("register_local_route(enqueue)")
+            .expect("the window registers the destination a parked report flushes to");
+        let pass = boot
+            .find("restart_recovery::recover(Some(")
+            .expect("the boot runs the restart recovery pass");
+        assert!(
+            route < pass,
+            "the local destination exists before the pass can produce a report"
+        );
+        assert!(
+            boot.contains("tokio::spawn("),
+            "the pass rides the surface runtime: recover's 30s flush dies with any \
+             runtime a boot thread drops when its block_on returns"
+        );
+        assert!(
+            boot.contains("interrupted by a previous run"),
+            "the count is logged on every boot, zero included"
         );
     }
 }
