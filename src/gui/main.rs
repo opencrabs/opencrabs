@@ -33,6 +33,7 @@ mod command_palette;
 mod commands;
 mod editor;
 mod icon;
+mod layout_store;
 mod logging;
 mod markdown;
 mod mission_control;
@@ -1942,6 +1943,61 @@ impl Dashboard {
         agent_bridge::set_composer_session(self.focused_pane());
     }
 
+    /// Write the split the window is showing, so the next launch puts the same
+    /// panes back in the same slots at the same sizes (#2675). Called wherever
+    /// the layout can change under the user's hand: a split, a close, a
+    /// divider drag, a caret move, a conversation switch.
+    fn persist_layout(&self) {
+        layout_store::save(&layout_store::path(), self.panes.as_ref(), self.pane_focus);
+    }
+
+    /// Put back the split the last run left (#2675). Runs once, after the boot
+    /// open, because the chat's own leaf has to exist before the tree can
+    /// agree with it. A saved layout that does not hold the conversation on
+    /// screen, a pane whose session the ledger no longer has, and a file that
+    /// cannot be read all fall back to the plain chat: a wrong window is worse
+    /// than a plain one.
+    fn restore_layout(&mut self, saved: Option<layout_store::SavedLayout>, cx: &mut Context<Self>) {
+        let Some(saved) = saved else {
+            return;
+        };
+        let Some(chat) = self.transcript.session else {
+            return;
+        };
+        let Some(tree) = saved.panes else {
+            return;
+        };
+        if !tree.contains(chat) {
+            logging::info("gui layout: the chat is not one of its panes, opening plain");
+            return;
+        }
+        let known: std::collections::HashSet<Uuid> =
+            self.sessions.items.iter().map(|item| item.id).collect();
+        let Some(tree) = layout_store::prune(tree, &known) else {
+            logging::info("gui layout: fewer than two panes survive, opening plain");
+            return;
+        };
+        let leaves = tree.leaves();
+        self.panes = Some(tree);
+        // Every pane but the chat needs its own state: its composer, its
+        // transcript, its plan strip. The chat's is the window's own.
+        for leaf in leaves.iter().copied().filter(|id| *id != chat) {
+            self.open_pane_state(leaf, cx);
+        }
+        // The caret goes back where it was, unless that pane is gone or it is
+        // the chat itself, which the window spells as `None`.
+        self.pane_focus = saved.focus.filter(|id| *id != chat && leaves.contains(id));
+        self.sync_composer_session();
+        // The pruned tree is what this run holds now, so the file matches it.
+        self.persist_layout();
+        logging::info(&format!(
+            "gui layout: restored {} panes, caret {:?}",
+            leaves.len(),
+            self.pane_focus
+        ));
+        cx.notify();
+    }
+
     /// The composer the keyboard owns (#2610): the focused pane's own field,
     /// or the window's when the chat leaf holds the caret.
     ///
@@ -2010,6 +2066,8 @@ impl Dashboard {
             self.refocus_screen();
             cx.notify();
         }
+        // The pane is gone: the file must say so before the next launch (#2675).
+        self.persist_layout();
     }
 
     /// `ctrl+x` and the × on the focused pane's header: close the pane holding
@@ -2067,48 +2125,16 @@ impl Dashboard {
         // highlighted the new pane while every keystroke still landed in the
         // chat leaf's field, so the chord appeared to rotate exactly once.
         self.refocus_screen();
+        // The caret is the layout too: the next launch puts it back (#2675).
+        self.persist_layout();
         cx.notify();
     }
 
-    /// Fill a new pane with `id`, splitting the pane the pick started from,
-    /// and load its newest messages (#2438, #2472).
-    fn choose_split(&mut self, id: Uuid, cx: &mut Context<Self>) {
-        let Some(layout) = self.split_pick else {
-            return;
-        };
-        let Some(target) = self.split_target else {
-            self.split_pick = None;
-            return;
-        };
-        if self.transcript.session == Some(id)
-            || self.panes.as_ref().is_some_and(|tree| tree.contains(id))
-        {
-            self.live
-                .notices
-                .push("That session is already open in a pane. Pick another.".to_string());
-            cx.notify();
-            return;
-        }
-        self.split_pick = None;
-        self.split_target = None;
-        self.rail_focused = false;
-        // The pane just picked is the one the caret and ctrl+x land on, so a
-        // split opens ready to act on what was clicked (#2474).
-        self.pane_focus = Some(id);
-        self.sync_composer_session();
-        self.refocus_screen();
-        let split = self
-            .panes
-            .as_mut()
-            .is_some_and(|tree| tree.split(target, layout, id));
-        if !split {
-            self.pane_focus = None;
-            self.live
-                .notices
-                .push("That pane is no longer open.".to_string());
-            cx.notify();
-            return;
-        }
+    /// Everything a fresh pane needs, keyed by the session it shows: its own
+    /// composer wired to the send path, its own drag-to-copy, its plan path,
+    /// and its newest messages. Split out of `choose_split` so a restored
+    /// layout builds a pane exactly the way a split does (#2675).
+    fn open_pane_state(&mut self, id: Uuid, cx: &mut Context<Self>) {
         let title = self
             .sessions
             .items
@@ -2184,11 +2210,65 @@ impl Dashboard {
         .detach();
     }
 
+    /// Fill a new pane with `id`, splitting the pane the pick started from,
+    /// and load its newest messages (#2438, #2472).
+    fn choose_split(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        let Some(layout) = self.split_pick else {
+            return;
+        };
+        let Some(target) = self.split_target else {
+            self.split_pick = None;
+            return;
+        };
+        if self.transcript.session == Some(id)
+            || self.panes.as_ref().is_some_and(|tree| tree.contains(id))
+        {
+            self.live
+                .notices
+                .push("That session is already open in a pane. Pick another.".to_string());
+            cx.notify();
+            return;
+        }
+        self.split_pick = None;
+        self.split_target = None;
+        self.rail_focused = false;
+        // The pane just picked is the one the caret and ctrl+x land on, so a
+        // split opens ready to act on what was clicked (#2474).
+        self.pane_focus = Some(id);
+        self.sync_composer_session();
+        self.refocus_screen();
+        let split = self
+            .panes
+            .as_mut()
+            .is_some_and(|tree| tree.split(target, layout, id));
+        if !split {
+            self.pane_focus = None;
+            self.live
+                .notices
+                .push("That pane is no longer open.".to_string());
+            cx.notify();
+            return;
+        }
+        self.open_pane_state(id, cx);
+        // The layout is the user's now, so it is written down for the next
+        // launch (#2675).
+        self.persist_layout();
+    }
+
     /// Keep the chat on a leaf of the tree (#2472). A first open starts the
     /// tree; a plain switch moves the chat's own leaf to the new session;
     /// opening a session another pane already shows moves it into the chat and
     /// closes that pane, so one session never sits in two leaves.
     fn adopt_chat_leaf(&mut self, previous: Option<Uuid>, id: Uuid) {
+        self.place_chat_leaf(previous, id);
+        // The chat's leaf is part of the saved layout, so every path that
+        // moves it writes the tree, the one-pane case included (#2675).
+        self.persist_layout();
+    }
+
+    /// The body of `adopt_chat_leaf`. It writes nothing, so the caller can
+    /// save once, whichever path the switch took.
+    fn place_chat_leaf(&mut self, previous: Option<Uuid>, id: Uuid) {
         let Some(tree) = self.panes.as_mut() else {
             self.panes = Some(PaneTree::leaf(id));
             return;
@@ -2222,6 +2302,20 @@ impl Dashboard {
         ev: &MouseDownEvent,
         cx: &mut Context<Self>,
     ) {
+        // A double click is a layout change on its own: the pair goes back to
+        // even and that size is what the next launch must show (#2675). It is
+        // answered before the borrow below so the write can take the window.
+        if ev.click_count == 2 {
+            let evened = self
+                .panes
+                .as_mut()
+                .is_some_and(|tree| tree.even_divider(path, divider));
+            if evened {
+                self.persist_layout();
+                cx.notify();
+            }
+            return;
+        }
         let stacked = {
             let Some(tree) = self.panes.as_mut() else {
                 return;
@@ -2233,11 +2327,6 @@ impl Dashboard {
                 return;
             };
             if divider + 1 >= children.len() {
-                return;
-            }
-            if ev.click_count == 2 {
-                tree.even_divider(path, divider);
-                cx.notify();
                 return;
             }
             layout.is_stacked()
@@ -9363,7 +9452,11 @@ impl Render for Dashboard {
                     this.dragging_rail = false;
                     this.drag_from = None;
                     this.rail_swipe = None;
-                    this.split_drag = None;
+                    // A divider dragged to a new size is a layout the user
+                    // chose, so the release is when it gets written (#2675).
+                    if this.split_drag.take().is_some() {
+                        this.persist_layout();
+                    }
                 }),
             );
         if self.rail_open {
@@ -9820,6 +9913,11 @@ fn main() {
         &sessions_state.items,
         opencrabs::utils::last_session::read(),
     );
+    // The split the last run closed with (#2675). Read here, on the main
+    // thread, and put back once the conversation is open: the chat's leaf has
+    // to exist before the tree can agree with it. Nothing is drawn from it
+    // until then, so a stale or unreadable file costs one log line.
+    let saved_layout = layout_store::load(&layout_store::path());
     Application::new().run(move |cx: &mut App| {
         // Dock icon first: a bare binary has no bundle, so macOS would show
         // its generic "exec" icon for the whole session otherwise.
@@ -10083,6 +10181,13 @@ fn main() {
                 // every other DB read in this window.
                 if let Some(id) = initial_session {
                     view.update(cx, |this, cx| this.open_session(id, cx));
+                }
+                // Then the panes the last run left behind, in the same slots
+                // at the same sizes, with the caret on the same pane (#2675).
+                // The TUI has always done this from its own file; the window
+                // had no layout file at all until now.
+                if saved_layout.is_some() {
+                    view.update(cx, |this, cx| this.restore_layout(saved_layout, cx));
                 }
                 view
             },
@@ -12121,6 +12226,8 @@ fn pane_composer_dim(
         .on_mouse_down(MouseButton::Left, move |_, _, cx: &mut App| {
             let _ = entity.update(cx, |this, cx| {
                 this.pane_focus = if is_chat { None } else { Some(session) };
+                // The next launch puts the caret back on this pane (#2675).
+                this.persist_layout();
                 this.refocus_screen();
                 cx.notify();
             });
@@ -12494,6 +12601,9 @@ fn pane_element(
                 let _ = reach.update(cx, |this, cx| {
                     if this.pane_focus != next {
                         this.pane_focus = next;
+                        // A click that takes the keyboard changes which pane
+                        // the next launch puts the caret on (#2675).
+                        this.persist_layout();
                         this.refocus_screen();
                         cx.notify();
                     }
