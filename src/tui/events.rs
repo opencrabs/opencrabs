@@ -739,8 +739,23 @@ pub mod keys {
     /// Alt+Shift+Tab — rotate the caret to the previous pane, anticlockwise
     /// (#2579). Terminals that fold shift into the glyph report it as
     /// `BackTab`, so both spellings count.
+    ///
+    /// The modifier set is read with `contains`, not compared exactly: a real
+    /// terminal sends `BackTab` with both ALT and SHIFT still attached, and an
+    /// exact `ALT` match silently dropped the chord, so the reverse direction
+    /// never rotated while the forward one did (#2656).
     pub fn is_pane_rotate_prev(event: &KeyEvent) -> bool {
-        key_matches(event, KeyCode::Tab, KeyModifiers::ALT | KeyModifiers::SHIFT)
-            || key_matches(event, KeyCode::BackTab, KeyModifiers::ALT)
+        if event
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
+        {
+            return false;
+        }
+        let alt = event.modifiers.contains(KeyModifiers::ALT);
+        match event.code {
+            KeyCode::Tab => alt && event.modifiers.contains(KeyModifiers::SHIFT),
+            KeyCode::BackTab => alt,
+            _ => false,
+        }
     }
 }

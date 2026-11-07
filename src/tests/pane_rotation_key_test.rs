@@ -43,6 +43,24 @@ fn alt_shift_tab_is_the_anticlockwise_rotation() {
     // Terminals that fold shift into the glyph report BackTab instead.
     let back_tab = event(KeyCode::BackTab, KeyModifiers::ALT);
     assert!(keys::is_pane_rotate_prev(&back_tab), "alt+backtab too");
+    // A real terminal keeps SHIFT attached to BackTab, so the chord must read
+    // the modifier set, not compare it exactly (#2656).
+    let real_back_tab = event(KeyCode::BackTab, KeyModifiers::ALT | KeyModifiers::SHIFT);
+    assert!(
+        keys::is_pane_rotate_prev(&real_back_tab),
+        "alt+shift+backtab is what a terminal actually sends"
+    );
+    assert!(
+        !keys::is_pane_rotate_prev(&event(KeyCode::BackTab, KeyModifiers::SHIFT)),
+        "a bare shift+backtab is not a pane chord"
+    );
+    assert!(
+        !keys::is_pane_rotate_prev(&event(
+            KeyCode::Tab,
+            KeyModifiers::ALT | KeyModifiers::CONTROL
+        )),
+        "ctrl+alt+tab must stay the window's, not rotate"
+    );
 }
 
 #[test]
