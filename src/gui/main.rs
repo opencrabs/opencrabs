@@ -2476,22 +2476,42 @@ impl Dashboard {
         cx.notify();
     }
 
+    /// Stop the turn the focused split leaf is running, if there is one.
+    ///
+    /// `/stop` and Esc share this so the two cannot drift about which turn
+    /// they stop or what they leave behind (#2614, #2657). The window's turn
+    /// is a separate question: a leaf runs with `pane.busy` set while
+    /// `self.busy` stays clear, so a stop that looked only at `self.busy`
+    /// walked straight past a running pane and reported nothing to do.
+    ///
+    /// Returns true when a pane turn was actually cancelled. `why` is the name
+    /// in the log line, so a stop can still be traced to the key that did it.
+    fn cancel_focused_pane_turn(&mut self, why: &str, cx: &mut Context<Self>) -> bool {
+        let Some(id) = self.pane_focus else {
+            return false;
+        };
+        let Some(pane) = self.pane_states.get_mut(&id) else {
+            return false;
+        };
+        let Some(cancel) = pane.cancel.take() else {
+            return false;
+        };
+        cancel.cancel();
+        pane.busy = false;
+        pane.live.thinking = false;
+        pane.live.notices.push("Operation cancelled.".to_string());
+        logging::info(&format!("pane turn cancelled by {why}"));
+        cx.notify();
+        true
+    }
+
     /// `/stop`: abort the turn in flight, the same effect as Esc and the
     /// same wording. The pane stops claiming a turn is running the moment the
     /// user asks, and the service's own failure event lands afterwards.
     fn stop_turn(&mut self, cx: &mut Context<Self>) {
         // A split leaf runs its own turn, so `/stop` reaches the pane the
         // keyboard is on before it reports nothing to stop (#2614).
-        if let Some(id) = self.pane_focus
-            && let Some(pane) = self.pane_states.get_mut(&id)
-            && let Some(cancel) = pane.cancel.take()
-        {
-            cancel.cancel();
-            pane.busy = false;
-            pane.live.thinking = false;
-            pane.live.notices.push("Operation cancelled.".to_string());
-            logging::info("pane turn cancelled by /stop");
-            cx.notify();
+        if self.cancel_focused_pane_turn("/stop", cx) {
             return;
         }
         let Some(cancel) = self.cancel.take() else {
@@ -4904,6 +4924,40 @@ impl Dashboard {
                     self.live.thinking = false;
                     reload = self.transcript.session;
                 }
+                agent_bridge::TurnEvent::Cancelled { session } => {
+                    // A stop dropped the turn where it stood (#2657), so no
+                    // Done and no Failed follows. This is the settle, and it
+                    // carries no text: whoever asked for the stop already said
+                    // "Operation cancelled", so a second line would be noise.
+                    self.refresh_rail(cx);
+                    self.pending_metrics.remove(&session);
+                    if self.transcript.session == Some(session) {
+                        // No reload on purpose. The dropped future cannot
+                        // promise the ledger has the text it streamed, and a
+                        // re-read now would wipe what the user can still see.
+                        // The card keeps its stream, with the clock and rate
+                        // frozen where the stop landed.
+                        self.live.finalize(None);
+                        self.busy = false;
+                        self.live.thinking = false;
+                        self.cancel = None;
+                        logging::info("turn settled after the stop dropped it");
+                    } else {
+                        // A split leaf: same settle inside its own card, and
+                        // the parked copy of a switched-away turn retires.
+                        self.stashed.remove(&session);
+                        if let Some(pane) = self.pane_states.get_mut(&session) {
+                            pane.live.finalize(None);
+                            pane.live.thinking = false;
+                            pane.busy = false;
+                            pane.cancel = None;
+                        }
+                    }
+                    // The turn is gone, so its rail spinner goes with it.
+                    if self.rail.clear(session) {
+                        cx.notify();
+                    }
+                }
                 agent_bridge::TurnEvent::TurnReverted { session } => {
                     // The stopped turn's rows are deleted and its question is
                     // back in the composer, so the transcript must stop drawing
@@ -6498,6 +6552,14 @@ impl Dashboard {
             // own rule, so one stray key never throws away a half-filled run.
             if self.screen == Screen::Onboard {
                 self.onboard_escape(cx);
+                return;
+            }
+            // A split leaf runs its own turn with `pane.busy` set while
+            // `self.busy` stays clear, so the idle path below would hand the
+            // keyboard back and leave that turn streaming (#2657). The stop
+            // reaches the pane the keyboard is on first, the same order
+            // `/stop` uses (#2614).
+            if self.cancel_focused_pane_turn("Esc", cx) {
                 return;
             }
             if !self.busy {

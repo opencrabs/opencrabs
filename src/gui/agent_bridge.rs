@@ -63,6 +63,12 @@ pub enum TurnEvent {
     /// The turn failed; carries the user-facing message the channels use
     /// and the session it belonged to, for the same reason as `Done` (#2614).
     Failed { session: Uuid, text: String },
+    /// The user stopped this turn and the stop dropped it where it stood
+    /// (#2657). No `Done` and no `Failed` follows a dropped future, so this is
+    /// the only thing that tells the window the turn is gone. It carries no
+    /// text on purpose: whoever asked for the stop already said so, and this
+    /// just settles a card that would otherwise claim work forever.
+    Cancelled { session: Uuid },
     /// A detached background task finished: the resumed-turn payload, not a UI
     /// notice. The row it settles is drawn and closed by the progress events;
     /// this is what tells the agent the command it backgrounded is done.
@@ -828,6 +834,38 @@ pub fn spawn_plan_path(db_path: std::path::PathBuf, session_id: Uuid, sink: Even
     }
 }
 
+/// Race a turn against its stop token (#2657).
+///
+/// The service reads the token cooperatively: at tool-iteration boundaries,
+/// and once a streaming call has returned. Inside one long provider stream
+/// neither checkpoint runs, so a stop was invisible until the answer finished
+/// (`turn cancelled by Esc`, then `turn done` tens of seconds later). Racing
+/// the whole turn is the window's equivalent of the terminal's
+/// `handle.abort()`: when the token fires the future is dropped where it
+/// stands, which runs the service's own drop guards and keeps the text it
+/// already streamed.
+///
+/// Biased on the token, so a stop that lands in the same poll as the answer
+/// wins. The user asked for the turn to be gone; painting an answer over their
+/// cancellation is what makes a stop look like it did nothing.
+///
+/// `None` means the stop fired and the turn was dropped. `Some(output)` is the
+/// turn's own result, untouched.
+pub async fn race_turn<F>(
+    turn: F,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Option<F::Output>
+where
+    F: std::future::Future,
+{
+    tokio::pin!(turn);
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => None,
+        output = &mut turn => Some(output),
+    }
+}
+
 /// Run one turn on a 4 MB thread: the TUI's `send_message_with_tools_and_mode`
 /// call with the queue-completion handshake the TUI does around it.
 ///
@@ -860,10 +898,21 @@ pub fn spawn_turn(
                 }
             };
             runtime.block_on(async move {
-                match service
-                    .send_message_with_tools_and_mode(session_id, content, None, Some(cancel))
-                    .await
-                {
+                let turn = service.send_message_with_tools_and_mode(
+                    session_id,
+                    content,
+                    None,
+                    Some(cancel.clone()),
+                );
+                // A cooperative token only lands where the service looks for
+                // it, and inside one provider stream it never looks (#2657).
+                let Some(outcome) = race_turn(turn, &cancel).await else {
+                    let _ = sink.send(TurnEvent::Cancelled {
+                        session: session_id,
+                    });
+                    return;
+                };
+                match outcome {
                     Ok(response) => {
                         let _ = sink.send(TurnEvent::Done {
                             session: session_id,
@@ -927,19 +976,28 @@ fn spawn_resume(
             };
             let turn_sink = sink.clone();
             runtime.block_on(async move {
-                match service
-                    .resume_interrupted_turn(
-                        session_id,
-                        content,
-                        None,
-                        Some(cancel),
-                        None,
-                        None,
-                        "tui",
-                        None,
-                    )
-                    .await
-                {
+                let turn = service.resume_interrupted_turn(
+                    session_id,
+                    content,
+                    None,
+                    Some(cancel.clone()),
+                    None,
+                    None,
+                    "tui",
+                    None,
+                );
+                // A resumed turn is a turn: the same stop applies, and the
+                // same cooperative gap (#2657).
+                let Some(outcome) = race_turn(turn, &cancel).await else {
+                    // It answered nobody, so it is not a delivered resume; the
+                    // summary must not claim otherwise.
+                    opencrabs::brain::agent::service::boot_report::record_failed();
+                    let _ = turn_sink.send(TurnEvent::Cancelled {
+                        session: session_id,
+                    });
+                    return;
+                };
+                match outcome {
                     Ok(response) => {
                         opencrabs::brain::agent::service::boot_report::record_delivered();
                         let _ = turn_sink.send(TurnEvent::Done {
@@ -1938,6 +1996,108 @@ mod tests {
         assert!(
             boot.contains("interrupted by a previous run"),
             "the count is logged on every boot, zero included"
+        );
+    }
+
+    /// Both turn runners race their stop token (#2657).
+    ///
+    /// The service reads the token where it looks for it, which inside one
+    /// provider stream is never, so a stop that is only handed to the service
+    /// is invisible until the answer finishes. Both runners have to race it:
+    /// a resumed turn is a turn and its stop button has to end it too.
+    #[test]
+    fn gui_cancel_both_runners_race_the_stop() {
+        let src = include_str!("agent_bridge.rs");
+        let shipped = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the shipped source before the tests");
+        let mut raced = 0usize;
+        for (runner, end) in [
+            ("fn spawn_turn(", "/// Re-run one interrupted turn"),
+            ("fn spawn_resume(", "/// Resolve the boot accounting"),
+        ] {
+            let body = shipped
+                .split(runner)
+                .nth(1)
+                .expect("the runner is in the shipped source");
+            let body = body.split(end).next().expect("the runner has an end");
+            assert!(
+                body.contains("race_turn(turn, &cancel)"),
+                "{runner} must race the turn against its stop token, or the stop \
+                 only lands when the provider finishes (#2657)"
+            );
+            assert!(
+                body.contains("TurnEvent::Cancelled"),
+                "{runner} must settle the window when the stop drops the turn: a \
+                 dropped future sends no Done and no Failed"
+            );
+            raced += 1;
+        }
+        assert_eq!(raced, 2, "both turn runners were scanned");
+    }
+
+    /// A turn nobody stopped comes back exactly as it was.
+    #[tokio::test]
+    async fn gui_cancel_race_hands_an_untouched_turn_back() {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        assert_eq!(
+            race_turn(std::future::ready(7u8), &cancel).await,
+            Some(7),
+            "with no stop the race is the turn's own result"
+        );
+    }
+
+    /// A stop that lands in the same poll as the answer wins (#2657).
+    ///
+    /// The user asked for the turn to be gone. Painting an answer over their
+    /// cancellation is exactly the behaviour that made the stop look dead.
+    #[tokio::test]
+    async fn gui_cancel_race_prefers_the_stop_when_both_are_ready() {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        cancel.cancel();
+        assert_eq!(
+            race_turn(std::future::ready(7u8), &cancel).await,
+            None,
+            "a fired token beats a turn that is already finished"
+        );
+    }
+
+    /// The dropped future is the whole fix: it must be dropped where it stands.
+    #[tokio::test]
+    async fn gui_cancel_race_drops_the_turn_where_it_stands() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct Dropped(std::sync::Arc<AtomicBool>);
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let dropped = std::sync::Arc::new(AtomicBool::new(false));
+        let guard = Dropped(dropped.clone());
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let token = cancel.clone();
+        // The stop lands while the turn sits in a stream that never returns,
+        // which is the shape of the bug: one long provider call.
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            token.cancel();
+        });
+        let turn = async move {
+            let _guard = guard;
+            std::future::pending::<()>().await
+        };
+        assert!(
+            race_turn(turn, &cancel).await.is_none(),
+            "the stop settles the race"
+        );
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "the turn future is dropped at its current await, the window's \
+             handle.abort(): without this the provider keeps streaming and the \
+             turn reports done minutes after the stop (#2657)"
         );
     }
 }
