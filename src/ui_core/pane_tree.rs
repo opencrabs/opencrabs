@@ -5,11 +5,16 @@
 //! plain chat is the base case, not a special one.
 
 use crate::ui_core::split::{Layout, MIN_PANE_PX};
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use uuid::Uuid;
 
 /// One node of the pane tree.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// `Serialize`/`Deserialize` exist so a client can put the tree on disk and
+/// get it back on the next launch: the terminal saves it to `layout.json`,
+/// the window to its own `gui_layout.json` (#2675).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum PaneTree {
     /// A pane showing one session. `share` is this pane's fraction of its
     /// parent split's span along the split axis; a root leaf's share is 1.

@@ -73,6 +73,11 @@ pub struct SessionsState {
     pub parents: HashMap<uuid::Uuid, uuid::Uuid>,
     /// Closed sessions (#2305): drawn dimmed and refuse new turns.
     pub closed: HashSet<uuid::Uuid>,
+    /// Sessions whose topic tree is folded (#2670): their topics stay out of
+    /// the list until the row is unfolded. Read from the same
+    /// `topics_collapsed` column the terminal writes, so folding in either
+    /// surface holds in the other.
+    pub collapsed: HashSet<uuid::Uuid>,
 }
 
 impl SessionsState {
@@ -103,6 +108,12 @@ impl SessionsState {
         let mut out: Vec<&Session> = Vec::with_capacity(visible.len());
         for top in pinned {
             out.push(top);
+            // A folded row keeps its topics out of the list (#2670), the same
+            // way the terminal stops listing them (#2427). The arrow keys walk
+            // this exact order, so a hidden row can never be cursored.
+            if self.is_collapsed(top.id) {
+                continue;
+            }
             // Topic pins are always visible beneath their parent. The arrow
             // keys walk this exact order, so no cursor can target a hidden row.
             out.extend(
@@ -118,6 +129,12 @@ impl SessionsState {
     /// Whether a row is a topic shown under its parent, so it is indented.
     pub fn is_closed(&self, id: uuid::Uuid) -> bool {
         self.closed.contains(&id)
+    }
+
+    /// Whether this row's topic tree is folded, so its children stay out of
+    /// the painted list (#2670).
+    pub fn is_collapsed(&self, id: uuid::Uuid) -> bool {
+        self.collapsed.contains(&id)
     }
 
     pub fn is_indented(&self, id: uuid::Uuid) -> bool {
@@ -533,6 +550,75 @@ pub async fn set_closed(
     }
 }
 
+/// The sessions whose topic tree is folded (#2670). Same column the terminal
+/// writes through `set_topics_collapsed` (#2427), so one surface's fold is the
+/// other's.
+pub async fn load_collapsed(db_path: std::path::PathBuf) -> Result<Vec<uuid::Uuid>, String> {
+    let (tx, rx) = futures::channel::oneshot::channel::<Result<Vec<uuid::Uuid>, String>>();
+    let spawned = std::thread::Builder::new()
+        .name("collapsed-fetch".into())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let result = match runtime {
+                Ok(rt) => rt
+                    .block_on(async {
+                        let db = Database::connect(&db_path).await?;
+                        let repo = SessionRepository::new(db.pool().clone());
+                        repo.topics_collapsed_ids().await
+                    })
+                    .map_err(|e| format!("{e:#}")),
+                Err(e) => Err(format!("tokio runtime failed: {e}")),
+            };
+            let _ = tx.send(result);
+        });
+    match spawned {
+        Ok(_) => match rx.await {
+            Ok(result) => result,
+            Err(_) => Err("collapsed fetch thread dropped its result".into()),
+        },
+        Err(e) => Err(format!("collapsed fetch thread failed to spawn: {e}")),
+    }
+}
+
+/// Fold or unfold one session's topic tree. The caller re-reads the folded set
+/// afterwards, so what is drawn follows what was written (#2670).
+pub async fn set_topics_collapsed(
+    db_path: std::path::PathBuf,
+    id: uuid::Uuid,
+    collapsed: bool,
+) -> Result<(), String> {
+    let (tx, rx) = futures::channel::oneshot::channel::<Result<(), String>>();
+    let spawned = std::thread::Builder::new()
+        .name("collapsed-write".into())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let result = match runtime {
+                Ok(rt) => rt
+                    .block_on(async {
+                        let db = Database::connect(&db_path).await?;
+                        let repo = SessionRepository::new(db.pool().clone());
+                        repo.set_topics_collapsed(id, collapsed).await
+                    })
+                    .map_err(|e| format!("{e:#}")),
+                Err(e) => Err(format!("tokio runtime failed: {e}")),
+            };
+            let _ = tx.send(result);
+        });
+    match spawned {
+        Ok(_) => match rx.await {
+            Ok(result) => result,
+            Err(_) => Err("collapsed write thread dropped its result".into()),
+        },
+        Err(e) => Err(format!("collapsed write thread failed to spawn: {e}")),
+    }
+}
+
 /// Every (topic, parent) pair. Read separately from the rows, like favorites,
 /// so the grouping does not change the row model (#2303).
 pub async fn load_topic_parents(
@@ -902,17 +988,6 @@ pub enum MenuKind {
 pub struct MenuEntry {
     pub kind: MenuKind,
     pub label: &'static str,
-}
-
-/// The heading a rename prompt shows for its target (#2668). A conversation
-/// and a topic share one prompt and one write, so the heading is the only
-/// place the difference between them is visible.
-pub fn rename_prompt_label(is_topic: bool) -> &'static str {
-    if is_topic {
-        "Rename topic"
-    } else {
-        "Rename conversation"
-    }
 }
 
 /// The menu's contents, resolved from the row's pin state. Pure, so the
@@ -1384,6 +1459,43 @@ mod tests {
         assert!(!state.is_indented(a1_id));
     }
 
+    /// #2670: folding a session keeps its topics out of the list, the way the
+    /// terminal stops drawing them (#2427), and the keyboard cannot land on a
+    /// row that is no longer painted.
+    #[test]
+    fn a_folded_session_hides_its_topics_from_the_list_and_the_keyboard() {
+        let a = Session::new(Some("A".into()), None, None);
+        let a1 = Session::new(Some("A topic".into()), None, None);
+        let b = Session::new(Some("B".into()), None, None);
+        let (a_id, a1_id, b_id) = (a.id, a1.id, b.id);
+        let mut state = SessionsState {
+            items: vec![a, a1, b],
+            ..Default::default()
+        };
+        state.parents.insert(a1_id, a_id);
+
+        let expanded: Vec<_> = state.ordered().map(|s| s.id).collect();
+        assert_eq!(expanded, vec![a_id, a1_id, b_id]);
+
+        state.collapsed.insert(a_id);
+        assert!(state.is_collapsed(a_id));
+        let folded: Vec<_> = state.ordered().map(|s| s.id).collect();
+        assert_eq!(
+            folded,
+            vec![a_id, b_id],
+            "a folded session draws itself and nothing beneath it"
+        );
+        assert_eq!(
+            state.cursor_step(Some(a_id), 1),
+            Some(b_id),
+            "the arrow steps over the hidden topics instead of into them"
+        );
+
+        state.collapsed.clear();
+        let reopened: Vec<_> = state.ordered().map(|s| s.id).collect();
+        assert_eq!(reopened, expanded, "unfolding puts the topics back");
+    }
+
     /// #2271's whole class, seated: truncation walks chars, never bytes. Any
     /// return to byte-index slicing panics here on a multibyte boundary, and
     /// the sweep hits every max so no length dodges.
@@ -1742,15 +1854,6 @@ mod tests {
                 .expect("every row offers a rename");
             assert_eq!(rename.label, "Rename", "the label never varies");
         }
-    }
-
-    /// The prompt's heading names what is being renamed (#2668): a topic and
-    /// a conversation share one prompt, so the heading is the only place the
-    /// difference shows.
-    #[test]
-    fn rename_prompt_names_its_target() {
-        assert_eq!(rename_prompt_label(false), "Rename conversation");
-        assert_eq!(rename_prompt_label(true), "Rename topic");
     }
 
     /// Split | and Split _ sit before Delete on every row, so a split starts
