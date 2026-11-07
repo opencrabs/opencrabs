@@ -583,3 +583,72 @@ fn finalize_revived_status(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A report produced by the boot pass reaches the session its row names,
+    /// never whichever surface happened to boot first (#2626).
+    ///
+    /// This is the routing `report_interrupted` uses for every detached row:
+    /// the report is parked against the owning session, another session's
+    /// claim takes nothing, and the claim from the owner delivers it once.
+    #[test]
+    fn an_interrupted_task_is_reported_into_its_own_session() {
+        // Serialized against every other suite that parks a report, and
+        // started from an empty queue.
+        let _guard = test_guard();
+        let owner = Uuid::from_u128(0x2626_0001);
+        let other = Uuid::from_u128(0x2626_0002);
+
+        let report = QueuedUserMessage {
+            context_text: "interrupted".to_string(),
+            display_text: "Background task interrupted by restart: build".to_string(),
+            origin: PushOrigin::Recovery,
+            bg_meta: None,
+        };
+        assert!(
+            !deliver_or_park(owner, report),
+            "no route has claimed the session yet, so the report parks instead of \
+             going to the booting surface"
+        );
+        assert_eq!(parked_count(), 1, "one report, waiting for its session");
+
+        let stolen: MessageEnqueueCallback =
+            std::sync::Arc::new(|_: Uuid, _: QueuedUserMessage| {
+                panic!("a report was handed to another session")
+            });
+        assert_eq!(
+            claim_session(other, &stolen),
+            0,
+            "another session's claim must not take it"
+        );
+        assert_eq!(parked_count(), 1, "the report is still waiting for its own");
+
+        let seen: std::sync::Arc<Mutex<Vec<(Uuid, String)>>> =
+            std::sync::Arc::new(Mutex::new(Vec::new()));
+        let deliver: MessageEnqueueCallback = {
+            let seen = std::sync::Arc::clone(&seen);
+            std::sync::Arc::new(move |id: Uuid, msg: QueuedUserMessage| {
+                seen.lock()
+                    .expect("the delivered log")
+                    .push((id, msg.display_text));
+            })
+        };
+        assert_eq!(
+            claim_session(owner, &deliver),
+            1,
+            "its own session takes the report"
+        );
+        assert_eq!(parked_count(), 0, "nothing is left behind");
+
+        let seen = seen.lock().expect("the delivered log");
+        assert_eq!(seen.len(), 1, "delivered exactly once");
+        assert_eq!(seen[0].0, owner, "the report names the row's session");
+        assert_eq!(
+            seen[0].1, "Background task interrupted by restart: build",
+            "what the user sees names the task that died"
+        );
+    }
+}

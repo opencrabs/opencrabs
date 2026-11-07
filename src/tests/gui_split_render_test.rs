@@ -194,14 +194,18 @@ fn the_focused_pane_wears_a_band_under_its_header() {
 
 #[test]
 fn choosing_a_session_repaints_before_the_transcript_loads() {
-    let choose = GUI_MAIN
-        .split("fn choose_split(")
+    // The pane itself is built by `open_pane_state`, which a split and a
+    // restored layout both call, so the store and its repaint live there
+    // (#2675). The ordering it has to keep is unchanged: paint the pane, then
+    // load its transcript.
+    let pane = GUI_MAIN
+        .split("fn open_pane_state(")
         .nth(1)
-        .expect("choose_split is defined");
-    let stored = choose
+        .expect("open_pane_state is defined");
+    let stored = pane
         .find("self.pane_states.insert(")
         .expect("the picked pane is stored");
-    let tail = choose
+    let tail = pane
         .get(stored..)
         .expect("the pane is stored on a char boundary");
     let painted = tail
@@ -211,6 +215,10 @@ fn choosing_a_session_repaints_before_the_transcript_loads() {
         painted < tail.find("cx.spawn").unwrap_or(painted + 1),
         "the repaint happens before the transcript load is spawned"
     );
+    let choose = GUI_MAIN
+        .split("fn choose_split(")
+        .nth(1)
+        .expect("choose_split is defined");
     assert!(
         choose.contains(".is_some_and(|tree| tree.split(target, layout, id));"),
         "the pane the pick started from is the one that splits, which is what nests a split"
@@ -297,8 +305,10 @@ fn the_divider_resizes_both_panes() {
         GUI_MAIN.contains("tree.drag_divider(&drag.path, drag.divider, travelled, span);"),
         "the move lands on that split's own pair, measured against its own span"
     );
+    // The reset is answered before the borrow that starts the drag, so the
+    // even pair can be written down for the next launch (#2675).
     assert!(
-        GUI_MAIN.contains("tree.even_divider(path, divider);"),
+        GUI_MAIN.contains("tree.even_divider(path, divider)"),
         "a double click puts the pair back to even"
     );
     assert!(

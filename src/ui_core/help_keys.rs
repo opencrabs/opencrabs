@@ -415,7 +415,7 @@ pub const ROWS: &[HelpRow] = &[
         HelpSection::Sessions,
         "r",
         "R",
-        None,
+        Some("r"),
         "Rename the selected session",
     ),
     row(HelpSection::Sessions, "p", "P", None, "Browse projects"),
@@ -430,21 +430,21 @@ pub const ROWS: &[HelpRow] = &[
         HelpSection::Sessions,
         "t",
         "T",
-        None,
+        Some("t"),
         "New topic under this session",
     ),
     row(
         HelpSection::Sessions,
         "c",
         "C",
-        None,
+        Some("c"),
         "Close or reopen the selected topic",
     ),
     row(
         HelpSection::Sessions,
         "z",
         "Z",
-        None,
+        Some("z"),
         "Fold or unfold the topic tree",
     ),
 ];
@@ -702,10 +702,16 @@ mod tests {
         let tui = seeker_items(HelpClient::Tui);
         let gui = seeker_items(HelpClient::Gui);
 
+        // The window answers `r` since #2670, so both surfaces list it now.
         assert!(tui.iter().any(|item| item.title.contains("Rename")));
-        assert!(!gui.iter().any(|item| item.title.contains("Rename")));
+        assert!(gui.iter().any(|item| item.title.contains("Rename")));
+        // The window scales its own rem (#2425) and the terminal has no say.
         assert!(gui.iter().any(|item| item.title.contains("Zoom")));
         assert!(!tui.iter().any(|item| item.title.contains("Zoom")));
+        // The window has no projects screen yet, so `p` stays terminal only
+        // until #2669 gives it one. Flip this assertion with that landing.
+        assert!(tui.iter().any(|item| item.title.contains("projects")));
+        assert!(!gui.iter().any(|item| item.title.contains("projects")));
 
         let terminal_help = tui
             .iter()

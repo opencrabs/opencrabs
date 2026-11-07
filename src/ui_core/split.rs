@@ -2,8 +2,10 @@
 //! (`ctrl+shift+|`) or stacked (`ctrl+shift+_`). This module holds the chord
 //! and the layout rule; the window owns the panes and their transcripts.
 
+use serde::{Deserialize, Serialize};
+
 /// How the two panes sit.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Layout {
     /// Side by side, a vertical divider: `ctrl+shift+|`.
     Side,
