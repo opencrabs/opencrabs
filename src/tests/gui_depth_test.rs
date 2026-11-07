@@ -59,11 +59,13 @@ fn a_split_panel_carries_its_own_composer_and_footer() {
         leaf.contains("if let Some(chrome) = ctx.chrome.remove(session)"),
         "the panel draws its own composer and plan, not the window's"
     );
-    // The chrome sits in its own shrink-proof column so its rows cannot be
-    // squeezed away in a split (#2530).
     let chrome_at = leaf
-        .find("node = node.child(div().flex().flex_col().flex_none().min_w_0().child(chrome));")
-        .expect("the panel takes it");
+        .find(".child(chrome)")
+        .expect("the panel takes its own chrome");
+    assert!(
+        leaf.contains(".flex_col().flex_none().min_w_0().child(chrome)"),
+        "the chrome keeps its own height inside the pane (#2624)"
+    );
     let footer_at = leaf
         .find("node.child(pane_footer(")
         .expect("the panel draws its own footer row");

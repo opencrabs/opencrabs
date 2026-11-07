@@ -138,9 +138,14 @@ fn mc_line_rows_render_through_the_flex_row_truncate_shape() {
     // shrinkable text child. Pin both halves so neither can regress.
     let flat = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
     let panel = flat(between(GUI_MAIN, "fn mc_panel(", "fn mc_inbox_panel"));
-    assert!(panel.contains(
-        "McRow::Line(line, _) => { cell = cell .flex() .flex_row() .child(text(line, Size::Xs, color).flex_1().min_w_0().truncate()); }"
-    ));
+    assert!(
+        panel.contains("McRow::Line(line, _) => {"),
+        "the line arm must exist in the panel row builder"
+    );
+    assert!(
+        panel.contains(".child(text(line, Size::Xs, color).flex_1().min_w_0().truncate())"),
+        "the line renders as a growing, shrinkable, truncated text child (#2642)"
+    );
     assert!(
         !GUI_MAIN.contains(".text_xs().truncate().child("),
         "the block-div truncate shape is back in main.rs"

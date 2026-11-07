@@ -55,13 +55,6 @@ async fn split_and_open_picker(app: &mut App, dir: &std::path::Path) {
     app.file_picker_current_dir = dir.to_path_buf();
 }
 
-fn alt_tab() -> crossterm::event::KeyEvent {
-    crossterm::event::KeyEvent::new(
-        crossterm::event::KeyCode::Tab,
-        crossterm::event::KeyModifiers::ALT,
-    )
-}
-
 fn key(code: crossterm::event::KeyCode) -> crossterm::event::KeyEvent {
     crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE)
 }
@@ -134,21 +127,36 @@ async fn tab_select_returns_to_chat_before_persistence_completes_ordering() {
 
 #[tokio::test]
 async fn alt_tab_cycles_panes_when_chat_is_split() {
-    // Pane rotation moved off bare Tab onto Alt+Tab (#2580), because Tab is
-    // also the follow-up suggestion and emoji picker accept. The #2494 rule
-    // that a split Chat keeps cycling panes still holds, now on Alt+Tab.
+    // The #2494 pane-cycling behaviour must survive the #2526 guard and the
+    // #2580 chord move: in Chat mode on a split layout Alt+Tab moves pane
+    // focus, while bare Tab keeps its own action.
     let mut app = app().await;
     app.pane_manager.split(SplitDirection::Horizontal);
     let ids = app.pane_manager.pane_ids_in_order();
     assert_eq!(ids.len(), 2);
     let before = app.pane_manager.focused_pane().map(|p| p.id);
 
-    app.handle_key_event(alt_tab()).await.unwrap();
+    app.handle_key_event(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Tab,
+        crossterm::event::KeyModifiers::ALT,
+    ))
+    .await
+    .unwrap();
 
     assert_eq!(app.mode, AppMode::Chat);
+    let after_alt = app.pane_manager.focused_pane().map(|p| p.id);
     assert_ne!(
-        app.pane_manager.focused_pane().map(|p| p.id),
-        before,
+        after_alt, before,
         "Alt+Tab in split Chat mode must still cycle pane focus (#2494, #2580)"
+    );
+
+    // Bare Tab is the follow-up accept and picker key now, never a pane move.
+    app.handle_key_event(key(crossterm::event::KeyCode::Tab))
+        .await
+        .unwrap();
+    assert_eq!(
+        app.pane_manager.focused_pane().map(|p| p.id),
+        after_alt,
+        "bare Tab must not rotate panes any more (#2580)"
     );
 }

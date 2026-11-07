@@ -9432,6 +9432,15 @@ fn remember_open_session(id: Uuid) {
 }
 
 fn main() {
+    // The terminal binary installs the rustls provider before anything opens a
+    // TLS connection (`src/main.rs`), and the window serves the same channels,
+    // so it installs it too. Without it the Slack connector panics while it
+    // tries to pick a provider from the crate features, and that task dies on
+    // every boot while Telegram, which does not use rustls, keeps working
+    // (#2452, #2607).
+    #[cfg(feature = "slack")]
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     // First, so a panic during the first fetch still lands in the trail.
     logging::init();
     // The ledger path is resolved once, here, on the main thread: every
