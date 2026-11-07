@@ -78,6 +78,75 @@ fn normalize_shares(children: &mut [PaneTree]) {
     }
 }
 
+/// Where a dragged pane lands against the pane under the pointer (#2683).
+///
+/// A drop names two things: the axis the target splits along, and whether the
+/// newcomer lands after the target in draw order or before it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DropHalf {
+    /// The axis the target splits along.
+    pub layout: Layout,
+    /// Whether the newcomer sits after the target in draw order.
+    pub after: bool,
+}
+
+/// The half of a pane box a pointer is nearest (#2683).
+///
+/// `bounds` is `[left, top, right, bottom]` as the paint recorded it. The four
+/// edges are compared as fractions of the box, so a wide pane offers its left
+/// and right halves and a tall one its top and bottom: the drop follows the
+/// shape the user is looking at. Ties go to the earlier edge in
+/// left, right, top, bottom order, and a degenerate box falls back to the
+/// right half, which is where a plain split puts a newcomer.
+pub fn drop_half(bounds: [f32; 4], x: f32, y: f32) -> DropHalf {
+    let [x0, y0, x1, y1] = bounds;
+    let (w, h) = (x1 - x0, y1 - y0);
+    if !w.is_finite() || !h.is_finite() || w <= 0.0 || h <= 0.0 {
+        return DropHalf {
+            layout: Layout::Side,
+            after: true,
+        };
+    }
+    let fx = ((x - x0) / w).clamp(0.0, 1.0);
+    let fy = ((y - y0) / h).clamp(0.0, 1.0);
+    let mut best = (
+        fx,
+        DropHalf {
+            layout: Layout::Side,
+            after: false,
+        },
+    );
+    let candidates = [
+        (
+            1.0 - fx,
+            DropHalf {
+                layout: Layout::Side,
+                after: true,
+            },
+        ),
+        (
+            fy,
+            DropHalf {
+                layout: Layout::Stack,
+                after: false,
+            },
+        ),
+        (
+            1.0 - fy,
+            DropHalf {
+                layout: Layout::Stack,
+                after: true,
+            },
+        ),
+    ];
+    for (distance, half) in candidates {
+        if distance < best.0 {
+            best = (distance, half);
+        }
+    }
+    best.1
+}
+
 impl PaneTree {
     /// The unsplit window: one pane, the whole span.
     pub fn leaf(session: Uuid) -> Self {
@@ -100,33 +169,98 @@ impl PaneTree {
     /// that session, or when the tree is one leaf and the newcomer IS that
     /// session, which would split a session with itself.
     pub fn split(&mut self, session: Uuid, layout: Layout, new_session: Uuid) -> bool {
+        self.split_at(session, layout, true, new_session)
+    }
+
+    /// Split the leaf holding `session` along `layout`, putting `new_session`
+    /// before or after it (#2683). A new pane arrives after the pane it was
+    /// split from unless a drop says otherwise.
+    pub fn split_at(
+        &mut self,
+        session: Uuid,
+        layout: Layout,
+        after: bool,
+        new_session: Uuid,
+    ) -> bool {
         if self.leaves().len() == 1 && self.contains(new_session) {
             return false;
         }
         match self {
             PaneTree::Leaf { session: s, share } if *s == session => {
                 let half = *share / 2.0;
+                let mut panes = vec![
+                    PaneTree::Leaf {
+                        session: *s,
+                        share: half,
+                    },
+                    PaneTree::Leaf {
+                        session: new_session,
+                        share: half,
+                    },
+                ];
+                if !after {
+                    panes.reverse();
+                }
                 *self = PaneTree::Split {
                     layout,
                     share: *share,
-                    children: vec![
-                        PaneTree::Leaf {
-                            session: *s,
-                            share: half,
-                        },
-                        PaneTree::Leaf {
-                            session: new_session,
-                            share: half,
-                        },
-                    ],
+                    children: panes,
                 };
                 true
             }
             PaneTree::Split { children, .. } => children
                 .iter_mut()
-                .any(|child| child.split(session, layout, new_session)),
+                .any(|child| child.split_at(session, layout, after, new_session)),
             PaneTree::Leaf { .. } => false,
         }
+    }
+
+    /// Move the pane holding `from` to sit beside the pane holding `target`
+    /// (#2683). The emptied split collapses and the survivor keeps its parent's
+    /// share, so a move never grows or shrinks the area the panes cover; the
+    /// target splits along `half.layout`, with the mover taking half of the
+    /// target's share and landing before or after it per `half.after`.
+    ///
+    /// Returns `false` when either session is not in the tree, or when they
+    /// are the same pane: a drop on itself is not a move.
+    pub fn move_leaf(&mut self, from: Uuid, target: Uuid, half: DropHalf) -> bool {
+        if from == target || !self.contains(from) || !self.contains(target) {
+            return false;
+        }
+        let Some(()) = self.take_leaf(from) else {
+            return false;
+        };
+        self.split_at(target, half.layout, half.after, from)
+    }
+
+    /// Remove the leaf holding `session`, collapsing any split this leaves with
+    /// a single child (#2683). The survivor takes the emptied split's share, so
+    /// the panes around it keep their sizes.
+    fn take_leaf(&mut self, session: Uuid) -> Option<()> {
+        let share = self.share();
+        let PaneTree::Split { children, .. } = self else {
+            return None;
+        };
+        if let Some(index) = children
+            .iter()
+            .position(|child| matches!(child, PaneTree::Leaf { session: s, .. } if *s == session))
+        {
+            children.remove(index);
+            if children.len() == 1 {
+                let only = children.remove(0);
+                *self = only;
+                set_share(self, share);
+            } else {
+                // The opened share goes back to the siblings, so the split
+                // still adds up to the one span it owns. A two pane split
+                // never reaches here: one removal already collapsed it.
+                normalize_shares(children);
+            }
+            return Some(());
+        }
+        children
+            .iter_mut()
+            .find_map(|child| child.take_leaf(session))
     }
 
     /// Close the leaf showing `session`: its share is shared out evenly
@@ -606,5 +740,118 @@ mod tests {
         let c_share = tree.leaf_width_share(c()).expect("c is a leaf");
         assert!((c_share - 0.5).abs() < 1e-4, "c got {c_share}");
         assert!(tree.leaf_width_share(Uuid::nil()).is_none());
+    }
+
+    /// A moved pane lands on the half it was dropped on (#2683): the target
+    /// splits, the newcomer takes half its share, and the pane that got moved
+    /// is only in one place.
+    #[test]
+    fn moving_a_pane_beside_another_splits_the_target() {
+        let mut tree = PaneTree::leaf(a());
+        tree.split(a(), Layout::Side, b());
+        let half = DropHalf {
+            layout: Layout::Stack,
+            after: true,
+        };
+        assert!(tree.move_leaf(a(), b(), half));
+        assert_eq!(tree.leaves(), vec![b(), a()]);
+        assert!(tree.duplicates().is_empty());
+        let PaneTree::Split {
+            layout, children, ..
+        } = &tree
+        else {
+            panic!("root must be a split");
+        };
+        assert_eq!(*layout, Layout::Stack);
+        assert_eq!(children[0].share(), 0.5);
+        assert_eq!(children[1].share(), 0.5);
+    }
+
+    /// The split a moved pane leaves behind collapses, and the survivor keeps
+    /// the emptied split's share: a move never resizes the panes around it.
+    #[test]
+    fn a_move_collapses_the_split_it_empties() {
+        let mut tree = PaneTree::leaf(a());
+        tree.split(a(), Layout::Side, b());
+        tree.split(b(), Layout::Stack, c());
+        let half = DropHalf {
+            layout: Layout::Side,
+            after: false,
+        };
+        assert!(tree.move_leaf(c(), a(), half));
+        // The window normalizes every frame against the area it painted, so
+        // this is the shape the next frame lays out (#2683).
+        tree.normalize(1000.0);
+        let shares: f32 = tree
+            .leaves()
+            .iter()
+            .filter_map(|session| tree.leaf_width_share(*session))
+            .sum();
+        assert!((shares - 1.0).abs() < 1e-4, "shares sum to {shares}");
+        assert!(tree.duplicates().is_empty());
+        // b was left alone in the stacked split, so it owns the full side half
+        // it used to share with c.
+        let b_share = tree.leaf_width_share(b()).expect("b is a leaf");
+        assert!((b_share - 0.5).abs() < 1e-4, "b got {b_share}");
+    }
+
+    /// Dropping a pane on itself is not a move, and a session that is not in
+    /// the tree cannot be moved or landed on.
+    #[test]
+    fn a_move_needs_two_different_panes_in_the_tree() {
+        let mut tree = PaneTree::leaf(a());
+        tree.split(a(), Layout::Side, b());
+        let half = DropHalf {
+            layout: Layout::Side,
+            after: true,
+        };
+        assert!(!tree.move_leaf(a(), a(), half));
+        assert!(!tree.move_leaf(Uuid::nil(), a(), half));
+        assert!(!tree.move_leaf(a(), Uuid::nil(), half));
+        assert_eq!(tree.leaves(), vec![a(), b()]);
+    }
+
+    /// A drop follows the edge the pointer is nearest, measured as a fraction
+    /// of the pane box, so a wide pane trades left and right and a tall one
+    /// top and bottom (#2683).
+    #[test]
+    fn a_drop_reads_the_nearest_edge() {
+        let wide = [0.0, 0.0, 1000.0, 600.0];
+        assert_eq!(
+            drop_half(wide, 900.0, 300.0),
+            DropHalf {
+                layout: Layout::Side,
+                after: true
+            }
+        );
+        assert_eq!(
+            drop_half(wide, 100.0, 300.0),
+            DropHalf {
+                layout: Layout::Side,
+                after: false
+            }
+        );
+        assert_eq!(
+            drop_half(wide, 500.0, 30.0),
+            DropHalf {
+                layout: Layout::Stack,
+                after: false
+            }
+        );
+        assert_eq!(
+            drop_half(wide, 500.0, 570.0),
+            DropHalf {
+                layout: Layout::Stack,
+                after: true
+            }
+        );
+        // A box the paint never measured falls back to the right half.
+        assert_eq!(
+            drop_half([10.0, 10.0, 10.0, 10.0], 10.0, 10.0),
+            DropHalf {
+                layout: Layout::Side,
+                after: true
+            }
+        );
     }
 }

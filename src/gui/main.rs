@@ -68,7 +68,7 @@ use opencrabs::ui_core::channel_status;
 use opencrabs::ui_core::message_select::{MessageAction, Selection};
 use opencrabs::ui_core::model_layout;
 use opencrabs::ui_core::model_selector::{FetchRequest, ProviderSelectorState};
-use opencrabs::ui_core::pane_tree::PaneTree;
+use opencrabs::ui_core::pane_tree::{DropHalf, PaneTree, drop_half};
 use opencrabs::ui_core::rail;
 use opencrabs::ui_core::split::{self, Layout};
 use opencrabs::ui_core::topic_bar;
@@ -93,7 +93,7 @@ use gpui::{
     DragMoveEvent, Entity, ExternalPaths, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta, ScrollHandle, ScrollWheelEvent,
     SharedString, Stateful, TitlebarOptions, Window, WindowBounds, WindowOptions, div, point,
-    prelude::*, px, rems, rgb, rgba, size,
+    prelude::*, px, relative, rems, rgb, rgba, size,
 };
 use opencrabs::brain::agent::ProgressEvent;
 use opencrabs::utils::drop_landing::human_size;
@@ -157,6 +157,36 @@ struct DividerDrag {
     stacked: bool,
     /// Where the pointer was along that axis on the last move, in px.
     last: f32,
+}
+
+/// A pane picked up by its header (#2683). The drag carries the session that
+/// owns the pane and nothing else: where the pane lands is decided by the drop
+/// target under the pointer, not by the drag path it took.
+#[derive(Clone)]
+struct PaneDrag {
+    session: Uuid,
+}
+
+/// What follows the pointer while a pane is dragged (#2683): the pane's own
+/// title on a card, so the drag reads as the pane it will land as rather than
+/// as a nameless chip.
+struct PaneGhost {
+    title: SharedString,
+}
+
+impl Render for PaneGhost {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_2()
+            .py_1()
+            .rounded(px(CARD_RADIUS))
+            .bg(rgb(palette::current().panel_hi))
+            .border_1()
+            .border_color(rgb(palette::current().accent))
+            .text_xs()
+            .text_color(rgb(palette::current().text))
+            .child(self.title.clone())
+    }
 }
 
 /// One pane beside the window's own chat: its transcript and scroll (#2438).
@@ -619,6 +649,10 @@ struct Dashboard {
     split_drag: Option<DividerDrag>,
     /// The pane a pending pick splits; the sidebar fills it (#2472).
     split_target: Option<Uuid>,
+    /// Where a dragged pane would land (#2683): the pane under the pointer and
+    /// which half of it. Live only while a pane is in flight, so a stale value
+    /// can never outline a pane nobody is dragging.
+    pane_drop: Option<(Uuid, DropHalf)>,
     /// The layout a split is waiting on a session for; the sidebar picks it (#2438).
     split_pick: Option<Layout>,
     /// A split's new session is being created, so the created row fills the pane.
@@ -7863,6 +7897,7 @@ impl Dashboard {
             interactive,
             footers: &footers,
             chrome: &mut chrome,
+            drop: self.pane_drop,
         };
         let mut path = Vec::new();
         let tree = self.panes.as_ref().expect("checked a moment ago");
@@ -10348,6 +10383,9 @@ impl Render for Dashboard {
                     this.dragging_rail = false;
                     this.drag_from = None;
                     this.rail_swipe = None;
+                    // A pane drag ends here whether or not it landed anywhere
+                    // (#2683): the band belongs to the drag, so it goes with it.
+                    this.pane_drop = None;
                     // A divider dragged to a new size is a layout the user
                     // chose, so the release is when it gets written (#2675).
                     if this.split_drag.take().is_some() {
@@ -10972,6 +11010,7 @@ fn main() {
                         split_areas: Rc::new(std::cell::RefCell::new(HashMap::new())),
                         split_drag: None,
                         split_target: None,
+                        pane_drop: None,
                         copy_drag,
                         split_pick: None,
                         split_creating: false,
@@ -13166,6 +13205,8 @@ fn pane_header(
     id: SharedString,
     title: SharedString,
     focused: bool,
+    draggable: bool,
+    session: Uuid,
     close: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     let title_color = if focused {
@@ -13184,6 +13225,11 @@ fn pane_header(
     } else {
         palette::current().bg
     };
+    // The header is the pane's grip (#2683): pressing it and moving picks the
+    // whole pane up, and the drop target under the pointer decides where it
+    // lands. The ghost carries the pane's title, so what follows the pointer is
+    // the pane the user grabbed and not a blank chip.
+    let drag_title = title.clone();
     div()
         .flex()
         .flex_row()
@@ -13196,6 +13242,19 @@ fn pane_header(
         .bg(rgb(header_bg))
         .border_b_2()
         .border_color(rgb(rule_color))
+        // The grip needs a stateful element: `on_drag` is only offered by
+        // `StatefulInteractiveElement`, and a bare `Div` has no id to key the
+        // drag on, so the pane's own key rides here (#2683).
+        .id(SharedString::from(format!("pane-grip-{id}")))
+        .when(draggable, |d| {
+            d.cursor(CursorStyle::OpenHand).on_drag(
+                PaneDrag { session },
+                move |_drag, _offset, _window, cx| {
+                    let title = drag_title.clone();
+                    cx.new(|_| PaneGhost { title })
+                },
+            )
+        })
         .child(
             div()
                 .flex_1()
@@ -13291,6 +13350,37 @@ fn focus_ring_color(focused: bool) -> u32 {
     } else {
         split_rule_color()
     }
+}
+
+/// The band that shows where a dragged pane will land (#2683).
+///
+/// It covers the half of the pane the pointer is nearest and sits inside the
+/// pane's own box, so the drop is aimed before the release instead of guessed
+/// after it. The tint is the accent at low alpha with a solid edge, so it reads
+/// over a transcript on every theme without hiding the text under it.
+fn drop_indicator(half: DropHalf) -> AnyElement {
+    let accent = palette::current().accent;
+    let band = div()
+        .absolute()
+        .bg(rgba((accent << 8) | 0x2e))
+        .border_2()
+        .border_color(rgb(accent));
+    let band = if half.layout.is_stacked() {
+        let band = band.left(px(0.)).right(px(0.)).h(relative(0.5));
+        if half.after {
+            band.bottom(px(0.))
+        } else {
+            band.top(px(0.))
+        }
+    } else {
+        let band = band.top(px(0.)).bottom(px(0.)).w(relative(0.5));
+        if half.after {
+            band.right(px(0.))
+        } else {
+            band.left(px(0.))
+        }
+    };
+    band.into_any_element()
 }
 
 /// What one pane may plan its rows against (#2473, #2476). Side by side the
@@ -13444,6 +13534,9 @@ struct PanesCtx<'a> {
     /// to hand each leaf its own. The chat leaf gets the window's chrome, so
     /// an unsplit window never draws its composer twice.
     chrome: &'a mut HashMap<Uuid, AnyElement>,
+    /// Where a dragged pane would land (#2683): the pane under the pointer and
+    /// the half of it. Read by each leaf to draw its landing band.
+    drop: Option<(Uuid, DropHalf)>,
 }
 
 /// Draw the pane tree (#2472). A leaf is one pane: its header, its ×, and the
@@ -13532,8 +13625,19 @@ fn pane_element(
                 });
             };
             let interactive = ctx.interactive;
+            // Where a dragged pane would land if released here (#2683). Only
+            // the target draws a band, and only while a pane is in flight.
+            let landing = ctx
+                .drop
+                .filter(|(target, _)| target == session)
+                .map(|(_, half)| half);
+            let hover_weak = ctx.entity.clone();
+            let hover_session = *session;
+            let drop_weak = ctx.entity.clone();
+            let drop_session = *session;
             let mut node = div()
                 .id(SharedString::from(format!("pane-{session}")))
+                .relative()
                 .flex()
                 .flex_col()
                 .flex_1()
@@ -13549,13 +13653,72 @@ fn pane_element(
                 .when(!focused, |d| d.opacity(UNFOCUSED_PANE_OPACITY))
                 .when(interactive, |d| {
                     d.on_mouse_down(MouseButton::Left, take_keyboard)
+                        // Every pane is a drop target (#2683). The half the
+                        // pointer is nearest picks the axis and the side while
+                        // the drag is still in flight, so the band under it is
+                        // the layout the release will produce.
+                        .on_drag_move::<PaneDrag>(move |ev, _window, cx| {
+                            let from = ev.drag(cx).session;
+                            let b = ev.bounds;
+                            let bounds = [
+                                f32::from(b.origin.x),
+                                f32::from(b.origin.y),
+                                f32::from(b.origin.x + b.size.width),
+                                f32::from(b.origin.y + b.size.height),
+                            ];
+                            let half = drop_half(
+                                bounds,
+                                f32::from(ev.event.position.x),
+                                f32::from(ev.event.position.y),
+                            );
+                            // A pane dropped on itself is not a move, so it
+                            // never shows a landing band of its own.
+                            let next = (from != hover_session).then_some((hover_session, half));
+                            let _ = hover_weak.update(cx, |this, cx| {
+                                if this.pane_drop != next {
+                                    this.pane_drop = next;
+                                    cx.notify();
+                                }
+                            });
+                        })
+                        .on_drop::<PaneDrag>(move |drag, _window, cx| {
+                            let from = drag.session;
+                            let _ = drop_weak.update(cx, |this, cx| {
+                                // The half the last move recorded here, or the
+                                // right half when the pointer arrived and left
+                                // without a move of its own.
+                                let half = this
+                                    .pane_drop
+                                    .filter(|(target, _)| *target == drop_session)
+                                    .map(|(_, half)| half)
+                                    .unwrap_or(DropHalf {
+                                        layout: Layout::Side,
+                                        after: true,
+                                    });
+                                this.pane_drop = None;
+                                let moved = this
+                                    .panes
+                                    .as_mut()
+                                    .is_some_and(|tree| tree.move_leaf(from, drop_session, half));
+                                if moved {
+                                    // A move is the layout the user chose, so
+                                    // the release is when it gets written
+                                    // (#2683, #2675).
+                                    this.persist_layout();
+                                }
+                                cx.notify();
+                            });
+                        })
                 })
                 .child(pane_header(
                     SharedString::from(format!("pane-close-{session}")),
                     title,
                     focused,
+                    interactive,
+                    *session,
                     close,
                 ))
+                })
                 // The transcript takes the slack, the strips and the composer
                 // below it keep their height (#2624). Without the wrapper the
                 // conversation's own min height won the shrink and the plan
@@ -13583,6 +13746,9 @@ fn pane_element(
                 ctx.footers.get(session).cloned(),
                 focused,
             ))
+            // Painted last, so the landing band covers the pane's own rows
+            // instead of hiding under its transcript (#2683).
+            .when_some(landing, |d, half| d.child(drop_indicator(half)))
             .into_any_element()
         }
         PaneTree::Split {
@@ -15002,7 +15168,14 @@ mod tests {
         // #2625: the row menu named the session, so opening it as the chat
         // first and then asking again grew the split from the first pane.
         let src = include_str!("main.rs");
-        let menu = fn_body(src, "render")
+        // The drag ghost (#2683) implements Render too, so the scan anchors
+        // on the window's own signature instead of the first `fn render(`.
+        let window_render = src
+            .split("fn render(&mut self, window: &mut Window, cx: &mut Context<Self>)")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .expect("the window render");
+        let menu = window_render
             .split("sessions::MenuKind::SplitSide")
             .nth(1)
             .and_then(|rest| rest.split("MenuKind::Delete").next())
