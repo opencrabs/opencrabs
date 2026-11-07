@@ -12,6 +12,10 @@ use gpui::{Div, InteractiveElement, SharedString, Stateful, Styled, div, prelude
 /// Which row action a context-menu item performs.
 pub enum MenuKind {
     Pin,
+    /// Take a new name, next to Pin: a rail row is where a conversation is
+    /// managed, and the prompt used to be reachable only from the body's own
+    /// menu (#2668).
+    Rename,
     Delete,
     EnableTopics,
     NewTopic,

@@ -977,24 +977,6 @@ pub fn pin_mark(favorited: bool) -> (&'static str, u32) {
     }
 }
 
-/// Which row action a context-menu item performs.
-pub enum MenuKind {
-    Pin,
-    Rename,
-    Delete,
-    EnableTopics,
-    NewTopic,
-    SplitSide,
-    SplitStack,
-}
-
-/// One item of the rail's context menu. The labels are the interface:
-/// Pin flips to Unpin on a pinned row, Delete never changes.
-pub struct MenuEntry {
-    pub kind: MenuKind,
-    pub label: &'static str,
-}
-
 /// The menu's contents, resolved from the row's pin state. Pure, so the
 /// labels are pinned by test and the render only draws what this returns
 /// (#2354).
