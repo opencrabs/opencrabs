@@ -6638,6 +6638,7 @@ impl Render for Dashboard {
                             this.sessions.rail_menu = None;
                             match kind {
                                 sessions::MenuKind::Pin => this.toggle_favorite(id, cx),
+                                sessions::MenuKind::Rename => this.start_rename(id, cx),
                                 sessions::MenuKind::EnableTopics => this.enable_topics(id, cx),
                                 sessions::MenuKind::NewTopic => {
                                     // The prompt works on the open chat, so open the row first (#2397).
@@ -9224,10 +9225,11 @@ impl Render for Dashboard {
         // The name prompt takes the whole window: the scrim darkens everything
         // else, and a click outside the panel cancels, as Esc does (#2398).
         if let Some(draft) = self.topic_draft.clone() {
-            let label = if self.topic_rename.is_some() {
-                "Rename topic"
-            } else {
-                "New topic"
+            let label = match self.topic_rename {
+                Some(target) => {
+                    sessions::rename_prompt_label(self.sessions.parents.contains_key(&target))
+                }
+                None => "New topic",
             };
             let cancel = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
                 this.topic_draft = None;

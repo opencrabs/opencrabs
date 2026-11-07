@@ -889,6 +889,7 @@ pub fn pin_mark(favorited: bool) -> (&'static str, u32) {
 /// Which row action a context-menu item performs.
 pub enum MenuKind {
     Pin,
+    Rename,
     Delete,
     EnableTopics,
     NewTopic,
@@ -903,6 +904,17 @@ pub struct MenuEntry {
     pub label: &'static str,
 }
 
+/// The heading a rename prompt shows for its target (#2668). A conversation
+/// and a topic share one prompt and one write, so the heading is the only
+/// place the difference between them is visible.
+pub fn rename_prompt_label(is_topic: bool) -> &'static str {
+    if is_topic {
+        "Rename topic"
+    } else {
+        "Rename conversation"
+    }
+}
+
 /// The menu's contents, resolved from the row's pin state. Pure, so the
 /// labels are pinned by test and the render only draws what this returns
 /// (#2354).
@@ -911,6 +923,14 @@ pub fn rail_menu_entries(favorited: bool, topics_enabled: bool) -> Vec<MenuEntry
         kind: MenuKind::Pin,
         label: if favorited { "Unpin" } else { "Pin" },
     }];
+    // Rename sits next to Pin: the rail row is where a conversation is
+    // managed, and the prompt used to be reachable only from the
+    // conversation body's own menu, which left a sidebar row with no way to
+    // take a new name (#2668).
+    entries.push(MenuEntry {
+        kind: MenuKind::Rename,
+        label: "Rename",
+    });
     // Topics are opt-in per session (#2302): the item is offered only while
     // they are off, so it cannot be flipped twice by accident. Once they are
     // on, the same slot offers a new topic under the row (#2397).
@@ -1686,22 +1706,51 @@ mod tests {
     #[test]
     fn rail_menu_offers_pin_and_delete() {
         let off = rail_menu_entries(false, false);
-        assert_eq!(off.len(), 5, "pin, enable topics, two splits and delete");
+        assert_eq!(
+            off.len(),
+            6,
+            "pin, rename, enable topics, two splits and delete"
+        );
         assert_eq!(off[0].label, "Pin");
         assert!(matches!(off[0].kind, MenuKind::Pin));
-        assert_eq!(off[4].label, "Delete");
-        assert!(matches!(off[4].kind, MenuKind::Delete));
+        assert_eq!(off[1].label, "Rename");
+        assert!(matches!(off[1].kind, MenuKind::Rename));
+        assert_eq!(off[5].label, "Delete");
+        assert!(matches!(off[5].kind, MenuKind::Delete));
 
         let on = rail_menu_entries(false, true);
-        assert_eq!(on.len(), 5, "pin, new topic, two splits and delete");
-        assert_eq!(on[1].label, "New topic");
-        assert!(matches!(on[1].kind, MenuKind::NewTopic));
-        assert_eq!(on[4].label, "Delete");
+        assert_eq!(on.len(), 6, "pin, rename, new topic, two splits and delete");
+        assert_eq!(on[2].label, "New topic");
+        assert!(matches!(on[2].kind, MenuKind::NewTopic));
+        assert_eq!(on[5].label, "Delete");
 
         let pinned = rail_menu_entries(true, true);
         assert_eq!(pinned[0].label, "Unpin", "a pinned row offers the way out");
         assert!(matches!(pinned[0].kind, MenuKind::Pin));
-        assert_eq!(pinned[4].label, "Delete");
+        assert_eq!(pinned[5].label, "Delete");
+    }
+
+    /// A rail row can take a new name from its own menu (#2668). The prompt
+    /// already existed; only the entry that reaches it was missing.
+    #[test]
+    fn rail_menu_offers_rename_on_every_row() {
+        for (favorited, topics) in [(false, false), (false, true), (true, true)] {
+            let menu = rail_menu_entries(favorited, topics);
+            let rename = menu
+                .iter()
+                .find(|e| matches!(e.kind, MenuKind::Rename))
+                .expect("every row offers a rename");
+            assert_eq!(rename.label, "Rename", "the label never varies");
+        }
+    }
+
+    /// The prompt's heading names what is being renamed (#2668): a topic and
+    /// a conversation share one prompt, so the heading is the only place the
+    /// difference shows.
+    #[test]
+    fn rename_prompt_names_its_target() {
+        assert_eq!(rename_prompt_label(false), "Rename conversation");
+        assert_eq!(rename_prompt_label(true), "Rename topic");
     }
 
     /// Split | and Split _ sit before Delete on every row, so a split starts
@@ -1725,9 +1774,9 @@ mod tests {
     #[test]
     fn rail_menu_offers_enable_topics_only_while_topics_are_off() {
         let off = rail_menu_entries(false, false);
-        assert_eq!(off.len(), 5);
-        assert_eq!(off[1].label, "Enable topics");
-        assert!(matches!(off[1].kind, MenuKind::EnableTopics));
+        assert_eq!(off.len(), 6);
+        assert_eq!(off[2].label, "Enable topics");
+        assert!(matches!(off[2].kind, MenuKind::EnableTopics));
 
         let on = rail_menu_entries(false, true);
         assert!(
