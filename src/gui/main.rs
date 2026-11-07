@@ -4316,6 +4316,12 @@ impl Dashboard {
                     context_tokens,
                     tokens_per_second,
                 } => {
+                    // A settled turn is what moves a row up the rail (#2666).
+                    // The ledger bumps `updated_at` beside the message insert
+                    // and the rail paints that order, so without a refetch
+                    // here a conversation used a minute ago kept the slot and
+                    // the date it had when the rail was last read.
+                    self.refresh_rail(cx);
                     // A split pane runs its own turn (#2614): the answer
                     // belongs to that leaf, so the window's footer and its
                     // conversation are left exactly where the user put them.
@@ -4382,6 +4388,9 @@ impl Dashboard {
                     reload = self.transcript.session;
                 }
                 agent_bridge::TurnEvent::Failed { session, text } => {
+                    // A failure is still activity, so the row moves like a
+                    // settled turn does (#2666).
+                    self.refresh_rail(cx);
                     if self.transcript.session != Some(session) {
                         // Same as Done: a failure for a conversation that is
                         // not on screen retires its parked card and leaves the

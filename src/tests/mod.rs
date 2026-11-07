@@ -362,6 +362,7 @@ pub mod gui_esc_screens_test;
 pub mod gui_footer_title_test;
 pub mod gui_layout_test;
 pub mod gui_overlay_layer_test;
+pub mod gui_rail_last_activity_test;
 pub mod gui_sessions_rail_test;
 pub mod gui_split_render_test;
 pub mod gui_theme_config_test;
