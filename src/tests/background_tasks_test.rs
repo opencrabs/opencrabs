@@ -599,3 +599,56 @@ async fn detached_run_stops_waiting_at_its_ceiling() {
         "the ceiling must end the wait, not sleep 30 ({elapsed:?})"
     );
 }
+
+/// #2676: a detached command must finalize after the runtime that spawned it
+/// is gone.
+///
+/// The window runs every turn on a `current_thread` runtime it drops the moment
+/// the turn returns (`gui::agent_bridge::spawn_turn`). While the waiter lived on
+/// that runtime it died with the turn: `kill_on_drop` killed the shell, the
+/// finalize never ran, and the row, the status file and the DB record stayed
+/// `Running` for the life of the window. The waiter now owns a process-lifetime
+/// runtime, so this spawns inside a throwaway runtime, drops it, and still
+/// expects the finish.
+#[test]
+fn a_command_finalizes_after_its_spawning_runtime_is_dropped() {
+    let sid = Uuid::new_v4();
+    let mgr = Arc::new(BackgroundTaskManager::new());
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let progress: ProgressCallback = Arc::new(move |_sid, event| {
+        if let ProgressEvent::DetachedTaskFinished { task_id, .. } = event {
+            let _ = tx.send(task_id.to_string());
+        }
+    });
+
+    // The shape of a GUI turn: spawn the command, start it, then let the
+    // runtime go out of scope while the command is still running.
+    {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("the throwaway turn runtime");
+        runtime.block_on(async {
+            mgr.clone().spawn_command(
+                sid,
+                std::env::temp_dir(),
+                "turn-exit probe".to_string(),
+                "sleep 1; echo turn-exit probe done".to_string(),
+                Some(progress),
+            );
+            // Land the spawn and start the child before the runtime dies.
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        });
+    }
+
+    let finished = rx.recv_timeout(std::time::Duration::from_secs(20));
+    assert!(
+        finished.is_ok(),
+        "the finish must outlive the runtime that spawned the command (#2676)"
+    );
+    assert_eq!(
+        mgr.running_for(sid),
+        0,
+        "a settled task must leave the running roster"
+    );
+}
