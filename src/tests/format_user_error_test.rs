@@ -158,10 +158,7 @@ fn tool_loop_produces_loop_message_with_models_remedy() {
         msg.contains("loop") || msg.contains("tool"),
         "must describe the tool loop: {msg}"
     );
-    assert!(
-        msg.contains("/models"),
-        "must still suggest /models: {msg}"
-    );
+    assert!(msg.contains("/models"), "must still suggest /models: {msg}");
 }
 
 #[test]

@@ -89,10 +89,7 @@ fn no_pending_calls_describe_as_empty() {
 fn loop_break_is_the_error_the_rotation_wrapper_matches() {
     let err = loop_break_error("near-identical tool-call loop", "bash", 4, 8, "bash {..}");
     assert!(
-        matches!(
-            err,
-            AgentError::Provider(ProviderError::ToolLoop(_))
-        ),
+        matches!(err, AgentError::Provider(ProviderError::ToolLoop(_))),
         "{err:?}"
     );
 }
@@ -310,10 +307,16 @@ async fn an_exhausted_chain_ends_the_turn_naming_the_dropped_call() {
 fn distinct_loop_reasons_for_tool_and_announcement_guards() {
     // #2465: tool loops must be attributed to "tool_loop", announcement loops to "announcement_loop"
     let tool_err = loop_break_error("near-identical tool-call loop", "bash", 4, 8, "bash {}");
-    assert!(matches!(tool_err, AgentError::Provider(ProviderError::ToolLoop(_))));
+    assert!(matches!(
+        tool_err,
+        AgentError::Provider(ProviderError::ToolLoop(_))
+    ));
 
     let announce_err = AgentError::Provider(ProviderError::AnnouncementLoop(
-        "near-identical announcements repeated within the turn".to_string()
+        "near-identical announcements repeated within the turn".to_string(),
     ));
-    assert!(matches!(announce_err, AgentError::Provider(ProviderError::AnnouncementLoop(_))));
+    assert!(matches!(
+        announce_err,
+        AgentError::Provider(ProviderError::AnnouncementLoop(_))
+    ));
 }
