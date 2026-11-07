@@ -1316,3 +1316,5 @@ pub mod usage_key_names_log_test;
 pub mod usage_prompt_share_test;
 
 pub mod session_switch_transcript_test;
+
+pub mod agent_config_off_stack_2661_test;
