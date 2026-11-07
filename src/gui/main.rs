@@ -830,6 +830,10 @@ struct Dashboard {
 /// Apply sidebar visibility without letting a closed rail retain keyboard
 /// focus or a hidden filter. Width belongs to the window layout and is not
 /// part of this transition.
+///
+/// Opening is a request to walk the list, so the rail takes the keyboard on
+/// the way in and the cursor stands on the open conversation (#2665). It used
+/// to arrive unfocused, which left up and down dead until a Tab.
 fn set_rail_open_state(
     open: bool,
     rail_open: &mut bool,
@@ -837,7 +841,10 @@ fn set_rail_open_state(
     sessions: &mut sessions::SessionsState,
 ) {
     *rail_open = open;
-    if !open {
+    if open {
+        *rail_focused = true;
+        sessions.cursor = sessions.cursor.or(sessions.selected);
+    } else {
         *rail_focused = false;
         sessions.filter.clear();
         sessions.filter_active = false;
@@ -847,6 +854,17 @@ fn set_rail_open_state(
 #[cfg(test)]
 mod sidebar_action_tests {
     use super::*;
+
+    /// The body of one function in one of the GUI files, up to the next method.
+    /// The source scans below pin decisions a unit test cannot reach without a
+    /// window, and they read the body so a mention elsewhere cannot satisfy
+    /// them (#2665).
+    fn fn_body(src: &'static str, name: &str) -> &'static str {
+        src.split(&format!("fn {name}("))
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .unwrap_or_else(|| panic!("{name} not found"))
+    }
 
     #[test]
     fn sidebar_actions_gui_open_and_close_are_idempotent() {
@@ -862,7 +880,9 @@ mod sidebar_action_tests {
             set_rail_open_state(true, &mut open, &mut focused, &mut sessions);
             set_rail_open_state(true, &mut open, &mut focused, &mut sessions);
             assert!(open);
-            assert_eq!(focused, initially_open);
+            // Opening arms the walk (#2665): the arrows have to move the cards
+            // without a Tab first, which is what opening the sidebar means.
+            assert!(focused);
             assert_eq!(sessions.filter_active, initially_open);
 
             set_rail_open_state(false, &mut open, &mut focused, &mut sessions);
@@ -872,6 +892,120 @@ mod sidebar_action_tests {
             assert!(sessions.filter.is_empty());
             assert!(!sessions.filter_active);
         }
+    }
+
+    #[test]
+    fn opening_the_rail_arms_the_walk_on_the_open_conversation() {
+        // #2665: opening the sidebar is asking to move with the arrows, so it
+        // must not need a Tab first, and the walk starts on the conversation
+        // on screen instead of nowhere.
+        let mut open = false;
+        let mut focused = false;
+        let mut sessions = sessions::SessionsState::default();
+        let on_screen = Uuid::new_v4();
+        sessions.selected = Some(on_screen);
+
+        set_rail_open_state(true, &mut open, &mut focused, &mut sessions);
+
+        assert!(open, "the rail opens");
+        assert!(
+            focused,
+            "opening arms the keys, the arrows need no Tab first"
+        );
+        assert_eq!(
+            sessions.cursor,
+            Some(on_screen),
+            "the walk starts where the user is, not on an arbitrary row"
+        );
+    }
+
+    #[test]
+    fn a_committed_row_hands_the_keyboard_to_the_composer() {
+        // #2665: a pick ends the walk. The rail stays on screen but stops
+        // owning keys, and the focus request is made after that, because
+        // `open_overlays` counts the rail only while it is focused.
+        let src = include_str!("main.rs");
+        let body = fn_body(src, "open_session_handing_back");
+        let (_before, after) = body
+            .split_once("if hand_back {")
+            .unwrap_or_else(|| panic!("the hand back branch"));
+        assert!(
+            after.contains("self.rail_focused = false"),
+            "a committed row takes the keys off the rail"
+        );
+        assert!(
+            after.contains("self.refocus_screen()"),
+            "the focus request follows, so the derivation sees an unarmed rail"
+        );
+        assert!(
+            after.find("self.rail_focused = false") < after.find("self.refocus_screen()"),
+            "the rail has to let go before focus is derived"
+        );
+        // Every commit goes through the wrapper, so the click, Enter, the
+        // palette, the find field and a topic tab all hand the keys back.
+        assert!(
+            fn_body(src, "open_session").contains("open_session_handing_back(id, true, cx)"),
+            "a commit is the form that hands the keyboard back"
+        );
+    }
+
+    #[test]
+    fn the_arrow_walk_previews_without_taking_the_keys() {
+        // #2665: the walk opens each row it stands on, so handing the composer
+        // the caret there would eat the next arrow.
+        let src = include_str!("main.rs");
+        let keys = fn_body(src, "on_key");
+        assert!(
+            keys.contains("open_session_handing_back(id, false, cx)"),
+            "the arrows preview the row and keep the rail armed"
+        );
+    }
+
+    #[test]
+    fn a_created_session_and_a_new_split_leave_the_caret_in_the_composer() {
+        // #2665: every one of these was clicked from the rail, so each has to
+        // take the keys off it before asking for focus again.
+        let src = include_str!("main.rs");
+        for name in ["new_session", "choose_split"] {
+            let body = fn_body(src, name);
+            let (_before, after) = body
+                .split_once("self.rail_focused = false")
+                .unwrap_or_else(|| panic!("{name} never lets the rail go"));
+            assert!(
+                after.contains("self.refocus_screen()"),
+                "{name} asks for focus after the rail lets go"
+            );
+        }
+    }
+
+    #[test]
+    fn an_attached_file_asks_for_the_caret_back() {
+        // #2665: the platform picker holds the keyboard while it is open, so
+        // attaching is the moment to ask for it back. Deferred to render
+        // because only a frame holding a window can focus.
+        let src = include_str!("editor.rs");
+        let body = src
+            .split("fn pick_paths(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .unwrap_or_else(|| panic!("pick_paths"));
+        assert!(
+            body.contains("attach_paths(paths) > 0"),
+            "only a real attach asks for it"
+        );
+        assert!(
+            body.contains("editor.focus_pending = true"),
+            "the caret goes back to the field the chips landed in"
+        );
+        let render = src
+            .split("impl Render for Editor")
+            .nth(1)
+            .and_then(|rest| rest.split("impl ").next())
+            .expect("the render impl");
+        assert!(
+            render.contains("window.focus(&self.focus_handle)"),
+            "the deferred request needs the window, so it lands in render"
+        );
     }
 
     #[test]
@@ -1027,6 +1161,18 @@ impl Dashboard {
     /// per-conversation reset lives one layer down in `begin_conversation`,
     /// so the screen and the session can never disagree.
     fn open_session(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        self.open_session_handing_back(id, true, cx);
+    }
+
+    /// The same open, with the keyboard decision made explicit (#2665).
+    ///
+    /// `hand_back` is true for every commit (rail click, Enter, the palette,
+    /// the find field, a topic tab, a created topic): the row is chosen, so
+    /// the next keystroke is a message and the composer takes the caret. It is
+    /// false while the arrows walk the rail, because that walk opens the row
+    /// it stands on as a preview, and moving focus to the composer would stop
+    /// the next arrow from arriving.
+    fn open_session_handing_back(&mut self, id: Uuid, hand_back: bool, cx: &mut Context<Self>) {
         self.begin_conversation(id, cx);
         // Opening a conversation is reading its plan: the rail's ring stops
         // here, not at paint, so a repaint can never be mistaken for a read and
@@ -1061,6 +1207,11 @@ impl Dashboard {
             .ok();
         })
         .detach();
+        // A committed row takes the keyboard off the rail: the rail holds it
+        // only while the list is being walked (#2665).
+        if hand_back {
+            self.rail_focused = false;
+        }
         self.refocus_screen();
         cx.notify();
     }
@@ -2225,9 +2376,9 @@ impl Dashboard {
             &mut self.rail_focused,
             &mut self.sessions,
         );
-        if !open {
-            self.refocus_screen();
-        }
+        // Both directions move the keyboard: opening hands it to the list,
+        // closing gives it back to the input (#2665).
+        self.refocus_screen();
         cx.notify();
     }
 
@@ -5037,6 +5188,9 @@ impl Dashboard {
             provider,
             model,
         );
+        // A new conversation is about to be typed into, so the rail gives the
+        // keyboard up even when the click came from its own button (#2665).
+        self.rail_focused = false;
         self.refocus_screen();
         cx.notify();
     }
@@ -5484,6 +5638,10 @@ impl Dashboard {
         self.topic_draft_icon = None;
         self.topic_menu = None;
         self.topic_draft = Some(String::new());
+        // The prompt is the field being typed into, so it takes the keyboard
+        // while it is open; without this the name landed in the composer
+        // behind it (#2665).
+        self.refocus_overlay();
         cx.notify();
     }
 
@@ -5508,6 +5666,10 @@ impl Dashboard {
                             this.topic_draft = None;
                             this.topic_rename = None;
                             this.refresh_rail(cx);
+                            // The prompt closed, so the caret goes back to the
+                            // input the rename was asked from (#2665).
+                            this.rail_focused = false;
+                            this.refocus_screen();
                             cx.notify();
                         })
                         .ok();
@@ -6372,7 +6534,7 @@ impl Dashboard {
                         }
                         // During a split pick the arrows only walk the list (#2438).
                         if self.split_pick.is_none() {
-                            self.open_session(id, cx);
+                            self.open_session_handing_back(id, false, cx);
                         }
                     }
                     cx.notify();
@@ -6747,6 +6909,21 @@ impl Render for Dashboard {
                 }
                 FocusTarget::Root => window.focus(&self.focus),
             }
+        }
+        // The rail is an overlay only while it holds the keys. A path that
+        // focuses the composer directly (a drop, a pasted image, the
+        // paperclip's deferred request) never asks `refocus_screen`, so the
+        // claim is repaired here: an armed rail over a focused input would
+        // steal the caret back on the next transition (#2665).
+        if self.rail_focused
+            && self.rail_open
+            && self
+                .composer_entity()
+                .read(cx)
+                .focus_handle
+                .is_focused(window)
+        {
+            self.rail_focused = false;
         }
         // The plan strip follows the open conversation. Where a plan lives
         // depends on what the session is bound to, so the lookup is a DB read

@@ -162,15 +162,25 @@ impl PlanStripState {
                 LineKind::Running => palette::current().text,
                 LineKind::Next => palette::current().text_faint,
             };
+            // A flex row with a growing, shrinkable text child, not a
+            // width-full block div holding truncating text (#2624). gpui
+            // measures a nowrap child once, at the flex basis it is handed, and
+            // caches that on wrap_width: inside a plain block div the basis is
+            // zero, so the line is laid out one character wide and stays an
+            // ellipsis no matter how wide the card gets. The full card above
+            // already renders through this shape (#2642); the pane card did not,
+            // which is why every pane line was a dot in a wide empty card.
             col = col.child(
-                div()
-                    .w_full()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .truncate()
-                    .text_xs()
-                    .text_color(rgb(color))
-                    .child(SharedString::from(line)),
+                div().flex().flex_row().w_full().min_w_0().child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .truncate()
+                        .text_xs()
+                        .text_color(rgb(color))
+                        .child(SharedString::from(line)),
+                ),
             );
         }
         Some(col)
@@ -528,10 +538,13 @@ mod tests {
         plan
     }
 
-    /// #2624: the pane card was a wide box of ellipses in a split. A column
-    /// sized from its own content contains truncating text, so gpui measured
-    /// each line against the width it was about to define and gave it one
-    /// character. The card and every line take the pane's width instead.
+    /// #2624: the pane card was a wide box of ellipses in a split. Two faults
+    /// stacked. A column sized from its own truncating content made gpui
+    /// measure each line against the width it was about to define, and each
+    /// line was a width-full block div holding truncating text, which gpui
+    /// lays out once at a zero flex basis and caches as an ellipsis (#2642).
+    /// Both halves are pinned: the card owns its width, and each row is a flex
+    /// row with a growing, shrinkable, truncated child.
     #[test]
     fn the_pane_card_takes_the_panes_width() {
         const SRC: &str = include_str!("plan_strip.rs");
@@ -550,9 +563,18 @@ mod tests {
             .split_once("col = col.child(")
             .expect("pane rows are built in a loop")
             .1;
+        let flat: String = row.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
-            row.contains(".w_full()") && row.contains(".truncate()"),
-            "each line takes the card's width and clips there"
+            flat.contains(".flex_row()"),
+            "each line is a flex row: {flat}"
+        );
+        assert!(
+            flat.contains(".flex_1()"),
+            "the text child grows and shrinks inside that row: {flat}"
+        );
+        assert!(
+            !flat.contains(".w_full() .min_w_0() .overflow_hidden() .truncate()"),
+            "the block-div truncate shape is back: gpui lays it out one character wide"
         );
     }
 
