@@ -1828,7 +1828,7 @@ impl Dashboard {
             commands::GuiAction::OpenModels => self.open_models(arg, session, cx),
             commands::GuiAction::OpenSkills => self.open_skills(cx),
             commands::GuiAction::OpenOnboard(name) => self.open_onboard(name, arg, cx),
-            commands::GuiAction::Text(command) => self.run_text_command(command, arg, cx),
+            commands::GuiAction::Text(command) => self.run_text_command(command, arg, session, cx),
             commands::GuiAction::Quit => cx.quit(),
             commands::GuiAction::Evolve => {
                 let session = self.transcript.session.unwrap_or_else(Uuid::nil);
@@ -2347,14 +2347,16 @@ impl Dashboard {
 
     /// The commands that answer in text or compose a turn (#2469).
     ///
-    /// `/compact` and `/goal` are dispatched here because they need
-    /// `send_message`, which only the window has. Everything else runs on the
-    /// bridge against the engine's own entry points, so the answer a window
-    /// user reads is the one the terminal prints.
+    /// `/compact` and `/goal` are dispatched here because they compose a turn,
+    /// which only the window has. `send_command_turn` keeps that turn on the
+    /// session that asked for it. Everything else runs on the bridge against
+    /// the engine's own entry points, so the answer a window user reads is the
+    /// one the terminal prints.
     fn run_text_command(
         &mut self,
         command: text_commands::TextCommand,
         arg: Option<String>,
+        session: Option<Uuid>,
         cx: &mut Context<Self>,
     ) {
         use text_commands::TextCommand as C;
@@ -2367,7 +2369,8 @@ impl Dashboard {
                 };
                 // Send first, then report (#1375): a notice printed before the
                 // trigger claims a compaction that may never start.
-                self.send_message(
+                self.send_command_turn(
+                    session,
                     "[SYSTEM: Compact context now. Summarize this conversation for continuity.]"
                         .to_string(),
                     cx,
@@ -2380,7 +2383,7 @@ impl Dashboard {
             C::Cowork => {
                 // No screen in either frontend: the agent calls the tool that
                 // builds the deep link, exactly as the terminal asks it to.
-                self.send_message(text_commands::cowork_prompt(&arg), cx);
+                self.send_command_turn(session, text_commands::cowork_prompt(&arg), cx);
             }
             C::Goal => {
                 if opencrabs::brain::goal::is_bare(&arg) {
@@ -2391,7 +2394,11 @@ impl Dashboard {
                         .push(opencrabs::brain::goal::goal_usage_warning());
                     cx.notify();
                 } else {
-                    self.send_message(opencrabs::brain::goal::goal_command_prompt(&arg), cx);
+                    self.send_command_turn(
+                        session,
+                        opencrabs::brain::goal::goal_command_prompt(&arg),
+                        cx,
+                    );
                 }
             }
             C::Cd => {
@@ -2402,7 +2409,7 @@ impl Dashboard {
                 if arg.is_empty() {
                     self.open_cd_picker(cx);
                 } else {
-                    let Some(session) = self.transcript.session else {
+                    let Some(session) = session else {
                         self.live
                             .notices
                             .push("No conversation is open. Type /new first.".to_string());
@@ -2423,9 +2430,10 @@ impl Dashboard {
                             None => expanded.clone(),
                         };
                         let _ = this.update(cx, |this, cx| {
-                            this.live
-                                .notices
-                                .push(text_commands::cd_reply(&applied.display().to_string()));
+                            this.push_session_notice(
+                                session,
+                                text_commands::cd_reply(&applied.display().to_string()),
+                            );
                             cx.notify();
                         });
                     })
@@ -2433,7 +2441,7 @@ impl Dashboard {
                 }
             }
             other => {
-                let Some(session) = self.transcript.session else {
+                let Some(session) = session else {
                     self.live
                         .notices
                         .push("No conversation is open. Type /new first.".to_string());
@@ -4323,6 +4331,33 @@ impl Dashboard {
         .detach();
     }
 
+    /// Send one turn to the session it belongs to: the window's chat when that
+    /// is the session, otherwise the split leaf drawing it (#2672).
+    ///
+    /// A command typed into a pane resolved its session at the door and then
+    /// the turn it asked for fell through to the window's chat, so `/execute`
+    /// in pane B approved B's plan and ran the seeded checklist in A. Both
+    /// paths already own the queue and busy gates for their leaf, so the turn
+    /// keeps the conversation it was asked for.
+    fn send_turn_to(&mut self, session: Uuid, text: String, cx: &mut Context<Self>) {
+        if Some(session) == self.transcript.session {
+            self.send_message(text, cx);
+        } else {
+            self.send_from_pane(session, text, cx);
+        }
+    }
+
+    /// Dispatch the one turn a window command asked for, into the session that
+    /// ran it (#2672). With no session open the window's own path keeps the
+    /// text: it waits in the queue and a conversation is created, exactly as a
+    /// composer send with nothing on screen does.
+    fn send_command_turn(&mut self, session: Option<Uuid>, text: String, cx: &mut Context<Self>) {
+        match session {
+            Some(session) => self.send_turn_to(session, text, cx),
+            None => self.send_message(text, cx),
+        }
+    }
+
     fn send_message(&mut self, text: String, cx: &mut Context<Self>) {
         let text = text.trim().to_string();
         if text.is_empty() {
@@ -4546,15 +4581,21 @@ impl Dashboard {
                     cx.notify();
                 }
                 // A text command answered on the bridge: one line, the same
-                // wording the terminal prints (#2469).
-                agent_bridge::TurnEvent::CommandReply(text) => {
-                    self.live.notices.push(text);
+                // wording the terminal prints (#2469). The line belongs to the
+                // session that ran the command, so a pane answers on its own
+                // strip; a window-level notice (surface, boot summary) carries
+                // no session and stays where it has always been (#2672).
+                agent_bridge::TurnEvent::CommandReply { session, text } => {
+                    match session {
+                        Some(id) => self.push_session_notice(id, text),
+                        None => self.live.notices.push(text),
+                    }
                     cx.notify();
                 }
                 // A text command that needs one visible turn: `/plan <query>`,
                 // `/execute` seeding the checklist, or `/goal`.
-                agent_bridge::TurnEvent::CommandTurn(text) => {
-                    self.send_message(text, cx);
+                agent_bridge::TurnEvent::CommandTurn { session, text } => {
+                    self.send_turn_to(session, text, cx);
                 }
                 agent_bridge::TurnEvent::SessionDeleted(id) => {
                     logging::info(&format!("session deleted {id}"));

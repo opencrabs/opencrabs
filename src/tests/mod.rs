@@ -368,6 +368,7 @@ pub mod gui_overlay_layer_test;
 pub mod gui_rail_last_activity_test;
 pub mod gui_rail_letters_test;
 pub mod gui_sessions_rail_test;
+pub mod gui_split_command_session_2672_test;
 pub mod gui_split_render_test;
 pub mod gui_theme_config_test;
 pub mod gui_themes_screen_test;
