@@ -370,7 +370,15 @@ impl BackgroundTaskManager {
             // row settles here AND the completion is delivered below, both
             // every time. The turn that reports the outcome is the contract,
             // not a duplicate.
-            if let Some(cb) = this.progress_for(session_id, task_id) {
+            // The callback is read first because it lives on the row, but it
+            // fires AFTER the row is gone: a surface that answers the finish
+            // by reading the running roster must not still find the task it is
+            // being told about. Firing first left a window where the badge
+            // outlived the completion, and it was wide enough for a test to
+            // catch it every run (#2676).
+            let finish_cb = this.progress_for(session_id, task_id);
+            this.mark_finished_by_id(session_id, task_id);
+            if let Some(cb) = finish_cb {
                 cb(
                     session_id,
                     ProgressEvent::DetachedTaskFinished {
@@ -381,7 +389,6 @@ impl BackgroundTaskManager {
                     },
                 );
             }
-            this.mark_finished_by_id(session_id, task_id);
             if let Some(hook) = hook {
                 // A hook replaces the generic delivery entirely (#1748): the
                 // rebuild exec-replaces the process on success, so an
