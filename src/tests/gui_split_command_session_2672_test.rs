@@ -24,19 +24,31 @@ fn production(src: &str) -> &str {
         .expect("the file always has content before its test module")
 }
 
+/// Slice from a byte offset with the char-boundary check made explicit.
+fn tail(src: &str, start: usize) -> &str {
+    src.get(start..)
+        .unwrap_or_else(|| panic!("slice from {start} is not a char boundary"))
+}
+
+/// Slice a byte range with the char-boundary check made explicit.
+fn window(src: &str, start: usize, end: usize) -> &str {
+    src.get(start..end)
+        .unwrap_or_else(|| panic!("slice {start}..{end} is not a char boundary"))
+}
+
 /// The body of the function whose signature starts with `signature`, braces
 /// matched, so a scan of one function cannot run on into the next one.
 fn function_body<'a>(src: &'a str, signature: &str) -> Option<&'a str> {
     let start = src.find(signature)?;
-    let open = start + src[start..].find('{')?;
+    let open = start + tail(src, start).find('{')?;
     let mut depth = 0usize;
-    for (offset, ch) in src[open..].char_indices() {
+    for (offset, ch) in tail(src, open).char_indices() {
         match ch {
             '{' => depth += 1,
             '}' => {
                 depth -= 1;
                 if depth == 0 {
-                    return Some(&src[open..open + offset + 1]);
+                    return Some(window(src, open, open + offset + 1));
                 }
             }
             _ => {}
@@ -53,9 +65,9 @@ fn arm_body<'a>(src: &'a str, marker: &str) -> &'a str {
     let start = src
         .find(marker)
         .unwrap_or_else(|| panic!("the window folds `{marker}`"));
-    let rest = &src[start + marker.len()..];
+    let rest = tail(src, start + marker.len());
     let end = rest.find("TurnEvent::").unwrap_or(rest.len());
-    &rest[..end]
+    window(rest, 0, end)
 }
 
 /// The slice between two match-arm markers of the same `match`. Arms are
@@ -65,11 +77,11 @@ fn between<'a>(src: &'a str, from: &str, to: &str) -> &'a str {
     let start = src
         .find(from)
         .unwrap_or_else(|| panic!("the window folds `{from}`"));
-    let rest = &src[start + from.len()..];
+    let rest = tail(src, start + from.len());
     let end = rest
         .find(to)
         .unwrap_or_else(|| panic!("`{to}` follows `{from}` in the same match"));
-    &rest[..end]
+    window(rest, 0, end)
 }
 
 #[test]
@@ -87,9 +99,9 @@ fn the_text_runner_takes_the_session_it_was_handed() {
     let signature = src
         .find("fn run_text_command(")
         .expect("run_text_command exists");
-    let open = signature + src[signature..].find('{').expect("its body opens");
+    let open = signature + tail(src, signature).find('{').expect("its body opens");
     assert!(
-        src[signature..open].contains("session: Option<Uuid>"),
+        window(src, signature, open).contains("session: Option<Uuid>"),
         "run_text_command must take the session of the door it answers (#2672)"
     );
     let body = function_body(src, "fn run_text_command(").expect("its body is closed");
