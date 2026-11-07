@@ -15,6 +15,8 @@
 
 use crate::cli::ui::profiles_to_adopt;
 use crate::config::profile::ProfileEntry;
+// Used by the seeding test, which holds a unix flock.
+#[cfg(unix)]
 use std::path::PathBuf;
 use tempfile::TempDir;
 

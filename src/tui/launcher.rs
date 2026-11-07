@@ -149,7 +149,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Every test that waits on a launcher callback drives a real `sh`, so the
+    // channel and the timeout are unix-only. Importing them unconditionally
+    // leaves a Windows build warning about both.
+    #[cfg(unix)]
     use std::sync::mpsc;
+    #[cfg(unix)]
     use std::time::Duration;
 
     /// A launcher that exits non-zero after spawning must report it. Uses a
