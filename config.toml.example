@@ -818,6 +818,22 @@ allowed_users = []                      # Trello member IDs allowed to @mention 
 # session_idle_hours = 24.0             # Archive inactive non-owner sessions after N hours (default: never)
 
 # ========================================
+# Desktop Window (opencrabs-gui)
+# ========================================
+# The window's theme, picked from the centered modal (`ctrl+shift+t` or
+# `/theme`). Unset means "auto", so a first install follows the system
+# appearance from the first frame.
+[gui]
+# "orgn"   the window's own dark palette, fixed dark
+# "light"  a native soft light palette, fixed light
+# "custom" the system base plus the accent below
+# "auto"   orgn on a dark system, light on a light one, following changes
+# theme = "auto"
+# The accent "custom" paints, as #RRGGBB. Unset or unparsable means the
+# palette's own orange.
+# custom_accent = "#FF7A1A"
+
+# ========================================
 # Daemon Mode (systemd / launchd service)
 # ========================================
 # Settings for `opencrabs daemon` headless mode.

@@ -7,6 +7,7 @@ mod current;
 #[cfg(unix)]
 pub(crate) mod flock;
 pub mod guard;
+pub mod gui_theme;
 pub mod health;
 pub(crate) mod live_home_guard;
 pub mod owner;

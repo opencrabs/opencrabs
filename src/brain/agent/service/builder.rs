@@ -18,6 +18,21 @@ pub(super) const RECENT_PATHS_CAP: usize = 12;
 /// Used to restore the user's pick after an in-flight turn took a fallback.
 type ManualSwitchPin = (u64, Arc<dyn Provider>, String);
 
+/// Load the config without building it on the async stack (#2661).
+///
+/// `Config::load` is synchronous and materialises a large value. Called
+/// directly from inside the tool loop it blocked a worker thread and, in a
+/// debug build, overflowed that worker's 2 MB stack, aborting the whole
+/// process. The load runs on the blocking pool and the value is boxed there,
+/// so only a pointer crosses back over the await.
+async fn load_config_off_stack() -> std::result::Result<Box<crate::config::Config>, String> {
+    match tokio::task::spawn_blocking(|| crate::config::Config::load().map(Box::new)).await {
+        Ok(Ok(config)) => Ok(config),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(e) => Err(format!("config load task failed: {e}")),
+    }
+}
+
 /// Live-rebuild handle for the system brain (#213).
 ///
 /// The system brain was historically built once at startup and cached as a
@@ -1540,7 +1555,7 @@ impl AgentService {
     /// heard of this feature behaves exactly as before.
     pub(crate) async fn apply_plan_mode_provider(&self, session_id: Uuid) {
         let state = crate::utils::plan_files::plan_mode_state(session_id).await;
-        let config = match crate::config::Config::load() {
+        let config = match load_config_off_stack().await {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!(
@@ -1732,7 +1747,7 @@ impl AgentService {
         if saved == self.provider_name() {
             return;
         }
-        let config = match crate::config::Config::load() {
+        let config = match load_config_off_stack().await {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!(

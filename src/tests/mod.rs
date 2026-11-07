@@ -355,6 +355,8 @@ pub mod goal_driver_line_test;
 pub mod goal_judge_test;
 pub mod goal_manage_test;
 pub mod group_history_test;
+pub mod gui_accent_test;
+pub mod gui_accent_wheel_test;
 pub mod gui_chat_menu_2480_test;
 pub mod gui_debug_config_test;
 pub mod gui_depth_test;
@@ -367,6 +369,7 @@ pub mod gui_sessions_rail_test;
 pub mod gui_split_render_test;
 pub mod gui_theme_config_test;
 pub mod gui_themes_screen_test;
+pub mod gui_tls_provider_2452_test;
 pub mod gui_topic_isolation_test;
 pub mod gui_two_agents_migrations_2297_test;
 pub mod headless_tool_surface_test;
@@ -1316,3 +1319,5 @@ pub mod usage_key_names_log_test;
 pub mod usage_prompt_share_test;
 
 pub mod session_switch_transcript_test;
+
+pub mod agent_config_off_stack_2661_test;

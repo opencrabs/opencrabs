@@ -126,23 +126,37 @@ async fn tab_select_returns_to_chat_before_persistence_completes_ordering() {
 }
 
 #[tokio::test]
-async fn tab_still_cycles_panes_when_chat_is_split() {
-    // The #2494 pane-cycling behaviour must survive the #2526 guard:
-    // in Chat mode on a split layout, Tab still moves pane focus.
+async fn alt_tab_cycles_panes_when_chat_is_split() {
+    // The #2494 pane-cycling behaviour must survive the #2526 guard and the
+    // #2580 chord move: in Chat mode on a split layout Alt+Tab moves pane
+    // focus, while bare Tab keeps its own action.
     let mut app = app().await;
     app.pane_manager.split(SplitDirection::Horizontal);
     let ids = app.pane_manager.pane_ids_in_order();
     assert_eq!(ids.len(), 2);
     let before = app.pane_manager.focused_pane().map(|p| p.id);
 
+    app.handle_key_event(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Tab,
+        crossterm::event::KeyModifiers::ALT,
+    ))
+    .await
+    .unwrap();
+
+    assert_eq!(app.mode, AppMode::Chat);
+    let after_alt = app.pane_manager.focused_pane().map(|p| p.id);
+    assert_ne!(
+        after_alt, before,
+        "Alt+Tab in split Chat mode must still cycle pane focus (#2494, #2580)"
+    );
+
+    // Bare Tab is the follow-up accept and picker key now, never a pane move.
     app.handle_key_event(key(crossterm::event::KeyCode::Tab))
         .await
         .unwrap();
-
-    assert_eq!(app.mode, AppMode::Chat);
-    assert_ne!(
+    assert_eq!(
         app.pane_manager.focused_pane().map(|p| p.id),
-        before,
-        "Tab in split Chat mode must still cycle pane focus (#2494)"
+        after_alt,
+        "bare Tab must not rotate panes any more (#2580)"
     );
 }

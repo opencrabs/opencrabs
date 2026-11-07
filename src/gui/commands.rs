@@ -26,7 +26,7 @@ use super::text_commands::{self, TextCommand};
 pub enum GuiAction {
     /// Download the latest release and report it, as the TUI does (#2406).
     Evolve,
-    /// The themes screen: preview, keep, or restore.
+    /// The theme modal: four cards over the conversation, a pick saves at once.
     OpenThemes,
     /// The usage ledger.
     OpenUsage,

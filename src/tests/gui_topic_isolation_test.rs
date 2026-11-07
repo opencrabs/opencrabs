@@ -173,14 +173,14 @@ fn create_topic_walks_the_begin_conversation_door() {
         .next()
         .expect("begin_conversation body");
     for reset in [
-        "self.ctx_tokens = None;",
-        "self.pending_metrics = None;",
-        "self.queued.clear();",
+        "&mut self.ctx_tokens,",
+        "self.pending_metrics.clear();",
+        "ed.release_recall(false)",
         "ed.begin_conversation(cx)",
     ] {
         assert!(
             door.contains(reset),
-            "begin_conversation must reset {reset}"
+            "begin_conversation must still carry the reset: {reset}"
         );
     }
 }

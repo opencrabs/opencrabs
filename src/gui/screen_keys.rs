@@ -61,7 +61,6 @@ pub fn screen_chord(key: &str, mods: ChordMods, screen: Screen) -> Option<Screen
             Screen::Files => Some(ScreenAction::LeaveFiles),
             Screen::MissionControl => Some(ScreenAction::LeaveMissionControl),
             Screen::Chat
-            | Screen::Themes
             | Screen::Models
             | Screen::Skills
             | Screen::Onboard
@@ -135,6 +134,8 @@ pub enum OverlayId {
     SplitPick,
     /// Seeker.
     CommandPalette,
+    /// The theme modal, which owns the window while it is open (#2619).
+    Themes,
 }
 
 /// Who answers a keystroke. Exactly one of these is true at a time, which is
@@ -251,7 +252,7 @@ mod tests {
     #[test]
     fn esc_on_chat_is_unclaimed() {
         assert_eq!(screen_chord("escape", PLAIN, Screen::Chat), None);
-        assert_eq!(screen_chord("escape", PLAIN, Screen::Themes), None);
+        assert_eq!(screen_chord("escape", PLAIN, Screen::Models), None);
     }
 
     #[test]
@@ -310,12 +311,7 @@ mod tests {
 
     #[test]
     fn focus_for_screen_puts_focus_on_the_root_off_chat() {
-        for screen in [
-            Screen::Usage,
-            Screen::Files,
-            Screen::Themes,
-            Screen::MissionControl,
-        ] {
+        for screen in [Screen::Usage, Screen::Files, Screen::MissionControl] {
             assert_eq!(
                 focus_target(keyboard_owner(&[], screen)),
                 FocusTarget::Root,
@@ -346,8 +342,14 @@ mod tests {
     fn keyboard_owner_falls_back_to_the_screen_then_the_composer() {
         assert_eq!(keyboard_owner(&[], Screen::Chat), KeyboardOwner::Composer);
         assert_eq!(
-            keyboard_owner(&[], Screen::Themes),
-            KeyboardOwner::Screen(Screen::Themes)
+            keyboard_owner(&[], Screen::Models),
+            KeyboardOwner::Screen(Screen::Models)
+        );
+        // The theme modal is an overlay, not a screen, so it outranks whichever
+        // screen it was opened over (#2619).
+        assert_eq!(
+            keyboard_owner(&[OverlayId::Themes], Screen::MissionControl),
+            KeyboardOwner::Overlay(OverlayId::Themes)
         );
     }
 

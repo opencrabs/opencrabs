@@ -2802,7 +2802,7 @@ mod tests {
     /// accent, so no hue is introduced.
     #[test]
     fn the_user_bubble_is_a_neutral_step_off_the_history_canvas() {
-        let dark = palette::DARK;
+        let dark = palette::ORGN;
         let light = palette::Palette {
             bg: 0xf5f5f5,
             panel: 0xffffff,

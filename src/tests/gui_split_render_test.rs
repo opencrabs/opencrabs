@@ -92,8 +92,8 @@ fn the_chat_screen_draws_the_panes() {
     );
     assert_eq!(
         GUI_MAIN.matches("self.panes_body(").count(),
-        2,
-        "both screens draw the same panes: the chat and the themes preview"
+        1,
+        "only the chat arm draws the panes: the theme modal opens over it (#2619)"
     );
 }
 

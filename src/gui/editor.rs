@@ -237,6 +237,11 @@ struct Recall {
 /// crossing the `EntityInputHandler` boundary is utf16, per the contract.
 pub struct Editor {
     pub focus_handle: FocusHandle,
+    /// A request to put the caret back in this field once a frame with a
+    /// window is drawing it (#2665). The platform's file dialog takes the
+    /// keyboard away, and the callback that runs after it closes has no
+    /// window to focus through, so the request waits for `render`.
+    focus_pending: bool,
     pub content: String,
     /// Submitted messages and the draft stashed while recalling them.
     input_history: Vec<String>,
@@ -317,6 +322,7 @@ impl Editor {
     pub fn new(cx: &mut Context<Self>) -> Self {
         Self {
             focus_handle: cx.focus_handle(),
+            focus_pending: false,
             content: String::new(),
             input_history: Vec::new(),
             input_history_index: None,
@@ -453,6 +459,10 @@ impl Editor {
             };
             this.update(cx, |editor, cx| {
                 if editor.attach_paths(paths) > 0 {
+                    // The dialog held the keyboard, so attaching is the
+                    // moment to hand it back to the field the chips landed
+                    // in (#2665).
+                    editor.focus_pending = true;
                     cx.notify();
                 }
             })
@@ -1626,7 +1636,13 @@ impl Element for EditorElement {
 }
 
 impl Render for Editor {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // A deferred caret request (#2665): only a frame holding a window can
+        // put focus back after the platform's file dialog closed.
+        if self.focus_pending {
+            self.focus_pending = false;
+            window.focus(&self.focus_handle);
+        }
         // Chips above the text, the paperclip beside it: the input stays the
         // biggest thing in the box and the attachment row never pushes the
         // caret around.

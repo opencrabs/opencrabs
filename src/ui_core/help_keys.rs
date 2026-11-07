@@ -167,7 +167,7 @@ pub const ROWS: &[HelpRow] = &[
         "alt+t",
         "Alt+T",
         Some("ctrl-shift-t"),
-        "Themes: preview and keep a theme",
+        "Themes: choose the palette",
     ),
     row(
         HelpSection::Global,
@@ -533,7 +533,8 @@ mod tests {
         "@",
         "| (sessions)",
         "_ (sessions)",
-        "Tab",
+        "Alt+Tab",
+        "Alt+Shift+Tab",
         "Ctrl+X",
         "↑ / ↓",
         "← / →",
@@ -736,7 +737,7 @@ mod tests {
                     state
                         .visible()
                         .iter()
-                        .any(|row| { row.item.title == "/help Themes: preview and keep a theme" }),
+                        .any(|row| { row.item.title == "/help Themes: choose the palette" }),
                     "{client:?} missed {query}"
                 );
             }

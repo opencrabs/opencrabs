@@ -31,6 +31,39 @@ fn the_panes_are_attached_before_the_delete_dialog() {
     );
 }
 
+/// The theme modal is a scrim over the window (#2619). It is attached last,
+/// after the panes and after every other overlay, so a click on a card never
+/// reaches the surface behind it, and the scrim itself carries `.occlude()`.
+#[test]
+fn the_theme_modal_paints_above_the_panes_and_takes_the_pointer() {
+    let modal = position("root = root.child(self.themes_modal(cx))");
+    assert!(
+        position(".child(right)") < modal,
+        "the theme modal must paint above the panes"
+    );
+    assert!(
+        position(".child(command_palette::overlay(") < modal,
+        "the theme modal is attached last, so it paints over the other overlays too"
+    );
+    let view = include_str!("../gui/themes_view.rs");
+    let scrim = view
+        .find(".id(\"theme-modal-scrim\")")
+        .expect("the modal owns a scrim");
+    let after = view
+        .get(scrim..)
+        .expect("the scrim marker is a char boundary");
+    let card = after
+        .find(".child(card)")
+        .expect("the scrim wraps the card");
+    assert!(
+        after
+            .get(..card)
+            .expect("the card marker is a char boundary")
+            .contains(".occlude()"),
+        "the scrim must take the pointer from the window"
+    );
+}
+
 #[test]
 fn the_key_reference_fills_the_window() {
     // The help screen is a full-window Help Center (#2403 replaced the capped
