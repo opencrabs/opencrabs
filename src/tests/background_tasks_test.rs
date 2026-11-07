@@ -9,8 +9,11 @@ use crate::brain::agent::service::QueuedUserMessage;
 use crate::brain::agent::service::background_tasks::{
     BackgroundTaskManager, ClaudeTurnTasks, CmdResult, claude_completion_message,
     claude_needs_survival_delivery, claude_task_label, clear_claude_mirrors_for_session,
-    completion_message, format_elapsed, run_detached, short_label, tail_lines,
+    completion_message, format_elapsed, short_label, tail_lines,
 };
+// `run_detached`'s tests drive shell job control (`&`), so they are unix-only.
+#[cfg(unix)]
+use crate::brain::agent::service::background_tasks::run_detached;
 use crate::brain::agent::service::restart_recovery;
 use crate::brain::agent::service::session_routes;
 use std::sync::{Arc, Mutex};

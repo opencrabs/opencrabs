@@ -113,13 +113,15 @@ fn the_homebrew_cask_installs_the_bundle() {
 #[test]
 fn the_bundle_script_is_executable() {
     let path = repo().join("scripts/package-macos-app.sh");
-    let meta = std::fs::metadata(&path).expect("scripts/package-macos-app.sh is missing");
+    // The binding is `_meta` because only the unix arm below reads it; the
+    // metadata call itself is the assertion, so it stays unconditional.
+    let _meta = std::fs::metadata(&path).expect("scripts/package-macos-app.sh is missing");
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         assert!(
-            meta.permissions().mode() & 0o111 != 0,
+            _meta.permissions().mode() & 0o111 != 0,
             "scripts/package-macos-app.sh is not executable, so the workflow step fails with permission denied"
         );
     }

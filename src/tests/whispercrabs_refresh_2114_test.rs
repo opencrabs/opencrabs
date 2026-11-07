@@ -14,9 +14,11 @@
 
 use crate::tui::app::dialogs::{
     WHISPERCRABS_BIN, extract_whispercrabs_archive, helper_binary_is_usable, helper_needs_refresh,
-    helper_refresh_is_due, install_staged_helpers, migrate_legacy_whispercrabs, read_installed_tag,
-    write_installed_tag,
+    helper_refresh_is_due, read_installed_tag, write_installed_tag,
 };
+// The two installer tests assert on the executable bit, so they are unix-only.
+#[cfg(unix)]
+use crate::tui::app::dialogs::{install_staged_helpers, migrate_legacy_whispercrabs};
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 use tempfile::TempDir;

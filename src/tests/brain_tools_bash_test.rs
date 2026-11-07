@@ -1,5 +1,8 @@
 use crate::brain::tools::Tool;
 use crate::brain::tools::ToolCapability;
+// Only `test_bash_timeout` asserts on the error variant, and that test is
+// skipped on Windows (cmd.exe has no equivalent of `sleep 5`).
+#[cfg(not(target_os = "windows"))]
 use crate::brain::tools::ToolError;
 use crate::brain::tools::ToolExecutionContext;
 use crate::brain::tools::bash::*;

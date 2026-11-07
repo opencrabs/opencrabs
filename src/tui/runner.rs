@@ -169,6 +169,10 @@ pub(crate) fn reclaim_terminal(terminal: &mut TuiTerminal) -> Result<()> {
 /// Re-establish TUI terminal ownership after an editor handoff (#1744) gave
 /// the real tty to a full-screen child. Mirrors the `run()` startup sequence;
 /// the drain step is what keeps editor escape bytes out of the input buffer.
+///
+/// Unix only: the editor handoff itself is (#1755), so on Windows nothing
+/// calls this and an ungated definition is dead code there.
+#[cfg(unix)]
 pub(crate) fn reinit_terminal_for_editor(terminal: &mut TuiTerminal) -> Result<()> {
     reclaim_terminal(terminal)
 }
@@ -378,6 +382,10 @@ async fn run_loop(
     sigint_flag: &AtomicBool,
     listener_handle: &mut tokio::task::JoinHandle<()>,
 ) -> Result<()> {
+    // Only the unix editor handoff (#1744) re-binds the reader, so on Windows
+    // the handle is threaded through and never touched.
+    #[cfg(not(unix))]
+    let _ = listener_handle;
     use super::events::TuiEvent;
 
     // Tracks the last applied mouse-capture state so we only call
