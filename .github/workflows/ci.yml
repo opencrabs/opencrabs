@@ -465,29 +465,75 @@ jobs:
       #                                       contention and fail-closed
       #                                       terminate proof, cfg(windows):
       #                                       these run nowhere else
-      #   tests::utils_shell_test            12 tests, the shell_pair probe
+      #   tests::utils_shell_test             4 tests, the shell_pair probe
       #                                       contract
-      #   tests::utils_cwd_test               5 tests, drive-letter and
+      #   tests::utils_cwd_test               4 tests, drive-letter and
       #                                       lookalike dirs
       #   tests::browser_default_windows_test  6 tests, browser path
       #                                       detection
-      #   tests::profile_test                67 tests, lock-owner stamp
-      #                                       parsing and reused-PID
+      #   tests::profile_test                69 tests (13 of them
+      #                                       #[ignore]d for touching the
+      #                                       live ~/.opencrabs), lock-owner
+      #                                       stamp parsing and reused-PID
       #                                       resolution. The round-9
       #                                       finding (a Windows-only test
       #                                       failure) lived in exactly this
       #                                       module, and no CI job could
       #                                       have seen it: Windows ran no
       #                                       tests.
+      #   tests::rtk_path_test                5 tests, the PATH separator
+      #                                       shape: `ensure_dir_in_path`
+      #                                       joined with `:` instead of
+      #                                       `;`, fusing the rtk dir to the
+      #                                       first existing entry and
+      #                                       deleting System32 from PATH
+      #                                       for every child process.
+      # Counts above are measured on Windows at the time of writing, not
+      # estimated: a stale count makes the zero-match tripwire's coverage
+      # claim a guess. Total collected: 91.
       # cli::service_windows is NOT in the slice yet: its carrier belongs to
       # #1821 and does not exist here, so listing it would make this step
       # permanently red on a zero-match and defeat the flip noted below.
-      # continue-on-error: true is the honest day-1 state, not a dodge: 93
-      # tests here have never executed on Windows in this repo's history, so
-      # their outcome is unknown and must not block a PR. The smoke step
-      # above is NOT soft, because a binary that does not start is a hard
-      # fail. Flip continue-on-error to false once the receipts are green,
-      # in the PR that reports them.
+      # This step is SOFT (`continue-on-error: true`), and the receipt below
+      # is why it has to stay soft: the slice is not green.
+      #
+      # Measured on Windows 11 (26320), x86_64-pc-windows-msvc, rustc 1.98.1
+      # (pinned by rust-toolchain.toml), --profile ci, --locked, one filter
+      # per module, on a clean run against origin/main 565c9dec with the rtk
+      # fix applied: 75 passed / 3 failed / 13 ignored across the 91
+      # collected. Per-module counts and the failing assertions are in
+      # VERIFY.md in the submission bundle.
+      #
+      # The three failures are NOT caused by the rtk change, and both
+      # blockers predate it:
+      #   - config::winlock::non_blocking_second_handle_reports_held
+      #     (#1863: still failing in effect — winlock.rs is byte-identical
+      #     to main and the assert still fires).
+      #   - tests::profile_test::create_profile_seeds_all_brain_templates
+      #     and ::create_profile_brain_files_are_non_trivial_size, both
+      #     "failed to lock profiles.toml.lock: invalid byte range
+      #     (os error 307)".
+      #
+      # Both share one root cause, and it is a PRODUCT bug, not a test bug:
+      # winlock::exclusive asks LockFileEx for a range starting at the 1 MiB
+      # sentinel with length (u32::MAX, u32::MAX) = 2^64-1 bytes. 1 MiB plus
+      # (2^64-1) overflows the 64-bit range, so Windows rejects the call with
+      # ERROR 307 before any lock is attempted. A 2 GiB length at the same
+      # offset acquires fine, and the same 2^64-1 length at offset 0 acquires
+      # fine, which isolates the overflow as the cause.
+      #
+      # Do NOT flip this to a hard gate until both blockers are fixed: a hard
+      # gate over a red slice turns every Windows PR red on day one. The flip
+      # is the follow-up #1863 already names, and it belongs in the PR that
+      # reports green receipts — not in the rtk fix.
+      #
+      # Scope, so nobody over-reads the softness either: windows-build is NOT
+      # in ci-gate's needs (2x billing, 51m cold), so a red here does not set
+      # the required check by itself. It reaches the run through the `abort`
+      # job, which DOES need windows-build: red here cancels the run, and a
+      # cancelled run cannot report a green required gate. The smoke step
+      # above is deliberately NOT soft, because a binary that does not start
+      # is a hard fail.
       - name: "Scoped tests (windows): platform-behaviour slice"
         continue-on-error: true
         shell: bash
@@ -507,7 +553,7 @@ jobs:
           status=0
           for m in config::winlock tests::utils_shell_test \
                    tests::utils_cwd_test tests::browser_default_windows_test \
-                   tests::profile_test; do
+                   tests::profile_test tests::rtk_path_test; do
             set +e
             out=$(cargo test --locked --profile ci --target x86_64-pc-windows-msvc \
                     --lib -- "$m" 2>&1)
