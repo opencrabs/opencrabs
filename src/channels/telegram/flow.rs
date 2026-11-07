@@ -2186,11 +2186,94 @@ pub(crate) async fn take_folded_final(
     (host, trailer)
 }
 
+/// Zero-width space the file-marker renderer inserts inside a label
+/// (`src/utils/image.rs`, `ZWSP`) so a `.md` name is not auto-linked. It has no
+/// ink, so it must never make two renderings of the same answer compare
+/// different.
+const ZWSP: char = '\u{200b}';
+
+/// Is this link target a LOCAL file reference, the only shape the delivery
+/// path rewrites into a visible `📎 label` marker? Remote URLs stay verbatim:
+/// two answers that differ in destination are not the same answer.
+fn local_file_target(target: &str) -> bool {
+    let t = target
+        .trim()
+        .trim_start_matches('<')
+        .trim_end_matches('>')
+        .trim();
+    if t.is_empty() {
+        return false;
+    }
+    t.starts_with('/')
+        || t.starts_with("~/")
+        || t.starts_with("./")
+        || t.starts_with("../")
+        || t.starts_with("file:")
+        || t.starts_with("tg://document")
+}
+
+/// Canonicalize file references so the two shapes of the SAME reference compare
+/// equal.
+///
+/// The model writes `[label](</abs path/file.md>)` in its answer; the delivery
+/// pass (`crate::utils::image::extract_local_files`) replaces a resolvable
+/// reference with the visible `📎 label` marker and inserts a zero-width space
+/// inside the label. When those two renderings of one answer meet the dedupe
+/// checks below they used to compare as different, so the folded copy survived
+/// and the turn shipped the whole answer twice. Observed in production on
+/// 2026-11-04: one Telegram bubble held 6051 chars, a 2987-char marker half and
+/// a 3062-char link half separated by a blank line, both the same words.
+///
+/// Only local references are unwrapped; `[x](https://…)` stays verbatim so a
+/// link target difference still counts as a difference.
+fn canonicalize_file_refs(s: &str) -> String {
+    let cleaned: String = s.chars().filter(|c| *c != ZWSP).collect();
+    if !cleaned.contains('[') {
+        return cleaned;
+    }
+    let chars: Vec<char> = cleaned.chars().collect();
+    let mut out = String::with_capacity(cleaned.len());
+    let mut i = 0;
+    while i < chars.len() {
+        // `[label](target)` and `![label](target)` share the bracket parse; the
+        // leading `!` of an image is kept only when the link is not local.
+        let is_image = chars[i] == '!' && i + 1 < chars.len() && chars[i + 1] == '[';
+        let open = if is_image { i + 1 } else { i };
+        if chars[open] == '[' {
+            let close = (open + 1..chars.len()).find(|&j| chars[j] == ']');
+            let end = close.and_then(|close| {
+                (chars.get(close + 1) == Some(&'('))
+                    .then(|| (close + 2..chars.len()).find(|&j| chars[j] == ')'))
+                    .flatten()
+                    .map(|end| (close, end))
+            });
+            if let Some((close, end)) = end {
+                let label: String = chars[open + 1..close].iter().collect();
+                let target: String = chars[close + 2..end].iter().collect();
+                if local_file_target(&target) {
+                    out.push_str(&label);
+                } else {
+                    out.extend(&chars[i..=end]);
+                }
+                i = end + 1;
+                continue;
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
 /// Normalize a body for duplicate comparison (#2156): collapse whitespace so a
 /// streamed run and the delivered answer compare on their words, not on where
-/// the line breaks fell.
+/// the line breaks fell, and canonicalize file references (marker form vs the
+/// model's markdown-link form, zero-width spaces dropped) so the same answer
+/// rendered two ways still compares as one body.
 pub(crate) fn normalized_body(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
+    let canonical = canonicalize_file_refs(s);
+    let stripped: String = canonical.chars().filter(|c| *c != '📎').collect();
+    stripped.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Does `final_text` already deliver EVERY word of `candidate`? True when the
