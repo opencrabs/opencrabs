@@ -13,6 +13,7 @@
 //! rewitten plan redraws on the next frame.
 
 use crate::palette;
+use crate::transcript::{SMALL_TEXT_SIZE, SelectionContext, selectable_styled_text, small_style};
 use opencrabs::ui_core::card::{CARD_RADIUS, glass_fill};
 use opencrabs::ui_core::plan_history::{COMPLETED_PLAN_FOOTER, CompletedPlanView};
 use std::path::PathBuf;
@@ -440,7 +441,11 @@ fn checklist(plan: &PlanDocument) -> Div {
 /// A historical checklist in the transcript. Unlike the live strip above the
 /// editor, this card has no six-row window and no interactive controls. Its
 /// DOM id comes from the durable message, not from its position in the turn.
-pub fn completed_plan_card(message_id: uuid::Uuid, plan: &CompletedPlanView) -> Stateful<Div> {
+pub fn completed_plan_card(
+    message_id: uuid::Uuid,
+    plan: &CompletedPlanView,
+    selection: Option<&SelectionContext>,
+) -> Stateful<Div> {
     let mut card = div()
         .id(SharedString::from(format!("completed-plan-{message_id}")))
         .flex()
@@ -449,45 +454,30 @@ pub fn completed_plan_card(message_id: uuid::Uuid, plan: &CompletedPlanView) -> 
         .p_3()
         .rounded(px(CARD_RADIUS))
         .bg(glass_fill(palette::current().panel))
-        .child(
-            div()
-                .text_xs()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(rgb(palette::current().teal))
-                .child(SharedString::from(format!("☑ {}", plan.header()))),
-        );
+        .child(selectable_styled_text(
+            format!("\u{2611} {}", plan.header()),
+            small_style(SMALL_TEXT_SIZE, palette::current().teal),
+            Vec::new(),
+            selection,
+        ));
 
     for task in &plan.tasks {
-        card = card.child(
-            div()
-                .flex()
-                .flex_row()
-                .gap_2()
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(palette::current().teal))
-                        .child("☑"),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(palette::current().text_muted))
-                        .child(SharedString::from(format!(
-                            "{}. {}",
-                            task.order, task.title
-                        ))),
-                ),
-        );
+        // One line per task, spelled exactly as `copy_text` spells it, so a
+        // drag over one title copies that title alone (#2678).
+        card = card.child(selectable_styled_text(
+            format!("  \u{2611} {}. {}", task.order, task.title),
+            small_style(SMALL_TEXT_SIZE, palette::current().text_muted),
+            Vec::new(),
+            selection,
+        ));
     }
 
-    card.child(
-        div()
-            .text_xs()
-            .italic()
-            .text_color(rgb(palette::current().text_faint))
-            .child(COMPLETED_PLAN_FOOTER),
-    )
+    card.child(selectable_styled_text(
+        COMPLETED_PLAN_FOOTER.to_string(),
+        small_style(SMALL_TEXT_SIZE, palette::current().text_faint),
+        Vec::new(),
+        selection,
+    ))
 }
 
 /// The task window: six rows, centred on the running task, or the first six
@@ -717,5 +707,36 @@ mod tests {
             "the metric group keeps its width"
         );
         assert!(body.contains(".truncate()"), "a long title is cut");
+    }
+
+    /// #2678: a finished plan's card is text the user reads, so each of its
+    /// lines has to be a selectable segment, spelled exactly as `copy_text`
+    /// spells it. Otherwise the only thing a drag can copy is the whole card.
+    #[test]
+    fn the_completed_card_draws_one_selectable_line_per_copy_line() {
+        let src = include_str!("plan_strip.rs");
+        let body = src
+            .split("pub fn completed_plan_card(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("the completed card body");
+        assert_eq!(
+            body.matches(["selectable_", "styled_text("].concat().as_str())
+                .count(),
+            3,
+            "the header, the task rows and the footer are all selectable"
+        );
+        // The draw spells the tick as an escape while `copy_text` spells it as
+        // the character, so compare the way the code renders it rather than the
+        // bytes it happens to be written with.
+        let rendered = body.replace("\\u{2611}", "\u{2611}");
+        assert!(
+            rendered.contains("\u{2611} {}. {}") && body.contains("task.order, task.title"),
+            "a task line is spelled the way copy_text spells it"
+        );
+        assert!(
+            !body.contains(".text_xs()"),
+            "a selectable line carries its size in the style, not on the div"
+        );
     }
 }

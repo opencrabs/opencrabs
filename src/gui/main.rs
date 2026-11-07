@@ -7484,7 +7484,18 @@ impl Render for Dashboard {
         // folds: only this `cx` can build one, and the card that is on screen
         // is the one a click must fold (#2442).
         let live_click: transcript::ClickHandler =
-            std::rc::Rc::new(cx.listener(|this, _ev: &gpui::ClickEvent, _window, cx| {
+            std::rc::Rc::new(cx.listener(|this, ev: &gpui::ClickEvent, _window, cx| {
+                // A release that ended a drag is the end of a copy, not a
+                // request to fold. gpui fires a click on every release with no
+                // movement threshold, and the row's own release handler clears
+                // the selection before this listener runs, so the positions are
+                // the only evidence left: without this, copying a line out of
+                // the card also closed the card the line was in (#2678).
+                if let gpui::ClickEvent::Mouse(click) = ev
+                    && (click.up.position - click.down.position).magnitude() > 2.0
+                {
+                    return;
+                }
                 this.transcript.live_expanded = !this.transcript.live_expanded;
                 cx.notify();
             }));
@@ -11844,6 +11855,15 @@ fn swap_visible_turn(
 /// touching the border, and a long command ellipsizes instead of painting
 /// over the neighbouring leaf (#2622).
 fn task_strip(text: String) -> Div {
+    // #2678: the roster above the composer is the line the user quotes back at
+    // the agent ("that job is stuck"), so a drag over it copies it. The strip
+    // is one truncated line with no character grid of its own, so there is
+    // nothing to select inside it: the gesture is the copy, and it copies the
+    // whole label rather than the part that survived truncation.
+    let press: Rc<std::cell::Cell<Option<Point<Pixels>>>> = Rc::new(std::cell::Cell::new(None));
+    let down = press.clone();
+    let up = press.clone();
+    let copied = format!("⏳ {text}");
     div()
         .flex()
         .flex_row()
@@ -11855,6 +11875,17 @@ fn task_strip(text: String) -> Div {
         .px_2()
         .text_xs()
         .text_color(rgb(palette::current().teal))
+        .on_mouse_down(MouseButton::Left, move |ev, _window, _app| {
+            down.set(Some(ev.position));
+        })
+        .on_mouse_up(MouseButton::Left, move |ev, _window, app| {
+            let Some(from) = up.get() else { return };
+            up.set(None);
+            if (ev.position - from).magnitude() <= 2.0 {
+                return;
+            }
+            app.write_to_clipboard(ClipboardItem::new_string(copied.clone()));
+        })
         .child(
             div()
                 .min_w_0()
@@ -14102,6 +14133,40 @@ mod tests {
         assert!(strip.contains(".px_2()"), "the strip keeps a gutter");
         assert!(strip.contains(".truncate()"), "a long label ellipsizes");
         assert!(strip.contains(".min_w_0()"), "the label may shrink");
+    }
+
+    #[test]
+    fn the_running_task_strip_copies_its_label_on_a_drag() {
+        // #2678: the strip names the job the user wants to quote back ("that
+        // command is stuck"). It is one truncated line with no character grid,
+        // so the gesture is the copy: a press, then a release far enough away
+        // to be a drag, writes the whole label. A plain click stays a click.
+        let src = include_str!("main.rs");
+        let strip = src
+            .split("fn task_strip(")
+            .nth(1)
+            .and_then(|rest| rest.split("\nfn ").next())
+            .expect("task strip");
+        assert!(
+            strip.contains(".on_mouse_down(MouseButton::Left"),
+            "the press is recorded"
+        );
+        assert!(
+            strip.contains(".on_mouse_up(MouseButton::Left"),
+            "the release decides whether it was a drag"
+        );
+        assert!(
+            strip.contains("magnitude() <= 2.0"),
+            "a release inside the threshold is a click, not a copy"
+        );
+        assert!(
+            strip.contains("write_to_clipboard(ClipboardItem::new_string"),
+            "a drag writes the label to the clipboard"
+        );
+        assert!(
+            strip.contains("let copied = format!("),
+            "the whole label is copied, not the truncated part"
+        );
     }
 
     #[test]

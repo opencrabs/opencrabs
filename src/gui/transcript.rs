@@ -1048,6 +1048,16 @@ fn body_style(size: f32) -> TextStyle {
     }
 }
 
+/// A small line of text in a fixed colour, for the rows that are not messages:
+/// tool calls, the completed plan card, the live card's ledger.
+pub(crate) fn small_style(size: f32, color: u32) -> TextStyle {
+    TextStyle {
+        color: rgb(color).into(),
+        font_size: AbsoluteLength::Pixels(px(size)),
+        ..Default::default()
+    }
+}
+
 fn mono_style() -> TextStyle {
     TextStyle {
         font_family: "Menlo".into(),
@@ -1199,6 +1209,9 @@ const MESSAGE_PAD_Y: f32 = 12.0;
 const MESSAGE_RADIUS: f32 = 12.0;
 const USER_TEXT_SIZE: f32 = 16.0;
 const PLAIN_TEXT_SIZE: f32 = 13.0;
+/// Tool calls and card lines: the `text_xs` size the pane draws them at, so a
+/// selectable segment measures exactly the box it paints in.
+pub(crate) const SMALL_TEXT_SIZE: f32 = 12.0;
 
 /// Assistant content as markdown. Consecutive fence lines group under one
 /// padded mono container so a code block reads as one shape, while a table
@@ -1518,21 +1531,41 @@ fn thinking_block(content: &str, full: bool) -> Div {
 /// counts the calls, so the expanded body does not repeat the count. Every call
 /// is a row in one list, with no panel of its own: a fill and a radius rounder
 /// than the card around it turned three bash calls into three widgets (#2639).
-fn tools_block(calls: &[ToolCall]) -> Div {
+fn tools_block(calls: &[ToolCall], selection: Option<&SelectionContext>) -> Div {
     let mut col = div().flex().flex_col().gap_0p5().min_w_0();
     for call in calls {
         let (mark, color) = tool_mark(call);
+        // The status mark is a glyph, not part of the copy text, so it is drawn
+        // on its own. The description is the selectable segment, which is what
+        // makes one call's name copyable on its own (#2678).
         col = col.child(
             div()
-                .text_xs()
-                .text_color(rgb(color))
-                .child(SharedString::from(format!(
-                    "{mark} {}",
-                    fit(call.description.trim(), 160)
-                ))),
+                .flex()
+                .flex_row()
+                .gap_1()
+                .min_w_0()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(color))
+                        .child(SharedString::from(mark)),
+                )
+                .child(selectable_styled_text(
+                    tool_line(call),
+                    small_style(SMALL_TEXT_SIZE, color),
+                    Vec::new(),
+                    selection,
+                )),
         );
     }
     col
+}
+
+/// One call's drawn text, which is exactly the line its row copies. Both the
+/// renderer and `block_text` go through here so a character offset can never
+/// point at a different string than the one on screen.
+fn tool_line(call: &ToolCall) -> String {
+    fit(call.description.trim(), 160)
 }
 
 /// One call's status mark and the colour that carries it. Shared with the
@@ -1761,8 +1794,11 @@ fn live_card_lines(live: &LiveTurn) -> Vec<LiveCardLine> {
     lines
 }
 
-/// The card's body: the same lines, as elements.
-fn live_card_body(live: &LiveTurn) -> Div {
+/// The card's body: the same lines, as elements. The body is one copy row whose
+/// segments are drawn in order, so a drag over a single tool line copies that
+/// line's name and nothing else (#2678).
+fn live_card_body(live: &LiveTurn, drag: Option<&Rc<CopyDrag>>) -> Div {
+    let lines = live_card_lines(live);
     let mut body = div()
         .flex()
         .flex_col()
@@ -1771,31 +1807,59 @@ fn live_card_body(live: &LiveTurn) -> Div {
         .pb_1()
         .min_w_0()
         .overflow_hidden();
-    for line in live_card_lines(live) {
-        match line {
-            LiveCardLine::Tool { mark, color, text } => {
-                body = body.child(
-                    div()
-                        .text_xs()
-                        .min_w_0()
-                        .text_color(rgb(color))
-                        .child(SharedString::from(format!("{mark} {text}"))),
-                );
-            }
-            LiveCardLine::Narration(text) => body = body.child(md_block(&text, None)),
-            LiveCardLine::Reasoning(text) => {
-                body = body.child(
-                    div()
-                        .text_xs()
-                        .italic()
-                        .min_w_0()
-                        .text_color(rgb(palette::current().text_muted))
-                        .child(SharedString::from(text)),
-                );
-            }
+    let row_text = lines
+        .iter()
+        .map(live_card_line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let Some(d) = drag.filter(|_| !row_text.trim().is_empty()) else {
+        for line in lines {
+            body = body.child(live_card_line(line, None));
         }
+        return body;
+    };
+    let ordinal = {
+        let mut texts = d.texts.borrow_mut();
+        texts.push(row_text);
+        texts.len() - 1
+    };
+    let selection = SelectionContext::new(d, ordinal);
+    for line in lines {
+        body = body.child(live_card_line(line, Some(&selection)));
     }
     body
+}
+
+/// One body line's copy text. It matches what the line paints, so a character
+/// offset in the row always points at the character under the pointer.
+fn live_card_line_text(line: &LiveCardLine) -> String {
+    match line {
+        LiveCardLine::Tool { mark, text, .. } => format!("{mark} {text}"),
+        LiveCardLine::Narration(text) => markdown_copy_text(text),
+        LiveCardLine::Reasoning(text) => text.clone(),
+    }
+}
+
+/// One body line, drawn. With a selection it becomes a selectable segment, which
+/// is what lets a single name be copied out of the ledger.
+fn live_card_line(line: LiveCardLine, selection: Option<&SelectionContext>) -> AnyElement {
+    match line {
+        LiveCardLine::Tool { mark, color, text } => selectable_styled_text(
+            format!("{mark} {text}"),
+            small_style(SMALL_TEXT_SIZE, color),
+            Vec::new(),
+            selection,
+        )
+        .into_any_element(),
+        LiveCardLine::Narration(text) => md_block(&text, selection).into_any_element(),
+        LiveCardLine::Reasoning(text) => selectable_styled_text(
+            text,
+            small_style(SMALL_TEXT_SIZE, palette::current().text_muted),
+            Vec::new(),
+            selection,
+        )
+        .into_any_element(),
+    }
 }
 
 /// The live turn as ONE card, in the Telegram grammar (#2442): the header is
@@ -1808,7 +1872,12 @@ fn live_card_body(live: &LiveTurn) -> Div {
 /// The corners are the message radius, not the card radius (#2618): this card
 /// becomes the message row once the turn persists, so it must not be rounder
 /// than the row it turns into.
-fn live_card(live: &LiveTurn, expanded: bool, ctx: (Option<u32>, u32)) -> Stateful<Div> {
+fn live_card(
+    live: &LiveTurn,
+    expanded: bool,
+    ctx: (Option<u32>, u32),
+    drag: Option<&Rc<CopyDrag>>,
+) -> Stateful<Div> {
     let frame = if live.settled.is_some() {
         "\u{2705}".to_string()
     } else {
@@ -1874,7 +1943,7 @@ fn live_card(live: &LiveTurn, expanded: bool, ctx: (Option<u32>, u32)) -> Statef
         .hover(|d| d.bg(rgb(palette::current().panel_hi)))
         .child(head);
     if expanded {
-        card = card.child(live_card_body(live));
+        card = card.child(live_card_body(live, drag));
     }
     if let Some(footer) = live_card_footer(live, ctx) {
         card = card.child(
@@ -1931,10 +2000,10 @@ fn block_view(
             ..
         } => bubble(role, content, time, content_width, handlers, selection),
         Block::Thinking { content } => thinking_block(content, false),
-        Block::Tools { calls } => tools_block(calls),
-        Block::CompletedPlan { message_id, plan } => {
-            div().child(crate::plan_strip::completed_plan_card(*message_id, plan))
-        }
+        Block::Tools { calls } => tools_block(calls, selection),
+        Block::CompletedPlan { message_id, plan } => div().child(
+            crate::plan_strip::completed_plan_card(*message_id, plan, selection),
+        ),
         Block::Marker { hidden } => div()
             .text_xs()
             .text_color(rgb(palette::current().text_muted))
@@ -2035,6 +2104,35 @@ fn live_status_text(live: &LiveTurn) -> String {
     }
 }
 
+/// One block of the running turn, selectable while a drag is in flight. The
+/// ordinal comes from the same counter the settled rows use, in build order, so
+/// a drag that starts in the live card and ends in the transcript above (or the
+/// other way round) stays one continuous range. Returns None when there is no
+/// drag or the block carries no text, and the caller draws it the old way.
+fn live_block(
+    drag: Option<&Rc<CopyDrag>>,
+    block: &Block,
+    content_width: f32,
+    handlers: &HashMap<String, ClickHandler>,
+) -> Option<AnyElement> {
+    let text = block_text(block);
+    let d = drag.filter(|_| !text.trim().is_empty())?;
+    let ordinal = {
+        let mut texts = d.texts.borrow_mut();
+        texts.push(text);
+        texts.len() - 1
+    };
+    let selection = SelectionContext::new(d, ordinal);
+    Some(
+        selectable_row(
+            d,
+            ordinal,
+            block_view(block, content_width, handlers, Some(&selection)),
+        )
+        .into_any_element(),
+    )
+}
+
 /// The running turn, drawn with the transcript's own block grammar: the
 /// question as a user bubble, tool rows with their live status, the streamed
 /// answer as markdown, notices in amber. Nothing here folds: the turn has no
@@ -2047,20 +2145,24 @@ fn live_view(
     ctx: (Option<u32>, u32),
     live_click: Option<&ClickHandler>,
     handlers: &HashMap<String, ClickHandler>,
+    drag: Option<&Rc<CopyDrag>>,
 ) -> Div {
     let mut col = div().flex().flex_col().gap_2();
     if let Some(user) = &live.user {
-        col = col.child(block_view(
-            &Block::Msg {
-                role: "user".into(),
-                content: user.clone(),
-                time: live_time(live.sent_at),
-                placeholder: false,
-            },
-            content_width,
-            handlers,
-            None,
-        ));
+        let block = Block::Msg {
+            role: "user".into(),
+            content: user.clone(),
+            time: live_time(live.sent_at),
+            placeholder: false,
+        };
+        // A live turn stays on screen often enough, and for long enough, that
+        // its text has to copy like any other: while the transcript is short of
+        // a finished turn the live card is the only copy of the answer the user
+        // can see, so it is the only copy there is to drag.
+        col = col.child(match live_block(drag, &block, content_width, handlers) {
+            Some(row) => row,
+            None => block_view(&block, content_width, handlers, None).into_any_element(),
+        });
     }
     for notice in &live.notices {
         col = col.child(
@@ -2074,22 +2176,21 @@ fn live_view(
     // order, so a message typed mid-turn shows up where it entered the turn
     // rather than after it (#2441).
     for text in &live.injected {
-        col = col.child(block_view(
-            &Block::Msg {
-                role: "user".into(),
-                content: text.clone(),
-                time: live_time(live.sent_at),
-                placeholder: false,
-            },
-            content_width,
-            handlers,
-            None,
-        ));
+        let block = Block::Msg {
+            role: "user".into(),
+            content: text.clone(),
+            time: live_time(live.sent_at),
+            placeholder: false,
+        };
+        col = col.child(match live_block(drag, &block, content_width, handlers) {
+            Some(row) => row,
+            None => block_view(&block, content_width, handlers, None).into_any_element(),
+        });
     }
     // ONE card for the whole turn: header, body when open, footer. The three
     // loose children it replaces (a ledger, a status line below it, and a bare
     // reasoning line) are what made a busy turn unreadable (#2442).
-    let card = live_card(live, expanded, ctx);
+    let card = live_card(live, expanded, ctx, drag);
     col = col.child(match live_click {
         Some(click) => {
             let click = click.clone();
@@ -2098,17 +2199,16 @@ fn live_view(
         None => card,
     });
     if let Some(answer) = live.answer() {
-        col = col.child(block_view(
-            &Block::Msg {
-                role: "assistant".into(),
-                content: answer.to_string(),
-                time: live_time(live.answer_at.or(live.sent_at)),
-                placeholder: false,
-            },
-            content_width,
-            handlers,
-            None,
-        ));
+        let block = Block::Msg {
+            role: "assistant".into(),
+            content: answer.to_string(),
+            time: live_time(live.answer_at.or(live.sent_at)),
+            placeholder: false,
+        };
+        col = col.child(match live_block(drag, &block, content_width, handlers) {
+            Some(row) => row,
+            None => block_view(&block, content_width, handlers, None).into_any_element(),
+        });
     }
     col
 }
@@ -2238,7 +2338,10 @@ impl CopyDrag {
 /// Selection state threaded through one message renderer. Every selectable
 /// `StyledText` is one segment; joining segments with newlines gives both the
 /// copy string and a stable coordinate space for endpoint offsets.
-struct SelectionContext<'a> {
+/// One drawn text segment of a selectable row: where the segment starts in the
+/// row's copy text, advanced in render order. `plain_block` and the card
+/// renderers share it so a multi-line row keeps exact character offsets.
+pub(crate) struct SelectionContext<'a> {
     drag: &'a Rc<CopyDrag>,
     row: usize,
     offset: Cell<usize>,
@@ -2255,7 +2358,7 @@ impl<'a> SelectionContext<'a> {
         }
     }
 
-    fn begin_segment(&self, len: usize) -> usize {
+    pub(crate) fn begin_segment(&self, len: usize) -> usize {
         let start = if self.segments.get() == 0 {
             0
         } else {
@@ -2318,7 +2421,7 @@ fn highlights_with_selection(
 /// Render one real `StyledText` and retain its layout handle for pointer hit
 /// testing. Text handlers stop propagation so the row-level fallback cannot
 /// overwrite a precise offset with a block endpoint.
-fn selectable_styled_text(
+pub(crate) fn selectable_styled_text(
     text: String,
     style: TextStyle,
     highlights: Vec<(Range<usize>, HighlightStyle)>,
@@ -2437,11 +2540,7 @@ fn block_text(block: &Block) -> String {
             }
         }
         Block::Thinking { content } => content.trim().to_string(),
-        Block::Tools { calls } => calls
-            .iter()
-            .map(|c| c.description.as_str())
-            .collect::<Vec<_>>()
-            .join("\n"),
+        Block::Tools { calls } => calls.iter().map(tool_line).collect::<Vec<_>>().join("\n"),
         Block::CompletedPlan { plan, .. } => plan.copy_text(),
         Block::Marker { .. } => String::new(),
     }
@@ -2627,6 +2726,7 @@ pub fn view(
             (ctx_used, ctx_max),
             live_click.as_ref(),
             &attachment_handlers,
+            drag.as_ref(),
         ));
     }
     // Releasing the mouse ends the drag and copies the selected range (#2383,
@@ -4092,7 +4192,7 @@ mod tests {
         // And the drawing order itself: header, then body, then footer.
         const SRC: &str = include_str!("transcript.rs");
         let head = [".child(", "head)"].concat();
-        let body = ["live_card_", "body(live)"].concat();
+        let body = ["live_card_", "body(live, drag)"].concat();
         let foot = ["live_card_", "footer(live, ctx)"].concat();
         assert!(
             src_at(SRC, &head) < src_at(SRC, &body),
@@ -4275,6 +4375,86 @@ mod tests {
         assert!(
             !live_src.contains(["status_", "line(live)"].concat().as_str()),
             "nor a status line below the rows"
+        );
+    }
+
+    /// The live turn is the only copy of the answer the user can see while the
+    /// transcript is short of a settled turn, so its rows have to take part in
+    /// a drag exactly like the settled rows do. They were the one renderer left
+    /// out, which is how a stranded live panel became a pane with nothing
+    /// selectable in it.
+    #[test]
+    fn the_live_pane_copies_like_the_settled_rows() {
+        const SRC: &str = include_str!("transcript.rs");
+        let (_, after) = SRC
+            .split_once(["fn live_", "view("].concat().as_str())
+            .expect("live_view exists");
+        let (live_src, _) = after
+            .split_once(["/// The transcript pane"].concat().as_str())
+            .expect("live_view ends");
+        assert!(
+            live_src.contains(["drag: Option<&Rc<", "CopyDrag>>,"].concat().as_str()),
+            "the live pane takes the pane's own drag state"
+        );
+        assert_eq!(
+            live_src
+                .matches(["live_", "block(drag, &block"].concat().as_str())
+                .count(),
+            3,
+            "the question, the queued rows and the answer all copy"
+        );
+        let (_, helper) = SRC
+            .split_once(["fn live_", "block("].concat().as_str())
+            .expect("live_block exists");
+        let (helper_body, _) = helper.split_once("\n}\n").expect("live_block ends");
+        assert!(
+            helper_body.contains(["selectable_", "row("].concat().as_str()),
+            "a live row is the same selectable row the transcript draws"
+        );
+    }
+
+    /// #2678: the rows that are not messages have to copy too. A tool call, the
+    /// completed plan card and the live card's ledger each draw their text
+    /// through the same selectable segment, and each one's copy text is the
+    /// string it paints, so a drag over one name copies that name alone.
+    #[test]
+    fn every_text_row_copies_not_just_the_messages() {
+        const SRC: &str = include_str!("transcript.rs");
+        let (_, tools) = SRC
+            .split_once(["fn tools_", "block("].concat().as_str())
+            .expect("tools_block exists");
+        let (tools_body, _) = tools.split_once("\n}\n").expect("tools_block ends");
+        assert!(
+            tools_body.contains(["selectable_", "styled_text("].concat().as_str()),
+            "a tool call's description is a selectable segment"
+        );
+        assert!(
+            tools_body.contains(["tool_", "line(call)"].concat().as_str()),
+            "the row draws exactly the text it copies"
+        );
+        let (_, card) = SRC
+            .split_once(["fn live_card_", "body("].concat().as_str())
+            .expect("live_card_body exists");
+        let (card_src, _) = card.split_once("\n}\n").expect("live_card_body ends");
+        assert!(
+            card_src.contains(["texts.push(row_", "text)"].concat().as_str()),
+            "the live card's ledger registers its own copy row"
+        );
+        assert!(
+            card_src.contains(
+                ["live_card_line(line, Some(&", "selection))"]
+                    .concat()
+                    .as_str()
+            ),
+            "every ledger line is drawn as a segment of that row"
+        );
+        let (_, block) = SRC
+            .split_once(["fn block_", "text("].concat().as_str())
+            .expect("block_text exists");
+        let (block_src, _) = block.split_once("\n}\n").expect("block_text ends");
+        assert!(
+            block_src.contains(["map(tool_", "line)"].concat().as_str()),
+            "the copy text of a tool block is the lines the pane draws"
         );
     }
 
