@@ -1901,9 +1901,17 @@ mod tests {
     /// again on the next boot (#2626).
     #[test]
     fn the_window_boot_runs_the_restart_recovery_pass() {
+        // Read the shipped source only. This test spells the calls it looks
+        // for, and on the whole file the first match for the bootstrap was
+        // this test's own needle, so the slice started at the bottom of the
+        // file and every assertion below it read the wrong text (#2673).
         let src = include_str!("agent_bridge.rs");
-        let boot = src
-            .split("pub async fn build(")
+        let shipped = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the shipped source before the tests");
+        let boot = shipped
+            .split("async fn build(")
             .nth(1)
             .expect("the window's bootstrap");
         let boot = boot
@@ -1911,8 +1919,9 @@ mod tests {
             .next()
             .expect("the end of the bootstrap");
 
+        let route_needle = ["register_local", "_route(enqueue)"].concat();
         let route = boot
-            .find("register_local_route(enqueue)")
+            .find(route_needle.as_str())
             .expect("the window registers the destination a parked report flushes to");
         let pass = boot
             .find("restart_recovery::recover(Some(")

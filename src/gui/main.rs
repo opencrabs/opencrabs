@@ -14592,9 +14592,17 @@ mod tests {
     /// report, which is what the local route is for (#1036). One call only.
     #[test]
     fn the_bridge_registers_the_local_route() {
+        // One route for the whole window (#1036), counted in the shipped
+        // source: a test that names the call in its own body is not a second
+        // registration, and counting the whole file made the result depend on
+        // how a test writes its needle (#2673).
         let src = include_str!("agent_bridge.rs");
+        let shipped = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the shipped source before the tests");
         let needle = ["register_local", "_route("].concat();
-        let sites = src.match_indices(needle.as_str()).count();
+        let sites = shipped.match_indices(needle.as_str()).count();
         assert_eq!(sites, 1, "one local route registration, found {sites}");
     }
 
