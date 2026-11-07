@@ -5451,6 +5451,29 @@ impl Dashboard {
         cx.notify();
     }
 
+    /// Fold or unfold one session's topic tree (#2670). The state is re-read
+    /// from the database, so the rows follow what was actually written and a
+    /// fold made in the terminal shows here too.
+    fn toggle_fold_topic(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        let collapsed = self.sessions.is_collapsed(id);
+        let db_path = self.db_path.clone();
+        cx.spawn(async move |this, cx| {
+            if let Err(e) = sessions::set_topics_collapsed(db_path, id, !collapsed).await {
+                logging::error(&format!("fold topic tree {id}: {e}"));
+                this.update(cx, |this, cx| {
+                    this.live.notices.push(format!("fold topics: {e}"));
+                    cx.notify();
+                })
+                .ok();
+                return;
+            }
+            this.update(cx, |this, cx| this.refresh_topic_state(cx))
+                .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
     /// Whether the open chat is a session with topics turned on.
     fn open_chat_topics_on(&self) -> bool {
         self.transcript
@@ -5736,12 +5759,17 @@ impl Dashboard {
         cx.spawn(async move |this, cx| {
             let parents = sessions::load_topic_parents(db_path.clone()).await;
             let closed = sessions::load_closed(db_path.clone()).await;
+            let collapsed = sessions::load_collapsed(db_path.clone()).await;
             let icons = sessions::load_topic_icons(db_path.clone()).await;
             let topics = sessions::load_topics(db_path).await;
             this.update(cx, |this, cx| {
                 match closed {
                     Ok(ids) => this.sessions.closed = ids.into_iter().collect(),
                     Err(e) => logging::error(&format!("closed refresh: {e}")),
+                }
+                match collapsed {
+                    Ok(ids) => this.sessions.collapsed = ids.into_iter().collect(),
+                    Err(e) => logging::error(&format!("collapsed refresh: {e}")),
                 }
                 match parents {
                     Ok(pairs) => this.sessions.parents = pairs.into_iter().collect(),
@@ -6566,6 +6594,45 @@ impl Dashboard {
                     // the target, which is the row the transcript shows.
                     if let Some(target) = self.sessions.delete_target() {
                         self.request_delete(target, cx);
+                    }
+                    cx.notify();
+                    return;
+                }
+                // The session letters the terminal answers, on the same keys
+                // (#2670). Each one routes to the handler its row menu item
+                // already calls, so the two paths cannot drift apart. They sit
+                // behind the same rail_focused gate the arrows use, so a letter
+                // typed with the composer focused stays text.
+                "r" if self.rail_focused => {
+                    // Rename the row the keyboard stands on (#2304).
+                    if let Some(id) = self.sessions.rail_target() {
+                        self.start_rename(id, cx);
+                    }
+                    cx.notify();
+                    return;
+                }
+                "t" if self.rail_focused => {
+                    // New topic under that row (#2397). The prompt works on the
+                    // open chat, so the row is opened first, as the menu does.
+                    if let Some(id) = self.sessions.rail_target() {
+                        self.open_session(id, cx);
+                        self.start_topic_draft(cx);
+                    }
+                    cx.notify();
+                    return;
+                }
+                "c" if self.rail_focused => {
+                    // Close the topic, or reopen it if it is closed (#2305).
+                    if let Some(id) = self.sessions.rail_target() {
+                        self.toggle_closed_topic(id, cx);
+                    }
+                    cx.notify();
+                    return;
+                }
+                "z" if self.rail_focused => {
+                    // Fold or unfold that session's topic tree (#2427).
+                    if let Some(id) = self.sessions.rail_target() {
+                        self.toggle_fold_topic(id, cx);
                     }
                     cx.notify();
                     return;
@@ -9399,10 +9466,14 @@ impl Render for Dashboard {
         // The name prompt takes the whole window: the scrim darkens everything
         // else, and a click outside the panel cancels, as Esc does (#2398).
         if let Some(draft) = self.topic_draft.clone() {
-            let label = if self.topic_rename.is_some() {
-                "Rename topic"
-            } else {
-                "New topic"
+            // The heading follows what the prompt will rename: a child session
+            // is a topic, a root one is a conversation. Reading it from the
+            // pending rename alone labelled every conversation rename as a
+            // topic edit (#2668).
+            let label = match self.topic_rename {
+                Some(id) if self.sessions.parents.contains_key(&id) => "Rename topic",
+                Some(_) => "Rename conversation",
+                None => "New topic",
             };
             let cancel = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
                 this.topic_draft = None;
@@ -9675,6 +9746,16 @@ fn main() {
             })
             .into_iter()
             .collect();
+    // Folded topic trees are read up front too, from the column the terminal
+    // writes, so a fold made there holds here on boot (#2670).
+    let collapsed: std::collections::HashSet<uuid::Uuid> =
+        futures::executor::block_on(sessions::load_collapsed(db_path.clone()))
+            .unwrap_or_else(|e| {
+                logging::error(&format!("collapsed load: {e}"));
+                Vec::new()
+            })
+            .into_iter()
+            .collect();
     // Which topic sits under which session, so the rail can group them (#2303).
     let parents: std::collections::HashMap<uuid::Uuid, uuid::Uuid> =
         futures::executor::block_on(sessions::load_topic_parents(db_path.clone()))
@@ -9704,6 +9785,7 @@ fn main() {
             topics: topics.clone(),
             parents: parents.clone(),
             closed: closed.clone(),
+            collapsed: collapsed.clone(),
             topic_icons: topic_icons.clone(),
             topic_titles: HashMap::new(),
             selected: None,
@@ -9719,6 +9801,7 @@ fn main() {
             topics,
             parents,
             closed,
+            collapsed,
             topic_icons,
             topic_titles: HashMap::new(),
             selected: None,
@@ -14255,6 +14338,13 @@ mod tests {
             ("ctrl+d", "Delete the selected session"),
             ("ctrl+g", "Session files"),
             ("esc", "Cancel or step back"),
+            // The session letters the rail answers now (#2670). p is absent on
+            // purpose: the window has no projects screen yet (#2669), so its
+            // row carries no window chord.
+            ("r", "Rename the selected session"),
+            ("t", "New topic under this session"),
+            ("c", "Close or reopen the selected topic"),
+            ("z", "Fold or unfold the topic tree"),
         ];
         let sessions: Vec<_> = help_keys::section_rows(HelpSection::Sessions).collect();
         for (chord, description) in wanted {

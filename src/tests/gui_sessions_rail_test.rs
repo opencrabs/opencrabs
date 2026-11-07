@@ -50,9 +50,12 @@ fn the_rail_header_is_compact_opencrabs_branding() {
 #[test]
 fn grouped_topics_are_compact_visible_pins_not_a_dropdown() {
     let ordered = block(SESSIONS, "pub fn ordered(", "/// Whether a row is a topic");
+    // #2670 gave the rail the terminal's fold key, so the order does hide a
+    // folded session's topics. The toggle is a key, not rail chrome: the row
+    // still paints no fold button or dropdown.
     assert!(
-        !ordered.contains("collapsed"),
-        "ordering never hides a topic behind a fold"
+        ordered.contains("is_collapsed(top.id)"),
+        "a folded session keeps its topics out of the order"
     );
 
     let row = block(SESSIONS, "pub fn row(", "pub fn on_click(");
@@ -64,10 +67,8 @@ fn grouped_topics_are_compact_visible_pins_not_a_dropdown() {
         "compact topic pins omit repeated date and cost metadata"
     );
     assert!(
-        !SESSIONS.contains("pub fn fold_button(")
-            && !GUI_MAIN.contains("sessions::fold_button(")
-            && !GUI_MAIN.contains("self.sessions.collapsed"),
-        "no fold control or hidden-row state remains in the GUI rail"
+        !SESSIONS.contains("pub fn fold_button(") && !GUI_MAIN.contains("sessions::fold_button("),
+        "no fold button joins the row chrome"
     );
     assert!(
         GUI_MAIN.contains("sessions::row(s, flags, action, menu)"),
