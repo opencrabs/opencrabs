@@ -823,6 +823,8 @@ pub mod respond_to_scope_test;
 #[cfg(feature = "rtk")]
 pub mod rtk_autodownload_test;
 #[cfg(feature = "rtk")]
+pub mod rtk_path_test;
+#[cfg(feature = "rtk")]
 pub mod rtk_rewrite_test;
 #[cfg(feature = "rtk")]
 pub mod rtk_tracker_test;

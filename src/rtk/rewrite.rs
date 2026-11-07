@@ -131,16 +131,45 @@ pub(crate) fn rtk_bin_filename() -> &'static str {
     if cfg!(windows) { "rtk.exe" } else { "rtk" }
 }
 
+/// Prepend `dir` to a PATH-shaped string, or `None` when it is already an entry.
+///
+/// PATH is a *list*, and its separator is host-specific: `:` on unix, `;` on
+/// Windows. Formatting the joined value by hand means hardcoding one of them,
+/// and the wrong one does not add an entry — it fuses the new directory to the
+/// first existing one (`C:\bin:C:\WINDOWS\system32`), deleting `system32` from
+/// the environment of every child process. [`std::env::split_paths`] and
+/// [`std::env::join_paths`] are the only separator-aware pair in std, so the
+/// list is round-tripped through them and never formatted by string.
+///
+/// Split out of [`ensure_dir_in_path`] so the separator handling is testable
+/// without mutating the process environment.
+pub(crate) fn prepend_rtk_dir(path: &str, dir: &str) -> Option<String> {
+    let dir_path = std::path::Path::new(dir);
+    let mut entries: Vec<std::path::PathBuf> = std::env::split_paths(path)
+        .filter(|entry| !entry.as_os_str().is_empty())
+        .collect();
+    if entries.iter().any(|entry| entry == dir_path) {
+        return None;
+    }
+    entries.insert(0, dir_path.to_path_buf());
+    // `join_paths` only fails on an entry that cannot be represented in PATH
+    // (a quote or the separator itself); there is no such entry here, and a
+    // failed join must leave PATH alone rather than write a broken value.
+    std::env::join_paths(entries)
+        .ok()
+        .map(|joined| joined.to_string_lossy().into_owned())
+}
+
 /// Ensure a directory is in PATH so bare binary names resolve at exec time.
 /// Called once during `find_rtk_binary` init (single writer via OnceCell).
 fn ensure_dir_in_path(dir: &std::path::Path) {
     let dir_str = dir.to_string_lossy().to_string();
     if let Ok(path) = std::env::var("PATH")
-        && !path.split(':').any(|p| p == dir_str)
+        && let Some(prepended) = prepend_rtk_dir(&path, &dir_str)
     {
         // SAFETY: called once during OnceCell init; no concurrent writers.
         unsafe {
-            std::env::set_var("PATH", format!("{}:{}", dir_str, path));
+            std::env::set_var("PATH", prepended);
         }
     }
 }
