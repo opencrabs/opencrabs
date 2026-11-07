@@ -2227,9 +2227,6 @@ fn selection_rgba() -> u32 {
 /// What a successful copy tells the view that owns the composer (#2587).
 type CopiedListener = Rc<dyn Fn(&mut App)>;
 
-/// One transcript mouse release: the window to repaint and the app to write to.
-type MouseRelease = Rc<dyn Fn(&mut Window, &mut App)>;
-
 /// Drag-to-copy over transcript rows (#2383) and their UTF-8 text ranges
 /// (#2529). Each row records the text its selectable segments render. GPUI's
 /// `TextLayout` turns a pointer into a byte offset; this state orders the two
@@ -2281,6 +2278,24 @@ impl CopyDrag {
         app.write_to_clipboard(item);
         self.clear_selection();
         true
+    }
+
+    /// The one release path for a drag: end it, copy what it holds, and tell
+    /// the owner so the composer can confirm. Every element that can start a
+    /// drag also ends it here, because the row under the pointer is the only
+    /// element guaranteed to still be hovered at mouse up. Calls after a copy
+    /// find the selection already cleared, so one gesture copies once.
+    pub fn release(&self, window: &mut Window, app: &mut App) {
+        self.dragging.set(false);
+        let held = self.copied_text().map_or(0, |text| text.chars().count());
+        let copied = self.finish_copy(app);
+        crate::logging::info(&format!(
+            "transcript release: selected_chars={held} copied={copied}"
+        ));
+        if copied {
+            self.announce_copied(app);
+        }
+        window.refresh();
     }
 
     fn points(&self) -> Option<(TextPoint, TextPoint)> {
@@ -2451,6 +2466,7 @@ pub(crate) fn selectable_styled_text(
         begin.anchor.set(Some(TextPoint::new(row, offset)));
         begin.end.set(Some(TextPoint::new(row, offset)));
         begin.dragging.set(true);
+        crate::logging::info(&format!("transcript drag start: row={row} offset={offset}"));
         cx.stop_propagation();
         window.refresh();
     })
@@ -2473,6 +2489,7 @@ fn selectable_row(drag: &Rc<CopyDrag>, ordinal: usize, child: Div) -> Stateful<D
     let text_len = drag.texts.borrow().get(ordinal).map_or(0, String::len);
     let start = drag.clone();
     let extend = drag.clone();
+    let release = drag.clone();
     div()
         .id(SharedString::from(format!("tblock-{ordinal}")))
         .when(selected, |d| d.bg(rgba(selection_rgba())))
@@ -2492,6 +2509,13 @@ fn selectable_row(drag: &Rc<CopyDrag>, ordinal: usize, child: Div) -> Stateful<D
                 extend.end.set(Some(TextPoint::new(ordinal, offset)));
                 window.refresh();
             }
+        })
+        // The row ends the drag it started. gpui only runs a bubble mouse-up
+        // handler on a hovered hitbox, and the row under the pointer is the one
+        // hitbox guaranteed to be hovered, while the pane behind it may not be.
+        // A second release for the same gesture finds nothing left to copy.
+        .on_mouse_up(MouseButton::Left, move |_ev, window, app| {
+            release.release(window, app)
         })
         .child(child)
 }
@@ -2734,22 +2758,18 @@ pub fn view(
     // and says nothing. A copy that landed drops the highlight and tells the
     // composer, which is what the terminal does on release (#2587).
     if let Some(d) = drag {
-        let release: MouseRelease = Rc::new(move |window, app| {
-            d.dragging.set(false);
-            if d.finish_copy(app) {
-                d.announce_copied(app);
-            }
-            window.refresh();
-        });
-        let on_up = release.clone();
+        // Rows end the drag under the pointer (see `selectable_row`). The pane
+        // keeps the same path as a fallback for a release over its padding and
+        // for a release past its last pixel, which is still the end of the
+        // drag: without it the drag stayed armed and the next click extended a
+        // stale selection instead of starting a new one (#2587).
+        let on_up = d.clone();
         col = col.on_mouse_up(MouseButton::Left, move |_ev, window, app| {
-            on_up(window, app)
+            on_up.release(window, app)
         });
-        // A release past the pane's last pixel is still the end of the drag.
-        // Without this the drag stayed armed and the next click extended it
-        // instead of starting a new one.
+        let on_out = d.clone();
         col = col.on_mouse_up_out(MouseButton::Left, move |_ev, window, app| {
-            release(window, app)
+            on_out.release(window, app)
         });
     }
     col
@@ -4488,17 +4508,40 @@ mod tests {
     #[test]
     fn drag_copy_announces_through_one_listener_and_ends_outside_too() {
         const SRC: &str = include_str!("transcript.rs");
-        // The listener is the only path from the transcript to the composer,
-        // so a landed copy has to go through it instead of writing silently.
-        let (_, after_release) = SRC
-            .split_once(["if d.", "finish_copy(app)"].concat().as_str())
-            .expect("the release handler copies through finish_copy");
-        let (body, _) = after_release
-            .split_once("\n        });")
-            .expect("the release handler ends");
+        // One release path, wherever the gesture ended: it copies, then tells
+        // the composer, so a landed copy is acknowledged exactly once.
+        let (_, release) = SRC
+            .split_once(
+                [
+                    "pub fn release(&self, window: &mut Window",
+                    ", app: &mut App) {",
+                ]
+                .concat()
+                .as_str(),
+            )
+            .expect("CopyDrag owns the release path");
+        let (body, _) = release
+            .split_once("\n    }\n")
+            .expect("the release path ends");
+        let copied = body
+            .find(["finish", "_copy(app)"].concat().as_str())
+            .expect("the release copies");
+        let announced = body
+            .find(["announce", "_copied(app)"].concat().as_str())
+            .expect("the release announces");
         assert!(
-            body.contains(["d.", "announce_copied(app)"].concat().as_str()),
-            "a landed copy must announce, or the composer cannot say so"
+            copied < announced,
+            "a copy has to land before the composer confirms it"
+        );
+        assert_eq!(
+            SRC.matches(
+                ["let copied = self.", "finish_copy(app);"]
+                    .concat()
+                    .as_str()
+            )
+            .count(),
+            1,
+            "the clipboard is written from one place, not once per caller"
         );
         assert!(
             SRC.contains(["on_mouse_up_", "out(MouseButton::Left"].concat().as_str()),
@@ -4507,6 +4550,25 @@ mod tests {
         assert!(
             !SRC.contains(["d.", "write_to_clipboard(app);"].concat().as_str()),
             "no caller writes the clipboard without clearing the selection"
+        );
+    }
+
+    #[test]
+    fn drag_copy_row_release_ends_the_drag_where_it_started() {
+        const SRC: &str = include_str!("transcript.rs");
+        let (_, after) = SRC
+            .split_once("fn selectable_row(")
+            .expect("the drag rows exist");
+        let (row, _) = after.split_once("\n}\n").expect("the row builder ends");
+        assert!(
+            row.contains(["on_mouse_up(MouseButton::", "Left"].concat().as_str()),
+            "the row that starts a drag has to end it too: gpui runs a bubble \
+             mouse-up handler only on a hitbox that is hovered, and the pane \
+             behind the row is not guaranteed to be that hitbox"
+        );
+        assert!(
+            row.contains(["release.", "release(window, app)"].concat().as_str()),
+            "the row release goes through the one copy path"
         );
     }
 }
