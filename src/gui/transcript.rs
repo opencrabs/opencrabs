@@ -22,7 +22,7 @@ use opencrabs::ui_core::card::{CARD_RADIUS, concentric_radius, glass_fill};
 use opencrabs::ui_core::copy_select::{self, TextPoint};
 use opencrabs::ui_core::plan_history::CompletedPlanView;
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
 use std::rc::Rc;
 
@@ -1340,11 +1340,81 @@ const PLAIN_TEXT_SIZE: f32 = 13.0;
 /// selectable segment measures exactly the box it paints in.
 pub(crate) const SMALL_TEXT_SIZE: f32 = 12.0;
 
+/// How many distinct markdown sources the cache holds before the oldest are
+/// dropped (#2688).
+const MD_CACHE_ENTRIES: usize = 512;
+
+/// The source bytes the cache may hold. Parsed blocks cost more than the
+/// source, so this is a budget on the input, not the resident set.
+const MD_CACHE_BYTES: usize = 16 * 1024 * 1024;
+
+/// Parsed markdown per source string (#2688).
+///
+/// The transcript rebuilds every row of every pane on each frame, and the
+/// running spinner notifies the whole window twenty times a second. Parsing
+/// was the expensive half of that: a 4 MB session re-ran `markdown::blocks`
+/// over every visible answer at frame rate. Parsing depends on the source
+/// text alone, so the parse is cached and only the cheap element tree is
+/// rebuilt per frame.
+#[derive(Default)]
+struct MdCache {
+    by_key: HashMap<(u64, usize), Rc<Vec<markdown::MdBlock>>>,
+    /// Insertion order, oldest first, for eviction.
+    order: VecDeque<(u64, usize)>,
+    /// Source bytes currently held, for the byte budget.
+    bytes: usize,
+}
+
+impl MdCache {
+    fn get(&mut self, key: (u64, usize)) -> Option<Rc<Vec<markdown::MdBlock>>> {
+        self.by_key.get(&key).cloned()
+    }
+
+    fn insert(&mut self, key: (u64, usize), blocks: Rc<Vec<markdown::MdBlock>>) {
+        let weight = key.1;
+        if self.by_key.insert(key, blocks).is_none() {
+            self.order.push_back(key);
+            self.bytes += weight;
+        }
+        while (self.order.len() > MD_CACHE_ENTRIES || self.bytes > MD_CACHE_BYTES)
+            && self.order.len() > 1
+        {
+            let Some(old) = self.order.pop_front() else {
+                break;
+            };
+            if self.by_key.remove(&old).is_some() {
+                self.bytes = self.bytes.saturating_sub(old.1);
+            }
+        }
+    }
+}
+
+thread_local! {
+    static MD_CACHE: RefCell<MdCache> = RefCell::new(MdCache::default());
+}
+
+/// The parsed blocks for `src`, from the cache when this source was already
+/// parsed (#2688). Keyed on a hash of the whole string plus its length, so a
+/// different answer never reads another one's parse.
+fn md_blocks(src: &str) -> Rc<Vec<markdown::MdBlock>> {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    src.hash(&mut hasher);
+    let key = (hasher.finish(), src.len());
+    if let Some(hit) = MD_CACHE.with(|c| c.borrow_mut().get(key)) {
+        return hit;
+    }
+    let parsed = Rc::new(markdown::blocks(src));
+    MD_CACHE.with(|c| c.borrow_mut().insert(key, parsed.clone()));
+    parsed
+}
+
 /// Assistant content as markdown. Consecutive fence lines group under one
 /// padded mono container so a code block reads as one shape, while a table
 /// block keeps its grid instead of being flattened into text rows.
 fn md_block(src: &str, selection: Option<&SelectionContext>) -> Div {
-    let blocks = markdown::blocks(src);
+    let parsed = md_blocks(src);
+    let blocks = parsed.as_slice();
     let mut out = div().flex().flex_col().gap(px(RHYTHM_BASE_GAP));
     let mut i = 0;
     while i < blocks.len() {

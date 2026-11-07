@@ -308,7 +308,11 @@ code-graph = ["tree-sitter", "tree-sitter-rust"]
 # and the CI gate stay free of the gpui dependency tree.
 gui = ["dep:gpui", "dep:objc2", "dep:objc2-foundation", "dep:objc2-app-kit"]
 [profile.dev]
-opt-level = 0
+# Our own crate is optimised too: the GUI re-runs transcript layout on every
+# keystroke in the composer, and at opt-level 0 that work was slow enough to
+# make typing lag in a split window (#2688). Dependencies keep their own
+# opt-level below, so the edit-compile cycle stays close to what it was.
+opt-level = 1
 debug = true
 split-debuginfo = "unpacked"
 
