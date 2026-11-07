@@ -774,6 +774,11 @@ struct Dashboard {
     /// the conversation's room for the checklist, per pane, so expanding one
     /// leaf never grows the card in the others.
     plan_expanded: std::collections::HashSet<Uuid>,
+    /// Plan tasks whose completion already rang (#2691). One set for the
+    /// whole window, shared by the window strip and every pane strip, so a
+    /// plan drawn in two places rings once. The terminal keeps the same
+    /// single set (`tui::app::state::announced_task_completions`).
+    announced_task_completions: std::collections::HashSet<Uuid>,
     /// The selected session's transcript and its scroll handle, so a fresh
     /// load can open at the bottom where the conversation ends.
     transcript: transcript::TranscriptState,
@@ -4888,6 +4893,14 @@ impl Dashboard {
                         ));
                     }
                 }
+                // A plan just closed (#2255, #2691). The settle emits this
+                // before the plan file is archived, so it is the one signal
+                // that cannot be missed by a file read. The chime is opt-in
+                // and feature-gated, and no toast or desktop notification is
+                // raised, exactly as the terminal's arm.
+                agent_bridge::TurnEvent::ProgressFor(_, ProgressEvent::PlanCompleted { .. }) => {
+                    Self::play_task_chime();
+                }
                 // Compaction notices and queue echoes: the phase-2 transcript
                 // mirror. They persist to the DB and show on the reload;
                 // nothing to draw live yet.
@@ -7600,6 +7613,45 @@ impl Dashboard {
         }
     }
 
+    /// Ring for plan tasks that settled since the last frame (#2691).
+    ///
+    /// The terminal does this from its tick (`tui::app::state`), reading the
+    /// plan file the tool writes. A gpui window has no tick, so the render
+    /// path is the equivalent place: it already re-reads the strips by
+    /// mtime, and this pass turns the settled tasks into one chime. The
+    /// window strip and every pane strip share one seen set, so a plan drawn
+    /// twice rings once, and a reload of an unchanged file rings not at all.
+    fn chime_settled_plan_tasks(&mut self) {
+        let seen = &mut self.announced_task_completions;
+        let mut plans: Vec<Option<&opencrabs::tui::plan::PlanDocument>> =
+            Vec::with_capacity(1 + self.pane_states.len());
+        plans.push(self.plan.document());
+        for pane in self.pane_states.values() {
+            plans.push(pane.plan.document());
+        }
+        if opencrabs::utils::completion_sound::newly_resolved(seen, &plans) == 0 {
+            return;
+        }
+        Self::play_task_chime();
+    }
+
+    /// The chime itself, honouring the operator's opt-in and the build
+    /// feature (#2691). The flag is read at the moment of the chime, so
+    /// flipping `[agent] completion_notification_enabled` in a live session
+    /// takes effect without a restart, exactly as the terminal's arm does.
+    #[cfg(feature = "notification-sound")]
+    fn play_task_chime() {
+        let enabled = opencrabs::config::Config::load()
+            .map(|c| c.agent.completion_notification_enabled)
+            .unwrap_or(false);
+        if enabled {
+            opencrabs::utils::completion_sound::play_completion_sound();
+        }
+    }
+
+    #[cfg(not(feature = "notification-sound"))]
+    fn play_task_chime() {}
+
     /// The pane body for the chat screen and the themes preview: the chat
     /// element alone while the tree is one leaf, or the whole tree drawn
     /// around it (#2472). The chat element is moved into its own leaf, so it
@@ -7878,6 +7930,11 @@ impl Render for Dashboard {
             }
         }
         self.plan.refresh();
+        // A task that just settled rings once (#2691). This is the window's
+        // tick: the strip was re-read by mtime just above, and the pane
+        // strips are re-read again when the split body is built below, so a
+        // pane that settles between frames is caught on the next one.
+        self.chime_settled_plan_tasks();
 
         // The rail's rows: each carries its own click listener, built in its
         // own loop turn so the `&mut cx` borrow stays legal.
@@ -10980,6 +11037,7 @@ fn main() {
                         plan: plan_strip::PlanStripState::default(),
                         plan_for: None,
                         plan_expanded: std::collections::HashSet::new(),
+                        announced_task_completions: std::collections::HashSet::new(),
                         transcript: transcript::TranscriptState {
                             session: initial_session,
                             ..Default::default()

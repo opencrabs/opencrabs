@@ -1674,8 +1674,9 @@ pub struct AgentConfig {
     /// Play a short notification sound when a plan reaches 100% at turn
     /// settle (#2255). Default FALSE: an agent that chirps unasked is
     /// noise, so this is opt-in. Only the WAV at
-    /// `src/assets/sound/notification.wav` is used, only the TUI plays
-    /// it, and no desktop notification or toast is ever raised.
+    /// `src/assets/sound/notification.wav` is used, the TUI and the GUI
+    /// both play it (#2691), and no desktop notification or toast is ever
+    /// raised.
     #[serde(default)]
     pub completion_notification_enabled: bool,
 

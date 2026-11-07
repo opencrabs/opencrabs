@@ -6,9 +6,9 @@
 //!   pure function over the plan document, so the never-fire cases (Editing,
 //!   partly done, failed, discarded) are unit-testable with no audio device.
 //! - [`play_completion_sound`] plays the embedded notification chime once, on
-//!   its own thread. Sound is a TUI surface concern: the settle hook emits
-//!   `ProgressEvent::PlanCompleted` for every surface, and only the TUI turns
-//!   that fact into audio.
+//!   its own thread. Sound is a surface concern: the settle hook emits
+//!   `ProgressEvent::PlanCompleted` for every surface, and the TUI and the GUI
+//!   each turn that fact into audio behind the same opt-in (#2691).
 
 use std::collections::HashSet;
 
@@ -38,7 +38,7 @@ pub fn announcement_pending(plan: Option<&PlanDocument>) -> Option<usize> {
 ///
 /// Never blocks the turn and never panics: a machine with no output device
 /// (a server, a container, a Mac with no audio route) logs a warning and
-/// carries on. Only the TUI calls this, and only when
+/// carries on. The TUI and the GUI call this, and only when
 /// `[agent] completion_notification_enabled = true`.
 #[cfg(feature = "notification-sound")]
 pub fn play_completion_sound() {

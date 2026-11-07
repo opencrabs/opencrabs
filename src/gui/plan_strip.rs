@@ -66,6 +66,14 @@ impl PlanStripState {
             .and_then(opencrabs::utils::plan_files::load_plan_from_path);
     }
 
+    /// The plan this strip last read (#2691). The window's chime pass walks
+    /// every strip through here and hands the documents to
+    /// `completion_sound::newly_resolved`, which dedupes by task id, so the
+    /// strip keeps ownership of its cache and the caller only reads it.
+    pub fn document(&self) -> Option<&PlanDocument> {
+        self.doc.as_ref()
+    }
+
     /// One compact line for the pane footer (#2593): `3/12` plus the task in
     /// flight. The strip above the composer already carries the detail; this
     /// is the version that survives inside a split, where the strip of a
@@ -526,6 +534,62 @@ mod tests {
             plan.tasks[i].status = TaskStatus::InProgress;
         }
         plan
+    }
+
+    /// #2691: the GUI had no chime call site at all, so the notification the
+    /// terminal rings was silence in the window. The window's pass reads the
+    /// strips through `document()` and dedupes with one shared seen set. This
+    /// pins the data half of that wiring against a real plan file: a settled
+    /// task counts once, an unchanged re-read counts zero, and the same plan
+    /// drawn by two strips still counts once.
+    #[test]
+    fn a_settled_task_rings_once_across_every_strip_showing_it() {
+        use super::PlanStripState;
+        use opencrabs::utils::completion_sound::newly_resolved;
+        use std::collections::HashSet;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("plan.json");
+        let mut plan = plan_with(2, 1, Some(1));
+        std::fs::write(&path, serde_json::to_string(&plan).expect("plan serializes"))
+            .expect("plan file written");
+
+        let mut window_strip = PlanStripState::default();
+        window_strip.set_path(Some(path.clone()));
+        let mut pane_strip = PlanStripState::default();
+        pane_strip.set_path(Some(path.clone()));
+        assert!(
+            window_strip.document().is_some(),
+            "the strip loads the plan the chime pass reads"
+        );
+
+        // One seen set for the window, exactly as the Dashboard holds it.
+        let mut seen: HashSet<uuid::Uuid> = HashSet::new();
+        assert_eq!(
+            newly_resolved(&mut seen, &[window_strip.document(), pane_strip.document()]),
+            1,
+            "the same settled task in two strips is one chime, not two"
+        );
+        window_strip.refresh();
+        pane_strip.refresh();
+        assert_eq!(
+            newly_resolved(&mut seen, &[window_strip.document(), pane_strip.document()]),
+            0,
+            "an unchanged re-read must not ring again"
+        );
+
+        // The second task settles and the tool rewrites the file.
+        plan.tasks[1].status = TaskStatus::Completed;
+        std::fs::write(&path, serde_json::to_string(&plan).expect("plan serializes"))
+            .expect("plan file rewritten");
+        window_strip.refresh();
+        pane_strip.refresh();
+        assert_eq!(
+            newly_resolved(&mut seen, &[window_strip.document(), pane_strip.document()]),
+            1,
+            "the newly settled task rings once"
+        );
+        assert_eq!(seen.len(), 2, "both settled tasks are recorded");
     }
 
     /// #2624: the pane card was a wide box of ellipses in a split. Two faults
