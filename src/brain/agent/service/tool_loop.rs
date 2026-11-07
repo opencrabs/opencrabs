@@ -696,9 +696,9 @@ impl AgentService {
                 .await;
 
             let loop_reason = match &attempt {
-                Err(AgentError::Provider(
-                    crate::brain::provider::ProviderError::ToolLoop(_),
-                )) => Some("tool_loop"),
+                Err(AgentError::Provider(crate::brain::provider::ProviderError::ToolLoop(_))) => {
+                    Some("tool_loop")
+                }
                 Err(AgentError::Provider(
                     crate::brain::provider::ProviderError::AnnouncementLoop(_),
                 )) => Some("announcement_loop"),
@@ -712,10 +712,7 @@ impl AgentService {
             }
 
             let fb = self.provider_for_session(session_id);
-            if !fb.force_next_fallback(
-                reason,
-                &self.provider_model_for_session(session_id),
-            ) {
+            if !fb.force_next_fallback(reason, &self.provider_model_for_session(session_id)) {
                 // Chain exhausted: every provider was asked and each hit the
                 // loop. Now the error is the honest answer, and it says so,
                 // naming the dropped call and that nothing is queued (#1397).
