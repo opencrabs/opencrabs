@@ -695,19 +695,25 @@ impl AgentService {
                 )
                 .await;
 
-            let killed_by_loop_detector = matches!(
-                &attempt,
+            let loop_reason = match &attempt {
                 Err(AgentError::Provider(
-                    crate::brain::provider::ProviderError::AnnouncementLoop(_)
-                ))
-            );
-            if !killed_by_loop_detector || rotations >= MAX_CHAIN_ROTATIONS {
+                    crate::brain::provider::ProviderError::ToolLoop(_),
+                )) => Some("tool_loop"),
+                Err(AgentError::Provider(
+                    crate::brain::provider::ProviderError::AnnouncementLoop(_),
+                )) => Some("announcement_loop"),
+                _ => None,
+            };
+            let Some(reason) = loop_reason else {
+                break attempt;
+            };
+            if rotations >= MAX_CHAIN_ROTATIONS {
                 break attempt;
             }
 
             let fb = self.provider_for_session(session_id);
             if !fb.force_next_fallback(
-                "announcement_loop",
+                reason,
                 &self.provider_model_for_session(session_id),
             ) {
                 // Chain exhausted: every provider was asked and each hit the
@@ -717,7 +723,7 @@ impl AgentService {
             }
             rotations += 1;
             tracing::warn!(
-                "Loop-detector kill: handing the turn to the next provider (rotation \
+                "Loop-detector kill ({reason}): handing the turn to the next provider (rotation \
                  {rotations}) instead of dropping it"
             );
         };
@@ -2464,6 +2470,7 @@ impl AgentService {
                         || matches!(
                             &e,
                             crate::brain::provider::ProviderError::AnnouncementLoop(_)
+                                | crate::brain::provider::ProviderError::ToolLoop(_)
                         ) =>
                 {
                     // 401/403 auth failures and missing-key errors are

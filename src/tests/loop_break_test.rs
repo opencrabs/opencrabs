@@ -91,7 +91,7 @@ fn loop_break_is_the_error_the_rotation_wrapper_matches() {
     assert!(
         matches!(
             err,
-            AgentError::Provider(ProviderError::AnnouncementLoop(_))
+            AgentError::Provider(ProviderError::ToolLoop(_))
         ),
         "{err:?}"
     );
@@ -106,7 +106,7 @@ fn loop_break_message_names_guard_label_count_window_and_dropped_call() {
         8,
         "bash {\"command\":\"sed -n '495,580p' agent.rs\"}",
     );
-    let AgentError::Provider(ProviderError::AnnouncementLoop(msg)) = err else {
+    let AgentError::Provider(ProviderError::ToolLoop(msg)) = err else {
         panic!("wrong variant");
     };
     assert!(
@@ -124,7 +124,7 @@ fn loop_break_message_names_guard_label_count_window_and_dropped_call() {
 #[test]
 fn exhausted_chain_says_how_many_were_tried_and_that_nothing_is_queued() {
     let err = chain_exhausted(loop_break_error("g", "bash", 4, 8, "bash {}"), 3);
-    let AgentError::Provider(ProviderError::AnnouncementLoop(msg)) = err else {
+    let AgentError::Provider(ProviderError::ToolLoop(msg)) = err else {
         panic!("wrong variant");
     };
     assert!(msg.contains("dropped call: bash {}"), "{msg}");
@@ -294,7 +294,7 @@ async fn an_exhausted_chain_ends_the_turn_naming_the_dropped_call() {
         .send_message_with_tools(session.id, "merge the PRs".to_string(), None)
         .await;
 
-    let Err(AgentError::Provider(ProviderError::AnnouncementLoop(msg))) = result else {
+    let Err(AgentError::Provider(ProviderError::ToolLoop(msg))) = result else {
         panic!("expected the loop error once the chain is exhausted: {result:?}");
     };
     assert!(msg.contains("'probe_tool' recurred"), "{msg}");
@@ -304,4 +304,16 @@ async fn an_exhausted_chain_ends_the_turn_naming_the_dropped_call() {
     );
     assert!(msg.contains("(1 tried)"), "{msg}");
     assert!(msg.contains("Nothing is queued"), "{msg}");
+}
+
+#[test]
+fn distinct_loop_reasons_for_tool_and_announcement_guards() {
+    // #2465: tool loops must be attributed to "tool_loop", announcement loops to "announcement_loop"
+    let tool_err = loop_break_error("near-identical tool-call loop", "bash", 4, 8, "bash {}");
+    assert!(matches!(tool_err, AgentError::Provider(ProviderError::ToolLoop(_))));
+
+    let announce_err = AgentError::Provider(ProviderError::AnnouncementLoop(
+        "near-identical announcements repeated within the turn".to_string()
+    ));
+    assert!(matches!(announce_err, AgentError::Provider(ProviderError::AnnouncementLoop(_))));
 }
