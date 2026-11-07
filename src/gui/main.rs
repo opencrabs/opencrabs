@@ -997,10 +997,12 @@ mod sidebar_action_tests {
             body.contains("editor.focus_pending = true"),
             "the caret goes back to the field the chips landed in"
         );
+        // Cut at the impl's closing brace: `split("impl ")` also matches the
+        // `-> impl IntoElement` return type and leaves a 76-byte stub.
         let render = src
             .split("impl Render for Editor")
             .nth(1)
-            .and_then(|rest| rest.split("impl ").next())
+            .and_then(|rest| rest.split("\n}\n").next())
             .expect("the render impl");
         assert!(
             render.contains("window.focus(&self.focus_handle)"),
@@ -14584,9 +14586,27 @@ mod tests {
         let (door, _) = after
             .split_once("\n    fn ")
             .expect("the next method ends it");
+        // #2665 split the door in two: `open_session` commits and
+        // `open_session_handing_back` makes the keyboard decision. The open
+        // still lands in `begin_conversation`, one link further down.
+        let handing_back = ["open_session_", "handing_back(id, true, cx)"].concat();
         assert!(
-            door.contains(&delegate),
-            "open_session routes through begin_conversation"
+            door.contains(&handing_back),
+            "open_session commits through open_session_handing_back"
+        );
+        let (_, back) = src
+            .split_once(
+                ["fn open_session_", "handing_back(&mut self, id: Uuid"]
+                    .concat()
+                    .as_str(),
+            )
+            .expect("open_session_handing_back exists");
+        let (back_body, _) = back
+            .split_once("\n    fn ")
+            .expect("the next method ends it");
+        assert!(
+            back_body.contains(&delegate),
+            "open_session_handing_back routes through begin_conversation"
         );
         let (_, helper) = src
             .split_once(["fn begin_", "conversation(&mut self"].concat().as_str())
