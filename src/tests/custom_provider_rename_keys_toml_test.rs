@@ -31,15 +31,21 @@
 //! (unreadable/unparseable) means "presence unknown, remove nothing".
 //! The tests below pin that fail-open contract.
 
+// Every test here overrides the profile home, which `dirs::home_dir()`
+// ignores on Windows, so the harness is unix-only.
+#[cfg(unix)]
 use crate::config::Config;
+#[cfg(unix)]
 use crate::config::profile::{home_for_profile, with_profile_home};
 
+#[cfg(unix)]
 fn write_profile_home(home: &std::path::Path, config_toml: &str, keys_toml: &str) {
     std::fs::create_dir_all(home).expect("create profile home");
     std::fs::write(home.join("config.toml"), config_toml).expect("write config");
     std::fs::write(home.join("keys.toml"), keys_toml).expect("write keys");
 }
 
+#[cfg(unix)]
 fn read_keys_toml(home: &std::path::Path) -> String {
     std::fs::read_to_string(home.join("keys.toml")).expect("read keys.toml")
 }
@@ -245,6 +251,7 @@ fn rename_path_in_onboarding_save_removes_old_config_section() {
 
 /// Keys.toml content mirroring the 2026-09-07 incident state: several
 /// custom providers with live api_keys, none of which may be touched.
+#[cfg(unix)]
 fn incident_keys_toml() -> String {
     "[providers.custom.bigmodel-glm52]\napi_key = \"k-bigmodel\"\n\n\
      [providers.custom.nvidia-stepfun]\napi_key = \"k-stepfun\"\n\n\
@@ -256,6 +263,7 @@ fn incident_keys_toml() -> String {
 /// config.toml mirroring the exact incident breakage: a duplicate key
 /// inside `[channels.telegram]`, which rejects both the serde/toml load
 /// AND the toml_edit parse the cleanup uses.
+#[cfg(unix)]
 fn incident_broken_config_toml() -> String {
     "bot_owner = 7711740248\n\n[channels.telegram]\nbot_owner = 7711740248\n\
      bot_owner = 7711740248\n"

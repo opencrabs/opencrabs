@@ -9,10 +9,16 @@
 //! autocompleted to another bot's handle (so this bot ignored it) and the
 //! fallback @handle strip used to discard the command's argument (#265).
 
+// The tests here override the profile home, which `dirs::home_dir()` ignores
+// on Windows, so every one of them is `#[cfg(unix)]` and so is this harness.
+#[cfg(unix)]
 use crate::channels::commands::handle_respond_to;
+#[cfg(unix)]
 use crate::config::profile::{home_for_profile, with_profile_home_async};
+#[cfg(unix)]
 use crate::config::{Config, RespondTo};
 
+#[cfg(unix)]
 fn write_profile_home(home: &std::path::Path, config_toml: &str) {
     std::fs::create_dir_all(home).expect("create profile home");
     std::fs::write(home.join("config.toml"), config_toml).expect("write config");
