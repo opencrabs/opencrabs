@@ -1845,7 +1845,10 @@ impl Dashboard {
     /// split is the one the caret is on, so a nested split grows from the
     /// pane being read rather than from the window's first leaf (#2472).
     fn begin_split(&mut self, layout: Layout, cx: &mut Context<Self>) {
-        let target = self.pane_focus.or(self.transcript.session);
+        // The chord door splits the pane holding the caret, resolved through
+        // the same `focused_pane` every other door uses, so the chord, the
+        // row menu and the composer cannot disagree about the leaf (#2625).
+        let target = self.focused_pane();
         let target = target.filter(|id| self.panes.as_ref().is_some_and(|t| t.contains(*id)));
         let Some(target) = target else {
             self.live
@@ -13888,6 +13891,42 @@ mod tests {
         assert!(
             !body.contains("self.sessions.cursor = self.transcript.session;"),
             "the chat's row is not the pane being split"
+        );
+    }
+
+    #[test]
+    fn begin_split_targets_the_focused_leaf() {
+        // #2625: the chord door resolves its target through `focused_pane`,
+        // so a split grows from the leaf holding the caret rather than from
+        // whichever leaf the tree happens to reach first.
+        let src = include_str!("main.rs");
+        let body = fn_body(src, "begin_split");
+        assert!(
+            body.contains("let target = self.focused_pane();"),
+            "the chord door splits the pane that holds the caret"
+        );
+        assert!(
+            !body.contains("self.pane_focus.or(self.transcript.session)"),
+            "the resolution stays in `focused_pane`, not a second copy here"
+        );
+        assert!(
+            body.contains("t.contains(*id)"),
+            "a leaf the tree no longer holds is not a split target"
+        );
+        assert!(
+            body.contains("self.split_target = Some(target);"),
+            "the picker answers into the leaf the caret was on"
+        );
+        // The chord is the door this test pins, so it has to reach the
+        // resolution above rather than a path of its own.
+        let keys = fn_body(src, "on_key");
+        assert!(
+            keys.contains("if let Some(layout) = split_chord(ks)"),
+            "the split chord is what names the layout"
+        );
+        assert!(
+            keys.contains("self.begin_split(layout, cx)"),
+            "the chord opens the pick through `begin_split`"
         );
     }
 
