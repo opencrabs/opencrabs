@@ -23,14 +23,19 @@ pub const FILE: &str = "gui_layout.json";
 /// tree draws a wrong window.
 pub const VERSION: u32 = 1;
 
-/// What the window writes down: the pane tree and the leaf that held the
-/// caret. `focus` is `None` when the chat itself owned it, the same `None` the
-/// window uses in memory.
+/// What the window writes down: the pane tree, the leaf that held the
+/// caret, and the leaf that was the window's own chat. `focus` is `None` when
+/// the chat itself owned it, the same `None` the window uses in memory, and
+/// `chat` says which leaf that chat was (#2689).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SavedLayout {
     pub version: u32,
     pub panes: Option<PaneTree>,
     pub focus: Option<Uuid>,
+    /// The window's own transcript leaf. Files written before #2689 have no
+    /// such key and read as `None`; the boot pick then uses the caret leaf.
+    #[serde(default)]
+    pub chat: Option<Uuid>,
 }
 
 /// Where the window keeps its layout.
@@ -66,7 +71,7 @@ pub fn load(path: &Path) -> Option<SavedLayout> {
 /// Write the layout the window is showing. One pane is the plain chat, so the
 /// file is removed instead: no file means "no custom layout", which is the
 /// signal the terminal uses too, and it keeps a first run read-free.
-pub fn save(path: &Path, panes: Option<&PaneTree>, focus: Option<Uuid>) {
+pub fn save(path: &Path, panes: Option<&PaneTree>, focus: Option<Uuid>, chat: Option<Uuid>) {
     let split = panes.is_some_and(|tree| tree.leaves().len() > 1);
     if !split {
         discard(path);
@@ -76,6 +81,7 @@ pub fn save(path: &Path, panes: Option<&PaneTree>, focus: Option<Uuid>) {
         version: VERSION,
         panes: panes.cloned(),
         focus,
+        chat,
     };
     let Ok(json) = serde_json::to_string_pretty(&saved) else {
         logging::error("gui layout: could not serialise the pane tree");
@@ -84,6 +90,21 @@ pub fn save(path: &Path, panes: Option<&PaneTree>, focus: Option<Uuid>) {
     if let Err(e) = std::fs::write(path, json) {
         logging::warn(&format!("gui layout: write failed ({e})"));
     }
+}
+
+/// The conversation a launch opens so the saved tree can come back (#2689).
+/// The chat leaf first: the window's own transcript has to exist before the
+/// tree can agree with it. Then the caret leaf, for files written before the
+/// chat was recorded. Then the first leaf the ledger still holds. `None` when
+/// no leaf survives, and the launch falls back to its normal pick.
+pub fn boot_session(saved: &SavedLayout, known: &HashSet<Uuid>) -> Option<Uuid> {
+    let leaves = saved.panes.as_ref()?.leaves();
+    for id in [saved.chat, saved.focus].into_iter().flatten() {
+        if leaves.contains(&id) && known.contains(&id) {
+            return Some(id);
+        }
+    }
+    leaves.into_iter().find(|id| known.contains(id))
 }
 
 /// The tree with the leaves the ledger no longer holds taken out. `None` when
@@ -129,7 +150,7 @@ mod tests {
         let (left, right) = (Uuid::new_v4(), Uuid::new_v4());
         let mut tree = split_tree(left, right);
         assert!(tree.drag_divider(&[], 0, 80.0, 800.0), "drag the divider");
-        save(&file, Some(&tree), Some(right));
+        save(&file, Some(&tree), Some(right), Some(left));
 
         let saved = load(&file).expect("a saved layout reads back");
         assert_eq!(saved.version, VERSION);
@@ -146,9 +167,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp home");
         let file = dir.path().join("gui_layout.json");
         let (left, right) = (Uuid::new_v4(), Uuid::new_v4());
-        save(&file, Some(&split_tree(left, right)), None);
+        save(&file, Some(&split_tree(left, right)), None, Some(left));
         assert!(file.exists(), "a split writes the file");
-        save(&file, Some(&PaneTree::leaf(left)), None);
+        save(&file, Some(&PaneTree::leaf(left)), None, Some(left));
         assert!(!file.exists(), "back to one pane removes it");
     }
 
@@ -173,6 +194,7 @@ mod tests {
             version: VERSION + 1,
             panes: Some(split_tree(left, right)),
             focus: None,
+            chat: None,
         };
         std::fs::write(&file, serde_json::to_string(&saved).expect("json")).expect("write");
         assert!(load(&file).is_none());
@@ -197,5 +219,92 @@ mod tests {
             prune(split_tree(left, right), &known).is_none(),
             "one survivor means the plain chat, not a one-pane split"
         );
+    }
+
+    #[test]
+    fn boot_opens_the_saved_chat_leaf_even_when_the_caret_is_elsewhere() {
+        // #2689: last_session drifts to whatever surface spoke last, so the
+        // boot pick is rarely one of the panes. The layout names its own chat.
+        let (left, right) = (Uuid::new_v4(), Uuid::new_v4());
+        let saved = SavedLayout {
+            version: VERSION,
+            panes: Some(split_tree(left, right)),
+            focus: Some(right),
+            chat: Some(left),
+        };
+        let known: HashSet<Uuid> = [left, right].into_iter().collect();
+        assert_eq!(boot_session(&saved, &known), Some(left));
+    }
+
+    #[test]
+    fn boot_falls_back_to_the_caret_leaf_when_the_chat_is_gone() {
+        let (left, right) = (Uuid::new_v4(), Uuid::new_v4());
+        let saved = SavedLayout {
+            version: VERSION,
+            panes: Some(split_tree(left, right)),
+            focus: Some(right),
+            chat: Some(left),
+        };
+        let known: HashSet<Uuid> = [right].into_iter().collect();
+        assert_eq!(boot_session(&saved, &known), Some(right));
+    }
+
+    #[test]
+    fn boot_falls_back_to_the_first_leaf_the_ledger_still_holds() {
+        let (left, right) = (Uuid::new_v4(), Uuid::new_v4());
+        let saved = SavedLayout {
+            version: VERSION,
+            panes: Some(split_tree(left, right)),
+            focus: None,
+            chat: None,
+        };
+        let known: HashSet<Uuid> = [right].into_iter().collect();
+        assert_eq!(boot_session(&saved, &known), Some(right));
+    }
+
+    #[test]
+    fn boot_with_no_surviving_leaf_leaves_the_pick_to_the_launch() {
+        let (left, right) = (Uuid::new_v4(), Uuid::new_v4());
+        let saved = SavedLayout {
+            version: VERSION,
+            panes: Some(split_tree(left, right)),
+            focus: Some(right),
+            chat: Some(left),
+        };
+        assert_eq!(boot_session(&saved, &HashSet::new()), None);
+    }
+
+    #[test]
+    fn an_old_file_without_the_chat_field_still_loads() {
+        // Files written before #2689 have no chat key; they must not be
+        // discarded as unreadable.
+        let dir = tempfile::tempdir().expect("temp home");
+        let file = dir.path().join("gui_layout.json");
+        let (left, right) = (Uuid::new_v4(), Uuid::new_v4());
+        let json = serde_json::json!({
+            "version": VERSION,
+            "panes": split_tree(left, right),
+            "focus": serde_json::Value::Null,
+        });
+        std::fs::write(&file, json.to_string()).expect("write the old file");
+        let saved = load(&file).expect("an old file reads back");
+        assert_eq!(saved.chat, None);
+        let known: HashSet<Uuid> = [left, right].into_iter().collect();
+        assert_eq!(boot_session(&saved, &known), Some(left));
+    }
+
+    #[test]
+    fn the_chat_leaf_survives_a_save_and_load_round_trip() {
+        let dir = tempfile::tempdir().expect("temp home");
+        let file = dir.path().join("gui_layout.json");
+        let (left, right) = (Uuid::new_v4(), Uuid::new_v4());
+        save(
+            &file,
+            Some(&split_tree(left, right)),
+            Some(right),
+            Some(left),
+        );
+        let saved = load(&file).expect("the layout reads back");
+        assert_eq!(saved.chat, Some(left), "the chat leaf comes back");
     }
 }

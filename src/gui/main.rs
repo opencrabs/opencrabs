@@ -2090,9 +2090,16 @@ impl Dashboard {
     /// Write the split the window is showing, so the next launch puts the same
     /// panes back in the same slots at the same sizes (#2675). Called wherever
     /// the layout can change under the user's hand: a split, a close, a
-    /// divider drag, a caret move, a conversation switch.
+    /// divider drag, a caret move, a conversation switch. The chat's own leaf
+    /// goes with it, so a launch knows which pane was the window's transcript
+    /// (#2689).
     fn persist_layout(&self) {
-        layout_store::save(&layout_store::path(), self.panes.as_ref(), self.pane_focus);
+        layout_store::save(
+            &layout_store::path(),
+            self.panes.as_ref(),
+            self.pane_focus,
+            self.transcript.session,
+        );
     }
 
     /// Put back the split the last run left (#2675). Runs once, after the boot
@@ -10983,19 +10990,32 @@ fn main() {
             filter_active: false,
         },
     };
-    // Chat is the default screen: the conversation the user was in opens on
-    // launch, and a first run opens the newest. The usage ledger is something
-    // the user asks for (ctrl+u); the two never share the pane, so a
-    // conversation can never render as "usage" (#2444).
-    let initial_session = pick_initial_session(
-        &sessions_state.items,
-        opencrabs::utils::last_session::read(),
-    );
     // The split the last run closed with (#2675). Read here, on the main
     // thread, and put back once the conversation is open: the chat's leaf has
     // to exist before the tree can agree with it. Nothing is drawn from it
     // until then, so a stale or unreadable file costs one log line.
     let saved_layout = layout_store::load(&layout_store::path());
+    // Chat is the default screen: the conversation the user was in opens on
+    // launch, and a first run opens the newest. The usage ledger is something
+    // the user asks for (ctrl+u); the two never share the pane, so a
+    // conversation can never render as "usage" (#2444).
+    // A saved layout names the boot conversation itself (#2689): last_session
+    // drifts to whatever surface spoke last, so it is rarely one of the panes,
+    // and letting it pick sent every restart back to the plain chat. The
+    // terminal has always restored its tree this way; the window now agrees.
+    let initial_session = saved_layout
+        .as_ref()
+        .and_then(|saved| {
+            let known: std::collections::HashSet<Uuid> =
+                sessions_state.items.iter().map(|item| item.id).collect();
+            layout_store::boot_session(saved, &known)
+        })
+        .or_else(|| {
+            pick_initial_session(
+                &sessions_state.items,
+                opencrabs::utils::last_session::read(),
+            )
+        });
     Application::new().run(move |cx: &mut App| {
         // Dock icon first: a bare binary has no bundle, so macOS would show
         // its generic "exec" icon for the whole session otherwise.
