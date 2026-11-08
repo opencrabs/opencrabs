@@ -3248,7 +3248,7 @@ impl Tool for PlanTool {
                         .unwrap_or_default();
                     let run_gate_now = !gate_enabled
                         || scope == VerificationScope::Each
-                        || is_final_task(&current_plan, task_order);
+                        || is_final_task(current_plan, task_order);
                     if run_gate_now {
                         match verify_task_completion(
                             &task_type_str,
