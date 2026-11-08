@@ -732,8 +732,8 @@ impl Editor {
             // The display halves join with newlines and a synthetic entry keeps
             // its receipt tag, so a background task's payload never turns into
             // editable text (#2650).
-            let joined = crate::agent_bridge::PendingMessage::join(&msgs)
-                .expect("a non-empty recall joins");
+            let joined =
+                crate::agent_bridge::PendingMessage::join(&msgs).expect("a non-empty recall joins");
             let recall = self.recall.get_or_insert_with(|| Recall {
                 session,
                 entries: Vec::new(),

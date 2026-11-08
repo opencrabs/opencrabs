@@ -889,7 +889,10 @@ async fn drop_unanswered_duplicate(
     session_id: Uuid,
     outgoing: &str,
 ) {
-    let rows = match messages.list_recent_messages_for_session(session_id, 2).await {
+    let rows = match messages
+        .list_recent_messages_for_session(session_id, 2)
+        .await
+    {
         Ok(rows) => rows,
         Err(e) => {
             crate::logging::error(&format!("gui dedup read: {e}"));
@@ -960,8 +963,7 @@ pub fn spawn_turn(
                 // Before the turn writes its rows: a resend of the text an
                 // unanswered turn left behind must not stack a second copy of
                 // it in history (#2697).
-                let messages =
-                    opencrabs::services::MessageService::new(service.context().clone());
+                let messages = opencrabs::services::MessageService::new(service.context().clone());
                 drop_unanswered_duplicate(&messages, session_id, &content).await;
                 let turn = service.send_message_with_tools_and_mode(
                     session_id,
@@ -2299,15 +2301,14 @@ mod tests {
             .create_session(Some("dedup".to_string()))
             .await
             .expect("session");
-        (opencrabs::services::MessageService::new(context), session.id)
+        (
+            opencrabs::services::MessageService::new(context),
+            session.id,
+        )
     }
 
     /// What a turn does on start: the question row, then an empty placeholder.
-    async fn open_turn(
-        messages: &opencrabs::services::MessageService,
-        session: Uuid,
-        text: &str,
-    ) {
+    async fn open_turn(messages: &opencrabs::services::MessageService, session: Uuid, text: &str) {
         messages
             .create_message(session, "user".to_string(), text.to_string())
             .await
