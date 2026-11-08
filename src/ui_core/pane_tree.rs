@@ -698,6 +698,34 @@ mod tests {
         assert!((children[1].share() - (1.0 - floor)).abs() < 1e-4);
     }
 
+    /// A nested pair narrower than two fixed floors still drags: the pair's
+    /// own span decides the floor, and the drag only trades inside the pair (#2684).
+    #[test]
+    fn a_nested_pair_under_the_fixed_floor_still_drags() {
+        let mut tree = PaneTree::leaf(a());
+        assert!(tree.split(a(), Layout::Side, b()));
+        assert!(tree.split(b(), Layout::Stack, c()));
+        // The nested pair owns half of an 800px window: 400px, too narrow
+        // for two 240px panes, so the floor goes proportional instead of
+        // freezing the divider at even.
+        assert!(tree.drag_divider(&[1], 0, 40.0, 800.0));
+        let Some(PaneTree::Split { children, .. }) = tree.at(&[1]) else {
+            panic!("the nested split is still there");
+        };
+        let (PaneTree::Leaf { share: top, .. }, PaneTree::Leaf { share: bottom, .. }) =
+            (&children[0], &children[1])
+        else {
+            panic!("the nested children are leaves");
+        };
+        assert!((top - 0.3).abs() < 1e-4, "top got {top}");
+        assert!((bottom - 0.2).abs() < 1e-4, "bottom got {bottom}");
+        // Width shares cannot pin conservation here: both stacked panes span
+        // the split's full width, so the leaves sum past one. Conservation is
+        // per split: the pair keeps its combined share (#2684).
+        let held = children[0].share() + children[1].share();
+        assert!((held - 0.5).abs() < 1e-4, "pair held {held}");
+    }
+
     /// A nested split takes its own path, and a divider index past the last
     /// pair is refused rather than wrapping.
     #[test]
