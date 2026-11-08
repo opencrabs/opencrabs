@@ -1346,28 +1346,30 @@ pub fn queue_take(session_id: Uuid) -> Vec<QueuedUserMessage> {
     taken
 }
 
-/// The newest message waiting for the composer's session, taken out of the
-/// queue.
+/// The whole queue waiting for the composer's session, taken out in one call,
+/// oldest first.
 ///
-/// Recall used to read the queue and leave the message in it (#2629), so the
-/// original was still there to be sent while the user edited a copy: pulling a
-/// message out and then deciding not to send it did not stop it from going out,
-/// and the strip kept naming it as queued (#2637). Up now takes it. What the
-/// composer holds belongs to the composer; only sending puts it back.
-pub fn queue_recall_take() -> Option<(Uuid, QueuedUserMessage)> {
+/// Up used to walk the queue one message per press, newest first (#2629), and
+/// each step took its message so the drain could not send the original while
+/// the user edited a copy (#2637). Three queued messages were three separate
+/// edits; the owner asked for all of them at once (#2696). One take now yields
+/// the entire queue in the order it was written, and what the composer holds
+/// stays out of the queue until it is sent.
+pub fn queue_recall_take() -> Option<(Uuid, Vec<QueuedUserMessage>)> {
     let session = (*COMPOSER_SESSION.lock().ok()?)?;
-    let mut map = queue();
-    let entry = map.get_mut(&session)?;
-    let msg = entry.pop()?;
-    if entry.is_empty() {
-        map.remove(&session);
+    // `queue_take` is the same take-all the Esc flush uses, so a recall and a
+    // flush can never disagree about what is still waiting, and the take
+    // leaves one receipt in the GUI log (#2695).
+    let taken = queue_take(session);
+    if taken.is_empty() {
+        return None;
     }
-    Some((session, msg))
+    Some((session, taken))
 }
 
-/// Put a message the composer took for editing back where it waited. Walking
-/// down past a recall returns it to its own session's queue, edits and all, so
-/// nothing that was queued is lost by looking at it (#2637).
+/// Put the messages a recall took for editing back where they waited, oldest
+/// first. Abandoning a recall returns every original untouched, so nothing that
+/// was queued is lost by looking at it (#2637).
 pub fn queue_recall_return(session_id: Uuid, msg: QueuedUserMessage) {
     queue_push(session_id, msg);
 }
@@ -1892,15 +1894,15 @@ async fn run_text_command(
 mod tests {
     use super::*;
 
-    /// Up walks the whole queue, newest first (#2629), and takes each message
-    /// out of it: a recall the user abandons must not be sent when the turn
-    /// ends (#2637).
+    /// Up brings the WHOLE queue into the composer in one take, oldest first
+    /// (#2696), and the take empties the queue: a recall the user abandons must
+    /// not be sent when the turn ends (#2637).
     #[test]
-    fn up_takes_the_queue_one_message_at_a_time() {
+    fn up_recalls_the_whole_queue_at_once() {
         // One test for the queue's recall path: `COMPOSER_SESSION` and `QUEUE`
         // are process-wide, so two tests here would race on them.
-        let session = Uuid::from_u128(0x2629_0001);
-        let other = Uuid::from_u128(0x2629_0002);
+        let session = Uuid::from_u128(0x2696_0001);
+        let other = Uuid::from_u128(0x2696_0002);
 
         for text in ["one", "two", "three"] {
             queue_push(session, QueuedUserMessage::plain(text.to_string()));
@@ -1909,15 +1911,17 @@ mod tests {
         queue_push(other, QueuedUserMessage::plain("elsewhere".to_string()));
 
         set_composer_session(Some(session));
-        let mut walked: Vec<String> = Vec::new();
-        while let Some((from, msg)) = queue_recall_take() {
-            assert_eq!(from, session, "a recall never reaches another session");
-            walked.push(msg.display_text);
-        }
+        let (from, taken) = queue_recall_take().expect("the queue has messages");
+        assert_eq!(from, session, "a recall never reaches another session");
+        let recalled: Vec<String> = taken.iter().map(|msg| msg.display_text.clone()).collect();
         assert_eq!(
-            walked,
-            vec!["three".to_string(), "two".to_string(), "one".to_string()],
-            "Up walks from the newest to the oldest"
+            recalled,
+            vec!["one".to_string(), "two".to_string(), "three".to_string()],
+            "one Up yields the whole queue, oldest first"
+        );
+        assert!(
+            queue_recall_take().is_none(),
+            "the take emptied the queue, so a second Up has nothing to recall"
         );
         assert!(
             queue_snapshot(session).is_empty(),
@@ -1929,17 +1933,19 @@ mod tests {
             "taking this session's queue leaves another session's alone"
         );
 
-        // Walking away from a recall puts it back, in the order it was taken.
-        queue_recall_return(session, QueuedUserMessage::plain("two".to_string()));
-        queue_recall_return(session, QueuedUserMessage::plain("three".to_string()));
+        // Abandoning the recall puts every original back, in the order it was
+        // written.
+        for msg in taken {
+            queue_recall_return(session, msg);
+        }
         let left: Vec<String> = queue_snapshot(session)
             .iter()
             .map(|msg| msg.display_text.clone())
             .collect();
         assert_eq!(
             left,
-            vec!["two".to_string(), "three".to_string()],
-            "a returned message waits in its own queue again"
+            vec!["one".to_string(), "two".to_string(), "three".to_string()],
+            "returning a recall preserves the original order"
         );
 
         let _ = queue_take(session);

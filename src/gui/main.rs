@@ -1200,9 +1200,9 @@ impl Dashboard {
             if let Some(b) = agent_bridge::bridge() {
                 self.ctx_max = b.service.context_limit_for_session(id);
             }
-            // A queue walk belongs to the conversation it started in too, so
-            // its messages go back to wait instead of vanishing with the old
-            // draft (#2637).
+            // A recall belongs to the conversation it started in too, so its
+            // messages go back to wait instead of vanishing with the old draft
+            // (#2637, #2696).
             let returned = self.editor.update(cx, |ed, _| ed.release_recall(false));
             if let Some((session, msgs)) = returned {
                 for msg in msgs {
@@ -5513,10 +5513,10 @@ impl Dashboard {
         }
     }
 
-    /// A composer just sent its field. The message it shows is the one going
-    /// out, so it stays out of the queue; every message its walk took before
-    /// it goes back to wait, because the user never consumed it. Other
-    /// composers release their whole recall (#2637).
+    /// A composer just sent its field. The field holds every message its recall
+    /// took, joined into one edit, so the whole text is the one going out and
+    /// nothing goes back to wait. Other composers release their whole recall
+    /// (#2637, #2696).
     fn finish_recall(&mut self, sent: &Entity<editor::Editor>, cx: &mut Context<Self>) {
         let mut editors = vec![self.editor.clone()];
         editors.extend(self.pane_states.values().map(|pane| pane.editor.clone()));

@@ -221,14 +221,14 @@ pub enum EditorEvent {
     Preview(std::path::PathBuf),
 }
 
-/// A queue walk the composer is holding: the messages Up took out of one
-/// session's queue, in the order it took them, and the draft the first Up
-/// covered. Taking them is the point: a message the user pulled out to edit
-/// must not still be queued, or the drain would send the original while they
-/// edit a copy (#2637).
+/// A queue recall the composer is holding: every message Up took out of one
+/// session's queue, oldest first, and the draft the recall covered. Taking them
+/// is the point: a message the user pulled out to edit must not still be queued,
+/// or the drain would send the original while they edit a copy (#2637).
 struct Recall {
     session: Uuid,
-    /// Newest taken first. The last entry is the one in the field.
+    /// Oldest first, the order they were written; `join` shows them the same
+    /// way. Empty only between the take and the assignment.
     entries: Vec<crate::agent_bridge::PendingMessage>,
     draft: String,
 }
@@ -678,22 +678,18 @@ impl Editor {
     /// Everything the recall still holds, for the caller to put back in the
     /// queue it came from.
     ///
-    /// `keep_current` is for the send path: the message in the field is the one
-    /// going out, so it leaves with the send, while the ones the walk took
-    /// before it go back to wait, because the user never consumed them
-    /// (#2637).
+    /// The field shows every recalled message joined into one edit (#2696), so
+    /// `keep_current` is the send path: the whole joined text is going out, and
+    /// all of it leaves with the send. Abandoning returns every original
+    /// untouched, oldest first, the order they were written in (#2637).
     pub fn release_recall(
         &mut self,
         keep_current: bool,
     ) -> Option<(Uuid, Vec<crate::agent_bridge::PendingMessage>)> {
-        let mut recall = self.recall.take()?;
+        let recall = self.recall.take()?;
         if keep_current {
-            recall.entries.pop();
+            return Some((recall.session, Vec::new()));
         }
-        // The walk took the run newest first; a queue is appended to, so it
-        // takes them back oldest first or the order they were written in
-        // comes back inverted.
-        recall.entries.reverse();
         Some((recall.session, recall.entries))
     }
 
@@ -720,31 +716,31 @@ impl Editor {
     /// like the lines the reader sees. At the top row Up goes to the very
     /// start, and at the bottom row Down goes to the very end.
     fn up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
-        // Up walks the queue back one message at a time: newest first, then the
-        // one before it, so five queued messages are five edits instead of one
-        // (#2629). Each step TAKES its message out of the queue: leaving the
-        // original behind meant a message the user pulled out and decided not
-        // to send still went out when the turn ended, while the strip kept
-        // calling it queued (#2637).
-        if (self.content.is_empty() || self.recall.is_some())
-            && let Some((session, msg)) = crate::agent_bridge::queue_recall_take()
+        // Up brings the WHOLE queue into the field in one press (#2696): every
+        // waiting message joins into one edit, oldest first, so three queued
+        // messages are one correction instead of three. The take empties the
+        // queue, so what the composer holds cannot also be sent by the drain
+        // behind the user's back (#2637).
+        //
+        // Only into an empty field with no recall already held: there is no
+        // walk left to continue, and taking again would replace the originals
+        // the recall is holding with whatever arrived since.
+        if self.content.is_empty()
+            && self.recall.is_none()
+            && let Some((session, msgs)) = crate::agent_bridge::queue_recall_take()
         {
-            // A walk belongs to the session it started in: a recall from
-            // another conversation goes back to wait before this one starts.
-            if self
-                .recall
-                .as_ref()
-                .is_some_and(|recall| recall.session != session)
-            {
-                self.give_back_recall(false);
-            }
+            // The display halves join with newlines and a synthetic entry keeps
+            // its receipt tag, so a background task's payload never turns into
+            // editable text (#2650).
+            let joined = crate::agent_bridge::PendingMessage::join(&msgs)
+                .expect("a non-empty recall joins");
             let recall = self.recall.get_or_insert_with(|| Recall {
                 session,
                 entries: Vec::new(),
                 draft: std::mem::take(&mut self.content),
             });
-            recall.entries.push(msg.clone());
-            self.content = msg.display_text;
+            recall.entries = msgs;
+            self.content = joined.display_text;
             let end = self.content.len();
             self.selected_range = end..end;
             self.selection_reversed = false;
@@ -787,37 +783,27 @@ impl Editor {
         if self.step_emoji_popup(1, cx) {
             return;
         }
-        // Down is Up's way back out of a recall: the message on screen goes
-        // back into its queue, edits and all, and the next newer one, then the
-        // draft the first Up covered, takes its place (#2637).
+        // Inside a recall the field holds several messages joined, so Down
+        // walks the caret through them first. Off the last row it is the way
+        // out: every original goes back to wait untouched, oldest first, and
+        // the draft the recall covered returns (#2696, #2637).
+        let rows = self.visual_rows();
+        let target = vertical_row_target(&rows, self.cursor_offset(), 1);
+        if target != self.cursor_offset() {
+            self.move_to(target, cx);
+            return;
+        }
         if self.recall.is_some() {
-            let mut recall = self.recall.take().expect("a recall is active");
-            if let Some(mut msg) = recall.entries.pop() {
-                let original = msg.display_text.clone();
-                if msg.context_text == original {
-                    msg.context_text = self.content.clone();
-                }
-                msg.display_text = self.content.clone();
+            let recall = self.recall.take().expect("a recall is active");
+            for msg in recall.entries {
                 crate::agent_bridge::queue_recall_return(recall.session, msg);
             }
-            match recall.entries.last() {
-                Some(msg) => {
-                    self.content = msg.display_text.clone();
-                    self.recall = Some(recall);
-                }
-                None => self.content = std::mem::take(&mut recall.draft),
-            }
+            self.content = recall.draft;
             let end = self.content.len();
             self.selected_range = end..end;
             self.selection_reversed = false;
             self.marked_range = None;
             cx.notify();
-            return;
-        }
-        let rows = self.visual_rows();
-        let target = vertical_row_target(&rows, self.cursor_offset(), 1);
-        if target != self.cursor_offset() {
-            self.move_to(target, cx);
             return;
         }
         if input_history_down(
