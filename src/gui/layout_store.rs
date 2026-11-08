@@ -202,6 +202,34 @@ mod tests {
         assert!(restored.duplicates().is_empty(), "no session twice");
     }
 
+    /// A custom share inside a nested split loads back unchanged: the
+    /// snapshot keeps the whole tree's numbers, not just the root pair
+    /// (#2684).
+    #[test]
+    fn a_nested_custom_share_survives_a_save_and_load_round_trip() {
+        let dir = tempfile::tempdir().expect("temp home");
+        let file = dir.path().join("gui_layout.json");
+        let (a, b, c) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let mut tree = PaneTree::leaf(a);
+        assert!(tree.split(a, Layout::Side, b), "split the leaf");
+        assert!(tree.split(b, Layout::Stack, c), "split the second pane");
+        // The nested pair holds half of 2400px, so 120px of travel moves it
+        // off even without touching the floor.
+        assert!(tree.drag_divider(&[1], 0, 120.0, 2400.0), "drag the pair");
+        let nested_before = tree.leaf_width_share(b);
+        assert_ne!(nested_before, Some(0.25), "the drag moved the share");
+        save(&file, Some(&tree), Some(b), Some(a));
+
+        let saved = load(&file).expect("a saved layout reads back");
+        let restored = saved.panes.expect("the tree");
+        assert_eq!(restored.leaves(), vec![a, b, c], "same draw order");
+        assert_eq!(
+            restored.leaf_width_share(b),
+            nested_before,
+            "the nested share comes back unchanged"
+        );
+    }
+
     #[test]
     fn one_pane_is_not_a_layout_and_leaves_no_file() {
         let dir = tempfile::tempdir().expect("temp home");
