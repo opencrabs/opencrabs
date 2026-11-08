@@ -5659,6 +5659,25 @@ impl Dashboard {
         map
     }
 
+    /// The rail card's plan progress for every row it is about to draw:
+    /// `(done, total)` for an approved plan with a checklist, nothing else.
+    ///
+    /// A separate pass from the badges because the idle repaint check only
+    /// asks about animation, and this question is static state. The index
+    /// already cached the paths and documents for the badge pass, so each row
+    /// here costs one `stat` at most and a parse only when the file moved.
+    fn rail_plan_progress_map(&mut self) -> HashMap<Uuid, (usize, usize)> {
+        let rows: Vec<Uuid> = self.sessions.ordered().map(|s| s.id).collect();
+        let now = std::time::Instant::now();
+        let mut map = HashMap::new();
+        for id in rows {
+            if let Some(progress) = self.rail_index.progress(id, now) {
+                map.insert(id, progress);
+            }
+        }
+        map
+    }
+
     /// One pane's footer text (#2593): pane index, whether that session is
     /// mid-turn, who is answering it, and its plan progress. The detached
     /// commands ride the strip above the composer instead, so the one-line
@@ -8684,6 +8703,9 @@ impl Render for Dashboard {
         // before the loop: the index needs `&mut self` and the row iterator
         // holds `&self`.
         let activity = self.rail_activity_map();
+        // The plan bar reads the same cached index the badges just warmed:
+        // one stat per row with a plan file, no second loader.
+        let plan_progress = self.rail_plan_progress_map();
         // Telegram-style topics: a parent's children paint as compact chips
         // on its card, not as their own rows. Resolve the chip set once before
         // the loop so the paint can skip those rows and hang the strip on the
@@ -8799,6 +8821,7 @@ impl Render for Dashboard {
                 // Already formatted in the loader: the paint only clones a
                 // shared string, so the shared clock costs no allocation.
                 preview: self.sessions.previews.get(&id).cloned(),
+                plan: plan_progress.get(&id).copied(),
             };
             // A parent card carries its topics as inline chips: three by
             // default, a "+N" pill expands the rest, a collapse pill folds
