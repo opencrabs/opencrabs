@@ -34,6 +34,25 @@ pub struct SessionListOptions {
 /// Title prefix every spawned sub-agent session carries, set by `spawn_agent`.
 pub const SUBAGENT_TITLE_PREFIX: &str = "subagent:";
 
+/// Why an existing session could not be attached as a topic. Typed so the
+/// picker can show a plain sentence instead of a raw constraint error; the
+/// migration triggers remain the last line of defence behind these guards.
+#[derive(Debug, thiserror::Error)]
+pub enum AttachTopicError {
+    #[error("a session cannot be a topic of itself")]
+    SelfParent,
+    #[error("the target is itself a topic; topics nest only one level")]
+    ParentIsTopic,
+    #[error("that session already has topics of its own and cannot become one")]
+    ChildIsParent,
+    #[error("that session is already a topic of another group")]
+    AlreadyAttached,
+    #[error("session not found")]
+    NotFound,
+    #[error(transparent)]
+    Db(#[from] anyhow::Error),
+}
+
 /// Repository for session operations
 #[derive(Clone)]
 pub struct SessionRepository {
@@ -87,6 +106,97 @@ impl SessionRepository {
             .map_err(interact_err)?
             .context("Failed to attach topic to its session")?;
         Ok(topic.id)
+    }
+
+    /// Attach an existing session as a topic of `parent`, transcript and
+    /// settings untouched. The guards mirror the depth-1 contract so the UI
+    /// gets a readable reason; the migration triggers still backstop them.
+    /// Idempotent when the child already belongs to this same parent.
+    pub async fn attach_topic(&self, child: Uuid, parent: Uuid) -> Result<(), AttachTopicError> {
+        if child == parent {
+            return Err(AttachTopicError::SelfParent);
+        }
+        let (child_str, parent_str) = (child.to_string(), parent.to_string());
+        self.pool
+            .get()
+            .await
+            .context("Failed to get connection")
+            .map_err(AttachTopicError::Db)?
+            .interact(move |conn| -> Result<(), AttachTopicError> {
+                let tx = conn
+                    .transaction()
+                    .map_err(|e| AttachTopicError::Db(e.into()))?;
+                let child_parent: Option<String> = tx
+                    .query_row(
+                        "SELECT parent_id FROM sessions WHERE id = ?1",
+                        params![child_str],
+                        |r| r.get(0),
+                    )
+                    .optional()
+                    .map_err(|e| AttachTopicError::Db(e.into()))?
+                    .ok_or(AttachTopicError::NotFound)?;
+                let parent_parent: Option<String> = tx
+                    .query_row(
+                        "SELECT parent_id FROM sessions WHERE id = ?1",
+                        params![parent_str],
+                        |r| r.get(0),
+                    )
+                    .optional()
+                    .map_err(|e| AttachTopicError::Db(e.into()))?
+                    .ok_or(AttachTopicError::NotFound)?;
+                if parent_parent.is_some() {
+                    return Err(AttachTopicError::ParentIsTopic);
+                }
+                if let Some(existing) = child_parent
+                    && existing != parent_str
+                {
+                    return Err(AttachTopicError::AlreadyAttached);
+                }
+                let child_kids: i64 = tx
+                    .query_row(
+                        "SELECT COUNT(*) FROM sessions WHERE parent_id = ?1",
+                        params![child_str],
+                        |r| r.get(0),
+                    )
+                    .map_err(|e| AttachTopicError::Db(e.into()))?;
+                if child_kids > 0 {
+                    return Err(AttachTopicError::ChildIsParent);
+                }
+                tx.execute(
+                    "UPDATE sessions SET parent_id = ?2 WHERE id = ?1",
+                    params![child_str, parent_str],
+                )
+                .map_err(|e| AttachTopicError::Db(e.into()))?;
+                tx.execute(
+                    "UPDATE sessions SET topics_enabled = 1 WHERE id = ?1",
+                    params![parent_str],
+                )
+                .map_err(|e| AttachTopicError::Db(e.into()))?;
+                tx.commit().map_err(|e| AttachTopicError::Db(e.into()))?;
+                Ok(())
+            })
+            .await
+            .map_err(|e| AttachTopicError::Db(interact_err(e)))?
+    }
+
+    /// Release a topic back to a top-level session (`parent_id = NULL`). The
+    /// depth trigger only fires on a non-null parent, so this always passes.
+    pub async fn detach_topic(&self, child: Uuid) -> Result<()> {
+        let child_str = child.to_string();
+        self.pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                conn.execute(
+                    "UPDATE sessions SET parent_id = NULL WHERE id = ?1",
+                    params![child_str],
+                )
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to detach topic")?;
+        Ok(())
     }
 
     /// Every (topic, parent) pair, as ids. A topic is a session with a parent.
@@ -767,10 +877,15 @@ impl SessionRepository {
     /// Permanently remove a session and every row keyed to it.
     ///
     /// Unlike [`delete`](Self::delete), which archives the row and keeps it for
-    /// usage joins, this is a real delete — used only by the sub-agent sweep,
+    /// usage joins, this is a real delete, used only by the sub-agent sweep,
     /// where the whole point is to stop the data accumulating (#931). Runs in
     /// one transaction so a failure part-way cannot leave a session row whose
     /// children are gone.
+    ///
+    /// Attached topics are released, not deleted: `parent_id` cascades on
+    /// delete, so a real conversation grouped under this session would be
+    /// destroyed with it. Detaching first turns a purge into "the children
+    /// become top-level sessions", never "the group wipes its conversations".
     pub async fn purge(&self, id: Uuid) -> Result<()> {
         let id_str = id.to_string();
         self.pool
@@ -785,6 +900,14 @@ impl SessionRepository {
                         params![id_str],
                     )?;
                 }
+                // Release attached topics before the row goes: the parent_id
+                // foreign key cascades on delete, so without this a grouped
+                // conversation dies with its parent. The depth trigger only
+                // fires on a non-null parent, so setting NULL passes it.
+                tx.execute(
+                    "UPDATE sessions SET parent_id = NULL WHERE parent_id = ?1",
+                    params![id_str],
+                )?;
                 tx.execute("DELETE FROM sessions WHERE id = ?1", params![id_str])?;
                 tx.commit()?;
                 Ok::<_, rusqlite::Error>(())
@@ -1022,5 +1145,156 @@ impl<T> OptionalExt<T> for rusqlite::Result<T> {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AttachTopicError, OptionalExt, Session, SessionRepository, params};
+    use crate::db::Database;
+    use uuid::Uuid;
+
+    async fn repo() -> (Database, SessionRepository) {
+        let db = Database::connect_in_memory().await.expect("in-memory db");
+        db.run_migrations().await.expect("migrations");
+        let repo = SessionRepository::new(db.pool().clone());
+        (db, repo)
+    }
+
+    async fn session(repo: &SessionRepository, title: &str) -> Uuid {
+        let s = Session::new(Some(title.to_string()), None, None);
+        let id = s.id;
+        repo.create(&s).await.expect("create session");
+        id
+    }
+
+    async fn parent_of(db: &Database, id: Uuid) -> Option<String> {
+        let id_str = id.to_string();
+        db.pool()
+            .get()
+            .await
+            .unwrap()
+            .interact(move |conn| {
+                conn.query_row(
+                    "SELECT parent_id FROM sessions WHERE id = ?1",
+                    params![id_str],
+                    |r| r.get::<_, Option<String>>(0),
+                )
+                .optional()
+            })
+            .await
+            .unwrap()
+            .unwrap()
+            .flatten()
+    }
+
+    async fn topics_enabled(db: &Database, id: Uuid) -> bool {
+        let id_str = id.to_string();
+        db.pool()
+            .get()
+            .await
+            .unwrap()
+            .interact(move |conn| {
+                conn.query_row(
+                    "SELECT topics_enabled FROM sessions WHERE id = ?1",
+                    params![id_str],
+                    |r| r.get::<_, i64>(0),
+                )
+            })
+            .await
+            .unwrap()
+            .unwrap()
+            != 0
+    }
+
+    /// A session can never be its own topic.
+    #[tokio::test]
+    async fn attach_topic_rejects_self() {
+        let (_db, repo) = repo().await;
+        let a = session(&repo, "A").await;
+        let err = repo.attach_topic(a, a).await.unwrap_err();
+        assert!(matches!(err, AttachTopicError::SelfParent));
+    }
+
+    /// Depth-1 contract: a target that is itself a topic refuses a child.
+    #[tokio::test]
+    async fn attach_topic_rejects_depth_two() {
+        let (_db, repo) = repo().await;
+        let a = session(&repo, "A").await;
+        let b = session(&repo, "B").await;
+        let c = session(&repo, "C").await;
+        repo.attach_topic(b, a).await.expect("B under A");
+        let err = repo.attach_topic(c, b).await.unwrap_err();
+        assert!(matches!(err, AttachTopicError::ParentIsTopic));
+    }
+
+    /// A session that already has topics of its own cannot become one.
+    #[tokio::test]
+    async fn attach_topic_rejects_child_that_is_a_parent() {
+        let (_db, repo) = repo().await;
+        let a = session(&repo, "A").await;
+        let b = session(&repo, "B").await;
+        let c = session(&repo, "C").await;
+        repo.attach_topic(c, a).await.expect("C under A");
+        let err = repo.attach_topic(a, b).await.unwrap_err();
+        assert!(matches!(err, AttachTopicError::ChildIsParent));
+    }
+
+    /// A child already attached to a different group is refused.
+    #[tokio::test]
+    async fn attach_topic_rejects_already_attached() {
+        let (_db, repo) = repo().await;
+        let a = session(&repo, "A").await;
+        let b = session(&repo, "B").await;
+        let c = session(&repo, "C").await;
+        repo.attach_topic(c, a).await.expect("C under A");
+        let err = repo.attach_topic(c, b).await.unwrap_err();
+        assert!(matches!(err, AttachTopicError::AlreadyAttached));
+    }
+
+    /// A successful attach sets the child's parent and turns topics on for
+    /// the parent; re-attaching to the same parent is idempotent.
+    #[tokio::test]
+    async fn attach_topic_sets_parent_and_enables_topics_idempotently() {
+        let (db, repo) = repo().await;
+        let a = session(&repo, "A").await;
+        let c = session(&repo, "C").await;
+        repo.attach_topic(c, a).await.expect("C under A");
+        assert_eq!(parent_of(&db, c).await, Some(a.to_string()));
+        assert!(topics_enabled(&db, a).await);
+        repo.attach_topic(c, a).await.expect("same parent again");
+        assert_eq!(parent_of(&db, c).await, Some(a.to_string()));
+    }
+
+    /// Detach releases a topic back to a top-level session.
+    #[tokio::test]
+    async fn detach_topic_clears_parent() {
+        let (db, repo) = repo().await;
+        let a = session(&repo, "A").await;
+        let c = session(&repo, "C").await;
+        repo.attach_topic(c, a).await.expect("C under A");
+        repo.detach_topic(c).await.expect("detach");
+        assert_eq!(parent_of(&db, c).await, None);
+    }
+
+    /// Purging a group releases its children as top-level sessions instead of
+    /// cascading them away: the attached conversation and its messages live.
+    #[tokio::test]
+    async fn purge_releases_children_instead_of_deleting_them() {
+        let (db, repo) = repo().await;
+        let a = session(&repo, "A").await;
+        let c = session(&repo, "C").await;
+        repo.attach_topic(c, a).await.expect("C under A");
+        repo.purge(a).await.expect("purge group");
+        assert!(repo.find_by_id(a).await.unwrap().is_none(), "group is gone");
+        assert!(
+            repo.find_by_id(c).await.unwrap().is_some(),
+            "the attached conversation survives the purge"
+        );
+        assert_eq!(
+            parent_of(&db, c).await,
+            None,
+            "the survivor is released to a top-level session"
+        );
     }
 }
