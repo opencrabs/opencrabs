@@ -11639,7 +11639,7 @@ fn main() {
                             let _ = weak.update(cx, |this, cx| this.ctrl_c_press(cx));
                         },
                     );
-                    let _ = view.update(cx, |this, _| this.ctrl_c_interceptor = Some(kept));
+                    view.update(cx, |this, _| this.ctrl_c_interceptor = Some(kept));
                 }
                 // The palette follows the system appearance from the first
                 // frame, and again whenever the system switches (#2341).
