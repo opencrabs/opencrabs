@@ -7,7 +7,26 @@ use crate::db::database::interact_err;
 use crate::db::models::Message;
 use anyhow::{Context, Result};
 use rusqlite::params;
+use rusqlite::params_from_iter;
+use std::collections::HashMap;
 use uuid::Uuid;
+
+/// How much of a message fits on a rail card's preview line.
+///
+/// A character budget, never a byte one: truncating by bytes panics on
+/// multibyte content (#2271).
+pub const PREVIEW_CHARS: usize = 60;
+
+/// One session's latest message, flattened and cut for the rail card.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessagePreview {
+    /// The row's role: `user`, `assistant`, or whatever a tool turn wrote.
+    pub role: String,
+    /// The content with every run of whitespace collapsed to one space.
+    pub text: String,
+    /// True when the stored content was longer than [`PREVIEW_CHARS`].
+    pub truncated: bool,
+}
 
 /// Repository for message operations
 #[derive(Clone)]
@@ -648,6 +667,95 @@ impl MessageRepository {
             .context("Failed to get last message")
     }
 
+    /// The latest message of every session in `ids`, in one round trip.
+    ///
+    /// The rail paints a preview on every card and repaints on a shared clock,
+    /// so asking [`Self::get_last_message`] once per card is a query per card
+    /// per frame. This asks for the whole visible set at once and is meant to
+    /// be called on a rail reload, never from a paint.
+    ///
+    /// Ordering is by `sequence`, not `created_at`: an assistant row is
+    /// created at turn start and updated in place, so its timestamp matches
+    /// the triggering user row and cannot order the transcript. `sequence` is
+    /// also what `get_last_message` uses, so the preview and the transcript
+    /// agree on which row is last.
+    ///
+    /// Ids are chunked well under SQLite's bound-parameter limit, so a long
+    /// rail still resolves in a bounded number of statements.
+    pub async fn last_messages_for(&self, ids: &[Uuid]) -> Result<HashMap<Uuid, MessagePreview>> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        // 999 is the oldest SQLITE_MAX_VARIABLE_NUMBER; staying under it means
+        // the chunk size is valid on every SQLite we might be linked against.
+        const CHUNK: usize = 500;
+        let mut previews = HashMap::with_capacity(ids.len());
+        for chunk in ids.chunks(CHUNK) {
+            let keys: Vec<String> = chunk.iter().map(Uuid::to_string).collect();
+            let placeholders = vec!["?"; keys.len()].join(",");
+            let sql = format!(
+                "SELECT session_id, role, content FROM ( \
+                    SELECT session_id, role, content, \
+                           ROW_NUMBER() OVER ( \
+                               PARTITION BY session_id ORDER BY sequence DESC \
+                           ) AS rn \
+                    FROM messages WHERE session_id IN ({placeholders}) \
+                ) WHERE rn = 1"
+            );
+            let rows: Vec<(String, String, String)> = self
+                .pool
+                .get()
+                .await
+                .context("Failed to get connection")?
+                .interact(move |conn| {
+                    let mut stmt = conn.prepare_cached(&sql)?;
+                    let mapped = stmt.query_map(params_from_iter(keys.iter()), |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    })?;
+                    let mut collected = Vec::new();
+                    for row in mapped {
+                        collected.push(row?);
+                    }
+                    // The error type is named, not inferred: several crates
+                    // implement From<rusqlite::Error>, so a bare `Ok` here
+                    // leaves `?` ambiguous (E0283).
+                    Ok::<_, anyhow::Error>(collected)
+                })
+                .await
+                .map_err(interact_err)?
+                .context("Failed to read last messages")?;
+
+            for (session_id, role, content) in rows {
+                // A row whose id will not parse is not addressable by the
+                // rail, so skipping it loses nothing a card could show.
+                let Ok(id) = Uuid::parse_str(&session_id) else {
+                    continue;
+                };
+                let (text, truncated) = preview_text(&content, PREVIEW_CHARS);
+                // A last message that is only reasoning (mid-turn) cleans to
+                // empty; "Crabs: " with nothing after it is worse than the
+                // date·cost line, so leave the preview absent and let the
+                // card fall back to it.
+                if text.is_empty() {
+                    continue;
+                }
+                previews.insert(
+                    id,
+                    MessagePreview {
+                        role,
+                        text,
+                        truncated,
+                    },
+                );
+            }
+        }
+        Ok(previews)
+    }
+
     /// Get the most recent assistant message in a session.
     ///
     /// Used to recover reply context in Telegram DMs: bot messages live in
@@ -692,6 +800,27 @@ impl MessageRepository {
         tracing::debug!("Deleted all messages for session: {}", session_id);
         Ok(())
     }
+}
+
+/// Flatten a message to one preview line and cut it to `max` characters.
+///
+/// Newlines become single spaces so a multi-line answer cannot open a hole in
+/// the rail, and the cut walks characters rather than bytes: a byte slice on
+/// multibyte content panics (#2271).
+fn preview_text(content: &str, max: usize) -> (String, bool) {
+    // The rail shows the answer, not the model's deliberation. CLI providers
+    // persist reasoning inline as `<!-- reasoning -->` blocks (and some leak
+    // think/tool tags), so run the same delivery-side sanitizer the TUI and
+    // channels use before flattening; otherwise the raw markers and the
+    // thinking prose land in the one-line card preview.
+    let cleaned = crate::utils::sanitize::strip_llm_artifacts(content);
+    let flattened = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flattened.chars().count() <= max {
+        return (flattened, false);
+    }
+    let mut cut: String = flattened.chars().take(max).collect();
+    cut.push('\u{2026}');
+    (cut, true)
 }
 
 /// Extension trait for rusqlite to add `.optional()` to query results
@@ -741,4 +870,111 @@ fn insert_message(conn: &rusqlite::Connection, m: &Message) -> rusqlite::Result<
             m.forward.as_ref().map(|f| f.batch.to_string()),
         ],
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Message, MessageRepository, PREVIEW_CHARS, preview_text};
+    use crate::db::Database;
+    use crate::db::models::Session;
+    use crate::db::repository::SessionRepository;
+    use uuid::Uuid;
+
+    async fn setup() -> (Database, SessionRepository, MessageRepository) {
+        let db = Database::connect_in_memory().await.expect("in-memory db");
+        db.run_migrations().await.expect("migrations");
+        let sessions = SessionRepository::new(db.pool().clone());
+        let messages = MessageRepository::new(db.pool().clone());
+        (db, sessions, messages)
+    }
+
+    async fn session(sessions: &SessionRepository, title: &str) -> Uuid {
+        let s = Session::new(Some(title.to_string()), None, None);
+        let id = s.id;
+        sessions.create(&s).await.expect("create session");
+        id
+    }
+
+    async fn say(messages: &MessageRepository, sid: Uuid, role: &str, content: &str, seq: i32) {
+        let m = Message::new(sid, role.to_string(), content.to_string(), seq);
+        messages.create(&m).await.expect("create message");
+    }
+
+    /// One row per session, the newest by sequence, even when the id list
+    /// spans the 500-parameter chunk boundary: real sessions sit in both
+    /// chunks with filler ids between them.
+    #[tokio::test]
+    async fn last_messages_for_newest_per_session_across_chunk_boundary() {
+        let (_db, sessions, messages) = setup().await;
+        let a = session(&sessions, "A").await;
+        let b = session(&sessions, "B").await;
+        let c = session(&sessions, "C").await;
+        say(&messages, a, "user", "old A", 1).await;
+        say(&messages, a, "assistant", "new A", 2).await;
+        say(&messages, b, "user", "only B", 1).await;
+        say(&messages, c, "assistant", "old C", 1).await;
+        say(&messages, c, "assistant", "newer C", 2).await;
+        say(&messages, c, "user", "newest C", 3).await;
+
+        // A and B land in the first 500-id chunk, C in the second; the rest
+        // are ids with no messages, so only the three real sessions resolve.
+        let mut ids = vec![a, b];
+        ids.extend((0..498).map(|_| Uuid::new_v4()));
+        ids.push(c);
+        assert_eq!(ids.len(), 501);
+
+        let previews = messages.last_messages_for(&ids).await.expect("batch read");
+        assert_eq!(previews.len(), 3, "filler ids resolve to nothing");
+        assert_eq!(previews[&a].text, "new A");
+        assert_eq!(previews[&a].role, "assistant");
+        assert_eq!(previews[&b].text, "only B");
+        assert_eq!(previews[&b].role, "user");
+        assert_eq!(previews[&c].text, "newest C");
+        assert_eq!(previews[&c].role, "user");
+    }
+
+    /// Content longer than the budget is cut on a character boundary and
+    /// flagged truncated, never sliced through a multibyte byte.
+    #[tokio::test]
+    async fn last_messages_for_truncates_long_content() {
+        let (_db, sessions, messages) = setup().await;
+        let d = session(&sessions, "D").await;
+        let long = "é".repeat(PREVIEW_CHARS + 20);
+        say(&messages, d, "assistant", &long, 1).await;
+        let previews = messages.last_messages_for(&[d]).await.expect("batch read");
+        let p = &previews[&d];
+        assert!(p.truncated);
+        assert_eq!(p.text.chars().count(), PREVIEW_CHARS + 1);
+        assert!(p.text.ends_with('\u{2026}'));
+    }
+
+    /// A last message that is only reasoning cleans to empty, so the card
+    /// gets no preview rather than a bare "Crabs: " with nothing after it.
+    #[tokio::test]
+    async fn last_messages_for_skips_reasoning_only_message() {
+        let (_db, sessions, messages) = setup().await;
+        let e = session(&sessions, "E").await;
+        say(
+            &messages,
+            e,
+            "assistant",
+            "<!-- reasoning -->only thinking, no answer yet<!-- /reasoning -->",
+            1,
+        )
+        .await;
+        let previews = messages.last_messages_for(&[e]).await.expect("batch read");
+        assert!(
+            previews.is_empty(),
+            "reasoning-only last message stays absent"
+        );
+    }
+
+    /// The flattener collapses every whitespace run to one space and leaves
+    /// short content untruncated.
+    #[test]
+    fn preview_text_flattens_whitespace() {
+        let (text, truncated) = preview_text("a\n  b\tc   d", PREVIEW_CHARS);
+        assert_eq!(text, "a b c d");
+        assert!(!truncated);
+    }
 }
