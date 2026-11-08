@@ -92,6 +92,9 @@ fn a_narrow_pane_area_keeps_the_divider_movable() {
     assert!((pane_floor(span, 2) - floor).abs() < 1e-6);
     assert!((share_after_drag(0.6, 300.0, span) - (1.0 - floor)).abs() < 1e-6);
     assert!((share_after_drag(0.4, -300.0, span) - floor).abs() < 1e-6);
+    // The issue's own repro: 350px cannot hold two 240px panes, so the old
+    // fixed floor froze the share at exactly 0.5. It must move now (#2684).
+    assert_ne!(share_after_drag(0.5, 10.0, 350.0), 0.5);
     // A dead span still holds: there is nothing to drag inside nothing.
     assert_eq!(share_after_drag(0.6, 300.0, 0.0), 0.6);
     assert_eq!(share_after_drag(0.6, 300.0, f32::NAN), 0.6);

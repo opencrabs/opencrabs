@@ -34,7 +34,7 @@ inputs:
     description: "Token carrying `actions: write`. Fork PRs receive a read-only token whatever the workflow asks for."
     required: true
   run-id:
-    description: Run to cancel, normally ${{ github.run_id }}.
+    description: Run to cancel, normally the workflow run id.
     required: true
 
 runs:

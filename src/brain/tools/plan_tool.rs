@@ -828,6 +828,12 @@ pub(crate) struct RalphVerification {
     /// invent one for "update the docs".
     #[serde(default = "default_true")]
     pub(crate) spec_check_generation: bool,
+    /// When the mechanical gate runs (#2694). `final` (default) runs it once,
+    /// on the task whose completion finishes the plan; intermediate tasks
+    /// complete without running commands and are logged Uncertain (verification
+    /// deferred). `each` runs it on every task, the pre-#2694 behaviour.
+    #[serde(default)]
+    pub(crate) scope: VerificationScope,
 }
 
 /// Policy for completion claims made against unverified acceptance criteria (#870).
@@ -878,6 +884,34 @@ impl std::fmt::Display for SpecCheckPolicy {
             SpecCheckPolicy::Advisory => write!(f, "advisory"),
             SpecCheckPolicy::Block => write!(f, "block"),
             SpecCheckPolicy::Off => write!(f, "off"),
+        }
+    }
+}
+
+/// When the mechanical verification gate runs (#2694).
+///
+/// Running the gate on every task means a multi-task plan pays for a full
+/// `cargo test` / `cargo clippy` (or the project's equivalent) once per task,
+/// which is hours on a large suite, while the default advisory policy cannot
+/// even reject a completion. The gate exists to validate the finished plan, so
+/// by default it runs once, on the task that finishes it.
+#[derive(Debug, Deserialize, Default, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum VerificationScope {
+    /// Run the gate only on the task whose completion finishes the plan.
+    /// Intermediate tasks complete without running commands; their belief is
+    /// logged Uncertain with a "deferred to the final task" note.
+    #[default]
+    Final,
+    /// Run the gate on every task completion (the pre-#2694 behaviour).
+    Each,
+}
+
+impl std::fmt::Display for VerificationScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            VerificationScope::Final => write!(f, "final"),
+            VerificationScope::Each => write!(f, "each"),
         }
     }
 }
@@ -1311,6 +1345,17 @@ pub(crate) enum VerificationOutcome {
     NotConfigured,
     /// Verification globally disabled (no config / `enabled = false`).
     Disabled,
+}
+
+/// Whether completing `task_order` finishes the plan (#2694): every other task
+/// is already resolved (completed or skipped). This is the task the end-scoped
+/// verification gate runs on, so the gate fires once, when the last outstanding
+/// task completes, instead of on every task. A single-task plan's only task is
+/// trivially final.
+pub(crate) fn is_final_task(plan: &PlanDocument, task_order: usize) -> bool {
+    plan.tasks.iter().all(|t| {
+        t.order == task_order || matches!(t.status, TaskStatus::Completed | TaskStatus::Skipped)
+    })
 }
 
 /// Mechanical verification gate: run the verification commands for the task
@@ -3190,79 +3235,114 @@ impl Tool for PlanTool {
                         .get_task_by_order(task_order)
                         .map(|t| (t.task_type.to_string(), !t.acceptance_criteria.is_empty()))
                         .unwrap_or_default();
-                    match verify_task_completion(&task_type_str, task_order, &context.working_dir())
-                    {
-                        Err(verify_msg) => {
-                            return Ok(ToolResult::error(format!(
-                                "🔒 Ralph Loop verification REJECTED task #{task_order}.\n\n{verify_msg}"
-                            )));
-                        }
-                        Ok(outcome) => {
-                            // Per-task spec check (#1904): the check locked
-                            // at `start`, re-derived from the criteria as they
-                            // read now, run before the verdict below so that a
-                            // pass counts as proof.
-                            let spec = run_locked_spec_check(
-                                current_plan,
-                                task_order,
-                                &context.working_dir(),
-                            );
-                            if spec.rejected {
+                    // Scope (#2694): by default the gate runs once, on the task
+                    // that finishes the plan, not on every task. Running a full
+                    // `cargo test` / `cargo clippy` per task burned hours while
+                    // the advisory policy could not even reject a completion.
+                    // The deferral only applies when the gate is enabled; a
+                    // disabled or absent config keeps the pre-#2694 behaviour.
+                    let gate_config = ralph_loop_config(&context.working_dir());
+                    let gate_enabled = gate_config.as_ref().is_some_and(|c| c.verification.enabled);
+                    let scope = gate_config
+                        .map(|c| c.verification.scope)
+                        .unwrap_or_default();
+                    let run_gate_now = !gate_enabled
+                        || scope == VerificationScope::Each
+                        || is_final_task(current_plan, task_order);
+                    if run_gate_now {
+                        match verify_task_completion(
+                            &task_type_str,
+                            task_order,
+                            &context.working_dir(),
+                        ) {
+                            Err(verify_msg) => {
                                 return Ok(ToolResult::error(format!(
-                                    "🔒 Ralph Loop spec check REJECTED task #{task_order}.\n\n{}",
-                                    spec.note.as_deref().unwrap_or("the locked check failed")
+                                    "🔒 Ralph Loop verification REJECTED task #{task_order}.\n\n{verify_msg}"
                                 )));
                             }
-                            // A locked check that ran and exited 0 is real
-                            // proof, and proof is what a type with no
-                            // configured commands was missing: it turns
-                            // silence into Verified.
-                            let outcome = if spec.passed {
-                                VerificationOutcome::Verified
-                            } else {
-                                outcome
-                            };
-                            if let Some(note) = &spec.note {
-                                criteria_downgraded = true;
-                                downgrade_reason = Some(note.clone());
-                            }
-                            if spec.passed {
-                                spec_passed = Some(describe_commands(&spec.commands));
-                            }
-                            let policy = ralph_loop_config(&context.working_dir())
-                                .map(|c| c.verification.criteria_policy)
-                                .unwrap_or_default();
-                            let policy = audit_criteria_policy_flip(&context.working_dir(), policy);
-                            match criteria_verdict(policy, outcome) {
-                                CriteriaVerdict::Reject => {
-                                    let reason = if has_criteria {
-                                        "it declares acceptance criteria but no verification \
-                                         commands are configured for this task type"
-                                            .to_string()
-                                    } else {
-                                        "it declares no acceptance criteria and no verification \
-                                         commands are configured for this task type"
-                                            .to_string()
-                                    };
+                            Ok(outcome) => {
+                                // Per-task spec check (#1904): the check locked
+                                // at `start`, re-derived from the criteria as they
+                                // read now, run before the verdict below so that a
+                                // pass counts as proof.
+                                let spec = run_locked_spec_check(
+                                    current_plan,
+                                    task_order,
+                                    &context.working_dir(),
+                                );
+                                if spec.rejected {
                                     return Ok(ToolResult::error(format!(
-                                        "🔒 Ralph Loop REJECTED task #{task_order} (type={task_type_str}): \
+                                        "🔒 Ralph Loop spec check REJECTED task #{task_order}.\n\n{}",
+                                        spec.note.as_deref().unwrap_or("the locked check failed")
+                                    )));
+                                }
+                                // A locked check that ran and exited 0 is real
+                                // proof, and proof is what a type with no
+                                // configured commands was missing: it turns
+                                // silence into Verified.
+                                let outcome = if spec.passed {
+                                    VerificationOutcome::Verified
+                                } else {
+                                    outcome
+                                };
+                                if let Some(note) = &spec.note {
+                                    criteria_downgraded = true;
+                                    downgrade_reason = Some(note.clone());
+                                }
+                                if spec.passed {
+                                    spec_passed = Some(describe_commands(&spec.commands));
+                                }
+                                let policy = ralph_loop_config(&context.working_dir())
+                                    .map(|c| c.verification.criteria_policy)
+                                    .unwrap_or_default();
+                                let policy =
+                                    audit_criteria_policy_flip(&context.working_dir(), policy);
+                                match criteria_verdict(policy, outcome) {
+                                    CriteriaVerdict::Reject => {
+                                        let reason = if has_criteria {
+                                            "it declares acceptance criteria but no verification \
+                                         commands are configured for this task type"
+                                                .to_string()
+                                        } else {
+                                            "it declares no acceptance criteria and no verification \
+                                         commands are configured for this task type"
+                                            .to_string()
+                                        };
+                                        return Ok(ToolResult::error(format!(
+                                            "🔒 Ralph Loop REJECTED task #{task_order} (type={task_type_str}): \
                                          {reason}. Under `criteria_policy = \"strict\"` a success claim \
                                          without proof is refused. Configure commands under [verification] \
                                          in ralph_loop.toml for the task type (or set \
                                          criteria_policy = \"downgrade\"), then complete again."
-                                    )));
-                                }
-                                CriteriaVerdict::Downgrade => {
-                                    criteria_downgraded = true;
-                                    tracing::info!(
-                                        "Ralph loop: task #{task_order} completion downgraded to Uncertain \
+                                        )));
+                                    }
+                                    CriteriaVerdict::Downgrade => {
+                                        criteria_downgraded = true;
+                                        tracing::info!(
+                                            "Ralph loop: task #{task_order} completion downgraded to Uncertain \
                                          (type '{task_type_str}' ran no verification commands; criteria \
                                          declared: {has_criteria})"
-                                    );
+                                        );
+                                    }
+                                    CriteriaVerdict::Accept => {}
                                 }
-                                CriteriaVerdict::Accept => {}
                             }
                         }
+                    } else {
+                        // Deferred (#2694): verification runs once when the
+                        // plan's final task completes. This task is not
+                        // individually verified, so its belief is Uncertain,
+                        // not a silent pass.
+                        criteria_downgraded = true;
+                        downgrade_reason = Some(
+                            "verification is deferred to the plan's final task \
+                             (scope = \"final\"); this task was not individually verified"
+                                .to_string(),
+                        );
+                        tracing::info!(
+                            "Ralph Loop scope: deferring verification of task #{task_order} \
+                             to the plan's final task (#2694)"
+                        );
                     }
 
                     // Receipt binding (#1011): a commit claimed in the output

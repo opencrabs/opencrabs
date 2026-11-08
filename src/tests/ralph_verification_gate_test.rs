@@ -148,6 +148,9 @@ fn verification(enabled: bool, pairs: &[(&str, &[&str])]) -> RalphVerification {
         // Added by #2063: model-written checks. Off here, so these tests keep
         // pinning the command mapping and never ask a model for anything.
         spec_check_generation: false,
+        // Added by #2694: when the gate runs. These tests pin the per-type
+        // command mapping, which the scope does not touch.
+        scope: Default::default(),
         task_type_commands: pairs
             .iter()
             .map(|(t, c)| TaskTypeCommands {

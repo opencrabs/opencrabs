@@ -663,8 +663,28 @@ jobs:
         # the moment of death are in the log. Linux-only at runtime (it reads
         # /proc and the cgroup memory controller and returns immediately
         # elsewhere), so this stays one copy of the suite command.
+        # #2699: the hosted runner is a 4 vCPU / 16 GB VM and this crate does not
+        # fit on it at full parallelism. Two of our own units compiling together
+        # (the library and its test harness, then the binary) sit at 5 GB each
+        # and climb past 8 GB, so the VM is evicted at ~300 MB free before a
+        # single test runs: run 42440814274 died at 03:27:52 with rustc at
+        # 8662 MB and 6334 MB, mem_used 15.7 GB of 16, and no `test result:`
+        # line in the log.
+        #
+        # CARGO_BUILD_JOBS=1 is the fix: cargo then compiles one unit at a time,
+        # so the peak is a single rustc (~9 GB) instead of two, and each unit
+        # still fans its codegen across all four cores. The suite command is
+        # untouched: opt-level 3 and thin LTO still run, so this stays the
+        # release-mode correctness check the leg exists for.
+        #
+        # Do NOT pin CARGO_PROFILE_CI_CODEGEN_UNITS here. Codegen-units is part
+        # of cargo's fingerprint, so overriding it rebuilds the entire dependency
+        # tree from source: the first attempt at this fix did exactly that (913
+        # `Compiling` lines, 17 minutes of cold deps on a warm cache) and was
+        # still evicted, because the two units ran concurrently anyway.
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then
+            export CARGO_BUILD_JOBS=1
             bash scripts/ci-resource-sampler.sh 10 &
             sampler=$!
             trap 'kill "$sampler" 2>/dev/null || true' EXIT
@@ -717,7 +737,10 @@ jobs:
     needs: [lint, audit]
     if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    # 90, not 60 (#2699): the leg compiles one unit at a time on four cores so
+    # the 16 GB VM is not evicted, which costs wall clock. A cold dependency
+    # build on top of that is ~20 minutes before our own crate starts.
+    timeout-minutes: 90
     steps: *test-steps
 
   # ── Stage 1b: Security (fast gate — runs alongside lint, before build/test)

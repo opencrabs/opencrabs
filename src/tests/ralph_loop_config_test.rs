@@ -16,7 +16,7 @@
 //! nothing ever writes to `~/.opencrabs/safety/`.
 
 use crate::brain::tools::plan_tool::{
-    RalphLoopConfig, SpecCheckPolicy, ralph_config_path, ralph_loop_config,
+    RalphLoopConfig, SpecCheckPolicy, VerificationScope, ralph_config_path, ralph_loop_config,
 };
 use crate::brain::tools::toml_hot_reload::safety_path;
 use std::fs;
@@ -214,4 +214,70 @@ fn bundled_template_documents_spec_checks_and_still_parses() {
 
     let parsed: RalphLoopConfig = toml::from_str(template).expect("bundled template must parse");
     assert_eq!(parsed.verification.spec_checks, SpecCheckPolicy::Advisory);
+}
+
+/// #2694: a config that never mentions `scope` gets the end-scoped default, so
+/// the gate runs once at plan completion instead of on every task. This is the
+/// behaviour change: the full per-type suite is no longer paid per step.
+#[test]
+fn scope_defaults_to_final_when_absent() {
+    let dir = scratch("scope_default");
+    fs::write(
+        dir.path().join("ralph_loop.toml"),
+        "[verification]\nenabled = true\n",
+    )
+    .unwrap();
+
+    let config = ralph_loop_config(dir.path()).expect("file present");
+    assert_eq!(config.verification.scope, VerificationScope::Final);
+}
+
+/// Each variant parses lower-case, and a typo is a parse error rather than a
+/// silent slide back to the default. A key that quietly degrades is worse than
+/// one that fails: the user would believe the gate runs per task when it does
+/// not, or the reverse.
+#[test]
+fn scope_parses_each_variant_and_refuses_a_typo() {
+    for (name, text, expected) in [
+        ("final", "final", VerificationScope::Final),
+        ("each", "each", VerificationScope::Each),
+    ] {
+        let dir = scratch(&format!("scope_{name}"));
+        fs::write(
+            dir.path().join("ralph_loop.toml"),
+            format!("[verification]\nenabled = true\nscope = \"{text}\"\n"),
+        )
+        .unwrap();
+
+        let config = ralph_loop_config(dir.path()).expect("file present");
+        assert_eq!(
+            config.verification.scope, expected,
+            "scope = {text:?} must parse as {name}"
+        );
+    }
+
+    let dir = scratch("scope_typo");
+    fs::write(
+        dir.path().join("ralph_loop.toml"),
+        "[verification]\nscope = \"last\"\n",
+    )
+    .unwrap();
+    assert!(
+        ralph_loop_config(dir.path()).is_none(),
+        "an unknown scope must fail loudly, not fall back to final"
+    );
+}
+
+/// The bundled template must name the new key and still parse, so the default
+/// is visible to the only audience that reads the seed.
+#[test]
+fn bundled_template_documents_scope_and_still_parses() {
+    let template = include_str!("../docs/reference/templates/ralph_loop.toml");
+    assert!(
+        template.contains("scope = \"final\""),
+        "the bundled template must show the default"
+    );
+
+    let parsed: RalphLoopConfig = toml::from_str(template).expect("bundled template must parse");
+    assert_eq!(parsed.verification.scope, VerificationScope::Final);
 }

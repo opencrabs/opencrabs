@@ -24,10 +24,10 @@ use std::time::{Duration, Instant};
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, ClipboardEntry, ClipboardItem, Context, CursorStyle, Div,
     Element, ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
-    Focusable, GlobalElementId, ImageFormat, KeyBinding, LayoutId, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ObjectFit, PathPromptOptions, Pixels, Point, SharedString, Style,
-    TextAlign, TextRun, UTF16Selection, Window, WrappedLine, actions, div, fill, img, point,
-    prelude::*, px, relative, rgb, rgba, size,
+    Focusable, Font, GlobalElementId, ImageFormat, KeyBinding, LayoutId, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, PathPromptOptions, Pixels, Point,
+    SharedString, Style, TextAlign, TextRun, UTF16Selection, Window, WrappedLine, actions, div,
+    fill, img, point, prelude::*, px, relative, rgb, rgba, size,
 };
 
 use unicode_segmentation::UnicodeSegmentation;
@@ -289,6 +289,8 @@ pub struct Editor {
     notice: Option<Notice>,
     /// Bumped on every new notice so an older timer cannot clear a newer one.
     notice_generation: u64,
+    /// Last shaped draft, reused while its key holds still (#2688).
+    shaped_draft: Option<ShapedDraft>,
 }
 
 /// One transient line inside the composer (#2587). The terminal keeps the same
@@ -345,6 +347,7 @@ impl Editor {
             emoji_dismissed: false,
             notice: None,
             notice_generation: 0,
+            shaped_draft: None,
         }
     }
 
@@ -1383,6 +1386,15 @@ struct RowPaint {
     cursor: Option<Point<Pixels>>,
 }
 
+/// The composer's shaped lines plus the inputs they were shaped from (#2688).
+/// Shaping is the expensive half of a composer frame; a caret blink, a
+/// selection, a notice timer or a streaming answer re-renders the field without
+/// changing the draft, size, width, font or color, so those frames reuse this.
+struct ShapedDraft {
+    key: (String, Pixels, Pixels, Font, [f32; 4]),
+    lines: Option<Vec<WrappedLine>>,
+}
+
 /// The custom element: shapes every row during prepaint, paints rows and
 /// quads during paint, and registers the platform input handler so typing,
 /// IME and paste all land in the `Editor`.
@@ -1488,24 +1500,59 @@ impl Element for EditorElement {
         } else {
             style.color
         };
+        let font = style.font();
         let run = TextRun {
             len: display.len(),
-            font: style.font(),
+            font: font.clone(),
             color: run_color,
             background_color: None,
             underline: None,
             strikethrough: None,
         };
-        let shaped = window
-            .text_system()
-            .shape_text(
-                SharedString::from(display.clone()),
-                font_size,
-                &[run],
-                Some(wrap_width),
-                None,
-            )
-            .ok();
+        // Shaping is the expensive half of a composer frame, and the draft,
+        // size, width, font and color are the only inputs it depends on. A
+        // caret blink, a selection, a notice timer or a streaming answer
+        // re-renders the field without touching any of them, so reuse the last
+        // shaping instead of paying for it again (#2688).
+        let key = (
+            display.clone(),
+            font_size,
+            wrap_width,
+            font,
+            [run_color.h, run_color.s, run_color.l, run_color.a],
+        );
+        let cached = self
+            .input
+            .read(cx)
+            .shaped_draft
+            .as_ref()
+            .filter(|cache| cache.key == key)
+            .map(|cache| cache.lines.clone());
+        let shaped = match cached {
+            Some(lines) => lines,
+            None => {
+                let lines = window
+                    .text_system()
+                    .shape_text(
+                        SharedString::from(display.clone()),
+                        font_size,
+                        &[run],
+                        Some(wrap_width),
+                        None,
+                    )
+                    .ok()
+                    // shape_text hands back a SmallVec; settle it into the
+                    // plain Vec the cache stores so both match arms agree.
+                    .map(|lines| lines.into_vec());
+                self.input.update(cx, |input, _| {
+                    input.shaped_draft = Some(ShapedDraft {
+                        key,
+                        lines: lines.clone(),
+                    });
+                });
+                lines
+            }
+        };
 
         let mut rows = Vec::new();
         let mut line_start = 0usize;
@@ -2146,6 +2193,23 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).expect("scratch dir");
         dir
+    }
+
+    /// The composer must not re-shape the draft on every frame: the shaping
+    /// call sits behind the `shaped_draft` cache, so a caret blink, selection
+    /// or streaming answer reuses the last shaping (#2688).
+    #[test]
+    fn composer_shaping_is_cached_between_frames() {
+        let src = include_str!("editor.rs");
+        assert!(src.contains("shaped_draft: Option<ShapedDraft>"));
+        let prepaint = src
+            .split("fn prepaint(")
+            .nth(1)
+            .and_then(|rest| rest.split("fn paint(").next())
+            .expect("editor prepaint");
+        assert!(prepaint.contains(".filter(|cache| cache.key == key)"));
+        assert!(prepaint.contains("let shaped = match cached"));
+        assert!(prepaint.contains("input.shaped_draft = Some(ShapedDraft"));
     }
 
     #[test]

@@ -478,6 +478,7 @@ pub mod provider_streaming_perf_test;
 pub mod queued_message_join_test;
 pub mod ralph_loop_config_test;
 pub mod ralph_receipt_binding_test;
+pub mod ralph_scope_test;
 pub mod ralph_verification_gate_test;
 pub mod readme_channel_surface_test;
 pub mod reasoning_split_test;
