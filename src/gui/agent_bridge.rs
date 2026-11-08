@@ -870,6 +870,61 @@ where
     }
 }
 
+/// Cut the trailing unanswered pair before a resend duplicates it (#2697).
+///
+/// A turn writes its `user` row and an empty `assistant` placeholder at the
+/// moment it starts, before the provider is asked. A stop that lands after the
+/// first token cannot hand the text back (the `untouched()` hand-back only
+/// covers a stop that beat the token), so that pair stays behind with no
+/// answer, and sending the same text again appended a second copy of it.
+///
+/// The pair is cut only when it is provably leftover: the newest row is an
+/// `assistant` row whose content is still empty, and the row before it is a
+/// `user` row carrying exactly the outgoing text. Anything else ends the walk.
+/// A real answer, a turn that ran a tool (tool activity lives on the assistant
+/// row, so an empty one answered nothing), and a different question are
+/// history, and history is never touched.
+async fn drop_unanswered_duplicate(
+    messages: &opencrabs::services::MessageService,
+    session_id: Uuid,
+    outgoing: &str,
+) {
+    let rows = match messages.list_recent_messages_for_session(session_id, 2).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            crate::logging::error(&format!("gui dedup read: {e}"));
+            return;
+        }
+    };
+    let Some(placeholder) = rows.last() else {
+        return;
+    };
+    if placeholder.role != "assistant" || !placeholder.content.trim().is_empty() {
+        return;
+    }
+    let Some(question) = rows.get(rows.len().saturating_sub(2)) else {
+        return;
+    };
+    if question.role != "user" {
+        return;
+    }
+    // The ledger keeps the redacted form of the text the turn was given.
+    let stored = opencrabs::utils::sanitize::redact_secrets(outgoing);
+    if question.content.trim() != stored.trim() {
+        return;
+    }
+    for row in [question, placeholder] {
+        if let Err(e) = messages.delete_message(row.id).await {
+            crate::logging::error(&format!("gui dedup delete: {e}"));
+            return;
+        }
+    }
+    crate::logging::info(&format!(
+        "gui dedup: dropped the unanswered pair a resend would have duplicated \
+         (session {session_id})"
+    ));
+}
+
 /// Run one turn on a 4 MB thread: the TUI's `send_message_with_tools_and_mode`
 /// call with the queue-completion handshake the TUI does around it.
 ///
@@ -902,6 +957,12 @@ pub fn spawn_turn(
                 }
             };
             runtime.block_on(async move {
+                // Before the turn writes its rows: a resend of the text an
+                // unanswered turn left behind must not stack a second copy of
+                // it in history (#2697).
+                let messages =
+                    opencrabs::services::MessageService::new(service.context().clone());
+                drop_unanswered_duplicate(&messages, session_id, &content).await;
                 let turn = service.send_message_with_tools_and_mode(
                     session_id,
                     content,
@@ -2223,6 +2284,154 @@ mod tests {
             "the turn future is dropped at its current await, the window's \
              handle.abort(): without this the provider keeps streaming and the \
              turn reports done minutes after the stop (#2657)"
+        );
+    }
+
+    // ── #2697: a resend must not duplicate the unanswered pair ──────────────
+
+    /// A ledger with one session, for the resend-dedup tests.
+    async fn temp_ledger() -> (opencrabs::services::MessageService, Uuid) {
+        let db = Database::connect_in_memory().await.expect("in-memory db");
+        db.run_migrations().await.expect("migrations");
+        let context = ServiceContext::new(db.pool().clone());
+        let sessions = opencrabs::services::SessionService::new(context.clone());
+        let session = sessions
+            .create_session(Some("dedup".to_string()))
+            .await
+            .expect("session");
+        (opencrabs::services::MessageService::new(context), session.id)
+    }
+
+    /// What a turn does on start: the question row, then an empty placeholder.
+    async fn open_turn(
+        messages: &opencrabs::services::MessageService,
+        session: Uuid,
+        text: &str,
+    ) {
+        messages
+            .create_message(session, "user".to_string(), text.to_string())
+            .await
+            .expect("user row");
+        messages
+            .create_message(session, "assistant".to_string(), String::new())
+            .await
+            .expect("placeholder");
+    }
+
+    /// The resend keeps one copy of the question and gets a fresh placeholder.
+    #[tokio::test]
+    async fn dedup_leaves_one_copy_of_a_resent_message() {
+        let (messages, session) = temp_ledger().await;
+        open_turn(&messages, session, "ship it").await;
+
+        drop_unanswered_duplicate(&messages, session, "ship it").await;
+        // The turn the resend starts persists exactly what any turn persists.
+        open_turn(&messages, session, "ship it").await;
+
+        let rows = messages
+            .list_messages_for_session(session)
+            .await
+            .expect("rows");
+        let asked: Vec<_> = rows.iter().filter(|r| r.role == "user").collect();
+        assert_eq!(
+            asked.len(),
+            1,
+            "the resend must not duplicate the question: {rows:?}"
+        );
+        assert_eq!(asked[0].content, "ship it");
+        assert_eq!(rows.len(), 2, "one question and one fresh placeholder");
+        assert_eq!(rows[1].role, "assistant");
+        assert!(rows[1].content.is_empty(), "the placeholder is unanswered");
+    }
+
+    /// An answered pair is history: a later identical question leaves it alone.
+    #[tokio::test]
+    async fn dedup_keeps_an_answered_pair() {
+        let (messages, session) = temp_ledger().await;
+        messages
+            .create_message(session, "user".to_string(), "ship it".to_string())
+            .await
+            .expect("user row");
+        messages
+            .create_message(session, "assistant".to_string(), "done".to_string())
+            .await
+            .expect("answer");
+
+        drop_unanswered_duplicate(&messages, session, "ship it").await;
+
+        let rows = messages
+            .list_messages_for_session(session)
+            .await
+            .expect("rows");
+        assert_eq!(rows.len(), 2, "an answered pair is never cut: {rows:?}");
+        assert_eq!(rows[1].content, "done");
+    }
+
+    /// A different question behind an empty placeholder is not a duplicate.
+    #[tokio::test]
+    async fn dedup_keeps_a_different_question() {
+        let (messages, session) = temp_ledger().await;
+        open_turn(&messages, session, "other question").await;
+
+        drop_unanswered_duplicate(&messages, session, "ship it").await;
+
+        let rows = messages
+            .list_messages_for_session(session)
+            .await
+            .expect("rows");
+        assert_eq!(rows.len(), 2, "only the exact text is a resend: {rows:?}");
+        assert_eq!(rows[0].content, "other question");
+    }
+
+    /// Anything after the placeholder ends the walk: only the trailing pair is
+    /// ever a candidate, never rows a turn already wrote behind it.
+    #[tokio::test]
+    async fn dedup_stops_at_anything_after_the_placeholder() {
+        let (messages, session) = temp_ledger().await;
+        open_turn(&messages, session, "ship it").await;
+        messages
+            .create_message(session, "system".to_string(), "system note".to_string())
+            .await
+            .expect("system row");
+
+        drop_unanswered_duplicate(&messages, session, "ship it").await;
+
+        let rows = messages
+            .list_messages_for_session(session)
+            .await
+            .expect("rows");
+        assert_eq!(
+            rows.len(),
+            3,
+            "the last row is not the empty placeholder, so nothing is cut: {rows:?}"
+        );
+    }
+
+    /// The guard is wired into the send path, ahead of the turn's first write.
+    #[test]
+    fn dedup_runs_before_the_turn_persists() {
+        let src = include_str!("agent_bridge.rs");
+        let shipped = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the shipped source before the tests");
+        let body = shipped
+            .split("pub fn spawn_turn(")
+            .nth(1)
+            .expect("spawn_turn is in the shipped source");
+        let body = body
+            .split("/// Re-run one interrupted turn")
+            .next()
+            .expect("spawn_turn has an end");
+        let guard = body
+            .find("drop_unanswered_duplicate(")
+            .expect("spawn_turn runs the dedup guard");
+        let send = body
+            .find("send_message_with_tools_and_mode(")
+            .expect("spawn_turn sends the turn");
+        assert!(
+            guard < send,
+            "the guard has to run before the turn persists its rows (#2697)"
         );
     }
 }
