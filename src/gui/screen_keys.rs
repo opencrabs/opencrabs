@@ -107,6 +107,8 @@ pub enum OverlayId {
     Help,
     /// The delete confirmation.
     ConfirmDelete,
+    /// The multi select that groups existing sessions under a parent row.
+    GroupPick,
     /// A warning that stopped a pick and waits on its one answer.
     Warning,
     /// A file preview, which covers the window.

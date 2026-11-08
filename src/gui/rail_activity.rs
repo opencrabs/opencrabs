@@ -106,9 +106,12 @@ impl RailActivity {
         busy || pane_busy || detached || self.streaming.contains(&session)
     }
 
-    /// How many sessions are streaming with no pane. The tests use it to prove
+    /// How many sessions are streaming with no pane.
+    ///
+    /// The rail reads it to decide whether a live preview refresh is worth a
+    /// database query: with nothing streaming, the last message cannot have
+    /// changed since the last refresh. The tests use the same count to prove
     /// the set does not grow past the sessions that are actually running.
-    #[cfg(test)]
     pub fn streaming_count(&self) -> usize {
         self.streaming.len()
     }

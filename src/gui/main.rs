@@ -617,6 +617,13 @@ struct Dashboard {
     /// The one monotonic origin every rail animation reads, so all rows blink
     /// on the same frame instead of one clock each.
     rail_clock: std::time::Instant,
+    /// When the rail's live previews were last re-read, so a stream of chunks
+    /// costs at most one query a second instead of one per token.
+    preview_refreshed_at: Option<std::time::Instant>,
+    /// Parents whose topic chips are expanded past the first three. A chip
+    /// strip shows three plus a "+N" pill by default; tapping it reveals the
+    /// rest, and the collapse pill folds them back (Telegram topic style).
+    rail_chips_expanded: std::collections::HashSet<Uuid>,
     /// Rail width in rem, moved by the splitter's drag. Never below
     /// `RAIL_MIN_REM`: dragging past it closes the rail instead, and ctrl+s
     /// brings it back at the last width.
@@ -711,6 +718,15 @@ struct Dashboard {
     /// and only the dialog's own button erases, so no gesture can cost a
     /// conversation.
     confirm_delete: Option<Uuid>,
+    /// The Group topics picker: the parent row being grouped under, the
+    /// candidate sessions (id, title, date), the multi-selection, the keyboard
+    /// cursor, a guard sentence on refusal, and a busy flag while attaching.
+    group_target: Option<Uuid>,
+    group_candidates: Vec<(Uuid, String, String)>,
+    group_selected: std::collections::HashSet<Uuid>,
+    group_cursor: usize,
+    group_error: Option<String>,
+    group_busy: bool,
     /// Whether the key reference is open (#2320). The overlay reads the same
     /// table the terminal's `/help` prints, so the two cannot disagree.
     help_open: bool,
@@ -1622,6 +1638,9 @@ impl Dashboard {
         }
         if self.confirm_delete.is_some() {
             open.push(OverlayId::ConfirmDelete);
+        }
+        if self.group_target.is_some() {
+            open.push(OverlayId::GroupPick);
         }
         if self.topic_warning.is_some() {
             open.push(OverlayId::Warning);
@@ -4996,6 +5015,10 @@ impl Dashboard {
                         self.transcript.error = None;
                     }
                     self.live.notices.push("Session cleared.".to_string());
+                    // The card must drop the line of a chat that no longer has
+                    // messages. Only the previews are re-read: a rail refresh
+                    // here would reorder rows under the cursor.
+                    self.refresh_previews(cx);
                     cx.notify();
                 }
                 agent_bridge::TurnEvent::ClearFailed(text) => {
@@ -5168,6 +5191,9 @@ impl Dashboard {
                     // streams instead of appearing with the final answer.
                     self.live.thinking = false;
                     self.live.note_chunk(&text);
+                    // The rail's preview follows the answer as it streams, at
+                    // most one batched read a second.
+                    self.refresh_previews_if_live(cx);
                 }
                 agent_bridge::TurnEvent::ProgressFor(
                     _,
@@ -5559,6 +5585,43 @@ impl Dashboard {
             .map(|t| (t.label, t.started.elapsed().as_secs()))
             .collect();
         opencrabs::tui::render::format_background_tasks(&tasks, opencrabs::tui::render::LABEL_CHARS)
+    }
+
+    /// The context-menu popover for one rail row (or topic chip), built only
+    /// when that id's menu is open. Shared by full rows and chips so a chip's
+    /// right-click offers the same pin / rename / split / delete picks.
+    fn rail_menu_popover_for(&self, id: Uuid, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        if self.sessions.rail_menu != Some(id) {
+            return None;
+        }
+        let favorite = self.sessions.is_favorite(id);
+        let topics_on = self.sessions.is_topic_enabled(id);
+        let items = sessions::rail_menu_entries(favorite, topics_on)
+            .into_iter()
+            .map(|entry| {
+                let kind = entry.kind;
+                let pick = cx.listener(move |this, _ev, _window, cx| {
+                    cx.stop_propagation();
+                    this.sessions.rail_menu = None;
+                    match kind {
+                        sessions::MenuKind::Pin => this.toggle_favorite(id, cx),
+                        sessions::MenuKind::Rename => this.start_rename(id, cx),
+                        sessions::MenuKind::EnableTopics => this.enable_topics(id, cx),
+                        sessions::MenuKind::NewTopic => {
+                            // The prompt works on the open chat, so open the row first (#2397).
+                            this.open_session(id, cx);
+                            this.start_topic_draft(cx);
+                        }
+                        sessions::MenuKind::GroupTopics => this.start_group_topics(id, cx),
+                        sessions::MenuKind::SplitSide => this.split_row(id, Layout::Side, cx),
+                        sessions::MenuKind::SplitStack => this.split_row(id, Layout::Stack, cx),
+                        sessions::MenuKind::Delete => this.request_delete(id, cx),
+                    }
+                });
+                sessions::menu_item(entry.label).on_click(pick)
+            })
+            .collect::<Vec<_>>();
+        Some(sessions::menu_popover(items))
     }
 
     /// The rail's badges for every row it is about to draw (#2636).
@@ -6417,6 +6480,114 @@ impl Dashboard {
         cx.notify();
     }
 
+    /// Open the Group topics picker for `id`: load every other session as a
+    /// candidate, drop the ones already in a topic tree, and show the multi
+    /// select. The rail's own parent map is the source of truth, so a session
+    /// that is already a parent or a child cannot be re-grouped by accident.
+    fn start_group_topics(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        // Close the context menu the entry was clicked from.
+        self.sessions.rail_menu = None;
+        self.group_target = Some(id);
+        self.group_candidates = Vec::new();
+        self.group_selected.clear();
+        self.group_cursor = 0;
+        self.group_error = None;
+        self.group_busy = false;
+        self.refocus_screen();
+        let db_path = self.db_path.clone();
+        // Taken rows: topics themselves, every child (a key) and every parent
+        // (a value) already in the rail's tree.
+        let mut taken: std::collections::HashSet<Uuid> = self.sessions.topics.clone();
+        taken.extend(self.sessions.parents.keys().copied());
+        taken.extend(self.sessions.parents.values().copied());
+        cx.spawn(async move |this, cx| {
+            match sessions::load_group_candidates(db_path, id).await {
+                Ok(rows) => {
+                    this.update(cx, |this, cx| {
+                        // A stale open (target changed while loading) is dropped.
+                        if this.group_target != Some(id) {
+                            return;
+                        }
+                        this.group_candidates = rows
+                            .into_iter()
+                            .filter(|(sid, _, _)| !taken.contains(sid))
+                            .collect();
+                        cx.notify();
+                    })
+                    .ok();
+                }
+                Err(e) => {
+                    this.update(cx, |this, cx| {
+                        if this.group_target == Some(id) {
+                            this.group_error = Some(e);
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+                }
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Attach every checked candidate under the target, then close the picker
+    /// and refresh the rail. A guard refusal stops the batch and shows its
+    /// sentence instead of a raw constraint error.
+    fn submit_group_topics(&mut self, cx: &mut Context<Self>) {
+        let Some(parent) = self.group_target else {
+            return;
+        };
+        if self.group_busy {
+            return;
+        }
+        let children: Vec<Uuid> = self
+            .group_candidates
+            .iter()
+            .map(|(id, _, _)| *id)
+            .filter(|id| self.group_selected.contains(id))
+            .collect();
+        if children.is_empty() {
+            self.close_group_topics();
+            return;
+        }
+        self.group_busy = true;
+        self.group_error = None;
+        let db_path = self.db_path.clone();
+        cx.spawn(async move |this, cx| {
+            for child in children {
+                if let Err(e) = sessions::attach_topic(db_path.clone(), child, parent).await {
+                    this.update(cx, |this, cx| {
+                        this.group_busy = false;
+                        this.group_error = Some(e);
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
+            }
+            this.update(cx, |this, cx| {
+                this.close_group_topics();
+                this.refresh_rail(cx);
+                this.refresh_topic_state(cx);
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Dismiss the picker and hand the keyboard back to whatever opened it.
+    fn close_group_topics(&mut self) {
+        self.group_target = None;
+        self.group_candidates = Vec::new();
+        self.group_selected.clear();
+        self.group_cursor = 0;
+        self.group_error = None;
+        self.group_busy = false;
+        self.refocus_screen();
+    }
+
     /// Re-read which sessions are topics and what each topic's parent is.
     fn refresh_topic_state(&mut self, cx: &mut Context<Self>) {
         let db_path = self.db_path.clone();
@@ -6486,11 +6657,58 @@ impl Dashboard {
                     Err(e) => this.sessions.error = Some(e.into()),
                 }
                 this.refresh_favorites(cx);
+                // Previews follow the rows, so a new or renamed session gets
+                // its line without a second trigger.
+                this.refresh_previews(cx);
                 cx.notify();
             })
             .ok();
         })
         .detach();
+    }
+
+    /// One batched preview read for the rows the rail already holds.
+    ///
+    /// Never called from a paint: the row loop reads `sessions.previews`. The
+    /// rail repaints on a shared clock, so asking per row there would be a
+    /// query per card per frame.
+    fn refresh_previews(&mut self, cx: &mut Context<Self>) {
+        let ids: Vec<uuid::Uuid> = self.sessions.items.iter().map(|s| s.id).collect();
+        if ids.is_empty() {
+            self.sessions.previews.clear();
+            return;
+        }
+        let db_path = self.db_path.clone();
+        cx.spawn(
+            async move |this, cx| match sessions::load_previews(db_path, ids).await {
+                Ok(pairs) => {
+                    this.update(cx, |this, cx| {
+                        this.sessions.previews = pairs;
+                        cx.notify();
+                    })
+                    .ok();
+                }
+                Err(e) => logging::error(&format!("rail previews: {e}")),
+            },
+        )
+        .detach();
+    }
+
+    /// Keep a running conversation's preview warm without hammering the DB:
+    /// at most one read a second, and only while something is streaming. The
+    /// chunk event is the trigger, so no timer is added for this.
+    fn refresh_previews_if_live(&mut self, cx: &mut Context<Self>) {
+        if self.rail.streaming_count() == 0 {
+            return;
+        }
+        if self
+            .preview_refreshed_at
+            .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(1))
+        {
+            return;
+        }
+        self.preview_refreshed_at = Some(std::time::Instant::now());
+        self.refresh_previews(cx);
     }
 
     /// The bar that stands where the composer stands in select mode (#2613):
@@ -7550,6 +7768,38 @@ impl Dashboard {
             cx.notify();
             return;
         }
+        // The Group topics picker is a multi select modal: arrows move the
+        // cursor, Space toggles the row under it, Enter attaches the checked
+        // rows, Esc cancels. Every other key is swallowed so nothing behind
+        // the card answers while it is up.
+        if self.group_target.is_some() {
+            match ev.keystroke.key.as_str() {
+                "up" | "k" if !self.group_candidates.is_empty() => {
+                    self.group_cursor = self.group_cursor.saturating_sub(1);
+                }
+                "down" | "j" if !self.group_candidates.is_empty() => {
+                    self.group_cursor =
+                        (self.group_cursor + 1).min(self.group_candidates.len() - 1);
+                }
+                "space" => {
+                    if let Some((id, _, _)) = self.group_candidates.get(self.group_cursor) {
+                        let id = *id;
+                        if !self.group_selected.insert(id) {
+                            self.group_selected.remove(&id);
+                        }
+                    }
+                }
+                "enter" => {
+                    self.submit_group_topics(cx);
+                }
+                "escape" => {
+                    self.close_group_topics();
+                }
+                _ => {}
+            }
+            cx.notify();
+            return;
+        }
         // The delete confirmation is a modal with two answers, so it owns
         // both keys while it is up: Enter confirms, Esc cancels, and every
         // other keystroke is swallowed rather than reaching anything behind
@@ -8434,9 +8684,44 @@ impl Render for Dashboard {
         // before the loop: the index needs `&mut self` and the row iterator
         // holds `&self`.
         let activity = self.rail_activity_map();
+        // Telegram-style topics: a parent's children paint as compact chips
+        // on its card, not as their own rows. Resolve the chip set once before
+        // the loop so the paint can skip those rows and hang the strip on the
+        // parent. A live search falls back to flat rows so a match is never
+        // hidden inside a chip; a favorite stays a full row; a collapsed
+        // parent keeps its children as rows so the fold still reads.
+        let searching = !self.sessions.filter.trim().is_empty();
+        let visible_ids: std::collections::HashSet<Uuid> =
+            self.sessions.visible().map(|s| s.id).collect();
+        let chip_children: std::collections::HashSet<Uuid> = if searching {
+            std::collections::HashSet::new()
+        } else {
+            self.sessions
+                .visible()
+                .filter(|s| !self.sessions.is_favorite(s.id))
+                .filter_map(|s| self.sessions.parents.get(&s.id).map(|p| (s.id, *p)))
+                .filter(|(_, p)| visible_ids.contains(p) && !self.sessions.is_collapsed(*p))
+                .map(|(cid, _)| cid)
+                .collect()
+        };
+        let mut children_by_parent: HashMap<Uuid, Vec<(Uuid, String)>> = HashMap::new();
+        for s in self.sessions.visible() {
+            if chip_children.contains(&s.id)
+                && let Some(p) = self.sessions.parents.get(&s.id)
+            {
+                children_by_parent
+                    .entry(*p)
+                    .or_default()
+                    .push((s.id, s.title.clone().unwrap_or_default()));
+            }
+        }
         // Pinned rows first, the rest untouched: the TUI's own order.
         for s in self.sessions.ordered() {
             let id = s.id;
+            // This child paints as a chip on its parent's card, not a row.
+            if chip_children.contains(&id) {
+                continue;
+            }
             let selected = self.sessions.selected == Some(id);
             let cursored = self.sessions.cursor == Some(id);
             let favorite = self.sessions.is_favorite(id);
@@ -8470,6 +8755,10 @@ impl Render for Dashboard {
                         .id(SharedString::from(format!("session-actions-{id}")))
                         .flex()
                         .flex_row()
+                        // The body takes the remaining width now that the name
+                        // line fills the row, so the strip has to refuse to
+                        // shrink; otherwise a long title clips its icons.
+                        .flex_none()
                         .items_center()
                         .gap_1()
                         .child(sessions::pin_button(favorite).on_click(pin))
@@ -8489,40 +8778,9 @@ impl Render for Dashboard {
             });
             // The menu overlays its row, so a pick must not fall through to
             // the row's click (which opens the chat) or read as a dismissal.
-            let menu = if self.sessions.rail_menu == Some(id) {
-                let topics_on = self.sessions.is_topic_enabled(id);
-                let items = sessions::rail_menu_entries(favorite, topics_on)
-                    .into_iter()
-                    .map(|entry| {
-                        let kind = entry.kind;
-                        let pick = cx.listener(move |this, _ev, _window, cx| {
-                            cx.stop_propagation();
-                            this.sessions.rail_menu = None;
-                            match kind {
-                                sessions::MenuKind::Pin => this.toggle_favorite(id, cx),
-                                sessions::MenuKind::Rename => this.start_rename(id, cx),
-                                sessions::MenuKind::EnableTopics => this.enable_topics(id, cx),
-                                sessions::MenuKind::NewTopic => {
-                                    // The prompt works on the open chat, so open the row first (#2397).
-                                    this.open_session(id, cx);
-                                    this.start_topic_draft(cx);
-                                }
-                                sessions::MenuKind::SplitSide => {
-                                    this.split_row(id, Layout::Side, cx)
-                                }
-                                sessions::MenuKind::SplitStack => {
-                                    this.split_row(id, Layout::Stack, cx)
-                                }
-                                sessions::MenuKind::Delete => this.request_delete(id, cx),
-                            }
-                        });
-                        sessions::menu_item(entry.label).on_click(pick)
-                    })
-                    .collect::<Vec<_>>();
-                Some(sessions::menu_popover(items))
-            } else {
-                None
-            };
+            // Shared with the topic chips: a chip's right-click builds the
+            // same popover through this helper.
+            let menu = self.rail_menu_popover_for(id, cx);
             let indented = self.sessions.is_indented(id);
             let closed = self.sessions.is_closed(id);
             // One glyph cell, from the window's shared clock, so a list of
@@ -8538,8 +8796,66 @@ impl Render for Dashboard {
                 indented,
                 closed,
                 badge,
+                // Already formatted in the loader: the paint only clones a
+                // shared string, so the shared clock costs no allocation.
+                preview: self.sessions.previews.get(&id).cloned(),
             };
-            let r = sessions::row(s, flags, action, menu);
+            // A parent card carries its topics as inline chips: three by
+            // default, a "+N" pill expands the rest, a collapse pill folds
+            // them back. Each chip opens its child on click and offers the
+            // shared context menu on right-click, with its own live glyph.
+            let chips = children_by_parent.get(&id).map(|kids| {
+                let expanded = self.rail_chips_expanded.contains(&id);
+                let limit = if expanded { kids.len() } else { 3 };
+                let mut els: Vec<Stateful<Div>> = Vec::new();
+                for (kid_id, title) in kids.iter().take(limit) {
+                    let kid_id = *kid_id;
+                    let st = activity.get(&kid_id).copied().unwrap_or_default();
+                    let live = st
+                        .badge
+                        .map(|_| rail_activity::frame(self.rail_clock.elapsed()));
+                    let sel = self.sessions.selected == Some(kid_id)
+                        || self.sessions.cursor == Some(kid_id);
+                    let open = cx.listener(move |this, _ev, _window, cx| {
+                        cx.stop_propagation();
+                        this.close_rail_filter(cx);
+                        this.open_session(kid_id, cx);
+                    });
+                    let ask = cx.listener(move |this, _ev: &MouseDownEvent, _window, cx| {
+                        cx.stop_propagation();
+                        this.sessions.rail_menu = Some(kid_id);
+                        this.rail_actions = None;
+                        cx.notify();
+                    });
+                    let mut chip = sessions::topic_chip(kid_id, title, live, st.ring, sel)
+                        .on_click(open)
+                        .on_mouse_down(MouseButton::Right, ask);
+                    if let Some(pop) = self.rail_menu_popover_for(kid_id, cx) {
+                        chip = chip.child(gpui::deferred(pop).with_priority(1));
+                    }
+                    els.push(chip);
+                }
+                let hidden = kids.len().saturating_sub(limit);
+                if hidden > 0 {
+                    let label = SharedString::from(format!("+{hidden}"));
+                    let expand = cx.listener(move |this, _ev, _window, cx| {
+                        cx.stop_propagation();
+                        this.rail_chips_expanded.insert(id);
+                        cx.notify();
+                    });
+                    els.push(sessions::count_chip(id, label).on_click(expand));
+                } else if expanded && kids.len() > 3 {
+                    let label = SharedString::from("\u{2212}");
+                    let collapse = cx.listener(move |this, _ev, _window, cx| {
+                        cx.stop_propagation();
+                        this.rail_chips_expanded.remove(&id);
+                        cx.notify();
+                    });
+                    els.push(sessions::count_chip(id, label).on_click(collapse));
+                }
+                sessions::topic_chips(id, els)
+            });
+            let r = sessions::row(s, flags, action, menu, chips);
             // The press starts the slide and closes any other row's strip.
             let press = cx.listener(move |this, _ev: &MouseDownEvent, window, cx| {
                 this.rail_slide_opened = None;
@@ -10912,6 +11228,179 @@ impl Render for Dashboard {
             });
             root = root.child(confirm_delete_overlay(title, confirm, cancel));
         }
+        // The Group topics picker: a multi select card painted above both
+        // panes. Rows toggle on click, the keyboard cursor and Space mirror
+        // the same selection, and only the group button writes anything.
+        if self.group_target.is_some() {
+            let parent_title = self
+                .group_target
+                .and_then(|id| self.sessions.items.iter().find(|s| s.id == id))
+                .and_then(|s| s.title.clone())
+                .unwrap_or_else(|| "(untitled)".to_string());
+            let mut list = div().id("group-pick-list").flex().flex_col().gap_0p5();
+            for (idx, (sid, title, date)) in self.group_candidates.iter().enumerate() {
+                let sid = *sid;
+                let checked = self.group_selected.contains(&sid);
+                let cursored = idx == self.group_cursor;
+                let toggle = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
+                    this.group_cursor = idx;
+                    if !this.group_selected.insert(sid) {
+                        this.group_selected.remove(&sid);
+                    }
+                    cx.notify();
+                });
+                let mark = div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(rems(1.0))
+                    .rounded(px(3.0))
+                    .border_1()
+                    .border_color(rgb(palette::current().text_muted))
+                    .when(checked, |d| {
+                        d.bg(rgb(palette::current().accent))
+                            .border_color(rgb(palette::current().accent))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(palette::current().panel))
+                                    .child(SharedString::from("\u{2713}")),
+                            )
+                    });
+                let row = div()
+                    .id(SharedString::from(format!("group-pick-row-{sid}")))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .rounded(px(4.0))
+                    .cursor_pointer()
+                    .when(cursored, |d| d.bg(rgb(palette::current().selection)))
+                    .hover(|d| d.bg(rgb(palette::current().panel_hi)))
+                    .on_click(toggle)
+                    .child(mark)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_sm()
+                            .text_color(rgb(palette::current().text))
+                            .truncate()
+                            .child(SharedString::from(title.clone())),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(palette::current().text_muted))
+                            .child(SharedString::from(date.clone())),
+                    );
+                list = list.child(row);
+            }
+            let scroller = div()
+                .id("group-pick-body")
+                .max_h(rems(20.0))
+                .overflow_y_scroll()
+                .child(list);
+            let cancel = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                this.close_group_topics();
+                cx.notify();
+            });
+            let confirm = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                this.submit_group_topics(cx);
+            });
+            let count = self.group_selected.len();
+            let card = div()
+                .id("group-pick")
+                .flex()
+                .flex_col()
+                .gap_3()
+                .w(rems(28.0))
+                .p_4()
+                .rounded(px(CARD_RADIUS))
+                .border_1()
+                .border_color(rgb(palette::current().panel_hi))
+                .bg(glass_fill(palette::current().panel))
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(palette::current().text))
+                        .child(SharedString::from(format!(
+                            "Group topics under {parent_title}"
+                        ))),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(palette::current().text_muted))
+                        .child(SharedString::from(
+                            "Pick sessions to attach as topics. Space toggles, Enter groups.",
+                        )),
+                )
+                .when_some(self.group_error.clone(), |d, e| {
+                    d.child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(palette::current().red))
+                            .child(SharedString::from(e)),
+                    )
+                })
+                .child(scroller)
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .justify_end()
+                        .gap_2()
+                        .child(
+                            div()
+                                .id("group-pick-cancel")
+                                .px_3()
+                                .py_1()
+                                .rounded(px(4.0))
+                                .text_xs()
+                                .text_color(rgb(palette::current().text_normal))
+                                .cursor_pointer()
+                                .hover(|d| d.bg(rgb(palette::current().panel_hi)))
+                                .child(SharedString::from("cancel"))
+                                .on_click(cancel),
+                        )
+                        .child(
+                            div()
+                                .id("group-pick-yes")
+                                .px_3()
+                                .py_1()
+                                .rounded(px(4.0))
+                                .text_xs()
+                                .text_color(rgb(palette::current().accent))
+                                .cursor_pointer()
+                                .border_1()
+                                .border_color(rgb(palette::current().accent))
+                                .hover(|d| d.bg(rgb(palette::current().selection)))
+                                .child(SharedString::from(if self.group_busy {
+                                    "grouping...".to_string()
+                                } else {
+                                    format!("group ({count})")
+                                }))
+                                .on_click(confirm),
+                        ),
+                );
+            let scrim = div()
+                .id("group-pick-scrim")
+                .occlude()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .bg(rgba(0x0a0a0acc))
+                .child(card);
+            root = root.child(scrim);
+        }
         // A pick that named a topic says why no prompt opened (#2605). The
         // card is the delete dialog's shape with one answer, so a stopped
         // pick can never be mistaken for a progress notice.
@@ -11294,6 +11783,7 @@ fn main() {
             collapsed: collapsed.clone(),
             topic_icons: topic_icons.clone(),
             topic_titles: HashMap::new(),
+            previews: HashMap::new(),
             selected: None,
             cursor: None,
             rail_menu: None,
@@ -11310,6 +11800,7 @@ fn main() {
             collapsed,
             topic_icons,
             topic_titles: HashMap::new(),
+            previews: HashMap::new(),
             selected: None,
             cursor: None,
             rail_menu: None,
@@ -11491,6 +11982,8 @@ fn main() {
                             opencrabs::config::opencrabs_home().join("rail_seen.json"),
                         )),
                         rail_clock: std::time::Instant::now(),
+                        preview_refreshed_at: None,
+                        rail_chips_expanded: std::collections::HashSet::new(),
                         rail_width: RAIL_DEFAULT_REM,
                         rail_open: true,
                         rail_focused: false,
@@ -11521,6 +12014,12 @@ fn main() {
                         rail_swipe: None,
                         rail_slide_opened: None,
                         confirm_delete: None,
+                        group_target: None,
+                        group_candidates: Vec::new(),
+                        group_selected: std::collections::HashSet::new(),
+                        group_cursor: 0,
+                        group_error: None,
+                        group_busy: false,
                         preview: None,
                         preview_zoom: 1.0,
                         preview_video: None,

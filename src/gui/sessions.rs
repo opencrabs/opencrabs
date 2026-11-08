@@ -23,6 +23,7 @@ use opencrabs::db::Database;
 use opencrabs::db::models::Session;
 use opencrabs::db::repository::session::{SessionListOptions, SessionRepository};
 use opencrabs::db::repository::session_favorites::SessionFavoritesRepository;
+use opencrabs::db::repository::{MessageRepository, PREVIEW_CHARS};
 
 // The menu primitives moved to `menu.rs` (#2613) so the transcript can draw
 // its own context menu without depending on the session rail. Re-exported
@@ -83,6 +84,12 @@ pub struct SessionsState {
     /// `topics_collapsed` column the terminal writes, so folding in either
     /// surface holds in the other.
     pub collapsed: HashSet<uuid::Uuid>,
+    /// One already-formatted preview line per session, for the card's third
+    /// line. Filled by one batched read on a rail refresh, never inside a
+    /// paint: the rail repaints on a shared clock, so a per-row query would
+    /// be a query per card per frame. Formatted once here so the paint only
+    /// clones a `SharedString`.
+    pub previews: HashMap<uuid::Uuid, SharedString>,
 }
 
 impl SessionsState {
@@ -143,11 +150,13 @@ impl SessionsState {
     }
 
     pub fn is_indented(&self, id: uuid::Uuid) -> bool {
-        !self.is_favorite(id)
-            && self
-                .parents
-                .get(&id)
-                .is_some_and(|p| self.visible().any(|s| s.id == *p))
+        // Indentation tracks chip-strip membership, not the pin: a pinned
+        // topic is still a topic of its parent, so the favorite flag must not
+        // drop its indent (#2670 regression). The pin keeps its role in
+        // ordering only (pinned first), never in whether a row is grouped.
+        self.parents
+            .get(&id)
+            .is_some_and(|p| self.visible().any(|s| s.id == *p))
     }
 
     /// Whether this session is pinned right now.
@@ -394,6 +403,49 @@ pub async fn load_favorites(db_path: std::path::PathBuf) -> Result<Vec<uuid::Uui
             Err(_) => Err("favorites fetch thread dropped its result".into()),
         },
         Err(e) => Err(format!("favorites fetch thread failed to spawn: {e}")),
+    }
+}
+
+/// The preview line for every session in `ids`, through the same 4 MB
+/// no-migration door as [`load_sessions`]. One batched query per pass, so a
+/// rail of 200 cards costs one round trip rather than 200.
+pub async fn load_previews(
+    db_path: std::path::PathBuf,
+    ids: Vec<uuid::Uuid>,
+) -> Result<HashMap<uuid::Uuid, SharedString>, String> {
+    let (tx, rx) =
+        futures::channel::oneshot::channel::<Result<HashMap<uuid::Uuid, SharedString>, String>>();
+    let spawned = std::thread::Builder::new()
+        .name("session-previews-fetch".into())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let result = match runtime {
+                Ok(rt) => rt
+                    .block_on(async {
+                        let db = Database::connect(&db_path).await?;
+                        let repo = MessageRepository::new(db.pool().clone());
+                        repo.last_messages_for(&ids).await
+                    })
+                    .map(|previews| {
+                        previews
+                            .into_iter()
+                            .map(|(id, p)| (id, preview_line(&p.role, &p.text)))
+                            .collect()
+                    })
+                    .map_err(|e| format!("{e:#}")),
+                Err(e) => Err(format!("tokio runtime failed: {e}")),
+            };
+            let _ = tx.send(result);
+        });
+    match spawned {
+        Ok(_) => match rx.await {
+            Ok(result) => result,
+            Err(_) => Err("previews fetch thread dropped its result".into()),
+        },
+        Err(e) => Err(format!("previews fetch thread failed to spawn: {e}")),
     }
 }
 
@@ -695,6 +747,91 @@ pub async fn create_topic(
     }
 }
 
+/// Candidate sessions for the Group topics picker: live, non-subagent rows
+/// other than the target, each as (id, title, date). Topic status is filtered
+/// by the caller from the rail's own parent map, so this stays a plain list
+/// read on the same dedicated-stack thread the other rail loaders use.
+pub async fn load_group_candidates(
+    db_path: std::path::PathBuf,
+    target: uuid::Uuid,
+) -> Result<Vec<(uuid::Uuid, String, String)>, String> {
+    let (tx, rx) =
+        futures::channel::oneshot::channel::<Result<Vec<(uuid::Uuid, String, String)>, String>>();
+    let spawned = std::thread::Builder::new()
+        .name("group-candidates".into())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let result = match runtime {
+                Ok(rt) => rt
+                    .block_on(async {
+                        let db = Database::connect(&db_path).await?;
+                        let repo = SessionRepository::new(db.pool().clone());
+                        let rows = repo.list(SessionListOptions::default()).await?;
+                        Ok::<_, anyhow::Error>(
+                            rows.into_iter()
+                                .filter(|s| s.id != target)
+                                .map(|s| {
+                                    let title = s.title.unwrap_or_else(|| "(untitled)".to_string());
+                                    let date = s.created_at.format("%m-%d %H:%M").to_string();
+                                    (s.id, title, date)
+                                })
+                                .collect(),
+                        )
+                    })
+                    .map_err(|e| format!("{e:#}")),
+                Err(e) => Err(format!("tokio runtime failed: {e}")),
+            };
+            let _ = tx.send(result);
+        });
+    match spawned {
+        Ok(_) => match rx.await {
+            Ok(result) => result,
+            Err(_) => Err("group candidates thread dropped its result".into()),
+        },
+        Err(e) => Err(format!("group candidates thread failed to spawn: {e}")),
+    }
+}
+
+/// Attach one existing session as a topic of `parent`. A guard refusal comes
+/// back as its plain sentence (the typed error's Display), so the picker can
+/// show why instead of a raw constraint error.
+pub async fn attach_topic(
+    db_path: std::path::PathBuf,
+    child: uuid::Uuid,
+    parent: uuid::Uuid,
+) -> Result<(), String> {
+    let (tx, rx) = futures::channel::oneshot::channel::<Result<(), String>>();
+    let spawned = std::thread::Builder::new()
+        .name("topic-attach".into())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let result = match runtime {
+                Ok(rt) => rt
+                    .block_on(async {
+                        let db = Database::connect(&db_path).await?;
+                        let repo = SessionRepository::new(db.pool().clone());
+                        repo.attach_topic(child, parent).await
+                    })
+                    .map_err(|e| format!("{e:#}")),
+                Err(e) => Err(format!("tokio runtime failed: {e}")),
+            };
+            let _ = tx.send(result);
+        });
+    match spawned {
+        Ok(_) => match rx.await {
+            Ok(result) => result,
+            Err(_) => Err("topic attach thread dropped its result".into()),
+        },
+        Err(e) => Err(format!("topic attach thread failed to spawn: {e}")),
+    }
+}
+
 /// Every session with topics turned on. Read separately from the rows, the
 /// same way favorites are, so the row model does not carry the flag.
 pub async fn load_topics(db_path: std::path::PathBuf) -> Result<Vec<uuid::Uuid>, String> {
@@ -959,6 +1096,20 @@ fn fit(s: &str, max_chars: usize) -> String {
     out
 }
 
+/// The card's preview line: who spoke, then the flattened text cut to fit.
+///
+/// The prefix names the speaker the way the reader thinks of them, not the
+/// way the table stores the role. A role that is neither `user` nor
+/// `assistant` keeps its own name rather than pretending to be one of them.
+pub fn preview_line(role: &str, text: &str) -> SharedString {
+    let who = match role {
+        "user" => "You:",
+        "assistant" => "Crabs:",
+        other => other,
+    };
+    SharedString::from(format!("{who} {}", fit(text, PREVIEW_CHARS)))
+}
+
 /// One session row: title and cost on the left, the caller's action strip on
 /// the right. Pure data plus one slot for behaviour, so the view owns every
 /// listener it puts on screen. A pinned row carries the star the owner asked
@@ -1007,6 +1158,13 @@ pub fn rail_menu_entries(favorited: bool, topics_enabled: bool) -> Vec<MenuEntry
             label: "Enable topics",
         });
     }
+    // Group existing conversations under this row as topics, without moving
+    // their transcripts. The attach guards refuse a depth-2 target with a
+    // readable sentence rather than a constraint error.
+    entries.push(MenuEntry {
+        kind: MenuKind::GroupTopics,
+        label: "Group topics...",
+    });
     // Split | and Split _ start a split from this row (#2438).
     entries.push(MenuEntry {
         kind: MenuKind::SplitSide,
@@ -1025,7 +1183,10 @@ pub fn rail_menu_entries(favorited: bool, topics_enabled: bool) -> Vec<MenuEntry
 
 /// What a rail row shows about its session right now. Grouped so the row
 /// keeps a short argument list as the rail gains states.
-#[derive(Clone, Copy, Default)]
+///
+/// Clone, not Copy: the preview is a shared string, so the struct owns a
+/// refcount rather than a bag of bits.
+#[derive(Clone, Default)]
 pub struct RowFlags {
     pub selected: bool,
     pub cursored: bool,
@@ -1036,6 +1197,98 @@ pub struct RowFlags {
     /// The rail supplies the frame from its one shared clock; this module only
     /// draws the cell, so it never owns a timer.
     pub badge: Option<&'static str>,
+    /// The already-formatted preview line, or `None` when the session has no
+    /// readable message yet. A card shows this INSTEAD of its date and cost
+    /// line, so it never grows a fourth line.
+    pub preview: Option<SharedString>,
+}
+
+/// One topic chip: a child conversation painted as a compact pill on its
+/// parent's card instead of its own row (Telegram topic style). `live` is the
+/// spinner glyph while the child streams; `ring` paints a dot while it awaits
+/// the user. The caller attaches the open / context-menu handlers and the
+/// deferred popover, so this stays pure data plus paint.
+pub fn topic_chip(
+    id: uuid::Uuid,
+    title: &str,
+    live: Option<&'static str>,
+    ring: bool,
+    selected: bool,
+) -> Stateful<Div> {
+    let mut chip = div()
+        .id(SharedString::from(format!("topic-chip-{id}")))
+        .relative()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_0p5()
+        .flex_none()
+        .px_2()
+        .py_0p5()
+        .rounded_md()
+        .cursor_pointer()
+        .text_xs()
+        .text_color(rgb(palette::current().text))
+        .bg(rgb(if selected {
+            palette::current().selection
+        } else {
+            palette::current().panel
+        }))
+        .hover(|d| d.bg(rgb(palette::current().focus)));
+    if let Some(glyph) = live {
+        chip = chip.child(
+            div()
+                .flex_none()
+                .text_color(rgb(palette::current().teal))
+                .child(SharedString::from(glyph)),
+        );
+    } else if ring {
+        chip = chip.child(
+            div()
+                .flex_none()
+                .text_color(rgb(palette::current().accent))
+                .child("\u{25CF}"),
+        );
+    }
+    chip.child(div().truncate().child(SharedString::from(fit(title, 14))))
+}
+
+/// The overflow pill: "+N" expands a parent's hidden chips, the collapse
+/// label folds them back. Same shape as a topic chip, no title of its own.
+pub fn count_chip(id: uuid::Uuid, label: SharedString) -> Stateful<Div> {
+    div()
+        .id(SharedString::from(format!("topic-count-{id}")))
+        .flex()
+        .flex_row()
+        .items_center()
+        .flex_none()
+        .px_2()
+        .py_0p5()
+        .rounded_md()
+        .cursor_pointer()
+        .text_xs()
+        .text_color(rgb(palette::current().text_muted))
+        .bg(rgb(palette::current().panel))
+        .hover(|d| d.bg(rgb(palette::current().focus)))
+        .child(label)
+}
+
+/// The chip strip under a parent card's title: the visible topic chips on one
+/// wrapping line. The parent id keys the strip so two parents never share an
+/// element id.
+pub fn topic_chips(id: uuid::Uuid, chips: Vec<Stateful<Div>>) -> Stateful<Div> {
+    let mut strip = div()
+        .id(SharedString::from(format!("topic-chips-{id}")))
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .items_center()
+        .gap_1()
+        .w_full();
+    for chip in chips {
+        strip = strip.child(chip);
+    }
+    strip
 }
 
 pub fn row(
@@ -1043,6 +1296,7 @@ pub fn row(
     flags: RowFlags,
     action: Option<Stateful<Div>>,
     menu: Option<Stateful<Div>>,
+    chips: Option<Stateful<Div>>,
 ) -> Stateful<Div> {
     let RowFlags {
         selected,
@@ -1051,6 +1305,7 @@ pub fn row(
         indented,
         closed,
         badge,
+        preview,
     } = flags;
     let title_text = div()
         // A closed topic reads dimmed: still there, no longer taking work.
@@ -1075,6 +1330,10 @@ pub fn row(
         .items_center()
         .gap_1()
         .min_w_0()
+        // The name line fills the body so the badge's `ml_auto` has free space
+        // to push against. Without this it shrinks to its text and the glyph
+        // parks right after the name (#2636 follow-up).
+        .w_full()
         .when(indented, |d| d.child(topic_pin_mark()))
         .child({
             let (mark, colour) = pin_mark(favorited);
@@ -1085,31 +1344,46 @@ pub fn row(
                 .child(SharedString::from(mark))
         })
         .child(title_text)
-        // The activity glyph sits on the name's own line, pushed to the right
-        // edge (#2636): a sibling of the title block would have centred itself
-        // on the card instead. `flex_none` keeps the cell its width when a long
-        // title truncates.
+        // The activity glyph rides the name's own line out to the right edge
+        // (#2636). It only gets there because `body` fills the row and this
+        // line fills `body`, leaving `ml_auto` free space to consume.
+        // `flex_none` keeps the cell its width when a long title truncates.
         .when_some(badge, |d, glyph| d.child(badge_cell(glyph)));
     // A grouped topic is a compact pin beneath its session. Its title stays
     // visible, while the repeated date and cost metadata belongs to full rows.
+    // Fill the remaining row width: `justify_between` alone left this
+    // content-sized, so the badge's `ml_auto` had nothing to consume and the
+    // activity glyph never reached the right edge (#2636).
     let body = div()
         .flex()
         .flex_col()
         .gap_0p5()
+        .flex_1()
         .min_w_0()
         .child(title)
+        // Topic chips ride inline under the title, on the parent card itself
+        // (Telegram topic style). They never push a child out to its own row.
+        .when_some(chips, |d, c| d.child(c))
         .when(!indented, |d| {
+            // The preview REPLACES the date and cost line, it never adds a
+            // fourth line to a card. A session with no readable message yet
+            // still shows the ledger's own stamp, so the slot is never blank.
+            let line = match preview {
+                Some(preview) => preview,
+                None => SharedString::from(format!(
+                    "{} · ${:.2}",
+                    s.updated_at
+                        .with_timezone(&chrono::Local)
+                        .format("%m-%d %H:%M"),
+                    s.total_cost
+                )),
+            };
             d.child(
                 div()
                     .text_xs()
                     .text_color(rgb(palette::current().text_muted))
-                    .child(SharedString::from(format!(
-                        "{} · ${:.2}",
-                        s.updated_at
-                            .with_timezone(&chrono::Local)
-                            .format("%m-%d %H:%M"),
-                        s.total_cost
-                    ))),
+                    .truncate()
+                    .child(line),
             )
         });
     let mut row = div()
@@ -1148,6 +1422,13 @@ pub fn row(
 }
 
 /// One glyph cell at the right edge of a row's name line (#2636).
+///
+/// The cell carries `ml_auto`, but an auto margin only pushes when its
+/// container is wider than its content. That is why `row` gives `body`
+/// `flex_1().min_w_0()` and `body` gives `title` `w_full()`: without both, the
+/// margin has zero free space and the glyph parks next to the name. This
+/// function is deliberately unaware of layout, so the fill lives on the
+/// containers rather than here.
 ///
 /// Cyan, because that is the colour the running-work surfaces already use: the
 /// same hue as the task strip, so "busy" reads the same wherever it is drawn.
@@ -1354,12 +1635,14 @@ fn brand_header() -> Div {
 #[cfg(test)]
 mod tests {
     use super::{
-        Database, MenuKind, SessionsState, fit, load_sessions, palette, pin_mark, rail_menu_entries,
+        Database, MenuKind, PREVIEW_CHARS, SessionsState, fit, load_sessions, palette, pin_mark,
+        preview_line, rail_menu_entries,
     };
     use opencrabs::db::models::Session;
 
-    /// #2303: a topic sits directly under its parent, a favorited topic stays
-    /// pinned at the top level, and an indent is only drawn for a grouped row.
+    /// #2303: a topic sits directly under its parent. A favorited topic stays
+    /// pinned at the top level for ordering, but keeps its indent: the pin
+    /// changes where it sorts, never whether it is a topic of its parent.
     #[test]
     fn topics_group_under_their_parent_and_favorites_stay_pinned() {
         let a = Session::new(Some("A".into()), None, None);
@@ -1390,7 +1673,10 @@ mod tests {
         state.favorites.insert(a1_id);
         let order: Vec<_> = state.ordered().map(|s| s.id).collect();
         assert_eq!(order[0], a1_id, "a pinned topic stays above the groups");
-        assert!(!state.is_indented(a1_id));
+        assert!(
+            state.is_indented(a1_id),
+            "a pinned topic is still a topic of its parent: the pin changes order, not indent"
+        );
     }
 
     /// #2670: folding a session keeps its topics out of the list, the way the
@@ -1754,26 +2040,32 @@ mod tests {
         let off = rail_menu_entries(false, false);
         assert_eq!(
             off.len(),
-            6,
-            "pin, rename, enable topics, two splits and delete"
+            7,
+            "pin, rename, enable topics, group topics, two splits and delete"
         );
         assert_eq!(off[0].label, "Pin");
         assert!(matches!(off[0].kind, MenuKind::Pin));
         assert_eq!(off[1].label, "Rename");
         assert!(matches!(off[1].kind, MenuKind::Rename));
-        assert_eq!(off[5].label, "Delete");
-        assert!(matches!(off[5].kind, MenuKind::Delete));
+        assert_eq!(off[3].label, "Group topics...");
+        assert!(matches!(off[3].kind, MenuKind::GroupTopics));
+        assert_eq!(off[6].label, "Delete");
+        assert!(matches!(off[6].kind, MenuKind::Delete));
 
         let on = rail_menu_entries(false, true);
-        assert_eq!(on.len(), 6, "pin, rename, new topic, two splits and delete");
+        assert_eq!(
+            on.len(),
+            7,
+            "pin, rename, new topic, group topics, two splits and delete"
+        );
         assert_eq!(on[2].label, "New topic");
         assert!(matches!(on[2].kind, MenuKind::NewTopic));
-        assert_eq!(on[5].label, "Delete");
+        assert_eq!(on[6].label, "Delete");
 
         let pinned = rail_menu_entries(true, true);
         assert_eq!(pinned[0].label, "Unpin", "a pinned row offers the way out");
         assert!(matches!(pinned[0].kind, MenuKind::Pin));
-        assert_eq!(pinned[5].label, "Delete");
+        assert_eq!(pinned[6].label, "Delete");
     }
 
     /// A rail row can take a new name from its own menu (#2668). The prompt
@@ -1811,7 +2103,7 @@ mod tests {
     #[test]
     fn rail_menu_offers_enable_topics_only_while_topics_are_off() {
         let off = rail_menu_entries(false, false);
-        assert_eq!(off.len(), 6);
+        assert_eq!(off.len(), 7);
         assert_eq!(off[2].label, "Enable topics");
         assert!(matches!(off[2].kind, MenuKind::EnableTopics));
 
@@ -1913,5 +2205,73 @@ mod tests {
         assert!(rail_source.contains(".px_2()"), "controls keep their inset");
         assert!(!rail_source.contains(".p_2()"));
         assert!(!rail_source.contains(".gap_1()"));
+    }
+
+    /// Telegram-style topics: a parent card mounts its children as an inline
+    /// wrapping chip strip, and the paint loop skips those children as rows.
+    /// Structural, the same source-split style as the #2636 badge pins.
+    #[test]
+    fn topic_children_paint_as_inline_chips_not_rows() {
+        let source = include_str!("sessions.rs");
+        let row_source = source
+            .split("pub fn row(")
+            .nth(1)
+            .expect("session row renderer")
+            .split("pub fn on_click(")
+            .next()
+            .expect("row source before click handler");
+        assert!(
+            row_source.contains(".when_some(chips,"),
+            "the parent card mounts the chip strip inline under its title"
+        );
+
+        let strip_source = source
+            .split("pub fn topic_chips(")
+            .nth(1)
+            .expect("chip strip renderer")
+            .split("pub fn row(")
+            .next()
+            .expect("strip source before the row renderer");
+        assert!(
+            strip_source.contains(".flex_wrap()"),
+            "chips wrap on one line"
+        );
+        assert!(strip_source.contains(".flex_row()"));
+
+        let chip_source = source
+            .split("pub fn topic_chip(")
+            .nth(1)
+            .expect("topic chip renderer")
+            .split("pub fn count_chip(")
+            .next()
+            .expect("chip source before the overflow pill");
+        assert!(chip_source.contains(".text_xs()"), "a chip is compact");
+        assert!(
+            chip_source.contains("fit(title, 14)"),
+            "chip title truncates"
+        );
+
+        // The paint loop drops a chip child from the row stream, so it never
+        // paints as its own row while its parent is visible.
+        let main_source = include_str!("main.rs");
+        assert!(
+            main_source.contains("if chip_children.contains(&id)"),
+            "the rail skips a child that paints as a chip"
+        );
+    }
+
+    /// The preview names the speaker the way the reader thinks of them and
+    /// cuts long text on a character boundary with an ellipsis.
+    #[test]
+    fn preview_line_prefixes_sender_and_truncates() {
+        assert_eq!(preview_line("user", "hello").to_string(), "You: hello");
+        assert_eq!(preview_line("assistant", "hi").to_string(), "Crabs: hi");
+        assert_eq!(preview_line("tool", "x").to_string(), "tool x");
+
+        let long = "x".repeat(PREVIEW_CHARS + 10);
+        let line = preview_line("user", &long).to_string();
+        assert!(line.ends_with('\u{2026}'), "long text gets an ellipsis");
+        let body = line.strip_prefix("You: ").expect("sender prefix");
+        assert_eq!(body.chars().count(), PREVIEW_CHARS);
     }
 }

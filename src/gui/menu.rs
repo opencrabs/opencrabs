@@ -19,6 +19,8 @@ pub enum MenuKind {
     Delete,
     EnableTopics,
     NewTopic,
+    /// Attach existing sessions as topics of this row, transcripts untouched.
+    GroupTopics,
     SplitSide,
     SplitStack,
 }
