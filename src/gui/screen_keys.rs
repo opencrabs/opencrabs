@@ -91,21 +91,6 @@ pub fn screen_chord(key: &str, mods: ChordMods, screen: Screen) -> Option<Screen
     None
 }
 
-/// The word the key log prints for a table answer. `none` is the signal that
-/// the keystroke arrived and matched nothing, which is a different failure from
-/// a keystroke that never arrived at all.
-pub fn action_label(action: Option<ScreenAction>) -> &'static str {
-    match action {
-        Some(ScreenAction::EnterUsage) => "EnterUsage",
-        Some(ScreenAction::LeaveUsage) => "LeaveUsage",
-        Some(ScreenAction::EnterFiles) => "EnterFiles",
-        Some(ScreenAction::LeaveFiles) => "LeaveFiles",
-        Some(ScreenAction::LeaveMissionControl) => "LeaveMissionControl",
-        Some(ScreenAction::ToggleHelp) => "ToggleHelp",
-        None => "none",
-    }
-}
-
 /// An inline overlay that can hold the keyboard while it is open. The caller
 /// passes them bottom to top, so the last one is what the user is nearest.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -218,10 +203,6 @@ mod tests {
             screen_chord("escape", PLAIN, Screen::MissionControl),
             Some(ScreenAction::LeaveMissionControl)
         );
-        assert_eq!(
-            action_label(Some(ScreenAction::LeaveMissionControl)),
-            "LeaveMissionControl"
-        );
     }
 
     #[test]
@@ -293,12 +274,6 @@ mod tests {
         for key in ["u", "g", "h", "q", "escape"] {
             assert_eq!(screen_chord(key, PLAIN, Screen::Chat), None, "{key}");
         }
-    }
-
-    #[test]
-    fn the_action_label_prints_none_for_an_unclaimed_key() {
-        assert_eq!(action_label(None), "none");
-        assert_eq!(action_label(Some(ScreenAction::LeaveUsage)), "LeaveUsage");
     }
 
     #[test]

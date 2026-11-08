@@ -634,17 +634,14 @@ fn a_pane_wears_a_ring_and_the_unfocused_ones_are_drawn_back() {
 }
 
 #[test]
-fn typing_is_not_written_to_the_log_keystroke_by_keystroke() {
-    let handler = flat(on_key());
-    let gate_at = handler
-        .find("is_typing_key(&ev.keystroke.key, m.control, m.platform, m.alt)")
-        .expect("the log gate asks the shared predicate whether the key is text");
-    let log_at = handler
-        .find("logging::debug(&format!(")
-        .expect("the key line is still there for chords");
+fn keystrokes_are_not_written_to_the_log() {
+    // The owner removed per-keystroke logging entirely (#2693): the daily log
+    // and the cargo-run terminal are not a keystroke recorder. Targeted key
+    // diagnostics are added ad hoc when a key is actually being debugged, so
+    // this pins the flood line itself, not all logging in the handler.
     assert!(
-        gate_at < log_at,
-        "the predicate decides before the line is written"
+        !flat(on_key()).contains("key {:?} screen="),
+        "the window must not write one log line per keystroke (#2693)"
     );
 }
 

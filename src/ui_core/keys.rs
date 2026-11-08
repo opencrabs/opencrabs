@@ -39,23 +39,3 @@ pub enum UiKey {
     /// key from being silently reinterpreted as a known one.
     Other,
 }
-
-/// Whether a keystroke can only be text (#2611).
-///
-/// The window logs one debug line per keystroke, which is what tells a chord
-/// that never fired apart from a chord that never arrived (#2356). A typed
-/// character answers neither question: it is no chord candidate, and every
-/// surface types characters all day, so the line becomes a keystroke
-/// recorder. Control, platform and alt are the modifiers that turn a key into
-/// a command, and a named key (`tab`, `escape`, `enter`, `up`) is never a
-/// character, so both keep the line.
-///
-/// Shift is deliberately not a term. `shift+t` is a capital letter, and the
-/// chords that need shift spell themselves as a named key (`backtab`) or as a
-/// modifier the window reads on its own.
-pub fn is_typing_key(key: &str, control: bool, platform: bool, alt: bool) -> bool {
-    if control || platform || alt {
-        return false;
-    }
-    key == "space" || key.chars().count() == 1
-}

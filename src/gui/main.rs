@@ -58,8 +58,8 @@ mod transcript;
 mod usage_view;
 
 use crate::screen_keys::{
-    ChordMods, FocusTarget, KeyboardOwner, OverlayId, ScreenAction, action_label, focus_target,
-    keyboard_owner, screen_chord,
+    ChordMods, FocusTarget, KeyboardOwner, OverlayId, ScreenAction, focus_target, keyboard_owner,
+    screen_chord,
 };
 use crate::theme::{BASE_REM, Size, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP, text};
 use opencrabs::db::models::Message;
@@ -108,7 +108,7 @@ use opencrabs::config::Config;
 use opencrabs::config::GuiTheme;
 use opencrabs::config::gui_theme;
 use opencrabs::tui::app::mission_control::log_viewer::LogViewerState;
-use opencrabs::ui_core::keys::{UiKey, is_typing_key};
+use opencrabs::ui_core::keys::UiKey;
 use opencrabs::ui_core::usage::data::Period;
 use opencrabs::ui_core::usage::input::{self, DashboardState, UsageKeyOutcome};
 use opencrabs::ui_core::usage::loader::usage_view;
@@ -7045,29 +7045,7 @@ impl Dashboard {
             cx.notify();
             return;
         }
-        // The line carries the screen and the table's answer, because a report
-        // that only says which key arrived cannot tell a keystroke that never
-        // reached this handler from one that reached it and matched nothing
-        // (#2356).
         let screen_action = screen_chord(&ev.keystroke.key, mods, self.screen);
-        // One line per keystroke is what tells a chord that never fired from
-        // one that never arrived (#2356), so chords and named keys keep it. A
-        // typed character answers neither question, and logging it turned the
-        // daily log into a keystroke recorder (#2611).
-        if screen_action.is_some()
-            || !is_typing_key(&ev.keystroke.key, m.control, m.platform, m.alt)
-        {
-            logging::debug(&format!(
-                "key {:?} screen={:?} action={} ctrl={} cmd={} shift={} alt={}",
-                ev.keystroke.key,
-                self.screen,
-                action_label(screen_action),
-                m.control,
-                m.platform,
-                m.shift,
-                m.alt
-            ));
-        }
         // The screen chords are answered by one pure table and they must work
         // while typing, so they sit before the editor focus gate: the editor
         // only claims IME escapes, and these keys belong to the window.
