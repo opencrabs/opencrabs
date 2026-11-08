@@ -1706,7 +1706,7 @@ mod tests {
     /// pinned at the top level for ordering, but keeps its indent: the pin
     /// changes where it sorts, never whether it is a topic of its parent.
     #[test]
-    fn topics_group_under_their_parent_and_favorites_stay_pinned() {
+    fn a_pinned_topic_keeps_its_indent_and_sorts_first() {
         let a = Session::new(Some("A".into()), None, None);
         let b = Session::new(Some("B".into()), None, None);
         let a1 = Session::new(Some("A topic".into()), None, None);
