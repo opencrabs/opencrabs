@@ -21,8 +21,8 @@
 //! its own row in the live turn and a `⏳` strip above the input, both drawn
 //! from the same formatter the TUI uses. When it finishes, the row settles by
 //! task id and the conversation resumes with the output (#2322). A completion
-//! for a session other than the open one is logged, not resumed: the window
-//! runs one conversation at a time.
+//! resumes the session that started the task, whether or not its conversation
+//! is the one on screen (#2704).
 
 mod accent;
 mod agent_bridge;
@@ -5521,17 +5521,14 @@ impl Dashboard {
                     // the agent is told, so the work is reported instead of the
                     // window going quiet with the turn already finished.
                     //
-                    // The window runs one turn, on the conversation it has
-                    // open (`agent_bridge` module doc). A completion for any
-                    // other session is logged, not silently dropped: resuming a
-                    // session nobody is looking at needs its own queue and turn
-                    // runner, which is #2322's documented gap.
-                    if Some(session_id) != self.transcript.session {
-                        logging::warn(&format!(
-                            "background task finished on session {session_id} while session {:?} is open: not resumed",
-                            self.transcript.session
-                        ));
-                    } else if self.busy {
+                    // The completion belongs to the session that started the
+                    // task, never to whatever conversation happens to be on
+                    // screen. The terminal resumes that session wherever the
+                    // user is looking (`tui/app/state.rs`), and the window now
+                    // does the same (#2704): a session already working takes
+                    // the receipt in its queue, and an idle one starts its turn
+                    // and parks it in the stash when it is not on screen.
+                    if self.running_here(session_id) {
                         // Queue it against the session the task belongs to, in
                         // the store the agent drains, so it goes out between
                         // tool calls instead of waiting for the turn to end
@@ -5541,8 +5538,10 @@ impl Dashboard {
                             session_id,
                             agent_bridge::PendingMessage::system(context_text, display_text),
                         );
-                    } else {
+                    } else if self.transcript.session == Some(session_id) {
                         self.resume_finished_task(session_id, context_text, display_text, cx);
+                    } else {
+                        self.resume_off_screen_task(session_id, context_text, display_text, cx);
                     }
                 }
             }
@@ -5761,6 +5760,78 @@ impl Dashboard {
         if !attached.is_empty() {
             agent_bridge::spawn_track_files(self.db_path.clone(), session_id, attached);
         }
+        cx.notify();
+    }
+
+    /// Whether `session` already has a turn in flight in this window: the
+    /// conversation on screen while it is busy, a split leaf still working, or
+    /// a turn parked in the stash (#2704).
+    ///
+    /// A completion for one of those joins the session's queue instead of
+    /// starting a second turn over it, which is the rule the terminal applies
+    /// to its own per-session state.
+    fn running_here(&self, session: Uuid) -> bool {
+        if self.transcript.session == Some(session) && self.busy {
+            return true;
+        }
+        if self.pane_states.get(&session).is_some_and(|p| p.busy) {
+            return true;
+        }
+        self.stashed.contains_key(&session)
+    }
+
+    /// Start the turn a completion asks for on a conversation nobody is
+    /// looking at, parking its card under that session (#2704).
+    ///
+    /// The terminal resumes the owning session wherever the user is looking,
+    /// so the window does too instead of logging the receipt away. The parked
+    /// turn is the same shape a switch leaves behind (#2616): `swap_visible_turn`
+    /// brings it back whole when that conversation is opened.
+    fn resume_off_screen_task(
+        &mut self,
+        session_id: Uuid,
+        context_text: String,
+        display_text: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(bridge) = agent_bridge::bridge() else {
+            // Still booting: key it to the session it finished on, so it
+            // resumes when the stack is ready (#2629).
+            agent_bridge::queue_push(
+                session_id,
+                agent_bridge::PendingMessage::system(context_text, display_text),
+            );
+            return;
+        };
+        let mut live = transcript::LiveTurn::default();
+        live.begin(display_text);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        self.stashed.insert(
+            session_id,
+            StashedTurn {
+                live,
+                cancel: Some(cancel.clone()),
+                // The rows land under a conversation that is not on screen, so
+                // no reload has to be proven here; opening it reads them.
+                settle_expect: None,
+                settle_retries: 0,
+                ctx_tokens: None,
+            },
+        );
+        let attached = editor::marker_paths(&context_text);
+        agent_bridge::spawn_turn(
+            bridge.service.clone(),
+            session_id,
+            context_text,
+            self.sink.clone(),
+            cancel,
+        );
+        if !attached.is_empty() {
+            agent_bridge::spawn_track_files(self.db_path.clone(), session_id, attached);
+        }
+        // The rail says the session is working from the first frame, the same
+        // signal a visible turn gives (#2666, #2636).
+        self.refresh_rail(cx);
         cx.notify();
     }
 
@@ -17299,21 +17370,33 @@ mod tests {
         );
     }
 
-    /// The completion event is handled, and the cross-session branch says so
-    /// out loud instead of dropping the receipt. Halves again: the file this
+    /// The completion event resumes the session that started the task, never
+    /// only the conversation on screen (#2704). Halves again: the file this
     /// reads includes this test.
     #[test]
-    fn the_completion_event_is_handled() {
+    fn the_completion_event_resumes_its_own_session() {
         let src = include_str!("main.rs");
         let event = ["TurnEvent::", "BackgroundTaskDone"].concat();
-        let warn = ["logging::", "warn("].concat();
         assert!(
             src.contains(&event),
             "the poll loop must handle the completion event"
         );
+        let arm = src.split(&event).nth(1).expect("the completion arm");
+        let arm = arm
+            .split("agent_bridge::TurnEvent::")
+            .next()
+            .expect("the end of the arm");
         assert!(
-            src.contains(&warn),
-            "a completion for another session is logged, never dropped"
+            arm.contains("self.running_here(session_id)"),
+            "a session already working takes the receipt in its queue"
+        );
+        assert!(
+            arm.contains("self.resume_off_screen_task(session_id"),
+            "a completion for a conversation nobody is looking at starts its turn"
+        );
+        assert!(
+            !arm.contains("background task finished on session"),
+            "the receipt is resumed, not logged away"
         );
     }
 
