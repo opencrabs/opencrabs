@@ -91,7 +91,7 @@ use futures::channel::oneshot;
 
 use gpui::{
     AnyElement, App, Application, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, Div,
-    DragMoveEvent, Entity, ExternalPaths, FocusHandle, KeyDownEvent, MouseButton,
+    DragMoveEvent, Entity, ExternalPaths, FocusHandle, KeyDownEvent, KeystrokeEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta, ScrollHandle,
     ScrollWheelEvent, SharedString, Stateful, TitlebarOptions, Window, WindowBounds, WindowOptions,
     div, point, prelude::*, px, relative, rems, rgb, rgba, size,
@@ -830,6 +830,13 @@ struct Dashboard {
     /// that lands afterwards is out of view. It is released when the reader
     /// scrolls up and re-armed when they send, open or come back (#2698).
     transcript_follow: Follow,
+    /// When the first Ctrl+C armed the quit window (#2308). `None` means no
+    /// press is waiting, and the next one only clears and arms again.
+    ctrl_c_pending: Option<std::time::Instant>,
+    /// The keystroke interceptor that hands Ctrl+C to this window before the
+    /// composer's own copy chord can take it (#2308). Held here because
+    /// dropping the subscription would silently unregister it.
+    ctrl_c_interceptor: Option<gpui::Subscription>,
     /// The rail's own scroll handle, so a cursor moved by the arrows can
     /// ask the next frame to bring its row into view (#2351).
     rail_scroll: ScrollHandle,
@@ -1103,6 +1110,59 @@ mod sidebar_action_tests {
 /// instead of pixels, the same 20px GPUI's own list uses (#2698).
 const WHEEL_LINE_PX: f32 = 20.0;
 
+/// How long a first Ctrl+C stays armed before the second press stops meaning
+/// "quit": the terminal's own three seconds (`tui/app/state.rs:3730`).
+const QUIT_WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// What one Ctrl+C press spends itself on (#2308).
+///
+/// The terminal has answered this key the same way for years, so the window
+/// asks the same question in the same order instead of inventing a second
+/// meaning for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CtrlCAction {
+    /// The reader is scrolled up: put them back at the bottom, keep the window
+    /// open.
+    SnapBottom,
+    /// Throw the draft away and arm the quit window, with the hint.
+    ClearAndArm,
+    /// A second press inside the window: leave.
+    Quit,
+}
+
+/// The terminal's Ctrl+C ladder, as a decision (#2308).
+///
+/// `following` is the transcript's own follow, `input_empty` whether the
+/// composer has anything to throw away, `pending` the first press while it is
+/// still armed, and `now` the clock that judges it. A composer holding text is
+/// a fresh start, never a confirmation: the press throws that text away and
+/// arms again, so a keystroke typed between the two presses can never be the
+/// thing that closes the window.
+fn ctrl_c_action(
+    following: bool,
+    input_empty: bool,
+    pending: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> CtrlCAction {
+    // A reader scrolled up gets the bottom back and nothing else: the press
+    // never costs them the window.
+    if !following {
+        return CtrlCAction::SnapBottom;
+    }
+    // The second press quits, and only over an empty composer. A pending
+    // stamp in the future means the clock moved backwards: that is no proof
+    // of a second press, so it re-arms instead of quitting.
+    if input_empty
+        && let Some(at) = pending
+        && now
+            .checked_duration_since(at)
+            .is_some_and(|elapsed| elapsed < QUIT_WINDOW)
+    {
+        return CtrlCAction::Quit;
+    }
+    CtrlCAction::ClearAndArm
+}
+
 /// How far one wheel tick asks a transcript to move, in px (#2698).
 ///
 /// Platforms disagree on the unit and on the axis: a trackpad reports pixels
@@ -1286,6 +1346,65 @@ impl Dashboard {
     /// PageUp (#2698). The TUI drops `auto_scroll` on the same two gestures.
     fn release_transcript_follow(&mut self) {
         self.transcript_follow.release();
+    }
+
+    /// One Ctrl+C press (#2308), the terminal's three steps ported whole.
+    ///
+    /// Scrolled up, the press only gives the bottom back. Otherwise it throws
+    /// the draft away and arms a three second window, and a second press
+    /// inside that window stops the turn in flight and closes the window. The
+    /// keystroke interceptor and `on_key` both land here, so the key means one
+    /// thing wherever it is caught.
+    fn ctrl_c_press(&mut self, cx: &mut Context<Self>) {
+        let now = std::time::Instant::now();
+        let input_empty = self.editor.read(cx).is_empty();
+        let action = ctrl_c_action(
+            self.transcript_follow.is_following(),
+            input_empty,
+            self.ctrl_c_pending,
+            now,
+        );
+        match action {
+            CtrlCAction::SnapBottom => {
+                self.ctrl_c_pending = None;
+                self.rearm_transcript_follow();
+                // The pane the keyboard is on follows the same rule as the
+                // window: it is the transcript the reader was looking at.
+                if let Some(id) = self.pane_focus {
+                    self.rearm_pane_follow(id);
+                }
+                self.editor
+                    .update(cx, |editor, cx| editor.discard_draft(cx));
+                logging::info("ctrl+c snapped the transcript to the bottom");
+            }
+            CtrlCAction::ClearAndArm => {
+                self.ctrl_c_pending = Some(now);
+                self.editor
+                    .update(cx, |editor, cx| editor.discard_draft(cx));
+                self.live
+                    .notices
+                    .push("Press Ctrl+C again to quit".to_string());
+            }
+            CtrlCAction::Quit => {
+                self.ctrl_c_pending = None;
+                // The stop reaches the pane the keyboard is on first, then the
+                // window's own turn, the same order Esc uses.
+                self.cancel_focused_pane_turn("Ctrl+C", cx);
+                if let Some(cancel) = self.cancel.take() {
+                    cancel.cancel();
+                }
+                self.busy = false;
+                self.live.thinking = false;
+                self.cancel = None;
+                logging::info("ctrl+c quit the window");
+                cx.quit();
+                return;
+            }
+        }
+        // The draft is gone, so the hint that describes an empty field is the
+        // one that belongs under it now (#2308).
+        self.sync_composer_hint(cx);
+        cx.notify();
     }
 
     /// The same pair for one pane's transcript (#2685, #2698).
@@ -7716,6 +7835,21 @@ impl Dashboard {
             cx.notify();
             return;
         }
+        // Ctrl+C is the terminal's own ladder (#2308): scrolled up it gives
+        // the bottom back, otherwise it throws the draft away and arms a three
+        // second quit window, and the second press stops the turn in flight and
+        // closes the window. It sits ahead of the composer gate so the key
+        // answers while the caret is in the field; the interceptor in `main` is
+        // what keeps the editor's copy chord from taking the press first when
+        // nothing is selected.
+        if ev.keystroke.modifiers.control
+            && !ev.keystroke.modifiers.platform
+            && !ev.keystroke.modifiers.alt
+            && ev.keystroke.key == "c"
+        {
+            self.ctrl_c_press(cx);
+            return;
+        }
         // While the editor holds focus it owns the keyboard: its actions
         // (send, newline, movement) run through the keymap, and raw keys
         // reaching this handler would double-handle Enter and friends.
@@ -11442,6 +11576,10 @@ fn main() {
                         },
                         transcript_scroll: ScrollHandle::new(),
                         transcript_follow: Follow::new(),
+                        ctrl_c_pending: None,
+                        // Registered by `main` once the window exists: it needs
+                        // a handle on this view to judge the press (#2308).
+                        ctrl_c_interceptor: None,
                         rail_scroll: ScrollHandle::new(),
                         editor,
                         agent_rx,
@@ -11464,6 +11602,45 @@ fn main() {
                         branch: git_branch(&opencrabs::utils::cwd::launch_cwd()),
                     }
                 });
+                // Ctrl+C has to reach the window even while the composer holds
+                // the keyboard, and the editor binds the key to its own copy
+                // action (#2587): a keymap match stops every listener behind
+                // it, so the quit ladder is judged in an interceptor, which
+                // runs before bindings resolve and can answer the press itself
+                // (#2308). A composer selection keeps its copy and the press
+                // falls through untouched.
+                {
+                    let weak = view.downgrade();
+                    let kept = cx.intercept_keystrokes(
+                        move |ev: &KeystrokeEvent, window: &mut Window, cx: &mut App| {
+                            let chord = ev.keystroke.modifiers.control
+                                && !ev.keystroke.modifiers.platform
+                                && !ev.keystroke.modifiers.alt
+                                && ev.keystroke.key == "c";
+                            if !chord {
+                                return;
+                            }
+                            let falls_to_copy = weak
+                                .read_with(cx, |this, cx| {
+                                    let editor = this.editor.read(cx);
+                                    this.screen == Screen::Chat
+                                        && editor.focus_handle.is_focused(window)
+                                        && editor.has_selection()
+                                })
+                                .unwrap_or(false);
+                            if falls_to_copy {
+                                return;
+                            }
+                            // Interceptors run ahead of the bindings and a
+                            // stopped keystroke never reaches a listener, so
+                            // the press is answered here instead of in the
+                            // view's own handler (#2308).
+                            cx.stop_propagation();
+                            let _ = weak.update(cx, |this, cx| this.ctrl_c_press(cx));
+                        },
+                    );
+                    let _ = view.update(cx, |this, _| this.ctrl_c_interceptor = Some(kept));
+                }
                 // The palette follows the system appearance from the first
                 // frame, and again whenever the system switches (#2341).
                 palette::follow_appearance(window.appearance());
@@ -16746,6 +16923,120 @@ mod tests {
         );
     }
 
+    /// The terminal's Ctrl+C ladder, as a decision (#2308): scrolled up the
+    /// press only gives the bottom back, and it never costs the window.
+    #[test]
+    fn ctrl_c_gives_the_bottom_back_before_it_takes_the_window() {
+        let now = std::time::Instant::now();
+        let armed = Some(now - std::time::Duration::from_secs(1));
+        for pending in [None, armed] {
+            assert_eq!(
+                super::ctrl_c_action(false, true, pending, now),
+                super::CtrlCAction::SnapBottom,
+                "a reader scrolled up gets the bottom, never the quit"
+            );
+            assert_eq!(
+                super::ctrl_c_action(false, false, pending, now),
+                super::CtrlCAction::SnapBottom,
+                "and a draft in the field does not change that"
+            );
+        }
+    }
+
+    /// The first press throws the draft away and arms; the second inside the
+    /// three second window leaves (#2308).
+    #[test]
+    fn ctrl_c_quits_on_a_second_press_inside_the_window_only() {
+        let now = std::time::Instant::now();
+        assert_eq!(
+            super::ctrl_c_action(true, false, None, now),
+            super::CtrlCAction::ClearAndArm,
+            "nothing armed yet: the press only clears"
+        );
+        assert_eq!(
+            super::ctrl_c_action(
+                true,
+                true,
+                Some(now - std::time::Duration::from_secs(1)),
+                now
+            ),
+            super::CtrlCAction::Quit,
+            "a second press one second later quits"
+        );
+        assert_eq!(
+            super::ctrl_c_action(true, true, Some(now - super::QUIT_WINDOW), now),
+            super::CtrlCAction::ClearAndArm,
+            "the window is three seconds wide and it is spent at the edge"
+        );
+        assert_eq!(
+            super::ctrl_c_action(
+                true,
+                true,
+                Some(now + std::time::Duration::from_secs(1)),
+                now
+            ),
+            super::CtrlCAction::ClearAndArm,
+            "a clock that moved backwards never quits"
+        );
+    }
+
+    /// Text typed between the two presses is a fresh start, never a
+    /// confirmation: the press throws it away and arms again (#2308).
+    #[test]
+    fn ctrl_c_clears_a_draft_typed_since_the_first_press() {
+        let now = std::time::Instant::now();
+        assert_eq!(
+            super::ctrl_c_action(
+                true,
+                false,
+                Some(now - std::time::Duration::from_secs(1)),
+                now
+            ),
+            super::CtrlCAction::ClearAndArm,
+            "a draft that came back is thrown away, not read as consent"
+        );
+    }
+
+    /// The branch sits ahead of the composer gate, so the key answers while
+    /// the caret is in the field (#2308).
+    #[test]
+    fn ctrl_c_branch_runs_ahead_of_the_composer_gate() {
+        let src = include_str!("main.rs");
+        let branch = src
+            .find("self.ctrl_c_press(cx);")
+            .expect("the Ctrl+C branch is in on_key");
+        let gate = src
+            .find("if self.editor.read(cx).focus_handle.is_focused(window)")
+            .expect("the composer gate is in on_key");
+        assert!(
+            branch < gate,
+            "Ctrl+C is judged before the editor takes the keyboard"
+        );
+    }
+
+    /// The composer's own ctrl-c binding would take the key before any window
+    /// listener, so an interceptor hands it over first, and a selection still
+    /// reaches the copy chord (#2308, #2587).
+    #[test]
+    fn ctrl_c_reaches_the_window_ahead_of_the_copy_chord() {
+        let src = include_str!("main.rs");
+        assert!(
+            src.contains("cx.intercept_keystrokes("),
+            "the quit lane is judged before keymap dispatch"
+        );
+        assert!(
+            src.contains("cx.stop_propagation();"),
+            "the press is handed to the window instead of the copy action"
+        );
+        assert!(
+            src.contains("editor.has_selection()"),
+            "a composer selection keeps its copy"
+        );
+        assert!(
+            include_str!("editor.rs").contains("KeyBinding::new(\"ctrl-c\", Copy, None)"),
+            "the editor still binds the key to copy"
+        );
+    }
 }
 
 #[cfg(test)]

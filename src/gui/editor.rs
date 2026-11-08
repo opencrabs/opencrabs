@@ -970,6 +970,21 @@ impl Editor {
         cx.notify();
     }
 
+    /// Whether there is anything to throw away: text in the field, or a chip
+    /// waiting to fly with it. A recall counts as text, because its joined
+    /// entries are what the field is showing.
+    pub fn is_empty(&self) -> bool {
+        self.content.trim().is_empty() && self.attachments.is_empty()
+    }
+
+    /// A Ctrl+C that throws the draft away (#2308). The text and the chips go,
+    /// and the queue takes back whatever an Up walk had pulled out of it: a
+    /// draft the user cancelled must never be sent behind their back.
+    pub fn discard_draft(&mut self, cx: &mut Context<Self>) {
+        self.give_back_recall(false);
+        self.begin_conversation(cx);
+    }
+
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         // A screenshot copies no text: the picture lands on a scratch file and
         // attaches through the same `attach_paths` door a Finder drop takes
