@@ -134,6 +134,7 @@ fn discard(path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opencrabs::ui_core::pane_tree::DropHalf;
     use opencrabs::ui_core::split::Layout;
 
     /// Two leaves side by side.
@@ -160,6 +161,73 @@ mod tests {
         // The drag moved the first pane off even: a restart must not snap the
         // panes back to 50/50.
         assert_ne!(restored.leaf_width_share(left), Some(0.5));
+    }
+
+    /// A moved pane survives a restart: the tree the move produced, with
+    /// its shares, is the tree that loads back (#2683).
+    #[test]
+    fn a_moved_pane_survives_a_save_and_load_round_trip() {
+        let dir = tempfile::tempdir().expect("temp home");
+        let file = dir.path().join("gui_layout.json");
+        let (a, b, c) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let mut tree = PaneTree::leaf(a);
+        assert!(tree.split(a, Layout::Side, b), "split the leaf");
+        assert!(tree.split(b, Layout::Stack, c), "split the second pane");
+        assert!(
+            tree.move_leaf(
+                c,
+                a,
+                DropHalf {
+                    layout: Layout::Side,
+                    after: false,
+                }
+            ),
+            "move c beside a"
+        );
+        let moved_leaves = tree.leaves();
+        let moved_shares: Vec<Option<f32>> = moved_leaves
+            .iter()
+            .map(|session| tree.leaf_width_share(*session))
+            .collect();
+        save(&file, Some(&tree), Some(a), Some(a));
+
+        let saved = load(&file).expect("a saved layout reads back");
+        let restored = saved.panes.expect("the tree");
+        assert_eq!(restored.leaves(), moved_leaves, "the move comes back");
+        let round_shares: Vec<Option<f32>> = moved_leaves
+            .iter()
+            .map(|session| restored.leaf_width_share(*session))
+            .collect();
+        assert_eq!(round_shares, moved_shares, "the shares come back");
+        assert!(restored.duplicates().is_empty(), "no session twice");
+    }
+
+    /// A custom share inside a nested split loads back unchanged: the
+    /// snapshot keeps the whole tree's numbers, not just the root pair
+    /// (#2684).
+    #[test]
+    fn a_nested_custom_share_survives_a_save_and_load_round_trip() {
+        let dir = tempfile::tempdir().expect("temp home");
+        let file = dir.path().join("gui_layout.json");
+        let (a, b, c) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let mut tree = PaneTree::leaf(a);
+        assert!(tree.split(a, Layout::Side, b), "split the leaf");
+        assert!(tree.split(b, Layout::Stack, c), "split the second pane");
+        // The nested pair holds half of 2400px, so 120px of travel moves it
+        // off even without touching the floor.
+        assert!(tree.drag_divider(&[1], 0, 120.0, 2400.0), "drag the pair");
+        let nested_before = tree.leaf_width_share(b);
+        assert_ne!(nested_before, Some(0.25), "the drag moved the share");
+        save(&file, Some(&tree), Some(b), Some(a));
+
+        let saved = load(&file).expect("a saved layout reads back");
+        let restored = saved.panes.expect("the tree");
+        assert_eq!(restored.leaves(), vec![a, b, c], "same draw order");
+        assert_eq!(
+            restored.leaf_width_share(b),
+            nested_before,
+            "the nested share comes back unchanged"
+        );
     }
 
     #[test]
