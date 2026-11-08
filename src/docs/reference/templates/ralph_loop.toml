@@ -19,6 +19,20 @@ require_all_pass = true
 # off                  = criteria stay advisory, no enforcement
 criteria_policy = "downgrade"
 
+# When the gate runs (#2694). Running the full per-type command suite (cargo
+# test / clippy) on EVERY task completion burns hours on a multi-task plan,
+# while the advisory policy above cannot even reject a completion. So by
+# default the gate runs once, on the task whose completion finishes the plan.
+#
+# final (default) = run the gate only on the task that finishes the plan;
+#                   intermediate tasks complete without running commands and
+#                   are logged Uncertain (verification deferred to the end)
+# each            = run the gate on every task completion (the old behaviour)
+#
+# Only applies when enabled = true. Receipt binding (the per-task commit check)
+# is unchanged and still runs on every task.
+scope = "final"
+
 # Per-task spec checks (#1904). A task locks one command read out of its own
 # acceptance criteria when it starts, and the gate runs that exact command when
 # the task completes. The lock is the point: the command is hashed at start, so
