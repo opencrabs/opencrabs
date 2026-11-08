@@ -388,17 +388,19 @@ fn alt_tab_rotates_the_panes_and_bare_tab_does_not() {
 
 #[test]
 fn the_page_keys_scroll_the_pane_holding_the_caret() {
-    let keys = on_key();
+    let keys = flat(on_key());
     // A read-only transcript holds the caret by taking the page keys. Without
     // this the second pane could be focused and still not scroll (#2475).
     assert!(
-        keys.contains(
-            "let scroll = match self.pane_focus.and_then(|id| self.pane_states.get(&id)) {"
-        ),
+        keys.contains(".filter(|id| self.pane_states.contains_key(id));"),
         "the page keys follow the caret into whichever pane holds it"
     );
     assert!(
-        keys.contains("None => &self.transcript_scroll,"),
+        keys.contains("let (x, y, max) = match target.and_then(|id| self.pane_states.get(&id)) {"),
+        "the caret's pane is the one the page keys move"
+    );
+    assert!(
+        keys.contains("let offset = self.transcript_scroll.offset();"),
         "with no pane focused the page keys scroll the chat"
     );
 }
