@@ -663,8 +663,19 @@ jobs:
         # the moment of death are in the log. Linux-only at runtime (it reads
         # /proc and the cgroup memory controller and returns immediately
         # elsewhere), so this stays one copy of the suite command.
+        # #2699: the hosted runner is a 4 vCPU / 16 GB VM, and this build peaked
+        # at 15.9 GB with the library and its test harness compiling at the same
+        # time (rustc at 8.9 GB and 6.0 GB), so the VM was evicted at 106 MB free
+        # before a single test ran. Capping cargo's job count and the profile's
+        # codegen fan-out keeps the peak near half of that. The suite command is
+        # untouched: opt-level 3 and thin LTO still run, so this stays the
+        # release-mode correctness check the leg exists for. If it is ever
+        # evicted again, the next step down is CARGO_BUILD_JOBS=1, which
+        # serialises the two units instead of running them together.
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then
+            export CARGO_BUILD_JOBS=2
+            export CARGO_PROFILE_CI_CODEGEN_UNITS=4
             bash scripts/ci-resource-sampler.sh 10 &
             sampler=$!
             trap 'kill "$sampler" 2>/dev/null || true' EXIT
