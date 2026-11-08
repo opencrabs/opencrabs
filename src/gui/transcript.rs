@@ -149,6 +149,12 @@ pub type ClickHandler = std::rc::Rc<dyn Fn(&ClickEvent, &mut Window, &mut App) +
 /// [`ClickHandler`]: only the owning view can build one (#2613).
 pub type PressHandler = std::rc::Rc<dyn Fn(&gpui::MouseDownEvent, &mut Window, &mut App) + 'static>;
 
+/// A wheel tick over the transcript, so a reader can release the follow by
+/// hand and get it back by scrolling down (#2698). Minted by the owning view
+/// for the same reason as [`ClickHandler`]: only it holds the state to change.
+pub type ScrollHandler =
+    std::rc::Rc<dyn Fn(&gpui::ScrollWheelEvent, &mut Window, &mut App) + 'static>;
+
 /// The open message menu (#2613): the row it belongs to and its resolved
 /// items. The window mints each pick, because the actions live on the window's
 /// own state; the transcript only draws the card over the row that asked.
@@ -2941,6 +2947,9 @@ fn block_text(block: &Block) -> String {
 pub struct ViewHooks {
     pub attachments: HashMap<String, ClickHandler>,
     pub drag: Option<Rc<CopyDrag>>,
+    /// The wheel over the transcript, minted by the owning view so a tick up
+    /// releases its follow and a tick down re-arms it (#2698).
+    pub wheel: Option<ScrollHandler>,
     /// Left click per stored message row, keyed by message id. Select mode
     /// mints one per row so a click toggles it; outside the mode the map is
     /// empty and every row stays inert (#2613).
@@ -2975,6 +2984,7 @@ pub fn view(
     let ViewHooks {
         attachments: attachment_handlers,
         drag,
+        wheel,
         ctx_used,
         ctx_max,
         live_click,
@@ -2998,6 +3008,11 @@ pub fn view(
         .gap_2()
         .p_2()
         .bg(rgb(palette::current().bg));
+    // The wheel is the reader's own hand on the transcript: the owning view
+    // decides whether a tick releases its follow or gives it back (#2698).
+    if let Some(wheel) = wheel {
+        col = col.on_scroll_wheel(move |ev, window, cx| wheel(ev, window, cx));
+    }
     // A press on the transcript's background closes the open message menu
     // (#2613). Rows that handle their own press and the menu card itself stop
     // the event before it reaches here, so this only fires for a click outside.

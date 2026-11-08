@@ -70,7 +70,7 @@ use opencrabs::ui_core::model_layout;
 use opencrabs::ui_core::model_selector::{FetchRequest, ProviderSelectorState};
 use opencrabs::ui_core::pane_tree::{DropHalf, PaneTree, drop_half};
 use opencrabs::ui_core::rail;
-use opencrabs::ui_core::scroll::Follow;
+use opencrabs::ui_core::scroll::{Follow, scrolled_from_top, wheel_releases_follow};
 use opencrabs::ui_core::split::{self, Layout};
 use opencrabs::ui_core::topic_bar;
 use transcript::{CopyDrag, TranscriptState};
@@ -91,10 +91,10 @@ use futures::channel::oneshot;
 
 use gpui::{
     AnyElement, App, Application, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, Div,
-    DragMoveEvent, Entity, ExternalPaths, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta, ScrollHandle, ScrollWheelEvent,
-    SharedString, Stateful, TitlebarOptions, Window, WindowBounds, WindowOptions, div, point,
-    prelude::*, px, relative, rems, rgb, rgba, size,
+    DragMoveEvent, Entity, ExternalPaths, FocusHandle, KeyDownEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta, ScrollHandle,
+    ScrollWheelEvent, SharedString, Stateful, TitlebarOptions, Window, WindowBounds, WindowOptions,
+    div, point, prelude::*, px, relative, rems, rgb, rgba, size,
 };
 use opencrabs::brain::agent::ProgressEvent;
 use opencrabs::utils::drop_landing::human_size;
@@ -509,6 +509,10 @@ struct StashedTurn {
 struct Dashboard {
     /// Which pane the right side draws: chat by default, usage on ctrl+u.
     screen: Screen,
+    /// The screen the previous frame drew (#2698). Coming back to the chat is
+    /// a return, not a resume: every panel that closes hands the reader the
+    /// newest row instead of the history they left behind.
+    last_screen: Screen,
     state: LoadState,
     /// Which card is focused, whether the breakdown is open: the shared
     /// state the TUI's own handler mutates, driven by the same `decide`.
@@ -823,8 +827,9 @@ struct Dashboard {
     transcript_scroll: ScrollHandle,
     /// Whether the chat transcript keeps following its bottom (#2685). A one
     /// shot snap could not: it is consumed by the next layout, and every row
-    /// that lands afterwards is out of view.
-    chat_follow: Follow,
+    /// that lands afterwards is out of view. It is released when the reader
+    /// scrolls up and re-armed when they send, open or come back (#2698).
+    transcript_follow: Follow,
     /// The rail's own scroll handle, so a cursor moved by the arrows can
     /// ask the next frame to bring its row into view (#2351).
     rail_scroll: ScrollHandle,
@@ -1094,6 +1099,22 @@ mod sidebar_action_tests {
     }
 }
 
+/// How tall one wheel "line" is when the platform reports the tick in lines
+/// instead of pixels, the same 20px GPUI's own list uses (#2698).
+const WHEEL_LINE_PX: f32 = 20.0;
+
+/// How far one wheel tick asks a transcript to move, in px (#2698).
+///
+/// Platforms disagree on the unit and on the axis: a trackpad reports pixels
+/// and a mouse may report lines, and either may be horizontal only. Only the
+/// vertical part decides whether the reader walked back through history.
+fn wheel_dy(delta: &ScrollDelta) -> f32 {
+    match delta {
+        ScrollDelta::Pixels(d) => f32::from(d.y),
+        ScrollDelta::Lines(d) => d.y * WHEEL_LINE_PX,
+    }
+}
+
 impl Dashboard {
     /// Re-read the channel chip now (#2452): after a Start click succeeds,
     /// the daemon appears within a second or two, so poll instead of
@@ -1245,21 +1266,57 @@ impl Dashboard {
     /// offset and leaves the offset alone, so growth can never be mistaken for
     /// the reader leaving.
     fn follow_chat(&mut self) {
-        let offset = self.transcript_scroll.offset().y.into();
-        let max = self.transcript_scroll.max_offset().height.into();
-        if self.chat_follow.update(offset, max) {
+        let offset = scrolled_from_top(f32::from(self.transcript_scroll.offset().y));
+        let max = f32::from(self.transcript_scroll.max_offset().height);
+        if self.transcript_follow.update(offset, max) {
             self.transcript_scroll.scroll_to_bottom();
+        }
+    }
+
+    /// Give the chat transcript back its follow and land on the newest row.
+    ///
+    /// Sending, opening a conversation and coming back from a panel all say
+    /// the same thing: the reader wants the end of it (#2698).
+    fn rearm_transcript_follow(&mut self) {
+        self.transcript_follow.rearm();
+        self.transcript_scroll.scroll_to_bottom();
+    }
+
+    /// Stop following because the reader moved by hand: a wheel tick up or a
+    /// PageUp (#2698). The TUI drops `auto_scroll` on the same two gestures.
+    fn release_transcript_follow(&mut self) {
+        self.transcript_follow.release();
+    }
+
+    /// The same pair for one pane's transcript (#2685, #2698).
+    fn release_pane_follow(&mut self, session: Uuid) {
+        if let Some(pane) = self.pane_states.get_mut(&session) {
+            pane.follow.release();
+        }
+    }
+
+    fn rearm_pane_follow(&mut self, session: Uuid) {
+        if let Some(pane) = self.pane_states.get_mut(&session) {
+            pane.follow.rearm();
+            pane.scroll.scroll_to_bottom();
         }
     }
 
     /// The same for one pane's transcript (#2685).
     fn follow_pane(&mut self, session: Uuid) {
         if let Some(pane) = self.pane_states.get_mut(&session) {
-            let offset = pane.scroll.offset().y.into();
-            let max = pane.scroll.max_offset().height.into();
-            if pane.follow.update(offset, max) {
-                pane.scroll.scroll_to_bottom();
-            }
+            Self::snap_pane_if_following(pane);
+        }
+    }
+
+    /// Snap one pane's transcript to its newest row only while that pane is
+    /// still following: a reader who scrolled up keeps their place while rows
+    /// land under them (#2685, #2698).
+    fn snap_pane_if_following(pane: &mut SplitPane) {
+        let offset = scrolled_from_top(f32::from(pane.scroll.offset().y));
+        let max = f32::from(pane.scroll.max_offset().height);
+        if pane.follow.update(offset, max) {
+            pane.scroll.scroll_to_bottom();
         }
     }
 
@@ -1347,7 +1404,10 @@ impl Dashboard {
                         }
                         Err(e) => this.transcript.error = Some(e.into()),
                     }
-                    this.transcript_scroll.scroll_to_bottom();
+                    // Opening a conversation is a fresh start: follow its end
+                    // even if the reader was parked in the last one's history
+                    // (#2698).
+                    this.rearm_transcript_follow();
                     cx.notify();
                 }
             })
@@ -2193,7 +2253,7 @@ impl Dashboard {
         // viewport that shrinks must not leave the newest row clipped while
         // the reader believes they are at the bottom (#2685, #2624).
         if Some(session) == self.transcript.session {
-            self.chat_follow.rearm();
+            self.transcript_follow.rearm();
         } else if let Some(pane) = self.pane_states.get_mut(&session) {
             pane.follow.rearm();
         }
@@ -2362,6 +2422,8 @@ impl Dashboard {
                         }
                         Err(e) => pane.transcript.error = Some(e.into()),
                     }
+                    // A new pane opens on its newest row (#2698).
+                    pane.follow.rearm();
                     pane.scroll.scroll_to_bottom();
                     cx.notify();
                 }
@@ -3575,8 +3637,11 @@ impl Dashboard {
         .detach();
     }
 
-    /// Esc, or `/usage` reached from here: back to the conversation with the
-    /// chat exactly where it was left.
+    /// Esc, or `/usage` reached from here: back to the conversation, landing
+    /// on its newest row. It used to promise "exactly where it was left",
+    /// which is the wrong promise twice over: rows land while a panel is
+    /// open, and a reader who stepped away did not ask to be parked in
+    /// history when they come back (#2698).
     fn close_mission_control(&mut self, cx: &mut Context<Self>) {
         self.screen = Screen::Chat;
         self.refocus_screen();
@@ -4360,6 +4425,8 @@ impl Dashboard {
             pane.transcript.live_expanded = false;
             pane.busy = true;
             pane.cancel = Some(cancel.clone());
+            // Sending in a pane puts its reader back on the end of it (#2698).
+            pane.follow.rearm();
             pane.scroll.scroll_to_bottom();
         }
         // Attachments are tracked against the pane's session, so the file
@@ -4389,7 +4456,9 @@ impl Dashboard {
     ) {
         if let Some(pane) = self.pane_states.get_mut(&session) {
             fold_live(&mut pane.live, progress);
-            pane.scroll.scroll_to_bottom();
+            // Rows landing under a reader who scrolled up must not drag them
+            // back to the bottom (#2685, #2698).
+            Self::snap_pane_if_following(pane);
             cx.notify();
             return;
         }
@@ -4428,7 +4497,8 @@ impl Dashboard {
             pane.live.thinking = false;
             pane.busy = false;
             pane.cancel = None;
-            pane.scroll.scroll_to_bottom();
+            // The turn ends where the reader is, not where it ended (#2698).
+            Self::snap_pane_if_following(pane);
             pane.live.tools.len()
         };
         // The leaf's card keeps the numbers it showed in flight, the same ones
@@ -4507,6 +4577,9 @@ impl Dashboard {
             pane.transcript.live_expanded = false;
             pane.busy = true;
             pane.cancel = Some(cancel.clone());
+            // A flushed queue is a send too, so the pane follows its answer
+            // the way a typed one does (#2698).
+            pane.follow.rearm();
             pane.scroll.scroll_to_bottom();
         }
         let attached = editor::marker_paths(&joined.context_text);
@@ -4548,7 +4621,9 @@ impl Dashboard {
                         if !pane.busy {
                             pane.live.clear();
                         }
-                        pane.scroll.scroll_to_bottom();
+                        // The persisted rows land where the reader is watching
+                        // (#2698), never under a reader parked in history.
+                        Self::snap_pane_if_following(pane);
                     }
                     cx.notify();
                 }
@@ -4680,6 +4755,8 @@ impl Dashboard {
             return;
         };
         self.live.begin(text.clone());
+        // A send is the reader asking for the end of the conversation (#2698).
+        self.rearm_transcript_follow();
         self.transcript.live_expanded = false;
         self.settle_retries = 0;
         // The finished turn must add one to the persisted count before the
@@ -5463,6 +5540,8 @@ impl Dashboard {
             return;
         };
         self.live.begin(display_text);
+        // A new turn re-arms the follow, the terminal's own rule (#2698).
+        self.rearm_transcript_follow();
         self.transcript.live_expanded = false;
         self.settle_retries = 0;
         self.settle_expect = Some(self.transcript.turns.len() + 1);
@@ -5584,6 +5663,8 @@ impl Dashboard {
                 msgs.len()
             ));
             self.live.begin(joined.display_text.clone());
+            // A flushed queue is a send, so it follows its own answer (#2698).
+            self.rearm_transcript_follow();
             self.transcript.live_expanded = false;
             self.settle_retries = 0;
             self.settle_expect = Some(self.transcript.turns.len() + 1);
@@ -6914,7 +6995,9 @@ impl Dashboard {
                     }
                     Err(e) => this.transcript.error = Some(e.into()),
                 }
-                this.transcript_scroll.scroll_to_bottom();
+                // The turn has landed: follow it only if the reader is still
+                // at the bottom, the terminal's own rule (#2685, #2698).
+                this.follow_chat();
                 cx.notify();
             })
             .ok();
@@ -7554,18 +7637,46 @@ impl Dashboard {
             let key = ev.keystroke.key.as_str();
             if matches!(key, "pageup" | "pagedown") {
                 let page = px(f32::from(window.viewport_size().height) * 0.8);
-                let dy = if key == "pagedown" { -page } else { page };
+                let up = key == "pageup";
+                let dy = if up { page } else { -page };
                 // The page keys act on the pane the caret is on, so a split
                 // scrolls the transcript the accent names rather than the
                 // chat underneath it (#2475, #2472).
-                let scroll = match self.pane_focus.and_then(|id| self.pane_states.get(&id)) {
-                    Some(pane) => &pane.scroll,
-                    None => &self.transcript_scroll,
+                let target = self
+                    .pane_focus
+                    .filter(|id| self.pane_states.contains_key(id));
+                let (x, y, max) = match target.and_then(|id| self.pane_states.get(&id)) {
+                    Some(pane) => {
+                        let offset = pane.scroll.offset();
+                        let max = pane.scroll.max_offset().height;
+                        (offset.x, (offset.y + dy).min(px(0.0)).max(-max), max)
+                    }
+                    None => {
+                        let offset = self.transcript_scroll.offset();
+                        let max = self.transcript_scroll.max_offset().height;
+                        (offset.x, (offset.y + dy).min(px(0.0)).max(-max), max)
+                    }
                 };
-                let offset = scroll.offset();
-                let max = scroll.max_offset().height;
-                let y = (offset.y + dy).min(px(0.0)).max(-max);
-                scroll.set_offset(gpui::point(offset.x, y));
+                match target {
+                    Some(id) => {
+                        if let Some(pane) = self.pane_states.get_mut(&id) {
+                            pane.scroll.set_offset(gpui::point(x, y));
+                        }
+                    }
+                    None => self.transcript_scroll.set_offset(gpui::point(x, y)),
+                }
+                // A page key is the reader moving by hand, the same gesture
+                // the terminal binds to its own scroll: up releases the follow
+                // and down gives it back only once it lands on the end, so a
+                // row that lands mid-page never drags the reader back down
+                // (#2698).
+                let at_end = y >= -max;
+                match (target, at_end) {
+                    (Some(id), true) => self.rearm_pane_follow(id),
+                    (Some(id), false) => self.release_pane_follow(id),
+                    (None, true) => self.rearm_transcript_follow(),
+                    (None, false) => self.release_transcript_follow(),
+                }
                 cx.notify();
                 return;
             }
@@ -8126,6 +8237,14 @@ impl Render for Dashboard {
                 FocusTarget::Root => window.focus(&self.focus),
             }
         }
+        // Coming back to the conversation is a return, not a resume: a panel
+        // that closes lands on the newest row instead of the history the
+        // reader left behind, the same rule the terminal applies when a
+        // dialog hands the chat back (#2698).
+        if self.screen == Screen::Chat && self.last_screen != Screen::Chat {
+            self.rearm_transcript_follow();
+        }
+        self.last_screen = self.screen;
         // Keep every transcript on its newest row (#2685). Run before the
         // tree is built so the snap lands in this frame's layout, and judged
         // from each viewport's own offset so a reader parked in history is
@@ -8522,6 +8641,18 @@ impl Render for Dashboard {
                     cx.notify();
                 }
             }));
+        // A wheel tick over the conversation is the reader's own hand on it
+        // (#2698): GPUI moves the viewport, and this only says whether the
+        // follow goes with it. A tick up releases it, and the frame loop
+        // re-arms it the moment the reader is back at the bottom.
+        let wheel: transcript::ScrollHandler =
+            Rc::new(cx.listener(|this, ev: &ScrollWheelEvent, _window, cx| {
+                if !wheel_releases_follow(wheel_dy(&ev.delta)) {
+                    return;
+                }
+                this.release_transcript_follow();
+                cx.notify();
+            }));
 
         // The transcript plans its attachment tiles from the width the pane
         // actually has, read from the live viewport rather than a constant, so
@@ -8593,6 +8724,7 @@ impl Render for Dashboard {
                     transcript::ViewHooks {
                         attachments: attachment_handlers,
                         drag: Some(self.copy_drag.clone()),
+                        wheel: Some(wheel),
                         ctx_used: self.ctx_tokens,
                         ctx_max: self.ctx_max,
                         live_click: Some(live_click.clone()),
@@ -11187,6 +11319,7 @@ fn main() {
                     .detach();
                     Dashboard {
                         screen: Screen::Chat,
+                        last_screen: Screen::Chat,
                         state,
                         dash: DashboardState::default(),
                         focus: focus.clone(),
@@ -11308,7 +11441,7 @@ fn main() {
                             ..Default::default()
                         },
                         transcript_scroll: ScrollHandle::new(),
-                        chat_follow: Follow::new(),
+                        transcript_follow: Follow::new(),
                         rail_scroll: ScrollHandle::new(),
                         editor,
                         agent_rx,
@@ -13807,6 +13940,19 @@ fn pane_element(
                     None => SharedString::from("(untitled)"),
                 }
             };
+            // The pane's own wheel, so a tick up releases only this pane's
+            // follow and never the window's (#2698).
+            let wheel_weak = ctx.entity.clone();
+            let wheel_session = *session;
+            let wheel = move |ev: &ScrollWheelEvent, _window: &mut Window, cx: &mut App| {
+                if !wheel_releases_follow(wheel_dy(&ev.delta)) {
+                    return;
+                }
+                let _ = wheel_weak.update(cx, |this, cx| {
+                    this.release_pane_follow(wheel_session);
+                    cx.notify();
+                });
+            };
             let body: AnyElement = if is_chat {
                 ctx.chat.take().unwrap_or_else(|| div().into_any_element())
             } else {
@@ -13833,6 +13979,7 @@ fn pane_element(
                                 // gesture was dead in every split because this
                                 // was `default()`, which leaves `drag: None`.
                                 drag: Some(pane.copy_drag.clone()),
+                                wheel: Some(Rc::new(wheel)),
                                 ..Default::default()
                             },
                         ))
@@ -15400,6 +15547,114 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_wheel_tick_up_releases_the_follow_it_does_not_fight_the_scroll() {
+        // #2698: the window follows its own bottom until the reader's hand
+        // says otherwise. GPUI applies the wheel to the viewport itself, so
+        // the listener may only drop the follow; fighting the scroll there
+        // would double-apply it. Both surfaces mint their own tick, and each
+        // one drops only its own follow.
+        // Read the production half only: this test lives in the same file it
+        // reads, so its own needles would count as hits and prove nothing.
+        let code = include_str!("main.rs")
+            .split("\nmod tests {")
+            .next()
+            .expect("the production half of the file");
+        assert!(
+            code.contains("wheel_releases_follow(wheel_dy(&ev.delta))"),
+            "the wheel is judged by the shared rule, never a second one"
+        );
+        assert!(
+            code.contains("this.release_transcript_follow();"),
+            "a tick over the conversation releases the window's follow"
+        );
+        assert!(
+            code.contains("this.release_pane_follow(wheel_session);"),
+            "a tick over a pane releases that pane's follow, not the window's"
+        );
+        assert_eq!(
+            code.matches("wheel: Some(Rc::new(wheel))").count(),
+            1,
+            "every pane boxes the tick it mints"
+        );
+        assert_eq!(
+            code.matches("wheel: Some(wheel),").count(),
+            1,
+            "the conversation hands over the tick it already owns"
+        );
+    }
+
+    #[test]
+    fn a_wheel_tick_reads_the_same_in_pixels_and_in_lines() {
+        let pixels = ScrollDelta::Pixels(gpui::point(px(0.0), px(-30.0)));
+        assert_eq!(wheel_dy(&pixels), -30.0);
+        assert!(!wheel_releases_follow(wheel_dy(&pixels)));
+        let lines = ScrollDelta::Lines(gpui::point(0.0, 3.0));
+        assert_eq!(wheel_dy(&lines), 3.0 * WHEEL_LINE_PX);
+        assert!(wheel_releases_follow(wheel_dy(&lines)));
+        // A trackpad tick that only moves sideways scrolls nothing vertically.
+        let sideways = ScrollDelta::Pixels(gpui::point(px(-12.0), px(0.0)));
+        assert_eq!(wheel_dy(&sideways), 0.0);
+        assert!(!wheel_releases_follow(wheel_dy(&sideways)));
+    }
+
+    #[test]
+    fn page_up_releases_the_follow_and_page_down_gives_it_back_at_the_end() {
+        // #2698: the page keys are the same gesture as the wheel, and the
+        // terminal binds them the same way. Down re-arms only when the page
+        // lands on the end, so a row that lands mid-page cannot drag a reader
+        // back down a screen they just left.
+        let src = include_str!("main.rs");
+        let branch = src
+            .split("matches!(key, \"pageup\" | \"pagedown\")")
+            .nth(1)
+            .and_then(|rest| rest.split("if key == \"k\"").next())
+            .expect("the page key branch");
+        assert!(
+            branch.contains("let at_end = y >= -max;"),
+            "landing on the end is what gives the follow back"
+        );
+        assert!(
+            branch.contains("(None, true) => self.rearm_transcript_follow()"),
+            "a page down that reaches the end re-arms the conversation"
+        );
+        assert!(
+            branch.contains("(Some(id), false) => self.release_pane_follow(id)"),
+            "a page up releases the pane it scrolled"
+        );
+    }
+
+    #[test]
+    fn a_panel_that_closes_hands_the_chat_back_at_its_newest_row() {
+        // #2698: coming back from a panel is a return, not a resume. The
+        // screen transition is the one place every panel funnels through, so
+        // the re-arm lives there instead of in each close path.
+        let src = include_str!("main.rs");
+        let render = src
+            .split("fn render(&mut self, window: &mut Window, cx: &mut Context<Self>)")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .expect("the window render");
+        assert!(
+            render.contains("self.screen == Screen::Chat && self.last_screen != Screen::Chat"),
+            "the transition into the chat is detected"
+        );
+        assert!(
+            render.contains("self.rearm_transcript_follow();"),
+            "and it hands the reader the newest row"
+        );
+        assert!(
+            src.contains("last_screen: Screen::Chat,"),
+            "the window starts on the chat, so the first frame is not a return"
+        );
+        // Sending is the other half of the contract: a send follows its own
+        // answer whatever the reader was doing before.
+        assert!(
+            fn_body(src, "send_message").contains("self.rearm_transcript_follow();"),
+            "a send re-arms the follow"
+        );
+    }
+
     /// The body of `fn name(` up to the next item at the same indent.
     fn fn_body(src: &'static str, name: &str) -> &'static str {
         src.split(&format!("fn {name}("))
@@ -16490,6 +16745,7 @@ mod tests {
             "the conversation returns before the apply task spawns"
         );
     }
+
 }
 
 #[cfg(test)]

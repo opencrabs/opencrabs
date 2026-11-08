@@ -39,6 +39,28 @@ pub fn follows_growth(offset: f32, max_offset: f32) -> bool {
     at_bottom(offset, max_offset)
 }
 
+/// The reader's place on the rule's own scale (#2698).
+///
+/// GPUI's `ScrollHandle` reports the content's displacement from the viewport,
+/// so the offset grows more negative as the reader walks down the transcript
+/// and the maximum it can reach is positive. Every rule here compares distances
+/// measured from the top, so the offset is flipped at this one door: comparing
+/// the raw offset with the maximum would read "at the bottom" as never true.
+pub fn scrolled_from_top(offset: f32) -> f32 {
+    -offset
+}
+
+/// Whether a wheel tick is the reader walking back through history (#2698).
+///
+/// GPUI applies the delta to the viewport itself, so this only answers whether
+/// the follow should be released on the spot. A positive vertical delta moves
+/// the content down, which is the reader going up; a purely horizontal tick
+/// (`0.0`) scrolls nothing vertically and releases nothing. A non-finite delta
+/// is not a gesture and never costs the reader their place.
+pub fn wheel_releases_follow(dy: f32) -> bool {
+    dy.is_finite() && dy > 0.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -59,6 +81,16 @@ mod tests {
     fn a_reader_scrolled_up_is_not_at_the_bottom() {
         assert!(!at_bottom(200.0, 1000.0));
         assert!(!follows_growth(900.0, 1000.0));
+    }
+
+    #[test]
+    fn the_handles_negative_offset_is_read_as_a_distance_from_the_top() {
+        // GPUI parks the handle at `-max` when the transcript is at its
+        // bottom, which is the state every one of these rules calls "here".
+        assert_eq!(scrolled_from_top(-1000.0), 1000.0);
+        assert_eq!(scrolled_from_top(0.0), 0.0);
+        assert!(at_bottom(scrolled_from_top(-1000.0), 1000.0));
+        assert!(!at_bottom(scrolled_from_top(-100.0), 1000.0));
     }
 
     #[test]
@@ -130,6 +162,13 @@ impl Follow {
     pub fn rearm(&mut self) {
         self.following = true;
     }
+
+    /// Drop the follow because the reader moved by hand: a wheel tick or a
+    /// PageUp says where they want to be, and the rows that keep landing must
+    /// not pull them back (#2698).
+    pub fn release(&mut self) {
+        self.following = false;
+    }
 }
 
 #[cfg(test)]
@@ -180,5 +219,27 @@ mod follow_tests {
         f.update(10.0, 2000.0);
         f.rearm();
         assert!(f.is_following());
+    }
+
+    #[test]
+    fn a_wheel_tick_up_releases_and_a_tick_down_does_not() {
+        assert!(wheel_releases_follow(1.0));
+        assert!(!wheel_releases_follow(-1.0));
+        assert!(!wheel_releases_follow(0.0));
+        assert!(!wheel_releases_follow(f32::NAN));
+    }
+
+    #[test]
+    fn release_holds_while_rows_keep_landing() {
+        let mut f = Follow::new();
+        f.update(1000.0, 1000.0);
+        f.release();
+        assert!(!f.is_following());
+        // Rows land under the reader and none of them pulls them back.
+        assert!(!f.update(400.0, 1200.0));
+        assert!(!f.update(400.0, 1600.0));
+        // Coming back down re-arms it.
+        f.rearm();
+        assert!(f.update(1600.0, 1600.0));
     }
 }
