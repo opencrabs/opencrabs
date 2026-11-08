@@ -680,6 +680,13 @@ impl MessageRepository {
     /// also what `get_last_message` uses, so the preview and the transcript
     /// agree on which row is last.
     ///
+    /// Only `user` and `assistant` rows are conversation context. Plan
+    /// events (`plan_completed`), tool results and system rows are ledger
+    /// noise: ranking them would dump raw JSON like
+    /// `plan_completed {"version":1,...}` onto the card, so the window
+    /// filters them out and the preview is the newest thing the user or the
+    /// crab actually said.
+    ///
     /// Ids are chunked well under SQLite's bound-parameter limit, so a long
     /// rail still resolves in a bounded number of statements.
     pub async fn last_messages_for(&self, ids: &[Uuid]) -> Result<HashMap<Uuid, MessagePreview>> {
@@ -700,6 +707,7 @@ impl MessageRepository {
                                PARTITION BY session_id ORDER BY sequence DESC \
                            ) AS rn \
                     FROM messages WHERE session_id IN ({placeholders}) \
+                        AND role IN ('user', 'assistant') \
                 ) WHERE rn = 1"
             );
             let rows: Vec<(String, String, String)> = self
@@ -737,9 +745,9 @@ impl MessageRepository {
                 };
                 let (text, truncated) = preview_text(&content, PREVIEW_CHARS);
                 // A last message that is only reasoning (mid-turn) cleans to
-                // empty; "Crabs: " with nothing after it is worse than the
-                // date·cost line, so leave the preview absent and let the
-                // card fall back to it.
+                // empty; "Crabs: " with nothing after it is noise, so the
+                // card simply gets no message line. The timestamp and cost
+                // ride the title line either way.
                 if text.is_empty() {
                     continue;
                 }
@@ -931,6 +939,37 @@ mod tests {
         assert_eq!(previews[&b].role, "user");
         assert_eq!(previews[&c].text, "newest C");
         assert_eq!(previews[&c].role, "user");
+    }
+
+    /// Plan events and tool rows are ledger noise, not conversation: the
+    /// preview walks back to the newest user/assistant row instead of
+    /// dumping `plan_completed {"version":1,...}` JSON onto the card.
+    #[tokio::test]
+    async fn last_messages_for_skips_non_conversation_roles() {
+        let (_db, sessions, messages) = setup().await;
+        let d = session(&sessions, "D").await;
+        say(&messages, d, "user", "ship it", 1).await;
+        say(&messages, d, "assistant", "on it", 2).await;
+        say(
+            &messages,
+            d,
+            "plan_completed",
+            "{\"version\":1,\"plan\":{\"id\":\"fc3\"}}",
+            3,
+        )
+        .await;
+        say(&messages, d, "tool", "{\"ok\":true}", 4).await;
+        say(&messages, d, "system", "event noise", 5).await;
+
+        let previews = messages.last_messages_for(&[d]).await.expect("batch read");
+        assert_eq!(previews[&d].text, "on it");
+        assert_eq!(previews[&d].role, "assistant");
+
+        // A session whose only rows are events gets no preview at all.
+        let e = session(&sessions, "E").await;
+        say(&messages, e, "plan_completed", "{\"version\":1}", 1).await;
+        let previews = messages.last_messages_for(&[e]).await.expect("batch read");
+        assert!(!previews.contains_key(&e), "event-only session stays quiet");
     }
 
     /// Content longer than the budget is cut on a character boundary and
