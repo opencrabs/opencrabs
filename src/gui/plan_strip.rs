@@ -551,8 +551,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("plan.json");
         let mut plan = plan_with(2, 1, Some(1));
-        std::fs::write(&path, serde_json::to_string(&plan).expect("plan serializes"))
-            .expect("plan file written");
+        std::fs::write(
+            &path,
+            serde_json::to_string(&plan).expect("plan serializes"),
+        )
+        .expect("plan file written");
 
         let mut window_strip = PlanStripState::default();
         window_strip.set_path(Some(path.clone()));
@@ -580,8 +583,11 @@ mod tests {
 
         // The second task settles and the tool rewrites the file.
         plan.tasks[1].status = TaskStatus::Completed;
-        std::fs::write(&path, serde_json::to_string(&plan).expect("plan serializes"))
-            .expect("plan file rewritten");
+        std::fs::write(
+            &path,
+            serde_json::to_string(&plan).expect("plan serializes"),
+        )
+        .expect("plan file rewritten");
         window_strip.refresh();
         pane_strip.refresh();
         assert_eq!(

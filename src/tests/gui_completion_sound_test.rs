@@ -38,7 +38,13 @@ fn the_gui_arms_plan_completed_before_the_catch_all() {
         arm < catch_all,
         "the PlanCompleted arm must precede the catch-all, or the event is swallowed again"
     );
-    let body = &GUI_MAIN[arm..catch_all];
+    // Split, never index: a byte slice of a str is a ratchet site, and the
+    // two needles are all this needs to carve the arm body out.
+    let body = GUI_MAIN
+        .split("ProgressEvent::PlanCompleted")
+        .nth(1)
+        .and_then(|tail| tail.split("TurnEvent::ProgressFor(_, _) => {}").next())
+        .expect("the arm body sits between the event and the catch-all");
     assert!(
         body.contains("Self::play_task_chime()"),
         "the arm has to reach the player, not just name the event: {body}"
@@ -113,7 +119,8 @@ fn the_player_stays_behind_the_opt_in_and_the_feature() {
         "the enabled path reaches the embedded WAV: {body}"
     );
     assert!(
-        GUI_MAIN.contains("#[cfg(not(feature = \"notification-sound\"))]\n    fn play_task_chime() {}"),
+        GUI_MAIN
+            .contains("#[cfg(not(feature = \"notification-sound\"))]\n    fn play_task_chime() {}"),
         "a build without the feature still compiles, with a silent no-op"
     );
 }

@@ -46,10 +46,15 @@ fn the_restore_still_checks_the_chat_is_a_pane() {
     );
 }
 
+/// The pin holds the ORDER of the candidates, not the name of the binding
+/// that walks them. It used to assert `for candidate in [...]`, and a clippy
+/// pass that flattened the two Options renamed the binding to `id` and turned
+/// this test red while the behaviour stayed exactly right. The array literal
+/// is the part that carries the meaning: chat leaf first, caret leaf second.
 #[test]
 fn the_boot_helper_prefers_the_chat_then_the_caret_then_any_survivor() {
     assert!(
-        LAYOUT_STORE.contains("for candidate in [saved.chat, saved.focus]"),
+        LAYOUT_STORE.contains("[saved.chat, saved.focus]"),
         "chat leaf first, caret leaf second"
     );
     assert!(
