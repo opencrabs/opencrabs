@@ -2669,7 +2669,12 @@ impl Dashboard {
         pane.busy = false;
         pane.live.thinking = false;
         pane.live.notices.push("Operation cancelled.".to_string());
-        logging::info(&format!("pane turn cancelled by {why}"));
+        // The stop names its session and what is still waiting, so the flush
+        // that lands with the cancellation event can be paired to it (#2695).
+        logging::info(&format!(
+            "pane turn cancelled by {why}: session {id}, {} still queued",
+            agent_bridge::queue_snapshot(id).len()
+        ));
         cx.notify();
         true
     }
@@ -4440,6 +4445,9 @@ impl Dashboard {
         );
         cx.notify();
         self.reload_pane(session, cx);
+        // The leaf's turn is over: whatever is still queued for its session
+        // becomes the next turn, the same flush the window runs (#2695).
+        self.drain_pane_pending(session, cx);
     }
 
     /// The pane's turn failed: the reason lands in that leaf's notices instead
@@ -4452,6 +4460,66 @@ impl Dashboard {
         pane.live.thinking = false;
         pane.busy = false;
         pane.cancel = None;
+        cx.notify();
+        // A failed turn still hands the queue to the next one: the text the
+        // user typed behind it is not part of the failure (#2695).
+        self.drain_pane_pending(session, cx);
+    }
+
+    /// A pane's turn ended (settled, failed, or stopped): everything still
+    /// queued for its session goes out as ONE joined turn, the exact contract
+    /// the window's `drain_pending` keeps (#2695). Before this, only the
+    /// window's post-batch drain existed and it reads the window's session,
+    /// so a leaf's queue survived the turn and sat in the strip until some
+    /// later turn happened to drain it mid-flight.
+    ///
+    /// The busy gate keeps the #2631 ordering: a stop flushes when its
+    /// cancellation event lands, never a second spawn into a turn still
+    /// unwinding, and a user who already sent the next turn by hand is never
+    /// doubled up on.
+    fn drain_pane_pending(&mut self, session: Uuid, cx: &mut Context<Self>) {
+        let Some(pane) = self.pane_states.get(&session) else {
+            return;
+        };
+        if pane.busy {
+            return;
+        }
+        let waiting = agent_bridge::queue_snapshot(session);
+        if waiting.is_empty() {
+            return;
+        }
+        let Some(bridge) = agent_bridge::bridge() else {
+            // Still booting: keep the text, the same rule the window keeps.
+            return;
+        };
+        let msgs = agent_bridge::queue_take(session);
+        let Some(joined) = agent_bridge::PendingMessage::join(&msgs) else {
+            return;
+        };
+        logging::info(&format!(
+            "pane queue flush: session {session}, sending {} queued as one turn",
+            msgs.len()
+        ));
+        let cancel = tokio_util::sync::CancellationToken::new();
+        if let Some(pane) = self.pane_states.get_mut(&session) {
+            pane.live = transcript::LiveTurn::default();
+            pane.live.begin(joined.display_text.clone());
+            pane.transcript.live_expanded = false;
+            pane.busy = true;
+            pane.cancel = Some(cancel.clone());
+            pane.scroll.scroll_to_bottom();
+        }
+        let attached = editor::marker_paths(&joined.context_text);
+        agent_bridge::spawn_turn(
+            bridge.service.clone(),
+            session,
+            joined.context_text,
+            self.sink.clone(),
+            cancel,
+        );
+        if !attached.is_empty() {
+            agent_bridge::spawn_track_files(self.db_path.clone(), session, attached);
+        }
         cx.notify();
     }
 
@@ -4473,8 +4541,13 @@ impl Dashboard {
                         pane.transcript.hidden = hidden;
                         pane.transcript.turns = turns;
                         // The persisted row is on screen: the live copy
-                        // retires, exactly as the window's does.
-                        pane.live.clear();
+                        // retires, exactly as the window's does, unless the
+                        // flush already started the next turn (#2695):
+                        // clearing then would wipe the card of the turn now
+                        // running, the same guard the window's reload keeps.
+                        if !pane.busy {
+                            pane.live.clear();
+                        }
                         pane.scroll.scroll_to_bottom();
                     }
                     cx.notify();
@@ -5162,6 +5235,10 @@ impl Dashboard {
                             pane.busy = false;
                             pane.cancel = None;
                         }
+                        // The stop is acknowledged: the leaf's queue becomes
+                        // the next turn now, never while the cancel unwinds
+                        // (#2695, the #2631 ordering the window keeps).
+                        self.drain_pane_pending(session, cx);
                     }
                     // The turn is gone, so its rail spinner goes with it.
                     if self.rail.clear(session) {
@@ -5499,6 +5576,13 @@ impl Dashboard {
         };
         let msgs = agent_bridge::queue_take(sid);
         if let Some(joined) = agent_bridge::PendingMessage::join(&msgs) {
+            // The flush receipt: how many queued messages ride out in this
+            // one turn, so a first-only report can be read against the pushes
+            // and takes that precede it (#2695).
+            logging::info(&format!(
+                "queue flush: session {sid}, sending {} queued as one turn",
+                msgs.len()
+            ));
             self.live.begin(joined.display_text.clone());
             self.transcript.live_expanded = false;
             self.settle_retries = 0;
@@ -15574,6 +15658,152 @@ mod tests {
         assert!(
             drain.contains("if waiting.is_empty() {\n            return;\n        }"),
             "an empty queue sends nothing"
+        );
+    }
+
+    /// A pane's turn-end paths flush that leaf's own queue (#2695): settle,
+    /// fail and the Cancelled branch all hand the session to
+    /// `drain_pane_pending`, which takes all, joins all and spawns one turn,
+    /// the window's contract. Before this the leaf had no drain at all, so
+    /// messages 2 and 3 sat in the strip after the stop.
+    #[test]
+    fn esc_flush_pane_turn_end_drains_the_leaf_queue() {
+        let src = include_str!("main.rs");
+        let production = src
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .expect("production source before the test module");
+        let settle = production
+            .split("    fn settle_pane(")
+            .nth(1)
+            .and_then(|rest| rest.split("    /// The pane's turn failed").next())
+            .expect("settle_pane");
+        assert!(
+            settle.contains("self.drain_pane_pending(session, cx);"),
+            "a settled pane flushes its queue"
+        );
+        let fail = production
+            .split("    fn fail_pane(")
+            .nth(1)
+            .and_then(|rest| rest.split("    /// A pane's turn ended").next())
+            .expect("fail_pane");
+        assert!(
+            fail.contains("self.drain_pane_pending(session, cx);"),
+            "a failed pane flushes its queue"
+        );
+        let cancelled = production
+            .split("agent_bridge::TurnEvent::Cancelled { session } =>")
+            .nth(1)
+            .and_then(|rest| rest.split("agent_bridge::TurnEvent::TurnReverted").next())
+            .expect("the Cancelled branch");
+        assert!(
+            cancelled.contains("self.drain_pane_pending(session, cx);"),
+            "a stopped pane flushes when the cancellation lands, the #2631 ordering"
+        );
+        let drain = production
+            .split("    fn drain_pane_pending(")
+            .nth(1)
+            .and_then(|rest| rest.split("    /// Re-read one pane's rows").next())
+            .expect("drain_pane_pending");
+        assert!(
+            drain.contains("if pane.busy {"),
+            "never a second spawn into a running or unwinding turn"
+        );
+        assert!(
+            drain.contains("agent_bridge::queue_take(session)"),
+            "the flush takes the whole queue, not one message"
+        );
+        assert!(
+            drain.contains("agent_bridge::PendingMessage::join(&msgs)"),
+            "the flush joins every message into one turn"
+        );
+        assert!(
+            drain.contains("agent_bridge::spawn_turn("),
+            "the flush sends the joined turn"
+        );
+    }
+
+    /// The reload a settle kicks off must not wipe the card of the turn the
+    /// flush just started (#2695): the live copy retires only while the leaf
+    /// is idle, the same guard the window's reload keeps.
+    #[test]
+    fn esc_flush_reload_keeps_the_drained_turns_card() {
+        let src = include_str!("main.rs");
+        let production = src
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .expect("production source before the test module");
+        let reload = production
+            .split("    fn reload_pane(")
+            .nth(1)
+            .and_then(|rest| rest.split("    /// Send one turn to the session").next())
+            .expect("reload_pane");
+        let guarded = reload
+            .split("if !pane.busy {")
+            .nth(1)
+            .expect("the reload guards the live clear with the busy flag");
+        assert!(
+            guarded.trim_start().starts_with("pane.live.clear();"),
+            "the clear sits inside the guard, so a drained turn keeps its card"
+        );
+    }
+
+    /// The flush leaves a readable trail (#2695): every push and take names
+    /// its session and count, both drains log the joined send, and a pane
+    /// stop names what is still waiting. A live first-only repro is then a
+    /// log read, not a guess.
+    #[test]
+    fn esc_flush_receipts_log_the_queue_flow() {
+        let bridge = include_str!("agent_bridge.rs");
+        let push = bridge
+            .split("pub fn queue_push(")
+            .nth(1)
+            .and_then(|rest| rest.split("/// What is waiting").next())
+            .expect("queue_push");
+        assert!(
+            push.contains("crate::logging::info("),
+            "a push leaves a receipt"
+        );
+        let take = bridge
+            .split("pub fn queue_take(")
+            .nth(1)
+            .and_then(|rest| rest.split("/// The newest message").next())
+            .expect("queue_take");
+        assert!(
+            take.contains("crate::logging::info("),
+            "a take leaves a receipt"
+        );
+        let src = include_str!("main.rs");
+        let production = src
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .expect("production source before the test module");
+        let window_drain = production
+            .split("    fn drain_pending(")
+            .nth(1)
+            .and_then(|rest| rest.split("    /// Create a conversation").next())
+            .expect("drain_pending");
+        assert!(
+            window_drain.contains("queue flush: session"),
+            "the window's flush logs its joined send"
+        );
+        let pane_drain = production
+            .split("    fn drain_pane_pending(")
+            .nth(1)
+            .and_then(|rest| rest.split("    /// Re-read one pane's rows").next())
+            .expect("drain_pane_pending");
+        assert!(
+            pane_drain.contains("pane queue flush: session"),
+            "the pane's flush logs its joined send"
+        );
+        let stop = production
+            .split("    fn cancel_focused_pane_turn(")
+            .nth(1)
+            .and_then(|rest| rest.split("    /// `/stop`").next())
+            .expect("cancel_focused_pane_turn");
+        assert!(
+            stop.contains("agent_bridge::queue_snapshot(id).len()"),
+            "a pane stop names how much is still queued"
         );
     }
 

@@ -1311,7 +1311,17 @@ fn queue() -> std::sync::MutexGuard<'static, std::collections::HashMap<Uuid, Vec
 
 /// Queue a message the user typed while `session_id` is busy.
 pub fn queue_push(session_id: Uuid, msg: QueuedUserMessage) {
-    queue().entry(session_id).or_default().push(msg);
+    let waiting = {
+        let mut map = queue();
+        let entry = map.entry(session_id).or_default();
+        entry.push(msg);
+        entry.len()
+    };
+    // A live repro of a stuck queue reads from the log: every push names its
+    // session and the count waiting after it (#2695).
+    crate::logging::info(&format!(
+        "queue push: session {session_id}, {waiting} waiting"
+    ));
 }
 
 /// What is waiting for `session_id`, oldest first. The strip shows these.
@@ -1323,7 +1333,17 @@ pub fn queue_snapshot(session_id: Uuid) -> Vec<QueuedUserMessage> {
 /// composer has pulled out to edit is no longer in the queue (#2637), so the
 /// drain can never send a recall behind the user's back.
 pub fn queue_take(session_id: Uuid) -> Vec<QueuedUserMessage> {
-    queue().remove(&session_id).unwrap_or_default()
+    let taken = queue().remove(&session_id).unwrap_or_default();
+    // The other half of the flush receipt: what left the queue, and how much
+    // of it, so a stuck-queue repro can pair every push with its take (#2695).
+    // Empty takes stay silent: the tool-boundary drain asks on every round.
+    if !taken.is_empty() {
+        crate::logging::info(&format!(
+            "queue take: session {session_id}, {} taken",
+            taken.len()
+        ));
+    }
+    taken
 }
 
 /// The newest message waiting for the composer's session, taken out of the
@@ -1925,6 +1945,43 @@ mod tests {
         let _ = queue_take(session);
         let _ = queue_take(other);
         set_composer_session(None);
+    }
+
+    /// Esc flushes the WHOLE queue into one turn (#2695): the drain takes
+    /// every waiting message, oldest first, and `join` folds them into a
+    /// single message, so nothing stays stuck behind the stop. The window's
+    /// `drain_pending` and the pane's `drain_pane_pending` both run this exact
+    /// pair, and the tool-boundary callback joins the same way.
+    #[test]
+    fn esc_flush_takes_all_queued_into_one_joined_turn() {
+        // QUEUE is process-wide, but this test owns its session key and never
+        // touches COMPOSER_SESSION, so it cannot race the recall walk above.
+        let session = Uuid::from_u128(0x2695_0001);
+        for text in ["first", "second", "third"] {
+            queue_push(session, QueuedUserMessage::plain(text.to_string()));
+        }
+        let msgs = queue_take(session);
+        assert_eq!(msgs.len(), 3, "the flush takes every waiting message");
+        let joined = QueuedUserMessage::join(&msgs).expect("a non-empty queue joins");
+        assert_eq!(
+            joined.display_text, "first\nsecond\nthird",
+            "all three ride out in one turn, oldest first"
+        );
+        assert_eq!(
+            joined.context_text, "first\nsecond\nthird",
+            "the context half joins the same way for typed messages"
+        );
+        assert!(
+            queue_snapshot(session).is_empty(),
+            "nothing stays stuck in the queue after the flush"
+        );
+        // A second drain finds nothing: the flush never sends a message twice.
+        let again = queue_take(session);
+        assert!(again.is_empty(), "the queue is empty once flushed");
+        assert!(
+            QueuedUserMessage::join(&again).is_none(),
+            "an empty queue spawns no turn"
+        );
     }
 
     /// Boot picks up exactly the work the killed process was in the middle of,
