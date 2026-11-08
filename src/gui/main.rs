@@ -16367,14 +16367,10 @@ mod tests {
         // #2625: the row menu named the session, so opening it as the chat
         // first and then asking again grew the split from the first pane.
         let src = include_str!("main.rs");
-        // The drag ghost (#2683) implements Render too, so the scan anchors
-        // on the window's own signature instead of the first `fn render(`.
-        let window_render = src
-            .split("fn render(&mut self, window: &mut Window, cx: &mut Context<Self>)")
-            .nth(1)
-            .and_then(|rest| rest.split("\n    fn ").next())
-            .expect("the window render");
-        let menu = window_render
+        // Rows and topic chips share one popover builder (#2701), so the
+        // split arms live there instead of inside the window render.
+        let popover = fn_body(src, "rail_menu_popover_for");
+        let menu = popover
             .split("sessions::MenuKind::SplitSide")
             .nth(1)
             .and_then(|rest| rest.split("MenuKind::Delete").next())
