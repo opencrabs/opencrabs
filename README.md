@@ -4138,13 +4138,20 @@ Any message that isn't a recognized command is forwarded to the AI agent as norm
 
 Each session shows its provider/model badge (e.g. `[anthropic/claude-sonnet-4-6]`) and token count. Sessions processing in the background show a spinner; sessions with unread responses show a green dot.
 
+A session is one to three rows. Under the name line, a session with a live plan draws the same progress bar the desktop rail draws (`██████░░░░ 6/10 60%`), and a session with history draws the newest message as `You: …` or `Crabs: …`, cut at 60 characters on a character boundary. A closed topic is flagged `⚑`, and topics fold under their parent with `z`. Scrolling walks the same heights the drawing does, so the selected card is always fully visible.
+
 | Shortcut | Action |
 |----------|--------|
 | `↑` / `↓` | Navigate sessions |
 | `/` | Search sessions by name (filters in real-time) |
 | `Enter` | Load selected session (auto-restores its provider + model) |
-| `R` | Rename session |
-| `D` | Delete session |
+| `n` | New session |
+| `r` | Rename session |
+| `d` | Delete session, after a confirmation banner naming it |
+| `t` | Topics: enable them on the session, then name a new topic |
+| `g` | Group sessions under the selected one (multi-select picker) |
+| `c` | Close or reopen the selected topic |
+| `z` | Fold or unfold the selected session's topic tree |
 | `F` | Browse session file artifacts |
 | `P` | Projects (coming soon) |
 | `Esc` | Back to chat |
