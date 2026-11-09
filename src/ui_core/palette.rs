@@ -726,6 +726,11 @@ const SHORT_TOKENS: &[&str] = &[
 const MIN_EXACT_CHARS: usize = 3;
 const MIN_PREFIX_CHARS: usize = 4;
 const SKILL_DESCRIPTION_WORDS: usize = 12;
+/// A session is named only by its title, so a word of four or more characters
+/// may land inside one title word and still find it. The tier sits below a
+/// whole-word keyword or subtitle hit, so a mid-word guess never outranks a
+/// field that actually says the word.
+const TITLE_SUBSTRING_POINTS: u16 = 450;
 const PHRASE_ABBREVIATIONS: &[(&str, &[&str])] = &[("gst", &["git", "status"])];
 /// A generic intent can name more than one docs page. Keep the established
 /// destination when a newer page also carries the same word.
@@ -760,9 +765,19 @@ fn score_normalized(query: &NormalizedQuery, item: &PaletteItem) -> Option<u16> 
     // that duplicate as the same bounded prose, not as a stronger keyword
     // field that can reintroduce matches the description limit rejected.
     let skill_prose = item.kind == PaletteKind::Skill;
+    // A session carries its name in the title alone, and that name is not
+    // always a whole word: `proxy` has to find `OCProxy`. Every other kind
+    // keeps whole-word title matching, because its keywords and its subtitle
+    // already carry the intent and a mid-word guess there is only noise.
+    let title_substring = if item.kind == PaletteKind::Session {
+        TITLE_SUBSTRING_POINTS
+    } else {
+        0
+    };
     let fields = [
         (&command, 1100u16, false, false),
         (&title, 1000, false, false),
+        (&title, title_substring, false, true),
         (&keywords, 700, false, false),
         (
             &subtitle,
@@ -777,6 +792,10 @@ fn score_normalized(query: &NormalizedQuery, item: &PaletteItem) -> Option<u16> 
     for group in query.groups() {
         let mut best = None;
         for (tokens, weight, is_prose, allow_substring) in &fields {
+            // A zero weight switches a field off for this item kind.
+            if *weight == 0 {
+                continue;
+            }
             if *is_prose && (item.kind != PaletteKind::Skill || query.groups().len() < 2) {
                 continue;
             }
@@ -2139,6 +2158,85 @@ mod tests {
         assert!(score("configuracao", &target).is_some());
         assert!(score("ção", &target).is_none());
         assert!(score("zzz", &target).is_none());
+    }
+
+    /// A session is named by its title and nothing else, so a word that sits
+    /// inside that name still has to find it (#2674).
+    #[test]
+    fn session_title_matches_a_word_inside_it() {
+        let session = PaletteItem::new(
+            "OCProxy",
+            "2026-11-07 01:28",
+            PaletteKind::Session,
+            PaletteAction::OpenSession(9),
+        );
+        assert!(
+            score("proxy", &session).is_some(),
+            "lowercase proxy must find the OCProxy session"
+        );
+        assert!(
+            score("PROXY", &session).is_some(),
+            "uppercase PROXY must find it too"
+        );
+        assert!(score("ocproxy", &session).is_some(), "exact title");
+        assert!(
+            score("ocpr", &session).is_some(),
+            "a four-letter prefix still matches"
+        );
+        assert!(
+            score("ocp", &session).is_none(),
+            "three characters stay below the prefix floor"
+        );
+        assert!(score("ox", &session).is_none(), "two letters stay noise");
+        assert!(
+            score("roxy", &session).is_some(),
+            "a four-letter word inside the title matches"
+        );
+    }
+
+    /// The mid-word title tier is a guess, so a field that actually says the
+    /// word still wins (#2674).
+    #[test]
+    fn a_whole_word_hit_outranks_a_mid_word_title() {
+        let mid_word = PaletteItem::new(
+            "OCProxy",
+            "2026-11-07 01:28",
+            PaletteKind::Session,
+            PaletteAction::OpenSession(9),
+        );
+        let keyword = PaletteItem::new(
+            "Session nine",
+            "2026-11-07 01:28",
+            PaletteKind::Session,
+            PaletteAction::OpenSession(10),
+        )
+        .with_keywords("proxy");
+        let mid = score("proxy", &mid_word).expect("mid-word title match");
+        let word = score("proxy", &keyword).expect("keyword match");
+        assert!(
+            word > mid,
+            "keyword {word} must outrank mid-word title {mid}"
+        );
+    }
+
+    /// Only a session leans on its title for its name. A command keeps
+    /// whole-word title matching, so a mid-word guess cannot surface it.
+    #[test]
+    fn a_command_title_keeps_whole_word_matching() {
+        let command = PaletteItem::new(
+            "OCProxy",
+            "saved shortcut",
+            PaletteKind::Command,
+            PaletteAction::RunSlash("/proxy"),
+        );
+        assert!(
+            score("proxy", &command).is_none(),
+            "a command title does not match a word inside it"
+        );
+        assert!(
+            score("ocproxy", &command).is_some(),
+            "the whole title still matches"
+        );
     }
 
     /// The idle card opens on the curated menu: destinations lead, the two
