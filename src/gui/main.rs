@@ -9007,8 +9007,8 @@ impl Render for Dashboard {
         // on its card, not as their own rows. Resolve the chip set once before
         // the loop so the paint can skip those rows and hang the strip on the
         // parent. A live search falls back to flat rows so a match is never
-        // hidden inside a chip; a favorite stays a full row; a collapsed
-        // parent keeps its children as rows so the fold still reads.
+        // hidden inside a chip; a favorite stays a chip on its parent, never
+        // a row; a collapsed parent folds its children out of sight (#2670).
         let searching = !self.sessions.filter.trim().is_empty();
         let visible_ids: std::collections::HashSet<Uuid> =
             self.sessions.visible().map(|s| s.id).collect();
@@ -9017,7 +9017,6 @@ impl Render for Dashboard {
         } else {
             self.sessions
                 .visible()
-                .filter(|s| !self.sessions.is_favorite(s.id))
                 .filter_map(|s| self.sessions.parents.get(&s.id).map(|p| (s.id, *p)))
                 .filter(|(_, p)| visible_ids.contains(p) && !self.sessions.is_collapsed(*p))
                 .map(|(cid, _)| cid)

@@ -104,13 +104,12 @@ impl SessionsState {
     /// top without disturbing the order inside either group.
     ///
     /// A topic sits directly under its parent when that parent is in view
-    /// (#2303). A pinned topic is a top-level row, so pins stay above groups.
+    /// (#2303). A pinned topic stays a chip under its parent: the pin orders
+    /// top-level rows only, it never ejects a topic to the top level (#2701).
     pub fn ordered(&self) -> impl Iterator<Item = &Session> {
         let visible: Vec<&Session> = self.visible().collect();
         let in_view = |id: uuid::Uuid| visible.iter().any(|s| s.id == id);
-        let grouped = |s: &Session| {
-            !self.is_favorite(s.id) && self.parents.get(&s.id).is_some_and(|p| in_view(*p))
-        };
+        let grouped = |s: &Session| self.parents.get(&s.id).is_some_and(|p| in_view(*p));
         let (mut pinned, rest): (Vec<&Session>, Vec<&Session>) = visible
             .iter()
             .copied()
@@ -1702,11 +1701,11 @@ mod tests {
     };
     use opencrabs::db::models::Session;
 
-    /// #2303: a topic sits directly under its parent. A favorited topic stays
-    /// pinned at the top level for ordering, but keeps its indent: the pin
-    /// changes where it sorts, never whether it is a topic of its parent.
+    /// #2701: a topic sits directly under its parent as a chip. Pinning it
+    /// does not eject it to a top-level row: the pin orders top-level rows
+    /// only, and the topic stays grouped (and indented) under its parent.
     #[test]
-    fn a_pinned_topic_keeps_its_indent_and_sorts_first() {
+    fn a_pinned_topic_stays_a_chip_under_its_parent() {
         let a = Session::new(Some("A".into()), None, None);
         let b = Session::new(Some("B".into()), None, None);
         let a1 = Session::new(Some("A topic".into()), None, None);
@@ -1734,10 +1733,15 @@ mod tests {
 
         state.favorites.insert(a1_id);
         let order: Vec<_> = state.ordered().map(|s| s.id).collect();
-        assert_eq!(order[0], a1_id, "a pinned topic stays above the groups");
+        assert_eq!(
+            order,
+            vec![a_id, a1_id, b_id, c_id],
+            "a pinned topic stays under its parent instead of ejecting to the top"
+        );
+        assert_eq!(order[0], a_id, "the parent, not the pinned topic, leads");
         assert!(
             state.is_indented(a1_id),
-            "a pinned topic is still a topic of its parent: the pin changes order, not indent"
+            "a pinned topic is still a topic of its parent: the pin never drops the indent"
         );
     }
 
@@ -2319,6 +2323,20 @@ mod tests {
         assert!(
             main_source.contains("if chip_children.contains(&id)"),
             "the rail skips a child that paints as a chip"
+        );
+
+        // A pinned topic stays a chip: the chip set must never filter out
+        // favorites, or they eject to top-level rows and scatter (#2701).
+        let chip_block = main_source
+            .split("let chip_children:")
+            .nth(1)
+            .expect("chip set resolver")
+            .split("let mut children_by_parent")
+            .next()
+            .expect("chip set before the parent map");
+        assert!(
+            !chip_block.contains("is_favorite"),
+            "the chip set never ejects a favorite: a pinned topic stays a chip"
         );
     }
 
