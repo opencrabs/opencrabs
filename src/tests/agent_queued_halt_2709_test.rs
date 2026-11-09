@@ -357,7 +357,12 @@ fn the_post_tool_drain_is_guarded_by_the_halt_predicate() {
     let start = src
         .find(marker)
         .expect("the post-tool queue drain site exists");
-    let before = &src[start.saturating_sub(900)..start];
+    // #2732: `.get` and never a range index. The offset is a byte count, so a
+    // range index panics when it lands inside a multi-byte character, and the
+    // byte-slice ratchet flags every such site. A `None` falls back to the
+    // whole head, which only widens the window these assertions search.
+    let head = src.get(..start).unwrap_or("");
+    let before = head.get(head.len().saturating_sub(900)..).unwrap_or(head);
 
     assert!(
         before.contains(
