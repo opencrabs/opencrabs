@@ -8667,39 +8667,51 @@ impl Dashboard {
     /// twice rings once, and a reload of an unchanged file rings not at all.
     fn chime_settled_plan_tasks(&mut self) {
         let now = std::time::Instant::now();
-        let mut rang = false;
-        // Which plans settled, so each one's row can flash. Collected while
-        // the seen set is borrowed, then written after it is released.
-        let mut settled: Vec<Uuid> = Vec::new();
+
+        // Every plan in this frame, each paired with the row that draws it, in
+        // one order so a settled task reaches the chime, the banner, and the
+        // flash from a single pass. A pre-init plan writes the nil session
+        // until the hook stamps it, so the drawing row is the honest fallback.
+        let mut plans: Vec<Option<&opencrabs::tui::plan::PlanDocument>> =
+            Vec::with_capacity(1 + self.pane_states.len());
+        let mut owners: Vec<Uuid> = Vec::with_capacity(1 + self.pane_states.len());
+
+        plans.push(self.plan.document());
+        owners.push(self.transcript.session.unwrap_or(Uuid::nil()));
+        for (pane_id, pane) in &self.pane_states {
+            plans.push(pane.plan.document());
+            owners.push(*pane_id);
+        }
+
         let seen = &mut self.announced_task_completions;
-        if let Some(doc) = self.plan.document()
-            && opencrabs::utils::completion_sound::newly_resolved_in(seen, Some(doc)) > 0
-        {
-            rang = true;
-            // A pre-init plan writes the nil session until the hook stamps
-            // it; the open conversation is the honest fallback.
+
+        // Which sessions settle in this pass. Read before the announce, because
+        // the announce is what writes them into `seen`, the only record of what
+        // already rang. Asking `contains` rather than `insert` keeps that write
+        // in one place, so the flash and the chime cannot disagree about which
+        // task was fresh.
+        let mut settled: Vec<Uuid> = Vec::new();
+        for (slot, owner) in plans.iter().zip(owners.iter()) {
+            let Some(doc) = *slot else {
+                continue;
+            };
+            let fresh = opencrabs::utils::completion_sound::resolved_task_ids(Some(doc))
+                .into_iter()
+                .any(|id| !seen.contains(&id));
+            if !fresh {
+                continue;
+            }
             settled.push(if doc.session_id == Uuid::nil() {
-                self.transcript.session.unwrap_or(Uuid::nil())
+                *owner
             } else {
                 doc.session_id
             });
         }
-        for (pane_id, pane) in &self.pane_states {
-            let Some(doc) = pane.plan.document() else {
-                continue;
-            };
-            if opencrabs::utils::completion_sound::newly_resolved_in(seen, Some(doc)) > 0 {
-                rang = true;
-                // A plan written before the hook stamped its session carries
-                // the nil id; the pane's own key is the honest fallback.
-                settled.push(if doc.session_id == Uuid::nil() {
-                    *pane_id
-                } else {
-                    doc.session_id
-                });
-            }
-        }
-        if !rang {
+
+        // #2729: the same set drives the OS banner, so a task that rings also
+        // reaches the Notification Center, and neither can fire twice for one
+        // settle.
+        if opencrabs::utils::desktop_notify::announce_settled_tasks(seen, &plans) == 0 {
             return;
         }
         // One flash per settled session, on the same instant the chime rings:

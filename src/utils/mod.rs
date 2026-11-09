@@ -6,6 +6,7 @@ pub mod completion_sound;
 pub(crate) mod config_reload_reason;
 pub mod config_watcher;
 pub mod cwd;
+pub mod desktop_notify;
 pub mod directives;
 pub mod dock_icon;
 pub mod drop_agent;

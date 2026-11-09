@@ -1671,14 +1671,36 @@ pub struct AgentConfig {
     #[serde(default)]
     pub plan_worker_allow_write: bool,
 
-    /// Play a short notification sound when a plan reaches 100% at turn
-    /// settle (#2255). Default FALSE: an agent that chirps unasked is
-    /// noise, so this is opt-in. Only the WAV at
-    /// `src/assets/sound/notification.wav` is used, the TUI and the GUI
-    /// both play it (#2691), and no desktop notification or toast is ever
-    /// raised.
+    /// Master switch for completion feedback when a plan reaches 100% at
+    /// turn settle (#2255, #2729). Default FALSE: an agent that chirps
+    /// unasked is noise, so this is opt-in. It plays the WAV at
+    /// `src/assets/sound/notification.wav` in the TUI and the GUI (#2691)
+    /// and it arms the four desktop-notification switches below. Those stay
+    /// independent of each other, so a user can take the banner without the
+    /// sound.
     #[serde(default)]
     pub completion_notification_enabled: bool,
+
+    /// Raise an OS notification when a whole plan finishes (#2729).
+    /// Requires `completion_notification_enabled`. Default FALSE.
+    #[serde(default)]
+    pub notify_on_plan_completed: bool,
+
+    /// Raise an OS notification when one plan task settles (#2729).
+    /// Requires `completion_notification_enabled`. Default FALSE.
+    #[serde(default)]
+    pub notify_on_task_completed: bool,
+
+    /// Raise an OS notification when a turn finishes and the agent is
+    /// waiting (#2729). Requires `completion_notification_enabled`.
+    /// Default FALSE.
+    #[serde(default)]
+    pub notify_on_turn_completed: bool,
+
+    /// Raise an OS notification when a turn stops on an error (#2729).
+    /// Requires `completion_notification_enabled`. Default FALSE.
+    #[serde(default)]
+    pub notify_on_turn_failed: bool,
 
     /// Auto-install new releases on startup without prompting (default: true).
     /// When false, the user is shown an update prompt dialog instead.
@@ -2088,6 +2110,10 @@ impl Default for AgentConfig {
             plan_worker_allow_nested: false,
             plan_worker_allow_write: false,
             completion_notification_enabled: false,
+            notify_on_plan_completed: false,
+            notify_on_task_completed: false,
+            notify_on_turn_completed: false,
+            notify_on_turn_failed: false,
             auto_update: default_auto_update(),
             evolve_allow_root: default_evolve_allow_root(),
             session_notify_enabled: false,
