@@ -1,4 +1,4 @@
-//! The one-line message preview both session surfaces draw (#2701).
+//! The one-line message preview both session surfaces draw (#2701, #2737).
 //!
 //! The GUI rail card shows `You: ...` or `Crabs: ...` under a session's name so
 //! the list says what the conversation is about, not just when it happened.

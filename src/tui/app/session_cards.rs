@@ -1,5 +1,5 @@
 //! Per-row card data for the sessions dialog, and the two transient prompts
-//! the row actions open (#2701).
+//! the row actions open (#2737).
 //!
 //! The GUI rail shows each session as a card: a preview of its newest
 //! message, a plan progress bar, a cost, and a glyph when a plan is waiting
@@ -106,7 +106,7 @@ pub struct DeleteConfirm {
     pub title: String,
 }
 
-/// The chat's topic bar (#2701), the row of chips above the transcript.
+/// The chat's topic bar (#2737), the row of chips above the transcript.
 ///
 /// The window draws the same bar from `ui_core::topic_bar`; the terminal keeps
 /// it to ONE row, `All` first, because the owner wants no sidebar here either.
