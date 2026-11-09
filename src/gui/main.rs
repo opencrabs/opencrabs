@@ -66,6 +66,7 @@ use crate::theme::{BASE_REM, Size, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP, text};
 use opencrabs::db::models::Message;
 use opencrabs::ui_core::actions;
 use opencrabs::ui_core::channel_status;
+use opencrabs::ui_core::composer;
 use opencrabs::ui_core::message_select::{MessageAction, Selection};
 use opencrabs::ui_core::model_layout;
 use opencrabs::ui_core::model_selector::{FetchRequest, ProviderSelectorState};
@@ -921,6 +922,14 @@ struct Dashboard {
     /// The message editor (task 4). Typing goes to it while it holds focus;
     /// its Sent events arrive through the subscription made in `main`.
     editor: Entity<editor::Editor>,
+    /// The submitted history every composer in this window walks. One handle
+    /// cloned into the window's field and every split pane, so a message sent
+    /// in one is recalled in all of them, in real time, and the terminal reads
+    /// the same list off the same file.
+    history: composer::SharedHistory,
+    /// Half-typed text keyed by the conversation it was typed in. Switching
+    /// away and back returns the same draft instead of throwing it away.
+    drafts: composer::DraftStore,
     /// Agent-side state (task 5). Events from the bridge's bootstrap and
     /// turn threads land in the receiver; the poll tick drains it.
     agent_rx: std::sync::mpsc::Receiver<agent_bridge::TurnEvent>,
@@ -1525,14 +1534,27 @@ impl Dashboard {
                 }
             }
             // The draft and its attachments belong to the conversation they
-            // were typed in (#2481).
-            self.editor.update(cx, |ed, cx| ed.begin_conversation(cx));
+            // were typed in (#2481). The text is filed under the conversation
+            // being left and the destination's own draft comes back, so a
+            // switch and a switch back return the same half-typed message.
+            let previous = self.transcript.session;
+            let draft = self.editor.update(cx, |ed, cx| ed.take_draft(cx));
+            if let Some(previous) = previous {
+                self.drafts.store(previous, draft);
+            }
+            let returning = self.drafts.take(id);
+            self.editor.update(cx, move |ed, cx| {
+                ed.begin_conversation(cx);
+                if let Some(draft) = returning {
+                    ed.restore_state(draft, cx);
+                }
+            });
         }
         let previous = self.transcript.session;
         self.transcript.session = Some(id);
         // The chat is a leaf of the pane tree, so switching conversations
         // moves that leaf instead of leaving a stale pane behind (#2472).
-        self.adopt_chat_leaf(previous, id);
+        self.adopt_chat_leaf(previous, id, cx);
         // The next launch opens this conversation. Both surfaces read the same
         // file, so switching here means the terminal comes back to it too, and
         // a restart no longer lands on whatever the rail listed first (#2444).
@@ -1704,7 +1726,9 @@ impl Dashboard {
             return;
         }
         // The pane's transcript, live turn, plan strip and editor all belong
-        // to the conversation that just left the leaf.
+        // to the conversation that just left the leaf; its draft is filed
+        // under that conversation first.
+        self.stash_pane_draft(pane, cx);
         self.pane_states.remove(&pane);
         self.open_pane_state(id, cx);
         self.pane_focus = Some(id);
@@ -2762,6 +2786,9 @@ impl Dashboard {
         let Some(absorbed) = tree.close(session) else {
             return;
         };
+        // The text typed in this pane is filed under its conversation before
+        // the editor goes, so reopening it returns the draft.
+        self.stash_pane_draft(session, cx);
         self.pane_states.remove(&session);
         self.split_drag = None;
         self.pane_focus = None;
@@ -2850,7 +2877,18 @@ impl Dashboard {
             .unwrap_or_else(|| "(untitled)".to_string());
         // The pane's composer is its own entity (#2530), so a draft belongs to
         // the pane it was typed in and the send carries that pane's session.
-        let pane_editor = cx.new(editor::Editor::new);
+        // It walks the window's shared history, not a private one, so history
+        // is the same whichever pane has the caret.
+        let pane_editor = cx.new({
+            let history = self.history.clone();
+            let history_path = composer::default_history_path();
+            move |cx| editor::Editor::new_with_history(history, history_path, cx)
+        });
+        // A draft filed before this pane was closed, moved, or switched comes
+        // back with it.
+        if let Some(draft) = self.drafts.take(id) {
+            pane_editor.update(cx, |ed, cx| ed.restore_state(draft, cx));
+        }
         cx.subscribe(&pane_editor, move |this, _editor, event, cx| match event {
             editor::EditorEvent::Sent(text) => {
                 this.send_from_pane(id, text.clone(), None, cx);
@@ -2986,12 +3024,31 @@ impl Dashboard {
         self.persist_layout();
     }
 
+    /// File one pane's half-typed text under the conversation it belongs to,
+    /// before the pane's editor is dropped (#2494).
+    fn stash_pane_draft(&mut self, session: Uuid, cx: &mut Context<Self>) {
+        let Some(pane) = self.pane_states.get(&session) else {
+            return;
+        };
+        let editor = pane.editor.clone();
+        let draft = editor.update(cx, |ed, cx| ed.take_draft(cx));
+        self.drafts.store(session, draft);
+    }
+
+    /// The same for every pane, for a tree replaced wholesale.
+    fn stash_all_pane_drafts(&mut self, cx: &mut Context<Self>) {
+        let sessions: Vec<Uuid> = self.pane_states.keys().copied().collect();
+        for session in sessions {
+            self.stash_pane_draft(session, cx);
+        }
+    }
+
     /// Keep the chat on a leaf of the tree (#2472). A first open starts the
     /// tree; a plain switch moves the chat's own leaf to the new session;
     /// opening a session another pane already shows moves it into the chat and
     /// closes that pane, so one session never sits in two leaves.
-    fn adopt_chat_leaf(&mut self, previous: Option<Uuid>, id: Uuid) {
-        self.place_chat_leaf(previous, id);
+    fn adopt_chat_leaf(&mut self, previous: Option<Uuid>, id: Uuid, cx: &mut Context<Self>) {
+        self.place_chat_leaf(previous, id, cx);
         // The chat's leaf is part of the saved layout, so every path that
         // moves it writes the tree, the one-pane case included (#2675).
         self.persist_layout();
@@ -2999,19 +3056,22 @@ impl Dashboard {
 
     /// The body of `adopt_chat_leaf`. It writes nothing, so the caller can
     /// save once, whichever path the switch took.
-    fn place_chat_leaf(&mut self, previous: Option<Uuid>, id: Uuid) {
+    fn place_chat_leaf(&mut self, previous: Option<Uuid>, id: Uuid, cx: &mut Context<Self>) {
         let Some(tree) = self.panes.as_mut() else {
             self.panes = Some(PaneTree::leaf(id));
             return;
         };
         if tree.contains(id) {
-            self.pane_states.remove(&id);
+            // The tree work first, so the borrow of `self.panes` ends before
+            // the pane's draft is filed.
             if let Some(was) = previous
                 && was != id
                 && tree.leaves().len() > 1
             {
                 tree.close(was);
             }
+            self.stash_pane_draft(id, cx);
+            self.pane_states.remove(&id);
             return;
         }
         if let Some(was) = previous
@@ -3020,6 +3080,7 @@ impl Dashboard {
             return;
         }
         self.panes = Some(PaneTree::leaf(id));
+        self.stash_all_pane_drafts(cx);
         self.pane_states.clear();
     }
 
@@ -6912,6 +6973,10 @@ impl Dashboard {
     /// local list was filtered.
     fn delete_session(&mut self, id: Uuid, cx: &mut Context<Self>) {
         agent_bridge::spawn_delete_session(self.db_path.clone(), id, self.sink.clone());
+        // A deleted conversation must not keep a draft waiting for a composer
+        // it can never reach. Its pane's editor leaves with the conversation.
+        self.drafts.remove(id);
+        self.pane_states.remove(&id);
         // The pin is part of the row: it leaves with the row.
         self.sessions.favorites.retain(|f| *f != id);
         if self.rail_actions == Some(id) {
@@ -13185,7 +13250,15 @@ fn main() {
             },
             |window, cx| {
                 let focus = cx.focus_handle();
-                let editor = cx.new(editor::Editor::new);
+                // The window's history, loaded once and shared with every
+                // composer this window builds, split panes included.
+                let history_path = composer::default_history_path();
+                let history = composer::new_shared_history(composer::load_history(&history_path));
+                let editor = cx.new({
+                    let history = history.clone();
+                    let history_path = history_path.clone();
+                    move |cx| editor::Editor::new_with_history(history, history_path, cx)
+                });
                 // A drag-copied range lands on the clipboard inside the
                 // transcript, which cannot see the composer. The dashboard owns
                 // both halves, so it is the one that turns a landed copy into
@@ -13197,6 +13270,8 @@ fn main() {
                         let _ = editor.update(cx, |editor, cx| editor.show_copied(cx));
                     }));
                 }
+                // The dashboard keeps its own handle on the same list.
+                let dashboard_history = history.clone();
                 let view = cx.new(move |cx: &mut Context<Dashboard>| {
                     // Enter on the editor is a send: routed into the agent
                     // turn path on the Dashboard itself.
@@ -13417,6 +13492,8 @@ fn main() {
                         ctrl_c_interceptor: None,
                         rail_scroll: ScrollHandle::new(),
                         editor,
+                        history: dashboard_history,
+                        drafts: composer::DraftStore::new(),
                         agent_rx,
                         sink: agent_sink,
                         agent_ready: false,
@@ -19185,6 +19262,48 @@ mod tests {
         assert!(
             recording.contains(&call),
             "begin_conversation records the conversation it opens"
+        );
+    }
+
+    /// The window and every split pane walk ONE history, and it is the file
+    /// the terminal reads, so recall shows the same past whichever composer
+    /// has the caret (#2494).
+    #[test]
+    fn gui_composer_history_is_one_shared_list() {
+        let src = include_str!("main.rs");
+        let shared = ["composer::new_shared_", "history("].concat();
+        assert!(src.contains(&shared), "the window loads one shared list");
+        let pane = ["editor::Editor::new_with_", "history(history"].concat();
+        assert!(
+            src.contains(&pane),
+            "a split pane takes the window's handle, never a private list"
+        );
+        let field = ["history: composer::", "SharedHistory,"].concat();
+        assert!(src.contains(&field), "the dashboard owns the handle");
+    }
+
+    /// Switching conversations files the draft under the one being left and
+    /// puts the destination's own draft back. A pane whose editor is dropped
+    /// files its text before it goes (#2494).
+    #[test]
+    fn gui_switching_conversations_keeps_the_draft() {
+        let src = include_str!("main.rs");
+        let (_, helper) = src
+            .split_once(&["fn begin_", "conversation(&mut self, id: Uuid"].concat())
+            .expect("begin_conversation exists");
+        let (body, _) = helper
+            .split_once("\n    fn ")
+            .expect("the next method ends it");
+        let filed = ["self.drafts.", "store(previous, draft)"].concat();
+        assert!(body.contains(&filed), "leaving files the draft");
+        let back = ["self.drafts.", "take(id)"].concat();
+        assert!(body.contains(&back), "arriving takes the stored draft");
+        let restore = ["ed.restore_", "state(draft, cx)"].concat();
+        assert!(body.contains(&restore), "the returned draft is put back");
+        let pane = ["self.stash_pane_", "draft(session, cx)"].concat();
+        assert!(
+            src.contains(&pane),
+            "a closing pane files its draft before its editor is dropped"
         );
     }
 

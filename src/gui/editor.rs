@@ -13,6 +13,7 @@
 use crate::palette;
 use opencrabs::ui_core::card::{CARD_RADIUS, glass_fill};
 use opencrabs::ui_core::commands::completions;
+use opencrabs::ui_core::composer::{self, ComposerDraft, SharedHistory, lock_history};
 use opencrabs::ui_core::input_history::{
     input_history_down, input_history_up, record_input_history,
 };
@@ -245,8 +246,14 @@ pub struct Editor {
     /// field the user is about to type into reclaims the caret (#2741).
     pub(crate) focus_pending: bool,
     pub content: String,
-    /// Submitted messages and the draft stashed while recalling them.
-    input_history: Vec<String>,
+    /// Submitted messages, shared by the window and every split pane. One list
+    /// means a message sent in one composer is recalled in all of them, and
+    /// the terminal reads the same list off the same file.
+    history: SharedHistory,
+    /// Where `history` is persisted, so a restart keeps it.
+    history_path: PathBuf,
+    /// Position in the shared list and the draft a recall stashed. These stay
+    /// per composer: two fields can walk the same list at different places.
     input_history_index: Option<usize>,
     input_history_stash: String,
     /// The queued messages Up pulled out of the queue to edit, newest taken
@@ -323,12 +330,29 @@ pub fn notice_expired(shown_at: Instant, now: Instant, ttl: Duration) -> bool {
 }
 
 impl Editor {
+    /// A composer owning a private history loaded from disk. The window
+    /// builds its composers through [`Editor::new_with_history`] instead, so
+    /// they all walk one list; this stays correct on its own for anything
+    /// that builds a lone field.
     pub fn new(cx: &mut Context<Self>) -> Self {
+        let path = composer::default_history_path();
+        let entries = composer::load_history(&path);
+        Self::new_with_history(composer::new_shared_history(entries), path, cx)
+    }
+
+    /// A composer walking `history`, persisting every new entry to
+    /// `history_path`.
+    pub fn new_with_history(
+        history: SharedHistory,
+        history_path: PathBuf,
+        cx: &mut Context<Self>,
+    ) -> Self {
         Self {
             focus_handle: cx.focus_handle(),
             focus_pending: false,
             content: String::new(),
-            input_history: Vec::new(),
+            history,
+            history_path,
             input_history_index: None,
             input_history_stash: String::new(),
             recall: None,
@@ -765,8 +789,9 @@ impl Editor {
             self.move_to(target, cx);
             return;
         }
+        let entries = lock_history(&self.history);
         if input_history_up(
-            &self.input_history,
+            entries.as_slice(),
             &mut self.content,
             &mut self.input_history_index,
             &mut self.input_history_stash,
@@ -811,8 +836,9 @@ impl Editor {
             cx.notify();
             return;
         }
+        let entries = lock_history(&self.history);
         if input_history_down(
-            &self.input_history,
+            entries.as_slice(),
             &mut self.content,
             &mut self.input_history_index,
             &mut self.input_history_stash,
@@ -924,7 +950,7 @@ impl Editor {
             None
         };
         if let Some(name) = picked {
-            record_input_history(&mut self.input_history, name);
+            self.remember(name);
             self.clear_after_send(cx);
             cx.emit(EditorEvent::Sent(name.to_string()));
             return;
@@ -935,9 +961,68 @@ impl Editor {
             return;
         }
         let payload = message_with_markers(&text, &attachments);
-        record_input_history(&mut self.input_history, &text);
+        self.remember(&text);
         self.clear_after_send(cx);
         cx.emit(EditorEvent::Sent(payload));
+    }
+
+    /// Record one sent entry in the shared list and on disk.
+    ///
+    /// The dedup and the cap live in `ui_core::input_history`, the file write
+    /// in `ui_core::composer`, so the terminal and this field cannot record
+    /// the same message differently.
+    fn remember(&mut self, entry: &str) {
+        {
+            let mut entries = lock_history(&self.history);
+            record_input_history(&mut entries, entry);
+        }
+        let _ = composer::append_history(&self.history_path, entry);
+    }
+
+    /// The state a conversation switch has to carry: the text, the caret, and
+    /// any recall in progress. Attachments are deliberately not part of it:
+    /// a chip points at a file for the message being written, and carrying it
+    /// into another conversation would aim it at the wrong one.
+    pub fn draft(&self) -> ComposerDraft {
+        ComposerDraft {
+            text: self.content.clone(),
+            cursor: self.cursor_offset(),
+            history_index: self.input_history_index,
+            history_stash: self.input_history_stash.clone(),
+        }
+    }
+
+    /// Take the draft out of the field, leaving it ready for another
+    /// conversation. The popup state resets with it: a list opened for this
+    /// text makes no sense over different text.
+    pub fn take_draft(&mut self, cx: &mut Context<Self>) -> ComposerDraft {
+        let draft = self.draft();
+        self.content.clear();
+        self.selected_range = 0..0;
+        self.selection_reversed = false;
+        self.marked_range = None;
+        self.input_history_index = None;
+        self.input_history_stash.clear();
+        self.command_index = 0;
+        self.command_dismissed = false;
+        self.emoji_index = 0;
+        self.emoji_dismissed = false;
+        cx.notify();
+        draft
+    }
+
+    /// Put a stored draft back, caret at its stored offset. Recalled text is
+    /// not re-shown: the walk starts over on the shared list.
+    pub fn restore_state(&mut self, draft: ComposerDraft, cx: &mut Context<Self>) {
+        let end = draft.cursor.min(draft.text.len());
+        self.content = draft.text;
+        let end = self.content.floor_char_boundary(end);
+        self.selected_range = end..end;
+        self.selection_reversed = false;
+        self.marked_range = None;
+        self.input_history_index = draft.history_index;
+        self.input_history_stash = draft.history_stash;
+        cx.notify();
     }
 
     /// Empty the field and put the command list back to its resting state.
@@ -2195,6 +2280,20 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).expect("scratch dir");
         dir
+    }
+
+    /// Every composer walks the shared list and writes new entries through
+    /// the one file writer the terminal uses, so history is the same in the
+    /// window, in a split pane, and after a restart (#2494).
+    #[test]
+    fn composer_history_is_shared_and_persisted() {
+        let src = include_str!("editor.rs");
+        let lock = ["lock_history(&self.", "history)"].concat();
+        assert!(src.contains(&lock), "recall reads the shared list");
+        let write = ["composer::append_history(&self.", "history_path"].concat();
+        assert!(src.contains(&write), "a sent entry reaches the shared file");
+        let ctor = ["pub fn new_with_", "history("].concat();
+        assert!(src.contains(&ctor), "the handle is injected at construction");
     }
 
     /// The composer must not re-shape the draft on every frame: the shaping
