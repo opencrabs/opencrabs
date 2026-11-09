@@ -385,10 +385,41 @@ pub struct App {
     /// batched query per list load. A row that is not a topic-bound Telegram
     /// session has no entry and keeps its stored name.
     pub(crate) topic_titles: HashMap<Uuid, String>,
+    /// Sessions with topics switched on (#2701). Read from `topics_enabled`,
+    /// not by counting children: the same flag the window's chat bar reads, so
+    /// `t` can tell "first press turns it on" from "second press prompts".
+    pub(crate) topics_enabled_sessions: HashSet<Uuid>,
     /// Closed sessions (#2305): dimmed in the dialog, refuse new turns.
     pub(crate) closed_sessions: HashSet<Uuid>,
     /// Sessions whose topic tree is folded: their topics are not listed (#2427).
     pub(crate) collapsed_sessions: HashSet<Uuid>,
+    /// Newest message of every listed session, for the row's preview line
+    /// (#2701). Loaded in ONE batched query per list load, never per row.
+    pub(crate) session_previews: super::session_cards::PreviewMap,
+    /// Per-session plan progress, `(done, total)`, drawn as a ten-cell bar on
+    /// the row. Absent means the session has no live plan.
+    pub(crate) session_plan_progress: HashMap<Uuid, (usize, usize)>,
+    /// Sessions whose plan file is ready for a hand: the row shows a glyph so
+    /// a waiting plan is visible from the list.
+    pub(crate) session_plan_ready: HashSet<Uuid>,
+    /// Reader for the plan files under the agents root. Holds an mtime cache,
+    /// so re-reading on a sweep is cheap; `None` roots never archive or
+    /// delete, they only look.
+    pub(crate) plan_index: crate::ui_core::plan_index::PlanIndex,
+    /// When the plan sweep last ran; throttles the refresh below.
+    pub(crate) plan_sweep_at: Option<std::time::Instant>,
+    /// The chat's topic bar (#2701): present when the conversation on screen
+    /// has topics on and at least one topic. Rebuilt on every session load, so
+    /// a topic attached from the list shows up the next time its parent opens.
+    pub(crate) chat_topic_bar: Option<super::session_cards::ChatTopicBar>,
+    /// Alt+T hides the bar without turning topics off: a view preference, not
+    /// a stored setting.
+    pub(crate) chat_topic_bar_hidden: bool,
+    /// The group-topics prompt (`g`), open while the user picks sessions to
+    /// attach under a target.
+    pub(crate) group_topics: Option<super::session_cards::GroupTopicsPick>,
+    /// The delete confirmation (`d`), open until answered.
+    pub(crate) delete_confirm: Option<super::session_cards::DeleteConfirm>,
     /// The name prompt for a new topic in the sessions dialog (#2306).
     pub(crate) topic_naming: bool,
     pub(crate) topic_name_buffer: String,
@@ -1009,8 +1040,18 @@ impl App {
             session_favorites: HashSet::new(),
             topic_parents: std::collections::HashMap::new(),
             topic_titles: HashMap::new(),
+            topics_enabled_sessions: HashSet::new(),
             closed_sessions: HashSet::new(),
             collapsed_sessions: HashSet::new(),
+            session_previews: super::session_cards::PreviewMap::new(),
+            session_plan_progress: HashMap::new(),
+            session_plan_ready: HashSet::new(),
+            plan_index: crate::ui_core::plan_index::PlanIndex::default(),
+            plan_sweep_at: None,
+            chat_topic_bar: None,
+            chat_topic_bar_hidden: false,
+            group_topics: None,
+            delete_confirm: None,
             topic_naming: false,
             topic_name_buffer: String::new(),
             usage_ledger_stats: Vec::new(),
@@ -2467,6 +2508,15 @@ impl App {
                 // the tool and re-read here, so no tool path has to know
                 // whether a sound is wanted.
                 self.chime_settled_plan_tasks().await;
+
+                // Plan rows are live, not a snapshot of when the list opened:
+                // a task settles while the owner stares at the cards, and the
+                // rail on the desktop side updates for it. The sweep throttles
+                // itself to `SWEEP_EVERY`, so this is one `read_dir` pass every
+                // five seconds, and only while the list is the visible screen.
+                if self.mode == AppMode::Sessions {
+                    self.sweep_plans();
+                }
             }
             TuiEvent::ToolApprovalRequested(request) => {
                 self.handle_approval_requested(request);
