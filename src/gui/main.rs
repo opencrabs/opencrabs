@@ -2246,7 +2246,9 @@ impl Dashboard {
         self.refocus_screen();
         match row.item.action {
             PaletteAction::RunSlash(name) => self.send_message(name.to_string(), cx),
-            PaletteAction::OpenSession(id) => self.open_session(Uuid::from_u128(id), cx),
+            // A Seeker row is a pick: while a split waits it fills the pane,
+            // the way a rail row does (#2760).
+            PaletteAction::OpenSession(id) => self.pick_or_open(Uuid::from_u128(id), cx),
             PaletteAction::OpenSurface(surface) => self.open_surface(surface, cx),
             PaletteAction::OpenSidebar => self.set_rail_open(true, cx),
             PaletteAction::CloseSidebar => self.set_rail_open(false, cx),
@@ -2911,6 +2913,23 @@ impl Dashboard {
             .ok();
         })
         .detach();
+    }
+
+    /// A pick from any list: during a split pick it fills the waiting pane,
+    /// otherwise it opens the conversation (#2760).
+    ///
+    /// The rail's full rows and its Enter key asked the picker first, but the
+    /// topic chips, the filter's Enter and the Seeker's session rows opened
+    /// directly. A topic chip also stops propagation, so the parent row never
+    /// got the chance: the topic landed in the chat leaf while the picker
+    /// stayed armed on the pane it started from, and the next click split
+    /// something nobody pointed at.
+    fn pick_or_open(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        if self.split_pick.is_some() {
+            self.choose_split(id, cx);
+        } else {
+            self.open_session(id, cx);
+        }
     }
 
     /// Fill a new pane with `id`, splitting the pane the pick started from,
@@ -8650,7 +8669,9 @@ impl Dashboard {
                     let target = self.sessions.find_target();
                     self.close_rail_filter(cx);
                     if let Some(id) = target {
-                        self.open_session(id, cx);
+                        // The field answers the split pick the way the row
+                        // underneath it does (#2760).
+                        self.pick_or_open(id, cx);
                     }
                 }
                 "up" | "down" => {
@@ -9957,7 +9978,10 @@ impl Render for Dashboard {
                     let open = cx.listener(move |this, _ev, _window, cx| {
                         cx.stop_propagation();
                         this.close_rail_filter(cx);
-                        this.open_session(kid_id, cx);
+                        // A chip is a pick like any row: while a split waits,
+                        // it fills the pane instead of opening the topic in
+                        // the chat leaf (#2760).
+                        this.pick_or_open(kid_id, cx);
                     });
                     let ask = cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
                         cx.stop_propagation();
@@ -18008,6 +18032,48 @@ mod tests {
         assert!(
             split_row.contains("self.choose_split(id, cx)"),
             "the row already answered the pick"
+        );
+    }
+
+    #[test]
+    fn a_topic_chip_answers_the_split_pick() {
+        // #2760: a chip stops propagation, so the parent row's picker never
+        // ran and the topic opened in the chat leaf while the split waited
+        // for a session nobody was going to pick.
+        let src = include_str!("main.rs");
+        assert!(
+            !src.contains("this.open_session(kid_id, cx)"),
+            "the chip must not open the topic directly"
+        );
+        assert!(
+            src.contains("this.pick_or_open(kid_id, cx)"),
+            "the chip answers the picker the way a row does"
+        );
+        let helper = fn_body(src, "pick_or_open");
+        assert!(
+            helper.contains("self.split_pick.is_some()"),
+            "the helper asks whether a pane is waiting"
+        );
+        assert!(
+            helper.contains("self.choose_split(id, cx)"),
+            "and fills it instead of opening the conversation"
+        );
+    }
+
+    #[test]
+    fn the_seeker_and_the_filter_answer_the_split_pick() {
+        // #2760: the Seeker's OpenSession arm and the rail filter's Enter both
+        // opened directly, so a pick from either left the waiting pane armed.
+        let src = include_str!("main.rs");
+        assert!(
+            src.contains(
+                "PaletteAction::OpenSession(id) => self.pick_or_open(Uuid::from_u128(id), cx)"
+            ),
+            "a Seeker row answers the picker"
+        );
+        assert!(
+            fn_body(src, "on_key").contains("self.pick_or_open(id, cx)"),
+            "the filter's Enter answers it too"
         );
     }
 
