@@ -8321,6 +8321,9 @@ impl Dashboard {
                             &loaded.origins,
                         );
                         let landed = settle_landed(expect, loaded.total);
+                        // Taken before `rows` is moved out below: every retry
+                        // log names the row total it was comparing against.
+                        let total = loaded.total;
                         this.transcript.hidden = hidden;
                         this.transcript.turns = turns;
                         // The rows now carry the question the card opened the

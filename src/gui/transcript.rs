@@ -996,19 +996,12 @@ fn row_blocks(m: &Message, forward: Option<ForwardMark>) -> Vec<Block> {
 /// `metrics` carries the per-turn ctx and rate this process still remembers,
 /// keyed by turn anchor (#2324): a turn keeps them across reloads of the same
 /// session and forgets them only when the process does.
-pub fn turns_with_metrics(
-    rows: &[Message],
-    total: i64,
-    metrics: &HashMap<String, TurnMetrics>,
-) -> (usize, Vec<Turn>) {
-    turns_with_origins(rows, total, metrics, &HashMap::new())
-}
-
-/// [`turns_with_metrics`] plus the per-row provenance of a merged `All` view
-/// (#2762): `origins` maps a row id to the topic that row lives in, so every
-/// turn carries the label its first row was written under. A change of label
-/// is a hard turn boundary, because without one the previous topic's answer
-/// would be drawn as the next topic's output.
+///
+/// `origins` is the per-row provenance of a merged `All` view (#2762): it maps
+/// a row id to the topic that row lives in, so every turn carries the label its
+/// first row was written under. A change of label is a hard turn boundary,
+/// because without one the previous topic's answer would be drawn as the next
+/// topic's output.
 pub fn turns_with_origins(
     rows: &[Message],
     total: i64,
@@ -3863,7 +3856,7 @@ mod tests {
     /// The stored-rows split with nothing remembered, which is what most
     /// seats here exercise. Metrics have their own seats.
     fn turns(rows: &[Message], total: i64) -> (usize, Vec<Turn>) {
-        turns_with_metrics(rows, total, &HashMap::new())
+        turns_with_origins(rows, total, &HashMap::new(), &HashMap::new())
     }
 
     fn row(role: &str, content: &str, sequence: i32) -> Message {
@@ -4449,7 +4442,7 @@ mod tests {
                 tool_calls: 0,
             },
         );
-        let (_, mut turns) = turns_with_metrics(&rows, 2, &known);
+        let (_, mut turns) = turns_with_origins(&rows, 2, &known, &HashMap::new());
         let turn = turns.pop().expect("one turn");
         let segment = turn
             .metrics
@@ -4485,7 +4478,7 @@ mod tests {
                 tool_calls: 4,
             },
         );
-        let (_, mut turns) = turns_with_metrics(&rows, 2, &known);
+        let (_, mut turns) = turns_with_origins(&rows, 2, &known, &HashMap::new());
         let turn = turns.pop().expect("one turn");
         assert_eq!(
             turn.summary.tool_calls, 4,
