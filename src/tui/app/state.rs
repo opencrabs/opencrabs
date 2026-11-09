@@ -7,106 +7,6 @@ use super::events::{
     SudoPasswordResponse, ToolApprovalRequest, ToolApprovalResponse, TuiEvent,
 };
 
-/// Live tok/s accumulator for the footer field.
-///
-/// Tracks ACTIVE streaming time (windows where token deltas are arriving
-/// continuously) and stashes the last finalized rate so the footer keeps
-/// showing the previous turn's tok/s during idle until the next turn
-/// produces its first token. Excludes tool execution waits, approval
-/// prompts, between-stream network round-trips — anything more than 1s
-/// without a token closes the current window.
-///
-/// 2026-05-28 user report: pre-tracker the footer divided streaming
-/// tokens by full wall-clock elapsed, so a 30s tool exec turned a
-/// 200 tok/s burst into "8 tok/s" mid-turn.
-#[derive(Debug, Clone, Default)]
-pub struct StreamingTpsTracker {
-    /// Accumulated active streaming seconds for the current turn.
-    active_secs: f64,
-    /// Instant the current open window started.
-    window_start: Option<std::time::Instant>,
-    /// Instant of the most recent advance() call (= last token event).
-    last_token_at: Option<std::time::Instant>,
-    /// Last finalized tok/s value. Persists across idle until the next
-    /// finalize().
-    pub last_tps: Option<f64>,
-}
-
-impl StreamingTpsTracker {
-    /// A gap longer than this between consecutive token events closes
-    /// the current active window. Tool execution, approval waits, and
-    /// between-response network round-trips all exceed this threshold,
-    /// so they're correctly excluded from the rate denominator.
-    const IDLE_GAP_SECS: f64 = 1.0;
-
-    /// Call on every `StreamingOutputTokens` event after incrementing
-    /// the token counter. `now` is `Instant::now()` (parameterized so
-    /// tests can drive the clock deterministically).
-    pub fn advance(&mut self, now: std::time::Instant) {
-        match (self.window_start, self.last_token_at) {
-            (None, _) => {
-                // First token this turn — open a window starting now.
-                self.window_start = Some(now);
-            }
-            (Some(start), Some(last)) => {
-                if (now - last).as_secs_f64() > Self::IDLE_GAP_SECS {
-                    // Idle gap — close the prior window and open a new one.
-                    self.active_secs += (last - start).as_secs_f64();
-                    self.window_start = Some(now);
-                }
-                // else: still inside the active window.
-            }
-            (Some(_), None) => {
-                // window_start without last_token: shouldn't normally
-                // happen but be safe — reset window start to `now`.
-                self.window_start = Some(now);
-            }
-        }
-        self.last_token_at = Some(now);
-    }
-
-    /// Total active seconds so far, including the currently-open
-    /// window if any. Window time is always measured between window
-    /// start and the LAST token event — never extended to `now`, so
-    /// idle ticks past the last token don't inflate the rate.
-    pub fn active_secs_now(&self, _now: std::time::Instant) -> f64 {
-        let in_flight = match (self.window_start, self.last_token_at) {
-            (Some(start), Some(last)) => (last - start).as_secs_f64().max(0.0),
-            _ => 0.0,
-        };
-        self.active_secs + in_flight
-    }
-
-    /// Stash the just-finished turn's rate as `last_tps` and reset the
-    /// accumulator for the next turn. A turn with zero tokens leaves
-    /// `last_tps` untouched (preserves the previous visible rate).
-    ///
-    /// `authoritative` is the agent service's computed tok/s from
-    /// `AgentResponse.tokens_per_second` — provider-reported output
-    /// tokens divided by summed per-iteration active streaming time.
-    /// When present, it overrides the local tiktoken-estimated rate
-    /// because (a) tiktoken's cl100k_base tokenizer over-counts
-    /// Qwen/Kimi/GLM bytes by ~1.5-2×, and (b) the local window
-    /// covers only the visible final-message streaming, not earlier
-    /// tool-call-iteration streaming. When `None` (CLI providers, or
-    /// any turn where the streaming layer couldn't measure active
-    /// time) we fall back to the local estimate so the footer
-    /// continues to show something rather than going blank.
-    pub fn finalize(&mut self, total_tokens: u32, authoritative: Option<f64>) {
-        let active = match (self.window_start, self.last_token_at) {
-            (Some(start), Some(last)) => self.active_secs + (last - start).as_secs_f64().max(0.0),
-            _ => self.active_secs,
-        };
-        if let Some(tps) = authoritative.filter(|t| t.is_finite() && *t > 0.0) {
-            self.last_tps = Some(tps);
-        } else if total_tokens > 0 && active > 0.0 {
-            self.last_tps = Some(total_tokens as f64 / active);
-        }
-        self.active_secs = 0.0;
-        self.window_start = None;
-        self.last_token_at = None;
-    }
-}
 use super::onboarding::OnboardingWizard;
 use crate::brain::agent::AgentService;
 use crate::brain::provider::Provider;
@@ -115,6 +15,7 @@ use crate::db::models::{Message, Session};
 use crate::services::{FileService, MessageService, ServiceContext, SessionService};
 use crate::tui::pane::PaneManager;
 use crate::tui::render::notice::{CLIPBOARD_HINT_TTL, ERROR_TTL, NOTIFICATION_TTL, notice_expired};
+pub use crate::ui_core::rate::StreamingTpsTracker;
 use crate::utils::prompt_analyzer::PromptAnalyzer;
 use anyhow::Result;
 use ratatui::text::Line;
