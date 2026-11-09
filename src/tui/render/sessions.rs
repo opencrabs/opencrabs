@@ -431,6 +431,17 @@ impl Column {
                         Style::default().fg(theme::role(Role::Warning)),
                     ));
                 }
+                // Live in-flight activity (#2722): the tool running now, else
+                // thinking/responding, worded like the GUI card's live lead.
+                // It rides inside this column and `fit_cell` truncates it, so
+                // a session stays exactly one row (A3). The spinner above is
+                // still the state marker; this is what the turn is doing.
+                if let Some(activity) = session_activity(app, session.id) {
+                    spans.push(Span::styled(
+                        format!(" {activity}"),
+                        Style::default().fg(theme::role(Role::GrayMid)),
+                    ));
+                }
                 if is_current {
                     spans.push(Span::styled(
                         " *",
@@ -457,6 +468,70 @@ impl Column {
             }
         }
     }
+}
+
+/// The in-flight activity phrase for a session row (#2722), worded like the
+/// GUI card's live lead: the tool description when one is running, else
+/// `thinking…` while reasoning streams, else `responding…` while text streams.
+/// `None` when there is nothing to say. Pure so the precedence is testable
+/// without an `App`; the Status column truncates whatever this returns.
+fn activity_text(
+    tool_description: Option<&str>,
+    thinking: bool,
+    responding: bool,
+) -> Option<String> {
+    if let Some(desc) = tool_description.map(str::trim).filter(|d| !d.is_empty()) {
+        return Some(desc.to_string());
+    }
+    if thinking {
+        return Some("thinking…".to_string());
+    }
+    if responding {
+        return Some("responding…".to_string());
+    }
+    None
+}
+
+/// Gather one session's live activity from the foreground fields (when it is
+/// the focused session) or its background sidecar, then word it. Only a
+/// processing session has anything to show; a turn that has started but not
+/// yet streamed reads as `thinking…`, the same feedback the GUI card gives
+/// during the first tool calls. One row per session is preserved (A3): the
+/// caller paints this inside the Status column and truncates it.
+fn session_activity(app: &App, session_id: uuid::Uuid) -> Option<String> {
+    if !app.is_session_processing(session_id) {
+        return None;
+    }
+    let (tool_group, reasoning, response) = if app.is_current_session(session_id) {
+        (
+            app.active_tool_group.as_ref(),
+            app.streaming_reasoning.as_deref(),
+            app.streaming_response.as_deref(),
+        )
+    } else if let Some(bg) = app.background_sessions.get(&session_id) {
+        (
+            bg.active_tool_group.as_ref(),
+            bg.streaming_reasoning.as_deref(),
+            bg.streaming_response.as_deref(),
+        )
+    } else {
+        return Some("thinking…".to_string());
+    };
+    // The call running now, else the last one that ran, mirroring the GUI's
+    // `live_activity`. A completed-only group still names what just happened.
+    let tool_description = tool_group.and_then(|g| {
+        g.calls
+            .iter()
+            .rev()
+            .find(|c| !c.completed)
+            .or_else(|| g.calls.last())
+            .map(|c| c.description.as_str())
+    });
+    let thinking = reasoning.is_some_and(|r| !r.trim().is_empty());
+    let responding = response.is_some_and(|r| !r.trim().is_empty());
+    Some(
+        activity_text(tool_description, thinking, responding).unwrap_or_else(|| "thinking…".into()),
+    )
 }
 
 /// One frame's column layout, computed once and shared by every row.
@@ -756,4 +831,240 @@ fn finish_row(mut spans: Vec<Span<'static>>, width: usize, is_selected: bool) ->
             .map(|s| Span::styled(s.content, s.style.bg(bg)))
             .collect::<Vec<_>>(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::brain::agent::service::AgentService;
+    use crate::db::Database;
+    use crate::services::ServiceContext;
+    use crate::tests::agent_service_mocks::MockProvider;
+    use crate::tui::app::state::{ToolCallEntry, ToolCallGroup};
+    use crate::tui::pane::PaneManager;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+    use std::sync::Arc;
+
+    // ── Pure precedence ──────────────────────────────────────────────────
+
+    #[test]
+    fn activity_running_tool_wins_over_thinking_and_responding() {
+        assert_eq!(
+            activity_text(Some("Reading src/main.rs"), true, true).as_deref(),
+            Some("Reading src/main.rs")
+        );
+    }
+
+    #[test]
+    fn activity_thinking_before_responding() {
+        assert_eq!(
+            activity_text(None, true, true).as_deref(),
+            Some("thinking…")
+        );
+        assert_eq!(
+            activity_text(None, true, false).as_deref(),
+            Some("thinking…")
+        );
+    }
+
+    #[test]
+    fn activity_responding_when_only_text_streams() {
+        assert_eq!(
+            activity_text(None, false, true).as_deref(),
+            Some("responding…")
+        );
+    }
+
+    #[test]
+    fn activity_blank_description_falls_through() {
+        assert_eq!(
+            activity_text(Some("   "), false, true).as_deref(),
+            Some("responding…")
+        );
+        assert_eq!(activity_text(Some(""), false, false), None);
+    }
+
+    #[test]
+    fn activity_idle_is_none() {
+        assert_eq!(activity_text(None, false, false), None);
+    }
+
+    // ── Rendered Status column (TestBackend) ─────────────────────────────
+
+    async fn app() -> App {
+        let db = Database::connect_in_memory().await.unwrap();
+        db.run_migrations().await.unwrap();
+        let context = ServiceContext::new(db.pool().clone());
+        let provider: Arc<dyn crate::brain::provider::Provider> = Arc::new(MockProvider);
+        let service = Arc::new(AgentService::new_for_test(provider, context.clone()).await);
+        #[cfg(feature = "whatsapp")]
+        let mut app = App::new(
+            service,
+            context,
+            Arc::new(crate::channels::whatsapp::WhatsAppState::new()),
+        );
+        #[cfg(not(feature = "whatsapp"))]
+        let mut app = App::new(service, context);
+        app.pane_manager = PaneManager::new();
+        app
+    }
+
+    fn session(title: &str) -> Session {
+        let now = chrono::Utc::now();
+        Session {
+            id: uuid::Uuid::new_v4(),
+            title: Some(title.to_string()),
+            model: None,
+            provider_name: None,
+            created_at: now,
+            updated_at: now,
+            archived_at: None,
+            token_count: 0,
+            total_cost: 0.0,
+            working_directory: None,
+            auto_title_attempted: false,
+            project_id: None,
+            channel_chat_key: None,
+        }
+    }
+
+    fn tool_group(description: &str, completed: bool) -> ToolCallGroup {
+        ToolCallGroup {
+            calls: vec![ToolCallEntry {
+                description: description.to_string(),
+                success: false,
+                details: None,
+                completed,
+                tool_input: serde_json::Value::Null,
+                task_id: None,
+            }],
+            expanded: false,
+        }
+    }
+
+    fn draw(app: &App, width: u16, height: u16) -> Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|f| render_sessions(f, app, Rect::new(0, 0, width, height)))
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn row_text(buffer: &Buffer, y: u16) -> String {
+        (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol().to_string())
+            .collect()
+    }
+
+    fn screen_text(buffer: &Buffer) -> String {
+        (0..buffer.area.height)
+            .map(|y| row_text(buffer, y))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Count the rows a needle appears on, to prove one row per session (A3).
+    fn rows_containing(buffer: &Buffer, needle: &str) -> usize {
+        (0..buffer.area.height)
+            .filter(|&y| row_text(buffer, y).contains(needle))
+            .count()
+    }
+
+    #[tokio::test]
+    async fn status_column_shows_the_running_tool_description() {
+        let mut app = app().await;
+        let s = session("Alpha session");
+        app.current_session = Some(s.clone());
+        app.processing_sessions.insert(s.id);
+        app.active_tool_group = Some(tool_group("Reading src/main.rs", false));
+        app.sessions.push(s);
+
+        let buf = draw(&app, 120, 10);
+        let text = screen_text(&buf);
+        assert!(text.contains("Reading"), "activity text missing: {text}");
+        assert!(text.contains("Alpha session"), "title missing: {text}");
+    }
+
+    #[tokio::test]
+    async fn processing_session_with_no_activity_reads_thinking() {
+        let mut app = app().await;
+        let s = session("Beta session");
+        app.current_session = Some(s.clone());
+        app.processing_sessions.insert(s.id);
+        app.sessions.push(s);
+
+        let text = screen_text(&draw(&app, 120, 10));
+        assert!(
+            text.contains("thinking"),
+            "expected thinking fallback: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn idle_session_has_no_activity_text() {
+        let mut app = app().await;
+        let s = session("Gamma session");
+        app.current_session = Some(s.clone());
+        app.sessions.push(s);
+
+        let text = screen_text(&draw(&app, 120, 10));
+        assert!(text.contains("Gamma session"), "title missing: {text}");
+        assert!(
+            !text.contains("thinking"),
+            "idle row leaked thinking: {text}"
+        );
+        assert!(
+            !text.contains("responding"),
+            "idle row leaked responding: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn background_session_activity_is_rendered() {
+        let mut app = app().await;
+        let s = session("Delta session");
+        // Not the focused session: its live state lives in the sidecar.
+        app.current_session = None;
+        app.processing_sessions.insert(s.id);
+        let mut bg = crate::tui::app::background_session::BackgroundSessionState::default();
+        bg.is_processing = true;
+        bg.active_tool_group = Some(tool_group("Writing tests", false));
+        app.background_sessions.insert(s.id, bg);
+        app.sessions.push(s);
+
+        let text = screen_text(&draw(&app, 120, 10));
+        assert!(
+            text.contains("Writing"),
+            "background activity missing: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn one_row_per_session_is_preserved_with_activity() {
+        let mut app = app().await;
+        let busy = session("Busy session");
+        let idle = session("Idle session");
+        app.current_session = Some(busy.clone());
+        app.processing_sessions.insert(busy.id);
+        app.active_tool_group = Some(tool_group(
+            "A very long tool description that must truncate",
+            false,
+        ));
+        app.sessions.push(busy);
+        app.sessions.push(idle);
+
+        let buf = draw(&app, 120, 12);
+        assert_eq!(
+            rows_containing(&buf, "Busy session"),
+            1,
+            "busy session wrapped"
+        );
+        assert_eq!(
+            rows_containing(&buf, "Idle session"),
+            1,
+            "idle session wrapped"
+        );
+    }
 }
