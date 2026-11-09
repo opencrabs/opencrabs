@@ -338,19 +338,12 @@ pub struct LiveTurn {
     /// TUI runs over every chunk (`brain::tokenizer`), so the live counter and
     /// the TUI's agree instead of being two estimates.
     pub tokens: u32,
-    /// Seconds the provider spent ACTUALLY streaming this turn (#2325), the
-    /// denominator every other surface divides by. Tool execution, approval
-    /// waits and between-response round-trips are excluded: a 30s tool run
-    /// used to turn a 200 tok/s burst into "8 tok/s".
-    active_secs: f64,
-    /// When the currently open streaming window started.
-    window_start: Option<std::time::Instant>,
-    /// When the newest chunk landed, which is where the open window ends.
-    last_token_at: Option<std::time::Instant>,
-    /// The last finalized rate, kept across idle so the footer shows the
-    /// previous turn's number until the next turn produces its first token,
-    /// exactly like the terminal's streaming tracker.
-    last_tps: Option<f64>,
+    /// The turn's streaming rate, measured by the same tracker the terminal
+    /// footer runs (#2703). It holds the active streaming seconds (tool runs,
+    /// approval waits and between-response round-trips excluded) and keeps the
+    /// last finalized rate across idle, so the footer shows the previous turn's
+    /// number instead of blanking.
+    tps: opencrabs::ui_core::rate::StreamingTpsTracker,
     /// When the turn opened. The status line's clock reads from here, which is
     /// the only reason a silent provider no longer looks like a frozen window.
     pub started: Option<std::time::Instant>,
@@ -432,41 +425,13 @@ impl LiveTurn {
         // The accumulator belongs to the turn that just ended; the finalized
         // rate deliberately survives, so an idle footer keeps the number
         // instead of blanking until the next turn streams.
-        self.active_secs = 0.0;
-        self.window_start = None;
-        self.last_token_at = None;
-    }
-
-    /// A gap longer than this between chunks closes the active window: tool
-    /// runs, approval prompts and between-response round-trips all exceed it,
-    /// so they are excluded from the rate's denominator.
-    const IDLE_GAP_SECS: f64 = 1.0;
-
-    /// Feed the active-window accumulator one token event (#2325), the same
-    /// rule `tui::app::state::StreamingTpsTracker::advance` applies. The clock
-    /// is a parameter so a seat can drive it deterministically.
-    fn advance_streaming(&mut self, now: std::time::Instant) {
-        match (self.window_start, self.last_token_at) {
-            (None, _) => self.window_start = Some(now),
-            (Some(start), Some(last)) => {
-                if (now - last).as_secs_f64() > Self::IDLE_GAP_SECS {
-                    // Idle gap: close the old window, open a new one.
-                    self.active_secs += (last - start).as_secs_f64();
-                    self.window_start = Some(now);
-                }
-            }
-            (Some(_), None) => self.window_start = Some(now),
-        }
-        self.last_token_at = Some(now);
+        self.tps.reset_window();
     }
 
     /// Active streaming seconds so far, including the open window. Measured
     /// to the LAST chunk, never to now, so idle ticks cannot inflate it.
     pub fn streaming_active_secs(&self) -> f64 {
-        match (self.window_start, self.last_token_at) {
-            (Some(start), Some(last)) => self.active_secs + (last - start).as_secs_f64().max(0.0),
-            _ => self.active_secs,
-        }
+        self.tps.active_secs()
     }
 
     /// Finish the turn's rate (#2325): prefer the service's own
@@ -475,15 +440,7 @@ impl LiveTurn {
     /// active-window estimate, and reset the accumulator. A turn that produced
     /// nothing keeps the previous number rather than reporting a fake zero.
     pub fn finalize(&mut self, authoritative: Option<f64>) {
-        let active = self.streaming_active_secs();
-        if let Some(tps) = authoritative.filter(|t| t.is_finite() && *t > 0.0) {
-            self.last_tps = Some(tps);
-        } else if self.tokens > 0 && active > 0.0 {
-            self.last_tps = Some(self.tokens as f64 / active);
-        }
-        self.active_secs = 0.0;
-        self.window_start = None;
-        self.last_token_at = None;
+        self.tps.finalize(self.tokens, authoritative);
     }
 
     /// Seconds since the turn opened; zero before one has.
@@ -497,21 +454,23 @@ impl LiveTurn {
     /// window is open the last finalized rate is returned, which is what keeps
     /// an idle footer from blanking the moment a turn settles.
     pub fn tokens_per_sec(&self) -> f32 {
-        let active = self.streaming_active_secs();
-        let live = (active > 0.0).then(|| self.tokens as f64 / active);
-        live.or(self.last_tps).map_or(0.0, |t| t as f32)
+        // The same guard the service and the terminal use (#2703): a window
+        // that collapsed below the floor, or a rate over the ceiling, is not a
+        // measurement, so the last credible number stays on screen instead.
+        opencrabs::ui_core::rate::credible_rate(self.tokens, self.tps.active_secs())
+            .or(self.tps.last_tps)
+            .map_or(0.0, |t| t as f32)
     }
 
-    /// Count one answer chunk: text plus its tokens. Counting here keeps the
-    /// live counter honest for every caller (a chunk that never renders still
-    /// cost the tokens).
-    pub fn note_chunk(&mut self, text: &str) {
-        self.note_chunk_at(text, std::time::Instant::now());
-    }
-
-    /// [`note_chunk`](Self::note_chunk) with the clock injected, so tests can
-    /// rehearse a stream with a tool wait in the middle.
-    fn note_chunk_at(&mut self, text: &str, now: std::time::Instant) {
+    /// Count one answer chunk: text plus its tokens, stamped with the instant
+    /// it arrived. Counting here keeps the live counter honest for every
+    /// caller (a chunk that never renders still cost the tokens).
+    ///
+    /// The stamp is a parameter rather than a `now()` read because `drain`
+    /// hands the GUI a whole batch at once (#2703). Reading the clock in here
+    /// stamped every chunk in the batch with one instant, collapsed the window
+    /// the rate is measured over, and is how 4640 tok/s reached the status bar.
+    pub(crate) fn note_chunk_at(&mut self, text: &str, now: std::time::Instant) {
         let tokens = opencrabs::brain::tokenizer::count_tokens(text) as u32;
         self.tokens = self.tokens.saturating_add(tokens);
         self.chunks += 1;
@@ -523,7 +482,7 @@ impl LiveTurn {
             self.answer_at = Some(chrono::Local::now());
         }
         if tokens > 0 {
-            self.advance_streaming(now);
+            self.tps.advance(now);
         }
         self.stream.push_str(text);
     }
@@ -579,9 +538,13 @@ impl LiveTurn {
         self.tools.push(call);
     }
 
-    /// The same guard for reasoning, which travels as `ReasoningChunk` and
-    /// again inside `IntermediateText`.
-    pub fn push_reasoning(&mut self, text: &str) {
+    /// The same guard for reasoning, which travels as `IntermediateText`.
+    ///
+    /// The clock is a parameter for the same reason as [`Self::note_chunk_at`]
+    /// (#2703): reasoning arrives inside a drained batch, so a clock read in
+    /// here would measure the fold loop instead of the stream and collapse the
+    /// rate window. The stamp travels from the bridge with the event.
+    pub fn push_reasoning_at(&mut self, text: &str, now: std::time::Instant) {
         let text = text.trim();
         if text.is_empty() {
             return;
@@ -593,24 +556,19 @@ impl LiveTurn {
         if !self.reasoning.trim_end().is_empty() {
             self.reasoning.push_str("\n\n");
         }
-        self.note_reasoning(text);
+        self.note_reasoning_at(text, now);
     }
 
-    /// Count one reasoning chunk. Reasoning IS model output and the TUI counts
-    /// it toward the turn's total (2026-05-29 receipt: a 38s reasoning turn
-    /// read "65 tok"), so excluding it here would understate the turn.
-    pub fn note_reasoning(&mut self, text: &str) {
-        self.note_reasoning_at(text, std::time::Instant::now());
-    }
-
-    /// [`note_reasoning`](Self::note_reasoning) with the clock injected.
+    /// Count one reasoning chunk, stamped with the instant it arrived.
     ///
-    /// Reasoning advances the streaming window the same way the answer does:
-    /// the channel bridge feeds `StreamingOutputTokens` for reasoning chunks
-    /// too (`cli/ui.rs`, "reasoning chunks ARE model output"), so the terminal
-    /// tracker counts that time, and counting the tokens here without the
-    /// time would inflate the rate (#2325).
-    fn note_reasoning_at(&mut self, text: &str, now: std::time::Instant) {
+    /// Reasoning advances the streaming window the same way the answer does,
+    /// because it is model output and the window must cover the time it took.
+    /// The stamp is injected for the same reason as `note_chunk_at` (#2703):
+    /// the GUI folds a drained batch in one loop, so a clock read here would
+    /// measure the loop rather than the stream. The terminal reads its clock
+    /// per event because its bridge mints `StreamingOutputTokens` one at a
+    /// time (`cli/ui.rs`); the GUI has no such event and must carry arrival.
+    pub(crate) fn note_reasoning_at(&mut self, text: &str, now: std::time::Instant) {
         let tokens = opencrabs::brain::tokenizer::count_tokens(text) as u32;
         self.tokens = self.tokens.saturating_add(tokens);
         if self.first_chunk.is_none() {
@@ -618,7 +576,7 @@ impl LiveTurn {
         }
         self.thinking = false;
         if tokens > 0 {
-            self.advance_streaming(now);
+            self.tps.advance(now);
         }
         self.reasoning.push_str(text);
         match self.entries.last_mut() {
@@ -3977,7 +3935,7 @@ mod tests {
         // must appear once (#2442).
         let mut live = LiveTurn::default();
         live.begin("question".into());
-        live.note_chunk("Checking the parser now.");
+        live.note_chunk_at("Checking the parser now.", std::time::Instant::now());
         live.push_narration("Checking the parser now.");
         assert_eq!(
             live.stream, "",
@@ -4001,13 +3959,13 @@ mod tests {
         );
 
         // Reasoning takes the same guard.
-        live.push_reasoning("think about it");
-        live.push_reasoning("think about it");
+        live.push_reasoning_at("think about it", std::time::Instant::now());
+        live.push_reasoning_at("think about it", std::time::Instant::now());
         assert_eq!(live.reasoning, "think about it");
 
         // Anything still streaming when a tool starts is narration, so it
         // joins the card before the row rather than leaking into the answer.
-        live.note_chunk("one more line");
+        live.note_chunk_at("one more line", std::time::Instant::now());
         live.push_tool(ToolCall::running("bash".into(), "bash: ls".into()));
         assert_eq!(
             narration_lines(&live),
@@ -4026,7 +3984,7 @@ mod tests {
         let mut live = LiveTurn::default();
         assert_eq!(live.tokens_per_sec(), 0.0);
         live.begin("question".into());
-        live.note_chunk("hello");
+        live.note_chunk_at("hello", std::time::Instant::now());
         assert!(live.tokens_per_sec() >= 0.0);
     }
 
@@ -4616,6 +4574,177 @@ mod tests {
         assert_eq!(live.streaming_active_secs(), 0.0);
     }
 
+    /// #2703: the window must survive how the UI happens to poll.
+    ///
+    /// `agent_bridge::drain` hands the whole batch over at once and the fold
+    /// walks it in one loop, so every chunk in a burst was stamped with a fold
+    /// time microseconds after the one before it. Measured on the owner's
+    /// screen that read 4640 tok/s where the log's own numbers imply ~180.
+    ///
+    /// The bound is not invented: the service refuses to report a rate above
+    /// `ui_core::rate::MAX_PLAUSIBLE_TOK_S` (2000), so a surface that prints
+    /// more than that is printing a number no other surface would.
+    #[test]
+    fn tps_a_folded_batch_does_not_print_a_rate_the_service_would_refuse() {
+        const SERVICE_CEILING: f32 = 2000.0;
+
+        // The receipt this reproduces (#2703): one turn logged 18382 tokens
+        // beside 592s of wall clock, and the surface printed 4640 tok/s. The
+        // token count was honest; the WINDOW was the lie. `agent_bridge::drain`
+        // hands the UI a batch and the fold stamps every chunk with
+        // `Instant::now()` as it walks that batch, so the whole burst lands
+        // inside a few dozen milliseconds of clock no matter how long the
+        // provider actually spent streaming it.
+        //
+        // The clock is injected here so the collapse is exact instead of
+        // depending on how fast this machine happens to fold 12 strings.
+        let base = std::time::Instant::now();
+        let mut live = LiveTurn::default();
+        live.begin("explain the design".into());
+        for i in 0..400u64 {
+            let text = "the quick brown fox jumps ";
+            live.note_chunk_at(text, base + std::time::Duration::from_micros(i * 250));
+        }
+
+        let tokens = live.tokens;
+        let active = live.streaming_active_secs();
+        let rate = live.tokens_per_sec();
+        assert!(
+            tokens > 0,
+            "the fold counted no tokens, so the rate is moot"
+        );
+        assert!(
+            active < 1.0,
+            "this test must model a collapsed window, got {active:.3}s"
+        );
+        assert!(
+            rate <= SERVICE_CEILING,
+            "{tokens} tokens over {active:.4}s of folded clock reads {rate:.0} tok/s, \
+             over the service's own {SERVICE_CEILING:.0} ceiling: the window collapsed \
+             because the clock is read at fold time, not at arrival"
+        );
+    }
+
+    /// #2703: a burst that collapses the window keeps the rate already on
+    /// screen instead of adopting an unbounded estimate.
+    ///
+    /// The first half of the bug is the too-short window; the second half is
+    /// that nothing bounded what the too-short window produced. Both halves
+    /// are pinned here: the burst is refused, and the footer keeps the number
+    /// it was already showing rather than blanking to zero.
+    #[test]
+    fn tps_a_collapsed_window_keeps_the_last_credible_rate() {
+        let base = std::time::Instant::now();
+        let mut live = LiveTurn::default();
+
+        // A turn that streamed: one chunk every 100ms for four seconds.
+        live.begin("first turn".into());
+        for i in 0..40u64 {
+            live.note_chunk_at(
+                "the quick brown fox jumps ",
+                base + std::time::Duration::from_millis(i * 100),
+            );
+        }
+        live.finalize(None);
+        let credible = live.tokens_per_sec();
+        assert!(
+            credible > 0.0 && credible <= 2000.0,
+            "a turn that streamed must measure a believable rate, got {credible}"
+        );
+
+        // The next turn arrives as one burst, so the window collapses.
+        live.begin("second turn".into());
+        for i in 0..400u64 {
+            live.note_chunk_at(
+                "the quick brown fox jumps ",
+                base + std::time::Duration::from_secs(30)
+                    + std::time::Duration::from_micros(i * 250),
+            );
+        }
+        assert_eq!(
+            live.tokens_per_sec(),
+            credible,
+            "a collapsed window must keep the rate already on screen"
+        );
+    }
+
+    /// #2703: two bursts three seconds apart still measure a believable rate.
+    ///
+    /// This is the shape the tracker exists for. A provider that answers in
+    /// bursts leaves gaps the idle rule must exclude, and the time inside each
+    /// burst is still streaming time. With arrival stamps the two windows
+    /// accumulate; with fold-time stamps the same batch lands in microseconds
+    /// and the window reads zero.
+    #[test]
+    fn tps_two_bursts_three_seconds_apart_measure_a_believable_rate() {
+        let base = std::time::Instant::now();
+        let mut live = LiveTurn::default();
+        live.begin("summarise the design".into());
+
+        // Burst one: five chunks 100ms apart, so 0.4s of streaming.
+        for i in 0..5u64 {
+            live.note_chunk_at(
+                "the quick brown fox jumps ",
+                base + std::time::Duration::from_millis(i * 100),
+            );
+        }
+        // Burst two, three seconds later: the gap exceeds the 1.0s idle rule,
+        // so it closes the first window and opens a second one.
+        for i in 0..5u64 {
+            live.note_chunk_at(
+                "the quick brown fox jumps ",
+                base + std::time::Duration::from_millis(3400 + i * 100),
+            );
+        }
+
+        let active = live.streaming_active_secs();
+        assert!(
+            (active - 0.8).abs() < 0.01,
+            "both bursts must count: 0.4s + 0.4s of streaming, got {active:.3}s"
+        );
+
+        let rate = live.tokens_per_sec();
+        assert!(
+            rate > 0.0 && rate <= 2000.0,
+            "ten chunks over 0.8s is a believable rate, got {rate:.0} tok/s"
+        );
+    }
+
+    /// #2703: the window reports exactly what the shared tracker measures.
+    ///
+    /// The terminal and the window run one tracker now (`ui_core::rate`), so
+    /// the same event sequence must produce the same number and the same
+    /// window. Before the move the window kept its own copy, and that copy is
+    /// what drifted: it read the clock when it drained a batch instead of when
+    /// the chunks arrived.
+    #[test]
+    fn tps_the_window_reports_exactly_what_the_shared_tracker_measures() {
+        let base = std::time::Instant::now();
+        let mut live = LiveTurn::default();
+        live.begin("same events both sides".into());
+        let mut shared = opencrabs::ui_core::rate::StreamingTpsTracker::default();
+
+        for i in 0..60u64 {
+            let at = base + std::time::Duration::from_millis(i * 100);
+            live.note_chunk_at("the quick brown fox jumps ", at);
+            shared.advance(at);
+        }
+
+        assert_eq!(
+            live.streaming_active_secs(),
+            shared.active_secs(),
+            "the window must measure the same streaming time the tracker does"
+        );
+        let shared_rate =
+            opencrabs::ui_core::rate::credible_rate(live.tokens, shared.active_secs())
+                .expect("six seconds of streaming must measure");
+        assert_eq!(
+            live.tokens_per_sec(),
+            shared_rate as f32,
+            "the window must report the shared tracker's number, not its own"
+        );
+    }
+
     /// A turn that produced no tokens must not overwrite the last good rate
     /// with a fake zero, and a rate of zero from the provider is not a
     /// measurement either.
@@ -4722,7 +4851,7 @@ mod tests {
     fn a_streaming_turn_without_tools_stops_saying_thinking() {
         let mut live = LiveTurn::default();
         live.begin("hello".into());
-        live.note_chunk("hello there, streaming now ");
+        live.note_chunk_at("hello there, streaming now ", std::time::Instant::now());
 
         let text = live_status_text(&live);
         assert!(!text.contains("thinking"), "got {text}");

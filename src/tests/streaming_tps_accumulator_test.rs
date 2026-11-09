@@ -102,16 +102,17 @@ fn finalize_stashes_rate_and_resets_accumulator() {
     let mut t = StreamingTpsTracker::default();
     let t0 = Instant::now();
     t.advance(t0);
-    t.advance(t0 + Duration::from_millis(100)); // 100ms window, 100 tokens
+    // 400ms window: above the MIN_ACTIVE_SECS floor, so the rate is credible.
+    t.advance(t0 + Duration::from_millis(400));
     // None = use local estimate (the path tested here).
     t.finalize(100, None);
     let tps = t.last_tps.expect("finalize must stash a rate");
     assert!(
-        (tps - 1000.0).abs() < 1e-3,
-        "100 tokens / 0.1s = 1000 tok/s, got {tps:.3}"
+        (tps - 250.0).abs() < 1e-3,
+        "100 tokens / 0.4s = 250 tok/s, got {tps:.3}"
     );
     // Reset state for next turn.
-    assert_eq!(t.active_secs_now(t0 + Duration::from_millis(200)), 0.0);
+    assert_eq!(t.active_secs_now(t0 + Duration::from_millis(500)), 0.0);
 }
 
 #[test]
@@ -168,12 +169,12 @@ fn finalize_falls_back_to_local_when_authoritative_is_none() {
     let mut t = StreamingTpsTracker::default();
     let t0 = Instant::now();
     t.advance(t0);
-    t.advance(t0 + std::time::Duration::from_millis(100));
+    t.advance(t0 + std::time::Duration::from_millis(400));
     t.finalize(100, None);
     let tps = t
         .last_tps
         .expect("local estimate must apply when authoritative is None");
-    assert!((tps - 1000.0).abs() < 1e-3);
+    assert!((tps - 250.0).abs() < 1e-3);
 }
 
 #[test]
@@ -184,15 +185,15 @@ fn finalize_ignores_non_finite_authoritative() {
     t.last_tps = Some(42.0);
     let t0 = Instant::now();
     t.advance(t0);
-    t.advance(t0 + std::time::Duration::from_millis(100));
+    t.advance(t0 + std::time::Duration::from_millis(400));
     t.finalize(100, Some(f64::NAN));
-    // Should have fallen back to local (1000 tok/s), not NaN.
+    // Should have fallen back to local (250 tok/s), not NaN.
     let tps = t
         .last_tps
         .expect("NaN authoritative must fall back to local, not blank");
     assert!(
-        (tps - 1000.0).abs() < 1e-3,
-        "got {tps:?}, expected ~1000 from local fallback"
+        (tps - 250.0).abs() < 1e-3,
+        "got {tps:?}, expected ~250 from local fallback"
     );
 }
 
@@ -211,5 +212,24 @@ fn idle_ticks_past_last_token_dont_inflate_in_flight_window() {
     assert!(
         (t.active_secs_now(queried_at) - 0.040).abs() < 1e-6,
         "active time must equal last-window span, not extend to now"
+    );
+}
+
+#[test]
+fn finalize_refuses_a_window_too_short_to_be_a_rate() {
+    // #2703: a burst-delivered response lands in one sub-second chunk, so the
+    // active window is a few milliseconds and the computed rate is a number no
+    // model produces (37203 tok/s was observed). The accumulator keeps the
+    // previous rate rather than printing the artifact.
+    let mut t = StreamingTpsTracker::default();
+    t.last_tps = Some(42.0);
+    let t0 = Instant::now();
+    t.advance(t0);
+    t.advance(t0 + Duration::from_millis(8));
+    t.finalize(297, None);
+    assert_eq!(
+        t.last_tps,
+        Some(42.0),
+        "an 8ms window must not print a rate, however many tokens it claims"
     );
 }

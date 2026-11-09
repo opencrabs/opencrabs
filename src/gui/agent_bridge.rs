@@ -44,7 +44,7 @@ pub enum TurnEvent {
     /// from. The id matters: sub-agents run their own sessions and their
     /// tool rows and token counts must never be painted into the
     /// conversation the user is reading.
-    ProgressFor(Uuid, ProgressEvent),
+    ProgressFor(Uuid, ProgressEvent, std::time::Instant),
     /// The turn finished; carries the final response content and the
     /// context size the provider reported for it (the footer's ctx budget).
     /// The session travels with it: a split pane runs its own turn, and the
@@ -1311,7 +1311,11 @@ async fn boot_resume(service: Arc<AgentService>, pool: opencrabs::db::Pool, sink
 fn install_progress_forwarder(sink: &EventSink) -> ProgressCallback {
     let sink = sink.clone();
     Arc::new(move |session, event| {
-        let _ = sink.send(TurnEvent::ProgressFor(session, event));
+        let _ = sink.send(TurnEvent::ProgressFor(
+            session,
+            event,
+            std::time::Instant::now(),
+        ));
     })
 }
 
