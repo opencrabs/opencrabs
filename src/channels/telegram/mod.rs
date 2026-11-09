@@ -41,6 +41,7 @@ pub(crate) mod stream_loop;
 pub(crate) mod suggest_options;
 pub(crate) mod telemetry;
 pub(crate) mod titles;
+pub mod topic_create;
 pub(crate) mod topic_link;
 pub(crate) mod typing;
 

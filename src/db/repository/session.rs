@@ -274,6 +274,36 @@ impl SessionRepository {
             .collect())
     }
 
+    /// How many live sessions this chat already keeps one-per-topic.
+    ///
+    /// The count answers one question for the desktop client: is this chat a
+    /// forum? A forum is the only channel chat that ever produces a
+    /// `[chat:<id>:topic:<tid>]` row, and the Bot API refuses a topic on
+    /// anything else. Reading it before the API call keeps a plain group or a
+    /// DM from hitting `Bad Request: the chat is not a forum` when the window
+    /// offers a topic action on it.
+    ///
+    /// Counted from titles, not `channel_chat_key`, so it also sees the rows
+    /// created before #1721 stamped keys.
+    pub async fn count_topics_for_chat(&self, chat_id: i64) -> Result<i64> {
+        let pattern = format!("%[chat:{chat_id}:topic:%]");
+        self.pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM sessions
+                     WHERE archived_at IS NULL AND title LIKE ?1",
+                    params![pattern],
+                    |r| r.get(0),
+                )
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to count a chat's topic sessions")
+    }
+
     /// Release a topic back to a top-level session (`parent_id = NULL`). The
     /// depth trigger only fires on a non-null parent, so this always passes.
     pub async fn detach_topic(&self, child: Uuid) -> Result<()> {

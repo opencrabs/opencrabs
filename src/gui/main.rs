@@ -49,6 +49,7 @@ mod rail_activity;
 mod screen_keys;
 mod sessions;
 mod skills_view;
+mod telegram_topics;
 mod text_commands;
 mod theme;
 mod themes_view;
@@ -7273,7 +7274,24 @@ impl Dashboard {
             .clone()
             .unwrap_or_else(|| DEFAULT_TOPIC_ICON.to_string());
         cx.spawn(async move |this, cx| {
-            match sessions::create_topic(db_path.clone(), parent, name).await {
+            // A Telegram forum gets a real forum thread before anything local
+            // happens (#2762). Only the Bot API can make a topic, and the
+            // thread id it returns is the key the bridge looks the session up
+            // by, so a row written without it is a topic the chat never sees.
+            // `Ok(None)` keeps the ordinary local path; `Err` is reported,
+            // never papered over with a local-only row.
+            let created = match telegram_topics::create_forum_topic_if_forum(
+                db_path.clone(),
+                parent,
+                name.clone(),
+            )
+            .await
+            {
+                Ok(Some(topic)) => Ok(topic),
+                Ok(None) => sessions::create_topic(db_path.clone(), parent, name).await,
+                Err(e) => Err(e),
+            };
+            match created {
                 Ok(topic) => {
                     if let Err(e) = sessions::set_topic_icon(db_path, topic, Some(icon)).await {
                         logging::error(&format!("topic icon {topic}: {e}"));
