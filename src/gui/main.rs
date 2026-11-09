@@ -383,11 +383,25 @@ fn zoom_step_for(key: &str, rem: f32, chord: bool) -> Option<f32> {
     zoom_step(key, rem)
 }
 
-/// How many times a finished turn's reload is retried while its rows are
-/// still being written. Eight attempts at the poll cadence is ~1.2s, long
-/// enough for the write and short enough to stay invisible; past it the live
-/// turn keeps the answer rather than the pane going blank.
-const SETTLE_ATTEMPTS: u8 = 8;
+/// How long a finished turn's reload keeps retrying while its rows are still
+/// being written.
+///
+/// The first version bounded this with `SETTLE_ATTEMPTS` (eight), which the
+/// poll cadence turned into roughly half a second. A 100 KB assistant row
+/// under WAL can take longer: the 2026-11-08 23:38:29 log shows retries 1 to
+/// 8 ending in "transcript never caught up", after which the live card stayed
+/// pinned beside the persisted turn until the session was reopened. A
+/// deadline bounds the wait without assuming how long one write takes.
+const SETTLE_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// One more read this long after the budget expired, so a write that landed
+/// late still releases the live card instead of leaving it pinned.
+const SETTLE_RECHECK: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How many late re-reads one turn may spend after the budget expired. The
+/// second covers a write that landed between the first recheck and its own
+/// read; past that, the log line is the honest answer.
+const SETTLE_RECHECKS: u8 = 2;
 
 /// The rail's default width, and the floor it may be dragged to. At the
 /// floor the splitter closes the rail instead of leaving a sliver: a 3-rem
@@ -503,6 +517,19 @@ struct StashedTurn {
     settle_expect: Option<usize>,
     settle_retries: u8,
     ctx_tokens: Option<u32>,
+}
+
+/// Whether a rail preview refresh can actually change a line.
+///
+/// The first version asked `rail.streaming_count()`, which counts only
+/// sessions streaming with no pane of their own. A turn in the open
+/// conversation never joins that set (its progress is handled inline) and a
+/// parked turn returns from `fold_pane_progress` before the set is touched, so
+/// the count read zero for the whole of a normal turn: the badge spun while
+/// the preview line, the cost and the row order stayed frozen until `Done`.
+/// Ask about the work instead of the set.
+fn previews_can_move(busy: bool, stashed_live: bool, streaming: usize) -> bool {
+    busy || stashed_live || streaming > 0
 }
 
 /// The phase 1 window. Every string on screen is real data or the real error.
@@ -879,6 +906,13 @@ struct Dashboard {
     /// Reload attempts made while waiting for the turn's rows to persist.
     /// Bounded, so a write that never lands cannot spin the fetch loop.
     settle_retries: u8,
+    /// When the current settle wait started. `None` between turns: the budget
+    /// is measured from the first reload that found the rows short, not from
+    /// the send, because the write only exists once the turn has ended.
+    settle_deadline: Option<std::time::Instant>,
+    /// Late re-reads already spent on this turn. Two is the whole allowance,
+    /// so a write that truly never lands leaves a log line instead of a loop.
+    settle_rechecks: u8,
     /// Rows the session must hold before the live turn is dropped: the
     /// session's row total when the send happened, plus the one the new turn
     /// appends. Measured on the ledger, not on the windowed transcript, so a
@@ -4899,6 +4933,8 @@ impl Dashboard {
         self.rearm_transcript_follow();
         self.transcript.live_expanded = false;
         self.settle_retries = 0;
+        self.settle_deadline = None;
+        self.settle_rechecks = 0;
         // The finished turn must add one row to the session before the live
         // copy may be dropped (see `reload_transcript`). Measured on the
         // session's own row total, which never saturates the way the windowed
@@ -5233,6 +5269,12 @@ impl Dashboard {
                         opencrabs::tui::app::App::format_tool_description(&tool_name, &tool_input);
                     self.live
                         .push_tool(transcript::ToolCall::running(tool_name, description));
+                    // A silent tool run still moves the preview's tool line, so
+                    // the same throttled read the chunk path uses is asked for
+                    // here too. Without it a long build leaves the rail frozen
+                    // for exactly the sessions that are working longest (#762's
+                    // lesson, applied to the preview).
+                    self.refresh_previews_if_live(cx);
                 }
                 agent_bridge::TurnEvent::ProgressFor(
                     _,
@@ -5767,6 +5809,8 @@ impl Dashboard {
         self.rearm_transcript_follow();
         self.transcript.live_expanded = false;
         self.settle_retries = 0;
+        self.settle_deadline = None;
+        self.settle_rechecks = 0;
         self.settle_expect = Some(self.transcript.row_total() + 1);
         self.busy = true;
         self.sync_composer_hint(cx);
@@ -5962,6 +6006,8 @@ impl Dashboard {
             self.rearm_transcript_follow();
             self.transcript.live_expanded = false;
             self.settle_retries = 0;
+            self.settle_deadline = None;
+            self.settle_rechecks = 0;
             self.settle_expect = Some(self.transcript.row_total() + 1);
             self.busy = true;
             self.sync_composer_hint(cx);
@@ -6808,10 +6854,17 @@ impl Dashboard {
     }
 
     /// Keep a running conversation's preview warm without hammering the DB:
-    /// at most one read a second, and only while something is streaming. The
-    /// chunk event is the trigger, so no timer is added for this.
+    /// at most one read a second, and only while a turn can still move the
+    /// line. The chunk and tool events are the triggers, so no timer is added
+    /// for this.
     fn refresh_previews_if_live(&mut self, cx: &mut Context<Self>) {
-        if self.rail.streaming_count() == 0 {
+        // A parked turn is still working even though its progress is not
+        // reaching the rail set.
+        let stashed_live = self
+            .stashed
+            .values()
+            .any(|t| t.live.user.is_some() || !t.live.tools.is_empty());
+        if !previews_can_move(self.busy, stashed_live, self.rail.streaming_count()) {
             return;
         }
         if self
@@ -7391,6 +7444,12 @@ impl Dashboard {
         // conversation past the display window settles like any other (#2705).
         let expect = self.settle_expect;
         let attempt = self.settle_retries;
+        // The budget starts at the first read that found the rows short, not
+        // when the question was sent: it measures the write, which only exists
+        // once the turn has ended.
+        let deadline = *self
+            .settle_deadline
+            .get_or_insert_with(|| std::time::Instant::now() + SETTLE_BUDGET);
         cx.spawn(async move |this, cx| {
             let result = transcript::load_recent(db_path, sid).await;
             this.update(cx, |this, cx| {
@@ -7404,6 +7463,20 @@ impl Dashboard {
                         let landed = settle_landed(expect, total);
                         this.transcript.hidden = hidden;
                         this.transcript.turns = turns;
+                        // The rows now carry the question the card opened the
+                        // turn with, so this exchange has been identified
+                        // against the DB once. Record it, because the
+                        // persisted turn is skipped while the card draws it:
+                        // dropping the card's own question here would leave
+                        // the prompt on neither side of the seam (#2705).
+                        let question_landed = this
+                            .transcript
+                            .turns
+                            .last()
+                            .is_some_and(|turn| transcript::newest_live_turn_matches(turn, &this.live));
+                        if question_landed {
+                            this.live.landed = true;
+                        }
                         // A turn that is still running owns the live card.
                         // Reading the conversation under it (a boot resume, or
                         // opening a session mid-turn) must not wipe the card
@@ -7423,26 +7496,63 @@ impl Dashboard {
                             }
                             this.settle_expect = None;
                             this.settle_retries = 0;
+                            this.settle_deadline = None;
+                            this.settle_rechecks = 0;
                         } else if in_flight {
                             // Short of the count while a turn is running is not
                             // a missed write, it is a turn still writing.
                             this.settle_expect = None;
                             this.settle_retries = 0;
-                        } else if attempt < SETTLE_ATTEMPTS {
+                            this.settle_deadline = None;
+                        } else if std::time::Instant::now() < deadline {
                             // The row is still in flight: retry shortly, the
                             // live turn keeps the answer on screen meanwhile.
+                            // The row total travels with the attempt so the
+                            // next incident is diagnosable from the log alone.
                             this.settle_retries = attempt + 1;
                             logging::info(&format!(
-                                "transcript short of the finished turn, retry {}",
-                                attempt + 1
+                                "transcript short of the finished turn, retry {} (rows {total}, want {})",
+                                attempt + 1,
+                                expect.map_or("?".to_string(), |n| n.to_string()),
                             ));
                             this.reload_transcript(sid, cx);
+                        } else if this.settle_rechecks < SETTLE_RECHECKS {
+                            // The budget ran out, but the payload is usually
+                            // written by now and only this read missed it. One
+                            // more look after a pause turns a permanently
+                            // pinned live card into a bounded delay (the
+                            // 2026-11-08 incident sat there until the session
+                            // was reopened).
+                            this.settle_rechecks += 1;
+                            this.settle_expect = expect;
+                            this.settle_retries = 0;
+                            this.settle_deadline = None;
+                            logging::info(&format!(
+                                "transcript short after {SETTLE_BUDGET:?}; recheck {} (rows {total}, want {})",
+                                this.settle_rechecks,
+                                expect.map_or("?".to_string(), |n| n.to_string()),
+                            ));
+                            let view = cx.entity().downgrade();
+                            cx.spawn(async move |_, cx| {
+                                cx.background_executor().timer(SETTLE_RECHECK).await;
+                                view.update(cx, |this, cx| {
+                                    if this.transcript.session == Some(sid) {
+                                        this.reload_transcript(sid, cx);
+                                    }
+                                })
+                                .ok();
+                            })
+                            .detach();
                         } else {
                             // Bounded: the live turn keeps the answer, so the
                             // pane is never empty even if the write never lands.
-                            logging::info("transcript never caught up; keeping the live turn");
+                            logging::info(&format!(
+                                "transcript never caught up; keeping the live turn (rows {total}, want {})",
+                                expect.map_or("?".to_string(), |n| n.to_string()),
+                            ));
                             this.settle_expect = None;
                             this.settle_retries = 0;
+                            this.settle_deadline = None;
                         }
                     }
                     Err(e) => this.transcript.error = Some(e.into()),
@@ -12207,6 +12317,8 @@ fn main() {
                         stashed: HashMap::new(),
                         settle_expect: None,
                         settle_retries: 0,
+                        settle_deadline: None,
+                        settle_rechecks: 0,
                         busy: false,
                         cancel: None,
                         hint_painted: None,
@@ -17872,6 +17984,28 @@ mod gui {
                     "with the model the shipped section declares"
                 );
             });
+        }
+
+        /// The preview gate asks about the work, not only about the rail's
+        /// pane-less set: an open turn, a parked turn holding a question or a
+        /// tool, or a background pane-less session each mean the newest row
+        /// can still change. All three empty means nothing to read.
+        #[test]
+        fn a_preview_refresh_follows_any_live_work() {
+            use super::super::previews_can_move;
+            assert!(previews_can_move(true, false, 0), "the open turn streams");
+            assert!(
+                previews_can_move(false, true, 0),
+                "a parked turn is working"
+            );
+            assert!(
+                previews_can_move(false, false, 1),
+                "a pane-less session runs"
+            );
+            assert!(
+                !previews_can_move(false, false, 0),
+                "with no work at all the last row cannot have moved"
+            );
         }
     }
 }
