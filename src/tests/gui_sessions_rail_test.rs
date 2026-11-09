@@ -29,7 +29,7 @@ fn session_rows_paint_edge_to_edge_without_card_chrome() {
         "the rail adds no outer gutter or gap around its rows"
     );
     assert!(
-        SESSIONS.contains(".when(!selected, |d| d.hover(")
+        SESSIONS.contains(".when(!selected && !holds_focus, |d| {")
             && SESSIONS.contains(".when(selected, |d| d.bg("),
         "hover and selection still paint on the full-width row"
     );
@@ -50,12 +50,16 @@ fn the_rail_header_is_compact_opencrabs_branding() {
 #[test]
 fn grouped_topics_are_compact_visible_pins_not_a_dropdown() {
     let ordered = block(SESSIONS, "pub fn ordered(", "/// Whether a row is a topic");
-    // #2670 gave the rail the terminal's fold key, so the order does hide a
-    // folded session's topics. The toggle is a key, not rail chrome: the row
-    // still paints no fold button or dropdown.
+    // #2701 retired the GUI fold: the flag that blanked CrabsDev's chip strip is
+    // no longer read, so a topic stays in the order under its parent whatever
+    // the terminal wrote to `topics_collapsed`. The TUI keeps its own fold.
     assert!(
-        ordered.contains("is_collapsed(top.id)"),
-        "a folded session keeps its topics out of the order"
+        !ordered.contains("is_collapsed("),
+        "the order no longer hides a folded session's topics"
+    );
+    assert!(
+        ordered.contains("parents.get(&s.id) == Some(&top.id) && grouped(s)"),
+        "every topic is listed directly under its parent"
     );
 
     let row = block(SESSIONS, "pub fn row(", "pub fn on_click(");

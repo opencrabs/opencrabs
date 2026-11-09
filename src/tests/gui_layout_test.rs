@@ -8,9 +8,12 @@ const MODEL_PICKER: &str = include_str!("../gui/model_picker.rs");
 
 #[test]
 fn the_hover_tint_is_not_applied_to_the_selected_row() {
+    // #2717 widened the gate: a row that holds the open topic also skips the
+    // hover tint, so the focus wash is never painted over by the pointer.
     assert!(
-        SESSIONS.contains(".when(!selected, |d| d.hover("),
-        "the hover tint applies only to rows that are not selected"
+        SESSIONS.contains(".when(!selected && !holds_focus, |d| {")
+            && SESSIONS.contains("d.hover(|d| d.bg(rgb(palette::current().bg)))"),
+        "the hover tint applies only to rows that are neither selected nor focused"
     );
 }
 
