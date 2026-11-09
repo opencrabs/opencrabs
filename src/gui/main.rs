@@ -6403,29 +6403,6 @@ impl Dashboard {
         cx.notify();
     }
 
-    /// Fold or unfold one session's topic tree (#2670). The state is re-read
-    /// from the database, so the rows follow what was actually written and a
-    /// fold made in the terminal shows here too.
-    fn toggle_fold_topic(&mut self, id: Uuid, cx: &mut Context<Self>) {
-        let collapsed = self.sessions.is_collapsed(id);
-        let db_path = self.db_path.clone();
-        cx.spawn(async move |this, cx| {
-            if let Err(e) = sessions::set_topics_collapsed(db_path, id, !collapsed).await {
-                logging::error(&format!("fold topic tree {id}: {e}"));
-                this.update(cx, |this, cx| {
-                    this.live.notices.push(format!("fold topics: {e}"));
-                    cx.notify();
-                })
-                .ok();
-                return;
-            }
-            this.update(cx, |this, cx| this.refresh_topic_state(cx))
-                .ok();
-        })
-        .detach();
-        cx.notify();
-    }
-
     /// Whether the open chat is a session with topics turned on.
     fn open_chat_topics_on(&self) -> bool {
         self.transcript
@@ -6837,17 +6814,12 @@ impl Dashboard {
         cx.spawn(async move |this, cx| {
             let parents = sessions::load_topic_parents(db_path.clone()).await;
             let closed = sessions::load_closed(db_path.clone()).await;
-            let collapsed = sessions::load_collapsed(db_path.clone()).await;
             let icons = sessions::load_topic_icons(db_path.clone()).await;
             let topics = sessions::load_topics(db_path).await;
             this.update(cx, |this, cx| {
                 match closed {
                     Ok(ids) => this.sessions.closed = ids.into_iter().collect(),
                     Err(e) => logging::error(&format!("closed refresh: {e}")),
-                }
-                match collapsed {
-                    Ok(ids) => this.sessions.collapsed = ids.into_iter().collect(),
-                    Err(e) => logging::error(&format!("collapsed refresh: {e}")),
                 }
                 match parents {
                     Ok(pairs) => this.sessions.parents = pairs.into_iter().collect(),
@@ -8495,14 +8467,6 @@ impl Dashboard {
                     cx.notify();
                     return;
                 }
-                "z" if self.rail_focused => {
-                    // Fold or unfold that session's topic tree (#2427).
-                    if let Some(id) = self.sessions.rail_target() {
-                        self.toggle_fold_topic(id, cx);
-                    }
-                    cx.notify();
-                    return;
-                }
                 _ => {}
             }
         }
@@ -9008,7 +8972,8 @@ impl Render for Dashboard {
         // the loop so the paint can skip those rows and hang the strip on the
         // parent. A live search falls back to flat rows so a match is never
         // hidden inside a chip; a favorite stays a chip on its parent, never
-        // a row; a collapsed parent folds its children out of sight (#2670).
+        // a row. Chips always paint: a terminal-written `topics_collapsed`
+        // flag never blanks the strip, the GUI has no row-era fold (#2701).
         let searching = !self.sessions.filter.trim().is_empty();
         let visible_ids: std::collections::HashSet<Uuid> =
             self.sessions.visible().map(|s| s.id).collect();
@@ -9018,7 +8983,7 @@ impl Render for Dashboard {
             self.sessions
                 .visible()
                 .filter_map(|s| self.sessions.parents.get(&s.id).map(|p| (s.id, *p)))
-                .filter(|(_, p)| visible_ids.contains(p) && !self.sessions.is_collapsed(*p))
+                .filter(|(_, p)| visible_ids.contains(p))
                 .map(|(cid, _)| cid)
                 .collect()
         };
@@ -9042,6 +9007,13 @@ impl Render for Dashboard {
             }
             let selected = self.sessions.selected == Some(id);
             let cursored = self.sessions.cursor == Some(id);
+            // The open conversation may live inside this card as a topic chip:
+            // then the parent carries the focus tint so the rail shows where
+            // you are even though the parent row itself is not selected (#2701).
+            let holds_focus = children_by_parent.get(&id).is_some_and(|kids| {
+                kids.iter()
+                    .any(|(kid_id, _)| self.sessions.selected == Some(*kid_id))
+            });
             let favorite = self.sessions.is_favorite(id);
             // A row's actions stay out of sight until asked for. There is no
             // always-visible delete: an ✕ on every row reads as "close" and
@@ -9110,6 +9082,7 @@ impl Render for Dashboard {
             let flags = sessions::RowFlags {
                 selected,
                 cursored,
+                holds_focus,
                 favorited: favorite,
                 indented,
                 closed,
@@ -9146,9 +9119,16 @@ impl Render for Dashboard {
                         this.rail_actions = None;
                         cx.notify();
                     });
-                    let mut chip = sessions::topic_chip(kid_id, title, live, st.ring, sel)
-                        .on_click(open)
-                        .on_mouse_down(MouseButton::Right, ask);
+                    let mut chip = sessions::topic_chip(
+                        kid_id,
+                        title,
+                        live,
+                        st.ring,
+                        sel,
+                        plan_progress.get(&kid_id).copied(),
+                    )
+                    .on_click(open)
+                    .on_mouse_down(MouseButton::Right, ask);
                     if let Some(pop) = self.rail_menu_popover_for(kid_id, cx) {
                         chip = chip.child(gpui::deferred(pop).with_priority(1));
                     }
@@ -12073,16 +12053,6 @@ fn main() {
             })
             .into_iter()
             .collect();
-    // Folded topic trees are read up front too, from the column the terminal
-    // writes, so a fold made there holds here on boot (#2670).
-    let collapsed: std::collections::HashSet<uuid::Uuid> =
-        futures::executor::block_on(sessions::load_collapsed(db_path.clone()))
-            .unwrap_or_else(|e| {
-                logging::error(&format!("collapsed load: {e}"));
-                Vec::new()
-            })
-            .into_iter()
-            .collect();
     // Which topic sits under which session, so the rail can group them (#2303).
     let parents: std::collections::HashMap<uuid::Uuid, uuid::Uuid> =
         futures::executor::block_on(sessions::load_topic_parents(db_path.clone()))
@@ -12112,7 +12082,6 @@ fn main() {
             topics: topics.clone(),
             parents: parents.clone(),
             closed: closed.clone(),
-            collapsed: collapsed.clone(),
             topic_icons: topic_icons.clone(),
             topic_titles: HashMap::new(),
             previews: HashMap::new(),
@@ -12129,7 +12098,6 @@ fn main() {
             topics,
             parents,
             closed,
-            collapsed,
             topic_icons,
             topic_titles: HashMap::new(),
             previews: HashMap::new(),

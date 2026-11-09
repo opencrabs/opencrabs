@@ -16,9 +16,11 @@ use std::collections::{HashMap, HashSet};
 
 use gpui::{
     AnyElement, AnyView, App, ClickEvent, Context, Div, InteractiveElement, Render, ScrollHandle,
-    SharedString, Stateful, Styled, Window, deferred, div, prelude::*, rems, rgb,
+    SharedString, Stateful, Styled, Window, deferred, div, linear_color_stop, linear_gradient,
+    prelude::*, rems, rgb,
 };
 
+use opencrabs::config::gui_theme;
 use opencrabs::db::Database;
 use opencrabs::db::models::Session;
 use opencrabs::db::repository::session::{SessionListOptions, SessionRepository};
@@ -79,11 +81,6 @@ pub struct SessionsState {
     pub parents: HashMap<uuid::Uuid, uuid::Uuid>,
     /// Closed sessions (#2305): drawn dimmed and refuse new turns.
     pub closed: HashSet<uuid::Uuid>,
-    /// Sessions whose topic tree is folded (#2670): their topics stay out of
-    /// the list until the row is unfolded. Read from the same
-    /// `topics_collapsed` column the terminal writes, so folding in either
-    /// surface holds in the other.
-    pub collapsed: HashSet<uuid::Uuid>,
     /// One already-formatted preview line per session, for the card's third
     /// line. Filled by one batched read on a rail refresh, never inside a
     /// paint: the rail repaints on a shared clock, so a per-row query would
@@ -119,12 +116,6 @@ impl SessionsState {
         let mut out: Vec<&Session> = Vec::with_capacity(visible.len());
         for top in pinned {
             out.push(top);
-            // A folded row keeps its topics out of the list (#2670), the same
-            // way the terminal stops listing them (#2427). The arrow keys walk
-            // this exact order, so a hidden row can never be cursored.
-            if self.is_collapsed(top.id) {
-                continue;
-            }
             // Topic pins are always visible beneath their parent. The arrow
             // keys walk this exact order, so no cursor can target a hidden row.
             out.extend(
@@ -140,12 +131,6 @@ impl SessionsState {
     /// Whether a row is a topic shown under its parent, so it is indented.
     pub fn is_closed(&self, id: uuid::Uuid) -> bool {
         self.closed.contains(&id)
-    }
-
-    /// Whether this row's topic tree is folded, so its children stay out of
-    /// the painted list (#2670).
-    pub fn is_collapsed(&self, id: uuid::Uuid) -> bool {
-        self.collapsed.contains(&id)
     }
 
     pub fn is_indented(&self, id: uuid::Uuid) -> bool {
@@ -603,75 +588,6 @@ pub async fn set_closed(
             Err(_) => Err("closed write thread dropped its result".into()),
         },
         Err(e) => Err(format!("closed write thread failed to spawn: {e}")),
-    }
-}
-
-/// The sessions whose topic tree is folded (#2670). Same column the terminal
-/// writes through `set_topics_collapsed` (#2427), so one surface's fold is the
-/// other's.
-pub async fn load_collapsed(db_path: std::path::PathBuf) -> Result<Vec<uuid::Uuid>, String> {
-    let (tx, rx) = futures::channel::oneshot::channel::<Result<Vec<uuid::Uuid>, String>>();
-    let spawned = std::thread::Builder::new()
-        .name("collapsed-fetch".into())
-        .stack_size(4 * 1024 * 1024)
-        .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build();
-            let result = match runtime {
-                Ok(rt) => rt
-                    .block_on(async {
-                        let db = Database::connect(&db_path).await?;
-                        let repo = SessionRepository::new(db.pool().clone());
-                        repo.topics_collapsed_ids().await
-                    })
-                    .map_err(|e| format!("{e:#}")),
-                Err(e) => Err(format!("tokio runtime failed: {e}")),
-            };
-            let _ = tx.send(result);
-        });
-    match spawned {
-        Ok(_) => match rx.await {
-            Ok(result) => result,
-            Err(_) => Err("collapsed fetch thread dropped its result".into()),
-        },
-        Err(e) => Err(format!("collapsed fetch thread failed to spawn: {e}")),
-    }
-}
-
-/// Fold or unfold one session's topic tree. The caller re-reads the folded set
-/// afterwards, so what is drawn follows what was written (#2670).
-pub async fn set_topics_collapsed(
-    db_path: std::path::PathBuf,
-    id: uuid::Uuid,
-    collapsed: bool,
-) -> Result<(), String> {
-    let (tx, rx) = futures::channel::oneshot::channel::<Result<(), String>>();
-    let spawned = std::thread::Builder::new()
-        .name("collapsed-write".into())
-        .stack_size(4 * 1024 * 1024)
-        .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build();
-            let result = match runtime {
-                Ok(rt) => rt
-                    .block_on(async {
-                        let db = Database::connect(&db_path).await?;
-                        let repo = SessionRepository::new(db.pool().clone());
-                        repo.set_topics_collapsed(id, collapsed).await
-                    })
-                    .map_err(|e| format!("{e:#}")),
-                Err(e) => Err(format!("tokio runtime failed: {e}")),
-            };
-            let _ = tx.send(result);
-        });
-    match spawned {
-        Ok(_) => match rx.await {
-            Ok(result) => result,
-            Err(_) => Err("collapsed write thread dropped its result".into()),
-        },
-        Err(e) => Err(format!("collapsed write thread failed to spawn: {e}")),
     }
 }
 
@@ -1190,6 +1106,10 @@ pub fn rail_menu_entries(favorited: bool, topics_enabled: bool) -> Vec<MenuEntry
 pub struct RowFlags {
     pub selected: bool,
     pub cursored: bool,
+    /// This card holds the open conversation as one of its topic chips: the
+    /// parent itself is not selected, but the active session lives inside it,
+    /// so the card carries the focus tint to show where you are (#2701).
+    pub holds_focus: bool,
     pub favorited: bool,
     pub indented: bool,
     pub closed: bool,
@@ -1213,16 +1133,22 @@ pub struct RowFlags {
 /// One topic chip: a child conversation painted as a compact pill on its
 /// parent's card instead of its own row (Telegram topic style). `live` is the
 /// spinner glyph while the child streams; `ring` paints a dot while it awaits
-/// the user. The caller attaches the open / context-menu handlers and the
-/// deferred popover, so this stays pure data plus paint.
+/// the user. `plan` is the child's approved checklist as `(done, total)`: while
+/// it runs the chip itself fills left-to-right like a progress bar, the done
+/// share tinted teal over the chip's base. The caller attaches the open /
+/// context-menu handlers and the deferred popover, so this stays pure data
+/// plus paint.
 pub fn topic_chip(
     id: uuid::Uuid,
     title: &str,
     live: Option<&'static str>,
     ring: bool,
     selected: bool,
+    plan: Option<(usize, usize)>,
 ) -> Stateful<Div> {
-    let mut chip = div()
+    let pal = palette::current();
+    let base = if selected { pal.selection } else { pal.panel };
+    let chip = div()
         .id(SharedString::from(format!("topic-chip-{id}")))
         .relative()
         .flex()
@@ -1235,13 +1161,23 @@ pub fn topic_chip(
         .rounded_md()
         .cursor_pointer()
         .text_xs()
-        .text_color(rgb(palette::current().text))
-        .bg(rgb(if selected {
-            palette::current().selection
-        } else {
-            palette::current().panel
-        }))
-        .hover(|d| d.bg(rgb(palette::current().focus)));
+        .text_color(rgb(pal.text));
+    // A running plan turns the chip into its own progress bar: a hard-stop
+    // gradient fills the done share with teal mixed into the base, the rest
+    // stays the base. No plan (or an empty one) keeps the flat chip colour.
+    let chip = match plan {
+        Some((done, total)) if total > 0 => {
+            let frac = (done as f32 / total as f32).clamp(0.0, 1.0);
+            let fill = gui_theme::mix(base, pal.teal, 45, 100);
+            chip.bg(linear_gradient(
+                90.0,
+                linear_color_stop(rgb(fill), frac),
+                linear_color_stop(rgb(base), frac),
+            ))
+        }
+        _ => chip.bg(rgb(base)),
+    };
+    let mut chip = chip.hover(|d| d.bg(rgb(palette::current().focus)));
     if let Some(glyph) = live {
         chip = chip.child(
             div()
@@ -1308,6 +1244,7 @@ pub fn row(
     let RowFlags {
         selected,
         cursored,
+        holds_focus,
         favorited,
         indented,
         closed,
@@ -1436,6 +1373,9 @@ pub fn row(
         .p_2()
         .when(indented, |d| d.pl_4().pr_2().py_1())
         .cursor_pointer()
+        // A card that holds the open topic carries the focus tint: you are
+        // inside one of its chips, so the parent shows where you are (#2701).
+        .when(holds_focus, |d| d.bg(rgb(palette::current().focus)))
         .when(selected, |d| d.bg(rgb(palette::current().selection)))
         // The keyboard's row reads as an accent bar on the left edge,
         // distinct from the filled block that marks the open conversation:
@@ -1443,9 +1383,12 @@ pub fn row(
         .when(cursored, |d| {
             d.border_l_2().border_color(rgb(palette::current().accent))
         })
-        // The hover tint is for rows that are not selected. On the selected row
-        // it would paint over the selection and hide which conversation is open.
-        .when(!selected, |d| d.hover(|d| d.bg(rgb(palette::current().bg))))
+        // The hover tint is for rows that are neither selected nor holding the
+        // open topic. On either it would paint over the state and hide which
+        // conversation is open.
+        .when(!selected && !holds_focus, |d| {
+            d.hover(|d| d.bg(rgb(palette::current().bg)))
+        })
         .child(body);
     if let Some(action) = action {
         row = row.child(action);
@@ -1745,11 +1688,12 @@ mod tests {
         );
     }
 
-    /// #2670: folding a session keeps its topics out of the list, the way the
-    /// terminal stops drawing them (#2427), and the keyboard cannot land on a
-    /// row that is no longer painted.
+    /// #2701: topics paint as chips on the parent card, so they always stay in
+    /// the ordered list and the keyboard can reach them. The row-era fold is
+    /// gone from the GUI: a `topics_collapsed` flag the terminal writes must
+    /// never blank the chip strip (the CrabsDev card showed no chips at all).
     #[test]
-    fn a_folded_session_hides_its_topics_from_the_list_and_the_keyboard() {
+    fn topics_always_stay_listed_under_their_parent() {
         let a = Session::new(Some("A".into()), None, None);
         let a1 = Session::new(Some("A topic".into()), None, None);
         let b = Session::new(Some("B".into()), None, None);
@@ -1760,26 +1704,17 @@ mod tests {
         };
         state.parents.insert(a1_id, a_id);
 
-        let expanded: Vec<_> = state.ordered().map(|s| s.id).collect();
-        assert_eq!(expanded, vec![a_id, a1_id, b_id]);
-
-        state.collapsed.insert(a_id);
-        assert!(state.is_collapsed(a_id));
-        let folded: Vec<_> = state.ordered().map(|s| s.id).collect();
+        let ordered: Vec<_> = state.ordered().map(|s| s.id).collect();
         assert_eq!(
-            folded,
-            vec![a_id, b_id],
-            "a folded session draws itself and nothing beneath it"
+            ordered,
+            vec![a_id, a1_id, b_id],
+            "a topic always stays directly under its parent"
         );
         assert_eq!(
             state.cursor_step(Some(a_id), 1),
-            Some(b_id),
-            "the arrow steps over the hidden topics instead of into them"
+            Some(a1_id),
+            "the arrow steps into the topic, never over it"
         );
-
-        state.collapsed.clear();
-        let reopened: Vec<_> = state.ordered().map(|s| s.id).collect();
-        assert_eq!(reopened, expanded, "unfolding puts the topics back");
     }
 
     /// #2271's whole class, seated: truncation walks chars, never bytes. Any
@@ -2316,6 +2251,14 @@ mod tests {
             chip_source.contains("fit(title, 14)"),
             "chip title truncates"
         );
+        assert!(
+            chip_source.contains("linear_gradient("),
+            "a running plan fills the chip like a progress bar (#2701)"
+        );
+        assert!(
+            row_source.contains(".when(holds_focus,"),
+            "a parent card tints when it holds the open topic (#2701)"
+        );
 
         // The paint loop drops a chip child from the row stream, so it never
         // paints as its own row while its parent is visible.
@@ -2337,6 +2280,14 @@ mod tests {
         assert!(
             !chip_block.contains("is_favorite"),
             "the chip set never ejects a favorite: a pinned topic stays a chip"
+        );
+        assert!(
+            !chip_block.contains("is_collapsed"),
+            "the chip set never hides a folded parent's topics: chips always paint"
+        );
+        assert!(
+            main_source.contains("let holds_focus = children_by_parent"),
+            "the rail resolves parent focus from the open topic (#2701)"
         );
     }
 
