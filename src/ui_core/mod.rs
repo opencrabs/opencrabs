@@ -14,6 +14,7 @@ pub mod bang;
 pub mod card;
 pub mod channel_status;
 pub mod commands;
+pub mod composer;
 pub mod copy_select;
 pub mod docs;
 pub mod help_keys;
@@ -40,7 +41,7 @@ mod purity_tests {
     //! break that silently at compile time for the GUI, never for us.
 
     /// Every source file in `ui_core`, with its contents.
-    fn sources() -> [(&'static str, &'static str); 35] {
+    fn sources() -> [(&'static str, &'static str); 36] {
         [
             ("ui_core/actions.rs", include_str!("actions.rs")),
             ("ui_core/bang.rs", include_str!("bang.rs")),
@@ -50,6 +51,7 @@ mod purity_tests {
                 include_str!("channel_status.rs"),
             ),
             ("ui_core/copy_select.rs", include_str!("copy_select.rs")),
+            ("ui_core/composer.rs", include_str!("composer.rs")),
             ("ui_core/docs.rs", include_str!("docs.rs")),
             ("ui_core/mod.rs", include_str!("mod.rs")),
             ("ui_core/palette.rs", include_str!("palette.rs")),

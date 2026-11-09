@@ -4,6 +4,10 @@
 //! the recall invariant: entering history stashes the current draft, and moving
 //! past the newest entry restores that exact draft.
 
+/// Entries kept in the submitted history. One number for both surfaces, so a
+/// terminal left open and a window cannot cap the same file differently.
+pub const HISTORY_CAP: usize = 500;
+
 /// Recall an older entry. Returns false when there is no history to enter.
 pub fn input_history_up(
     entries: &[String],
@@ -19,7 +23,11 @@ pub fn input_history_up(
         Some(current) if current < entries.len() => current.saturating_sub(1),
         Some(_) => return false,
     };
-    if index.is_none() {
+    // Stash what the user was writing, but never overwrite a draft that is
+    // already parked there with an empty buffer. Esc twice clears the field
+    // and leaves the text in the stash; entering history from that empty
+    // field must keep it, or the next Down restores nothing (#2494).
+    if index.is_none() && !buffer.is_empty() {
         *draft = buffer.clone();
     }
     *index = Some(next);
@@ -55,7 +63,7 @@ pub fn record_input_history(entries: &mut Vec<String>, text: &str) {
         return;
     }
     entries.push(text.to_string());
-    let excess = entries.len().saturating_sub(500);
+    let excess = entries.len().saturating_sub(HISTORY_CAP);
     if excess > 0 {
         entries.drain(..excess);
     }
