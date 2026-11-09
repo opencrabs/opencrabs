@@ -20,12 +20,10 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 use uuid::Uuid;
 
 use gpui::{IntoElement, ParentElement, Styled, div, rgba};
-use opencrabs::tui::plan::{PlanStatus, TaskStatus};
-use opencrabs::utils::plan_files::plan_state;
 
 use crate::palette;
 
@@ -207,21 +205,10 @@ impl SeenPlans {
     }
 }
 
-/// How long a plan file counts as live evidence after its own last write.
-pub const FRESH_WINDOW: Duration = Duration::from_secs(30 * 60);
-
-/// What a session's plan file says that the rail draws.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PlanEvidence {
-    /// Written and waiting for the owner: the row rings.
-    pub ready: bool,
-    /// Approved, with a task in flight: the row spins.
-    pub running: bool,
-    /// The file's own mtime, which is what "this plan" means for the ring's
-    /// seen key: a new plan in the same session writes a new stamp, so the
-    /// ring comes back for it even though the session id did not change.
-    pub stamp: SystemTime,
-}
+// The plan index itself lives in `ui_core::plan_index`: the rail and the TUI
+// session list ask the same questions of the same files, so the reading lives
+// once and neither surface can word the answer differently (#2636, #2701).
+pub use opencrabs::ui_core::plan_index::{PlanEvidence, PlanIndex};
 
 /// One row's whole answer.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -230,84 +217,6 @@ pub struct RowState {
     pub badge: Option<Badge>,
     /// The row rings: a plan waits for approval.
     pub ring: bool,
-}
-
-/// The rail's view of the shared plan index (#2715). The sweep, the caches
-/// and the filter classification live in the library so the TUI reads the
-/// same answers; the paint decisions (ring, spinner, progress bar) stay
-/// here.
-#[derive(Default)]
-pub struct PlanIndex {
-    inner: opencrabs::utils::plan_files::PlanIndex,
-}
-
-impl PlanIndex {
-    /// An index over explicit roots. The tests use it.
-    #[cfg(test)]
-    pub fn with_roots(roots: Vec<PathBuf>) -> Self {
-        Self {
-            inner: opencrabs::utils::plan_files::PlanIndex::with_roots(roots),
-        }
-    }
-
-    /// What the rail should draw for `session`, or `None` when its plan says
-    /// nothing worth animating.
-    ///
-    /// `live` is whether a turn for that session is running in this process.
-    /// It outranks the freshness window: a build can hold a plan file still for
-    /// longer than the window, and the work would then read as abandoned.
-    pub fn evidence(&mut self, session: Uuid, live: bool, now: Instant) -> Option<PlanEvidence> {
-        let (path, stamp) = self.inner.resolve(session, now)?;
-        let doc = self.inner.doc_at(&path, stamp)?;
-        let state = plan_state(doc, &path)?;
-        match state {
-            // A design draft or a seeded checklist is written and waits for the
-            // owner: the row rings until it is opened. Nothing executes yet, so
-            // no spinner.
-            PlanStatus::Editing => Some(PlanEvidence {
-                ready: true,
-                running: false,
-                stamp,
-            }),
-            PlanStatus::Active => {
-                let running_task = doc
-                    .tasks
-                    .iter()
-                    .any(|t| matches!(t.status, TaskStatus::InProgress));
-                if !running_task {
-                    return None;
-                }
-                // Measured on this box: 26 of 27 plans with a task in flight
-                // were abandoned, the oldest 100 days old. A badge lit from the
-                // file alone would animate for months-old corpses, so the file
-                // has to be recent or the turn has to be live here.
-                let fresh = SystemTime::now()
-                    .duration_since(stamp)
-                    .is_ok_and(|age| age < FRESH_WINDOW);
-                (live || fresh).then_some(PlanEvidence {
-                    ready: false,
-                    running: true,
-                    stamp,
-                })
-            }
-        }
-    }
-
-    /// The plan's checklist progress for the rail card: `(done, total)`.
-    ///
-    /// Only an approved plan with tasks has a bar to draw: a design draft has
-    /// no checklist yet, and an empty one would read as zero of nothing. The
-    /// counts come from the strip's own rule, so the card and the composer
-    /// strip agree about the same plan. No freshness gate here: the bar is
-    /// state, not animation, and 4 of 8 done stays true while the badge sleeps.
-    pub fn progress(&mut self, session: Uuid, now: Instant) -> Option<(usize, usize)> {
-        let (path, stamp) = self.inner.resolve(session, now)?;
-        let doc = self.inner.doc_at(&path, stamp)?;
-        if !matches!(plan_state(doc, &path)?, PlanStatus::Active) || doc.tasks.is_empty() {
-            return None;
-        }
-        Some(crate::plan_strip::progress_counts(doc))
-    }
 }
 
 /// The row's whole answer: the spinner from whatever is live now, plus the
@@ -345,8 +254,10 @@ pub fn ring(row: impl IntoElement, on: bool, phase: Duration) -> impl IntoElemen
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opencrabs::tui::plan::PlanDocument;
-    use opencrabs::utils::plan_files::{PLAN_PREFIX, PLAN_SUFFIX};
+    use std::time::Instant;
+
+    use opencrabs::tui::plan::{PlanDocument, PlanStatus, TaskStatus};
+    use opencrabs::ui_core::plan_index::{FRESH_WINDOW, PLAN_PREFIX, PLAN_SUFFIX};
 
     fn sid(n: u128) -> Uuid {
         Uuid::from_u128(n)
