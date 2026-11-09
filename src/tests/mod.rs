@@ -229,6 +229,7 @@ pub mod compaction_summary_budget_test;
 pub mod compaction_test;
 mod compaction_truncation_marker_test;
 pub mod compactor_retention_test;
+pub mod composer_persistence_test;
 pub mod completion_sound_test;
 pub mod confidential_read_deny_test;
 pub mod config_alias_merge_test;

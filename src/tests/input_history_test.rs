@@ -90,5 +90,38 @@ fn input_history_both_composers_use_the_shared_recall_machine() {
     let gui = include_str!("../gui/editor.rs");
     assert!(gui.contains("input_history_up("));
     assert!(gui.contains("input_history_down("));
-    assert!(gui.contains("record_input_history(&mut self.input_history, &text)"));
+    // Both surfaces record through the shared list and the one file writer;
+    // neither keeps a private Vec any more.
+    assert!(gui.contains("record_input_history(&mut entries, entry)"));
+    assert!(gui.contains("composer::append_history(&self.history_path, entry)"));
+    assert!(!gui.contains("record_input_history(&mut self.input_history"));
+}
+
+#[test]
+fn input_history_entering_from_an_empty_field_keeps_the_parked_draft() {
+    // Esc twice in the terminal clears the field and parks the text in the
+    // stash. Up from that empty field must not overwrite the parked draft
+    // with an empty string, or the rescue is a no-op (#2494).
+    let entries = vec!["newest".to_string()];
+    let mut buffer = String::new();
+    let mut index = None;
+    let mut draft = "what i was writing".to_string();
+
+    assert!(input_history_up(
+        &entries,
+        &mut buffer,
+        &mut index,
+        &mut draft
+    ));
+    assert_eq!(buffer, "newest");
+    assert_eq!(draft, "what i was writing", "the parked draft survives");
+
+    assert!(input_history_down(
+        &entries,
+        &mut buffer,
+        &mut index,
+        &mut draft
+    ));
+    assert_eq!(buffer, "what i was writing", "and comes back on Down");
+    assert!(draft.is_empty());
 }
