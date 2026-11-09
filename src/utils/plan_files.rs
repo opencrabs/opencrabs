@@ -23,8 +23,9 @@
 //! `None` (NoPlan).
 
 use crate::tui::plan::{ApprovalSource, PlanDocument, PlanStatus};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime};
 use uuid::Uuid;
 
 /// The session's data directory, resolved by what the session is bound to
@@ -916,4 +917,496 @@ pub fn template_section_warnings(md: &str) -> Vec<String> {
         }
     }
     warnings
+}
+
+/// The plan-file prefix: the loader writes `.opencrabs_plan_<session>.json`
+/// beside the design `.md` it mirrors.
+pub const PLAN_PREFIX: &str = ".opencrabs_plan_";
+/// The plan-file suffix, shared by the live store and its archived copies.
+pub const PLAN_SUFFIX: &str = ".json";
+/// Archived plans drop the leading dot and gain a timestamp:
+/// `archive/opencrabs_plan_<session>-<YYYYmmdd-HHMMSS>.json`
+/// (the naming `archive_plan_files` writes).
+const ARCHIVE_PREFIX: &str = "opencrabs_plan_";
+
+/// How often a session id the index has never seen may force it to re-sweep
+/// the roots.
+///
+/// The sweep is `read_dir` calls only. The per-file `stat` runs for the rows
+/// a surface actually draws, never for the whole store: this box holds
+/// thousands of plan files, and a list that statted all of them twenty times
+/// a second would be a syscall storm for rows nobody is looking at.
+pub const SWEEP_EVERY: Duration = Duration::from_secs(5);
+
+/// What a list filter needs to know about a session's plan (#2715).
+///
+/// The rail's paint states (ring, spinner, progress bar) stay in the GUI;
+/// this is the coarser three-way answer both binaries filter on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlanFilterState {
+    /// No live plan and nothing in the archive. A cancelled plan reads as
+    /// None: cancelled work never finished.
+    None,
+    /// A live plan: written and waiting for approval, or approved and
+    /// executing.
+    Wip,
+    /// The plan finished: a Completed file not yet archived, or an entry
+    /// under `archive/`.
+    Finished,
+}
+
+/// One cached read of a plan file.
+///
+/// The raw status is checked before serde, because the [`PlanStatus`]
+/// deserializer folds `Completed` into `Active` and `Cancelled` into
+/// `Editing`: parsing alone cannot tell a finished plan from a live one.
+enum CachedPlan {
+    /// A parseable, non-terminal plan document.
+    Doc(PlanDocument),
+    /// Raw status `Completed`: finished, still in the live directory.
+    Completed,
+    /// Cancelled, unreadable or unparseable: nothing live here.
+    Nothing,
+}
+
+/// Read a plan file without the loader's side effects.
+///
+/// [`load_plan_from_path`] archives a Completed plan and DELETES a Cancelled
+/// one, which is right when the user opens that session and wrong for a
+/// sweep that touches every plan a list can see: drawing a list must never
+/// delete somebody's history.
+fn read_plan_cached(path: &Path) -> CachedPlan {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return CachedPlan::Nothing;
+    };
+    let Ok(raw) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return CachedPlan::Nothing;
+    };
+    match raw.get("status").and_then(|s| s.as_str()) {
+        Some("Completed") => return CachedPlan::Completed,
+        Some("Cancelled") => return CachedPlan::Nothing,
+        _ => {}
+    }
+    match serde_json::from_value(raw) {
+        Ok(doc) => CachedPlan::Doc(doc),
+        Err(_) => CachedPlan::Nothing,
+    }
+}
+
+/// The plan's state, with the loader's legacy rule applied in memory: an
+/// Editing checklist that has tasks, no design doc and no approval marker
+/// predates the design/checklist split and was executable. Reading it as
+/// "waiting for approval" would ring forever for a plan that already ran.
+///
+/// `None` means there is no plan here worth drawing: `/plan` was entered but
+/// `plan init` never landed, so the file holds a flag rather than a plan.
+pub fn plan_state(doc: &PlanDocument, json_path: &Path) -> Option<PlanStatus> {
+    if doc.status != PlanStatus::Editing {
+        return Some(doc.status);
+    }
+    let md_exists = json_path.with_extension("md").exists();
+    if doc.pre_init_editing && !md_exists {
+        return None;
+    }
+    if !doc.pending_approval && !md_exists && !doc.tasks.is_empty() {
+        return Some(PlanStatus::Active);
+    }
+    Some(PlanStatus::Editing)
+}
+
+/// The id-to-plan-file index shared by the GUI rail and the TUI list
+/// (#2715), with the two caches that keep it off the paint path: the paths
+/// themselves (the sweep is throttled) and the parsed documents (keyed by
+/// mtime).
+///
+/// Read and classify only: a sweep never archives or deletes what it
+/// classifies, and it sees finished plans through each root's `archive/`
+/// directory so a "plan done" filter can find them.
+#[derive(Default)]
+pub struct PlanIndex {
+    /// The directories to sweep. `None` resolves the defaults once, because
+    /// the home is only known at run time.
+    roots: Option<Vec<PathBuf>>,
+    paths: HashMap<Uuid, PathBuf>,
+    /// Sessions with at least one retired plan under a root's `archive/`.
+    archived: HashSet<Uuid>,
+    swept_at: Option<Instant>,
+    docs: HashMap<PathBuf, (SystemTime, CachedPlan)>,
+}
+
+impl PlanIndex {
+    /// An index over explicit roots. Tests and alternate profiles use it;
+    /// production resolves the profile's own directories through
+    /// [`PlanIndex::default`].
+    pub fn with_roots(roots: Vec<PathBuf>) -> Self {
+        Self {
+            roots: Some(roots),
+            ..Default::default()
+        }
+    }
+
+    /// The directories a plan file can live in, in the order they are swept:
+    /// the profile's `session/`, the legacy `agents/session/`, then one
+    /// `session/` per project.
+    fn roots(&mut self) -> Vec<PathBuf> {
+        if self.roots.is_none() {
+            self.roots = Some(default_plan_roots());
+        }
+        self.roots.clone().unwrap_or_default()
+    }
+
+    /// Rebuild the id-to-path map and the archive set. A session that moved
+    /// projects leaves its old plan behind, so the same id can appear twice;
+    /// the newer write is the live one, and only that duplicate pays for the
+    /// extra stat.
+    fn sweep(&mut self, now: Instant) {
+        let mut paths: HashMap<Uuid, PathBuf> = HashMap::new();
+        let mut archived: HashSet<Uuid> = HashSet::new();
+        for root in self.roots() {
+            if let Ok(entries) = std::fs::read_dir(&root) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    let Some(id) = path.file_name().and_then(|n| n.to_str()).and_then(|name| {
+                        name.strip_prefix(PLAN_PREFIX)
+                            .and_then(|rest| rest.strip_suffix(PLAN_SUFFIX))
+                            .and_then(|stem| Uuid::parse_str(stem).ok())
+                    }) else {
+                        continue;
+                    };
+                    match paths.get(&id) {
+                        Some(existing) => {
+                            if mtime(&path) > mtime(existing) {
+                                paths.insert(id, path);
+                            }
+                        }
+                        None => {
+                            paths.insert(id, path);
+                        }
+                    }
+                }
+            }
+            // Finished plans retire beside the live ones. The archive name
+            // is `<stem>-<date>-<time>.json`, so peel the two timestamp
+            // fields from the right and let the UUID parser reject anything
+            // that is not a session id.
+            if let Ok(entries) = std::fs::read_dir(root.join("archive")) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    let Some(name) = name.to_str() else {
+                        continue;
+                    };
+                    let Some(rest) = name.strip_prefix(ARCHIVE_PREFIX) else {
+                        continue;
+                    };
+                    let Some(stem) = rest.strip_suffix(PLAN_SUFFIX) else {
+                        continue;
+                    };
+                    let Some((stem, _time)) = stem.rsplit_once('-') else {
+                        continue;
+                    };
+                    let Some((id_str, _date)) = stem.rsplit_once('-') else {
+                        continue;
+                    };
+                    if let Ok(id) = Uuid::parse_str(id_str) {
+                        archived.insert(id);
+                    }
+                }
+            }
+        }
+        self.paths = paths;
+        self.archived = archived;
+        self.swept_at = Some(now);
+        // A long-lived window sees sessions come and go; keeping every document
+        // it ever parsed would leak one small struct per conversation.
+        if self.docs.len() > 512 {
+            let live: HashSet<&PathBuf> = self.paths.values().collect();
+            self.docs.retain(|path, _| live.contains(path));
+        }
+    }
+
+    /// Parse the plan at `path`, or hand back the cached one. The mtime is
+    /// the key, so a rewritten plan reclassifies on the next ask and an
+    /// untouched one costs a `stat`, not a parse.
+    fn cache_at(&mut self, path: &Path, mtime: SystemTime) -> &CachedPlan {
+        let cached = matches!(self.docs.get(path), Some((at, _)) if *at == mtime);
+        if !cached {
+            let doc = read_plan_cached(path);
+            self.docs.insert(path.to_path_buf(), (mtime, doc));
+        }
+        &self.docs[path].1
+    }
+
+    /// The parsed live document at `path`, or the cached one. Terminal and
+    /// unreadable files hand back `None`: they hold nothing to draw.
+    pub fn doc_at(&mut self, path: &Path, mtime: SystemTime) -> Option<&PlanDocument> {
+        match self.cache_at(path, mtime) {
+            CachedPlan::Doc(doc) => Some(doc),
+            _ => None,
+        }
+    }
+
+    /// The plan file behind `session` and its current stamp, or `None`.
+    ///
+    /// The sweep is throttled for ids the index has never seen; a known path
+    /// costs one `stat`. Every question about a session's plan resolves
+    /// through here, so they can never disagree about which file is this
+    /// session's plan.
+    pub fn resolve(&mut self, session: Uuid, now: Instant) -> Option<(PathBuf, SystemTime)> {
+        if !self.paths.contains_key(&session) {
+            let due = self
+                .swept_at
+                .is_none_or(|at| now.duration_since(at) >= SWEEP_EVERY);
+            if due {
+                self.sweep(now);
+            }
+        }
+        let path = self.paths.get(&session)?.clone();
+        let stamp = mtime(&path)?;
+        Some((path, stamp))
+    }
+
+    /// The filter answer for `session`: Wip while a live plan exists,
+    /// Finished once it completed (a live Completed file or an archive
+    /// entry), None otherwise.
+    pub fn filter_state(&mut self, session: Uuid, now: Instant) -> PlanFilterState {
+        if let Some((path, stamp)) = self.resolve(session, now) {
+            match self.cache_at(&path, stamp) {
+                CachedPlan::Doc(doc) => {
+                    if plan_state(doc, &path).is_some() {
+                        return PlanFilterState::Wip;
+                    }
+                }
+                CachedPlan::Completed => return PlanFilterState::Finished,
+                CachedPlan::Nothing => {}
+            }
+        }
+        if self.archived.contains(&session) {
+            PlanFilterState::Finished
+        } else {
+            PlanFilterState::None
+        }
+    }
+}
+
+/// The plan directories this profile writes to.
+fn default_plan_roots() -> Vec<PathBuf> {
+    let home = crate::config::opencrabs_home();
+    let mut roots = vec![home.join("session"), home.join("agents").join("session")];
+    if let Ok(entries) = std::fs::read_dir(home.join("projects")) {
+        let mut per_project: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path().join("session"))
+            .filter(|dir| dir.is_dir())
+            .collect();
+        per_project.sort();
+        roots.extend(per_project);
+    }
+    roots
+}
+
+fn mtime(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).ok()?.modified().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PLAN_PREFIX, PLAN_SUFFIX, PlanFilterState, PlanIndex};
+    use crate::tui::plan::{PlanDocument, PlanStatus, PlanTask, TaskType};
+    use std::path::{Path, PathBuf};
+    use std::time::Instant;
+    use uuid::Uuid;
+
+    fn sid(n: u128) -> Uuid {
+        Uuid::from_u128(n)
+    }
+
+    /// Write a live plan file the way the plan tool does.
+    fn seed_plan(dir: &Path, session: Uuid, status: PlanStatus, pending: bool) {
+        let mut doc = PlanDocument::new(session, "filter test".to_string());
+        doc.status = status;
+        doc.pending_approval = pending;
+        let path = dir.join(format!("{PLAN_PREFIX}{session}{PLAN_SUFFIX}"));
+        std::fs::write(&path, serde_json::to_string(&doc).expect("plan json")).expect("write plan");
+    }
+
+    /// Write a raw-status file: serde cannot express the terminal statuses,
+    /// but the store holds them until the loader settles them.
+    fn seed_raw(dir: &Path, session: Uuid, status: &str) -> PathBuf {
+        let path = dir.join(format!("{PLAN_PREFIX}{session}{PLAN_SUFFIX}"));
+        std::fs::write(&path, format!(r#"{{"status":"{status}"}}"#)).expect("write raw");
+        path
+    }
+
+    /// Retire a plan the way `archive_plan_files` names it.
+    fn seed_archive(dir: &Path, session: Uuid) {
+        let archive = dir.join("archive");
+        std::fs::create_dir_all(&archive).expect("archive dir");
+        std::fs::write(
+            archive.join(format!("opencrabs_plan_{session}-20260101-000000.json")),
+            r#"{"status":"Completed"}"#,
+        )
+        .expect("write archive");
+    }
+
+    #[test]
+    fn plan_state_live_editing_and_active_read_wip() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let waiting = sid(100);
+        let running = sid(101);
+        seed_plan(tmp.path(), waiting, PlanStatus::Editing, true);
+        seed_plan(tmp.path(), running, PlanStatus::Active, false);
+        let mut index = PlanIndex::with_roots(vec![tmp.path().to_path_buf()]);
+        assert_eq!(
+            index.filter_state(waiting, Instant::now()),
+            PlanFilterState::Wip
+        );
+        assert_eq!(
+            index.filter_state(running, Instant::now()),
+            PlanFilterState::Wip
+        );
+    }
+
+    #[test]
+    fn plan_state_archived_entry_reads_finished() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = sid(102);
+        // No live file: the plan already retired to archive/.
+        seed_archive(tmp.path(), session);
+        let mut index = PlanIndex::with_roots(vec![tmp.path().to_path_buf()]);
+        assert_eq!(
+            index.filter_state(session, Instant::now()),
+            PlanFilterState::Finished
+        );
+    }
+
+    #[test]
+    fn plan_state_live_completed_reads_finished_and_stays_put() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = sid(103);
+        let path = seed_raw(tmp.path(), session, "Completed");
+        let mut index = PlanIndex::with_roots(vec![tmp.path().to_path_buf()]);
+        assert_eq!(
+            index.filter_state(session, Instant::now()),
+            PlanFilterState::Finished
+        );
+        // Classifying is not settling: the file must not move to archive/.
+        assert!(path.exists(), "the index must not archive what it reads");
+        assert!(!tmp.path().join("archive").exists());
+    }
+
+    #[test]
+    fn plan_state_cancelled_reads_none_and_stays_put() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = sid(104);
+        let path = seed_raw(tmp.path(), session, "Cancelled");
+        let mut index = PlanIndex::with_roots(vec![tmp.path().to_path_buf()]);
+        assert_eq!(
+            index.filter_state(session, Instant::now()),
+            PlanFilterState::None
+        );
+        // The loader deletes a Cancelled plan when the session opens it; a
+        // list sweep must never do that to somebody else's history.
+        assert!(path.exists(), "the index must not delete what it reads");
+    }
+
+    #[test]
+    fn plan_state_no_plan_reads_none() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut index = PlanIndex::with_roots(vec![tmp.path().to_path_buf()]);
+        assert_eq!(
+            index.filter_state(sid(105), Instant::now()),
+            PlanFilterState::None
+        );
+    }
+
+    #[test]
+    fn plan_state_sweep_never_archives_or_deletes() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let completed = sid(106);
+        let cancelled = sid(107);
+        let live = sid(108);
+        let completed_path = seed_raw(tmp.path(), completed, "Completed");
+        let cancelled_path = seed_raw(tmp.path(), cancelled, "Cancelled");
+        seed_plan(tmp.path(), live, PlanStatus::Active, false);
+
+        let mut index = PlanIndex::with_roots(vec![tmp.path().to_path_buf()]);
+        // The first ask sweeps; the unknown id forces the same sweep path a
+        // row with no plan file takes.
+        assert_eq!(
+            index.filter_state(completed, Instant::now()),
+            PlanFilterState::Finished
+        );
+        assert_eq!(
+            index.filter_state(cancelled, Instant::now()),
+            PlanFilterState::None
+        );
+        assert_eq!(
+            index.filter_state(live, Instant::now()),
+            PlanFilterState::Wip
+        );
+        assert_eq!(
+            index.filter_state(sid(109), Instant::now()),
+            PlanFilterState::None
+        );
+
+        assert_eq!(
+            std::fs::read_to_string(&completed_path).expect("completed file"),
+            r#"{"status":"Completed"}"#,
+            "the sweep must leave a completed plan byte for byte where it was"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&cancelled_path).expect("cancelled file"),
+            r#"{"status":"Cancelled"}"#,
+            "the sweep must leave a cancelled plan byte for byte where it was"
+        );
+        assert!(
+            !tmp.path().join("archive").exists(),
+            "the sweep must not create an archive directory"
+        );
+    }
+
+    #[test]
+    fn plan_state_legacy_checklist_reads_wip() {
+        // Before the design/checklist split, an Editing plan with tasks, no
+        // design doc and no approval marker was already executable.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = sid(110);
+        let mut doc = PlanDocument::new(session, "legacy".to_string());
+        doc.status = PlanStatus::Editing;
+        doc.pending_approval = false;
+        doc.tasks.push(PlanTask::new(
+            1,
+            "the task".to_string(),
+            String::new(),
+            TaskType::Edit,
+        ));
+        let path = tmp
+            .path()
+            .join(format!("{PLAN_PREFIX}{session}{PLAN_SUFFIX}"));
+        std::fs::write(&path, serde_json::to_string(&doc).expect("json")).expect("write");
+        let mut index = PlanIndex::with_roots(vec![tmp.path().to_path_buf()]);
+        assert_eq!(
+            index.filter_state(session, Instant::now()),
+            PlanFilterState::Wip
+        );
+    }
+
+    #[test]
+    fn plan_state_pre_init_flag_reads_none() {
+        // `/plan` entered but `plan init` never landed: an intent flag, not
+        // a plan, so the filter must not report work in progress.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = sid(111);
+        let mut doc = PlanDocument::new(session, String::new());
+        doc.pre_init_editing = true;
+        let path = tmp
+            .path()
+            .join(format!("{PLAN_PREFIX}{session}{PLAN_SUFFIX}"));
+        std::fs::write(&path, serde_json::to_string(&doc).expect("json")).expect("write");
+        let mut index = PlanIndex::with_roots(vec![tmp.path().to_path_buf()]);
+        assert_eq!(
+            index.filter_state(session, Instant::now()),
+            PlanFilterState::None
+        );
+    }
 }

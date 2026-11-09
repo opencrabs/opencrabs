@@ -19,12 +19,13 @@
 //! safe to ask for every row on every paint.
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 use uuid::Uuid;
 
 use gpui::{IntoElement, ParentElement, Styled, div, rgba};
-use opencrabs::tui::plan::{PlanDocument, PlanStatus, TaskStatus};
+use opencrabs::tui::plan::{PlanStatus, TaskStatus};
+use opencrabs::utils::plan_files::plan_state;
 
 use crate::palette;
 
@@ -206,22 +207,8 @@ impl SeenPlans {
     }
 }
 
-/// The plan-file prefix: the loader writes `.opencrabs_plan_<session>.json`
-/// beside the design `.md` it mirrors.
-const PLAN_PREFIX: &str = ".opencrabs_plan_";
-const PLAN_SUFFIX: &str = ".json";
-
 /// How long a plan file counts as live evidence after its own last write.
 pub const FRESH_WINDOW: Duration = Duration::from_secs(30 * 60);
-
-/// How often a session id the index has never seen may force it to re-sweep
-/// the roots.
-///
-/// The sweep is `read_dir` calls only. The per-file `stat` runs for the rows
-/// the rail actually draws, never for the whole store: this box holds 3600
-/// plan files, and a rail that statted all of them twenty times a second would
-/// be a syscall storm for rows nobody is looking at.
-pub const SWEEP_EVERY: Duration = Duration::from_secs(5);
 
 /// What a session's plan file says that the rail draws.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -245,110 +232,22 @@ pub struct RowState {
     pub ring: bool,
 }
 
-/// The id to plan-file index, with the two caches that keep it off the paint
-/// path: the paths themselves (the sweep is throttled) and the parsed
-/// documents (keyed by mtime, exactly as `PlanStripState` caches its own).
+/// The rail's view of the shared plan index (#2715). The sweep, the caches
+/// and the filter classification live in the library so the TUI reads the
+/// same answers; the paint decisions (ring, spinner, progress bar) stay
+/// here.
 #[derive(Default)]
 pub struct PlanIndex {
-    /// The directories to sweep. `None` resolves the defaults once, because
-    /// the home is only known at run time.
-    roots: Option<Vec<PathBuf>>,
-    paths: HashMap<Uuid, PathBuf>,
-    swept_at: Option<Instant>,
-    docs: HashMap<PathBuf, (SystemTime, Option<PlanDocument>)>,
+    inner: opencrabs::utils::plan_files::PlanIndex,
 }
 
 impl PlanIndex {
-    /// An index over explicit roots. The tests use it; production resolves the
-    /// profile's own directories through [`PlanIndex::default`].
+    /// An index over explicit roots. The tests use it.
     #[cfg(test)]
     pub fn with_roots(roots: Vec<PathBuf>) -> Self {
         Self {
-            roots: Some(roots),
-            ..Default::default()
+            inner: opencrabs::utils::plan_files::PlanIndex::with_roots(roots),
         }
-    }
-
-    /// The directories a plan file can live in, in the order they are swept:
-    /// the profile's `session/`, the legacy `agents/session/`, then one
-    /// `session/` per project.
-    fn roots(&mut self) -> Vec<PathBuf> {
-        if self.roots.is_none() {
-            self.roots = Some(default_roots());
-        }
-        self.roots.clone().unwrap_or_default()
-    }
-
-    /// Rebuild the id to path map. A session that moved projects leaves its old
-    /// plan behind, so the same id can appear twice; the newer write is the
-    /// live one, and only that duplicate pays for the extra stat.
-    fn sweep(&mut self, now: Instant) {
-        let mut paths: HashMap<Uuid, PathBuf> = HashMap::new();
-        for root in self.roots() {
-            let Ok(entries) = std::fs::read_dir(&root) else {
-                continue;
-            };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let Some(id) = path.file_name().and_then(|n| n.to_str()).and_then(|name| {
-                    name.strip_prefix(PLAN_PREFIX)
-                        .and_then(|rest| rest.strip_suffix(PLAN_SUFFIX))
-                        .and_then(|stem| Uuid::parse_str(stem).ok())
-                }) else {
-                    continue;
-                };
-                match paths.get(&id) {
-                    Some(existing) => {
-                        if mtime(&path) > mtime(existing) {
-                            paths.insert(id, path);
-                        }
-                    }
-                    None => {
-                        paths.insert(id, path);
-                    }
-                }
-            }
-        }
-        self.paths = paths;
-        self.swept_at = Some(now);
-        // A long-lived window sees sessions come and go; keeping every document
-        // it ever parsed would leak one small struct per conversation.
-        if self.docs.len() > 512 {
-            let live: HashSet<&PathBuf> = self.paths.values().collect();
-            self.docs.retain(|path, _| live.contains(path));
-        }
-    }
-
-    /// Parse the plan at `path`, or hand back the cached one. The mtime is the
-    /// key, so a rewritten plan redraws on the next ask and an untouched one
-    /// costs a `stat`, not a parse.
-    fn doc_at(&mut self, path: &Path, mtime: SystemTime) -> Option<&PlanDocument> {
-        let cached = matches!(self.docs.get(path), Some((at, _)) if *at == mtime);
-        if !cached {
-            let doc = read_plan(path);
-            self.docs.insert(path.to_path_buf(), (mtime, doc));
-        }
-        self.docs.get(path).and_then(|(_, doc)| doc.as_ref())
-    }
-
-    /// The plan file behind `session` and its current stamp, or `None`.
-    ///
-    /// The sweep is throttled for ids the index has never seen; a known path
-    /// costs one `stat`. The badge question and the progress question both
-    /// resolve through here, so they can never disagree about which file is
-    /// this session's plan.
-    fn resolve(&mut self, session: Uuid, now: Instant) -> Option<(PathBuf, SystemTime)> {
-        if !self.paths.contains_key(&session) {
-            let due = self
-                .swept_at
-                .is_none_or(|at| now.duration_since(at) >= SWEEP_EVERY);
-            if due {
-                self.sweep(now);
-            }
-        }
-        let path = self.paths.get(&session)?.clone();
-        let stamp = mtime(&path)?;
-        Some((path, stamp))
     }
 
     /// What the rail should draw for `session`, or `None` when its plan says
@@ -358,8 +257,8 @@ impl PlanIndex {
     /// It outranks the freshness window: a build can hold a plan file still for
     /// longer than the window, and the work would then read as abandoned.
     pub fn evidence(&mut self, session: Uuid, live: bool, now: Instant) -> Option<PlanEvidence> {
-        let (path, stamp) = self.resolve(session, now)?;
-        let doc = self.doc_at(&path, stamp)?;
+        let (path, stamp) = self.inner.resolve(session, now)?;
+        let doc = self.inner.doc_at(&path, stamp)?;
         let state = plan_state(doc, &path)?;
         match state {
             // A design draft or a seeded checklist is written and waits for the
@@ -402,72 +301,13 @@ impl PlanIndex {
     /// strip agree about the same plan. No freshness gate here: the bar is
     /// state, not animation, and 4 of 8 done stays true while the badge sleeps.
     pub fn progress(&mut self, session: Uuid, now: Instant) -> Option<(usize, usize)> {
-        let (path, stamp) = self.resolve(session, now)?;
-        let doc = self.doc_at(&path, stamp)?;
+        let (path, stamp) = self.inner.resolve(session, now)?;
+        let doc = self.inner.doc_at(&path, stamp)?;
         if !matches!(plan_state(doc, &path)?, PlanStatus::Active) || doc.tasks.is_empty() {
             return None;
         }
         Some(crate::plan_strip::progress_counts(doc))
     }
-}
-
-/// The plan directories this profile writes to.
-fn default_roots() -> Vec<PathBuf> {
-    let home = opencrabs::config::opencrabs_home();
-    let mut roots = vec![home.join("session"), home.join("agents").join("session")];
-    if let Ok(entries) = std::fs::read_dir(home.join("projects")) {
-        let mut per_project: Vec<PathBuf> = entries
-            .flatten()
-            .map(|e| e.path().join("session"))
-            .filter(|dir| dir.is_dir())
-            .collect();
-        per_project.sort();
-        roots.extend(per_project);
-    }
-    roots
-}
-
-fn mtime(path: &Path) -> Option<SystemTime> {
-    std::fs::metadata(path).ok()?.modified().ok()
-}
-
-/// Read a plan file without the loader's side effects.
-///
-/// `load_plan_from_path` archives a Completed plan and DELETES a Cancelled one,
-/// which is right when the user opens that session and wrong for a sweep that
-/// touches every plan the rail can see: drawing a list must never delete
-/// somebody's history.
-fn read_plan(path: &Path) -> Option<PlanDocument> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let raw: serde_json::Value = serde_json::from_str(&text).ok()?;
-    // The loader's own terminal rule: those two end a plan's life and are
-    // never drawn.
-    match raw.get("status").and_then(|s| s.as_str()) {
-        Some("Completed") | Some("Cancelled") => return None,
-        _ => {}
-    }
-    serde_json::from_value(raw).ok()
-}
-
-/// The plan's state, with the loader's legacy rule applied in memory: an
-/// Editing checklist that has tasks, no design doc and no approval marker
-/// predates the design/checklist split and was executable. Reading it as
-/// "waiting for approval" would ring forever for a plan that already ran.
-///
-/// `None` means there is no plan here worth drawing: `/plan` was entered but
-/// `plan init` never landed, so the file holds a flag rather than a plan.
-fn plan_state(doc: &PlanDocument, json_path: &Path) -> Option<PlanStatus> {
-    if doc.status != PlanStatus::Editing {
-        return Some(doc.status);
-    }
-    let md_exists = json_path.with_extension("md").exists();
-    if doc.pre_init_editing && !md_exists {
-        return None;
-    }
-    if !doc.pending_approval && !md_exists && !doc.tasks.is_empty() {
-        return Some(PlanStatus::Active);
-    }
-    Some(PlanStatus::Editing)
 }
 
 /// The row's whole answer: the spinner from whatever is live now, plus the
@@ -505,6 +345,8 @@ pub fn ring(row: impl IntoElement, on: bool, phase: Duration) -> impl IntoElemen
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opencrabs::tui::plan::PlanDocument;
+    use opencrabs::utils::plan_files::{PLAN_PREFIX, PLAN_SUFFIX};
 
     fn sid(n: u128) -> Uuid {
         Uuid::from_u128(n)
