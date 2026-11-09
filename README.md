@@ -2275,7 +2275,7 @@ cargo install opencrabs --no-default-features --features "telegram,whatsapp,disc
 | `code-graph` | tree-sitter | Symbol/call-graph index for structural code queries (see [Structural code search](#-benchmarks)) |
 | `rtk` | — | Bash output filtering via RTK, cutting tokens on supported commands |
 | `pdfium` | pdfium-render | PDF page rendering, the primary renderer; falls back to `pdftoppm` when the system Pdfium library is absent |
-| `notification-sound` | rodio | Plan chime: plays the embedded notification WAV when a plan task settles and when the plan reaches 100% at turn settle. Opt-in via `[agent] completion_notification_enabled` (default false), TUI and GUI, no desktop toast |
+| `notification-sound` | rodio | Plan chime: plays the embedded notification WAV when a plan task settles and when the plan reaches 100% at turn settle. Opt-in via `[agent] completion_notification_enabled` (default false), TUI and GUI. OS banners are a separate, always-compiled transport (`src/utils/desktop_notify.rs`, #2729) with its own four keys |
 
 ### Option 4: Build from Source (full control)
 
@@ -2991,8 +2991,17 @@ plan_worker_allow_write = false  # default false: isolated plan workers run READ
                                  # or background tasks (their long bash runs attached). true lets them nest.
 completion_notification_enabled = false # default false (#2255): play src/assets/sound/notification.wav when a
                                  # plan task settles and when the plan reaches 100% at turn settle. TUI and
-                                 # GUI (#2691), no desktop toast. Opt-in, because
-                                 # an agent that chirps unasked is noise.
+                                 # GUI (#2691). Opt-in, because an agent that chirps unasked is noise.
+                                 # This switch also ARMS the four desktop-notification keys below; they
+                                 # stay independent of each other, so a banner is possible without the chime.
+notify_on_plan_completed = false # default false (#2729): raise an OS notification when a whole plan finishes.
+notify_on_task_completed = false # default false (#2729): raise one when a single plan task settles.
+notify_on_turn_completed = false # default false (#2729): raise one when a turn finishes and the agent waits.
+notify_on_turn_failed = false    # default false (#2729): raise one when a turn stops on an error.
+                                 # All four require completion_notification_enabled. They are suppressed
+                                 # while the window or terminal holds focus, and a settle never announces
+                                 # twice. Set OPENCRABS_NO_DESKTOP_NOTIFY=1 (or true/yes/on) in the
+                                 # environment to mute banners for one process without editing this file.
 subagent_session_ttl_days = 7    # days a spawned sub-agent's session is kept before pruning. Nothing revisits
                                  # them, so they accumulate with their messages, tool rows and plan files. 0 keeps forever
 
@@ -5221,7 +5230,7 @@ cargo clippy -- -D warnings
 | `rtk` | Bash output filtering via RTK (default: enabled) |
 | `code-graph` | tree-sitter symbol/call-graph index behind `memory_search`'s structural lane (default: enabled) |
 | `pdfium` | PDF page rendering via the system Pdfium library, ahead of the `pdftoppm` fallback (default: enabled) |
-| `notification-sound` | Plan-finished chime from the embedded notification WAV, behind `[agent] completion_notification_enabled` (default: enabled feature, sound itself off by default) |
+| `notification-sound` | Plan-finished chime from the embedded notification WAV, behind `[agent] completion_notification_enabled` (default: enabled feature, sound itself off by default). Desktop banners do not need this feature |
 | `profiling` | Enable pprof flamegraph profiling (Unix only) |
 | `eval` | Offline + live evaluation harness. Compiled automatically under `cfg(test)`, and present in release binaries, which are built with `--all-features` |
 

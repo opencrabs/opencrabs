@@ -8624,7 +8624,10 @@ impl Dashboard {
         for pane in self.pane_states.values() {
             plans.push(pane.plan.document());
         }
-        if opencrabs::utils::completion_sound::newly_resolved(seen, &plans) == 0 {
+        // #2729: the same set drives the OS banner, so a task that rings also
+        // reaches the Notification Center, and neither can fire twice for one
+        // settle.
+        if opencrabs::utils::desktop_notify::announce_settled_tasks(seen, &plans) == 0 {
             return;
         }
         Self::play_task_chime();

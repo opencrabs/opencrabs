@@ -482,6 +482,21 @@ pub fn is_user_correction(msg: &str) -> bool {
     PATTERNS.iter().any(|p| lower.contains(p))
 }
 
+/// Whether OS-level completion banners belong to this session (#2729).
+///
+/// A banner exists for the person sitting at the machine. Sub-agent, cron and
+/// RSI sessions run with nobody watching a window, so they stay silent even
+/// when the per-event config is on. Unknown titles fall through as human: the
+/// classifier only special-cases the three autonomous kinds, and a missing
+/// title must never mute the feature for a real conversation.
+fn notifications_for_human(session: &crate::db::models::Session) -> bool {
+    use crate::db::repository::session::{SessionKind, classify_session_title};
+    matches!(
+        classify_session_title(session.title.as_deref().unwrap_or_default()),
+        SessionKind::Human
+    )
+}
+
 impl AgentService {
     /// #1960: the session's live skill inventory, read from the SAME two
     /// registries the continuation stamp uses (#125/#131): slash-invoked skills
@@ -735,6 +750,32 @@ impl AgentService {
             && let Err(e) = pending_repo.delete(request_id).await
         {
             tracing::warn!("Failed to clean up pending request: {}", e);
+        }
+
+        // #2729: a failed turn raises one banner, unless the user stopped it
+        // themselves. A deliberate stop is not news they need a toast for, and
+        // a shutdown cancel is the process leaving, not the work failing.
+        if let Err(err) = &result
+            && !matches!(err, AgentError::Cancelled)
+        {
+            // The session row is already loaded by the inner loop, but it is
+            // not returned, so failures pay one read to keep the same
+            // human-only rule the success path gets for free. Failures are
+            // rare and the whole arm is behind an opt-in default-off flag.
+            let human = match SessionService::new(self.context.clone())
+                .get_session(session_id)
+                .await
+            {
+                Ok(Some(session)) => notifications_for_human(&session),
+                _ => false,
+            };
+            if human {
+                crate::utils::desktop_notify::raise(
+                    crate::utils::desktop_notify::NotificationEvent::TurnFailed {
+                        reason: err.to_string(),
+                    },
+                );
+            }
         }
 
         result
@@ -8348,6 +8389,10 @@ impl AgentService {
         // in-progress plans are untouched; `load_plan` is a fast no-op when the
         // session has no live plan.
         let mut completed_plan = None;
+        // True when this turn's plan completed and the OS banner went out from
+        // the seam below, so the turn-completion banner further down stays
+        // silent instead of announcing the same finish twice (#2729).
+        let mut plan_announced = false;
         if let Some(mut finished) = crate::utils::plan_files::load_plan(session_id).await {
             // A plan whose only remaining task is the trailing delivery step
             // never reaches is_complete() on its own — delivering the answer is
@@ -8369,15 +8414,29 @@ impl AgentService {
             // reading the service field alone would drop the event for it.
             if let Some(resolved) =
                 crate::utils::completion_sound::announcement_pending(Some(&finished))
-                && let Some(cb) = progress_callback.as_ref()
             {
-                cb(
-                    session_id,
-                    ProgressEvent::PlanCompleted {
-                        title: finished.title.clone(),
-                        tasks: resolved,
-                    },
-                );
+                // #2729: the plan-finished fact reaches the OS from the same
+                // seam that hands it to the surfaces. Config, dedupe and focus
+                // live in the transport; the session-kind guard lives here
+                // because only this scope knows which session finished.
+                if notifications_for_human(&session) {
+                    crate::utils::desktop_notify::raise(
+                        crate::utils::desktop_notify::NotificationEvent::PlanCompleted {
+                            title: finished.title.clone(),
+                            tasks: resolved,
+                        },
+                    );
+                    plan_announced = true;
+                }
+                if let Some(cb) = progress_callback.as_ref() {
+                    cb(
+                        session_id,
+                        ProgressEvent::PlanCompleted {
+                            title: finished.title.clone(),
+                            tasks: resolved,
+                        },
+                    );
+                }
             }
             completed_plan = super::messaging::persist_completed_plan_before_archive(
                 &message_service,
@@ -8420,6 +8479,17 @@ impl AgentService {
             {
                 tracing::warn!("Failed to persist Sources footer to DB: {}", e);
             }
+        }
+
+        // #2729: the turn settled. A turn that already closed its plan raised
+        // PlanCompleted above, so it does not also raise a generic completion
+        // banner for the same finish.
+        if !plan_announced && notifications_for_human(&session) {
+            crate::utils::desktop_notify::raise(
+                crate::utils::desktop_notify::NotificationEvent::TurnCompleted {
+                    summary: crate::utils::desktop_notify::summary_line(&final_text),
+                },
+            );
         }
 
         Ok(AgentResponse {

@@ -1416,7 +1416,7 @@ impl App {
         let mut settled = 0usize;
         let mut flashes: Vec<Uuid> = Vec::new();
         for (session_id, plan) in &per_pane {
-            let count = crate::utils::completion_sound::newly_resolved(
+            let count = crate::utils::desktop_notify::announce_settled_tasks(
                 &mut self.announced_task_completions,
                 &[plan.as_ref()],
             );
@@ -1427,7 +1427,7 @@ impl App {
                 flashes.push(*session_id);
             }
         }
-        settled += crate::utils::completion_sound::newly_resolved(
+        settled += crate::utils::desktop_notify::announce_settled_tasks(
             &mut self.announced_task_completions,
             &[window_plan.as_ref()],
         );
@@ -3563,12 +3563,17 @@ impl App {
             }
             TuiEvent::FocusGained => {
                 self.window_focused = true;
+                // #2729: an OS banner is noise while the user is looking at
+                // the app, so the surface reports its focus and the transport
+                // suppresses while it holds.
+                crate::utils::desktop_notify::set_surface_focused(true);
                 // Immediate probe, bypassing the cooldown: alt-tabbing back is
                 // the moment a screenshot taken elsewhere becomes visible (#1816).
                 self.refresh_clipboard_hint(true);
             }
             TuiEvent::FocusLost => {
                 self.window_focused = false;
+                crate::utils::desktop_notify::set_surface_focused(false);
             }
             TuiEvent::Resize(w, h) => {
                 // Invalidate render cache on terminal resize (content width changes)

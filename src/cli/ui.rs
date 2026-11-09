@@ -894,8 +894,12 @@ async fn cmd_chat_inner(
                     })
                 }
                 // #2255: a plan just closed. The event carries the fact to
-                // every surface; the chime is opt-in and TUI-only, so no
-                // toast and no desktop notification is raised here.
+                // every surface; the chime is opt-in and this arm is the
+                // legacy TUI's only listener for it. The OS banner is NOT
+                // raised here: the settle seam raises it once through
+                // `crate::utils::desktop_notify` for every surface, a headless
+                // or channel run included, and raising it again from this arm
+                // would be the same dedupe key arriving twice.
                 ProgressEvent::PlanCompleted { .. } => {
                     play_plan_completion_sound_if_enabled();
                     return;
