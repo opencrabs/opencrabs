@@ -243,6 +243,37 @@ impl SessionRepository {
             .transpose()
     }
 
+    /// Live sessions whose title still carries a forum-topic key but that hang
+    /// under nobody. One-shot repair input for the Telegram backfill (#2603);
+    /// a no-op on an install that already groups its topics.
+    pub async fn list_unlinked_topic_sessions(&self) -> Result<Vec<(Uuid, String)>> {
+        let rows: Vec<(String, String)> = self
+            .pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                let mut stmt = conn.prepare_cached(
+                    "SELECT id, title FROM sessions
+                     WHERE parent_id IS NULL
+                       AND archived_at IS NULL
+                       AND title LIKE '%:topic:%]'
+                     ORDER BY created_at ASC",
+                )?;
+                let rows =
+                    stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to list unlinked topic sessions")?;
+
+        Ok(rows
+            .into_iter()
+            .filter_map(|(id, title)| Uuid::parse_str(&id).ok().map(|uuid| (uuid, title)))
+            .collect())
+    }
+
     /// Release a topic back to a top-level session (`parent_id = NULL`). The
     /// depth trigger only fires on a non-null parent, so this always passes.
     pub async fn detach_topic(&self, child: Uuid) -> Result<()> {
