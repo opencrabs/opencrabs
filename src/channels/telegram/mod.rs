@@ -41,6 +41,7 @@ pub(crate) mod stream_loop;
 pub(crate) mod suggest_options;
 pub(crate) mod telemetry;
 pub(crate) mod titles;
+pub(crate) mod topic_link;
 pub(crate) mod typing;
 
 /// Record a created or renamed forum topic in the message store so `list_topics`

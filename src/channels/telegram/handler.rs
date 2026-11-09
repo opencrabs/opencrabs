@@ -1838,6 +1838,40 @@ pub(crate) async fn handle_message(
         }
     };
 
+    // Forum topics hang under their forum (#2603). The rails fold purely on
+    // `parent_id`, and the GUI only offers topic actions on a parent that
+    // carries `topics_enabled`, so the link has to exist from the first
+    // message a topic receives. `attach_topic` sets both in one transaction.
+    //
+    // Grouping is never allowed to cost a message: a failure is logged and
+    // retried on the next one, exactly like the label refresh above.
+    if let Some(topic) = topic_id {
+        let parent_title = session_resolve::build_session_title(
+            is_dm,
+            &user.first_name,
+            user_id,
+            chat_title,
+            chat_id,
+            None,
+            None,
+        );
+        match super::topic_link::link_topic_session(&session_svc, chat_id, session_id, parent_title)
+            .await
+        {
+            Ok(linked) => tracing::debug!(
+                "Telegram: topic {topic} session {session_id} grouped under {} \
+                 (created={}, already_linked={})",
+                linked.parent,
+                linked.parent_created,
+                linked.already_linked
+            ),
+            Err(e) => tracing::warn!(
+                "Telegram: could not group topic {topic} session {session_id} \
+                 under its forum: {e:#}"
+            ),
+        }
+    }
+
     // Session gate (#1051, ADR-003): mark group sessions so memory_search
     // keeps external index content out of them by default.
     if !is_dm {
