@@ -6992,6 +6992,27 @@ impl Dashboard {
         self.split_focus().or(self.transcript.session)
     }
 
+    /// The conversation a new topic would hang under, or `None` when nothing
+    /// on screen can hold one (#2605).
+    ///
+    /// [`Self::topic_parent`] answers "which pane asked". This answers "can
+    /// that pane hold a topic", and the two used to disagree: the menu offered
+    /// New topic because the chat leaf had topics on, the draft then bailed
+    /// because the focused pane did not, the menu closed, and the typed name
+    /// went to the composer and got sent as a message. A prompt that cannot
+    /// create anything must never open, so both the row and the prompt resolve
+    /// through here.
+    fn topic_draft_parent(&self) -> Option<Uuid> {
+        if let Some(id) = self.topic_parent()
+            && self.sessions.is_topic_enabled(id)
+        {
+            return Some(id);
+        }
+        self.transcript
+            .session
+            .filter(|id| self.sessions.is_topic_enabled(*id))
+    }
+
     /// The chat's menu (#2480): what can be done to the conversation it
     /// belongs to. It opens from a right press on the conversation or on a
     /// topic tab; the header button that used to open it went with the title
@@ -7008,7 +7029,7 @@ impl Dashboard {
         let target = self.topic_menu?;
         let is_topic = self.sessions.parents.contains_key(&target);
         let mut items: Vec<Stateful<Div>> = Vec::new();
-        if self.open_chat_topics_on() {
+        if self.topic_draft_parent().is_some() {
             let new_topic = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
                 this.start_topic_draft(cx);
             });
@@ -7175,13 +7196,19 @@ impl Dashboard {
     }
 
     fn start_topic_draft(&mut self, cx: &mut Context<Self>) {
-        let topics_on = self
-            .topic_parent()
-            .is_some_and(|id| self.sessions.is_topic_enabled(id));
-        if !topics_on {
-            // Loud on purpose: this guard swallowed the seeker's pick with no
-            // trace, which made a working row look like a dead click (#2604).
-            logging::debug("topic draft: the open conversation has topics off");
+        if self.topic_draft_parent().is_none() {
+            // Nothing on screen can hold a topic. Say so and drop the menu in
+            // the same breath: the old guard returned with the menu already
+            // gone and no overlay owning the keys, so the typed name and its
+            // Enter fell through to the composer and were sent as a message
+            // (#2605). A prompt that cannot create anything never opens.
+            logging::debug("topic draft: no conversation here can hold topics");
+            self.topic_menu = None;
+            self.live
+                .notices
+                .push("topics are off for this conversation".to_string());
+            self.refocus_screen();
+            cx.notify();
             return;
         }
         self.topic_draft_icon = None;
@@ -7237,7 +7264,7 @@ impl Dashboard {
             cx.notify();
             return;
         }
-        let Some(parent) = self.topic_parent() else {
+        let Some(parent) = self.topic_draft_parent() else {
             return;
         };
         let db_path = self.db_path.clone();
