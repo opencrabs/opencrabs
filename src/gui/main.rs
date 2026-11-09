@@ -16058,17 +16058,39 @@ fn pane_element(
                                 f32::from(b.origin.x + b.size.width),
                                 f32::from(b.origin.y + b.size.height),
                             ];
-                            let half = drop_half(
-                                bounds,
-                                f32::from(ev.event.position.x),
-                                f32::from(ev.event.position.y),
-                            );
-                            // A pane dropped on itself is not a move, so it
-                            // never shows a landing band of its own.
-                            let next = (from != hover_session).then_some((hover_session, half));
+                            let x = f32::from(ev.event.position.x);
+                            let y = f32::from(ev.event.position.y);
+                            // gpui delivers `on_drag_move` to EVERY pane while
+                            // a drag is live, hovered or not (the dispatch has
+                            // no `is_hovered` gate, unlike `on_mouse_move`), so
+                            // each pane used to answer with its own bounds and
+                            // the last pane painted won: the band landed on a
+                            // pane the pointer was nowhere near, and its half
+                            // described that pane's nearest edge instead of the
+                            // one under the pointer (#2759).
+                            let inside = x >= bounds[0]
+                                && x <= bounds[2]
+                                && y >= bounds[1]
+                                && y <= bounds[3];
                             let _ = hover_weak.update(cx, |this, cx| {
-                                if this.pane_drop != next {
-                                    this.pane_drop = next;
+                                if inside {
+                                    // A pane dropped on itself is not a move,
+                                    // so it never shows a landing band of its
+                                    // own.
+                                    let next = (from != hover_session)
+                                        .then(|| (hover_session, drop_half(bounds, x, y)));
+                                    if this.pane_drop != next {
+                                        this.pane_drop = next;
+                                        cx.notify();
+                                    }
+                                } else if this
+                                    .pane_drop
+                                    .is_some_and(|(target, _)| target == hover_session)
+                                {
+                                    // Clear only a band this pane owns, so a
+                                    // pane hearing the move does not wipe the
+                                    // band the pane under the pointer set.
+                                    this.pane_drop = None;
                                     cx.notify();
                                 }
                             });
@@ -18103,6 +18125,39 @@ mod tests {
         assert!(
             !body.contains(".on_mouse_down(MouseButton::Left, take_keyboard)"),
             "a bubble-phase listener never runs under a transcript row"
+        );
+    }
+
+    #[test]
+    fn the_drop_band_only_follows_the_pane_under_the_pointer() {
+        // #2759: gpui hands every `on_drag_move` listener every move while a
+        // drag is live, hovered or not, so each pane answered with its own
+        // bounds and the last pane painted put the band on itself.
+        let src = include_str!("main.rs");
+        let body = src
+            .split(".on_drag_move::<PaneDrag>(")
+            .nth(1)
+            .and_then(|rest| rest.split(".on_drop::<PaneDrag>(").next())
+            .expect("the drag-move listener");
+        assert!(
+            body.contains("let inside = x >= bounds[0]"),
+            "the pane checks the pointer is inside its own bounds"
+        );
+        assert!(
+            body.contains("&& y <= bounds[3];"),
+            "the check covers both axes"
+        );
+        assert!(
+            body.contains("if inside {"),
+            "only a pane the pointer is over answers with a half"
+        );
+        assert!(
+            body.contains("drop_half(bounds, x, y)"),
+            "the half still comes from the same bounds and pointer"
+        );
+        assert!(
+            body.contains(".is_some_and(|(target, _)| target == hover_session)"),
+            "a pane clears only the band it owns"
         );
     }
 
