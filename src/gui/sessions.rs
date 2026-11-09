@@ -23,7 +23,9 @@ use gpui::{
 use opencrabs::config::gui_theme;
 use opencrabs::db::Database;
 use opencrabs::db::models::Session;
-use opencrabs::db::repository::session::{SessionListOptions, SessionRepository};
+use opencrabs::db::repository::session::{
+    SessionKind, SessionListOptions, SessionRepository, classify_session_title,
+};
 use opencrabs::db::repository::session_favorites::SessionFavoritesRepository;
 use opencrabs::db::repository::{MessageRepository, PREVIEW_CHARS};
 
@@ -87,12 +89,32 @@ pub struct SessionsState {
     /// be a query per card per frame. Formatted once here so the paint only
     /// clones a `SharedString`.
     pub previews: HashMap<uuid::Uuid, SharedString>,
+    /// The rail filter menu (#2719): a plan-state chip plus whether the
+    /// automation sessions (cron + RSI) show. It lives on the state so it
+    /// survives every repaint, and resets to its default when the rail closes.
+    pub rail_filter: RailFilter,
+    /// Plan checklist progress `(done, total)` for every session, snapshotted
+    /// once per paint before `visible()` filters. The plan chip decides each
+    /// row from this map, so the filter never reads a plan file inside the
+    /// row loop and never chases the rows it is about to hide (#2719).
+    pub plan_progress: HashMap<uuid::Uuid, (usize, usize)>,
 }
 
 impl SessionsState {
-    /// The rows the rail shows right now, in ledger order.
+    /// The rows the rail shows right now, in ledger order. Two gates: the
+    /// ctrl+f query (`matches`) and the filter menu (`rail_filter_allows`).
+    /// The menu reads the per-paint plan snapshot, never the index, so a row
+    /// hidden by the plan chip still had its progress resolved before the
+    /// filter ran (#2719).
     pub fn visible(&self) -> impl Iterator<Item = &Session> {
-        self.items.iter().filter(|s| matches(s, &self.filter))
+        self.items.iter().filter(|s| {
+            matches(s, &self.filter)
+                && rail_filter_allows(
+                    &self.rail_filter,
+                    s.title.as_deref().unwrap_or(""),
+                    self.plan_progress.get(&s.id).copied(),
+                )
+        })
     }
 
     /// Pinned first, then everything else, each group keeping the ledger's
@@ -238,6 +260,64 @@ pub fn matches(s: &Session, query: &str) -> bool {
         return true;
     }
     s.id.to_string().starts_with(&q)
+}
+
+/// Which plan-state chip the rail filter menu has selected (#2719). The
+/// progress counts come from the same plan index the card bar reads, so a
+/// row's chip and its bar never disagree about the same plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PlanFilter {
+    /// Every session, plan or not.
+    #[default]
+    All,
+    /// An approved checklist with work left: done < total.
+    Active,
+    /// An approved checklist that is complete: done == total, total > 0.
+    Done,
+    /// No approved checklist at all (no plan, or a draft with no tasks).
+    NoPlan,
+}
+
+/// The rail's filter menu state (#2719): a plan-state chip plus whether the
+/// automation sessions (cron + RSI) show. The default hides automation per
+/// A1 and leaves the plan chip on All, so an untouched rail reads the way it
+/// always did minus the background noise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RailFilter {
+    pub plan: PlanFilter,
+    pub show_automation: bool,
+}
+
+impl Default for RailFilter {
+    fn default() -> Self {
+        Self {
+            plan: PlanFilter::All,
+            show_automation: false,
+        }
+    }
+}
+
+/// Whether one row passes the rail filter menu (#2719). Pure: the title's
+/// kind comes from the core classifier and the plan progress from the
+/// per-paint snapshot, so the same inputs always give the same answer and
+/// the rule is testable without a window. Automation (cron + RSI) is hidden
+/// unless the toggle is on; the plan chip then narrows what remains. A
+/// subagent is not automation for this toggle: it stays visible.
+pub fn rail_filter_allows(filter: &RailFilter, title: &str, plan: Option<(usize, usize)>) -> bool {
+    if !filter.show_automation
+        && matches!(
+            classify_session_title(title),
+            SessionKind::Cron | SessionKind::Rsi
+        )
+    {
+        return false;
+    }
+    match filter.plan {
+        PlanFilter::All => true,
+        PlanFilter::Active => plan.is_some_and(|(done, total)| done < total),
+        PlanFilter::Done => plan.is_some_and(|(done, total)| total > 0 && done == total),
+        PlanFilter::NoPlan => plan.is_none(),
+    }
 }
 
 /// How far left a rail row must be slid before its action strip opens, in
@@ -1604,6 +1684,32 @@ pub fn delete_button() -> Stateful<Div> {
     )
 }
 
+/// One chip of the rail filter menu (#2719). Pure styling: the view attaches
+/// the click that flips the filter. The selected chip wears the accent so the
+/// active rule reads at a glance; the rest stay quiet.
+pub fn filter_chip(id: &'static str, label: &'static str, active: bool) -> Stateful<Div> {
+    let shown = palette::current();
+    let (bg, fg) = if active {
+        (shown.accent, shown.panel)
+    } else {
+        (shown.panel_hi, shown.text_muted)
+    };
+    div()
+        .id(id)
+        .flex()
+        .flex_none()
+        .items_center()
+        .px_2()
+        .py_0p5()
+        .rounded_sm()
+        .text_xs()
+        .bg(rgb(bg))
+        .text_color(rgb(fg))
+        .cursor_pointer()
+        .hover(|d| d.bg(rgb(shown.focus)))
+        .child(SharedString::from(label))
+}
+
 /// The rail column: header and error slot from the state, then the caller's
 /// prebuilt rows (each already carrying its click handler). Stateful, because
 /// the scroll container needs an element id.
@@ -1615,6 +1721,9 @@ pub fn rail(
     width_rem: f32,
     scroll: &ScrollHandle,
     footer: Option<AnyElement>,
+    // The filter menu (#2719), built by the view with its click handlers and
+    // pinned to the top-right of the rail. None until the view supplies it.
+    filter_control: Option<AnyElement>,
 ) -> Stateful<Div> {
     // No rail padding or inter-row gap: selection and hover paint edge to edge.
     let mut col = div()
@@ -1629,6 +1738,12 @@ pub fn rail(
         .bg(rgb(palette::current().panel))
         .py_2()
         .child(brand_header());
+
+    // The filter menu rides top-right, just under the brand (#2719). The
+    // element carries its own gaps and clicks; the rail only seats it.
+    if let Some(control) = filter_control {
+        col = col.child(div().px_2().pb_1().flex().justify_end().child(control));
+    }
 
     if state.filter_active {
         col = col.child(div().px_2().pb_1().child(filter_bar(state)));
@@ -1692,8 +1807,9 @@ fn brand_header() -> Div {
 #[cfg(test)]
 mod tests {
     use super::{
-        Database, MenuKind, PREVIEW_CHARS, SessionsState, accent_bar_visible, fit, load_sessions,
-        palette, pin_mark, preview_line, rail_menu_entries,
+        Database, MenuKind, PREVIEW_CHARS, PlanFilter, RailFilter, SessionsState,
+        accent_bar_visible, fit, load_sessions, palette, pin_mark, preview_line,
+        rail_filter_allows, rail_menu_entries,
     };
     use opencrabs::db::models::Session;
 
@@ -2477,5 +2593,127 @@ mod tests {
         assert!(line.ends_with('\u{2026}'), "long text gets an ellipsis");
         let body = line.strip_prefix("You: ").expect("sender prefix");
         assert_eq!(body.chars().count(), PREVIEW_CHARS);
+    }
+
+    /// A1: an untouched rail hides the cron and RSI noise but keeps humans
+    /// and subagents. The default chip is All, so the plan gate lets every
+    /// remaining row through (#2719).
+    #[test]
+    fn rail_filter_default_hides_cron_and_rsi() {
+        let f = RailFilter::default();
+        assert!(!f.show_automation, "automation starts hidden per A1");
+        assert_eq!(f.plan, PlanFilter::All);
+        assert!(rail_filter_allows(&f, "Fix the login bug", None));
+        assert!(rail_filter_allows(&f, "subagent: search", None));
+        assert!(!rail_filter_allows(&f, "daily recap [cron-job:7]", None));
+        assert!(!rail_filter_allows(&f, "RSI autonomous cycle", None));
+    }
+
+    /// The toggle is the only thing that brings cron and RSI back; a renamed
+    /// cron title still classifies as cron because the marker survives.
+    #[test]
+    fn rail_filter_toggle_shows_automation() {
+        let f = RailFilter {
+            show_automation: true,
+            ..Default::default()
+        };
+        assert!(rail_filter_allows(&f, "daily recap [cron-job:7]", None));
+        assert!(rail_filter_allows(&f, "RSI autonomous cycle", None));
+        assert!(rail_filter_allows(&f, "renamed recap [cron-job:9]", None));
+        assert!(rail_filter_allows(&f, "Fix the login bug", None));
+    }
+
+    /// The Active chip wants an approved checklist with work left. A finished
+    /// checklist and a session with no plan both fall out.
+    #[test]
+    fn rail_filter_plan_active_needs_unfinished_checklist() {
+        let f = RailFilter {
+            plan: PlanFilter::Active,
+            ..Default::default()
+        };
+        assert!(rail_filter_allows(&f, "chat", Some((2, 8))));
+        assert!(rail_filter_allows(&f, "chat", Some((0, 1))));
+        assert!(!rail_filter_allows(&f, "chat", Some((8, 8))));
+        assert!(!rail_filter_allows(&f, "chat", None));
+    }
+
+    /// The Done chip wants a complete, non-empty checklist. An empty (0, 0)
+    /// snapshot is not a finished plan, and neither is a session with none.
+    #[test]
+    fn rail_filter_plan_done_needs_complete_checklist() {
+        let f = RailFilter {
+            plan: PlanFilter::Done,
+            ..Default::default()
+        };
+        assert!(rail_filter_allows(&f, "chat", Some((8, 8))));
+        assert!(rail_filter_allows(&f, "chat", Some((1, 1))));
+        assert!(!rail_filter_allows(&f, "chat", Some((2, 8))));
+        assert!(!rail_filter_allows(&f, "chat", Some((0, 0))));
+        assert!(!rail_filter_allows(&f, "chat", None));
+    }
+
+    /// The No Plan chip is the complement: only rows with no approved
+    /// checklist show, whatever the counts on the others.
+    #[test]
+    fn rail_filter_plan_no_plan_hides_checklists() {
+        let f = RailFilter {
+            plan: PlanFilter::NoPlan,
+            ..Default::default()
+        };
+        assert!(rail_filter_allows(&f, "chat", None));
+        assert!(!rail_filter_allows(&f, "chat", Some((2, 8))));
+        assert!(!rail_filter_allows(&f, "chat", Some((8, 8))));
+    }
+
+    /// The two gates compose: a cron row stays hidden under a plan chip even
+    /// when its progress would pass, until the automation toggle is on.
+    #[test]
+    fn rail_filter_plan_chip_still_hides_automation() {
+        let mut f = RailFilter {
+            plan: PlanFilter::Active,
+            ..Default::default()
+        };
+        assert!(!rail_filter_allows(&f, "recap [cron-job:1]", Some((1, 4))));
+        f.show_automation = true;
+        assert!(rail_filter_allows(&f, "recap [cron-job:1]", Some((1, 4))));
+    }
+
+    /// `visible()` wires both gates: the ctrl+f query and the filter menu.
+    /// The plan snapshot decides the plan chip without a per-row file read,
+    /// and the menu state lives on the struct so a repaint keeps it.
+    #[test]
+    fn rail_filter_visible_wires_query_and_menu() {
+        let human = Session::new(Some("Fix login".into()), None, None);
+        let cron = Session::new(Some("recap [cron-job:1]".into()), None, None);
+        let planned = Session::new(Some("Big refactor".into()), None, None);
+        let (hid, cid, pid) = (human.id, cron.id, planned.id);
+        let mut state = SessionsState {
+            items: vec![human, cron, planned],
+            ..Default::default()
+        };
+        state.plan_progress.insert(pid, (8, 8));
+
+        // Default: cron hidden, the two humans show.
+        let ids: Vec<_> = state.visible().map(|s| s.id).collect();
+        assert_eq!(ids, vec![hid, pid]);
+
+        // The state persists across calls (a repaint does not reset it).
+        assert_eq!(state.visible().count(), 2);
+
+        // Done chip narrows to the finished plan; the query then narrows more.
+        state.rail_filter.plan = PlanFilter::Done;
+        let ids: Vec<_> = state.visible().map(|s| s.id).collect();
+        assert_eq!(ids, vec![pid]);
+        state.filter = "login".into();
+        assert_eq!(state.visible().count(), 0, "query and menu both gate");
+
+        // Clearing the query leaves the menu in place; toggling automation
+        // brings cron back under the All chip.
+        state.filter.clear();
+        state.rail_filter = RailFilter {
+            show_automation: true,
+            ..Default::default()
+        };
+        assert_eq!(state.visible().count(), 3);
     }
 }

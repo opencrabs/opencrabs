@@ -1002,6 +1002,9 @@ fn set_rail_open_state(
         *rail_focused = false;
         sessions.filter.clear();
         sessions.filter_active = false;
+        // The filter menu clears with the rail (#2719): a reopened rail
+        // starts from the default rule, never a stale chip from last time.
+        sessions.rail_filter = sessions::RailFilter::default();
     }
 }
 
@@ -6203,6 +6206,22 @@ impl Dashboard {
     /// asks about animation, and this question is static state. The index
     /// already cached the paths and documents for the badge pass, so each row
     /// here costs one `stat` at most and a parse only when the file moved.
+    /// Snapshot every session's plan progress before the rail filters (#2719).
+    /// The plan chip in `visible()` reads this map, so it must hold a row's
+    /// counts even when that row is about to be hidden: filling it from the
+    /// filtered `ordered()` would chase its own tail. The index resolves on
+    /// demand, so iterating all items warms it for the badge pass that follows.
+    fn snapshot_rail_plan_progress(&mut self) {
+        let now = std::time::Instant::now();
+        let ids: Vec<Uuid> = self.sessions.items.iter().map(|s| s.id).collect();
+        self.sessions.plan_progress.clear();
+        for id in ids {
+            if let Some(progress) = self.rail_index.progress(id, now) {
+                self.sessions.plan_progress.insert(id, progress);
+            }
+        }
+    }
+
     fn rail_plan_progress_map(&mut self) -> HashMap<Uuid, (usize, usize)> {
         let rows: Vec<Uuid> = self.sessions.ordered().map(|s| s.id).collect();
         let now = std::time::Instant::now();
@@ -9528,6 +9547,10 @@ impl Render for Dashboard {
         // The rail's rows: each carries its own click listener, built in its
         // own loop turn so the `&mut cx` borrow stays legal.
         let mut rail_rows: Vec<AnyElement> = Vec::with_capacity(self.sessions.items.len());
+        // The plan chip filters rows by progress, so resolve every session's
+        // counts before any pass calls `visible()` (#2719). This also warms
+        // the index the badge and bar passes read below.
+        self.snapshot_rail_plan_progress();
         // What every row says about work in flight (#2636), resolved once
         // before the loop: the index needs `&mut self` and the row iterator
         // holds `&self`.
@@ -9841,12 +9864,50 @@ impl Render for Dashboard {
             )
             .into_any_element()
         });
+        // The rail filter menu (#2719): plan-state chips plus the cron/RSI
+        // toggle, pinned top-right. Each chip flips one field on the state and
+        // repaints; the state lives on `sessions`, so it survives the repaint
+        // and only resets when the rail closes.
+        let rail_filter = self.sessions.rail_filter;
+        let plan_chips: [(&'static str, &'static str, sessions::PlanFilter); 4] = [
+            ("rail-filter-all", "all", sessions::PlanFilter::All),
+            ("rail-filter-active", "active", sessions::PlanFilter::Active),
+            ("rail-filter-done", "done", sessions::PlanFilter::Done),
+            (
+                "rail-filter-noplan",
+                "no plan",
+                sessions::PlanFilter::NoPlan,
+            ),
+        ];
+        let mut control = div()
+            .id("rail-filter-menu")
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_0p5();
+        for (id, label, plan) in plan_chips {
+            let pick = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
+                this.sessions.rail_filter.plan = plan;
+                cx.notify();
+            });
+            control = control
+                .child(sessions::filter_chip(id, label, rail_filter.plan == plan).on_click(pick));
+        }
+        let toggle = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
+            this.sessions.rail_filter.show_automation = !this.sessions.rail_filter.show_automation;
+            cx.notify();
+        });
+        control = control.child(
+            sessions::filter_chip("rail-filter-auto", "auto", rail_filter.show_automation)
+                .on_click(toggle),
+        );
         let rail = sessions::rail(
             &self.sessions,
             rail_rows,
             self.rail_width,
             &self.rail_scroll,
             chip_footer,
+            Some(control.into_any_element()),
         );
 
         // One label drives the in-window chrome and the OS titlebar: the old
@@ -12699,6 +12760,8 @@ fn main() {
             error: None,
             filter: String::new(),
             filter_active: false,
+            rail_filter: sessions::RailFilter::default(),
+            plan_progress: HashMap::new(),
         },
         Err(e) => sessions::SessionsState {
             items: Vec::new(),
@@ -12715,6 +12778,8 @@ fn main() {
             error: Some(e.into()),
             filter: String::new(),
             filter_active: false,
+            rail_filter: sessions::RailFilter::default(),
+            plan_progress: HashMap::new(),
         },
     };
     // The split the last run closed with (#2675). Read here, on the main
