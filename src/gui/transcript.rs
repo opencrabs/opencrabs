@@ -617,6 +617,17 @@ pub struct TranscriptState {
 }
 
 impl TranscriptState {
+    /// The session's true row total: the rows on screen plus the ones the
+    /// window hid, which is the count `load_recent` reads straight from the
+    /// ledger (#2705).
+    ///
+    /// This is what a settle test has to measure. The windowed turn count
+    /// stops growing once a session passes `WINDOW`, so a turn that appends
+    /// rows could never be seen to land.
+    pub fn row_total(&self) -> usize {
+        self.hidden + self.rows.len()
+    }
+
     /// Newest turn's anchor: the one ctrl-o acts on, as in the TUI where
     /// ctrl+o toggles the newest turn only.
     pub fn newest_anchor(&self) -> Option<&str> {
@@ -3711,6 +3722,23 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// The settle test measures the session, not the window (#2705): a
+    /// conversation past `WINDOW` rows keeps growing in the ledger while the
+    /// windowed turn count stays flat.
+    #[test]
+    fn row_total_counts_the_rows_the_window_hid() {
+        let state = TranscriptState {
+            hidden: 135,
+            rows: vec![row("user", "in the window", 1)],
+            ..Default::default()
+        };
+        assert_eq!(
+            state.row_total(),
+            136,
+            "the total the ledger reports is what a settle test has to read"
+        );
     }
 
     #[test]
