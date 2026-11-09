@@ -7898,7 +7898,19 @@ impl AgentService {
 
             // Check for queued user messages to inject between tool iterations.
             // This lets the user provide follow-up feedback mid-execution (like Claude Code).
-            if let Some(ref queue_cb) = self.message_queue_callback
+            //
+            // A round that halted on an option-surface tool has no next round
+            // to answer in: the loop breaks at the top of the next iteration
+            // (`option_surface_halt_seen && option_halt_iteration_has_text`).
+            // Draining the queue here took the message the user typed while
+            // the turn ran, persisted its user row and a fresh empty assistant
+            // placeholder, and ended the turn milliseconds later with no
+            // request made to answer it: the message was silently dropped
+            // (#2709). Leaving it queued is the contract every other surface
+            // already keeps: the surface flushes it as its own turn on `Done`.
+            let turn_halts_now = option_surface_halt_seen && option_halt_iteration_has_text;
+            if !turn_halts_now
+                && let Some(ref queue_cb) = self.message_queue_callback
                 && let Some(queued_msg) = queue_cb(session_id).await
             {
                 tracing::info!("Injecting queued user message between tool iterations");
