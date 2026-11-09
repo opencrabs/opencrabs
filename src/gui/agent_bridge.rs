@@ -21,6 +21,7 @@ use opencrabs::brain::agent::service::MessageEnqueueCallback;
 use opencrabs::brain::agent::{ProgressCallback, ProgressEvent, QueuedUserMessage};
 use opencrabs::brain::prompt_builder::{BrainLoader, RuntimeInfo};
 use opencrabs::brain::tools::ToolRegistry;
+use opencrabs::brain::tools::suggest_options::SuggestionItem;
 use opencrabs::config::Config;
 use opencrabs::db::Database;
 use opencrabs::services::ServiceContext;
@@ -1444,6 +1445,57 @@ pub fn set_composer_session(session_id: Option<Uuid>) {
     }
 }
 
+/// The follow-up options `suggest_options` offered, keyed by session (#2708).
+///
+/// In memory only, and that is correct rather than a gap: the tool's labels
+/// never reach the ledger (`suggest_options` answers with "Surfaced N
+/// follow-up suggestion(s)." and nothing else), so there is no stored copy to
+/// restore. The map lives as long as the process, which is the same lifetime
+/// the terminal gives its own follow-up list. Do not add a "restore on reload"
+/// path: there is nothing to restore from.
+static SUGGESTIONS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<Uuid, Vec<SuggestionItem>>>,
+> = std::sync::OnceLock::new();
+
+fn suggestions()
+-> std::sync::MutexGuard<'static, std::collections::HashMap<Uuid, Vec<SuggestionItem>>> {
+    SUGGESTIONS
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Replace what `session_id` is offering. The newest offer wins: the tool runs
+/// at most once per turn, so an older strip is stale by definition. An empty
+/// list is a clear, which keeps one call able to do both.
+pub fn set_options(session_id: Uuid, items: Vec<SuggestionItem>) {
+    let count = items.len();
+    {
+        let mut map = suggestions();
+        if items.is_empty() {
+            map.remove(&session_id);
+        } else {
+            map.insert(session_id, items);
+        }
+    }
+    // The GUI log is the only place a dropped offer can be seen, since the
+    // buttons are never persisted (#2708).
+    crate::logging::info(&format!(
+        "suggest options: session {session_id}, {count} offered"
+    ));
+}
+
+/// What `session_id` is offering, so its strip can draw it.
+pub fn options_snapshot(session_id: Uuid) -> Vec<SuggestionItem> {
+    suggestions().get(&session_id).cloned().unwrap_or_default()
+}
+
+/// Take the offer off `session_id`. A pick, a send, a stop and a session
+/// switch all end it: the buttons belonged to the turn that made them.
+pub fn options_take(session_id: Uuid) -> Vec<SuggestionItem> {
+    suggestions().remove(&session_id).unwrap_or_default()
+}
+
 /// The agent's between-tool-calls hook: everything queued for the session,
 /// joined into one message. The agent calls it after each tool round.
 fn queue_drain_callback() -> opencrabs::brain::agent::service::MessageQueueCallback {
@@ -1956,6 +2008,7 @@ async fn run_text_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opencrabs::brain::tools::suggest_options::SuggestionStyle;
 
     /// Up brings the WHOLE queue into the composer in one take, oldest first
     /// (#2696), and the take empties the queue: a recall the user abandons must
@@ -2014,6 +2067,61 @@ mod tests {
         let _ = queue_take(session);
         let _ = queue_take(other);
         set_composer_session(None);
+    }
+
+    /// #2708: the follow-up offer is per session, so a pane or a session
+    /// switch never shows another conversation's buttons, and a take clears
+    /// only the session it names.
+    #[test]
+    fn suggested_options_stay_with_their_session() {
+        let session = Uuid::from_u128(0x2708_0001);
+        let other = Uuid::from_u128(0x2708_0002);
+
+        set_options(
+            session,
+            vec![
+                SuggestionItem::new("run the tests", SuggestionStyle::Primary),
+                SuggestionItem::new("delete the branch", SuggestionStyle::Danger),
+            ],
+        );
+        set_options(other, vec![SuggestionItem::default_styled("elsewhere")]);
+
+        let offers = options_snapshot(session);
+        assert_eq!(offers.len(), 2, "both labels reach their own session");
+        assert_eq!(offers[0].label, "run the tests");
+        assert_eq!(
+            offers[1].style,
+            SuggestionStyle::Danger,
+            "the style travels with the label, so the row keeps its colour"
+        );
+        assert_eq!(
+            options_snapshot(other).len(),
+            1,
+            "one session's offer never lands in another's strip"
+        );
+
+        let taken = options_take(session);
+        assert_eq!(taken.len(), 2, "a pick takes the offer it came from");
+        assert!(
+            options_snapshot(session).is_empty(),
+            "a taken offer is gone, so a second press cannot send a stale label"
+        );
+        assert_eq!(
+            options_snapshot(other).len(),
+            1,
+            "taking this session's offer leaves another session's alone"
+        );
+
+        // An empty set is a clear: that is the shape the stop and send paths
+        // use, so one call covers both.
+        set_options(other, Vec::new());
+        assert!(
+            options_snapshot(other).is_empty(),
+            "an empty set clears the slot"
+        );
+
+        let _ = options_take(session);
+        let _ = options_take(other);
     }
 
     /// Esc flushes the WHOLE queue into one turn (#2695): the drain takes
