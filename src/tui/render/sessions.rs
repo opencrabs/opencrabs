@@ -1053,9 +1053,11 @@ mod tests {
         // Not the focused session: its live state lives in the sidecar.
         app.current_session = None;
         app.processing_sessions.insert(s.id);
-        let mut bg = crate::tui::app::background_session::BackgroundSessionState::default();
-        bg.is_processing = true;
-        bg.active_tool_group = Some(tool_group("Writing tests", false));
+        let bg = crate::tui::app::background_session::BackgroundSessionState {
+            is_processing: true,
+            active_tool_group: Some(tool_group("Writing tests", false)),
+            ..Default::default()
+        };
         app.background_sessions.insert(s.id, bg);
         app.sessions.push(s);
 
