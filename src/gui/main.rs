@@ -2490,12 +2490,13 @@ impl Dashboard {
     /// split is the one the caret is on, so a nested split grows from the
     /// pane being read rather than from the window's first leaf (#2472).
     fn begin_split(&mut self, layout: Layout, cx: &mut Context<Self>) {
-        // The chord door splits the pane holding the caret, resolved through
-        // the same `focused_pane` every other door uses, so the chord, the
-        // row menu and the composer cannot disagree about the leaf (#2625).
-        let target = self.focused_pane();
-        let target = target.filter(|id| self.panes.as_ref().is_some_and(|t| t.contains(*id)));
-        let Some(target) = target else {
+        // Every door splits the pane holding the caret (#2625), and the caret
+        // is resolved the way the render resolves it rather than read
+        // literally: a cached `pane_focus` naming a leaf the tree no longer
+        // holds made all three doors refuse with "Open a session before
+        // splitting it." while the window was plainly drawing a live focused
+        // pane (#2757).
+        let Some(target) = self.split_origin() else {
             self.live
                 .notices
                 .push("Open a session before splitting it.".to_string());
@@ -2537,14 +2538,10 @@ impl Dashboard {
     /// second step is skipped.
     fn split_row(&mut self, id: Uuid, layout: Layout, cx: &mut Context<Self>) {
         let chat = self.transcript.session;
-        if self.panes.is_none()
-            && let Some(chat) = chat
-        {
-            self.panes = Some(PaneTree::leaf(chat));
-        }
-        let target = self.focused_pane();
-        let target = target.filter(|it| self.panes.as_ref().is_some_and(|tree| tree.contains(*it)));
-        let Some(target) = target else {
+        // The pane the split grows from, seeded from the chat's own leaf when
+        // the window holds no tree yet: the same rule the chord door walks, so
+        // the two doors cannot disagree about the originating pane (#2757).
+        let Some(target) = self.split_origin() else {
             self.live
                 .notices
                 .push("Open a session before splitting it.".to_string());
@@ -2576,6 +2573,34 @@ impl Dashboard {
     /// took it (#2474).
     fn focused_pane(&self) -> Option<Uuid> {
         self.pane_focus.or(self.transcript.session)
+    }
+
+    /// The leaf a split door grows from (#2757).
+    ///
+    /// `focused_pane` reads `pane_focus` literally, and that id is a cache: a
+    /// closed pane, a layout pruned at boot, or a session moved into the chat
+    /// leaf all leave it naming a leaf the tree no longer holds. Filtered
+    /// literally, that stale id made every door push "Open a session before
+    /// splitting it." and return before the picker was ever set, while the
+    /// window went on drawing a live focused pane, because the render already
+    /// resolves the same id through `resolve_split_focus` (#2620). The door
+    /// now asks the same question the render asks: the caret leaf, then the
+    /// chat's own leaf, then the first surviving one. A window with no tree
+    /// starts from the chat's leaf, the way the row menu always has.
+    fn split_origin(&mut self) -> Option<Uuid> {
+        let chat = self.transcript.session;
+        if self.panes.is_none()
+            && let Some(chat) = chat
+        {
+            self.panes = Some(PaneTree::leaf(chat));
+        }
+        let leaves = self.panes.as_ref()?.leaves();
+        // `resolve_split_focus` answers `None` for the chat leaf, which is the
+        // caret unless another pane took it.
+        resolve_split_focus(&leaves, self.pane_focus, chat)
+            .or(chat)
+            .filter(|id| leaves.contains(id))
+            .or_else(|| leaves.last().copied())
     }
 
     /// Point recall at the composer that has the caret. A recall keeps the
@@ -17946,7 +17971,7 @@ mod tests {
         );
         let split_row = fn_body(src, "split_row");
         assert!(
-            split_row.contains("self.focused_pane()"),
+            split_row.contains("self.split_origin()"),
             "the pane being split is the one holding the caret"
         );
         assert!(
@@ -17973,22 +17998,33 @@ mod tests {
 
     #[test]
     fn begin_split_targets_the_focused_leaf() {
-        // #2625: the chord door resolves its target through `focused_pane`,
-        // so a split grows from the leaf holding the caret rather than from
-        // whichever leaf the tree happens to reach first.
+        // #2625: the chord door resolves its target, so a split grows from the
+        // leaf holding the caret rather than from whichever leaf the tree
+        // happens to reach first. #2757: the resolution lives in
+        // `split_origin`, which answers with the caret leaf the RENDER drew
+        // instead of refusing on a stale `pane_focus`.
         let src = include_str!("main.rs");
         let body = fn_body(src, "begin_split");
         assert!(
-            body.contains("let target = self.focused_pane();"),
+            body.contains("let Some(target) = self.split_origin() else"),
             "the chord door splits the pane that holds the caret"
         );
         assert!(
             !body.contains("self.pane_focus.or(self.transcript.session)"),
-            "the resolution stays in `focused_pane`, not a second copy here"
+            "the resolution stays in `split_origin`, not a second copy here"
+        );
+        let origin = fn_body(src, "split_origin");
+        assert!(
+            origin.contains("resolve_split_focus(&leaves, self.pane_focus, chat)"),
+            "a stale caret id falls back the way the render falls back"
         );
         assert!(
-            body.contains("t.contains(*id)"),
+            origin.contains(".filter(|id| leaves.contains(id))"),
             "a leaf the tree no longer holds is not a split target"
+        );
+        assert!(
+            origin.contains("self.panes = Some(PaneTree::leaf(chat));"),
+            "a window with no tree starts from the chat's own leaf"
         );
         assert!(
             body.contains("self.split_target = Some(target);"),
