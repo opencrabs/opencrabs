@@ -1202,13 +1202,22 @@ pub struct RowFlags {
     /// readable user/assistant message yet. It paints as the card's message
     /// line: under the title when there are no topics, under the chip strip
     /// when there are. Timestamp and cost always ride the title line, so a
-    /// card without a plan is at most three lines.
+    /// card without a plan or a running task is at most three lines.
     pub preview: Option<SharedString>,
     /// The session's approved plan progress as `(done, total)`, or `None`
     /// when there is no checklist to draw. Paints as a slim bar line under
     /// the preview, reusing the composer strip's own bar so the same plan
     /// reads identically in both places.
     pub plan: Option<(usize, usize)>,
+    /// Whether the plan bar is in the lit half of its settle flash, in which
+    /// case it paints orange instead of its resting teal. The caller owns the
+    /// clock; this module only picks the colour.
+    pub flash: bool,
+    /// The detached commands this session is still running, already shaped by
+    /// the terminal's own formatter (`⏳ cargo test 32s`), or `None` when
+    /// nothing runs. Paints as the card's last line, under the plan bar, so a
+    /// row says "work is still going here" without being opened.
+    pub running: Option<SharedString>,
 }
 
 /// One topic chip: a child conversation painted as a compact pill on its
@@ -1315,6 +1324,8 @@ pub fn row(
         badge,
         preview,
         plan,
+        flash,
+        running,
     } = flags;
     let title_text = div()
         // A closed topic reads dimmed: still there, no longer taking work.
@@ -1419,9 +1430,23 @@ pub fn row(
             })
             // An approved plan reads as a slim progress bar, never as raw
             // plan JSON in the message line. Same ten cells as the composer
-            // strip, so one plan has one look wherever it is drawn.
+            // strip, so one plan has one look wherever it is drawn. A task
+            // that just settled lifts the bar to the accent orange for a few
+            // seconds, then it falls back to its resting teal.
             .when_some(plan, |d, (done, total)| {
-                d.child(plan_progress_cell(done, total))
+                d.child(plan_progress_cell(done, total, flash))
+            })
+            // Detached commands close the card (#762): a session whose turn
+            // ended while a build is still running says so here, under the
+            // bar, instead of reading as idle for the whole build.
+            .when_some(running, |d, line| {
+                d.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(palette::current().warn))
+                        .truncate()
+                        .child(line),
+                )
             })
         });
     let mut row = div()
@@ -1482,8 +1507,15 @@ fn badge_cell(glyph: &str) -> Div {
 /// The plan's checklist as one slim line on the card: the same ten-cell bar
 /// the composer strip draws, plus the done/total count. The bar math lives in
 /// `plan_strip`, so a row and the strip can never disagree about one plan.
-fn plan_progress_cell(done: usize, total: usize) -> Div {
+fn plan_progress_cell(done: usize, total: usize, flash: bool) -> Div {
     let (_, bar) = crate::plan_strip::progress_bar(done, total);
+    // The theme's own accent is the orange: it stays legible on both the dark
+    // and the paper palette, where a hardcoded orange would wash out.
+    let bar_colour = if flash {
+        palette::current().accent
+    } else {
+        palette::current().teal
+    };
     div()
         .flex()
         .flex_row()
@@ -1493,7 +1525,7 @@ fn plan_progress_cell(done: usize, total: usize) -> Div {
         .child(
             div()
                 .flex_none()
-                .text_color(rgb(palette::current().teal))
+                .text_color(rgb(bar_colour))
                 .child(SharedString::from(bar)),
         )
         .child(
@@ -2381,8 +2413,8 @@ mod tests {
             "the plan bar paints only when an approved checklist exists"
         );
         assert!(
-            row_source.contains("plan_progress_cell(done, total)"),
-            "the bar line delegates to the shared cell"
+            row_source.contains("plan_progress_cell(done, total, flash)"),
+            "the bar line delegates to the shared cell, flash state and all"
         );
         let cell_source = source
             .split("fn plan_progress_cell(")

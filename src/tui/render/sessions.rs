@@ -266,13 +266,14 @@ impl Column {
     /// A value longer than the cap is ellipsised, so a deep working directory
     /// or a long branch name cannot shove its neighbours off the row. Two are
     /// wider than the common value needs: the project badge carries a
-    /// `{.name}` wrapper, and status is a composite of up to three indicators
-    /// that can all be on at once.
+    /// `{.name}` wrapper, and status is a composite of up to four indicators
+    /// that can all be on at once (activity, detached commands, the current
+    /// mark, and the pane index).
     fn cap(self, tier: SessionRowTier) -> usize {
         match self {
             Column::Date if tier == SessionRowTier::Narrow => 6,
             Column::Date => 17,
-            Column::Status => 14,
+            Column::Status => 18,
             Column::Model => 34,
             Column::Branch => 10,
             Column::Size => 13,
@@ -290,6 +291,7 @@ impl Column {
         session: &Session,
         is_current: bool,
         tier: SessionRowTier,
+        background: Option<&str>,
     ) -> Vec<Span<'static>> {
         let dim = Style::default().fg(theme::role(Role::GrayDim));
         let mid = Style::default().fg(theme::role(Role::GrayMid));
@@ -417,6 +419,18 @@ impl Column {
                         Style::default().fg(theme::role(Role::AccentTeal)),
                     ));
                 }
+                // Detached commands outlive the turn that spawned them (#762),
+                // so the row keeps saying "work is still going here" when no
+                // spinner can: the elapsed time is the part that answers "is
+                // it stuck", and the count says how many are behind it. The
+                // badge arrives ready-made from the frame's RowPlan, so this
+                // cell never touches the task manager.
+                if let Some(badge) = background {
+                    spans.push(Span::styled(
+                        format!(" {badge}"),
+                        Style::default().fg(theme::role(Role::Warning)),
+                    ));
+                }
                 if is_current {
                     spans.push(Span::styled(
                         " *",
@@ -456,6 +470,10 @@ struct RowPlan {
     columns: Vec<(Column, usize)>,
     /// The badge tier this frame resolved to.
     tier: SessionRowTier,
+    /// Detached commands still running per session, resolved ONCE for the
+    /// frame: the status column reads this instead of taking the manager's
+    /// lock again for every row, twice (natural width, then paint).
+    background: std::collections::HashMap<uuid::Uuid, String>,
 }
 
 /// Rank a tier so a column can ask "is this tier high enough?".
@@ -484,6 +502,26 @@ fn row_plan(app: &App, sessions: &[&Session], width: u16) -> RowPlan {
     let tier = responsive::session_row_tier(width as u16);
     let rank = tier_rank(tier);
 
+    // Detached commands, resolved once for the whole visible list: one lock
+    // for the frame instead of two per row inside the status cell.
+    let background: std::collections::HashMap<uuid::Uuid, String> = app
+        .agent_service
+        .background_manager()
+        .map(|mgr| {
+            sessions
+                .iter()
+                .filter_map(|s| {
+                    let tasks: Vec<(String, u64)> = mgr
+                        .running_tasks(s.id)
+                        .into_iter()
+                        .map(|t| (t.label, t.started.elapsed().as_secs()))
+                        .collect();
+                    super::background::row_background_badge(&tasks).map(|badge| (s.id, badge))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     // Natural width per column, capped so one runaway value cannot claim the
     // frame. Zero means no visible row has a value for that column.
     let mut natural = [0usize; Column::PRIORITY.len()];
@@ -492,11 +530,12 @@ fn row_plan(app: &App, sessions: &[&Session], width: u16) -> RowPlan {
             .current_session
             .as_ref()
             .is_some_and(|s| s.id == session.id);
+        let badge = background.get(&session.id).map(String::as_str);
         for (idx, column) in Column::PRIORITY.iter().enumerate() {
             if column.first_tier() > rank {
                 continue;
             }
-            let cell = column.cell(app, session, is_current, tier);
+            let cell = column.cell(app, session, is_current, tier, badge);
             natural[idx] = natural[idx].max(cell_width(&cell).min(column.cap(tier)));
         }
     }
@@ -533,6 +572,7 @@ fn row_plan(app: &App, sessions: &[&Session], width: u16) -> RowPlan {
         name_width,
         columns,
         tier,
+        background,
     }
 }
 
@@ -641,8 +681,9 @@ fn session_row(
         spans.push(Span::raw(" ".repeat(pad)));
     }
     for (column, column_width) in &plan.columns {
+        let badge = plan.background.get(&session.id).map(String::as_str);
         let cell = fit_cell(
-            column.cell(app, session, is_current, plan.tier),
+            column.cell(app, session, is_current, plan.tier, badge),
             *column_width,
         );
         let pad = column_width.saturating_sub(cell_width(&cell));

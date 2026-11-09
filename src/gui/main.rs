@@ -837,6 +837,14 @@ struct Dashboard {
     /// plan drawn in two places rings once. The terminal keeps the same
     /// single set (`tui::app::state::announced_task_completions`).
     announced_task_completions: std::collections::HashSet<Uuid>,
+    /// Until when each session's rail plan bar stays flashing orange, per
+    /// session, keyed by the plan's own session id (#2701 follow-up).
+    ///
+    /// The deadline is written on the exact event that rings the chime, so the
+    /// sound and the blink are two surfaces of one fact: a task just settled.
+    /// It is memory only, like the rail's streaming set: a window restart has
+    /// nothing to flash about.
+    plan_flash_until: HashMap<Uuid, std::time::Instant>,
     /// The selected session's transcript and its scroll handle, so a fresh
     /// load can open at the bottom where the conversation ends.
     transcript: transcript::TranscriptState,
@@ -4937,6 +4945,9 @@ impl Dashboard {
         if models_changed {
             cx.notify();
         }
+        // Pruned even on the busy path: a flash window that closed while a
+        // turn was streaming must not keep the map alive.
+        let flash_active = self.plan_flash_active(std::time::Instant::now());
         let events = agent_bridge::drain(&self.agent_rx);
         if events.is_empty() {
             // A live turn needs a repaint even when no event arrived: that is
@@ -4953,6 +4964,10 @@ impl Dashboard {
                     .rail_activity_map()
                     .values()
                     .any(|row| row.badge.is_some() || row.ring)
+                // A rail flash is an animation of its own: the plan bar has to
+                // keep alternating orange and its resting colour while the
+                // window is open, and stop the moment it closes.
+                || flash_active
             {
                 cx.notify();
             }
@@ -5695,6 +5710,40 @@ impl Dashboard {
         for id in rows {
             if let Some(progress) = self.rail_index.progress(id, now) {
                 map.insert(id, progress);
+            }
+        }
+        map
+    }
+
+    /// The detached commands every rail row is running, formatted once per
+    /// frame: `⏳ cargo test 32s` per session, `None` when nothing runs.
+    ///
+    /// The rail card answers "is anything still going in that conversation"
+    /// without opening it, which is the one fact a streaming spinner cannot
+    /// carry: a detached command takes the turn idle, so the row would
+    /// otherwise read as finished while a build grinds on (#762).
+    ///
+    /// Shaped by [`opencrabs::tui::render::format_background_tasks`], the same
+    /// formatter the composer strip and the terminal's footer use, so one
+    /// running task cannot read three different ways. One manager lookup for
+    /// the whole pass, never one per row.
+    fn rail_running_map(&self) -> HashMap<Uuid, SharedString> {
+        let Some(manager) = agent_bridge::bridge().and_then(|b| b.service.background_manager())
+        else {
+            return HashMap::new();
+        };
+        let mut map = HashMap::new();
+        for id in self.sessions.ordered().map(|s| s.id) {
+            let tasks: Vec<(String, u64)> = manager
+                .running_tasks(id)
+                .into_iter()
+                .map(|t| (t.label, t.started.elapsed().as_secs()))
+                .collect();
+            if let Some(line) = opencrabs::tui::render::format_background_tasks(
+                &tasks,
+                opencrabs::tui::render::LABEL_CHARS,
+            ) {
+                map.insert(id, SharedString::from(format!("\u{23f3} {line}")));
             }
         }
         map
@@ -8434,17 +8483,65 @@ impl Dashboard {
     /// window strip and every pane strip share one seen set, so a plan drawn
     /// twice rings once, and a reload of an unchanged file rings not at all.
     fn chime_settled_plan_tasks(&mut self) {
+        let now = std::time::Instant::now();
+        let mut rang = false;
+        // Which plans settled, so each one's row can flash. Collected while
+        // the seen set is borrowed, then written after it is released.
+        let mut settled: Vec<Uuid> = Vec::new();
         let seen = &mut self.announced_task_completions;
-        let mut plans: Vec<Option<&opencrabs::tui::plan::PlanDocument>> =
-            Vec::with_capacity(1 + self.pane_states.len());
-        plans.push(self.plan.document());
-        for pane in self.pane_states.values() {
-            plans.push(pane.plan.document());
+        if let Some(doc) = self.plan.document()
+            && opencrabs::utils::completion_sound::newly_resolved_in(seen, Some(doc)) > 0
+        {
+            rang = true;
+            // A pre-init plan writes the nil session until the hook stamps
+            // it; the open conversation is the honest fallback.
+            settled.push(if doc.session_id == Uuid::nil() {
+                self.transcript.session.unwrap_or(Uuid::nil())
+            } else {
+                doc.session_id
+            });
         }
-        if opencrabs::utils::completion_sound::newly_resolved(seen, &plans) == 0 {
+        for (pane_id, pane) in &self.pane_states {
+            let Some(doc) = pane.plan.document() else {
+                continue;
+            };
+            if opencrabs::utils::completion_sound::newly_resolved_in(seen, Some(doc)) > 0 {
+                rang = true;
+                // A plan written before the hook stamped its session carries
+                // the nil id; the pane's own key is the honest fallback.
+                settled.push(if doc.session_id == Uuid::nil() {
+                    *pane_id
+                } else {
+                    doc.session_id
+                });
+            }
+        }
+        if !rang {
             return;
         }
+        // One flash per settled session, on the same instant the chime rings:
+        // the sound and the blink are two surfaces of one event.
+        for session in settled {
+            if session == Uuid::nil() {
+                continue;
+            }
+            self.plan_flash_until.insert(
+                session,
+                now + opencrabs::utils::completion_sound::FLASH_WINDOW,
+            );
+        }
         Self::play_task_chime();
+    }
+
+    /// Whether any rail flash window is still open, dropping the expired ones.
+    ///
+    /// Read by the idle poll: while a bar blinks, the rail has to keep
+    /// repainting so the orange alternates, and once every window closed the
+    /// repaint budget goes back to zero. Pruned here rather than at paint time
+    /// so the map cannot grow past the sessions that are actually flashing.
+    fn plan_flash_active(&mut self, now: std::time::Instant) -> bool {
+        self.plan_flash_until.retain(|_, until| now < *until);
+        !self.plan_flash_until.is_empty()
     }
 
     /// The chime itself, honouring the operator's opt-in and the build
@@ -8802,6 +8899,12 @@ impl Render for Dashboard {
         // The plan bar reads the same cached index the badges just warmed:
         // one stat per row with a plan file, no second loader.
         let plan_progress = self.rail_plan_progress_map();
+        // Detached commands say "work is still running here" even when the
+        // turn is idle, so every card answers it without being opened.
+        let running_tasks = self.rail_running_map();
+        // One clock for the whole pass, so every flashing card blinks on the
+        // same frame instead of one behind its neighbour.
+        let flash_now = std::time::Instant::now();
         // Telegram-style topics: a parent's children paint as compact chips
         // on its card, not as their own rows. Resolve the chip set once before
         // the loop so the paint can skip those rows and hang the strip on the
@@ -8918,6 +9021,16 @@ impl Render for Dashboard {
                 // shared string, so the shared clock costs no allocation.
                 preview: self.sessions.previews.get(&id).cloned(),
                 plan: plan_progress.get(&id).copied(),
+                // The bar blinks orange for a few seconds after a task in
+                // this session's plan settles, on the same event that rings
+                // the chime, then falls back to its resting teal.
+                flash: opencrabs::utils::completion_sound::flash_blink_on(
+                    self.plan_flash_until.get(&id).copied(),
+                    flash_now,
+                ),
+                // The card's last line: whatever detached command is still
+                // running here, formatted exactly as the composer strip does.
+                running: running_tasks.get(&id).cloned(),
             };
             // A parent card carries its topics as inline chips: three by
             // default, a "+N" pill expands the rest, a collapse pill folds
@@ -12188,6 +12301,7 @@ fn main() {
                         plan_for: None,
                         plan_expanded: std::collections::HashSet::new(),
                         announced_task_completions: std::collections::HashSet::new(),
+                        plan_flash_until: HashMap::new(),
                         transcript: transcript::TranscriptState {
                             session: initial_session,
                             ..Default::default()
