@@ -23,9 +23,9 @@ use gpui::{
 use opencrabs::config::gui_theme;
 use opencrabs::db::Database;
 use opencrabs::db::models::Session;
+use opencrabs::db::repository::MessageRepository;
 use opencrabs::db::repository::session::{SessionListOptions, SessionRepository};
 use opencrabs::db::repository::session_favorites::SessionFavoritesRepository;
-use opencrabs::db::repository::{MessageRepository, PREVIEW_CHARS};
 
 // The menu primitives moved to `menu.rs` (#2613) so the transcript can draw
 // its own context menu without depending on the session rail. Re-exported
@@ -1017,12 +1017,11 @@ fn fit(s: &str, max_chars: usize) -> String {
 /// way the table stores the role. A role that is neither `user` nor
 /// `assistant` keeps its own name rather than pretending to be one of them.
 pub fn preview_line(role: &str, text: &str) -> SharedString {
-    let who = match role {
-        "user" => "You:",
-        "assistant" => "Crabs:",
-        other => other,
-    };
-    SharedString::from(format!("{who} {}", fit(text, PREVIEW_CHARS)))
+    // The wording lives in `ui_core`: the TUI session row draws the same
+    // line for the same session (#2701).
+    SharedString::from(opencrabs::ui_core::session_preview::preview_line(
+        role, text,
+    ))
 }
 
 /// One session row: title on the left, timestamp and cost aligned right on
@@ -1648,10 +1647,11 @@ fn brand_header() -> Div {
 #[cfg(test)]
 mod tests {
     use super::{
-        Database, MenuKind, PREVIEW_CHARS, SessionsState, accent_bar_visible, fit, load_sessions,
-        palette, pin_mark, preview_line, rail_menu_entries,
+        Database, MenuKind, SessionsState, accent_bar_visible, fit, load_sessions, palette,
+        pin_mark, preview_line, rail_menu_entries,
     };
     use opencrabs::db::models::Session;
+    use opencrabs::db::repository::PREVIEW_CHARS;
 
     /// #2701: a topic sits directly under its parent as a chip. Pinning it
     /// does not eject it to a top-level row: the pin orders top-level rows
@@ -2426,7 +2426,7 @@ mod tests {
     fn preview_line_prefixes_sender_and_truncates() {
         assert_eq!(preview_line("user", "hello").to_string(), "You: hello");
         assert_eq!(preview_line("assistant", "hi").to_string(), "Crabs: hi");
-        assert_eq!(preview_line("tool", "x").to_string(), "tool x");
+        assert_eq!(preview_line("tool", "x").to_string(), "tool: x");
 
         let long = "x".repeat(PREVIEW_CHARS + 10);
         let line = preview_line("user", &long).to_string();

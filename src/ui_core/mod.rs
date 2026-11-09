@@ -25,10 +25,12 @@ pub mod model_selector;
 pub mod palette;
 pub mod pane_tree;
 pub mod plan_history;
+pub mod plan_index;
 pub mod query;
 pub mod rail;
 pub mod rate;
 pub mod scroll;
+pub mod session_preview;
 pub mod split;
 pub mod topic_bar;
 pub mod usage;
@@ -40,7 +42,7 @@ mod purity_tests {
     //! break that silently at compile time for the GUI, never for us.
 
     /// Every source file in `ui_core`, with its contents.
-    fn sources() -> [(&'static str, &'static str); 35] {
+    fn sources() -> [(&'static str, &'static str); 37] {
         [
             ("ui_core/actions.rs", include_str!("actions.rs")),
             ("ui_core/bang.rs", include_str!("bang.rs")),
@@ -54,12 +56,17 @@ mod purity_tests {
             ("ui_core/mod.rs", include_str!("mod.rs")),
             ("ui_core/palette.rs", include_str!("palette.rs")),
             ("ui_core/plan_history.rs", include_str!("plan_history.rs")),
+            ("ui_core/plan_index.rs", include_str!("plan_index.rs")),
             ("ui_core/pane_tree.rs", include_str!("pane_tree.rs")),
             ("ui_core/query.rs", include_str!("query.rs")),
             ("ui_core/split.rs", include_str!("split.rs")),
             ("ui_core/rail.rs", include_str!("rail.rs")),
             ("ui_core/rate.rs", include_str!("rate.rs")),
             ("ui_core/scroll.rs", include_str!("scroll.rs")),
+            (
+                "ui_core/session_preview.rs",
+                include_str!("session_preview.rs"),
+            ),
             ("ui_core/topic_bar.rs", include_str!("topic_bar.rs")),
             ("ui_core/commands.rs", include_str!("commands.rs")),
             ("ui_core/help_keys.rs", include_str!("help_keys.rs")),

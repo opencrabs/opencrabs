@@ -342,24 +342,15 @@ fn progress(plan: &PlanDocument) -> (usize, usize, usize, String) {
 /// the rail card, so a row's bar and the composer strip agree about the same
 /// plan without a second copy of the filter.
 pub(crate) fn progress_counts(plan: &PlanDocument) -> (usize, usize) {
-    let total = plan.tasks.len();
-    let done = plan
-        .tasks
-        .iter()
-        .filter(|t| matches!(t.status, TaskStatus::Completed | TaskStatus::Skipped))
-        .count();
-    (done, total)
+    // One implementation, in `ui_core`: the TUI session row draws the same
+    // bar for the same plan (#2701), and two copies would drift.
+    opencrabs::ui_core::plan_index::progress_counts(plan)
 }
 
 /// The percentage and the ten-cell bar for a done/total pair. The rail card
 /// draws through this helper too, so the bar shape lives in exactly one place.
 pub(crate) fn progress_bar(done: usize, total: usize) -> (usize, String) {
-    let percent = (done * 100).checked_div(total).unwrap_or(0);
-    let filled = (done * 10).checked_div(total).unwrap_or(0);
-    (
-        percent,
-        format!("{}{}", "█".repeat(filled), "░".repeat(10 - filled)),
-    )
+    opencrabs::ui_core::plan_index::progress_bar(done, total)
 }
 
 /// The checklist body: header line, progress bar, then the visible tasks
