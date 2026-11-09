@@ -363,6 +363,12 @@ pub struct LiveTurn {
     /// When the question was sent, wall clock: the live bubble's timestamp, so
     /// a fresh turn reads the same as the row it becomes.
     pub sent_at: Option<chrono::DateTime<chrono::Local>>,
+    /// Whether a reload has already read this turn's question back out of the
+    /// DB. Set once, never before the row exists, so the card can stop asking
+    /// whether the newest persisted turn is its own: it has seen it land.
+    /// The question itself stays here, because the card is what draws it
+    /// while the persisted copy is skipped.
+    pub landed: bool,
     /// When the answer's first chunk arrived. Stamped once, not per repaint,
     /// or the timestamp would drift every frame.
     pub answer_at: Option<chrono::DateTime<chrono::Local>>,
@@ -422,6 +428,7 @@ impl LiveTurn {
         self.first_chunk = None;
         self.sent_at = None;
         self.answer_at = None;
+        self.landed = false;
         // The accumulator belongs to the turn that just ended; the finalized
         // rate deliberately survives, so an idle footer keeps the number
         // instead of blanking until the next turn streams.
@@ -628,6 +635,20 @@ impl LiveTurn {
         } else {
             self.settled.as_deref().filter(|t| !t.trim().is_empty())
         }
+    }
+
+    /// The paragraphs the crab actually spoke between tool calls, in order.
+    ///
+    /// They live in the card's body, which is folded by default, so a turn
+    /// with 27 tool calls read as a header and a count while the rail's
+    /// one-line preview quoted the sentence the reader could not find in the
+    /// chat. The prose is the turn's own words, not working-out, so the pane
+    /// prints it beside the card instead of hiding it behind a click.
+    pub fn narration(&self) -> impl Iterator<Item = &str> {
+        self.entries.iter().filter_map(|entry| match entry {
+            LiveEntry::Narration(text) => Some(text.as_str()),
+            _ => None,
+        })
     }
 }
 
@@ -1036,6 +1057,54 @@ pub fn turns_with_metrics(
         });
     }
     (hidden, out)
+}
+
+/// Whether this persisted turn is the exchange the live card is drawing.
+///
+/// The window keeps a live turn beside the rows it reloads, so the newest
+/// persisted turn and the live card can describe the same exchange. Identity
+/// is the question plus the second it was sent, never the row's position: a
+/// reload can install a different newest turn while a card keeps running, and
+/// the same text asked again later is a different turn.
+pub fn newest_live_turn_matches(turn: &Turn, live: &LiveTurn) -> bool {
+    let Some(question) = live.user.as_deref() else {
+        return false;
+    };
+    let question = question.trim();
+    if question.is_empty() {
+        return false;
+    }
+    let Some(Block::Msg {
+        role,
+        content,
+        time,
+        ..
+    }) = turn.blocks.first()
+    else {
+        return false;
+    };
+    if role != "user" || content.trim() != question {
+        return false;
+    }
+    let Some(sent) = live.sent_at else {
+        return true;
+    };
+    // A reload already read this question back out of the rows, so the turn
+    // whose question it is has been identified once and the seconds no longer
+    // have to agree: a write that landed late must not hand the same exchange
+    // back to the persisted copy while the card is still drawing it.
+    if live.landed {
+        return true;
+    }
+    // The row is stamped when the write landed, which can cross a second
+    // boundary, so a couple of seconds either way still reads as the same
+    // exchange. Text alone would also swallow a question the reader asked
+    // twice, and the previous answer would vanish while the new turn ran.
+    time.is_empty()
+        || [-2, -1, 0, 1, 2].iter().any(|offset| {
+            sent.checked_add_signed(chrono::TimeDelta::seconds(*offset))
+                .is_some_and(|at| live_time(Some(at)) == *time)
+        })
 }
 
 /// Whether one block still renders while its turn is folded. Mirrors
@@ -2400,6 +2469,33 @@ fn live_block(
     )
 }
 
+/// A narration paragraph, drawn as the assistant speaking rather than as
+/// working-out: plain markdown, no bubble and no dim, and registered with the
+/// drag surfaces like every other row so the sentence can be copied.
+fn narration_row(text: &str, drag: Option<&Rc<CopyDrag>>) -> AnyElement {
+    let body = div().w_full().min_w_0().px_2().child(md_block(text, None));
+    let Some(d) = drag.filter(|_| !text.trim().is_empty()) else {
+        return body.into_any_element();
+    };
+    let copy = markdown_copy_text(text);
+    let ordinal = {
+        let mut texts = d.texts.borrow_mut();
+        texts.push(copy);
+        texts.len() - 1
+    };
+    let selection = SelectionContext::new(d, ordinal);
+    selectable_row(
+        d,
+        ordinal,
+        div()
+            .w_full()
+            .min_w_0()
+            .px_2()
+            .child(md_block(text, Some(&selection))),
+    )
+    .into_any_element()
+}
+
 /// The running turn, drawn with the transcript's own block grammar: the
 /// question as a user bubble, tool rows with their live status, the streamed
 /// answer as markdown, notices in amber. Nothing here folds: the turn has no
@@ -2482,6 +2578,16 @@ fn live_view(
             Some(row) => row,
             None => block_view(&block, content_width, handlers, None).into_any_element(),
         });
+    }
+    // The words the turn spoke between tool calls, readable while it runs.
+    // They used to live only in the card's body, which folds by default, so a
+    // turn with 27 calls showed a header and a count and no prose while the
+    // rail quoted the sentence from the same row. The body still prints them
+    // when it is open, so this only fills the folded case.
+    if !expanded {
+        for paragraph in live.narration() {
+            col = col.child(narration_row(paragraph, drag));
+        }
     }
     col
 }
@@ -3072,8 +3178,21 @@ pub fn view(
         ));
     }
     let last = state.turns.len().saturating_sub(1);
+    // A turn still being drawn by the live card is not drawn again from the
+    // rows a reload just installed: the persisted copy has the same question,
+    // the same header and the same answer, and the screen showed all three
+    // twice. The card owns the exchange until `live` clears.
+    let live_on_screen = busy || !live.is_empty();
+    let newest_is_live = live_on_screen
+        && state
+            .turns
+            .last()
+            .is_some_and(|turn| newest_live_turn_matches(turn, live));
     for (ti, turn) in state.turns.iter().enumerate() {
         let newest = ti == last;
+        if newest && newest_is_live {
+            continue;
+        }
         let folded = !state.expanded.contains(&turn.anchor);
         let full = state.details.contains(&turn.anchor);
         // The card's head sits above the turn's first non-user row, as in the
@@ -5125,6 +5244,101 @@ mod tests {
         assert!(
             row.contains(["release.", "release(window, app)"].concat().as_str()),
             "the row release goes through the one copy path"
+        );
+    }
+
+    /// The duplicate the reader sees mid-turn: a reload installs the rows for
+    /// the turn the card is still drawing, so the screen holds two copies of
+    /// the question, the header and the answer. Identity is the question plus
+    /// its second, never the row's position.
+    #[test]
+    fn the_running_turn_is_recognised_in_the_rows_it_reloads() {
+        let mut live = LiveTurn::default();
+        live.begin("audit the repo config".into());
+        let stamped = live_time(live.sent_at);
+        let turn_with = |question: &str, time: String| Turn {
+            header: None,
+            summary: TurnSummary::default(),
+            metrics: None,
+            preview: None,
+            anchor: format!("{question}@{time}"),
+            blocks: vec![Block::Msg {
+                role: "user".into(),
+                content: question.into(),
+                time,
+                placeholder: false,
+                message_id: None,
+                forward: None,
+            }],
+            final_idx: None,
+        };
+        let turn = turn_with("audit the repo config", stamped.clone());
+        assert!(
+            newest_live_turn_matches(&turn, &live),
+            "the newest row is the question the card is drawing"
+        );
+
+        // The write can land a second after the send stamped the card.
+        let later = live
+            .sent_at
+            .and_then(|at| at.checked_add_signed(chrono::TimeDelta::seconds(1)))
+            .map(|at| live_time(Some(at)))
+            .unwrap_or_default();
+        assert!(
+            newest_live_turn_matches(&turn_with("audit the repo config", later), &live),
+            "a row stamped a second later is still the same exchange"
+        );
+
+        // A different question is a different turn, however close in time.
+        assert!(
+            !newest_live_turn_matches(&turn_with("something else", stamped), &live),
+            "a different question must not hide its answer"
+        );
+
+        // A row read back once identifies the exchange for good. A write that
+        // landed minutes late still belongs to this card, and matching by
+        // seconds alone would put the persisted turn and the card on screen
+        // together, which is the duplicate this fixes.
+        let mut known = LiveTurn::default();
+        known.begin("audit the repo config".into());
+        known.landed = true;
+        let drifted = known
+            .sent_at
+            .and_then(|at| at.checked_add_signed(chrono::TimeDelta::minutes(3)))
+            .map(|at| live_time(Some(at)))
+            .unwrap_or_default();
+        assert!(
+            newest_live_turn_matches(&turn_with("audit the repo config", drifted), &known),
+            "a question already read back is this exchange however late it was stamped"
+        );
+        assert!(
+            !newest_live_turn_matches(&turn_with("something else", drifted), &known),
+            "the text still decides, so a late stamp cannot hide another turn"
+        );
+    }
+
+    /// The prose a turn speaks between tool calls is part of the answer the
+    /// reader is following, so it is reachable outside the folded card.
+    #[test]
+    fn narration_is_reachable_outside_the_card_body() {
+        let mut live = LiveTurn::default();
+        live.begin("go".into());
+        live.push_tool(ToolCall::running("bash".into(), "bash: ls".into()));
+        live.push_narration("I'll audit the repo config first.");
+        live.push_narration("Then I'll check the runner setup.");
+        let said: Vec<&str> = live.narration().collect();
+        assert_eq!(
+            said,
+            vec![
+                "I'll audit the repo config first.",
+                "Then I'll check the runner setup."
+            ],
+            "narration keeps the order it was spoken in"
+        );
+        assert_eq!(
+            live.answer(),
+            None,
+            "narration is not the answer: the bubble below the card stays empty"
         );
     }
 }
