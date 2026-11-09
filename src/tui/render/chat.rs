@@ -11,7 +11,7 @@ use super::tools::{render_approve_menu, render_inline_approval, render_tool_grou
 use super::utils::{apply_rtl, wrap_line_with_padding};
 use ratatui::{
     Frame,
-    layout::Rect,
+    layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Padding, Paragraph},
@@ -688,6 +688,20 @@ struct TurnHeader {
 
 /// Render the chat messages
 pub(crate) fn render_chat(f: &mut Frame, app: &mut App, area: Rect) {
+    // The conversation's topic bar (#2701) sits above the transcript, one row:
+    // `All` first, then the topics. The transcript takes the rest of the area,
+    // and every coordinate below (including the mouse mapping) is measured
+    // from that reduced rect, so a click can never land a row off.
+    let area = match (&app.chat_topic_bar, app.chat_topic_bar_hidden) {
+        (Some(bar), false) if area.height > 2 => {
+            let [bar_area, rest] =
+                Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
+            render_topic_bar(f, bar, bar_area);
+            rest
+        }
+        _ => area,
+    };
+
     // A theme switch invalidates every cached line: the cache holds spans whose
     // colours are already resolved, so `/theme` would otherwise repaint only the
     // chrome and leave the transcript on the previous palette (#1634).
@@ -1846,4 +1860,46 @@ pub(crate) fn render_chat(f: &mut Frame, app: &mut App, area: Rect) {
             }
         }
     }
+}
+
+/// The chat's topic bar: one row of chips, `All` first, the open one marked.
+///
+/// The entry list comes from `ui_core::topic_bar`, the same rules the window's
+/// bar follows, so the two surfaces never disagree about what the strip holds
+/// or which entry is current.
+fn render_topic_bar(f: &mut Frame, bar: &crate::tui::app::session_cards::ChatTopicBar, area: Rect) {
+    let mut spans: Vec<Span<'static>> = vec![Span::raw("  ")];
+    let mut used = 2usize;
+    let width = area.width as usize;
+
+    for (index, entry) in bar.entries.iter().enumerate() {
+        let label = bar.label(*entry, index);
+        let is_open = entry.is_open(bar.root, bar.open);
+        // ` All ` plus a separator between chips.
+        let chip_width = label.width() + 2;
+        if used + chip_width + 1 > width {
+            break;
+        }
+        let style = if is_open {
+            Style::default()
+                .fg(theme::role(Role::Accent))
+                .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+        } else {
+            Style::default().fg(theme::role(Role::GrayMid))
+        };
+        spans.push(Span::styled(format!(" {label} "), style));
+        spans.push(Span::raw(" "));
+        used += chip_width + 1;
+    }
+    // Alt+←/→ are the only way to switch from here, so the hint rides the row
+    // instead of the footer, which belongs to the input's own keys.
+    let hint = " alt+←/→ switch  alt+t hide";
+    if used + hint.width() <= width {
+        spans.push(Span::styled(
+            hint.to_string(),
+            Style::default().fg(theme::role(Role::GrayDim)),
+        ));
+    }
+
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }

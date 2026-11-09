@@ -24,6 +24,7 @@ pub mod profiles_dialog;
 /// Reused by the gui transcript for thinking/narration parsing, same reason
 /// as `ledger_scan` above.
 pub mod reasoning_split;
+pub(crate) mod session_cards;
 pub mod skills_dialog;
 pub(crate) mod state;
 

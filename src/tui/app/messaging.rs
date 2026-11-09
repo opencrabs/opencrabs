@@ -701,7 +701,57 @@ impl App {
             self.pane_manager.save_layout();
         }
 
+        // The topic bar belongs to the conversation just opened (#2701).
+        self.refresh_chat_topic_bar();
+
         Ok(())
+    }
+
+    /// Rebuild the chat topic bar from the list already in memory (#2701).
+    ///
+    /// No query: `load_sessions` hydrates the parent map and the children, so
+    /// the bar is a filter over data the dialog is showing anyway. A topic
+    /// opens with its parent as the bar's root, which is how `All` gets back
+    /// to the whole conversation.
+    pub(crate) fn refresh_chat_topic_bar(&mut self) {
+        use crate::ui_core::topic_bar::{BarEntry, bar_entries};
+
+        let Some(current) = self.current_session.as_ref().map(|s| s.id) else {
+            self.chat_topic_bar = None;
+            return;
+        };
+        let root = self.topic_parents.get(&current).copied().unwrap_or(current);
+        let children: Vec<Uuid> = self
+            .sessions
+            .iter()
+            .filter(|s| self.topic_parents.get(&s.id) == Some(&root))
+            .map(|s| s.id)
+            .collect();
+        if children.is_empty() || !self.topics_enabled_sessions.contains(&root) {
+            self.chat_topic_bar = None;
+            return;
+        }
+
+        let labels = self
+            .sessions
+            .iter()
+            .filter(|s| self.topic_parents.get(&s.id) == Some(&root))
+            .map(|s| {
+                let title = crate::ui_core::rail::rail_title(
+                    s.title.as_deref(),
+                    self.topic_titles.get(&s.id).map(String::as_str),
+                );
+                (s.id, title)
+            })
+            .collect::<HashMap<Uuid, String>>();
+
+        let entries: Vec<BarEntry> = bar_entries(root, &children);
+        self.chat_topic_bar = Some(super::session_cards::ChatTopicBar {
+            root,
+            entries,
+            open: current,
+            labels,
+        });
     }
 
     /// Persist the current session ID to `~/.opencrabs/last_session` so
@@ -932,6 +982,12 @@ impl App {
             .unwrap_or_default()
             .into_iter()
             .collect();
+        self.topics_enabled_sessions = topic_repo
+            .topic_enabled_ids()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
         self.closed_sessions = topic_repo
             .closed_ids()
             .await
@@ -1013,6 +1069,36 @@ impl App {
         }
         self.sessions = ordered;
 
+        // Card rows (#2701): the newest thing said in every listed session, in
+        // ONE batched query. `last_messages_for` already skips plan events and
+        // tool rows, so the preview is the last real line of the conversation.
+        // A query failure degrades to no previews rather than an empty dialog.
+        self.session_previews = {
+            use crate::db::repository::message::MessageRepository;
+
+            let ids: Vec<Uuid> = self.sessions.iter().map(|s| s.id).collect();
+            if ids.is_empty() {
+                super::session_cards::PreviewMap::new()
+            } else {
+                MessageRepository::new(self.session_service.pool())
+                    .last_messages_for(&ids)
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(id, preview)| {
+                        let row = super::session_cards::SessionPreview {
+                            role: preview.role,
+                            text: preview.text,
+                        };
+                        (id, row)
+                    })
+                    .collect()
+            }
+        };
+
+        // The plan bar and the ready glyph (#2701), read from the plan files.
+        self.sweep_plans();
+
         // Populate project name cache for session list display
         if let Ok(projects) = self.project_service.list_projects().await {
             for p in projects {
@@ -1025,6 +1111,40 @@ impl App {
         self.usage_ledger_stats = ledger.stats_by_model().await.unwrap_or_default();
 
         Ok(())
+    }
+
+    /// Refresh the per-row plan facts from the plan files (#2701).
+    ///
+    /// Throttled to one sweep per window: the index keeps its own mtime cache,
+    /// so a sweep is a stat per known plan file, and repeated list loads (a
+    /// channel event can trigger one every second) must not pay it.
+    pub(crate) fn sweep_plans(&mut self) {
+        const SWEEP: std::time::Duration = std::time::Duration::from_secs(5);
+
+        let now = std::time::Instant::now();
+        if let Some(at) = self.plan_sweep_at
+            && now.duration_since(at) < SWEEP
+        {
+            return;
+        }
+        self.plan_sweep_at = Some(now);
+
+        let ids: Vec<Uuid> = self.sessions.iter().map(|s| s.id).collect();
+        self.session_plan_progress.clear();
+        self.session_plan_ready.clear();
+        for id in ids {
+            // `live` says a turn is in flight, which keeps a stale plan from
+            // ringing: the row already shows the spinner.
+            let live = self.processing_sessions.contains(&id);
+            if let Some(evidence) = self.plan_index.evidence(id, live, now)
+                && evidence.ready
+            {
+                self.session_plan_ready.insert(id);
+            }
+            if let Some(progress) = self.plan_index.progress(id, now) {
+                self.session_plan_progress.insert(id, progress);
+            }
+        }
     }
 
     /// Create the topic named in the prompt under the selected session, then
@@ -1102,6 +1222,175 @@ impl App {
         let repo = crate::db::repository::SessionRepository::new(self.session_service.pool());
         repo.set_topics_collapsed(parent, folded).await?;
         self.load_sessions().await
+    }
+
+    /// The `t` action on the selected row, in two states (#2701).
+    ///
+    /// A conversation that has never had topics on gets the flag written the
+    /// first time, exactly as the window's Seeker does (`TopicPick::
+    /// EnableThenDraft`). The prompt opens on the press after that, so the
+    /// first press never asks for a name the user has nowhere to put.
+    pub(crate) async fn add_topic_or_enable(&mut self) -> Result<()> {
+        let Some((id, title)) = self
+            .sessions
+            .get(self.selected_session_index)
+            .map(|s| (s.id, s.title.clone()))
+        else {
+            return Ok(());
+        };
+        if self.topic_parents.contains_key(&id) {
+            self.push_system_message(
+                "That is a topic. Topics nest only one level, so pick its parent.".to_string(),
+            );
+            return Ok(());
+        }
+        if self.topics_enabled_sessions.contains(&id) {
+            self.topic_naming = true;
+            self.topic_name_buffer.clear();
+            return Ok(());
+        }
+        let repo = crate::db::repository::SessionRepository::new(self.session_service.pool());
+        repo.set_topics_enabled(id, true).await?;
+        self.topics_enabled_sessions.insert(id);
+        let name = title.unwrap_or_else(|| "this conversation".to_string());
+        self.notification = Some(format!("Topics on for {name}: t again to name one"));
+        self.notification_shown_at = Some(std::time::Instant::now());
+        Ok(())
+    }
+
+    /// Open the group-topics picker for the selected row (#2701).
+    ///
+    /// Candidates are resolved once, here, from the list the user is looking
+    /// at: every session that is not the target, not a topic itself, and not
+    /// already a parent. The same exclusions the window's picker applies, so a
+    /// row that is already grouped cannot be re-grouped by accident; the
+    /// database guards still backstop whatever this lets through.
+    pub(crate) fn open_group_topics(&mut self) {
+        let Some(target) = self.sessions.get(self.selected_session_index) else {
+            return;
+        };
+        let target_id = target.id;
+        let target_title = crate::ui_core::rail::rail_title(
+            target.title.as_deref(),
+            self.topic_titles.get(&target_id).map(String::as_str),
+        );
+        if self.topic_parents.contains_key(&target_id) {
+            self.push_system_message(
+                "That is a topic. Topics nest only one level, so pick its parent.".to_string(),
+            );
+            return;
+        }
+
+        let candidates: Vec<super::session_cards::GroupCandidate> = self
+            .sessions
+            .iter()
+            .filter(|s| s.id != target_id)
+            .filter(|s| !self.topic_parents.contains_key(&s.id))
+            .filter(|s| !self.topic_parents.values().any(|p| *p == s.id))
+            .map(|s| {
+                let title = crate::ui_core::rail::rail_title(
+                    s.title.as_deref(),
+                    self.topic_titles.get(&s.id).map(String::as_str),
+                );
+                super::session_cards::GroupCandidate {
+                    id: s.id,
+                    title,
+                    selected: false,
+                }
+            })
+            .collect();
+
+        if candidates.is_empty() {
+            self.push_system_message(
+                "No session is free to become a topic: each one is already a topic or a group."
+                    .to_string(),
+            );
+            return;
+        }
+        self.group_topics = Some(super::session_cards::GroupTopicsPick::open(
+            target_id,
+            target_title,
+            candidates,
+        ));
+    }
+
+    /// Attach every marked candidate under the picker's target, then reload.
+    ///
+    /// A guard refusal stops the batch and leaves its sentence on the prompt,
+    /// so the user reads a reason ("that session already has topics of its
+    /// own") instead of a raw constraint error.
+    pub(crate) async fn submit_group_topics(&mut self) -> Result<()> {
+        let Some(pick) = self.group_topics.as_ref() else {
+            return Ok(());
+        };
+        let parent = pick.parent;
+        let children = pick.selected_ids();
+        if children.is_empty() {
+            self.group_topics = None;
+            return Ok(());
+        }
+
+        let repo = crate::db::repository::SessionRepository::new(self.session_service.pool());
+        for child in children {
+            if let Err(e) = repo.attach_topic(child, parent).await {
+                if let Some(pick) = self.group_topics.as_mut() {
+                    pick.error = Some(e.to_string());
+                }
+                return Ok(());
+            }
+        }
+        self.group_topics = None;
+        self.load_sessions().await
+    }
+
+    /// Delete `session_id` and every cached trace of it (`d`, after the
+    /// confirmation). The caller passes the id the confirmation named, so a
+    /// cursor that moved behind the banner cannot delete a different row.
+    pub(crate) async fn delete_session_at(&mut self, session_id: Uuid) -> Result<()> {
+        let is_current = self
+            .current_session
+            .as_ref()
+            .map(|s| s.id == session_id)
+            .unwrap_or(false);
+        self.session_service.delete_session(session_id).await?;
+        // Clean up all cached state for this session, including a draft no
+        // composer can ever reach again.
+        self.pane_message_cache.remove(&session_id);
+        self.drafts.remove(session_id);
+        // Also drop any background-session sidecar entry: without this a
+        // session that was processing in background at delete time would leak
+        // its pending_messages and tps_tracker forever. See
+        // background_session.rs doc for the routing model.
+        self.background_sessions.remove(&session_id);
+        if let Ok(mut q) = self.queued_messages.lock() {
+            q.remove(&session_id);
+        }
+        self.session_cancel_tokens.remove(&session_id);
+        self.processing_sessions.remove(&session_id);
+        self.session_previews.remove(&session_id);
+        self.session_plan_progress.remove(&session_id);
+        self.session_plan_ready.remove(&session_id);
+        if is_current {
+            self.current_session = None;
+            self.messages.clear();
+            self.render_cache.clear();
+            *self.shared_session_id.lock().await = None;
+        }
+        self.load_sessions().await?;
+        // The topic bar is built from the list this delete just rewrote, so a
+        // deleted session must not keep a chip. Deleting the open conversation
+        // leaves nothing to switch between, and the bar goes with it.
+        if self.current_session.is_some() {
+            self.refresh_chat_topic_bar();
+        } else {
+            self.chat_topic_bar = None;
+        }
+        // Adjust index if it's now out of bounds in the filtered view
+        let count = self.visible_session_indices().len();
+        if self.selected_session_index >= count {
+            self.selected_session_index = count.saturating_sub(1);
+        }
+        Ok(())
     }
 
     /// Clear all messages from the current session

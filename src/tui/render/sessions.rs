@@ -3,9 +3,11 @@
 //! Session manager view with navigation, renaming, and status indicators.
 //!
 //! The list is full-bleed (#2162): no border, no app title row, one row of
-//! footer at the bottom carrying the keys from the scoped keymap. Every
-//! session is exactly one terminal row, whatever the width, so the scroll
-//! math and the viewport can never disagree about where a session is.
+//! footer at the bottom carrying the keys from the scoped keymap. A session
+//! card is one to three rows (#2701): the name line, the plan bar when the
+//! session has a live plan, and the newest message preview. The scroll math
+//! walks the same heights the drawing does, so the selected card is always
+//! fully in view.
 //!
 //! Rows are laid out from one [`RowPlan`] computed per frame (#2175). Before
 //! that, each row solved its own gap and pushed a badge only when it had a
@@ -73,6 +75,14 @@ pub(super) fn render_sessions(f: &mut Frame, app: &App, area: Rect) {
     ])
     .areas(area);
 
+    // The group-topics picker takes the whole screen while it is open: the
+    // list behind it cannot be navigated and a half-covered picker reads as a
+    // broken list (#2701).
+    if let Some(pick) = &app.group_topics {
+        render_group_topics(f, pick, area);
+        return;
+    }
+
     // One source of truth for the visible rows: the same search + plan chip +
     // automation rule the input handler navigates and selects through (#2723).
     let visible_indices = app.visible_session_indices();
@@ -107,6 +117,22 @@ pub(super) fn render_sessions(f: &mut Frame, app: &App, area: Rect) {
             ),
             Span::styled(
                 "  Enter: assign  Esc: done",
+                Style::default().fg(theme::role(Role::TextDim)),
+            ),
+        ]));
+    }
+
+    // Delete confirmation (#2701): the row action asks, and this is the ask.
+    if let Some(confirm) = &app.delete_confirm {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("  Delete \"{}\"?", confirm.title),
+                Style::default()
+                    .fg(theme::role(Role::Error))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "  y: delete  n: cancel",
                 Style::default().fg(theme::role(Role::TextDim)),
             ),
         ]));
@@ -153,7 +179,8 @@ pub(super) fn render_sessions(f: &mut Frame, app: &App, area: Rect) {
         ]));
     }
 
-    // Track header line count for viewport scroll calculation
+    // Banners above the list: the scroll math below is measured from the top
+    // of the paragraph, so the selected card's offset includes these.
     let header_line_count = lines.len();
 
     if visible_indices.is_empty() && !app.session_search.is_empty() {
@@ -171,6 +198,10 @@ pub(super) fn render_sessions(f: &mut Frame, app: &App, area: Rect) {
         .collect();
     let plan = row_plan(app, &visible, content_area.width);
 
+    // One entry per visible session, each holding the 1-3 lines its card
+    // draws. The scroll math below walks these heights, so it can never
+    // disagree with the drawing about where a card starts.
+    let mut rows: Vec<Vec<Line<'static>>> = Vec::with_capacity(visible_indices.len());
     for (display_idx, &session_idx) in visible_indices.iter().enumerate() {
         let session = &app.sessions[session_idx];
         let is_selected = display_idx == app.selected_session_index;
@@ -181,26 +212,33 @@ pub(super) fn render_sessions(f: &mut Frame, app: &App, area: Rect) {
             .unwrap_or(false);
 
         if is_selected && app.session_renaming {
-            lines.push(rename_row(app, &plan));
+            rows.push(vec![rename_row(app, &plan)]);
             continue;
         }
         if is_selected && app.topic_naming {
-            lines.push(topic_name_row(app, &plan));
+            rows.push(vec![topic_name_row(app, &plan)]);
             continue;
         }
 
-        lines.push(session_row(app, session, is_selected, is_current, &plan));
+        rows.push(session_card_rows(
+            app,
+            session,
+            is_selected,
+            is_current,
+            &plan,
+        ));
     }
 
-    // Viewport scroll: keep the selected session visible. One row per
-    // session, so the row index is the line index.
+    // Viewport scroll: keep the WHOLE selected card visible, so a selected
+    // card's preview and plan bar are never the part that falls off the top.
     let visible_height = (content_area.height as usize).max(1);
-    let selected_line = header_line_count + app.selected_session_index;
-    let scroll = if selected_line >= visible_height {
-        (selected_line.saturating_sub(visible_height) + 1) as u16
-    } else {
-        0u16
-    };
+    let selected_row = app.selected_session_index.min(rows.len().saturating_sub(1));
+    let selected_start =
+        header_line_count + rows.iter().take(selected_row).map(Vec::len).sum::<usize>();
+    let selected_end = selected_start + rows.get(selected_row).map_or(1, Vec::len);
+    let scroll = selected_end.saturating_sub(visible_height) as u16;
+
+    lines.extend(rows.into_iter().flatten());
 
     f.render_widget(Paragraph::new(lines).scroll((scroll, 0)), content_area);
 
@@ -211,6 +249,125 @@ pub(super) fn render_sessions(f: &mut Frame, app: &App, area: Rect) {
         dialog_keys(DialogScope::Sessions),
         &format!("{} sessions", visible_indices.len()),
     );
+}
+
+/// The group-topics picker, full screen (#2701).
+///
+/// Same shape as the window's multi-select: the target named at the top, one
+/// row per candidate with a mark, Space toggles, Enter attaches. A guard
+/// refusal prints on the header instead of closing the picker, so the user
+/// keeps their marks and can drop the offending row.
+fn render_group_topics(
+    f: &mut Frame,
+    pick: &crate::tui::app::session_cards::GroupTopicsPick,
+    area: Rect,
+) {
+    let [content_area, rule_area, footer_area] = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(area);
+
+    let mut lines: Vec<Line<'static>> = vec![
+        Line::from(vec![
+            Span::styled(
+                "  Group topics under ",
+                Style::default().fg(theme::role(Role::TextDim)),
+            ),
+            Span::styled(
+                pick.parent_title.clone(),
+                Style::default()
+                    .fg(theme::role(Role::Accent))
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(Span::styled(
+            "  Space marks, Enter attaches, Esc cancels",
+            Style::default().fg(theme::role(Role::GrayDim)),
+        )),
+    ];
+    if let Some(error) = &pick.error {
+        lines.push(Line::from(Span::styled(
+            format!("  {error}"),
+            Style::default().fg(theme::role(Role::Error)),
+        )));
+    }
+
+    // Keep the cursor on screen on a long list, and never scroll past the
+    // end: the window starts at the cursor once it cannot all fit.
+    let room = (content_area.height as usize)
+        .saturating_sub(lines.len())
+        .max(1);
+    let first = pick.index.saturating_add(1).saturating_sub(room);
+
+    for (offset, candidate) in pick.candidates.iter().enumerate().skip(first).take(room) {
+        let is_cursor = offset == pick.index;
+        let mark = if candidate.selected { "[x]" } else { "[ ]" };
+        let style = if is_cursor {
+            Style::default()
+                .fg(theme::role(Role::Accent))
+                .add_modifier(Modifier::BOLD)
+        } else if candidate.selected {
+            Style::default().fg(theme::role(Role::Success))
+        } else {
+            Style::default().fg(theme::role(Role::TextPrimary))
+        };
+        let mut spans = vec![
+            Span::raw(" ".repeat(GUTTER)),
+            Span::styled(format!("{mark} "), style),
+            Span::styled(
+                truncate_to_width(&candidate.title, pick_title_room(content_area.width)),
+                style,
+            ),
+        ];
+        if is_cursor {
+            let bg = theme::role(Role::SelectionBg);
+            let used: usize = spans.iter().map(|s| s.content.width()).sum();
+            if used < content_area.width as usize {
+                spans.push(Span::styled(
+                    " ".repeat(content_area.width as usize - used),
+                    Style::default().bg(bg),
+                ));
+            }
+            spans = spans
+                .into_iter()
+                .map(|s| Span::styled(s.content, s.style.bg(bg)))
+                .collect();
+        }
+        lines.push(Line::from(spans));
+    }
+
+    f.render_widget(Paragraph::new(lines), content_area);
+    hints::render_separator(f, rule_area);
+    hints::render_footer_with_context(
+        f,
+        footer_area,
+        &[
+            crate::tui::app::dialog_keys::DialogKey {
+                events: &[],
+                label: "Space",
+                verb: "mark",
+            },
+            crate::tui::app::dialog_keys::DialogKey {
+                events: &[],
+                label: "Enter",
+                verb: "attach",
+            },
+            crate::tui::app::dialog_keys::DialogKey {
+                events: &[],
+                label: "Esc",
+                verb: "cancel",
+            },
+        ],
+        &format!("{} marked", pick.selected_ids().len()),
+    );
+}
+
+/// Room for a candidate's title on the picker row, after both gutters and the
+/// four-cell mark.
+fn pick_title_room(width: u16) -> usize {
+    (width as usize).saturating_sub(GUTTER * 2 + 5).max(1)
 }
 
 /// A right-hand column of the session list.
@@ -284,7 +441,9 @@ impl Column {
     fn cap(self, tier: SessionRowTier) -> usize {
         match self {
             Column::Date if tier == SessionRowTier::Narrow => 6,
-            Column::Date => 17,
+            // Timestamp plus ` $12.34`: a card that has run up a bill shows it
+            // without ellipsising the date it belongs to.
+            Column::Date => 26,
             Column::Status => 18,
             Column::Model => 34,
             Column::Branch => 10,
@@ -316,12 +475,26 @@ impl Column {
             // but opened in March rendered "2026-03-26" above one created
             // yesterday.
             Column::Date => {
-                let text = if tier == SessionRowTier::Narrow {
-                    format!(" {}", session.updated_at.format("%H:%M"))
-                } else {
-                    format!(" {}", session.updated_at.format("%Y-%m-%d %H:%M"))
-                };
-                vec![Span::styled(text, dim)]
+                if tier == SessionRowTier::Narrow {
+                    return vec![Span::styled(
+                        format!(" {}", session.updated_at.format("%H:%M")),
+                        dim,
+                    )];
+                }
+                // The card's cost rides on this column (#2701): the row already
+                // answers "when", so "what it cost" belongs beside it rather
+                // than in a column of its own that a narrow terminal drops.
+                let mut spans = vec![Span::styled(
+                    format!(" {}", session.updated_at.format("%Y-%m-%d %H:%M")),
+                    dim,
+                )];
+                if session.total_cost > 0.0 {
+                    spans.push(Span::styled(
+                        format!(" ${:.2}", session.total_cost),
+                        Style::default().fg(theme::role(Role::Warning)),
+                    ));
+                }
+                spans
             }
             Column::Size => {
                 if session.token_count <= 0 {
@@ -452,6 +625,19 @@ impl Column {
                     spans.push(Span::styled(
                         format!(" {activity}"),
                         Style::default().fg(theme::role(Role::GrayMid)),
+                    ));
+                }
+                // A plan waiting for a hand (#2701): the rail rings for this,
+                // the row shows the same mark so a waiting plan is visible
+                // from the list itself.
+                if app.session_plan_ready.contains(&session.id) {
+                    spans.push(Span::styled(
+                        " \u{2691}",
+                        Style::default()
+                            .fg(theme::role(Role::Warning))
+                            .add_modifier(Modifier::BOLD),
+                    ));
+                }
                     ));
                 }
                 if is_current {
@@ -686,6 +872,85 @@ fn fit_cell(spans: Vec<Span<'static>>, width: usize) -> Vec<Span<'static>> {
         break;
     }
     out
+}
+
+/// One session's card: the name line, then its plan bar and preview when it
+/// has them (#2701).
+///
+/// The rail card in the window carries the same three facts. The row keeps the
+/// single-column list the owner asked for: the extras hang under the name
+/// instead of widening the row, and a session with neither costs no extra
+/// line at all.
+fn session_card_rows(
+    app: &App,
+    session: &Session,
+    is_selected: bool,
+    is_current: bool,
+    plan: &RowPlan,
+) -> Vec<Line<'static>> {
+    let mut rows = vec![session_row(app, session, is_selected, is_current, plan)];
+
+    // Only a live plan with tasks draws a bar, so a session whose plan is
+    // finished or empty stays a one-line row.
+    if let Some(&(done, total)) = app.session_plan_progress.get(&session.id) {
+        rows.push(plan_row(app, session, done, total, plan, is_selected));
+    }
+
+    if let Some(preview) = app.session_previews.get(&session.id) {
+        rows.push(preview_row(preview, plan, is_selected));
+    }
+
+    rows
+}
+
+/// The plan bar under a session's name: `██████░░░░ 6/10 60%`.
+///
+/// The bar itself comes from `ui_core`, the same function the window's rail
+/// strip draws, so both surfaces show identical progress for the same plan.
+fn plan_row(
+    app: &App,
+    session: &Session,
+    done: usize,
+    total: usize,
+    plan: &RowPlan,
+    is_selected: bool,
+) -> Line<'static> {
+    let (percent, bar) = crate::ui_core::plan_index::progress_bar(done, total);
+    let mut spans = vec![
+        Span::raw(" ".repeat(GUTTER + 2)),
+        Span::styled(bar, Style::default().fg(theme::role(Role::Accent))),
+        Span::styled(
+            format!(" {done}/{total} {percent}%"),
+            Style::default().fg(theme::role(Role::GrayMid)),
+        ),
+    ];
+    if app.session_plan_ready.contains(&session.id) {
+        spans.push(Span::styled(
+            "  plan ready",
+            Style::default()
+                .fg(theme::role(Role::Warning))
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    finish_row(spans, plan.width, is_selected)
+}
+
+/// The newest message under a session's name, worded by `ui_core` so the row
+/// and the rail card say the same thing about the same session.
+fn preview_row(
+    preview: &crate::tui::app::session_cards::SessionPreview,
+    plan: &RowPlan,
+    is_selected: bool,
+) -> Line<'static> {
+    let room = plan.width.saturating_sub(GUTTER * 2 + 2).max(1);
+    let spans = vec![
+        Span::raw(" ".repeat(GUTTER + 2)),
+        Span::styled(
+            truncate_to_width(&preview.line(), room),
+            Style::default().fg(theme::role(Role::GrayDim)),
+        ),
+    ];
+    finish_row(spans, plan.width, is_selected)
 }
 
 /// One session, exactly one terminal row.

@@ -574,6 +574,18 @@ struct SessionsProbe {
     panes: usize,
     favorites: usize,
     filter: crate::tui::session_filter::SessionFilter,
+    /// A notice the binding pushed (close/fold on a plain session refuse
+    /// with a sentence rather than changing the row).
+    messages: usize,
+    /// Topics switched on for the fixture's session (`t`, first press).
+    topics_on: usize,
+    /// The topic name prompt (the branch `t` does not reach here).
+    topic_naming: bool,
+    /// The group-topics picker (`g`).
+    group_picker: bool,
+    /// The delete confirmation (`d`): the row is not gone until it is
+    /// answered, so this is what `d` must move.
+    delete_confirm: bool,
 }
 
 fn probe(app: &App) -> SessionsProbe {
@@ -586,6 +598,11 @@ fn probe(app: &App) -> SessionsProbe {
         panes: app.pane_manager.panes.len(),
         favorites: app.session_favorites.len(),
         filter: app.session_filter,
+        messages: app.messages.len(),
+        topics_on: app.topics_enabled_sessions.len(),
+        topic_naming: app.topic_naming,
+        group_picker: app.group_topics.is_some(),
+        delete_confirm: app.delete_confirm.is_some(),
     }
 }
 

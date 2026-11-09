@@ -1519,6 +1519,33 @@ impl App {
         use super::events::keys;
         use crossterm::event::{KeyCode, KeyModifiers};
 
+        // Topic bar keys (#2701). Alt is required so no bare arrow can be
+        // stolen from the input line, and the bar only answers while it is up.
+        if event.modifiers.contains(KeyModifiers::ALT) && self.chat_topic_bar.is_some() {
+            match event.code {
+                KeyCode::Left | KeyCode::Right => {
+                    let delta = if event.code == KeyCode::Left { -1 } else { 1 };
+                    let target = self.chat_topic_bar.as_ref().and_then(|b| b.step(delta));
+                    if let Some(target) = target
+                        && target
+                            != self
+                                .current_session
+                                .as_ref()
+                                .map(|s| s.id)
+                                .unwrap_or_default()
+                    {
+                        self.load_session(target).await?;
+                    }
+                    return Ok(());
+                }
+                KeyCode::Char('t') | KeyCode::Char('T') => {
+                    self.chat_topic_bar_hidden = !self.chat_topic_bar_hidden;
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+
         // Intercept keys when /approve menu is pending
         if self.has_pending_approve_menu() {
             if keys::is_up(&event) {
@@ -2541,6 +2568,51 @@ impl App {
         use super::events::keys;
         use crossterm::event::{KeyCode, KeyModifiers};
 
+        // Delete confirmation (#2701). `d` used to destroy the selected row on
+        // the keystroke itself, one slipped finger away from a lost
+        // conversation, so the row action asks and only y answers. The id the
+        // banner named is the id deleted: the confirmation, not the cursor,
+        // decides what goes.
+        if let Some(confirm) = self.delete_confirm.clone() {
+            match event.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                    self.delete_confirm = None;
+                    self.delete_session_at(confirm.id).await?;
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    self.delete_confirm = None
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+
+        // Group topics picker (#2701): Space marks, Enter attaches, Esc drops
+        // the pick. The list never wraps, so Down at the end stays put.
+        if self.group_topics.is_some() {
+            match event.code {
+                KeyCode::Esc => self.group_topics = None,
+                KeyCode::Up => {
+                    if let Some(pick) = self.group_topics.as_mut() {
+                        pick.move_by(-1);
+                    }
+                }
+                KeyCode::Down => {
+                    if let Some(pick) = self.group_topics.as_mut() {
+                        pick.move_by(1);
+                    }
+                }
+                KeyCode::Char(' ') => {
+                    if let Some(pick) = self.group_topics.as_mut() {
+                        pick.toggle();
+                    }
+                }
+                KeyCode::Enter => self.submit_group_topics().await?,
+                _ => {}
+            }
+            return Ok(());
+        }
+
         // Rename mode: typing the new name
         if self.session_renaming {
             match event.code {
@@ -2746,12 +2818,14 @@ impl App {
                 }
             }
         } else if event.code == KeyCode::Char('t') || event.code == KeyCode::Char('T') {
-            // New topic under the selected session (#2306). The name is asked for
+            // Topics on the selected session (#2306, two-state since #2701):
+            // the first press turns topics on, the next one asks for the name
             // in the prompt above the list.
-            if self.selected_session_actual_index().is_some() {
-                self.topic_naming = true;
-                self.topic_name_buffer.clear();
-            }
+            self.add_topic_or_enable().await?;
+        } else if event.code == KeyCode::Char('g') || event.code == KeyCode::Char('G') {
+            // Group existing sessions under the selected one (#2701): the same
+            // multi-select the window's rail menu opens.
+            self.open_group_topics();
         } else if event.code == KeyCode::Char('c') || event.code == KeyCode::Char('C') {
             // Close or reopen the selected topic (#2305).
             self.toggle_closed_selected().await?;
@@ -2826,45 +2900,16 @@ impl App {
             self.pane_manager.save_layout();
             // Stay on sessions screen — user picks which session goes in the new pane.
         } else if event.code == KeyCode::Char('d') || event.code == KeyCode::Char('D') {
-            // Delete the selected session
-            if let Some(session) = self
-                .selected_session_actual_index()
-                .and_then(|i| self.sessions.get(i))
-            {
-                let session_id = session.id;
-                let is_current = self
-                    .current_session
-                    .as_ref()
-                    .map(|s| s.id == session_id)
-                    .unwrap_or(false);
-                self.session_service.delete_session(session_id).await?;
-                // Clean up all cached state for this session, including a
-                // draft no composer can ever reach again.
-                self.pane_message_cache.remove(&session_id);
-                self.drafts.remove(session_id);
-                // Also drop any background-session sidecar entry —
-                // without this a session that was processing in
-                // background at delete time would leak its
-                // pending_messages and tps_tracker forever. See
-                // background_session.rs doc for the routing model.
-                self.background_sessions.remove(&session_id);
-                if let Ok(mut q) = self.queued_messages.lock() {
-                    q.remove(&session_id);
-                }
-                self.session_cancel_tokens.remove(&session_id);
-                self.processing_sessions.remove(&session_id);
-                if is_current {
-                    self.current_session = None;
-                    self.messages.clear();
-                    self.render_cache.clear();
-                    *self.shared_session_id.lock().await = None;
-                }
-                self.load_sessions().await?;
-                // Adjust index if it's now out of bounds in the filtered view
-                let count = self.visible_session_indices().len();
-                if self.selected_session_index >= count {
-                    self.selected_session_index = count.saturating_sub(1);
-                }
+            // Ask before destroying the row (#2701); y on the banner deletes.
+            if let Some(session) = self.sessions.get(self.selected_session_index) {
+                let title = crate::ui_core::rail::rail_title(
+                    session.title.as_deref(),
+                    self.topic_titles.get(&session.id).map(String::as_str),
+                );
+                self.delete_confirm = Some(super::session_cards::DeleteConfirm {
+                    id: session.id,
+                    title,
+                });
             }
         } else if (event.code == KeyCode::Char('p') || event.code == KeyCode::Char('P'))
             && (event.modifiers.contains(KeyModifiers::CONTROL)

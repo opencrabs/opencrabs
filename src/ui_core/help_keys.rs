@@ -402,7 +402,7 @@ pub const ROWS: &[HelpRow] = &[
         "ctrl+d",
         "D",
         Some("ctrl-d"),
-        "Delete the selected session",
+        "Delete the selected session (asks first)",
     ),
     row(
         HelpSection::Sessions,
@@ -431,7 +431,14 @@ pub const ROWS: &[HelpRow] = &[
         "t",
         "T",
         Some("t"),
-        "New topic under this session",
+        "Topics on, then a new topic under this session",
+    ),
+    row(
+        HelpSection::Sessions,
+        "g",
+        "G",
+        None,
+        "Group existing sessions under this one",
     ),
     row(
         HelpSection::Sessions,
@@ -554,6 +561,7 @@ mod tests {
         "P",
         "Esc",
         "T",
+        "G",
         "C",
         "Z",
     ];
