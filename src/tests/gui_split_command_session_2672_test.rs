@@ -126,8 +126,9 @@ fn the_seeded_turn_carries_the_session_it_belongs_to() {
     let main = production(GUI_MAIN);
     let body = arm_body(main, "TurnEvent::CommandTurn {");
     assert!(
-        body.contains("self.send_turn_to(session, text, cx)"),
-        "the seeded turn must be sent to the session it carries (#2672)"
+        body.contains("self.send_turn_to(session, text, display, cx)"),
+        "the seeded turn must be sent to the session it carries (#2672), and \
+         the display it carries keeps the prompt out of history (#2756)"
     );
     assert!(
         !body.contains("self.send_message("),

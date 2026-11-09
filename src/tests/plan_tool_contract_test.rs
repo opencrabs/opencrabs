@@ -340,7 +340,7 @@ async fn design_init_allowed_under_auto_approve_when_plan_slash_armed() {
         )
         .unwrap();
         match crate::utils::plan_mode::try_approve(ctx.session_id, ApprovalSource::User).await {
-            crate::utils::plan_mode::ApproveOutcome::SeedTurn { prompt } => {
+            crate::utils::plan_mode::ApproveOutcome::SeedTurn { prompt, .. } => {
                 assert!(prompt.contains("PLAN APPROVED"), "got: {prompt}");
                 assert!(prompt.contains("add_tasks"), "got: {prompt}");
             }

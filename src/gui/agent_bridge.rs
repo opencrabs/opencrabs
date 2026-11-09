@@ -132,7 +132,16 @@ pub enum TurnEvent {
     /// thread: `/plan <query>`, `/execute` seeding the checklist, or `/clear`
     /// asking the agent to acknowledge the cut. The turn belongs to the
     /// session that ran the command, so it carries that id with it (#2672).
-    CommandTurn { session: Uuid, text: String },
+    ///
+    /// `display` is the line the user sees when the text is scaffolding the
+    /// model needs and the user does not (#2756). `/execute` is the case that
+    /// matters: the model reads a full `[SYSTEM: PLAN APPROVED]` prompt, the
+    /// window shows the receipt, and history keeps the receipt.
+    CommandTurn {
+        session: Uuid,
+        text: String,
+        display: Option<String>,
+    },
     /// Personalized brain files were written from the onboarding notes; carries
     /// the line naming how many landed.
     BrainReady(String),
@@ -934,10 +943,17 @@ async fn drop_unanswered_duplicate(
 ///
 /// The progress forwarder (`install_progress_forwarder`) already streams
 /// events to `sink`; this thread only delivers the terminal event.
+///
+/// `display` is the row the user should read for this turn: the receipt of a
+/// command, or a channel's clean rendering of a wrapped message. The model
+/// always receives `content`; history gets `display` when one is supplied
+/// (#2756). Callers with nothing to hide pass `None` and history keeps the
+/// text that was sent.
 pub fn spawn_turn(
     service: Arc<AgentService>,
     session_id: Uuid,
     content: String,
+    display: Option<String>,
     sink: EventSink,
     cancel: tokio_util::sync::CancellationToken,
 ) {
@@ -964,13 +980,22 @@ pub fn spawn_turn(
                 // Before the turn writes its rows: a resend of the text an
                 // unanswered turn left behind must not stack a second copy of
                 // it in history (#2697).
+                // Compare against the row history will actually hold, which is
+                // the display line when a turn hides its prompt (#2756).
+                let persisted = display.as_deref().unwrap_or(&content);
                 let messages = opencrabs::services::MessageService::new(service.context().clone());
-                drop_unanswered_duplicate(&messages, session_id, &content).await;
-                let turn = service.send_message_with_tools_and_mode(
+                drop_unanswered_duplicate(&messages, session_id, persisted).await;
+                let turn = service.send_message_with_tools_and_display(
                     session_id,
                     content,
+                    display,
                     None,
                     Some(cancel.clone()),
+                    None,
+                    None,
+                    "tui",
+                    None,
+                    None,
                 );
                 // A cooperative token only lands where the service looks for
                 // it, and inside one provider stream it never looks (#2657).
@@ -1800,6 +1825,7 @@ async fn run_text_command(
                 out.push(TurnEvent::CommandTurn {
                     session: session_id,
                     text: arg.to_string(),
+                    display: None,
                 });
             }
             out
@@ -1820,10 +1846,11 @@ async fn run_text_command(
                     text,
                 }]
             }
-            opencrabs::utils::plan_mode::ApproveOutcome::SeedTurn { prompt } => {
+            opencrabs::utils::plan_mode::ApproveOutcome::SeedTurn { prompt, display } => {
                 vec![TurnEvent::CommandTurn {
                     session: session_id,
                     text: prompt,
+                    display: Some(display),
                 }]
             }
         },
@@ -2540,7 +2567,7 @@ mod tests {
             .find("drop_unanswered_duplicate(")
             .expect("spawn_turn runs the dedup guard");
         let send = body
-            .find("send_message_with_tools_and_mode(")
+            .find("send_message_with_tools_and_display(")
             .expect("spawn_turn sends the turn");
         assert!(
             guard < send,

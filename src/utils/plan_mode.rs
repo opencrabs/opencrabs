@@ -19,7 +19,12 @@ pub enum ApproveOutcome {
     /// The plan transitioned Editing -> Active (or an empty-tasks seed
     /// retry was accepted): dispatch this synthetic user message as one
     /// VISIBLE agent turn now.
-    SeedTurn { prompt: String },
+    ///
+    /// `prompt` is what the model reads. `display` is the one-line receipt
+    /// the user sees, in the live bubble and in the history row that
+    /// outlives the turn: the prompt itself is scaffolding and must never be
+    /// painted as something the user typed (#2756).
+    SeedTurn { prompt: String, display: String },
     /// The approve was refused; show this text to the user.
     Refused(String),
 }
@@ -77,6 +82,18 @@ fn start_prompt() -> String {
         .to_string()
 }
 
+/// The receipt a surface shows when a checklist plan is approved. One line,
+/// the same words everywhere: the window, the terminal and the channels all
+/// read this, so a user never has to learn a second vocabulary for the same
+/// action (#2756).
+pub const CHECKLIST_APPROVED_RECEIPT: &str =
+    "✅ Plan approved with /execute. Checklist is now running.";
+
+/// The receipt for the design track, where approval seeds the checklist from
+/// the `.md` instead of running tasks that already exist.
+pub const DESIGN_APPROVED_RECEIPT: &str =
+    "✅ Plan approved with /execute. Seeding the checklist from the design document.";
+
 /// Idle `/execute` / Approve. Allowed paths (locked):
 ///
 /// 1. Checklist approve (post-init Editing, `tasks` already present): the
@@ -126,6 +143,7 @@ pub async fn try_approve(session_id: Uuid, source: ApprovalSource) -> ApproveOut
                 }
                 return ApproveOutcome::SeedTurn {
                     prompt: start_prompt(),
+                    display: CHECKLIST_APPROVED_RECEIPT.to_string(),
                 };
             }
             // Design track: no tasks yet, so the `.md` prose IS the plan.
@@ -147,6 +165,7 @@ pub async fn try_approve(session_id: Uuid, source: ApprovalSource) -> ApproveOut
             }
             ApproveOutcome::SeedTurn {
                 prompt: seed_prompt(&md_path),
+                display: DESIGN_APPROVED_RECEIPT.to_string(),
             }
         }
         PlanModeState::Active => {
@@ -180,6 +199,7 @@ pub async fn try_approve(session_id: Uuid, source: ApprovalSource) -> ApproveOut
             }
             ApproveOutcome::SeedTurn {
                 prompt: seed_prompt(&md_path),
+                display: DESIGN_APPROVED_RECEIPT.to_string(),
             }
         }
     }

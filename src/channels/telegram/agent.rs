@@ -1818,6 +1818,7 @@ impl TelegramAgent {
                                     }
                                     crate::utils::plan_mode::ApproveOutcome::SeedTurn {
                                         prompt,
+                                        ..
                                     } => {
                                         if let Err(e) = bot
                                             .answer_callback_query(query.id.clone())

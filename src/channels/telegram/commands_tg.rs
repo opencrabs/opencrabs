@@ -587,7 +587,7 @@ pub(crate) async fn handle_channel_command(
                         .await?;
                         return Ok(CommandOutcome::Handled);
                     }
-                    crate::utils::plan_mode::ApproveOutcome::SeedTurn { prompt } => {
+                    crate::utils::plan_mode::ApproveOutcome::SeedTurn { prompt, .. } => {
                         // Visible seed turn: fall through to the agent with
                         // the locked implement-turn prompt as the message.
                         text = prompt;

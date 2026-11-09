@@ -1510,7 +1510,7 @@ impl App {
                     crate::utils::plan_mode::ApproveOutcome::Refused(reply) => {
                         self.push_system_message(reply);
                     }
-                    crate::utils::plan_mode::ApproveOutcome::SeedTurn { prompt } => {
+                    crate::utils::plan_mode::ApproveOutcome::SeedTurn { prompt, .. } => {
                         self.push_system_message("✅ Plan approved — starting now…".to_string());
                         self.reload_plan();
                         // Visible seed turn: dispatch the locked implement-turn
@@ -2294,6 +2294,13 @@ impl App {
         // structured summary the LLM uses to recover context. They must stay
         // fully transparent in the TUI — don't render them at all on reload.
         if msg.content.starts_with("[CONTEXT COMPACTION") {
+            return vec![];
+        }
+        // A synthetic seed is context for the model, never a message the user
+        // wrote (#2756). Rows persisted before the fix still carry the whole
+        // prompt, so the reload path refuses them too instead of painting a
+        // wall of instructions into the conversation.
+        if msg.role == "user" && crate::utils::is_internal_system_message(&msg.content) {
             return vec![];
         }
 
@@ -3444,7 +3451,7 @@ impl App {
             }
 
             // Add user message to UI — skip internal system triggers (e.g. /compact)
-            let is_system_trigger = content.starts_with("[SYSTEM:");
+            let is_system_trigger = crate::utils::is_internal_system_message(&content);
             if !is_system_trigger {
                 let display_content = Self::humanize_image_markers(&content);
 

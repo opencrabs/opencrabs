@@ -1,40 +1,76 @@
-/// The `is_system_continuation` check from `src/brain/agent/service/tool_loop.rs:212`.
-/// Tests the string prefix that determines whether a user message is a
-/// system continuation (and should be skipped from DB persistence).
+//! #2756: the seed prompts the harness sends to itself must never reach the
+//! transcript.
+//!
+//! This file used to assert `starts_with("[System:")` inline, which is the
+//! defect rather than a test of it: it pinned ONE spelling while every plan
+//! approval seed is written `[SYSTEM:` (uppercase), so 145 approval prompts
+//! and 52 compaction requests sat in the chat history as user rows and the
+//! suite stayed green. The rule now lives in
+//! `crate::utils::is_internal_system_message`, and these tests drive it.
+
+use crate::utils::is_internal_system_message;
 
 #[test]
-fn system_prefix_matches() {
-    let msg = "[System: You just rebuilt yourself from source and restarted]";
-    assert!(msg.starts_with("[System:"));
+fn the_plan_seed_is_internal() {
+    // The exact prompt `/execute` hands the model (`plan_mode.rs`). This is
+    // the one that leaked: uppercase, and the old check only knew the title
+    // case spelling.
+    let seed = "[SYSTEM: PLAN APPROVED] The user approved the checklist. Start task 1.";
+    assert!(is_internal_system_message(seed));
 }
 
 #[test]
-fn uppercase_system_does_not_match() {
-    // This was the bug fixed in 5524571 — the old prefix was "[SYSTEM:"
-    let msg = "[SYSTEM: You just rebuilt yourself]";
-    assert!(!msg.starts_with("[System:"));
+fn the_restart_seed_is_internal() {
+    let seed = "[System: You just rebuilt yourself from source and restarted]";
+    assert!(is_internal_system_message(seed));
 }
 
 #[test]
-fn normal_user_message_does_not_match() {
-    let msg = "Hello, how are you?";
-    assert!(!msg.starts_with("[System:"));
+fn the_compaction_seed_is_internal() {
+    let seed = "[SYSTEM: Compact context now. Summarize this conversation for continuity.]";
+    assert!(is_internal_system_message(seed));
 }
 
 #[test]
-fn empty_message_does_not_match() {
-    let msg = "";
-    assert!(!msg.starts_with("[System:"));
+fn a_typed_message_is_not_internal() {
+    assert!(!is_internal_system_message("Hello, how are you?"));
+    assert!(!is_internal_system_message(""));
+    // Someone who types the marker themselves wrote their own message.
+    assert!(!is_internal_system_message("[system: something I typed]"));
+    assert!(!is_internal_system_message("[Syste"));
+    // A compaction SUMMARY is a different marker with its own filter; the
+    // seed filter must not swallow the record of the summary.
+    assert!(!is_internal_system_message("[CONTEXT COMPACTION"));
 }
 
 #[test]
-fn partial_prefix_does_not_match() {
-    let msg = "[Syste";
-    assert!(!msg.starts_with("[System:"));
+fn the_marker_must_open_the_message() {
+    assert!(!is_internal_system_message(
+        "note to self [SYSTEM: PLAN APPROVED]"
+    ));
 }
 
+/// The three layers a seed can leak through, pinned on the source that has to
+/// use the one helper: the tool loop's persistence check, the window's
+/// transcript builder, and the terminal's send path.
 #[test]
-fn system_lowercase_does_not_match() {
-    let msg = "[system: something]";
-    assert!(!msg.starts_with("[System:"));
+fn every_layer_asks_the_shared_helper() {
+    for (file, src) in [
+        (
+            "tool_loop.rs",
+            include_str!("../brain/agent/service/tool_loop.rs"),
+        ),
+        ("transcript.rs", include_str!("../gui/transcript.rs")),
+        ("messaging.rs", include_str!("../tui/app/messaging.rs")),
+    ] {
+        let shipped = src.split("#[cfg(test)]").next().unwrap_or(src);
+        assert!(
+            shipped.contains("is_internal_system_message("),
+            "{file} must classify seeds through the shared helper, not a local prefix (#2756)"
+        );
+        assert!(
+            !shipped.contains("starts_with(\"[System:\")"),
+            "{file} still carries a one-spelling prefix check, which is the bug (#2756)"
+        );
+    }
 }

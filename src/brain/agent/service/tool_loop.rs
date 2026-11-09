@@ -7,6 +7,7 @@ use crate::brain::agent::error::{AgentError, Result};
 use crate::brain::provider::{ContentBlock, LLMRequest, LLMResponse, Message, Role};
 use crate::brain::tools::ToolExecutionContext;
 use crate::services::{MessageService, SessionService};
+use crate::utils::is_internal_system_message;
 use serde_json::Value;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -1323,11 +1324,9 @@ impl AgentService {
         }
 
         // Detect user corrections / negative feedback and record automatically.
-        // Only fires on real user messages (not system continuations).
-        if !user_message.starts_with("[System:")
-            && !user_message.starts_with("[SYSTEM:")
-            && is_user_correction(&user_message)
-        {
+        // Only fires on real user messages (not system continuations), in
+        // either spelling (#2756).
+        if !is_internal_system_message(&user_message) && is_user_correction(&user_message) {
             self.record_provider_feedback(
                 session_id,
                 "user_correction",
@@ -1366,8 +1365,6 @@ impl AgentService {
         context.add_message(user_msg);
 
         // Save user message to database (text only — images are ephemeral).
-        // Skip DB persistence for internal system continuations (restart recovery)
-        // — they go to context for the LLM but never appear in chat history.
         // Redact secrets so Bearer tokens, API keys etc. from cron prompts
         // never persist to DB or appear in TUI chat history.
         //
@@ -1379,9 +1376,20 @@ impl AgentService {
         // `first_attempt` keeps a rotation from re-writing the user row: the
         // retry re-enters with the same message and the history would otherwise
         // show it once per provider tried (#2009).
-        let is_system_continuation = user_message.starts_with("[System:");
-        if !is_system_continuation && first_attempt {
-            let raw_for_db = display_text_override.as_deref().unwrap_or(&user_message);
+        //
+        // A synthetic seed is internal (#2756): the model reads it, the user
+        // does not. Where the surface supplied a display line, that line is
+        // the row, because it is the receipt the user was shown. With no line
+        // the seed writes no row at all, so restart recovery and compaction
+        // triggers stay out of history. Both spellings count: the plan and
+        // compaction seeds are authored `[SYSTEM:` while recovery uses
+        // `[System:`, and a check that knew only one leaked the other.
+        let raw_for_db = if is_internal_system_message(&user_message) {
+            display_text_override.as_deref()
+        } else {
+            Some(display_text_override.as_deref().unwrap_or(&user_message))
+        };
+        if first_attempt && let Some(raw_for_db) = raw_for_db {
             let safe_message = crate::utils::sanitize::redact_secrets(raw_for_db);
             let _user_db_msg = message_service
                 .create_message(session_id, "user".to_string(), safe_message)

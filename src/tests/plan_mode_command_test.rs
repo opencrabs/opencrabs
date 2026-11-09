@@ -13,8 +13,8 @@ use crate::utils::plan_files::{
     set_pre_init_editing,
 };
 use crate::utils::plan_mode::{
-    ApproveOutcome, discard, enter_plan_mode, in_seed_window, seed_prompt, show_plan, try_approve,
-    validate_for_approve,
+    ApproveOutcome, CHECKLIST_APPROVED_RECEIPT, DESIGN_APPROVED_RECEIPT, discard, enter_plan_mode,
+    in_seed_window, seed_prompt, show_plan, try_approve, validate_for_approve,
 };
 use uuid::Uuid;
 
@@ -87,8 +87,14 @@ async fn first_approve_transitions_and_returns_seed_turn() {
         make_post_init(sid, GOLDEN_MD).await;
 
         match try_approve(sid, ApprovalSource::User).await {
-            ApproveOutcome::SeedTurn { prompt } => {
+            ApproveOutcome::SeedTurn { prompt, display } => {
                 assert!(prompt.contains("PLAN APPROVED"));
+                // #2756: the model reads the prompt, the user reads the
+                // receipt. The approval turn must carry the receipt so the
+                // bubble and the stored row never show the scaffolding.
+                // Zero tasks + a design `.md`: this is the DESIGN branch, so
+                // the receipt promises the seed, not a running checklist.
+                assert_eq!(display, DESIGN_APPROVED_RECEIPT);
                 assert!(prompt.contains("add_tasks"));
                 assert!(prompt.contains(&plan_md_path(sid).await.display().to_string()));
                 assert!(prompt.contains("Do NOT edit project files"));
@@ -137,8 +143,12 @@ async fn checklist_approve_transitions_without_md_validation() {
         assert_eq!(plan_mode_state(sid).await, PlanModeState::PostInitEditing);
 
         match try_approve(sid, ApprovalSource::User).await {
-            ApproveOutcome::SeedTurn { prompt } => {
+            ApproveOutcome::SeedTurn { prompt, display } => {
                 assert!(prompt.contains("PLAN APPROVED"));
+                // #2756: the model reads the prompt, the user reads the
+                // receipt. The approval turn must carry the receipt so the
+                // bubble and the stored row never show the scaffolding.
+                assert_eq!(display, CHECKLIST_APPROVED_RECEIPT);
                 assert!(
                     prompt.contains("already defined"),
                     "checklist approval dispatches the start prompt, not the .md seed: {prompt}"
@@ -233,7 +243,11 @@ async fn empty_tasks_seed_retry_redispatches_without_second_approve() {
         // Seed failed (tasks still empty): idle retry re-dispatches the
         // seed turn with no status transition and no re-stamp.
         match try_approve(sid, ApprovalSource::User).await {
-            ApproveOutcome::SeedTurn { prompt } => assert!(prompt.contains("add_tasks")),
+            ApproveOutcome::SeedTurn { prompt, display } => {
+                assert!(prompt.contains("add_tasks"));
+                // #2756: the design-track retry carries the design receipt.
+                assert_eq!(display, DESIGN_APPROVED_RECEIPT);
+            }
             other => panic!("expected retry SeedTurn, got {other:?}"),
         }
         let plan = plan_files::load_plan(sid).await.unwrap();

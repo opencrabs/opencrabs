@@ -21,6 +21,7 @@ use opencrabs::services::message::{CompletedPlanPayload, PLAN_COMPLETED_ROLE};
 use opencrabs::ui_core::card::{CARD_RADIUS, concentric_radius, glass_fill};
 use opencrabs::ui_core::copy_select::{self, TextPoint};
 use opencrabs::ui_core::plan_history::CompletedPlanView;
+use opencrabs::utils::is_internal_system_message;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
@@ -827,6 +828,12 @@ fn row_blocks(m: &Message, forward: Option<ForwardMark>) -> Vec<Block> {
         return blocks;
     }
     if m.content.starts_with("[CONTEXT COMPACTION") {
+        return blocks;
+    }
+    // A hidden prompt is not a conversation row (#2756). Rows written before
+    // the display line existed still hold the `[SYSTEM: ...]` scaffolding, and
+    // a row persisted while a turn was in flight can too; neither may render.
+    if m.role == "user" && is_internal_system_message(&m.content) {
         return blocks;
     }
     if m.role != "assistant" {
@@ -3887,6 +3894,24 @@ mod tests {
         let blocks = flat(&[row("user", "question", 1), malformed], 2);
         assert_eq!(blocks.len(), 1, "only the ordinary user row remains");
         assert!(!block_text(&blocks[0]).contains("GUI-PLAN-JSON-SENTINEL"));
+    }
+
+    /// #2756: a seed that still sits in the ledger must not paint. The plan
+    /// approval prompt is uppercase and the old filter only knew the title
+    /// case spelling, so 145 of them rendered as user bubbles.
+    #[test]
+    fn gui_transcript_never_paints_an_internal_seed() {
+        for seed in [
+            "[SYSTEM: PLAN APPROVED] The user approved the checklist.",
+            "[System: You just rebuilt yourself from source and restarted]",
+        ] {
+            assert!(
+                row_blocks(&row("user", seed, 1), None).is_empty(),
+                "{seed} is scaffolding, not a conversation row"
+            );
+        }
+        // A message the user typed is still a row of its own.
+        assert_eq!(row_blocks(&row("user", "hello", 1), None).len(), 1);
     }
 
     /// The card's narration lines, in order, so a test reads the words the

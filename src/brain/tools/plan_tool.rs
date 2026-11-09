@@ -3502,7 +3502,7 @@ impl Tool for PlanTool {
                     crate::utils::plan_mode::ApproveOutcome::Refused(msg) => {
                         Ok(ToolResult::error(msg))
                     }
-                    crate::utils::plan_mode::ApproveOutcome::SeedTurn { prompt } => {
+                    crate::utils::plan_mode::ApproveOutcome::SeedTurn { prompt, .. } => {
                         Ok(ToolResult::success(format!(
                             "✅ Plan self-approved (autonomy).\n\n{prompt}"
                         )))

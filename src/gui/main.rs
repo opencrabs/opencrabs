@@ -2770,7 +2770,7 @@ impl Dashboard {
         let pane_editor = cx.new(editor::Editor::new);
         cx.subscribe(&pane_editor, move |this, _editor, event, cx| match event {
             editor::EditorEvent::Sent(text) => {
-                this.send_from_pane(id, text.clone(), cx);
+                this.send_from_pane(id, text.clone(), None, cx);
             }
             editor::EditorEvent::Preview(path) => this.open_preview(path.clone(), cx),
         })
@@ -3000,6 +3000,7 @@ impl Dashboard {
                     session,
                     "[SYSTEM: Compact context now. Summarize this conversation for continuity.]"
                         .to_string(),
+                    Some("/compact".to_string()),
                     cx,
                 );
                 self.live
@@ -3010,7 +3011,13 @@ impl Dashboard {
             C::Cowork => {
                 // No screen in either frontend: the agent calls the tool that
                 // builds the deep link, exactly as the terminal asks it to.
-                self.send_command_turn(session, text_commands::cowork_prompt(&arg), cx);
+                let shown = format!("/cowork {arg}");
+                self.send_command_turn(
+                    session,
+                    text_commands::cowork_prompt(&arg),
+                    Some(shown.trim_end().to_string()),
+                    cx,
+                );
             }
             C::Goal => {
                 if opencrabs::brain::goal::is_bare(&arg) {
@@ -3021,9 +3028,11 @@ impl Dashboard {
                         .push(opencrabs::brain::goal::goal_usage_warning());
                     cx.notify();
                 } else {
+                    let shown = format!("/goal {arg}");
                     self.send_command_turn(
                         session,
                         opencrabs::brain::goal::goal_command_prompt(&arg),
+                        Some(shown.trim_end().to_string()),
                         cx,
                     );
                 }
@@ -4775,7 +4784,15 @@ impl Dashboard {
             .is_some_and(|tree| tree.leaves().len() > 1)
     }
 
-    fn send_from_pane(&mut self, session: Uuid, text: String, cx: &mut Context<Self>) {
+    /// A pane's own send. `display` is the row the reader gets when the text is
+    /// scaffolding the model needs and the user does not (#2756).
+    fn send_from_pane(
+        &mut self,
+        session: Uuid,
+        text: String,
+        display: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         let text = text.trim().to_string();
         if text.is_empty() {
             return;
@@ -4824,19 +4841,20 @@ impl Dashboard {
             return;
         };
         if pane_busy {
-            agent_bridge::queue_push(session, agent_bridge::PendingMessage::plain(text));
+            agent_bridge::queue_push(session, Self::pending_message(text, display.clone()));
             cx.notify();
             return;
         }
         let Some(bridge) = agent_bridge::bridge() else {
-            agent_bridge::queue_push(session, agent_bridge::PendingMessage::plain(text));
+            agent_bridge::queue_push(session, Self::pending_message(text, display.clone()));
             cx.notify();
             return;
         };
         let cancel = tokio_util::sync::CancellationToken::new();
+        let shown = display.clone().unwrap_or_else(|| text.clone());
         if let Some(pane) = self.pane_states.get_mut(&session) {
             pane.live = transcript::LiveTurn::default();
-            pane.live.begin(text.clone());
+            pane.live.begin(shown);
             pane.transcript.live_expanded = false;
             pane.busy = true;
             pane.cancel = Some(cancel.clone());
@@ -4851,6 +4869,7 @@ impl Dashboard {
             bridge.service.clone(),
             session,
             text,
+            display,
             self.sink.clone(),
             cancel,
         );
@@ -5059,6 +5078,7 @@ impl Dashboard {
             bridge.service.clone(),
             session,
             joined.context_text,
+            Some(joined.display_text),
             self.sink.clone(),
             cancel,
         );
@@ -5120,11 +5140,17 @@ impl Dashboard {
     /// in pane B approved B's plan and ran the seeded checklist in A. Both
     /// paths already own the queue and busy gates for their leaf, so the turn
     /// keeps the conversation it was asked for.
-    fn send_turn_to(&mut self, session: Uuid, text: String, cx: &mut Context<Self>) {
+    fn send_turn_to(
+        &mut self,
+        session: Uuid,
+        text: String,
+        display: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         if Some(session) == self.transcript.session {
-            self.send_message(text, cx);
+            self.send_message_showing(text, display, cx);
         } else {
-            self.send_from_pane(session, text, cx);
+            self.send_from_pane(session, text, display, cx);
         }
     }
 
@@ -5132,14 +5158,33 @@ impl Dashboard {
     /// ran it (#2672). With no session open the window's own path keeps the
     /// text: it waits in the queue and a conversation is created, exactly as a
     /// composer send with nothing on screen does.
-    fn send_command_turn(&mut self, session: Option<Uuid>, text: String, cx: &mut Context<Self>) {
+    fn send_command_turn(
+        &mut self,
+        session: Option<Uuid>,
+        text: String,
+        display: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         match session {
-            Some(session) => self.send_turn_to(session, text, cx),
-            None => self.send_message(text, cx),
+            Some(session) => self.send_turn_to(session, text, display, cx),
+            None => self.send_message_showing(text, display, cx),
         }
     }
 
     fn send_message(&mut self, text: String, cx: &mut Context<Self>) {
+        self.send_message_showing(text, None, cx);
+    }
+
+    /// The same send, with the row history should keep when the text is a
+    /// prompt the user must not read (#2756). A command that composes a turn
+    /// passes its receipt here, so the `[SYSTEM: ...]` scaffolding stays in
+    /// the model's context and never becomes a bubble.
+    fn send_message_showing(
+        &mut self,
+        text: String,
+        display: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         let text = text.trim().to_string();
         if text.is_empty() {
             return;
@@ -5205,9 +5250,11 @@ impl Dashboard {
             // below, after this one, which is the order they were queued in.
             match self.transcript.session {
                 Some(sid) => {
-                    agent_bridge::queue_push(sid, agent_bridge::PendingMessage::plain(text))
+                    agent_bridge::queue_push(sid, Self::pending_message(text, display.clone()))
                 }
-                None => self.unsent.push(agent_bridge::PendingMessage::plain(text)),
+                None => self
+                    .unsent
+                    .push(Self::pending_message(text, display.clone())),
             }
             self.finish_recall(&sent_from, cx);
             // The composer now says a message is waiting on the turn, the
@@ -5219,7 +5266,8 @@ impl Dashboard {
         let Some(bridge) = agent_bridge::bridge() else {
             // Still booting: keep the message, it fires on Ready. The queue
             // strip is where the user sees it.
-            self.unsent.push(agent_bridge::PendingMessage::plain(text));
+            self.unsent
+                .push(Self::pending_message(text, display.clone()));
             self.sync_composer_hint(cx);
             cx.notify();
             return;
@@ -5228,11 +5276,13 @@ impl Dashboard {
         // is nothing to write into, so one is created and the text waits in
         // the queue rather than vanishing into a session nobody is looking at.
         let Some(sid) = self.transcript.session else {
-            self.unsent.push(agent_bridge::PendingMessage::plain(text));
+            self.unsent
+                .push(Self::pending_message(text, display.clone()));
             self.new_session(cx);
             return;
         };
-        self.live.begin(text.clone());
+        self.live
+            .begin(display.clone().unwrap_or_else(|| text.clone()));
         // A send is the reader asking for the end of the conversation (#2698).
         self.rearm_transcript_follow();
         self.transcript.live_expanded = false;
@@ -5256,11 +5306,27 @@ impl Dashboard {
         // does it (`FileService::get_or_create_file`), so the file lands in
         // the session's artifacts, not just in the message text.
         let attached = editor::marker_paths(&text);
-        agent_bridge::spawn_turn(bridge.service.clone(), sid, text, self.sink.clone(), cancel);
+        agent_bridge::spawn_turn(
+            bridge.service.clone(),
+            sid,
+            text,
+            display,
+            self.sink.clone(),
+            cancel,
+        );
         if !attached.is_empty() {
             agent_bridge::spawn_track_files(self.db_path.clone(), sid, attached);
         }
         cx.notify();
+    }
+
+    /// The queue entry for a send: a hidden prompt keeps its display line, so
+    /// the queue strip never reads `[SYSTEM: ...]` (#2756).
+    fn pending_message(text: String, display: Option<String>) -> agent_bridge::PendingMessage {
+        match display {
+            Some(shown) => agent_bridge::PendingMessage::system(text, shown),
+            None => agent_bridge::PendingMessage::plain(text),
+        }
     }
 
     /// Drain the bridge channel: fold progress into the live view, finalize
@@ -5412,8 +5478,12 @@ impl Dashboard {
                 }
                 // A text command that needs one visible turn: `/plan <query>`,
                 // `/execute` seeding the checklist, or `/goal`.
-                agent_bridge::TurnEvent::CommandTurn { session, text } => {
-                    self.send_turn_to(session, text, cx);
+                agent_bridge::TurnEvent::CommandTurn {
+                    session,
+                    text,
+                    display,
+                } => {
+                    self.send_turn_to(session, text, display, cx);
                 }
                 agent_bridge::TurnEvent::SessionDeleted(id) => {
                     logging::info(&format!("session deleted {id}"));
@@ -6221,7 +6291,7 @@ impl Dashboard {
             );
             return;
         };
-        self.live.begin(display_text);
+        self.live.begin(display_text.clone());
         // A new turn re-arms the follow, the terminal's own rule (#2698).
         self.rearm_transcript_follow();
         self.transcript.live_expanded = false;
@@ -6238,6 +6308,7 @@ impl Dashboard {
             bridge.service.clone(),
             session_id,
             context_text,
+            Some(display_text.clone()),
             self.sink.clone(),
             cancel,
         );
@@ -6288,7 +6359,7 @@ impl Dashboard {
             return;
         };
         let mut live = transcript::LiveTurn::default();
-        live.begin(display_text);
+        live.begin(display_text.clone());
         let cancel = tokio_util::sync::CancellationToken::new();
         self.stashed.insert(
             session_id,
@@ -6307,6 +6378,7 @@ impl Dashboard {
             bridge.service.clone(),
             session_id,
             context_text,
+            Some(display_text.clone()),
             self.sink.clone(),
             cancel,
         );
@@ -6395,7 +6467,7 @@ impl Dashboard {
                     move |this: &mut Self, _ev: &gpui::ClickEvent, _window, cx| {
                         cx.stop_propagation();
                         agent_bridge::options_take(session);
-                        this.send_turn_to(session, label.clone(), cx);
+                        this.send_turn_to(session, label.clone(), None, cx);
                     },
                 ));
                 (item, pick)
@@ -6461,6 +6533,7 @@ impl Dashboard {
                 bridge.service.clone(),
                 sid,
                 joined.context_text,
+                Some(joined.display_text),
                 self.sink.clone(),
                 cancel,
             );
