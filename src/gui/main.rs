@@ -17329,11 +17329,12 @@ mod tests {
             ("esc", "Cancel or step back"),
             // The session letters the rail answers now (#2670). p is absent on
             // purpose: the window has no projects screen yet (#2669), so its
-            // row carries no window chord.
+            // row carries no window chord. z is absent too: #2701 replaced the
+            // fold tree with chips that always paint, so the window answers no
+            // z and must not advertise one.
             ("r", "Rename the selected session"),
             ("t", "New topic under this session"),
             ("c", "Close or reopen the selected topic"),
-            ("z", "Fold or unfold the topic tree"),
         ];
         let sessions: Vec<_> = help_keys::section_rows(HelpSection::Sessions).collect();
         for (chord, description) in wanted {

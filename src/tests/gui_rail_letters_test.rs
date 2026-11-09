@@ -36,7 +36,7 @@ fn the_rail_answers_the_session_letters() {
     let keys = on_key();
     // Each letter is spelled with the rail_focused gate the arrows use, so a
     // letter typed with the composer focused stays text (#2670).
-    for letter in ["r", "t", "c", "z"] {
+    for letter in ["r", "t", "c"] {
         let header = format!("\"{letter}\" if self.rail_focused => {{");
         assert!(
             keys.contains(&header),
@@ -58,9 +58,16 @@ fn the_rail_answers_the_session_letters() {
         arm_body("\"c\" if self.rail_focused => {").contains("self.toggle_closed_topic("),
         "c closes or reopens the topic"
     );
+    // #2701 replaced the fold tree with chips that always paint, so the window
+    // answers no z. Retiring it honestly beats leaving a key that folds
+    // nothing while the help still advertises it.
     assert!(
-        arm_body("\"z\" if self.rail_focused => {").contains("self.toggle_fold_topic("),
-        "z folds or unfolds the topic tree"
+        !keys.contains("\"z\" if self.rail_focused => {"),
+        "z is retired with the fold tree, not silently dead"
+    );
+    assert!(
+        !GUI_MAIN.contains("fn toggle_fold_topic("),
+        "the handler left with the key that called it"
     );
 }
 
@@ -110,14 +117,19 @@ fn the_prompt_heading_stops_calling_every_conversation_a_topic() {
 fn the_window_help_admits_the_session_letters() {
     use crate::ui_core::help_keys::{HelpSection, gui_rows, section_rows};
     // Every Sessions row the window answers is listed in its help, and the
-    // four letters are among them now that the rail answers them.
+    // three letters it still answers are among them now that the rail answers
+    // them. z left with the fold tree (#2701).
     let gui: Vec<&str> = gui_rows().map(|r| r.neutral).collect();
-    for chord in ["r", "t", "c", "z"] {
+    for chord in ["r", "t", "c"] {
         assert!(
             gui.contains(&chord),
             "the window's help lists {chord} now that the rail answers it"
         );
     }
+    assert!(
+        !gui.contains(&"z"),
+        "the window's help lists no z: the fold tree is gone (#2701)"
+    );
     assert!(
         !gui.contains(&"p"),
         "p is not offered by the window's help while the key is unbound"
