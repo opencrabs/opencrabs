@@ -34,6 +34,41 @@ pub struct SessionListOptions {
 /// Title prefix every spawned sub-agent session carries, set by `spawn_agent`.
 pub const SUBAGENT_TITLE_PREFIX: &str = "subagent:";
 
+/// Title marker every cron job session ends with: `Cron: <job name>
+/// [cron-job:<uuid>]`. The readable part can be renamed; the marker is the
+/// stable lookup key, so classification keys on it too (#2714).
+pub const CRON_TITLE_MARKER: &str = "[cron-job:";
+
+/// The exact title of the autonomous RSI cycle session (#2714).
+pub const RSI_SESSION_TITLE: &str = "RSI autonomous cycle";
+
+/// What kind of session a title belongs to. Title-based only: cron and RSI
+/// encode their identity in the title, and there is no kind column (#2714).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionKind {
+    Human,
+    Cron,
+    Rsi,
+    Subagent,
+}
+
+/// Classify a session by its title. Pub in the library so the GUI binary and
+/// the TUI both call the same decision and one session reads as the same kind
+/// on every surface (#2714). The cron check mirrors the scheduler's suffix
+/// lookup: the marker must sit in a title that ends with the closing bracket,
+/// so a rename of the readable part never changes the kind.
+pub fn classify_session_title(title: &str) -> SessionKind {
+    if title.starts_with(SUBAGENT_TITLE_PREFIX) {
+        SessionKind::Subagent
+    } else if title.ends_with(']') && title.contains(CRON_TITLE_MARKER) {
+        SessionKind::Cron
+    } else if title == RSI_SESSION_TITLE {
+        SessionKind::Rsi
+    } else {
+        SessionKind::Human
+    }
+}
+
 /// Why an existing session could not be attached as a topic. Typed so the
 /// picker can show a plain sentence instead of a raw constraint error; the
 /// migration triggers remain the last line of defence behind these guards.
@@ -1150,9 +1185,78 @@ impl<T> OptionalExt<T> for rusqlite::Result<T> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AttachTopicError, OptionalExt, Session, SessionRepository, params};
+    use super::{
+        AttachTopicError, CRON_TITLE_MARKER, OptionalExt, RSI_SESSION_TITLE, SUBAGENT_TITLE_PREFIX,
+        Session, SessionKind, SessionRepository, classify_session_title, params,
+    };
     use crate::db::Database;
     use uuid::Uuid;
+
+    /// #2714: one title, one kind, on every surface. The four identities the
+    /// rail and session-list filters need to tell apart.
+    #[test]
+    fn session_kind_classifies_the_four_identities() {
+        assert_eq!(
+            classify_session_title("Cron: morning recap [cron-job:9b2f]"),
+            SessionKind::Cron
+        );
+        assert_eq!(classify_session_title(RSI_SESSION_TITLE), SessionKind::Rsi);
+        assert_eq!(
+            classify_session_title("subagent: scout"),
+            SessionKind::Subagent
+        );
+        assert_eq!(classify_session_title("CrabsDev"), SessionKind::Human);
+        // Pin the remaining constants to the producer literals too.
+        assert_eq!(RSI_SESSION_TITLE, "RSI autonomous cycle");
+        assert_eq!(SUBAGENT_TITLE_PREFIX, "subagent:");
+    }
+
+    /// The cron marker is the stable key: renaming the readable part of the
+    /// title never changes the kind, same contract as the scheduler lookup.
+    #[test]
+    fn session_kind_cron_marker_survives_a_rename() {
+        assert_eq!(
+            classify_session_title("Renamed by the user [cron-job:9b2f]"),
+            SessionKind::Cron
+        );
+        assert_eq!(classify_session_title("[cron-job:9b2f]"), SessionKind::Cron);
+        // Pin the constants to the literals the producers write (cron
+        // scheduler, rsi.rs, spawn_agent) so a drift fails here first.
+        assert_eq!(CRON_TITLE_MARKER, "[cron-job:");
+        // A mention of the marker mid-title without the closing suffix is
+        // not a cron session.
+        assert_eq!(
+            classify_session_title("notes about [cron-job: syntax"),
+            SessionKind::Human
+        );
+    }
+
+    /// The RSI identity is the exact title, not a prefix or a substring.
+    #[test]
+    fn session_kind_rsi_is_the_exact_title() {
+        assert_eq!(
+            classify_session_title("RSI autonomous cycle follow-up"),
+            SessionKind::Human
+        );
+        assert_eq!(
+            classify_session_title("my RSI autonomous cycle"),
+            SessionKind::Human
+        );
+    }
+
+    /// The subagent rule stays the existing prefix contract: a title that
+    /// merely mentions the prefix mid-string is human.
+    #[test]
+    fn session_kind_subagent_is_a_prefix_not_a_mention() {
+        assert_eq!(
+            classify_session_title(SUBAGENT_TITLE_PREFIX),
+            SessionKind::Subagent
+        );
+        assert_eq!(
+            classify_session_title("talk about subagent: builds"),
+            SessionKind::Human
+        );
+    }
 
     async fn repo() -> (Database, SessionRepository) {
         let db = Database::connect_in_memory().await.expect("in-memory db");
