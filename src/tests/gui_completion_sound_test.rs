@@ -86,12 +86,18 @@ fn the_chime_pass_walks_every_strip_through_one_seen_set() {
         body.contains("self.plan.document()"),
         "the window strip is walked: {body}"
     );
+    // The pass now walks the map with its keys, not `.values()`: a pane plan
+    // written before the hook stamped its session carries the nil id, and the
+    // pane's own key is the only honest fallback for the flash deadline.
     assert!(
-        body.contains("self.pane_states.values()") && body.contains("pane.plan.document()"),
+        body.contains("in &self.pane_states") && body.contains("pane.plan.document()"),
         "every pane strip is walked too: {body}"
     );
+    // One document at a time through the shared pure helper, which counts how
+    // many of that plan's tasks newly resolved into the one window seen set.
+    // `newly_resolved` itself is now a fold over this same helper.
     assert!(
-        body.contains("newly_resolved(seen, &plans)"),
+        body.contains("newly_resolved_in(seen, Some(doc))"),
         "the dedupe is the shared pure helper, not a local count: {body}"
     );
     assert!(
