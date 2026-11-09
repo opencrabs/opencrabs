@@ -97,6 +97,7 @@ use gpui::{
     div, point, prelude::*, px, relative, rems, rgb, rgba, size,
 };
 use opencrabs::brain::agent::ProgressEvent;
+use opencrabs::brain::tools::suggest_options::{SuggestionItem, SuggestionStyle};
 use opencrabs::utils::drop_landing::human_size;
 use std::collections::HashMap;
 use std::ops::Range;
@@ -2919,6 +2920,14 @@ impl Dashboard {
     /// same wording. The pane stops claiming a turn is running the moment the
     /// user asks, and the service's own failure event lands afterwards.
     fn stop_turn(&mut self, cx: &mut Context<Self>) {
+        // A stop ends the offer too (#2708): the turn that made the buttons is
+        // gone, so they can only send a follow-up nobody asked for.
+        for sid in [self.focused_pane(), self.transcript.session]
+            .into_iter()
+            .flatten()
+        {
+            agent_bridge::options_take(sid);
+        }
         // A split leaf runs its own turn, so `/stop` reaches the pane the
         // keyboard is on before it reports nothing to stop (#2614).
         if self.cancel_focused_pane_turn("/stop", cx) {
@@ -4542,6 +4551,9 @@ impl Dashboard {
         if text.is_empty() {
             return;
         }
+        // A send ends that pane's offer, the same rule the window's own
+        // composer follows (#2708).
+        agent_bridge::options_take(session);
         // A slash line is a screen command: `/help`, `/models` and `/sessions`
         // read and write the window's own chrome, so they run there and the
         // leaf is left where it is. A prompt is the pane's own turn (#2614).
@@ -4846,6 +4858,12 @@ impl Dashboard {
         if text.is_empty() {
             return;
         }
+        // A send ends the offer (#2708): the buttons belonged to the turn that
+        // made them, and leaving them up over a new question would send a
+        // stale follow-up into it.
+        if let Some(sid) = self.transcript.session {
+            agent_bridge::options_take(sid);
+        }
         // The composer the text came from: when it sends a recalled message,
         // that message leaves the queue with the text while the rest of its
         // walk goes back to wait (#2637).
@@ -4996,6 +5014,19 @@ impl Dashboard {
         }
         let mut reload: Option<Uuid> = None;
         for ev in events {
+            // The tool's follow-up offer is stored here, before the pane
+            // filter below, because it belongs to a session and not to a card
+            // (#2708). Handling it in the match further down would have sent a
+            // split leaf's offer into `fold_pane_progress` with the rest of
+            // that leaf's progress, and the pane would never draw it.
+            if let agent_bridge::TurnEvent::ProgressFor(
+                sid,
+                ProgressEvent::SuggestedOptions(items),
+            ) = &ev
+            {
+                agent_bridge::set_options(*sid, items.clone());
+                cx.notify();
+            }
             // A split leaf runs its own turn (#2614), so its progress paints
             // into that leaf's card. A sub-agent's session has no leaf and is
             // dropped here rather than painted into somebody else's pane.
@@ -5366,7 +5397,9 @@ impl Dashboard {
                 }
                 // Compaction notices and queue echoes: the phase-2 transcript
                 // mirror. They persist to the DB and show on the reload;
-                // nothing to draw live yet.
+                // nothing to draw live yet. The follow-up offer is already
+                // stored further up this loop (#2708), so it reaches this
+                // catch-all spent.
                 agent_bridge::TurnEvent::ProgressFor(_, _) => {}
                 agent_bridge::TurnEvent::Done {
                     session,
@@ -5958,6 +5991,32 @@ impl Dashboard {
             out.extend(agent_bridge::queue_snapshot(sid));
         }
         out
+    }
+
+    /// The offered labels as drawable rows, each minted with the session it
+    /// belongs to so a pick sends into that conversation and nowhere else
+    /// (#2708). The offer is taken as the click lands: the buttons belong to
+    /// the turn that made them, so a second press must not send a stale one.
+    fn option_rows(
+        &self,
+        session: Uuid,
+        offers: Vec<SuggestionItem>,
+        cx: &mut Context<Self>,
+    ) -> Vec<(SuggestionItem, transcript::ClickHandler)> {
+        offers
+            .into_iter()
+            .map(|item| {
+                let label = item.label.clone();
+                let pick: transcript::ClickHandler = Rc::new(cx.listener(
+                    move |this: &mut Self, _ev: &gpui::ClickEvent, _window, cx| {
+                        cx.stop_propagation();
+                        agent_bridge::options_take(session);
+                        this.send_turn_to(session, label.clone(), cx);
+                    },
+                ));
+                (item, pick)
+            })
+            .collect()
     }
 
     fn drain_pending(&mut self, cx: &mut Context<Self>) {
@@ -8748,6 +8807,13 @@ impl Dashboard {
                             ),
                     );
                 }
+                // The follow-up offer sits with the queue, above the composer
+                // it will send into (#2708).
+                let offers = agent_bridge::options_snapshot(*session);
+                if !offers.is_empty() {
+                    let rows = self.option_rows(*session, offers, cx);
+                    col = col.child(options_strip(&rows));
+                }
                 if let Some(label) = self.running_tasks_label_for(*session) {
                     col = col.child(task_strip(label));
                 }
@@ -11233,6 +11299,19 @@ impl Render for Dashboard {
                             chat_measure_px,
                         ));
                     }
+                    // The follow-up offer sits where the queue does, directly
+                    // above the composer it sends into (#2708).
+                    if let Some(sid) = self.transcript.session {
+                        let offers = agent_bridge::options_snapshot(sid);
+                        if !offers.is_empty() {
+                            let rows = self.option_rows(sid, offers, cx);
+                            col = col.child(central(
+                                options_strip(&rows).into_any_element(),
+                                centred_chat,
+                                chat_measure_px,
+                            ));
+                        }
+                    }
                     // A detached command sits directly above the editor: the same
                     // place the TUI puts it (on the input box's top border), which
                     // is where the eye goes while waiting.
@@ -13651,6 +13730,50 @@ fn queue_strip(queued: &[agent_bridge::PendingMessage], expanded: bool) -> Div {
                 } else {
                     format!("… {rest} more")
                 })),
+        );
+    }
+    col
+}
+
+/// The follow-up options `suggest_options` offered, above the composer where
+/// the queued list sits. One numbered row per label, styled the way the
+/// channel buttons are: primary in the accent, danger in the red, default
+/// quiet. A click sends that exact label as the next turn (#2708).
+///
+/// The rows arrive with their handlers already minted by the window, because
+/// only it knows which session the offer belongs to. Nothing here reaches the
+/// database: see `agent_bridge::SUGGESTIONS` for why there is nothing to
+/// persist.
+fn options_strip(rows: &[(SuggestionItem, transcript::ClickHandler)]) -> Div {
+    let mut col = div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .p_3()
+        .rounded(px(CARD_RADIUS))
+        .bg(glass_fill(palette::current().panel))
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(palette::current().text_muted))
+                .child(SharedString::from("suggested")),
+        );
+    for (i, (item, pick)) in rows.iter().enumerate() {
+        let color = match item.style {
+            SuggestionStyle::Primary => palette::current().accent,
+            SuggestionStyle::Danger => palette::current().red,
+            SuggestionStyle::Default => palette::current().text_muted,
+        };
+        let pick = pick.clone();
+        col = col.child(
+            div()
+                .id(SharedString::from(format!("option-row-{i}")))
+                .text_xs()
+                .text_color(rgb(color))
+                .cursor_pointer()
+                .hover(|d| d.bg(rgb(palette::current().panel_hi)))
+                .child(SharedString::from(format!("{}. {}", i + 1, item.label)))
+                .on_click(move |ev, window, app| pick(ev, window, app)),
         );
     }
     col
