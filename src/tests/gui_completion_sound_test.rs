@@ -32,7 +32,7 @@ fn the_gui_arms_plan_completed_before_the_catch_all() {
         .find("ProgressEvent::PlanCompleted")
         .expect("the GUI matches PlanCompleted");
     let catch_all = GUI_MAIN
-        .find("TurnEvent::ProgressFor(_, _) => {}")
+        .find("TurnEvent::ProgressFor(_, _, _) => {}")
         .expect("the progress catch-all exists");
     assert!(
         arm < catch_all,
@@ -43,7 +43,7 @@ fn the_gui_arms_plan_completed_before_the_catch_all() {
     let body = GUI_MAIN
         .split("ProgressEvent::PlanCompleted")
         .nth(1)
-        .and_then(|tail| tail.split("TurnEvent::ProgressFor(_, _) => {}").next())
+        .and_then(|tail| tail.split("TurnEvent::ProgressFor(_, _, _) => {}").next())
         .expect("the arm body sits between the event and the catch-all");
     assert!(
         body.contains("Self::play_task_chime()"),
