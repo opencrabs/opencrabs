@@ -120,7 +120,14 @@ impl SessionRepository {
         Ok(())
     }
 
-    /// Create a topic under a session: a new session row with `parent_id` set.
+    /// Create a topic under a session: a new session row with `parent_id` set,
+    /// and topics switched on for the parent.
+    ///
+    /// The flag matters cross-surface: the chat topic bar and the rail menu read
+    /// `topics_enabled` rather than counting children, so a parent left at 0
+    /// hides its own topics everywhere except the tree that reads `parent_id`.
+    /// `attach_topic` has always done both; this path now matches it.
+    ///
     /// The depth trigger (migration 20261101000001) refuses a parent that is
     /// itself a topic, so the refusal comes back as an error here.
     pub async fn create_topic(&self, parent: Uuid, title: &str) -> Result<Uuid> {
@@ -135,6 +142,10 @@ impl SessionRepository {
                 conn.execute(
                     "UPDATE sessions SET parent_id = ?2 WHERE id = ?1",
                     params![topic_id, parent_str],
+                )?;
+                conn.execute(
+                    "UPDATE sessions SET topics_enabled = 1 WHERE id = ?1",
+                    params![parent_str],
                 )
             })
             .await
