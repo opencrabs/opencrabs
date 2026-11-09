@@ -271,17 +271,9 @@ impl App {
         // /sessions back to find it. Mirrors the same sync in
         // `load_session` further down this file. Persisting the layout
         // makes the binding survive restarts when the pane is split.
-        if let Some(pane) = self.pane_manager.focused_pane_mut() {
-            // A brand-new session must not inherit text typed for the old
-            // one: clear the pane's stashed input on an actual rebind (#2494).
-            if pane.session_id != Some(session.id) {
-                pane.clear_input();
-                self.input_buffer.clear();
-                self.cursor_position = 0;
-                self.input_history_index = None;
-            }
-            pane.session_id = Some(session.id);
-        }
+        // A brand-new session must not inherit text typed for the old one;
+        // the old draft waits under its own id (#2494).
+        self.bind_focused_pane_session(session.id);
         if self.pane_manager.is_split() {
             self.pane_manager.save_layout();
         }
@@ -321,6 +313,59 @@ impl App {
     }
 
     /// Load a session and its messages
+    /// Bind the focused pane to `session_id`, carrying the draft with the
+    /// conversation it was typed in.
+    ///
+    /// The outgoing conversation's text (and any recall it was in) is stored
+    /// under that conversation's id, and the destination's stored draft comes
+    /// back into the composer. Without this, switching sessions and switching
+    /// back lost the half-typed message for good (#2494).
+    fn bind_focused_pane_session(&mut self, session_id: Uuid) {
+        let outgoing = {
+            let Some(pane) = self.pane_manager.focused_pane_mut() else {
+                return;
+            };
+            if pane.session_id == Some(session_id) {
+                return;
+            }
+            let outgoing = pane.session_id;
+            // The pane's cached copy belongs to the conversation leaving; the
+            // working copy below is what carries text forward.
+            pane.clear_input();
+            pane.session_id = Some(session_id);
+            outgoing
+        };
+        let draft = crate::ui_core::composer::ComposerDraft {
+            text: std::mem::take(&mut self.input_buffer),
+            cursor: self.cursor_position,
+            history_index: self.input_history_index.take(),
+            history_stash: std::mem::take(&mut self.input_history_stash),
+        };
+        if let Some(outgoing) = outgoing {
+            // A pane with no session has nothing to file the text under.
+            self.drafts.store(outgoing, draft);
+        }
+        match self.drafts.take(session_id) {
+            Some(draft) => {
+                self.input_buffer = draft.text;
+                self.cursor_position = draft.cursor.min(self.input_buffer.len());
+                self.input_history_index = draft.history_index;
+                self.input_history_stash = draft.history_stash;
+            }
+            None => {
+                self.input_buffer.clear();
+                self.cursor_position = 0;
+                self.input_history_index = None;
+                self.input_history_stash.clear();
+            }
+        }
+        // A stored byte offset can land mid-codepoint after a differently
+        // shaped draft; the caret must always sit on a boundary.
+        self.cursor_position = self
+            .input_buffer
+            .floor_char_boundary(self.cursor_position.min(self.input_buffer.len()));
+    }
+
     pub(crate) async fn load_session(&mut self, session_id: Uuid) -> Result<()> {
         let session = self
             .session_service
@@ -646,20 +691,11 @@ impl App {
         self.context_max_tokens = max_ctx;
         self.session_context_max.insert(session_id, max_ctx);
 
-        // Keep focused pane in sync with loaded session
-        if let Some(pane) = self.pane_manager.focused_pane_mut() {
-            // Loading a DIFFERENT session into this pane clears its stashed
-            // input: half-typed text belonged to the previous conversation
-            // and must never fire into the new one (#2494). A same-session
-            // reload (Tab-back, session list refresh) keeps it.
-            if pane.session_id != Some(session_id) {
-                pane.clear_input();
-                self.input_buffer.clear();
-                self.cursor_position = 0;
-                self.input_history_index = None;
-            }
-            pane.session_id = Some(session_id);
-        }
+        // Keep the focused pane and its draft in sync with the loaded
+        // session: the text typed for the conversation being left is stored
+        // under that conversation, and the destination's own draft comes
+        // back (#2494). A same-session reload keeps the working copy.
+        self.bind_focused_pane_session(session_id);
         // Persist layout so pane-to-session mapping survives restarts
         if self.pane_manager.is_split() {
             self.pane_manager.save_layout();
@@ -1356,6 +1392,7 @@ impl App {
                     &mut self.input_buffer,
                     &mut self.cursor_position,
                     &mut self.input_history_index,
+                    &mut self.input_history_stash,
                 );
                 self.pane_manager.save_layout();
                 if let Some(sid) = self.pane_manager.focused_pane().and_then(|p| p.session_id)

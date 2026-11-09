@@ -1226,55 +1226,21 @@ impl App {
     }
 
     /// History file path: ~/.opencrabs/history.txt
-    fn history_path() -> Option<std::path::PathBuf> {
-        Some(crate::config::opencrabs_home().join("history.txt"))
+    ///
+    /// The reader, the writer and the path live in `ui_core::composer`, so the
+    /// terminal and the window cannot disagree about the file they share.
+    fn history_path() -> std::path::PathBuf {
+        crate::ui_core::composer::default_history_path()
     }
 
     /// Load input history from disk (one entry per line, most recent last)
     pub(crate) fn load_history() -> Vec<String> {
-        let Some(path) = Self::history_path() else {
-            return Vec::new();
-        };
-        match std::fs::read_to_string(&path) {
-            Ok(content) => content
-                .lines()
-                .filter(|l| !l.is_empty())
-                .map(|l| l.to_string())
-                .collect(),
-            Err(_) => Vec::new(),
-        }
+        crate::ui_core::composer::load_history(&Self::history_path())
     }
 
-    /// Append a single entry to the history file (and trim to 500 entries)
+    /// Record one submitted entry in the shared history file.
     fn save_history_entry(&self, entry: &str) {
-        let Some(path) = Self::history_path() else {
-            return;
-        };
-        // Ensure directory exists
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        // Cap at 500 entries: keep last 499 + new entry
-        let max_entries = 500;
-        if self.input_history.len() > max_entries {
-            // Rewrite the whole file with only the last max_entries
-            let start = self.input_history.len().saturating_sub(max_entries);
-            let trimmed: Vec<&str> = self.input_history[start..]
-                .iter()
-                .map(|s| s.as_str())
-                .collect();
-            let _ = std::fs::write(&path, trimmed.join("\n") + "\n");
-        } else {
-            // Just append
-            use std::io::Write;
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&path)
-            {
-                let _ = writeln!(f, "{}", entry);
-            }
-        }
+        let _ = crate::ui_core::composer::append_history(&Self::history_path(), entry);
     }
 
     pub fn has_pending_approval(&self) -> bool {
@@ -2239,13 +2205,16 @@ impl App {
                 self.escape_pending_at = None;
             } else if let Some(pending_at) = self.escape_pending_at {
                 if pending_at.elapsed() < std::time::Duration::from_secs(3) {
-                    // Second Escape within 3 seconds — stash input then clear
-                    // Arrow Up will recover the stashed text
-                    if !self.input_buffer.is_empty() {
-                        self.input_history_stash = self.input_buffer.clone();
-                    }
-                    self.input_buffer.clear();
-                    self.cursor_position = 0;
+                    // Second Escape within 3 seconds — stash input then clear.
+                    // Arrow Up recovers the stashed text. The rule lives in
+                    // `ui_core::composer`: a recalled line is not the draft,
+                    // so clearing it keeps the stash and ends the walk.
+                    crate::ui_core::composer::escape_clears_input(
+                        &mut self.input_buffer,
+                        &mut self.cursor_position,
+                        &mut self.input_history_index,
+                        &mut self.input_history_stash,
+                    );
                     self.attachments.clear();
                     self.focused_attachment = None;
                     self.error_message = None;
@@ -2819,6 +2788,7 @@ impl App {
                 &mut self.input_buffer,
                 &mut self.cursor_position,
                 &mut self.input_history_index,
+                &mut self.input_history_stash,
             );
             self.pane_manager
                 .split(crate::tui::pane::SplitDirection::Horizontal);
@@ -2826,6 +2796,7 @@ impl App {
                 &mut self.input_buffer,
                 &mut self.cursor_position,
                 &mut self.input_history_index,
+                &mut self.input_history_stash,
             );
             self.pane_manager.save_layout();
             // Stay on sessions screen — user picks which session goes in the new pane.
@@ -2842,6 +2813,7 @@ impl App {
                 &mut self.input_buffer,
                 &mut self.cursor_position,
                 &mut self.input_history_index,
+                &mut self.input_history_stash,
             );
             self.pane_manager
                 .split(crate::tui::pane::SplitDirection::Vertical);
@@ -2849,6 +2821,7 @@ impl App {
                 &mut self.input_buffer,
                 &mut self.cursor_position,
                 &mut self.input_history_index,
+                &mut self.input_history_stash,
             );
             self.pane_manager.save_layout();
             // Stay on sessions screen — user picks which session goes in the new pane.
@@ -2865,8 +2838,10 @@ impl App {
                     .map(|s| s.id == session_id)
                     .unwrap_or(false);
                 self.session_service.delete_session(session_id).await?;
-                // Clean up all cached state for this session
+                // Clean up all cached state for this session, including a
+                // draft no composer can ever reach again.
                 self.pane_message_cache.remove(&session_id);
+                self.drafts.remove(session_id);
                 // Also drop any background-session sidecar entry —
                 // without this a session that was processing in
                 // background at delete time would leak its

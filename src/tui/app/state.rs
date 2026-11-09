@@ -621,6 +621,9 @@ pub struct App {
     pub(crate) input_history_index: Option<usize>,
     /// Saves current input when entering history
     pub(crate) input_history_stash: String,
+    /// Half-typed text keyed by the conversation it was typed in, so a session
+    /// switch and a switch back return the same draft (#2494).
+    pub(crate) drafts: crate::ui_core::composer::DraftStore,
 
     /// Working directory
     pub working_directory: std::path::PathBuf,
@@ -1130,6 +1133,7 @@ impl App {
             input_history: Self::load_history(),
             input_history_index: None,
             input_history_stash: String::new(),
+            drafts: crate::ui_core::composer::DraftStore::new(),
             working_directory: crate::utils::cwd::launch_cwd(),
             pending_context: std::collections::HashMap::new(),
             #[cfg(unix)]
@@ -4138,6 +4142,7 @@ impl App {
                     &mut self.input_buffer,
                     &mut self.cursor_position,
                     &mut self.input_history_index,
+                    &mut self.input_history_stash,
                 );
                 let direction = match layout {
                     crate::ui_core::split::Layout::Side => {
@@ -4152,6 +4157,7 @@ impl App {
                     &mut self.input_buffer,
                     &mut self.cursor_position,
                     &mut self.input_history_index,
+                    &mut self.input_history_stash,
                 );
                 self.pane_manager.save_layout();
                 self.switch_mode(AppMode::Sessions).await?;
@@ -4544,6 +4550,7 @@ impl App {
                 &mut self.input_buffer,
                 &mut self.cursor_position,
                 &mut self.input_history_index,
+                &mut self.input_history_stash,
             );
             self.pane_manager.save_layout();
             if let Some(pane) = self.pane_manager.focused_pane()
@@ -4597,6 +4604,7 @@ impl App {
                 &mut self.input_buffer,
                 &mut self.cursor_position,
                 &mut self.input_history_index,
+                &mut self.input_history_stash,
             );
             if clockwise {
                 self.pane_manager.focus_next();
@@ -4607,6 +4615,7 @@ impl App {
                 &mut self.input_buffer,
                 &mut self.cursor_position,
                 &mut self.input_history_index,
+                &mut self.input_history_stash,
             );
             if let Some(pane) = self.pane_manager.focused_pane()
                 && let Some(session_id) = pane.session_id

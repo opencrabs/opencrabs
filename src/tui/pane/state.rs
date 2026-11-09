@@ -31,6 +31,9 @@ pub struct Pane {
     pub cursor_position: usize,
     /// Input-history navigation position, stashed alongside the buffer.
     pub input_history_index: Option<usize>,
+    /// The draft a recall stashed, carried with the pane. Without it a recall
+    /// that spans a focus change loses the sentence it was covering (#2494).
+    pub input_history_stash: String,
     /// Plan document cached for this pane's session. Inactive panes keep
     /// theirs, so a split layout can render each pane's own plan without
     /// a disk read per frame (#2494).
@@ -53,6 +56,7 @@ impl Pane {
             input_buffer: String::new(),
             cursor_position: 0,
             input_history_index: None,
+            input_history_stash: String::new(),
             plan_document: None,
             plan_file_path: None,
             plan_mtime: None,
@@ -64,6 +68,7 @@ impl Pane {
         self.input_buffer.clear();
         self.cursor_position = 0;
         self.input_history_index = None;
+        self.input_history_stash.clear();
     }
 }
 
@@ -161,12 +166,14 @@ impl PaneManager {
         buffer: &mut String,
         cursor: &mut usize,
         history: &mut Option<usize>,
+        history_stash: &mut String,
     ) {
         if let Some(pane) = self.focused_pane_mut() {
             pane.input_buffer = std::mem::take(buffer);
             pane.cursor_position = *cursor;
             *cursor = 0;
             pane.input_history_index = history.take();
+            pane.input_history_stash = std::mem::take(history_stash);
         }
     }
 
@@ -177,11 +184,13 @@ impl PaneManager {
         buffer: &mut String,
         cursor: &mut usize,
         history: &mut Option<usize>,
+        history_stash: &mut String,
     ) {
         if let Some(pane) = self.focused_pane() {
             *buffer = pane.input_buffer.clone();
             *cursor = pane.cursor_position;
             *history = pane.input_history_index;
+            *history_stash = pane.input_history_stash.clone();
         }
     }
 
@@ -498,9 +507,10 @@ mod tests {
         // ROOT was focused, then the split handler stashes BEFORE splitting
         // (split moves focus to the new pane).
         let (mut buf, mut cur, mut hist) = ("alpha".to_string(), 5usize, Some(2usize));
-        mgr.stash_input(&mut buf, &mut cur, &mut hist);
+        let mut stash = "alpha pre-recall".to_string();
+        mgr.stash_input(&mut buf, &mut cur, &mut hist, &mut stash);
         mgr.split(SplitDirection::Horizontal);
-        mgr.adopt_input(&mut buf, &mut cur, &mut hist);
+        mgr.adopt_input(&mut buf, &mut cur, &mut hist, &mut stash);
 
         // The new pane starts empty; ROOT kept what we typed.
         assert_eq!(buf, "");
@@ -509,6 +519,11 @@ mod tests {
         assert_eq!(mgr.get(PaneId::ROOT).unwrap().input_buffer, "alpha");
         assert_eq!(mgr.get(PaneId::ROOT).unwrap().cursor_position, 5);
         assert_eq!(mgr.get(PaneId::ROOT).unwrap().input_history_index, Some(2));
+        assert_eq!(
+            mgr.get(PaneId::ROOT).unwrap().input_history_stash,
+            "alpha pre-recall"
+        );
+        assert!(stash.is_empty(), "the stash moved into the pane");
 
         // Type here, cycle back, and the first pane's buffer comes home.
         // The real Tab handler order: stash the working buffer into the pane
@@ -516,12 +531,14 @@ mod tests {
         buf = "beta".to_string();
         cur = 4;
         hist = Some(1);
-        mgr.stash_input(&mut buf, &mut cur, &mut hist); // pane[1] keeps beta
+        stash = "beta pre-recall".to_string();
+        mgr.stash_input(&mut buf, &mut cur, &mut hist, &mut stash); // pane[1] keeps beta
         mgr.focus_next(); // wraps to the first pane
-        mgr.adopt_input(&mut buf, &mut cur, &mut hist); // buf = alpha
+        mgr.adopt_input(&mut buf, &mut cur, &mut hist, &mut stash); // buf = alpha
         assert_eq!(buf, "alpha");
         assert_eq!(cur, 5);
         assert_eq!(hist, Some(2));
+        assert_eq!(stash, "alpha pre-recall", "the recall draft comes home");
         assert_eq!(mgr.get(mgr.focused).unwrap().input_buffer, "alpha");
         // And the second pane still holds its own text.
         assert_eq!(mgr.get(mgr.panes[1].id).unwrap().input_buffer, "beta");
@@ -589,11 +606,13 @@ mod tests {
     fn single_pane_stash_adopt_round_trip_preserves_input() {
         let mut mgr = PaneManager::new();
         let (mut buf, mut cur, mut hist) = ("solo".to_string(), 4usize, None);
-        mgr.stash_input(&mut buf, &mut cur, &mut hist);
+        let mut stash = "solo pre-recall".to_string();
+        mgr.stash_input(&mut buf, &mut cur, &mut hist, &mut stash);
         assert_eq!(mgr.get(PaneId::ROOT).unwrap().input_buffer, "solo");
-        mgr.adopt_input(&mut buf, &mut cur, &mut hist);
+        mgr.adopt_input(&mut buf, &mut cur, &mut hist, &mut stash);
         assert_eq!(buf, "solo");
         assert_eq!(cur, 4);
         assert_eq!(hist, None);
+        assert_eq!(stash, "solo pre-recall");
     }
 }
