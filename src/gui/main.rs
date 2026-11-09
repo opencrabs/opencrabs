@@ -648,6 +648,11 @@ struct Dashboard {
     /// When the rail's live previews were last re-read, so a stream of chunks
     /// costs at most one query a second instead of one per token.
     preview_refreshed_at: Option<std::time::Instant>,
+    /// Monotonic generation of the ctrl+f deep search (#2720). Each keystroke
+    /// bumps it and spawns a debounced content query that carries the value;
+    /// a result only lands when its generation still matches, so a slow query
+    /// for "nee" can never paint over the hits for "needle".
+    rail_find_gen: u64,
     /// Parents whose topic chips are expanded past the first three. A chip
     /// strip shows three plus a "+N" pill by default; tapping it reveals the
     /// rest, and the collapse pill folds them back (Telegram topic style).
@@ -1005,6 +1010,9 @@ fn set_rail_open_state(
         // The filter menu clears with the rail (#2719): a reopened rail
         // starts from the default rule, never a stale chip from last time.
         sessions.rail_filter = sessions::RailFilter::default();
+        // The deep hits clear with the rail too (#2720): a reopened rail
+        // starts unsearched, never showing snippets from the last query.
+        sessions.content_matches.clear();
     }
 }
 
@@ -3117,6 +3125,12 @@ impl Dashboard {
             &mut self.rail_focused,
             &mut self.sessions,
         );
+        // Closing bumps the deep-search generation so a query still in flight
+        // bows out instead of repopulating a rail that is no longer shown
+        // (#2720).
+        if !open {
+            self.rail_find_gen = self.rail_find_gen.wrapping_add(1);
+        }
         // Both directions move the keyboard: opening hands it to the list,
         // closing gives it back to the input (#2665).
         self.refocus_screen();
@@ -4691,6 +4705,11 @@ impl Dashboard {
     fn close_rail_filter(&mut self, cx: &mut Context<Self>) {
         self.sessions.filter.clear();
         self.sessions.filter_active = false;
+        // The deep hits clear with the field, and the generation bumps so a
+        // query still in flight for the old text bows out instead of landing
+        // on an empty rail (#2720).
+        self.sessions.content_matches.clear();
+        self.rail_find_gen = self.rail_find_gen.wrapping_add(1);
         self.refocus_screen();
         cx.notify();
     }
@@ -7404,6 +7423,71 @@ impl Dashboard {
         self.refresh_previews(cx);
     }
 
+    /// ctrl+f's deep search (#2720): let the typing settle, then read which
+    /// sessions mention the query in their messages, off the paint path. Each
+    /// call bumps the generation and the spawned query carries it; a result
+    /// only lands when the generation still matches, so the newest text wins
+    /// even when an older query finishes last (the notice timer's trick,
+    /// editor.rs). An empty field clears the hits at once and spawns nothing.
+    fn schedule_rail_find(&mut self, cx: &mut Context<Self>) {
+        let query = self.sessions.filter.trim().to_string();
+        self.rail_find_gen = self.rail_find_gen.wrapping_add(1);
+        let generation = self.rail_find_gen;
+        if query.is_empty() {
+            self.sessions.content_matches.clear();
+            cx.notify();
+            return;
+        }
+        let db_path = self.db_path.clone();
+        cx.spawn(async move |this, cx| {
+            // A burst of keystrokes costs one query, not one per character.
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(250))
+                .await;
+            // A newer keystroke or a closed rail already moved the generation
+            // on: this query is stale, so it never touches the database.
+            let stale = this
+                .update(cx, |this, _| this.rail_find_gen != generation)
+                .unwrap_or(true);
+            if stale {
+                return;
+            }
+            match sessions::load_content_matches(db_path, query).await {
+                Ok(rows) => {
+                    let _ = this.update(cx, |this, cx| {
+                        if this.rail_find_gen == generation {
+                            this.apply_rail_find(rows);
+                            cx.notify();
+                        }
+                    });
+                }
+                Err(e) => logging::error(&format!("rail find: {e}")),
+            }
+        })
+        .detach();
+    }
+
+    /// Fold the content rows into the rail's deep-hit map (#2720): title
+    /// matches lead in ledger order, content-only sessions follow with their
+    /// snippet, and a session found both ways appears once. Only the
+    /// snippet-bearing rows are kept here; `visible()` already holds the title
+    /// matches on screen through `matches`, so this map is purely the deep
+    /// hits and the snippets that stand in for their previews.
+    fn apply_rail_find(&mut self, content: Vec<opencrabs::db::repository::ContentSearchRow>) {
+        let title_ids: Vec<Uuid> = self
+            .sessions
+            .items
+            .iter()
+            .filter(|s| sessions::matches(s, &self.sessions.filter))
+            .map(|s| s.id)
+            .collect();
+        let merged = sessions::merge_find_results(title_ids, &content);
+        self.sessions.content_matches = merged
+            .into_iter()
+            .filter_map(|m| m.snippet.map(|snippet| (m.session_id, snippet)))
+            .collect();
+    }
+
     /// The bar that stands where the composer stands in select mode (#2613):
     /// how many rows are picked, Forward, and Cancel. It borrows the
     /// composer's box so the swap reads as one surface changing state, not a
@@ -8444,6 +8528,7 @@ impl Dashboard {
                 }
                 "backspace" => {
                     self.sessions.filter.pop();
+                    self.schedule_rail_find(cx);
                     self.normalize_cursor();
                     cx.notify();
                 }
@@ -8452,6 +8537,7 @@ impl Dashboard {
                         && !ch.is_control()
                     {
                         self.sessions.filter.push(ch);
+                        self.schedule_rail_find(cx);
                         self.normalize_cursor();
                         cx.notify();
                     }
@@ -9684,7 +9770,16 @@ impl Render for Dashboard {
                 badge,
                 // Already formatted in the loader: the paint only clones a
                 // shared string, so the shared clock costs no allocation.
-                preview: self.sessions.previews.get(&id).cloned(),
+                // While ctrl+f is open a deep hit's snippet stands in for the
+                // preview so the reader sees why the row matched (#2720).
+                // Idle rows read the DB preview.
+                preview: self
+                    .sessions
+                    .content_matches
+                    .get(&id)
+                    .filter(|_| self.sessions.filter_active)
+                    .map(|snippet| SharedString::from(snippet.clone()))
+                    .or_else(|| self.sessions.previews.get(&id).cloned()),
                 // A turn nobody has a pane for still gets a line on its card
                 // (#2718). The wording is the pane's own (#2326), so a split
                 // leaf and its rail row never describe the same turn two
@@ -12762,6 +12857,7 @@ fn main() {
             filter_active: false,
             rail_filter: sessions::RailFilter::default(),
             plan_progress: HashMap::new(),
+            content_matches: HashMap::new(),
         },
         Err(e) => sessions::SessionsState {
             items: Vec::new(),
@@ -12780,6 +12876,7 @@ fn main() {
             filter_active: false,
             rail_filter: sessions::RailFilter::default(),
             plan_progress: HashMap::new(),
+            content_matches: HashMap::new(),
         },
     };
     // The split the last run closed with (#2675). Read here, on the main
@@ -12956,6 +13053,7 @@ fn main() {
                         )),
                         rail_clock: std::time::Instant::now(),
                         preview_refreshed_at: None,
+                        rail_find_gen: 0,
                         rail_chips_expanded: std::collections::HashSet::new(),
                         rail_width: RAIL_DEFAULT_REM,
                         rail_open: true,

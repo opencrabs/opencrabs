@@ -27,7 +27,7 @@ use opencrabs::db::repository::session::{
     SessionKind, SessionListOptions, SessionRepository, classify_session_title,
 };
 use opencrabs::db::repository::session_favorites::SessionFavoritesRepository;
-use opencrabs::db::repository::{MessageRepository, PREVIEW_CHARS};
+use opencrabs::db::repository::{ContentSearchRow, MessageRepository, PREVIEW_CHARS};
 
 // The menu primitives moved to `menu.rs` (#2613) so the transcript can draw
 // its own context menu without depending on the session rail. Re-exported
@@ -98,17 +98,24 @@ pub struct SessionsState {
     /// row from this map, so the filter never reads a plan file inside the
     /// row loop and never chases the rows it is about to hide (#2719).
     pub plan_progress: HashMap<uuid::Uuid, (usize, usize)>,
+    /// ctrl+f's deep hits (#2720): session id to the snippet centered on the
+    /// query, from the debounced content search. A row whose title misses the
+    /// query still shows when its messages match, and the snippet stands in
+    /// for the preview so the reader sees why. Empty whenever the field is
+    /// empty or closed, so an unsearched rail is untouched.
+    pub content_matches: HashMap<uuid::Uuid, String>,
 }
 
 impl SessionsState {
-    /// The rows the rail shows right now, in ledger order. Two gates: the
-    /// ctrl+f query (`matches`) and the filter menu (`rail_filter_allows`).
-    /// The menu reads the per-paint plan snapshot, never the index, so a row
-    /// hidden by the plan chip still had its progress resolved before the
-    /// filter ran (#2719).
+    /// The rows the rail shows right now, in ledger order. Three gates: the
+    /// ctrl+f query (`matches` on the title, or a deep content hit), and the
+    /// filter menu (`rail_filter_allows`). The menu reads the per-paint plan
+    /// snapshot, never the index, so a row hidden by the plan chip still had
+    /// its progress resolved before the filter ran (#2719). A content hit
+    /// keeps a row visible even when its title misses the query (#2720).
     pub fn visible(&self) -> impl Iterator<Item = &Session> {
         self.items.iter().filter(|s| {
-            matches(s, &self.filter)
+            (matches(s, &self.filter) || self.content_matches.contains_key(&s.id))
                 && rail_filter_allows(
                     &self.rail_filter,
                     s.title.as_deref().unwrap_or(""),
@@ -260,6 +267,50 @@ pub fn matches(s: &Session, query: &str) -> bool {
         return true;
     }
     s.id.to_string().starts_with(&q)
+}
+
+/// One session the ctrl+f field found, and why (#2720). A title-only match
+/// carries no snippet (the row's own preview stands); a content match carries
+/// the snippet centered on the query so the reader sees the hit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FindMatch {
+    pub session_id: uuid::Uuid,
+    pub snippet: Option<String>,
+}
+
+/// Merge title matches with content-search rows into one deduped list (#2720).
+/// Title matches keep the ledger's order and come first; content rows add the
+/// sessions the title missed, newest-first, each with its snippet. A session
+/// found both ways appears once, and the content snippet wins so a non-obvious
+/// title still shows why it matched. Pure: no database, no window, so the
+/// merge and its dedup are testable on their own.
+pub fn merge_find_results(
+    title_matches: Vec<uuid::Uuid>,
+    content: &[ContentSearchRow],
+) -> Vec<FindMatch> {
+    let snippets: HashMap<uuid::Uuid, &str> = content
+        .iter()
+        .map(|row| (row.session_id, row.snippet.as_str()))
+        .collect();
+    let mut seen: HashSet<uuid::Uuid> = HashSet::new();
+    let mut out: Vec<FindMatch> = Vec::new();
+    for id in title_matches {
+        if seen.insert(id) {
+            out.push(FindMatch {
+                session_id: id,
+                snippet: snippets.get(&id).map(|s| s.to_string()),
+            });
+        }
+    }
+    for row in content {
+        if seen.insert(row.session_id) {
+            out.push(FindMatch {
+                session_id: row.session_id,
+                snippet: Some(row.snippet.clone()),
+            });
+        }
+    }
+    out
 }
 
 /// Which plan-state chip the rail filter menu has selected (#2719). The
@@ -510,6 +561,48 @@ pub async fn load_previews(
             Err(_) => Err("previews fetch thread dropped its result".into()),
         },
         Err(e) => Err(format!("previews fetch thread failed to spawn: {e}")),
+    }
+}
+
+/// ctrl+f's deep read (#2720): which sessions mention `query` in their
+/// messages, with a snippet, through the same 4 MB no-migration door as
+/// [`load_previews`]. Spans every session (the core search includes archived),
+/// off the paint path, so a rail repaint never waits on the database. The row
+/// count is bounded so a common word cannot flood the rail.
+pub async fn load_content_matches(
+    db_path: std::path::PathBuf,
+    query: String,
+) -> Result<Vec<ContentSearchRow>, String> {
+    let (tx, rx) = futures::channel::oneshot::channel::<Result<Vec<ContentSearchRow>, String>>();
+    let spawned = std::thread::Builder::new()
+        .name("session-content-find".into())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let result = match runtime {
+                Ok(rt) => rt
+                    .block_on(async {
+                        let db = Database::connect(&db_path).await?;
+                        let messages = MessageRepository::new(db.pool().clone());
+                        let sessions = SessionRepository::new(db.pool().clone());
+                        opencrabs::db::repository::search_session_content(
+                            &messages, &sessions, &query, 50,
+                        )
+                        .await
+                    })
+                    .map_err(|e| format!("{e:#}")),
+                Err(e) => Err(format!("tokio runtime failed: {e}")),
+            };
+            let _ = tx.send(result);
+        });
+    match spawned {
+        Ok(_) => match rx.await {
+            Ok(result) => result,
+            Err(_) => Err("content find thread dropped its result".into()),
+        },
+        Err(e) => Err(format!("content find thread failed to spawn: {e}")),
     }
 }
 
@@ -1807,11 +1900,12 @@ fn brand_header() -> Div {
 #[cfg(test)]
 mod tests {
     use super::{
-        Database, MenuKind, PREVIEW_CHARS, PlanFilter, RailFilter, SessionsState,
-        accent_bar_visible, fit, load_sessions, palette, pin_mark, preview_line,
-        rail_filter_allows, rail_menu_entries,
+        Database, FindMatch, MenuKind, PREVIEW_CHARS, PlanFilter, RailFilter, SessionsState,
+        accent_bar_visible, fit, load_sessions, merge_find_results, palette, pin_mark,
+        preview_line, rail_filter_allows, rail_menu_entries,
     };
     use opencrabs::db::models::Session;
+    use opencrabs::db::repository::ContentSearchRow;
 
     /// #2701: a topic sits directly under its parent as a chip. Pinning it
     /// does not eject it to a top-level row: the pin orders top-level rows
@@ -2715,5 +2809,119 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(state.visible().count(), 3);
+    }
+
+    /// One content-search row, built in memory: the merge rule is about what
+    /// the rail does with hits, never about how they were fetched (#2720).
+    fn content_row(id: u128, snippet: &str) -> ContentSearchRow {
+        ContentSearchRow {
+            session_id: uuid::Uuid::from_u128(id),
+            title: format!("t{id}"),
+            snippet: snippet.to_string(),
+            match_count: 1,
+            last_hit_at: chrono::DateTime::from_timestamp(1_700_000_000 + id as i64, 0)
+                .expect("a fixed stamp is valid"),
+        }
+    }
+
+    /// A session found by both title and content appears once, and the
+    /// content snippet wins so the reader sees why it matched (#2720).
+    #[test]
+    fn rail_find_merge_dedups_a_session_found_both_ways() {
+        let merged = merge_find_results(
+            vec![uuid::Uuid::from_u128(1)],
+            &[content_row(1, "the hit line")],
+        );
+        assert_eq!(
+            merged,
+            vec![FindMatch {
+                session_id: uuid::Uuid::from_u128(1),
+                snippet: Some("the hit line".to_string()),
+            }]
+        );
+    }
+
+    /// Title matches keep the ledger order and lead; content-only sessions
+    /// follow in the order the search returned them (newest first).
+    #[test]
+    fn rail_find_merge_keeps_title_order_then_content() {
+        let merged = merge_find_results(
+            vec![uuid::Uuid::from_u128(1), uuid::Uuid::from_u128(2)],
+            &[content_row(3, "c"), content_row(4, "d")],
+        );
+        let ids: Vec<_> = merged.iter().map(|m| m.session_id).collect();
+        assert_eq!(
+            ids,
+            vec![
+                uuid::Uuid::from_u128(1),
+                uuid::Uuid::from_u128(2),
+                uuid::Uuid::from_u128(3),
+                uuid::Uuid::from_u128(4),
+            ]
+        );
+        assert!(merged[0].snippet.is_none(), "title-only has no snippet");
+        assert_eq!(merged[2].snippet.as_deref(), Some("c"));
+    }
+
+    /// A title match with no content hit keeps its own preview (no snippet);
+    /// a content-only hit carries its snippet.
+    #[test]
+    fn rail_find_merge_snippet_only_on_content_hits() {
+        let merged = merge_find_results(
+            vec![uuid::Uuid::from_u128(1)],
+            &[content_row(2, "deep hit")],
+        );
+        assert_eq!(merged[0].snippet, None);
+        assert_eq!(merged[1].snippet.as_deref(), Some("deep hit"));
+        assert_eq!(merged[1].session_id, uuid::Uuid::from_u128(2));
+    }
+
+    /// Empty inputs merge to nothing, so a cleared field shows no deep hits.
+    #[test]
+    fn rail_find_merge_empty_inputs() {
+        assert!(merge_find_results(Vec::new(), &[]).is_empty());
+    }
+
+    /// A repeated title id is collapsed too: the ledger can hand the same id
+    /// twice and the rail must not draw it twice.
+    #[test]
+    fn rail_find_merge_dedups_repeated_title_ids() {
+        let merged = merge_find_results(
+            vec![uuid::Uuid::from_u128(1), uuid::Uuid::from_u128(1)],
+            &[],
+        );
+        assert_eq!(merged.len(), 1);
+    }
+
+    /// `visible()` keeps a content-only match on screen even when its title
+    /// misses the query, and the snippet map is what holds it there (#2720).
+    #[test]
+    fn rail_find_visible_includes_content_only_matches() {
+        let by_title = Session::new(Some("needle chat".into()), None, None);
+        let by_content = Session::new(Some("unrelated name".into()), None, None);
+        let miss = Session::new(Some("nothing here".into()), None, None);
+        let (tid, cid, mid) = (by_title.id, by_content.id, miss.id);
+        let mut state = SessionsState {
+            items: vec![by_title, by_content, miss],
+            filter: "needle".to_string(),
+            filter_active: true,
+            ..Default::default()
+        };
+        // Title alone finds only the first row.
+        let ids: Vec<_> = state.visible().map(|s| s.id).collect();
+        assert_eq!(ids, vec![tid]);
+
+        // A deep hit on the second row brings it in; the third still misses.
+        state
+            .content_matches
+            .insert(cid, "a needle in the messages".into());
+        let ids: Vec<_> = state.visible().map(|s| s.id).collect();
+        assert_eq!(ids, vec![tid, cid]);
+        assert!(!ids.contains(&mid));
+
+        // Clearing the deep hits drops the content-only row back out.
+        state.content_matches.clear();
+        let ids: Vec<_> = state.visible().map(|s| s.id).collect();
+        assert_eq!(ids, vec![tid]);
     }
 }
