@@ -234,7 +234,7 @@ pub async fn write_forum_topic_row(
 mod tests {
     use super::*;
 
-    fn seed_parent(pool: &crate::db::Pool, id: Uuid, title: &str) {
+    async fn seed_parent(pool: &crate::db::Pool, id: Uuid, title: &str) {
         let sid = id.to_string();
         let title = title.to_string();
         pool.get()
@@ -293,7 +293,7 @@ mod tests {
         let repo = SessionRepository::new(pool.clone());
 
         let parent = Uuid::new_v4();
-        seed_parent(&pool, parent, "Telegram: Memes [chat:-100]");
+        seed_parent(&pool, parent, "Telegram: Memes [chat:-100]").await;
 
         let created = write_forum_topic_row(&svc, &repo, &pool, parent, -100, "Memes", 42, "Funny")
             .await
@@ -330,7 +330,7 @@ mod tests {
         let repo = SessionRepository::new(pool.clone());
 
         let parent = Uuid::new_v4();
-        seed_parent(&pool, parent, "Telegram: Memes [chat:-100]");
+        seed_parent(&pool, parent, "Telegram: Memes [chat:-100]").await;
 
         let first = write_forum_topic_row(&svc, &repo, &pool, parent, -100, "Memes", 42, "Funny")
             .await
