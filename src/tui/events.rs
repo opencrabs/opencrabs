@@ -311,6 +311,15 @@ pub enum TuiEvent {
     /// succeeded (#2170, #2172). `spawn` only proves the binary existed, so
     /// the optimistic "Opened …" line is corrected when this lands.
     LauncherFailed { target: String, detail: String },
+
+    /// The session-list keyword search finished its deep read (#2724).
+    /// Carries the generation it was scheduled with: a result only lands
+    /// while that generation is still current, so the newest query wins
+    /// even when an older read finishes last.
+    SessionContentSearchResult {
+        generation: u64,
+        rows: Vec<crate::db::repository::ContentSearchRow>,
+    },
 }
 
 /// Sudo password request from the bash tool

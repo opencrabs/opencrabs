@@ -754,6 +754,19 @@ fn session_row(
         format!("{fold_mark}{raw_title}")
     };
     let title = title_owned.as_str();
+    // A deep search hit shows why it matched: the snippet rides after the
+    // title in the same name cell, so a hit never costs an extra row (#2724).
+    // Mirrors the GUI rail, where a content match's snippet stands in for the
+    // preview (#2720).
+    let search_title = if !app.session_search.trim().is_empty() {
+        app.session_content_matches
+            .iter()
+            .find(|r| r.session_id == session.id)
+            .map(|r| format!("{title} · {}", r.snippet))
+    } else {
+        None
+    };
+    let title = search_title.as_deref().unwrap_or(title);
     let name = if app.session_favorites.contains(&session.id) {
         truncate_to_width(&format!("★ {title}"), plan.name_width)
     } else {
@@ -1202,5 +1215,124 @@ mod tests {
         let buf = draw(&app, 100, 10);
         assert_eq!(rows_containing(&buf, "plan wip"), 1);
         assert_eq!(rows_containing(&buf, "automation hidden"), 1);
+    }
+
+    // ── Session-list keyword search over message content (#2724) ─────────
+
+    use crate::db::repository::ContentSearchRow;
+    use crate::tui::events::TuiEvent;
+    use std::sync::atomic::Ordering::SeqCst;
+
+    /// A deep-hit row for `sid`, as the shared content search would return it.
+    fn content_row(sid: uuid::Uuid, snippet: &str) -> ContentSearchRow {
+        ContentSearchRow {
+            session_id: sid,
+            title: "Untitled".to_string(),
+            snippet: snippet.to_string(),
+            match_count: 1,
+            last_hit_at: chrono::Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn session_search_content_only_hit_surfaces_and_renders_snippet() {
+        let mut app = app().await;
+        // The title never mentions the query; only a message body does.
+        let s = session("Roadmap");
+        app.sessions = vec![s.clone()];
+        app.session_search = "rust".to_string();
+
+        // No deep hit yet: the title misses, so nothing is visible.
+        assert!(app.visible_session_indices().is_empty());
+
+        // The content search lands a hit: the row surfaces and keeps one row
+        // (A3), with the snippet riding after the title.
+        app.session_content_matches = vec![content_row(s.id, "we use rust here")];
+        assert_eq!(app.visible_session_indices(), vec![0]);
+        let buf = draw(&app, 120, 10);
+        let text = screen_text(&buf);
+        assert!(text.contains("Roadmap"), "title missing: {text}");
+        assert!(text.contains("rust"), "snippet missing: {text}");
+        assert_eq!(rows_containing(&buf, "Roadmap"), 1, "hit wrapped (A3)");
+    }
+
+    #[tokio::test]
+    async fn session_search_title_matches_lead_content_only_hits() {
+        let mut app = app().await;
+        let a = session("Rust notes"); // title match, ledger index 0
+        let b = session("Beta"); // content-only, ledger index 1
+        let c = session("Rust roadmap"); // title match, ledger index 2
+        app.sessions = vec![a.clone(), b.clone(), c.clone()];
+        app.session_search = "rust".to_string();
+        app.session_content_matches = vec![content_row(b.id, "rust in beta")];
+
+        // Title matches keep ledger order and lead; the content-only session
+        // follows, mirroring the GUI rail's merge (#2720).
+        assert_eq!(app.visible_session_indices(), vec![0, 2, 1]);
+    }
+
+    #[tokio::test]
+    async fn session_search_stale_generation_result_is_ignored() {
+        let mut app = app().await;
+        let s = session("Roadmap");
+        app.sessions = vec![s.clone()];
+        app.session_search = "rust".to_string();
+        // The current query is generation 5.
+        app.session_search_gen.store(5, SeqCst);
+
+        // An older read (generation 3) finishes last: it must not land.
+        app.handle_event(TuiEvent::SessionContentSearchResult {
+            generation: 3,
+            rows: vec![content_row(s.id, "stale rust hit")],
+        })
+        .await
+        .unwrap();
+        assert!(
+            app.session_content_matches.is_empty(),
+            "stale generation overwrote the hits"
+        );
+
+        // The current read (generation 5) lands.
+        app.handle_event(TuiEvent::SessionContentSearchResult {
+            generation: 5,
+            rows: vec![content_row(s.id, "fresh rust hit")],
+        })
+        .await
+        .unwrap();
+        assert_eq!(app.session_content_matches.len(), 1);
+        assert_eq!(app.session_content_matches[0].snippet, "fresh rust hit");
+    }
+
+    #[tokio::test]
+    async fn session_search_end_to_end_reads_message_content() {
+        use crate::db::models::Message;
+        use crate::db::repository::{MessageRepository, SessionRepository};
+
+        let mut app = app().await;
+        // Persist a session whose title misses the query but whose message
+        // body carries it, then let the real debounced read surface it.
+        let sessions = SessionRepository::new(app.session_service.pool());
+        let messages = MessageRepository::new(app.session_service.pool());
+        let s = session("Roadmap");
+        sessions.create(&s).await.unwrap();
+        let m = Message::new(s.id, "user".to_string(), "we use rust here".to_string(), 1);
+        messages.create(&m).await.unwrap();
+        app.sessions = vec![s.clone()];
+        app.session_search = "rust".to_string();
+
+        app.schedule_session_content_search();
+        // The read debounces 250ms then lands on the event rail; wait for it.
+        let event = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            app.event_handler_mut().next(),
+        )
+        .await
+        .expect("content search timed out")
+        .expect("event channel closed");
+        app.handle_event(event).await.unwrap();
+
+        assert_eq!(app.visible_session_indices(), vec![0]);
+        assert_eq!(app.session_content_matches.len(), 1);
+        assert!(app.session_content_matches[0].snippet.contains("rust"));
     }
 }

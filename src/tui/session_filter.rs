@@ -89,19 +89,102 @@ pub fn session_filter_allows(filter: &SessionFilter, title: &str, plan: PlanFilt
     }
 }
 
-/// The whole per-row visibility decision (#2723). An explicit keyword search
-/// spans every session (A1): the automation hide and the plan chip gate only
-/// the browsing list, never a search the user typed to find something. With no
-/// search, the browsing filter decides.
+/// The whole per-row visibility decision (#2723, #2724). An explicit keyword
+/// search spans every session (A1): the automation hide and the plan chip gate
+/// only the browsing list, never a search the user typed to find something.
+/// A search matches the title OR a deep content hit: `content_hit` says the
+/// shared content search found the query in this session's messages (#2724),
+/// so a keyword that lives only in a message body still surfaces the row.
+/// With no search, the browsing filter decides and content hits mean nothing.
 pub fn session_row_visible(
     filter: &SessionFilter,
     title: &str,
     plan: PlanFilterState,
     search: &str,
+    content_hit: bool,
 ) -> bool {
     let search = search.trim().to_lowercase();
     if !search.is_empty() {
-        return title.to_lowercase().contains(&search);
+        return title.to_lowercase().contains(&search) || content_hit;
     }
     session_filter_allows(filter, title, plan)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_search_content_hit_surfaces_a_row_the_title_misses() {
+        let filter = SessionFilter::default();
+        assert!(session_row_visible(
+            &filter,
+            "Roadmap",
+            PlanFilterState::None,
+            "rust",
+            true
+        ));
+        assert!(!session_row_visible(
+            &filter,
+            "Roadmap",
+            PlanFilterState::None,
+            "rust",
+            false
+        ));
+    }
+
+    #[test]
+    fn session_search_title_match_still_works_without_content() {
+        let filter = SessionFilter::default();
+        assert!(session_row_visible(
+            &filter,
+            "Rust notes",
+            PlanFilterState::None,
+            "rust",
+            false
+        ));
+    }
+
+    #[test]
+    fn session_search_spans_automation_even_when_hidden() {
+        let filter = SessionFilter::default();
+        let cron = "Recap [cron-job:x]";
+        // Browsing hides the cron row; a typed search finds it by title or
+        // by a content hit (A1).
+        assert!(!session_row_visible(
+            &filter,
+            cron,
+            PlanFilterState::None,
+            "",
+            false
+        ));
+        assert!(session_row_visible(
+            &filter,
+            cron,
+            PlanFilterState::None,
+            "recap",
+            false
+        ));
+        assert!(session_row_visible(
+            &filter,
+            cron,
+            PlanFilterState::None,
+            "budget",
+            true
+        ));
+    }
+
+    #[test]
+    fn session_search_content_hit_does_not_leak_into_browsing() {
+        let filter = SessionFilter::default();
+        // No search typed: the browsing filter decides, a stale content hit
+        // cannot force a hidden row visible.
+        assert!(!session_row_visible(
+            &filter,
+            "Recap [cron-job:x]",
+            PlanFilterState::None,
+            "",
+            true
+        ));
+    }
 }

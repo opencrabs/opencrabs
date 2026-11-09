@@ -2641,6 +2641,7 @@ impl App {
                 KeyCode::Esc => {
                     self.session_search_active = false;
                     self.session_search.clear();
+                    self.schedule_session_content_search();
                     self.selected_session_index = 0;
                 }
                 KeyCode::Backspace => {
@@ -2650,6 +2651,7 @@ impl App {
                         self.session_search.pop();
                         self.selected_session_index = 0;
                     }
+                    self.schedule_session_content_search();
                 }
                 KeyCode::Enter => {
                     let visible = self.visible_session_indices();
@@ -2684,12 +2686,14 @@ impl App {
                             self.load_session(session_id).await?;
                             self.session_search_active = false;
                             self.session_search.clear();
+                            self.schedule_session_content_search();
                             self.switch_mode(AppMode::Chat).await?;
                         }
                     }
                 }
                 KeyCode::Char(c) if !c.is_control() => {
                     self.session_search.push(c);
+                    self.schedule_session_content_search();
                     self.selected_session_index = 0;
                 }
                 KeyCode::Up => {
@@ -2979,6 +2983,7 @@ impl App {
             // Activate session search
             self.session_search_active = true;
             self.session_search.clear();
+            self.schedule_session_content_search();
             self.selected_session_index = 0;
         }
 

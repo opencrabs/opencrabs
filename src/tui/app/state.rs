@@ -590,6 +590,15 @@ pub struct App {
     /// The shared plan index behind the cache (#2723). Read and classify only:
     /// a sweep never archives or deletes a plan.
     pub(crate) plan_index: crate::utils::plan_files::PlanIndex,
+    /// Deep hits for the session-list keyword search (#2724): deduped session
+    /// rows from the shared core content search, newest-first. Empty whenever
+    /// no search is typed. The list draws a hit's snippet after the title so
+    /// the reader sees why the row matched.
+    pub session_content_matches: Vec<crate::db::repository::ContentSearchRow>,
+    /// Generation guard behind the debounced content search (#2724). Every
+    /// query change bumps it; a spawned read checks it before touching the
+    /// database, and its result only lands while it still matches.
+    pub(crate) session_search_gen: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// Viewport scroll offset for session list (first visible session index)
     pub sessions_scroll: usize,
 
@@ -1101,6 +1110,8 @@ impl App {
             session_filter: crate::tui::session_filter::SessionFilter::default(),
             session_plan_states: std::collections::HashMap::new(),
             plan_index: crate::utils::plan_files::PlanIndex::default(),
+            session_content_matches: Vec::new(),
+            session_search_gen: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             sessions_scroll: 0,
             ps: crate::tui::provider_selector::ProviderSelectorState::default(),
             input_history: Self::load_history(),
@@ -1243,30 +1254,105 @@ impl App {
         self.current_session.as_ref().map(|s| s.id) == Some(session_id)
     }
 
-    /// Returns indices into `self.sessions` that the list should draw (#2723).
+    /// Returns indices into `self.sessions` that the list should draw (#2723,
+    /// #2724).
     ///
     /// One pure rule decides each row: an explicit keyword search spans every
     /// session (A1), while the browsing list applies the plan chip and hides
     /// cron/RSI unless the automation toggle is on. The plan state comes from
     /// the cache `load_sessions` refreshes, so this reads no filesystem and the
     /// same inputs always give the same view.
+    ///
+    /// While searching, title matches lead in ledger order and content-only
+    /// hits follow in the deep search's newest-first rank, mirroring the GUI
+    /// rail's `merge_find_results` (#2720). A session found both ways appears
+    /// once, in the title block.
     pub(crate) fn visible_session_indices(&self) -> Vec<usize> {
         use crate::tui::session_filter::session_row_visible;
         use crate::utils::plan_files::PlanFilterState;
-        self.sessions
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| {
-                let title = s.title.as_deref().unwrap_or("New Chat");
-                let plan = self
-                    .session_plan_states
-                    .get(&s.id)
-                    .copied()
-                    .unwrap_or(PlanFilterState::None);
-                session_row_visible(&self.session_filter, title, plan, &self.session_search)
-            })
-            .map(|(i, _)| i)
-            .collect()
+        let searching = !self.session_search.trim().is_empty();
+        let mut title_hits: Vec<usize> = Vec::new();
+        let mut content_only: Vec<usize> = Vec::new();
+        for (i, s) in self.sessions.iter().enumerate() {
+            let title = s.title.as_deref().unwrap_or("New Chat");
+            let plan = self
+                .session_plan_states
+                .get(&s.id)
+                .copied()
+                .unwrap_or(PlanFilterState::None);
+            let content_hit = self
+                .session_content_matches
+                .iter()
+                .any(|r| r.session_id == s.id);
+            if !session_row_visible(
+                &self.session_filter,
+                title,
+                plan,
+                &self.session_search,
+                content_hit,
+            ) {
+                continue;
+            }
+            if searching
+                && title
+                    .to_lowercase()
+                    .contains(&self.session_search.trim().to_lowercase())
+            {
+                title_hits.push(i);
+            } else {
+                content_only.push(i);
+            }
+        }
+        if searching {
+            // Content-only rows keep the deep search's rank (newest-first).
+            content_only.sort_by_key(|&i| {
+                self.session_content_matches
+                    .iter()
+                    .position(|r| r.session_id == self.sessions[i].id)
+                    .unwrap_or(usize::MAX)
+            });
+        }
+        title_hits.extend(content_only);
+        title_hits
+    }
+
+    /// Kick the deep content read for the session-list keyword search (#2724).
+    ///
+    /// Every query change bumps the generation; the spawned read sleeps
+    /// 250ms so a burst of keystrokes costs one query, checks the generation
+    /// before touching the database, and only lands its rows while the
+    /// generation still matches. An empty query clears the hits at once and
+    /// schedules nothing. Mirrors the GUI's `schedule_seeker_find` guard
+    /// (#2721) on the TUI's event rail.
+    pub(crate) fn schedule_session_content_search(&mut self) {
+        use std::sync::atomic::Ordering::SeqCst;
+        let generation = self.session_search_gen.fetch_add(1, SeqCst) + 1;
+        let query = self.session_search.trim().to_string();
+        if query.is_empty() {
+            self.session_content_matches.clear();
+            return;
+        }
+        let search_gen = self.session_search_gen.clone();
+        let pool = self.session_service.pool();
+        let sender = self.event_sender();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            if search_gen.load(SeqCst) != generation {
+                return;
+            }
+            let messages = crate::db::repository::MessageRepository::new(pool.clone());
+            let sessions = crate::db::repository::SessionRepository::new(pool);
+            match crate::db::repository::search_session_content(&messages, &sessions, &query, 50)
+                .await
+            {
+                Ok(rows) => {
+                    let _ = sender.send(TuiEvent::SessionContentSearchResult { generation, rows });
+                }
+                Err(e) => {
+                    tracing::warn!("session content search failed: {e}");
+                }
+            }
+        });
     }
 
     /// The full-list index of the session the cursor is on, resolved through
@@ -3639,6 +3725,21 @@ impl App {
                 // succeeded; the exit status is the real answer (#2170).
                 self.notification = Some(format!("Could not open {target}: {detail}"));
                 self.notification_shown_at = Some(std::time::Instant::now());
+            }
+            TuiEvent::SessionContentSearchResult { generation, rows } => {
+                // Only the newest query's read may land: an older read that
+                // finishes last must not overwrite fresher hits (#2724).
+                if generation
+                    == self
+                        .session_search_gen
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    self.session_content_matches = rows;
+                    let visible = self.visible_session_indices().len();
+                    if self.selected_session_index >= visible {
+                        self.selected_session_index = visible.saturating_sub(1);
+                    }
+                }
             }
         }
         Ok(())
