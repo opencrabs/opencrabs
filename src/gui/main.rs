@@ -21,8 +21,8 @@
 //! its own row in the live turn and a `⏳` strip above the input, both drawn
 //! from the same formatter the TUI uses. When it finishes, the row settles by
 //! task id and the conversation resumes with the output (#2322). A completion
-//! for a session other than the open one is logged, not resumed: the window
-//! runs one conversation at a time.
+//! resumes the session that started the task, whether or not its conversation
+//! is the one on screen (#2704).
 
 mod accent;
 mod agent_bridge;
@@ -879,8 +879,10 @@ struct Dashboard {
     /// Reload attempts made while waiting for the turn's rows to persist.
     /// Bounded, so a write that never lands cannot spin the fetch loop.
     settle_retries: u8,
-    /// Turns the transcript must hold before the live turn is dropped: the
-    /// count on screen when the send happened, plus the new one.
+    /// Rows the session must hold before the live turn is dropped: the
+    /// session's row total when the send happened, plus the one the new turn
+    /// appends. Measured on the ledger, not on the windowed transcript, so a
+    /// conversation longer than `transcript::WINDOW` still settles (#2705).
     settle_expect: Option<usize>,
     /// A turn is running: sends queue instead of starting a second one.
     busy: bool,
@@ -4897,9 +4899,11 @@ impl Dashboard {
         self.rearm_transcript_follow();
         self.transcript.live_expanded = false;
         self.settle_retries = 0;
-        // The finished turn must add one to the persisted count before the
-        // live copy may be dropped (see `reload_transcript`).
-        self.settle_expect = Some(self.transcript.turns.len() + 1);
+        // The finished turn must add one row to the session before the live
+        // copy may be dropped (see `reload_transcript`). Measured on the
+        // session's own row total, which never saturates the way the windowed
+        // turn count does (#2705).
+        self.settle_expect = Some(self.transcript.row_total() + 1);
         // A recalled message is the turn's own text now, so it leaves the
         // queue with it; the messages the walk took before it go back to wait
         // (#2637).
@@ -5422,9 +5426,28 @@ impl Dashboard {
                     if !self.live.is_empty() {
                         self.live.notices.push(text);
                     }
-                    // A failed turn has no ctx or rate to report; a stale
-                    // record would land on whatever turn shows up next.
+                    // A failed turn still ran, so it keeps the numbers it
+                    // actually measured instead of showing a bare clock while
+                    // its neighbours carry ctx and rate (#2705). The record is
+                    // only written when the provider streamed something: a
+                    // failure before the first call has no reading of its own,
+                    // and borrowing the previous turn's budget would be a lie.
                     self.pending_metrics.remove(&session);
+                    self.live.finalize(None);
+                    if self.live.tokens > 0
+                        && let Some(used) = self.ctx_tokens
+                    {
+                        self.pending_metrics.insert(
+                            session,
+                            transcript::TurnMetrics {
+                                ctx_used: used,
+                                ctx_max: self.ctx_max,
+                                tps: Some(f64::from(self.live.tokens_per_sec()))
+                                    .filter(|t| *t > 0.0),
+                                tool_calls: self.live.tools.len(),
+                            },
+                        );
+                    }
                     self.busy = false;
                     self.live.thinking = false;
                     reload = self.transcript.session;
@@ -5521,17 +5544,14 @@ impl Dashboard {
                     // the agent is told, so the work is reported instead of the
                     // window going quiet with the turn already finished.
                     //
-                    // The window runs one turn, on the conversation it has
-                    // open (`agent_bridge` module doc). A completion for any
-                    // other session is logged, not silently dropped: resuming a
-                    // session nobody is looking at needs its own queue and turn
-                    // runner, which is #2322's documented gap.
-                    if Some(session_id) != self.transcript.session {
-                        logging::warn(&format!(
-                            "background task finished on session {session_id} while session {:?} is open: not resumed",
-                            self.transcript.session
-                        ));
-                    } else if self.busy {
+                    // The completion belongs to the session that started the
+                    // task, never to whatever conversation happens to be on
+                    // screen. The terminal resumes that session wherever the
+                    // user is looking (`tui/app/state.rs`), and the window now
+                    // does the same (#2704): a session already working takes
+                    // the receipt in its queue, and an idle one starts its turn
+                    // and parks it in the stash when it is not on screen.
+                    if self.running_here(session_id) {
                         // Queue it against the session the task belongs to, in
                         // the store the agent drains, so it goes out between
                         // tool calls instead of waiting for the turn to end
@@ -5541,8 +5561,10 @@ impl Dashboard {
                             session_id,
                             agent_bridge::PendingMessage::system(context_text, display_text),
                         );
-                    } else {
+                    } else if self.transcript.session == Some(session_id) {
                         self.resume_finished_task(session_id, context_text, display_text, cx);
+                    } else {
+                        self.resume_off_screen_task(session_id, context_text, display_text, cx);
                     }
                 }
             }
@@ -5745,7 +5767,7 @@ impl Dashboard {
         self.rearm_transcript_follow();
         self.transcript.live_expanded = false;
         self.settle_retries = 0;
-        self.settle_expect = Some(self.transcript.turns.len() + 1);
+        self.settle_expect = Some(self.transcript.row_total() + 1);
         self.busy = true;
         self.sync_composer_hint(cx);
         let cancel = tokio_util::sync::CancellationToken::new();
@@ -5761,6 +5783,78 @@ impl Dashboard {
         if !attached.is_empty() {
             agent_bridge::spawn_track_files(self.db_path.clone(), session_id, attached);
         }
+        cx.notify();
+    }
+
+    /// Whether `session` already has a turn in flight in this window: the
+    /// conversation on screen while it is busy, a split leaf still working, or
+    /// a turn parked in the stash (#2704).
+    ///
+    /// A completion for one of those joins the session's queue instead of
+    /// starting a second turn over it, which is the rule the terminal applies
+    /// to its own per-session state.
+    fn running_here(&self, session: Uuid) -> bool {
+        if self.transcript.session == Some(session) && self.busy {
+            return true;
+        }
+        if self.pane_states.get(&session).is_some_and(|p| p.busy) {
+            return true;
+        }
+        self.stashed.contains_key(&session)
+    }
+
+    /// Start the turn a completion asks for on a conversation nobody is
+    /// looking at, parking its card under that session (#2704).
+    ///
+    /// The terminal resumes the owning session wherever the user is looking,
+    /// so the window does too instead of logging the receipt away. The parked
+    /// turn is the same shape a switch leaves behind (#2616): `swap_visible_turn`
+    /// brings it back whole when that conversation is opened.
+    fn resume_off_screen_task(
+        &mut self,
+        session_id: Uuid,
+        context_text: String,
+        display_text: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(bridge) = agent_bridge::bridge() else {
+            // Still booting: key it to the session it finished on, so it
+            // resumes when the stack is ready (#2629).
+            agent_bridge::queue_push(
+                session_id,
+                agent_bridge::PendingMessage::system(context_text, display_text),
+            );
+            return;
+        };
+        let mut live = transcript::LiveTurn::default();
+        live.begin(display_text);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        self.stashed.insert(
+            session_id,
+            StashedTurn {
+                live,
+                cancel: Some(cancel.clone()),
+                // The rows land under a conversation that is not on screen, so
+                // no reload has to be proven here; opening it reads them.
+                settle_expect: None,
+                settle_retries: 0,
+                ctx_tokens: None,
+            },
+        );
+        let attached = editor::marker_paths(&context_text);
+        agent_bridge::spawn_turn(
+            bridge.service.clone(),
+            session_id,
+            context_text,
+            self.sink.clone(),
+            cancel,
+        );
+        if !attached.is_empty() {
+            agent_bridge::spawn_track_files(self.db_path.clone(), session_id, attached);
+        }
+        // The rail says the session is working from the first frame, the same
+        // signal a visible turn gives (#2666, #2636).
+        self.refresh_rail(cx);
         cx.notify();
     }
 
@@ -5868,7 +5962,7 @@ impl Dashboard {
             self.rearm_transcript_follow();
             self.transcript.live_expanded = false;
             self.settle_retries = 0;
-            self.settle_expect = Some(self.transcript.turns.len() + 1);
+            self.settle_expect = Some(self.transcript.row_total() + 1);
             self.busy = true;
             self.sync_composer_hint(cx);
             let cancel = tokio_util::sync::CancellationToken::new();
@@ -7291,8 +7385,10 @@ impl Dashboard {
     /// stays until the fetch returns a transcript that includes it.
     fn reload_transcript(&mut self, sid: Uuid, cx: &mut Context<Self>) {
         let db_path = self.db_path.clone();
-        // The turn that just finished should add one to the turn count. A
-        // reload that comes back short is a write that has not landed yet.
+        // The turn that just finished should add at least one row to the
+        // session. A reload that comes back short is a write that has not
+        // landed yet. The count is the session's own row total, so a
+        // conversation past the display window settles like any other (#2705).
         let expect = self.settle_expect;
         let attempt = self.settle_retries;
         cx.spawn(async move |this, cx| {
@@ -7305,7 +7401,7 @@ impl Dashboard {
                     Ok((rows, total)) => {
                         let (hidden, turns) =
                             transcript::turns_with_metrics(&rows, total, &this.turn_metrics);
-                        let landed = expect.is_none_or(|want| turns.len() >= want);
+                        let landed = settle_landed(expect, total);
                         this.transcript.hidden = hidden;
                         this.transcript.turns = turns;
                         // A turn that is still running owns the live card.
@@ -13718,6 +13814,16 @@ fn swap_visible_turn(
     }
 }
 
+/// Whether a reload holds the turn it was waiting for (#2705).
+///
+/// The comparison is against the session's row total as the ledger reports it,
+/// never against the windowed turn count: past `transcript::WINDOW` rows the
+/// window stops growing, so a turn count could never reach an expectation
+/// taken from it and the metrics of every later turn were thrown away.
+fn settle_landed(expect: Option<usize>, total: i64) -> bool {
+    expect.is_none_or(|want| total.max(0) as usize >= want)
+}
+
 /// The running detached command, above the input.
 ///
 /// Same formatter as the TUI (`tui::render::background`), so the two surfaces
@@ -17299,21 +17405,57 @@ mod tests {
         );
     }
 
-    /// The completion event is handled, and the cross-session branch says so
-    /// out loud instead of dropping the receipt. Halves again: the file this
+    /// The completion event resumes the session that started the task, never
+    /// only the conversation on screen (#2704). Halves again: the file this
     /// reads includes this test.
     #[test]
-    fn the_completion_event_is_handled() {
+    fn the_completion_event_resumes_its_own_session() {
         let src = include_str!("main.rs");
         let event = ["TurnEvent::", "BackgroundTaskDone"].concat();
-        let warn = ["logging::", "warn("].concat();
         assert!(
             src.contains(&event),
             "the poll loop must handle the completion event"
         );
+        let arm = src.split(&event).nth(1).expect("the completion arm");
+        let arm = arm
+            .split("agent_bridge::TurnEvent::")
+            .next()
+            .expect("the end of the arm");
         assert!(
-            src.contains(&warn),
-            "a completion for another session is logged, never dropped"
+            arm.contains("self.running_here(session_id)"),
+            "a session already working takes the receipt in its queue"
+        );
+        assert!(
+            arm.contains("self.resume_off_screen_task(session_id"),
+            "a completion for a conversation nobody is looking at starts its turn"
+        );
+        assert!(
+            !arm.contains("background task finished on session"),
+            "the receipt is resumed, not logged away"
+        );
+    }
+
+    /// A conversation longer than the display window still settles (#2705).
+    ///
+    /// The old expectation was `turns.len() + 1`, taken from the newest 200
+    /// rows: past that the count stops growing, so a real turn could never be
+    /// seen to land and its ctx and rate were thrown away. Measured on the
+    /// session's row total, the same turn lands on the first reload.
+    #[test]
+    fn a_session_past_the_window_still_settles() {
+        let rows_before = 335usize;
+        let expect = Some(rows_before + 1);
+        assert!(
+            !settle_landed(expect, rows_before as i64),
+            "the turn's row is not in the ledger yet"
+        );
+        assert!(
+            settle_landed(expect, (rows_before + 1) as i64),
+            "the row lands on the first reload, however long the conversation is"
+        );
+        assert!(
+            settle_landed(None, 0),
+            "a reload with nothing to wait for is never short"
         );
     }
 
