@@ -5320,6 +5320,26 @@ impl Dashboard {
         cx.notify();
     }
 
+    /// The two taps a plan waiting on approval offers (#2755).
+    ///
+    /// They send the literal commands the terminal and Telegram send, through
+    /// the composer path that parses them, so a tap and a typed `/execute` are
+    /// one code path and never two implementations of an approval.
+    fn plan_actions(&mut self, session: Uuid, cx: &mut Context<Self>) -> plan_strip::PlanActions {
+        let approve = cx.listener(move |this, _ev: &gpui::ClickEvent, _window, cx| {
+            cx.stop_propagation();
+            this.send_turn_to(session, "/execute".to_string(), None, cx);
+        });
+        let discard = cx.listener(move |this, _ev: &gpui::ClickEvent, _window, cx| {
+            cx.stop_propagation();
+            this.send_turn_to(session, "/discard".to_string(), None, cx);
+        });
+        plan_strip::PlanActions {
+            on_approve: std::rc::Rc::new(approve),
+            on_discard: std::rc::Rc::new(discard),
+        }
+    }
+
     /// The queue entry for a send: a hidden prompt keeps its display line, so
     /// the queue strip never reads `[SYSTEM: ...]` (#2756).
     fn pending_message(text: String, display: Option<String>) -> agent_bridge::PendingMessage {
@@ -9239,10 +9259,15 @@ impl Dashboard {
                 };
                 let density = plan_strip::pane_density(count, pane_width);
                 let expanded = self.plan_expanded.contains(session);
+                // A plan waiting on approval is the one card a pane must not
+                // lose in a split (#2755): it is the only place the tap lives.
+                let actions = self.plan_actions(*session, cx);
                 let (plan_view, queued, editor) = if is_chat {
                     self.plan.refresh();
                     (
-                        self.plan.pane_view(density, expanded),
+                        self.plan
+                            .editing_view(Some(&actions))
+                            .or_else(|| self.plan.pane_view(density, expanded)),
                         self.queued_for_strip(),
                         self.editor.clone(),
                     )
@@ -9251,7 +9276,9 @@ impl Dashboard {
                         Some(pane) => {
                             pane.plan.refresh();
                             (
-                                pane.plan.pane_view(density, expanded),
+                                pane.plan
+                                    .editing_view(Some(&actions))
+                                    .or_else(|| pane.plan.pane_view(density, expanded)),
                                 agent_bridge::queue_snapshot(*session),
                                 pane.editor.clone(),
                             )
@@ -11841,7 +11868,14 @@ impl Render for Dashboard {
                 // window keeps exactly the layout it has always had, measure
                 // wrapper included (#2594).
                 if !self.window_is_split() {
-                    if let Some(plan_view) = self.plan.view() {
+                    let open = self.transcript.session;
+                    let actions = open.map(|session| self.plan_actions(session, cx));
+                    self.plan.refresh();
+                    let card = self
+                        .plan
+                        .editing_view(actions.as_ref())
+                        .or_else(|| self.plan.view());
+                    if let Some(plan_view) = card {
                         col = col.child(central(
                             plan_view.into_any_element(),
                             centred_chat,

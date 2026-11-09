@@ -528,8 +528,14 @@ fn the_window_composer_stands_down_once_the_window_is_split() {
         "the window's composer sits inside the gate, still on the chat measure"
     );
     assert!(
-        gated.contains("if let Some(plan_view) = self.plan.view()"),
-        "so does the window's plan strip"
+        gated.contains(".editing_view(actions.as_ref())")
+            && gated.contains(".or_else(|| self.plan.view())"),
+        "so does the window's plan strip: the Editing approval card draws \
+         first (#2755) and the running view falls back"
+    );
+    assert!(
+        gated.contains("if let Some(plan_view) = card"),
+        "and the strip that wins still lands inside the measure wrapper"
     );
 }
 

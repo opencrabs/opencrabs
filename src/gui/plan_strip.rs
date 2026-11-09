@@ -13,13 +13,15 @@
 //! rewitten plan redraws on the next frame.
 
 use crate::palette;
-use crate::transcript::{SMALL_TEXT_SIZE, SelectionContext, selectable_styled_text, small_style};
+use crate::transcript::{
+    ClickHandler, SMALL_TEXT_SIZE, SelectionContext, selectable_styled_text, small_style,
+};
 use opencrabs::ui_core::card::{CARD_RADIUS, glass_fill};
 use opencrabs::ui_core::plan_history::{COMPLETED_PLAN_FOOTER, CompletedPlanView};
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-use gpui::{Div, SharedString, Stateful, div, prelude::*, px, rgb};
+use gpui::{Div, MouseButton, SharedString, Stateful, div, prelude::*, px, rgb};
 use opencrabs::tui::plan::{PlanDocument, PlanStatus, TaskStatus};
 
 /// The strip's state: the plan file it is showing, the mtime it last read,
@@ -33,6 +35,18 @@ pub struct PlanStripState {
     /// `None` means no plan for this session (or an unreadable one); the
     /// strip then draws nothing at all rather than an empty frame.
     doc: Option<PlanDocument>,
+}
+
+/// The two taps a plan waiting on approval offers (#2755).
+///
+/// The window mints them: only its own view can build a listener, and only it
+/// knows which session the card belongs to. The card stays a pure draw.
+pub struct PlanActions {
+    /// `✅ Approve plan`: sends `/execute`, the command the terminal and
+    /// Telegram send.
+    pub on_approve: ClickHandler,
+    /// `🗑 Discard`: sends `/discard`.
+    pub on_discard: ClickHandler,
 }
 
 impl PlanStripState {
@@ -130,6 +144,71 @@ impl PlanStripState {
         })
     }
 
+    /// The approval card (#2755): the plan that is waiting on the user.
+    ///
+    /// `Editing` is the one state that carries a decision, and the window drew
+    /// nothing at all in it. A GUI user was never told a plan was waiting, let
+    /// alone handed the button that approves it, while the same plan in the
+    /// terminal or on Telegram grew an Approve button. The taps send the two
+    /// commands those surfaces send, so a tap and a typed `/execute` are one
+    /// code path.
+    ///
+    /// `actions` is `None` only when the caller has no session to send through:
+    /// the card still names the plan and the commands, it just offers no tap.
+    pub fn editing_view(&self, actions: Option<&PlanActions>) -> Option<Div> {
+        let plan = self.doc.as_ref()?;
+        if !matches!(plan.status, PlanStatus::Editing) {
+            return None;
+        }
+        let mut col = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .p_3()
+            .min_w_0()
+            .rounded(px(CARD_RADIUS))
+            .bg(glass_fill(palette::current().panel));
+        for (kind, line) in editing_lines(plan) {
+            let color = match kind {
+                LineKind::Title => palette::current().text_muted,
+                _ => palette::current().text_faint,
+            };
+            col = col.child(
+                div().flex().flex_row().w_full().min_w_0().child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .truncate()
+                        .text_xs()
+                        .text_color(rgb(color))
+                        .child(SharedString::from(line)),
+                ),
+            );
+        }
+        if let Some(actions) = actions {
+            col = col.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_2()
+                    .child(action_chip(
+                        format!("plan-approve-{}", plan.id),
+                        APPROVE_LABEL,
+                        true,
+                        actions.on_approve.clone(),
+                    ))
+                    .child(action_chip(
+                        format!("plan-discard-{}", plan.id),
+                        DISCARD_LABEL,
+                        false,
+                        actions.on_discard.clone(),
+                    )),
+            );
+        }
+        Some(col)
+    }
+
     /// The plan as a split pane draws it: the task in flight and the next one
     /// or two while there is room, the count and the bar when there is less,
     /// and a bare bar in a wall of panes (#2622, #2624).
@@ -194,6 +273,59 @@ impl PlanStripState {
         }
         Some(col)
     }
+}
+
+/// What the approval card calls the plan: the same words the Telegram chrome
+/// uses, so one plan reads the same on both surfaces.
+const APPROVE_LABEL: &str = "✅ Approve plan";
+const DISCARD_LABEL: &str = "🗑 Discard";
+/// What the card tells the user to do, under the plan it names.
+pub const APPROVE_HINT: &str = "Approve with /execute, or discard with /discard.";
+
+/// The lines the approval card prints, split out of the view so the copy is
+/// testable without a frame (#2755).
+pub fn editing_lines(plan: &PlanDocument) -> Vec<(LineKind, String)> {
+    let header = if plan.tasks.is_empty() {
+        format!("✍️ Editing plan · {}", fit(&plan.title, 60))
+    } else {
+        format!(
+            "✍️ Editing plan · {} · {} tasks",
+            fit(&plan.title, 60),
+            plan.tasks.len()
+        )
+    };
+    vec![
+        (LineKind::Title, header),
+        (LineKind::Next, APPROVE_HINT.to_string()),
+    ]
+}
+
+/// One tap on the approval card. The id comes from the plan, so two strips
+/// showing the same plan never mint the same element twice.
+fn action_chip(id: String, label: &str, accent: bool, handler: ClickHandler) -> Stateful<Div> {
+    let color = if accent {
+        palette::current().teal
+    } else {
+        palette::current().text_muted
+    };
+    div()
+        .id(SharedString::from(id))
+        .flex_none()
+        .px_2()
+        .py_1()
+        .rounded(px(CARD_RADIUS))
+        .bg(rgb(palette::current().panel_hi))
+        .cursor_pointer()
+        .text_xs()
+        .text_color(rgb(color))
+        .child(SharedString::from(label.to_string()))
+        // A tap on a chip is not a tap on the card it sits in: the pane's card
+        // toggles its checklist on a press, and approving a plan must not also
+        // rewrite that pane's layout (#2755).
+        .on_mouse_down(MouseButton::Left, |_ev, _window, cx| {
+            cx.stop_propagation();
+        })
+        .on_click(move |event, window, cx| handler(event, window, cx))
 }
 
 /// How much of a plan one pane shows (#2624). A split pane is a fraction of
@@ -648,6 +780,95 @@ mod tests {
         assert!(
             !flat.contains(".w_full() .min_w_0() .overflow_hidden() .truncate()"),
             "the block-div truncate shape is back: gpui lays it out one character wide"
+        );
+    }
+
+    /// #2755: `Editing` is the state that owns the approval, and the window
+    /// drew nothing at all in it while the terminal and Telegram grew an
+    /// Approve button for the same plan.
+    #[test]
+    fn an_editing_plan_gets_a_card_naming_the_plan_and_the_commands() {
+        let mut plan = PlanDocument::new(uuid::Uuid::new_v4(), "Ship the card".to_string());
+        plan.status = PlanStatus::Editing;
+        let lines = super::editing_lines(&plan);
+        assert_eq!(lines[0].0, LineKind::Title);
+        assert!(
+            lines[0].1.contains("Editing plan") && lines[0].1.contains("Ship the card"),
+            "{:?}",
+            lines[0]
+        );
+        assert_eq!(lines[1], (LineKind::Next, super::APPROVE_HINT.to_string()));
+        assert!(super::APPROVE_HINT.contains("/execute"));
+        assert!(super::APPROVE_HINT.contains("/discard"));
+
+        // A plan with work says how much; an empty one still says it waits.
+        let sized = plan_with(3, 0, None);
+        assert!(super::editing_lines(&sized)[0].1.contains("3 tasks"));
+        assert!(
+            super::editing_lines(&plan)[0]
+                .1
+                .starts_with("\u{270d}\u{fe0f} Editing plan"),
+            "an empty plan is still waiting: {:?}",
+            super::editing_lines(&plan)[0]
+        );
+    }
+
+    /// The card is drawn for Editing only, in both draw paths, and its two
+    /// taps send the literal commands the terminal sends rather than calling
+    /// an approval implementation of their own.
+    #[test]
+    fn the_approval_card_is_drawn_where_the_taps_can_be_pressed() {
+        let src = include_str!("plan_strip.rs");
+        let body = src
+            .split("pub fn editing_view(")
+            .nth(1)
+            .and_then(|rest| rest.split("/// The plan as a split pane draws it").next())
+            .expect("the editing view body");
+        assert!(
+            body.contains("matches!(plan.status, PlanStatus::Editing)"),
+            "only a waiting plan gets the approval card"
+        );
+        assert!(
+            body.contains("actions.on_approve") && body.contains("actions.on_discard"),
+            "the card renders both taps it is handed"
+        );
+
+        let main = include_str!("main.rs");
+        let panes = main
+            .split("fn panes_body(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .expect("panes body");
+        assert!(
+            panes.contains("editing_view(Some(&actions))"),
+            "a split pane draws the waiting plan, not just the running one"
+        );
+        let unsplit = main
+            .split("if !self.window_is_split() {")
+            .nth(1)
+            .and_then(|rest| rest.split("let waiting = self.queued_for_strip();").next())
+            .expect("the unsplit strip block");
+        assert!(
+            unsplit.contains("editing_view(actions.as_ref())"),
+            "the unsplit window draws the waiting plan"
+        );
+
+        let taps = main
+            .split("fn plan_actions(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .expect("the tap builder");
+        assert!(
+            taps.contains("\"/execute\".to_string()"),
+            "Approve sends the command the terminal sends"
+        );
+        assert!(
+            taps.contains("\"/discard\".to_string()"),
+            "Discard sends the command the terminal sends"
+        );
+        assert!(
+            taps.contains("send_turn_to(session,"),
+            "a tap goes through the composer path that parses the command"
         );
     }
 
