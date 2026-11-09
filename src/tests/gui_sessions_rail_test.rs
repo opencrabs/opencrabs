@@ -50,16 +50,17 @@ fn the_rail_header_is_compact_opencrabs_branding() {
 #[test]
 fn grouped_topics_are_compact_visible_pins_not_a_dropdown() {
     let ordered = block(SESSIONS, "pub fn ordered(", "/// Whether a row is a topic");
-    // #2701 retired the GUI fold: the flag that blanked CrabsDev's chip strip is
-    // no longer read, so a topic stays in the order under its parent whatever
-    // the terminal wrote to `topics_collapsed`. The TUI keeps its own fold.
+    // #2701 replaced the fold tree with chips that always paint, so the order
+    // keeps every topic directly beneath its parent and hides none of them.
+    // The toggle is a key, not rail chrome: the row still paints no fold
+    // button or dropdown.
     assert!(
-        !ordered.contains("is_collapsed("),
-        "the order no longer hides a folded session's topics"
+        ordered.contains("self.parents.get(&s.id) == Some(&top.id) && grouped(s)"),
+        "a topic always follows its parent in the order"
     );
     assert!(
-        ordered.contains("parents.get(&s.id) == Some(&top.id) && grouped(s)"),
-        "every topic is listed directly under its parent"
+        !ordered.contains("is_collapsed"),
+        "the order never hides a topic behind a fold"
     );
 
     let row = block(SESSIONS, "pub fn row(", "pub fn on_click(");

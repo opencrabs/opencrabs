@@ -444,7 +444,7 @@ pub const ROWS: &[HelpRow] = &[
         HelpSection::Sessions,
         "z",
         "Z",
-        Some("z"),
+        None,
         "Fold or unfold the topic tree",
     ),
 ];

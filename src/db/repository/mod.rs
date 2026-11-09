@@ -7,6 +7,7 @@
 pub mod analytics_event;
 pub mod background_task;
 pub mod channel_message;
+pub mod content_search;
 pub mod cron_job;
 pub mod cron_job_run;
 pub mod decision_cache;
@@ -32,6 +33,7 @@ pub mod usage_ledger;
 pub use analytics_event::AnalyticsEventRepository;
 pub use background_task::{BackgroundTaskRepository, BackgroundTaskRow};
 pub use channel_message::{ChannelMessageRepository, TopicSummary};
+pub use content_search::{ContentSearchRow, map_hits_to_sessions, search_session_content};
 pub use cron_job::{CronJobPatch, CronJobRepository};
 pub use cron_job_run::CronJobRunRepository;
 pub use decision_cache::{DecisionCacheRepository, DecisionCacheRow, DecisionPut};

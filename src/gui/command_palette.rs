@@ -147,6 +147,17 @@ const CHIP_FILL: u32 = 0xffffff14;
 /// The invitation the field prints while it is empty.
 const PLACEHOLDER: &str = "Seeker: sessions, feats, skills, docs, debug and more.";
 
+/// The line the field prints while it is empty. An armed pick names its job
+/// instead of inviting a query: the list under it is a set of conversations
+/// to choose from, and nothing in the rows says which job the choice serves
+/// (#2711).
+pub(super) fn field_prompt(state: &PaletteState) -> &'static str {
+    match state.pick() {
+        Some(purpose) => opencrabs::ui_core::palette::pick_prompt(purpose),
+        None => PLACEHOLDER,
+    }
+}
+
 /// The shaped line and bounds from the latest paint. Mouse hit testing reads
 /// this snapshot; the shared palette state never depends on GPUI types.
 pub(super) struct FinderPaint {
@@ -184,6 +195,9 @@ fn selection_highlight(
 struct SeekerTextElement {
     paint: Entity<FinderPaint>,
     query: String,
+    /// The invitation the field prints while the query is empty: the armed
+    /// pick's own sentence, or the generic one (#2711).
+    placeholder: &'static str,
     caret: usize,
     selection: Option<Range<usize>>,
     caret_on: bool,
@@ -238,7 +252,7 @@ impl Element for SeekerTextElement {
         cx: &mut App,
     ) -> Self::PrepaintState {
         let empty = self.query.is_empty();
-        let display = if empty { PLACEHOLDER } else { &self.query };
+        let display = if empty { self.placeholder } else { &self.query };
         let style = window.text_style();
         let font_size = style.font_size.to_pixels(window.rem_size());
         let run = TextRun {
@@ -346,6 +360,7 @@ pub(super) fn query_line(
     let element = SeekerTextElement {
         paint,
         query: state.query().to_string(),
+        placeholder: field_prompt(state),
         caret: before.len(),
         selection,
         caret_on,
@@ -644,6 +659,17 @@ pub(super) fn overlay(
                         .text_color(rgb(INK_MUTED))
                         .child("enter starts the setup · esc closes"),
                 );
+        } else if pick_armed {
+            // An armed pick answers Enter with the pick, not with the row the
+            // line would run, so the legend names that (#2711).
+            card = card.child(
+                div()
+                    .px_3()
+                    .pb_3()
+                    .text_xs()
+                    .text_color(rgb(INK_MUTED))
+                    .child("enter pick · up/down move · esc cancel"),
+            );
         } else if !idle && !miss && !asks {
             // The legend prints only under a typed list; an idle card ends
             // at its rows so the glass stays a hint (#2491).
@@ -790,6 +816,60 @@ mod tests {
         assert!(
             !pill_src.contains("gap_3"),
             "the pill row itself carries no gap either"
+        );
+    }
+
+    /// An armed pick names its job in the field, and the generic invitation
+    /// returns the moment nothing is armed (#2711).
+    #[test]
+    fn an_armed_pick_names_its_job_in_the_field() {
+        use opencrabs::ui_core::palette::{PickFor, pick_prompt};
+
+        let idle = state_with(vec![item("Quit", PaletteKind::Command)]);
+        assert_eq!(
+            field_prompt(&idle),
+            PLACEHOLDER,
+            "an idle card keeps the invitation"
+        );
+
+        for purpose in [PickFor::NewTopic, PickFor::Favorite, PickFor::GroupTopics] {
+            let armed =
+                PaletteState::picking(purpose, vec![item("invoices", PaletteKind::Session)]);
+            assert_eq!(
+                field_prompt(&armed),
+                pick_prompt(purpose),
+                "{purpose:?} prints its own sentence"
+            );
+            assert_ne!(
+                field_prompt(&armed),
+                PLACEHOLDER,
+                "{purpose:?} must not fall back to the generic invitation"
+            );
+        }
+    }
+
+    /// The field element takes its invitation from the state, so a second
+    /// copy of the placeholder cannot come back inside prepaint (#2711).
+    #[test]
+    fn the_field_reads_its_prompt_from_the_state() {
+        let src = include_str!("command_palette.rs");
+        let prepaint = src
+            .find("fn prepaint(")
+            .expect("the element has a prepaint");
+        let body = src.get(prepaint..).expect("prepaint starts on a glyph");
+        let end = body.find("fn paint(").expect("prepaint ends before paint");
+        let body = body.get(..end).expect("the cut lands on a glyph");
+        assert!(
+            !body.contains("PLACEHOLDER"),
+            "prepaint prints the state's prompt, not the const"
+        );
+        assert!(
+            body.contains("self.placeholder"),
+            "prepaint paints the field the caller passed"
+        );
+        assert!(
+            src.contains("placeholder: field_prompt(state)"),
+            "query_line hands the state's prompt to the element"
         );
     }
 

@@ -18,14 +18,14 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::tui::render::chrome;
 use crate::tui::render::theme::{self, Role};
-use crate::ui_core::palette::{Channel, MAX_ROWS, PaletteState, channel_hint, roast};
+use crate::ui_core::palette::{Channel, MAX_ROWS, PaletteState, channel_hint, pick_prompt, roast};
 
 /// How many rows the card can print for a given outer area: the borders, the
-/// field and the footer take the rest, and the setup hint takes one more line
-/// when it is printed (#2462).
-fn page_height(area: Rect, hint: bool) -> usize {
+/// field and the footer take the rest, and every hint line takes one more
+/// (#2462, #2711).
+fn page_height(area: Rect, hint_lines: usize) -> usize {
     let card = card_area(area);
-    let chrome = if hint { 5 } else { 4 };
+    let chrome = 4 + u16::try_from(hint_lines).unwrap_or(0);
     usize::from(card.height.saturating_sub(chrome)).min(MAX_ROWS)
 }
 
@@ -92,12 +92,27 @@ pub(crate) fn render_command_palette(
         // A caret so an empty field still looks like it is listening.
         Span::styled("▏", Style::default().fg(accent)),
     ]));
-    match setup {
-        Some(hint) => lines.push(Line::from(Span::styled(
+    // The setup line stays first because it is rarer and louder. Under it,
+    // the armed pick names its job: without that sentence the card is an
+    // ordinary list of conversations that never says what the pick serves
+    // (#2462, #2711).
+    let mut hint_lines = 0;
+    if let Some(hint) = setup {
+        lines.push(Line::from(Span::styled(
             fit(hint, usize::from(card.width.saturating_sub(2))),
             Style::default().fg(theme::role(Role::Warning)),
-        ))),
-        None => lines.push(Line::from("")),
+        )));
+        hint_lines += 1;
+    }
+    if let Some(sentence) = state.pick().map(pick_prompt) {
+        lines.push(Line::from(Span::styled(
+            fit(sentence, usize::from(card.width.saturating_sub(2))),
+            Style::default().fg(muted),
+        )));
+        hint_lines += 1;
+    }
+    if hint_lines == 0 {
+        lines.push(Line::from(""));
     }
 
     let rows = state.visible();
@@ -107,7 +122,7 @@ pub(crate) fn render_command_palette(
             Style::default().fg(theme::role(Role::Warning)),
         )));
     } else {
-        let page = page_height(area, setup.is_some()).max(1);
+        let page = page_height(area, hint_lines).max(1);
         let armed = state.cursor().unwrap_or(0);
         let scroll = state
             .scroll()
@@ -200,15 +215,52 @@ mod tests {
         }
     }
 
+    /// An armed pick prints its own sentence under the field, so the terminal
+    /// names the job the same way the window does (#2711).
+    #[test]
+    fn an_armed_pick_prints_its_sentence_on_the_card() {
+        use crate::ui_core::palette::{PickFor, pick_prompt};
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        for purpose in [PickFor::NewTopic, PickFor::Favorite, PickFor::GroupTopics] {
+            let state = PaletteState::picking(purpose, vec![item("invoices")]);
+            let mut terminal = Terminal::new(TestBackend::new(90, 30)).unwrap();
+            terminal
+                .draw(|f| {
+                    let area = f.area();
+                    render_command_palette(f, &state, area, &[]);
+                })
+                .unwrap();
+            let printed: String = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            let sentence = pick_prompt(purpose);
+            // The card trims to its own width, so the test reads the head of
+            // the sentence, which is the part that names the job.
+            let head: String = sentence.chars().take(24).collect();
+            assert!(
+                printed.contains(&head),
+                "{purpose:?} prints {head:?} on the card"
+            );
+        }
+    }
+
     /// The page the card can print is bounded by the rows it has, so a long
     /// list scrolls instead of painting past the border.
     #[test]
     fn the_page_never_exceeds_the_card_or_the_row_cap() {
         let area = Rect::new(0, 0, 100, 40);
-        assert!(page_height(area, false) <= MAX_ROWS);
-        assert!(page_height(area, true) <= MAX_ROWS);
-        // The hint costs the list one row, never a row it did not have.
-        assert!(page_height(area, true) <= page_height(area, false));
+        assert!(page_height(area, 0) <= MAX_ROWS);
+        assert!(page_height(area, 1) <= MAX_ROWS);
+        assert!(page_height(area, 2) <= MAX_ROWS);
+        // Every hint line costs the list one row, never a row it did not have.
+        assert!(page_height(area, 1) <= page_height(area, 0));
+        assert!(page_height(area, 2) <= page_height(area, 1));
         let state = PaletteState::new(
             (0..MAX_ROWS + 30)
                 .map(|ix| item(&format!("r{ix}")))

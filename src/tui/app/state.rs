@@ -932,6 +932,57 @@ mod sidebar_action_tests {
             dispatch.contains("PaletteAction::CloseSidebar => self.apply_sidebar_action(false)")
         );
     }
+
+    /// The Seeker's split rows walk the same pane path the `|` and `_` keys
+    /// walk, and land the caret on the sessions list to pick the session for
+    /// the new pane (#2712).
+    #[test]
+    fn the_split_rows_split_the_pane_instead_of_printing_a_notice() {
+        let source = include_str!("state.rs");
+        let dispatch = source
+            .rsplit("async fn apply_palette_action")
+            .next()
+            .and_then(|tail| tail.split("/// Handle keyboard input").next())
+            .expect("palette dispatch");
+
+        let arm = dispatch
+            .split("PaletteAction::BeginSplit(layout) =>")
+            .nth(1)
+            .and_then(|tail| tail.split("PaletteAction::OpenDocs").next())
+            .expect("the split arm is in the dispatch");
+
+        assert!(
+            !arm.contains("window only"),
+            "the terminal owns panes, so the row must split one"
+        );
+        assert!(
+            arm.contains("self.pane_manager.split(direction)"),
+            "the row splits the pane the caret is on"
+        );
+        assert!(
+            arm.contains("crate::tui::pane::SplitDirection::Horizontal")
+                && arm.contains("crate::tui::pane::SplitDirection::Vertical"),
+            "both layouts map to a real direction"
+        );
+        assert!(
+            arm.contains("self.switch_mode(AppMode::Sessions).await?;"),
+            "the caret lands on the list that fills the new pane"
+        );
+        assert!(
+            arm.contains("pane.session_id = Some(sid)"),
+            "the pane being split keeps the session it shows"
+        );
+
+        let group = dispatch
+            .split("PaletteAction::GroupTopics =>")
+            .nth(1)
+            .and_then(|tail| tail.split("PaletteAction::GroupTopicsOn").next())
+            .expect("the group arm is in the dispatch");
+        assert!(
+            group.contains("opens in the window"),
+            "the terminal says where the group modal lives"
+        );
+    }
 }
 
 impl App {
@@ -3770,6 +3821,52 @@ impl App {
                     format!("Pinned to top: {title}")
                 });
                 self.notification_shown_at = Some(std::time::Instant::now());
+            }
+            PaletteAction::GroupTopics => {
+                // The group modal is a window surface, so the terminal names
+                // it instead of arming a pick that ends nowhere (#2713).
+                self.notification = Some("Group topics opens in the window".to_string());
+                self.notification_shown_at = Some(std::time::Instant::now());
+            }
+            PaletteAction::GroupTopicsOn(_) => {
+                // Nothing arms the group pick in the terminal, so this arm
+                // keeps the match exhaustive and says where the modal lives
+                // (#2713).
+                self.notification = Some("Group topics opens in the window".to_string());
+                self.notification_shown_at = Some(std::time::Instant::now());
+            }
+            PaletteAction::BeginSplit(layout) => {
+                // The same door the `|` and `_` keys walk (#2712): pin the
+                // focused pane to the session it is showing, stash the input
+                // with it, split, then leave the caret on the list to pick the
+                // session for the new pane.
+                if let Some(ref session) = self.current_session {
+                    let sid = session.id;
+                    if let Some(pane) = self.pane_manager.focused_pane_mut() {
+                        pane.session_id = Some(sid);
+                    }
+                }
+                self.pane_manager.stash_input(
+                    &mut self.input_buffer,
+                    &mut self.cursor_position,
+                    &mut self.input_history_index,
+                );
+                let direction = match layout {
+                    crate::ui_core::split::Layout::Side => {
+                        crate::tui::pane::SplitDirection::Horizontal
+                    }
+                    crate::ui_core::split::Layout::Stack => {
+                        crate::tui::pane::SplitDirection::Vertical
+                    }
+                };
+                self.pane_manager.split(direction);
+                self.pane_manager.adopt_input(
+                    &mut self.input_buffer,
+                    &mut self.cursor_position,
+                    &mut self.input_history_index,
+                );
+                self.pane_manager.save_layout();
+                self.switch_mode(AppMode::Sessions).await?;
             }
             PaletteAction::OpenDocs(path) => {
                 // Detached, exactly like a previewed file: waiting on the
