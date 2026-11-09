@@ -240,8 +240,10 @@ pub struct Editor {
     /// A request to put the caret back in this field once a frame with a
     /// window is drawing it (#2665). The platform's file dialog takes the
     /// keyboard away, and the callback that runs after it closes has no
-    /// window to focus through, so the request waits for `render`.
-    focus_pending: bool,
+    /// window to focus through, so the request waits for `render`. The
+    /// window also arms it after a press that hands the root the keys, so the
+    /// field the user is about to type into reclaims the caret (#2741).
+    pub(crate) focus_pending: bool,
     pub content: String,
     /// Submitted messages and the draft stashed while recalling them.
     input_history: Vec<String>,

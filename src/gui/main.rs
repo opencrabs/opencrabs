@@ -1004,10 +1004,43 @@ mod sidebar_action_tests {
     /// window, and they read the body so a mention elsewhere cannot satisfy
     /// them (#2665).
     fn fn_body(src: &'static str, name: &str) -> &'static str {
-        src.split(&format!("fn {name}("))
-            .nth(1)
-            .and_then(|rest| rest.split("\n    fn ").next())
-            .unwrap_or_else(|| panic!("{name} not found"))
+        item_body(src, &format!("fn {name}("))
+    }
+
+    /// The Dashboard's window render. Two impls in this file define `render`,
+    /// and only this signature is the one that holds the window (#2741).
+    fn dashboard_render(src: &'static str) -> &'static str {
+        item_body(
+            src,
+            "fn render(&mut self, window: &mut Window, cx: &mut Context<Self>)",
+        )
+    }
+
+    /// The body of one item, from its own definition to its closing brace.
+    ///
+    /// Two things this gets right that a plain `split` does not: only a real
+    /// definition counts, because the scans below quote the names they look
+    /// for inside their own strings, and the body ends at the brace that
+    /// closes it rather than at the next method, so a top level function in
+    /// another module file reads the same as a `Dashboard` method (#2741).
+    fn item_body(src: &'static str, needle: &str) -> &'static str {
+        let at = src
+            .match_indices(needle)
+            .map(|(at, _)| at)
+            .find(|&at| {
+                let line = src[..at].rfind('\n').map(|n| n + 1).unwrap_or(0);
+                let prefix = src[line..at].trim();
+                prefix.is_empty() || prefix.starts_with("pub")
+            })
+            .unwrap_or_else(|| panic!("{needle} not found"));
+        let line = src[..at].rfind('\n').map(|n| n + 1).unwrap_or(0);
+        let indent = src[line..at]
+            .chars()
+            .take_while(|c| *c == ' ' || *c == '\t')
+            .count();
+        let close = format!("\n{}}}", " ".repeat(indent));
+        let rest = &src[at..];
+        rest.split(&close).next().unwrap_or(rest)
     }
 
     #[test]
@@ -1094,6 +1127,40 @@ mod sidebar_action_tests {
     }
 
     #[test]
+    fn the_caret_receipt_names_who_took_the_keys() {
+        // #2741: the reconciler can ask for the composer and still lose the
+        // caret to the next press, and a silent `window.focus` cannot tell
+        // those apart. The receipt records the state before the call and the
+        // owner after it, so the next build answers it from the daily log.
+        let src = include_str!("main.rs");
+        let render = dashboard_render(src);
+        assert!(
+            render.contains("caret -> composer before={before} now={}"),
+            "the composer branch leaves a receipt"
+        );
+        assert!(
+            render.contains("caret -> root before={before} now={}"),
+            "the root branch leaves the mirror receipt"
+        );
+        assert!(
+            render.contains("keyboard owner -> {owner:?}"),
+            "an owner transition names the owner it moved to"
+        );
+        assert!(
+            render.contains("self.caret_owner_name(window, cx)"),
+            "the receipt names the element that holds the keys after the call"
+        );
+        let helper = fn_body(src, "caret_owner_name");
+        for name in ["\"composer\"", "\"root\"", "\"field\"", "\"none\""] {
+            assert!(helper.contains(name), "the helper names {name}");
+        }
+        assert!(
+            helper.contains("window.focused(cx)"),
+            "the name comes from the window's live focus, not a guess"
+        );
+    }
+
+    #[test]
     fn the_arrow_walk_previews_without_taking_the_keys() {
         // #2665: the walk opens each row it stands on, so handing the composer
         // the caret there would eat the next arrow.
@@ -1151,6 +1218,80 @@ mod sidebar_action_tests {
         assert!(
             render.contains("window.focus(&self.focus_handle)"),
             "the deferred request needs the window, so it lands in render"
+        );
+    }
+
+    #[test]
+    fn a_topic_switch_hands_the_caret_back() {
+        // #2741: a click on a topic chip took the caret and never asked for it
+        // back, on both of the paths that do not go through `open_session`:
+        // the session already sits in another leaf, or the leaf is renamed.
+        let src = include_str!("main.rs");
+        let body = fn_body(src, "open_topic_in_pane");
+        assert_eq!(
+            body.matches("self.request_composer_caret(cx)").count(),
+            2,
+            "both branches ask the composer for the caret"
+        );
+        assert_eq!(
+            body.matches("self.rail_focused = false").count(),
+            2,
+            "a chip in the rail also lets the rail go, the way a row does"
+        );
+        let caret = fn_body(src, "request_composer_caret");
+        assert!(
+            caret.contains("editor.focus_pending = true"),
+            "the field claims the caret from its own render, after the press"
+        );
+        assert!(
+            caret.contains("self.refocus_screen()"),
+            "the derived owner stays the one decision point"
+        );
+    }
+
+    #[test]
+    fn a_committed_row_leaves_the_keys_in_the_chat_leaf() {
+        // #2741: the chat leaf adopts the row's conversation, so a split that
+        // kept the caret in a neighbouring pane typed into a conversation the
+        // click did not open.
+        let src = include_str!("main.rs");
+        let body = fn_body(src, "open_session_handing_back");
+        let after = body
+            .split_once("self.rail_focused = false")
+            .map(|(_, rest)| rest)
+            .expect("a committed row lets the rail go");
+        assert!(
+            after.contains("self.pane_focus = None"),
+            "the chat leaf is the pane that took the conversation"
+        );
+        assert!(
+            after.contains("self.request_composer_caret(cx)"),
+            "the caret follows the conversation"
+        );
+        assert!(
+            after.contains("self.refocus_screen()"),
+            "the owner is derived again after the hand back"
+        );
+    }
+
+    #[test]
+    fn the_caret_is_repaired_from_the_window_not_the_owner() {
+        // #2741: the owner does not change when a press lands on chrome, so a
+        // reconciler that only acts on transitions never fires. The repair
+        // reads the window instead.
+        let src = include_str!("main.rs");
+        let render = dashboard_render(src);
+        assert!(
+            render.contains("caret -> composer repaired now={}"),
+            "a repaired caret leaves a receipt"
+        );
+        assert!(
+            render.contains("KeyboardOwner::Composer"),
+            "only the composer repairs, an overlay owns the keys on purpose"
+        );
+        assert!(
+            render.contains(".is_none_or(|handle| handle == self.focus)"),
+            "the root holding the keys is the drift this repairs"
         );
     }
 
@@ -1517,7 +1658,9 @@ impl Dashboard {
             // Already on screen: hand it the keyboard instead of showing one
             // conversation in two leaves.
             self.pane_focus = Some(id);
+            self.rail_focused = false;
             self.sync_composer_session();
+            self.request_composer_caret(cx);
             cx.notify();
             return;
         }
@@ -1533,7 +1676,9 @@ impl Dashboard {
         self.pane_states.remove(&pane);
         self.open_pane_state(id, cx);
         self.pane_focus = Some(id);
+        self.rail_focused = false;
         self.sync_composer_session();
+        self.request_composer_caret(cx);
         self.persist_layout();
         cx.notify();
     }
@@ -1595,9 +1740,14 @@ impl Dashboard {
         })
         .detach();
         // A committed row takes the keyboard off the rail: the rail holds it
-        // only while the list is being walked (#2665).
+        // only while the list is being walked (#2665). The chat leaf is the
+        // pane that adopted the conversation, so the caret goes there; a stored
+        // split pane would otherwise keep it in a conversation the click did
+        // not open (#2741).
         if hand_back {
             self.rail_focused = false;
+            self.pane_focus = None;
+            self.request_composer_caret(cx);
         }
         self.refocus_screen();
         cx.notify();
@@ -1715,6 +1865,25 @@ impl Dashboard {
     /// call site reads as taking the keyboard rather than re-labelling the
     /// screen.
     fn refocus_overlay(&mut self) {
+        self.refocus_screen();
+    }
+
+    /// Ask the composer that is drawn to take the caret, and let the field
+    /// re-assert it from its own render (#2741).
+    ///
+    /// The press that led here is dispatched before the next frame is drawn,
+    /// and it can still hand the window root the keys: any element without
+    /// `track_focus` lets it, and the owner may not even change, so the
+    /// reconciler in `render` never fires. The deferred request is the one
+    /// that sticks, because the editor claims the caret while the tree is
+    /// being built, after that press is done. `refocus_screen` stays the one
+    /// decision point, so the two can never disagree about who owns the keys.
+    fn request_composer_caret(&mut self, cx: &mut Context<Self>) {
+        let composer = self.composer_entity();
+        composer.update(cx, |editor, cx| {
+            editor.focus_pending = true;
+            cx.notify();
+        });
         self.refocus_screen();
     }
 
@@ -2433,6 +2602,23 @@ impl Dashboard {
                 .map(|pane| pane.editor.clone())
                 .unwrap_or_else(|| self.editor.clone()),
             None => self.editor.clone(),
+        }
+    }
+
+    /// Name the element the window gives the keys to, for the caret receipt
+    /// (#2741). Three answers: the composer that is drawn, the window root
+    /// that owns overlays and non-chat screens, or a field the dashboard does
+    /// not own (the rail's find box, a rename prompt).
+    fn caret_owner_name(&self, window: &Window, cx: &App) -> &'static str {
+        let Some(handle) = window.focused(cx) else {
+            return "none";
+        };
+        if handle == self.composer_entity().read(cx).focus_handle {
+            "composer"
+        } else if handle == self.focus {
+            "root"
+        } else {
+            "field"
         }
     }
 
@@ -9034,6 +9220,10 @@ impl Render for Dashboard {
         // reconciled every frame instead of trusted from each call site.
         let owner = keyboard_owner(&self.open_overlays(), self.screen);
         if self.last_owner != Some(owner) {
+            // A receipt in the daily log, the same shape as `pane focus ->`
+            // (#2549): a switch that never moves the owner is exactly the
+            // case the reconciler below cannot repair (#2741).
+            logging::debug(&format!("keyboard owner -> {owner:?}"));
             self.last_owner = Some(owner);
             self.refocus = Some(focus_target(owner));
         }
@@ -9046,9 +9236,46 @@ impl Render for Dashboard {
                     // a rotated caret that left focus on the chat leaf typed
                     // into a field the split was not drawing.
                     let composer = self.composer_entity();
-                    window.focus(&composer.read(cx).focus_handle);
+                    let handle = composer.read(cx).focus_handle.clone();
+                    // `before` is true when gpui turned the request into a
+                    // no-op, because it returns early on the handle that is
+                    // already focused. `now` names who holds the keys after
+                    // the call, so "the caret never came back" is answerable
+                    // from the log instead of guessed from a screenshot
+                    // (#2741).
+                    let before = handle.is_focused(window);
+                    window.focus(&handle);
+                    logging::debug(&format!(
+                        "caret -> composer before={before} now={}",
+                        self.caret_owner_name(window, cx)
+                    ));
                 }
-                FocusTarget::Root => window.focus(&self.focus),
+                FocusTarget::Root => {
+                    let before = self.focus.is_focused(window);
+                    window.focus(&self.focus);
+                    logging::debug(&format!(
+                        "caret -> root before={before} now={}",
+                        self.caret_owner_name(window, cx)
+                    ));
+                }
+            }
+        }
+        // A press on plain chrome takes the caret without moving the owner:
+        // the root tracks focus, so every element that does not sits under it
+        // and the press lands there, while the derived owner is still the
+        // composer. The transition above cannot see that, so the drift is read
+        // off the window instead and repaired before the user types (#2741).
+        if owner == KeyboardOwner::Composer {
+            let composer = self.composer_entity();
+            let drifted = !composer.read(cx).focus_handle.is_focused(window)
+                && window.focused(cx).is_none_or(|handle| handle == self.focus);
+            if drifted {
+                let handle = composer.read(cx).focus_handle.clone();
+                window.focus(&handle);
+                logging::debug(&format!(
+                    "caret -> composer repaired now={}",
+                    self.caret_owner_name(window, cx)
+                ));
             }
         }
         // Coming back to the conversation is a return, not a resume: a panel
@@ -16888,11 +17115,7 @@ mod tests {
         // screen transition is the one place every panel funnels through, so
         // the re-arm lives there instead of in each close path.
         let src = include_str!("main.rs");
-        let render = src
-            .split("fn render(&mut self, window: &mut Window, cx: &mut Context<Self>)")
-            .nth(1)
-            .and_then(|rest| rest.split("\n    fn ").next())
-            .expect("the window render");
+        let render = dashboard_render(src);
         assert!(
             render.contains("self.screen == Screen::Chat && self.last_screen != Screen::Chat"),
             "the transition into the chat is detected"
@@ -16915,10 +17138,45 @@ mod tests {
 
     /// The body of `fn name(` up to the next item at the same indent.
     fn fn_body(src: &'static str, name: &str) -> &'static str {
-        src.split(&format!("fn {name}("))
-            .nth(1)
-            .and_then(|rest| rest.split("\n    fn ").next())
-            .unwrap_or_else(|| panic!("{name} not found"))
+        item_body(src, &format!("fn {name}("))
+    }
+
+    /// The Dashboard's window render. Two impls in this file define `render`,
+    /// and only this signature is the one that holds the window (#2741).
+    fn dashboard_render(src: &'static str) -> &'static str {
+        item_body(
+            src,
+            "fn render(&mut self, window: &mut Window, cx: &mut Context<Self>)",
+        )
+    }
+
+    /// The body of one item, from its own definition to its closing brace.
+    ///
+    /// Two things this gets right that a plain `split` does not: only a real
+    /// definition counts, because the scans below quote the names they look
+    /// for inside their own strings, and the body ends at the brace that
+    /// closes it rather than at the next method, so a top level function in
+    /// another module file reads the same as a `Dashboard` method (#2741).
+    fn item_body(src: &'static str, needle: &str) -> &'static str {
+        let at = src
+            .match_indices(needle)
+            .map(|(at, _)| at)
+            .find(|&at| {
+                let line = src[..at].rfind('\n').map(|n| n + 1).unwrap_or(0);
+                let prefix = src[line..at].trim();
+                prefix.is_empty() || prefix.starts_with("pub")
+            })
+            .unwrap_or_else(|| panic!("{needle} not found"));
+        let line = src[..at].rfind('\n').map(|n| n + 1).unwrap_or(0);
+        let indent = src[line..at]
+            .chars()
+            .take_while(|c| *c == ' ' || *c == '\t')
+            .count();
+        let close = format!("\n{}}}", " ".repeat(indent));
+        let rest = &src[at..];
+        rest.split(&close).next().unwrap_or(rest)
+    }
+
     }
 
     #[test]
