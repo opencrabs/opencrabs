@@ -9461,18 +9461,20 @@ impl Dashboard {
                 } else {
                     focus == Some(*session)
                 };
-                // This pane's own topics, resolved from its own session
-                // (#2686). The root is the pane's parent when the pane holds
-                // a topic, so a pane showing a topic still lists its family,
-                // and the open chip is that pane's session rather than the
-                // chat's.
+                // This pane's own topics, resolved from its own session.
+                // The root is the pane's parent when the pane holds a topic,
+                // so the open chip is that pane's session rather than the
+                // chat's. In a split the strip belongs to the pane that
+                // carries the family, not to every topic inside it: a wall of
+                // topic panes repeated the same bar once per pane (#2761).
                 let pane_root = self
                     .sessions
                     .parents
                     .get(session)
                     .copied()
                     .unwrap_or(*session);
-                if self.sessions.is_topic_enabled(pane_root) {
+                let carries_topics = leaves.len() == 1 || pane_root == *session;
+                if carries_topics && self.sessions.is_topic_enabled(pane_root) {
                     let pane_key = session.to_string();
                     let tabs = self.topic_tabs(Some(*session), cx);
                     let toggle_edge = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
@@ -18006,6 +18008,22 @@ mod tests {
         assert!(
             split_row.contains("self.choose_split(id, cx)"),
             "the row already answered the pick"
+        );
+    }
+
+    #[test]
+    fn a_split_keeps_the_topics_bar_on_the_pane_that_carries_it() {
+        // #2761: every topic pane drew the whole family strip, so a wall of
+        // topics repeated one bar per pane and each bar claimed topics that
+        // belong to a different pane.
+        let src = include_str!("main.rs");
+        assert!(
+            src.contains("let carries_topics = leaves.len() == 1 || pane_root == *session;"),
+            "only the pane carrying the topics draws the strip"
+        );
+        assert!(
+            src.contains("if carries_topics && self.sessions.is_topic_enabled(pane_root) {"),
+            "and the strip is gated on it"
         );
     }
 
