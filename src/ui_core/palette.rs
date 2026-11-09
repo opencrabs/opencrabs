@@ -488,6 +488,18 @@ pub enum PaletteAction {
     /// The conversation picked in the favorite picker: the frontend runs
     /// its own pin toggle on it, the same one its rail button walks (#2487).
     FavoriteToggle(u128),
+    /// Arm the card as a session picker for grouping: the conversation the
+    /// pick names is the holder, and the frontend's own group topics modal
+    /// attaches the existing conversations under it (#2713).
+    GroupTopics,
+    /// The conversation picked in the group picker: the frontend opens the
+    /// group topics modal it already reaches from a rail row's right-click
+    /// menu (#2713).
+    GroupTopicsOn(u128),
+    /// Start a split with the layout the row names: the frontend walks the
+    /// same door its chord and its row menu walk, from the pane holding the
+    /// caret (#2712).
+    BeginSplit(crate::ui_core::split::Layout),
 }
 
 /// Why the card is armed as a session picker. The purpose decides what a
@@ -498,6 +510,23 @@ pub enum PickFor {
     NewTopic,
     /// The pick pins the conversation to the top of the rail.
     Favorite,
+    /// The pick names the conversation that holds the topics the group modal
+    /// attaches under it (#2713).
+    GroupTopics,
+}
+
+/// The one sentence a frontend prints while the card is armed, so both
+/// surfaces say the same thing and neither keeps a second copy (#2711).
+///
+/// The pick is a list of conversations with an empty field, which reads as
+/// the ordinary card unless the field names the job. Each sentence is short
+/// enough to sit in one field line at the narrowest card width.
+pub fn pick_prompt(purpose: PickFor) -> &'static str {
+    match purpose {
+        PickFor::NewTopic => "pick the session that gets the new topic",
+        PickFor::Favorite => "pick the session to pin to the top",
+        PickFor::GroupTopics => "pick the session that holds the topics",
+    }
 }
 
 /// One pickable row, already flat: the frontend paints it and nothing else.
@@ -1288,6 +1317,7 @@ impl PaletteState {
                     item.action = match purpose {
                         PickFor::NewTopic => PaletteAction::NewTopicOn(id),
                         PickFor::Favorite => PaletteAction::FavoriteToggle(id),
+                        PickFor::GroupTopics => PaletteAction::GroupTopicsOn(id),
                     };
                 }
                 score_normalized(&normalized, &item).map(|score| PaletteRow { item, score })
@@ -2104,6 +2134,90 @@ mod tests {
             Some(PaletteKind::NewTopic),
             "the row prints on top"
         );
+    }
+
+    /// The pick prints one sentence naming its job, and no two purposes share
+    /// it: a card that says the same thing for every pick names nothing
+    /// (#2711).
+    #[test]
+    fn every_pick_prints_its_own_sentence() {
+        let purposes = [PickFor::NewTopic, PickFor::Favorite, PickFor::GroupTopics];
+        let sentences: Vec<&str> = purposes.iter().map(|it| pick_prompt(*it)).collect();
+        for (purpose, sentence) in purposes.iter().zip(&sentences) {
+            assert!(!sentence.is_empty(), "{purpose:?} prints a sentence");
+            assert_eq!(
+                *sentence,
+                pick_prompt(*purpose),
+                "{purpose:?} says the same thing twice"
+            );
+        }
+        assert_eq!(
+            sentences[0], "pick the session that gets the new topic",
+            "the topic pick names the session that receives the topic"
+        );
+        assert_eq!(
+            sentences[1], "pick the session to pin to the top",
+            "the favorite pick names the pin"
+        );
+        assert_eq!(
+            sentences[2], "pick the session that holds the topics",
+            "the group pick names the holder"
+        );
+    }
+
+    /// Picking the group row arms the same picker and the pick names the
+    /// conversation that holds the topics, instead of opening it (#2713).
+    #[test]
+    fn seeker_group_pick_names_the_holder() {
+        let sessions = vec![PaletteItem::new(
+            "crabsland ops",
+            "2026-11-03 08:00",
+            PaletteKind::Session,
+            PaletteAction::OpenSession(7),
+        )];
+        let mut state = PaletteState::picking(PickFor::GroupTopics, sessions);
+        assert_eq!(
+            state.visible().len(),
+            1,
+            "an empty field prints every conversation"
+        );
+        for c in "crabs".chars() {
+            state.type_char(c);
+        }
+        assert_eq!(
+            state.selected().map(|r| r.item.action),
+            Some(PaletteAction::GroupTopicsOn(7)),
+            "the pick names the holder, it does not open the chat"
+        );
+    }
+
+    /// Every purpose maps a session row to its own action: a new variant
+    /// cannot fall through to opening the chat (#2711).
+    #[test]
+    fn every_pick_purpose_maps_to_its_own_action() {
+        let row = || {
+            vec![PaletteItem::new(
+                "invoices",
+                "2026-11-02 21:00",
+                PaletteKind::Session,
+                PaletteAction::OpenSession(2),
+            )]
+        };
+        for (purpose, expected) in [
+            (PickFor::NewTopic, PaletteAction::NewTopicOn(2)),
+            (PickFor::Favorite, PaletteAction::FavoriteToggle(2)),
+            (PickFor::GroupTopics, PaletteAction::GroupTopicsOn(2)),
+        ] {
+            let mut state = PaletteState::picking(purpose, row());
+            for c in "invo".chars() {
+                state.type_char(c);
+            }
+            assert_eq!(
+                state.selected().map(|r| r.item.action),
+                Some(expected),
+                "{purpose:?} must carry its own action"
+            );
+        }
     }
 
     /// Picking the row re-arms the card as a picker: empty field, every
