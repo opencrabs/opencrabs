@@ -331,13 +331,13 @@ impl PlanIndex {
         self.docs.get(path).and_then(|(_, doc)| doc.as_ref())
     }
 
-    /// What the rail should draw for `session`, or `None` when its plan says
-    /// nothing worth animating.
+    /// The plan file behind `session` and its current stamp, or `None`.
     ///
-    /// `live` is whether a turn for that session is running in this process.
-    /// It outranks the freshness window: a build can hold a plan file still for
-    /// longer than the window, and the work would then read as abandoned.
-    pub fn evidence(&mut self, session: Uuid, live: bool, now: Instant) -> Option<PlanEvidence> {
+    /// The sweep is throttled for ids the index has never seen; a known path
+    /// costs one `stat`. The badge question and the progress question both
+    /// resolve through here, so they can never disagree about which file is
+    /// this session's plan.
+    fn resolve(&mut self, session: Uuid, now: Instant) -> Option<(PathBuf, SystemTime)> {
         if !self.paths.contains_key(&session) {
             let due = self
                 .swept_at
@@ -348,6 +348,17 @@ impl PlanIndex {
         }
         let path = self.paths.get(&session)?.clone();
         let stamp = mtime(&path)?;
+        Some((path, stamp))
+    }
+
+    /// What the rail should draw for `session`, or `None` when its plan says
+    /// nothing worth animating.
+    ///
+    /// `live` is whether a turn for that session is running in this process.
+    /// It outranks the freshness window: a build can hold a plan file still for
+    /// longer than the window, and the work would then read as abandoned.
+    pub fn evidence(&mut self, session: Uuid, live: bool, now: Instant) -> Option<PlanEvidence> {
+        let (path, stamp) = self.resolve(session, now)?;
         let doc = self.doc_at(&path, stamp)?;
         let state = plan_state(doc, &path)?;
         match state {
@@ -381,6 +392,22 @@ impl PlanIndex {
                 })
             }
         }
+    }
+
+    /// The plan's checklist progress for the rail card: `(done, total)`.
+    ///
+    /// Only an approved plan with tasks has a bar to draw: a design draft has
+    /// no checklist yet, and an empty one would read as zero of nothing. The
+    /// counts come from the strip's own rule, so the card and the composer
+    /// strip agree about the same plan. No freshness gate here: the bar is
+    /// state, not animation, and 4 of 8 done stays true while the badge sleeps.
+    pub fn progress(&mut self, session: Uuid, now: Instant) -> Option<(usize, usize)> {
+        let (path, stamp) = self.resolve(session, now)?;
+        let doc = self.doc_at(&path, stamp)?;
+        if !matches!(plan_state(doc, &path)?, PlanStatus::Active) || doc.tasks.is_empty() {
+            return None;
+        }
+        Some(crate::plan_strip::progress_counts(doc))
     }
 }
 
@@ -689,6 +716,82 @@ mod tests {
         assert!(
             index.evidence(session, true, Instant::now()).is_none(),
             "an approved plan with no task in flight is not activity"
+        );
+    }
+
+    #[test]
+    fn rail_plan_progress_reports_done_over_total_for_an_active_plan() {
+        use opencrabs::tui::plan::{PlanTask, TaskType};
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = sid(40);
+        // Two done (one completed, one skipped), one in flight, one pending:
+        // the strip's rule counts Skipped, so the bar must read 2 of 4.
+        let mut doc = PlanDocument::new(session, "progress test".to_string());
+        doc.status = PlanStatus::Active;
+        for (order, status) in [
+            TaskStatus::Completed,
+            TaskStatus::Skipped,
+            TaskStatus::InProgress,
+            TaskStatus::Pending,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut t = PlanTask::new(
+                order + 1,
+                format!("task {order}"),
+                String::new(),
+                TaskType::Edit,
+            );
+            t.status = status;
+            doc.tasks.push(t);
+        }
+        let path = tmp
+            .path()
+            .join(format!("{PLAN_PREFIX}{session}{PLAN_SUFFIX}"));
+        std::fs::write(&path, serde_json::to_string(&doc).expect("json")).expect("write");
+        let mut index = PlanIndex::with_roots(vec![tmp.path().to_path_buf()]);
+        assert_eq!(
+            index.progress(session, Instant::now()),
+            Some((2, 4)),
+            "completed and skipped both count as done"
+        );
+        // A session with no plan file has no bar.
+        assert_eq!(index.progress(sid(41), Instant::now()), None);
+
+        // A design draft has no checklist to draw, even with tasks seeded.
+        doc.status = PlanStatus::Editing;
+        doc.pending_approval = true;
+        std::fs::write(&path, serde_json::to_string(&doc).expect("json")).expect("rewrite");
+        let stamp = SystemTime::now() + Duration::from_secs(2);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .expect("open plan")
+            .set_modified(stamp)
+            .expect("stamp plan");
+        assert_eq!(
+            index.progress(session, Instant::now()),
+            None,
+            "a draft awaiting approval has no progress bar"
+        );
+
+        // An approved plan with an empty checklist is zero of nothing: no bar.
+        doc.status = PlanStatus::Active;
+        doc.pending_approval = false;
+        doc.tasks.clear();
+        std::fs::write(&path, serde_json::to_string(&doc).expect("json")).expect("rewrite");
+        let stamp = SystemTime::now() + Duration::from_secs(4);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .expect("open plan")
+            .set_modified(stamp)
+            .expect("stamp plan");
+        assert_eq!(
+            index.progress(session, Instant::now()),
+            None,
+            "an empty checklist has no bar to draw"
         );
     }
 

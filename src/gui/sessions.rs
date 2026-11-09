@@ -1110,9 +1110,10 @@ pub fn preview_line(role: &str, text: &str) -> SharedString {
     SharedString::from(format!("{who} {}", fit(text, PREVIEW_CHARS)))
 }
 
-/// One session row: title and cost on the left, the caller's action strip on
-/// the right. Pure data plus one slot for behaviour, so the view owns every
-/// listener it puts on screen. A pinned row carries the star the owner asked
+/// One session row: title on the left, timestamp and cost aligned right on
+/// the same line, the caller's action strip on the far right. Pure data plus
+/// one slot for behaviour, so the view owns every listener it puts on
+/// screen. A pinned row carries the star the owner asked
 /// for, in the accent colour, so "why is this one on top" is answered by the
 /// row itself.
 /// The pin mark a row carries: the filled star once pinned, an outline
@@ -1198,9 +1199,16 @@ pub struct RowFlags {
     /// draws the cell, so it never owns a timer.
     pub badge: Option<&'static str>,
     /// The already-formatted preview line, or `None` when the session has no
-    /// readable message yet. A card shows this INSTEAD of its date and cost
-    /// line, so it never grows a fourth line.
+    /// readable user/assistant message yet. It paints as the card's message
+    /// line: under the title when there are no topics, under the chip strip
+    /// when there are. Timestamp and cost always ride the title line, so a
+    /// card without a plan is at most three lines.
     pub preview: Option<SharedString>,
+    /// The session's approved plan progress as `(done, total)`, or `None`
+    /// when there is no checklist to draw. Paints as a slim bar line under
+    /// the preview, reusing the composer strip's own bar so the same plan
+    /// reads identically in both places.
+    pub plan: Option<(usize, usize)>,
 }
 
 /// One topic chip: a child conversation painted as a compact pill on its
@@ -1306,6 +1314,7 @@ pub fn row(
         closed,
         badge,
         preview,
+        plan,
     } = flags;
     let title_text = div()
         // A closed topic reads dimmed: still there, no longer taking work.
@@ -1330,9 +1339,9 @@ pub fn row(
         .items_center()
         .gap_1()
         .min_w_0()
-        // The name line fills the body so the badge's `ml_auto` has free space
-        // to push against. Without this it shrinks to its text and the glyph
-        // parks right after the name (#2636 follow-up).
+        // The name line fills the body so the trailing cluster's `ml_auto`
+        // has free space to push against. Without this it shrinks to its text
+        // and the glyph parks right after the name (#2636 follow-up).
         .w_full()
         .when(indented, |d| d.child(topic_pin_mark()))
         .child({
@@ -1344,15 +1353,45 @@ pub fn row(
                 .child(SharedString::from(mark))
         })
         .child(title_text)
-        // The activity glyph rides the name's own line out to the right edge
-        // (#2636). It only gets there because `body` fills the row and this
-        // line fills `body`, leaving `ml_auto` free space to consume.
-        // `flex_none` keeps the cell its width when a long title truncates.
-        .when_some(badge, |d, glyph| d.child(badge_cell(glyph)));
+        // Timestamp, cost and the activity glyph share ONE right-aligned
+        // cluster: a single auto margin carries the whole group to the edge.
+        // Two auto margins (stamp and badge each their own) would split the
+        // free space and park the stamp mid-row on a streaming session.
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .flex_none()
+                .ml_auto()
+                .when(!indented, |d| {
+                    // The message line below stays pure conversation context,
+                    // and a grouped topic row keeps its compact pin without
+                    // the ledger metadata repeated on every child.
+                    d.child(
+                        div()
+                            .flex_none()
+                            .pl_1()
+                            .text_xs()
+                            .text_color(rgb(palette::current().text_muted))
+                            .child(SharedString::from(format!(
+                                "{} · ${:.2}",
+                                s.updated_at
+                                    .with_timezone(&chrono::Local)
+                                    .format("%m-%d %H:%M"),
+                                s.total_cost
+                            ))),
+                    )
+                })
+                // The activity glyph closes the cluster at the right edge
+                // (#2636). `flex_none` keeps it its width when a long title
+                // truncates.
+                .when_some(badge, |d, glyph| d.child(badge_cell(glyph))),
+        );
     // A grouped topic is a compact pin beneath its session. Its title stays
     // visible, while the repeated date and cost metadata belongs to full rows.
     // Fill the remaining row width: `justify_between` alone left this
-    // content-sized, so the badge's `ml_auto` had nothing to consume and the
+    // content-sized, so the cluster's `ml_auto` had nothing to consume and the
     // activity glyph never reached the right edge (#2636).
     let body = div()
         .flex()
@@ -1365,26 +1404,25 @@ pub fn row(
         // (Telegram topic style). They never push a child out to its own row.
         .when_some(chips, |d, c| d.child(c))
         .when(!indented, |d| {
-            // The preview REPLACES the date and cost line, it never adds a
-            // fourth line to a card. A session with no readable message yet
-            // still shows the ledger's own stamp, so the slot is never blank.
-            let line = match preview {
-                Some(preview) => preview,
-                None => SharedString::from(format!(
-                    "{} · ${:.2}",
-                    s.updated_at
-                        .with_timezone(&chrono::Local)
-                        .format("%m-%d %H:%M"),
-                    s.total_cost
-                )),
-            };
-            d.child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(palette::current().text_muted))
-                    .truncate()
-                    .child(line),
-            )
+            // The message line is pure conversation context: it paints only
+            // when a readable user/assistant message exists. The ledger
+            // stamp lives on the title line, so a quiet card simply stops
+            // after its title (and chips, when topics are attached).
+            d.when_some(preview, |d, line| {
+                d.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(palette::current().text_muted))
+                        .truncate()
+                        .child(line),
+                )
+            })
+            // An approved plan reads as a slim progress bar, never as raw
+            // plan JSON in the message line. Same ten cells as the composer
+            // strip, so one plan has one look wherever it is drawn.
+            .when_some(plan, |d, (done, total)| {
+                d.child(plan_progress_cell(done, total))
+            })
         });
     let mut row = div()
         .id(SharedString::from(s.id.to_string()))
@@ -1435,11 +1473,35 @@ pub fn row(
 fn badge_cell(glyph: &str) -> Div {
     div()
         .flex_none()
-        .ml_auto()
         .pl_1()
         .text_xs()
         .text_color(rgb(palette::current().teal))
         .child(SharedString::from(glyph.to_string()))
+}
+
+/// The plan's checklist as one slim line on the card: the same ten-cell bar
+/// the composer strip draws, plus the done/total count. The bar math lives in
+/// `plan_strip`, so a row and the strip can never disagree about one plan.
+fn plan_progress_cell(done: usize, total: usize) -> Div {
+    let (_, bar) = crate::plan_strip::progress_bar(done, total);
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .text_xs()
+        .child(
+            div()
+                .flex_none()
+                .text_color(rgb(palette::current().teal))
+                .child(SharedString::from(bar)),
+        )
+        .child(
+            div()
+                .flex_none()
+                .text_color(rgb(palette::current().text_muted))
+                .child(SharedString::from(format!("{done}/{total}"))),
+        )
 }
 
 /// The quiet branch mark that makes a grouped topic read as a compact pin.
@@ -1644,7 +1706,7 @@ mod tests {
     /// pinned at the top level for ordering, but keeps its indent: the pin
     /// changes where it sorts, never whether it is a topic of its parent.
     #[test]
-    fn topics_group_under_their_parent_and_favorites_stay_pinned() {
+    fn a_pinned_topic_keeps_its_indent_and_sorts_first() {
         let a = Session::new(Some("A".into()), None, None);
         let b = Session::new(Some("B".into()), None, None);
         let a1 = Session::new(Some("A topic".into()), None, None);
@@ -2257,6 +2319,85 @@ mod tests {
         assert!(
             main_source.contains("if chip_children.contains(&id)"),
             "the rail skips a child that paints as a chip"
+        );
+    }
+
+    /// Card contract: line one is the title with timestamp and cost aligned
+    /// right on the SAME line; the message context is its own line below
+    /// (under the chip strip when topics are attached). No date fallback
+    /// masquerading as a message. An approved plan may add one slim bar line
+    /// after the message; nothing else grows the card.
+    #[test]
+    fn card_meta_rides_title_line_and_preview_is_own_line() {
+        let source = include_str!("sessions.rs");
+        let row_source = source
+            .split("pub fn row(")
+            .nth(1)
+            .expect("session row renderer")
+            .split("pub fn on_click(")
+            .next()
+            .expect("row source before click handler");
+        let title_line = row_source
+            .split(".when_some(chips,")
+            .next()
+            .expect("title line before the chip strip");
+        assert!(
+            title_line.contains("%m-%d %H:%M"),
+            "the timestamp paints on the title line"
+        );
+        assert!(
+            title_line.contains("s.total_cost"),
+            "the cost paints on the title line"
+        );
+        assert!(
+            title_line.contains(".ml_auto()"),
+            "timestamp and cost align right"
+        );
+        assert!(
+            row_source.contains(".when_some(preview,"),
+            "the message line paints only when a preview exists"
+        );
+        assert!(
+            !row_source.contains("None => SharedString::from(format!("),
+            "no date/cost fallback on the message line"
+        );
+    }
+
+    /// An approved plan paints as the strip's own progress bar on a slim line
+    /// of its own, never as plan JSON in the message line. The bar math is
+    /// reused from plan_strip so the card and the composer agree.
+    #[test]
+    fn card_plan_paints_the_shared_progress_bar() {
+        let source = include_str!("sessions.rs");
+        let row_source = source
+            .split("pub fn row(")
+            .nth(1)
+            .expect("session row renderer")
+            .split("pub fn on_click(")
+            .next()
+            .expect("row source before click handler");
+        assert!(
+            row_source.contains(".when_some(plan,"),
+            "the plan bar paints only when an approved checklist exists"
+        );
+        assert!(
+            row_source.contains("plan_progress_cell(done, total)"),
+            "the bar line delegates to the shared cell"
+        );
+        let cell_source = source
+            .split("fn plan_progress_cell(")
+            .nth(1)
+            .expect("plan progress cell")
+            .split("fn topic_pin_mark(")
+            .next()
+            .expect("cell source before the pin mark");
+        assert!(
+            cell_source.contains("crate::plan_strip::progress_bar(done, total)"),
+            "the bar reuses the composer strip's math, not a second copy"
+        );
+        assert!(
+            cell_source.contains("{done}/{total}"),
+            "the done/total count rides the bar"
         );
     }
 

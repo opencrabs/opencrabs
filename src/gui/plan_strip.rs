@@ -333,17 +333,30 @@ const CHECKLIST_NOT_SEEDED: &str = "checklist not seeded";
 /// `done`, `total`, the percentage and the ten-cell bar. One place, so the
 /// full card and the compact strip can never disagree about the same plan.
 fn progress(plan: &PlanDocument) -> (usize, usize, usize, String) {
+    let (done, total) = progress_counts(plan);
+    let (percent, bar) = progress_bar(done, total);
+    (done, total, percent, bar)
+}
+
+/// The counting rule: Completed and Skipped both count as done. Shared with
+/// the rail card, so a row's bar and the composer strip agree about the same
+/// plan without a second copy of the filter.
+pub(crate) fn progress_counts(plan: &PlanDocument) -> (usize, usize) {
     let total = plan.tasks.len();
     let done = plan
         .tasks
         .iter()
         .filter(|t| matches!(t.status, TaskStatus::Completed | TaskStatus::Skipped))
         .count();
+    (done, total)
+}
+
+/// The percentage and the ten-cell bar for a done/total pair. The rail card
+/// draws through this helper too, so the bar shape lives in exactly one place.
+pub(crate) fn progress_bar(done: usize, total: usize) -> (usize, String) {
     let percent = (done * 100).checked_div(total).unwrap_or(0);
     let filled = (done * 10).checked_div(total).unwrap_or(0);
     (
-        done,
-        total,
         percent,
         format!("{}{}", "█".repeat(filled), "░".repeat(10 - filled)),
     )
