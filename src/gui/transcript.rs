@@ -1869,7 +1869,7 @@ fn fold_chevron(folded: bool) -> &'static str {
 /// turn ends. `None` for a turn that did no work, which earns no card (#758).
 fn settled_card(turn: &Turn, folded: bool, body: Vec<AnyElement>) -> Option<Stateful<Div>> {
     turn.header.as_ref()?;
-    let (glyph, verb) = settled_verdict(turn.summary);
+    let (glyph, verb) = settled_verdict(turn);
     let failed = glyph == "\u{274c}";
     let accent = if failed {
         palette::current().red
@@ -1969,12 +1969,46 @@ fn settled_card(turn: &Turn, folded: bool, body: Vec<AnyElement>) -> Option<Stat
 /// The verdict a settled turn's head carries: the Telegram flow block's own
 /// pair (#480), which is what the live card becomes on `Done`. One word, never
 /// a step count the reader has to total (#2632).
-fn settled_verdict(summary: TurnSummary) -> (&'static str, &'static str) {
-    if summary.failed > 0 || summary.has_error {
+///
+/// The tally is not the verdict (#2707). `summary.failed` counts every call
+/// that returned `success: false`, and a refusal the model then worked around
+/// is exactly that: a failed call inside a turn that finished its job. Reading
+/// the tally painted an 85-call turn red over two self-corrected refusals and
+/// a plan-gate advisory, which teaches the reader to ignore the cross. So the
+/// question asked here is the one the reader is asking: did the turn end on a
+/// failure? A failed call with assistant text after it was answered, and the
+/// footer still reports the count for anyone who wants it.
+fn settled_verdict(turn: &Turn) -> (&'static str, &'static str) {
+    if turn.summary.has_error || (turn.summary.failed > 0 && !answered_after_the_last_failure(turn))
+    {
         ("\u{274c}", "Failed")
     } else {
         ("\u{2705}", "Finished")
     }
+}
+
+/// Whether the turn's last failed call was followed by assistant text, the
+/// shape of a wall the model climbed over instead of one it hit.
+///
+/// Only the LAST failed call counts: an answer between two failures does not
+/// excuse the second, and a failure after the final text is still a dead end.
+/// A placeholder row is structure, not an answer, so it never counts.
+fn answered_after_the_last_failure(turn: &Turn) -> bool {
+    let Some(last_failed) = turn.blocks.iter().rposition(|b| match b {
+        Block::Tools { calls } => calls.iter().any(|c| !c.success),
+        _ => false,
+    }) else {
+        return false;
+    };
+    turn.blocks[last_failed + 1..].iter().any(|b| match b {
+        Block::Msg {
+            role,
+            content,
+            placeholder,
+            ..
+        } => role == "assistant" && !*placeholder && !content.trim().is_empty(),
+        _ => false,
+    })
 }
 
 /// One settled turn's footer, wording and order taken from the Telegram flow
@@ -4779,7 +4813,7 @@ mod tests {
             "the footer is the live card's line, settled: calls, ctx, its own rate, clock"
         );
         assert_eq!(
-            settled_verdict(turn.summary),
+            settled_verdict(&turn),
             ("\u{2705}", "Finished"),
             "a clean turn says Finished, not its step count"
         );
@@ -4824,16 +4858,155 @@ mod tests {
             turn_footer_text(&unmeasured).is_none(),
             "no record, no number"
         );
-        assert_eq!(
-            settled_verdict(TurnSummary {
+        // The tally alone is not the verdict (#2707): a failed call with no
+        // answer after it is the shape of a turn that ended on the failure.
+        let dead_end = Turn {
+            header: Some("\u{274c} 1 step \u{b7} 1 tool call".into()),
+            summary: TurnSummary {
+                tool_calls: 1,
                 failed: 1,
                 ..Default::default()
-            }),
+            },
+            metrics: None,
+            preview: None,
+            anchor: "d".into(),
+            blocks: vec![Block::Tools {
+                calls: vec![ToolCall {
+                    name: "bash".into(),
+                    task_id: None,
+                    description: "bash: exit 1".into(),
+                    success: false,
+                    done: true,
+                }],
+            }],
+            final_idx: None,
+        };
+        assert_eq!(
+            settled_verdict(&dead_end),
             ("\u{274c}", "Failed"),
-            "one failed call and the head says Failed"
+            "one failed call and no answer after it, the head says Failed"
         );
         assert_eq!(clock_glyph(9), "\u{23f1} 0:09", "the clock pads seconds");
         assert_eq!(clock_glyph(3_725), "\u{23f1} 1:02:05", "and rolls hours");
+    }
+
+    /// #2707: the verdict asks whether the turn ENDED on a failure, not how
+    /// many calls failed along the way. A refusal the model worked around
+    /// leaves assistant text after its failed call, and that turn finished its
+    /// job. Only the LAST failure counts: text between two failures excuses the
+    /// first and not the second.
+    #[test]
+    fn answered_after_last_failure() {
+        fn failed_call() -> ToolCall {
+            ToolCall {
+                name: "bash".into(),
+                task_id: None,
+                description: "bash: exit 1".into(),
+                success: false,
+                done: true,
+            }
+        }
+        fn answer(text: &str) -> Block {
+            Block::Msg {
+                role: "assistant".into(),
+                content: text.into(),
+                time: String::new(),
+                placeholder: false,
+                message_id: None,
+                forward: None,
+            }
+        }
+        fn turn(blocks: Vec<Block>, failed: usize) -> Turn {
+            Turn {
+                header: Some("x".into()),
+                summary: TurnSummary {
+                    tool_calls: failed,
+                    failed,
+                    ..Default::default()
+                },
+                metrics: None,
+                preview: None,
+                anchor: "f".into(),
+                blocks,
+                final_idx: None,
+            }
+        }
+
+        let recovered = turn(
+            vec![
+                Block::Tools {
+                    calls: vec![failed_call()],
+                },
+                answer("done"),
+            ],
+            1,
+        );
+        assert!(
+            answered_after_the_last_failure(&recovered),
+            "text after the failure is the answer the turn was working toward"
+        );
+        assert_eq!(
+            settled_verdict(&recovered),
+            ("\u{2705}", "Finished"),
+            "a self-corrected refusal is not a failed turn"
+        );
+
+        let dead_end = turn(
+            vec![
+                answer("trying"),
+                Block::Tools {
+                    calls: vec![failed_call()],
+                },
+            ],
+            1,
+        );
+        assert!(
+            !answered_after_the_last_failure(&dead_end),
+            "a failure after the last text is a dead end"
+        );
+        assert_eq!(
+            settled_verdict(&dead_end),
+            ("\u{274c}", "Failed"),
+            "a turn that ends on a failure says Failed"
+        );
+
+        let two_failures = turn(
+            vec![
+                Block::Tools {
+                    calls: vec![failed_call()],
+                },
+                answer("let me try another way"),
+                Block::Tools {
+                    calls: vec![failed_call()],
+                },
+            ],
+            2,
+        );
+        assert_eq!(
+            settled_verdict(&two_failures),
+            ("\u{274c}", "Failed"),
+            "the LAST failure is the one the verdict reads"
+        );
+
+        let clean = turn(vec![answer("all good")], 0);
+        assert!(
+            !answered_after_the_last_failure(&clean),
+            "a turn with no failed call has nothing to answer"
+        );
+        assert_eq!(settled_verdict(&clean), ("\u{2705}", "Finished"));
+
+        let errored = Turn {
+            summary: TurnSummary {
+                has_error: true,
+                ..Default::default()
+            },
+            ..turn(vec![answer("the answer arrived anyway")], 0)
+        };
+        assert_eq!(
+            settled_verdict(&errored),
+            ("\u{274c}", "Failed"),
+            "a harness error row still means Failed, whatever came after it"
+        );
     }
 
     /// #2442: the live card is the only block now, so the pane never grows a
