@@ -304,6 +304,46 @@ impl SessionRepository {
             .context("Failed to count a chat's topic sessions")
     }
 
+    /// One session plus every topic hanging under it, as `(id, title)` in
+    /// creation order, root first when the caller asked for the parent.
+    ///
+    /// The desktop client reads a chat's whole family through this: a parent
+    /// and its topics are separate session rows, so the `All` view's union is
+    /// a query, not a merge of structs it already loaded (#2762). A topic asked
+    /// for directly has no children and comes back alone.
+    ///
+    /// Archived rows stay out of the union: a closed topic is not part of what
+    /// `All` shows. The title is returned as stored, channel key included; the
+    /// caller strips it for display.
+    pub async fn family_of(&self, root: Uuid) -> Result<Vec<(Uuid, String)>> {
+        let root_str = root.to_string();
+        let rows: Vec<(String, String)> = self
+            .pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                let mut stmt = conn.prepare_cached(
+                    "SELECT id, COALESCE(title, '') FROM sessions
+                     WHERE (id = ?1 OR parent_id = ?1)
+                       AND archived_at IS NULL
+                     ORDER BY created_at ASC, id ASC",
+                )?;
+                let rows = stmt.query_map(params![root_str], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to read a session family")?;
+
+        Ok(rows
+            .into_iter()
+            .filter_map(|(id, title)| Uuid::parse_str(&id).ok().map(|uuid| (uuid, title)))
+            .collect())
+    }
+
     /// Release a topic back to a top-level session (`parent_id = NULL`). The
     /// depth trigger only fires on a non-null parent, so this always passes.
     pub async fn detach_topic(&self, child: Uuid) -> Result<()> {

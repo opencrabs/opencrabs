@@ -36,6 +36,7 @@ use gpui::{
 use opencrabs::db::Database;
 use opencrabs::db::models::Message;
 use opencrabs::db::repository::message::MessageRepository;
+use opencrabs::db::repository::session::SessionRepository;
 use opencrabs::tui::app::ledger_scan::next_ledger;
 use opencrabs::tui::app::reasoning_split::{self, Segment, is_intermediate, split_segments};
 // The fold header's wording is the TUI's own (#759), re-exported from the lib
@@ -285,6 +286,11 @@ pub struct Turn {
     pub blocks: Vec<Block>,
     /// The turn's final answer, the one assistant block the fold never hides.
     pub final_idx: Option<usize>,
+    /// Which topic this turn came from, `None` outside a merged `All` view
+    /// (#2762). The transcript draws a divider whenever the label changes, so
+    /// a forum read whole labels its rows the way Telegram does instead of
+    /// showing one undifferentiated stream.
+    pub origin: Option<String>,
 }
 
 /// One entry in the live card's body, in the order it happened. The Telegram
@@ -720,14 +726,29 @@ pub fn attachment_paths_with_live(state: &TranscriptState, live: &LiveTurn) -> V
     keys
 }
 
+/// One transcript read: the rows, the total the family holds, and which topic
+/// each row came from when the read merged several sessions (#2762).
+pub struct Loaded {
+    pub rows: Vec<Message>,
+    pub total: i64,
+    /// Row id to topic label. Empty for a single session, which is every read
+    /// that is not a forum's `All` view.
+    pub origins: HashMap<uuid::Uuid, String>,
+}
+
 /// Fetch the newest window of the conversation plus the session's total row
 /// count, on a thread with a real stack (crash receipt in `main.rs`).
 /// `Database::connect` runs pragmas only, never migrations.
+///
+/// A session that has topics comes back as its whole family: the parent plus
+/// every topic under it, merged by time, with each row's topic recorded in
+/// [`Loaded::origins`] (#2762). That is what `All` shows. A topic opened on its
+/// own has no children, so it reads alone and carries no labels at all.
 pub async fn load_recent(
     db_path: std::path::PathBuf,
     session_id: uuid::Uuid,
-) -> Result<(Vec<Message>, i64), String> {
-    let (tx, rx) = futures::channel::oneshot::channel::<Result<(Vec<Message>, i64), String>>();
+) -> Result<Loaded, String> {
+    let (tx, rx) = futures::channel::oneshot::channel::<Result<Loaded, String>>();
     let spawned = std::thread::Builder::new()
         .name("transcript-fetch".into())
         .stack_size(4 * 1024 * 1024)
@@ -740,10 +761,45 @@ pub async fn load_recent(
                     .block_on(async {
                         let db = Database::connect(&db_path).await?;
                         let repo = MessageRepository::new(db.pool().clone());
-                        let rows: Vec<Message> =
-                            repo.find_recent_by_session(session_id, WINDOW).await?;
-                        let total: i64 = repo.count_by_session(session_id).await?;
-                        Ok::<_, anyhow::Error>((rows, total))
+                        let sessions = SessionRepository::new(db.pool().clone());
+                        let family = sessions.family_of(session_id).await?;
+                        // One row in the family is the ordinary read this
+                        // function has always made.
+                        if family.len() <= 1 {
+                            let rows = repo.find_recent_by_session(session_id, WINDOW).await?;
+                            let total = repo.count_by_session(session_id).await?;
+                            return Ok::<_, anyhow::Error>(Loaded {
+                                rows,
+                                total,
+                                origins: HashMap::new(),
+                            });
+                        }
+                        let mut rows: Vec<Message> = Vec::new();
+                        let mut origins: HashMap<uuid::Uuid, String> = HashMap::new();
+                        let mut total: i64 = 0;
+                        for (id, title) in family {
+                            let label = topic_family_label(&title);
+                            let window = repo.find_recent_by_session(id, WINDOW).await?;
+                            total += repo.count_by_session(id).await?;
+                            for row in &window {
+                                // A label is only worth carrying when the
+                                // family has more than one name to tell apart,
+                                // which is exactly this branch.
+                                if let Some(label) = &label {
+                                    origins.insert(row.id, label.clone());
+                                }
+                            }
+                            rows.extend(window);
+                        }
+                        // Same order the TUI's reader gets from SQL. The id
+                        // breaks a tie between two rows stamped the same
+                        // second, so the union is stable across reloads.
+                        rows.sort_by_key(|m| (m.created_at, m.id));
+                        Ok::<_, anyhow::Error>(Loaded {
+                            rows,
+                            total,
+                            origins,
+                        })
                     })
                     .map_err(|e| format!("{e:#}")),
                 Err(e) => Err(format!("tokio runtime failed: {e}")),
@@ -757,6 +813,18 @@ pub async fn load_recent(
         },
         Err(e) => Err(format!("transcript fetch thread failed to spawn: {e}")),
     }
+}
+
+/// What a stored session title reads as once the channel key is off it. The
+/// key is bookkeeping (`[chat:-100:topic:42]`), not a name, and `All` labels
+/// every topic with this.
+fn topic_family_label(title: &str) -> Option<String> {
+    let trimmed = title.trim();
+    let base = match trimmed.rfind("[chat:") {
+        Some(i) if trimmed.ends_with(']') => trimmed[..i].trim_end(),
+        _ => trimmed,
+    };
+    (!base.is_empty()).then(|| base.to_string())
 }
 
 /// A model-switch receipt used to be persisted with the user role. Draw the
@@ -933,6 +1001,20 @@ pub fn turns_with_metrics(
     total: i64,
     metrics: &HashMap<String, TurnMetrics>,
 ) -> (usize, Vec<Turn>) {
+    turns_with_origins(rows, total, metrics, &HashMap::new())
+}
+
+/// [`turns_with_metrics`] plus the per-row provenance of a merged `All` view
+/// (#2762): `origins` maps a row id to the topic that row lives in, so every
+/// turn carries the label its first row was written under. A change of label
+/// is a hard turn boundary, because without one the previous topic's answer
+/// would be drawn as the next topic's output.
+pub fn turns_with_origins(
+    rows: &[Message],
+    total: i64,
+    metrics: &HashMap<String, TurnMetrics>,
+    origins: &HashMap<uuid::Uuid, String>,
+) -> (usize, Vec<Turn>) {
     let hidden = total.saturating_sub(rows.len() as i64).max(0) as usize;
     if rows.is_empty() {
         return (hidden, Vec::new());
@@ -949,7 +1031,10 @@ pub fn turns_with_metrics(
         let continues_batch = i > 0
             && m.forward.is_some()
             && m.forward.as_ref().map(|f| f.batch) == rows[i - 1].forward.as_ref().map(|f| f.batch);
-        if m.role == "user" && i > start && !continues_batch {
+        // A merged read sorts several topics into one stream, and the seam
+        // between them is a boundary like any question is (#2762).
+        let origin_changed = i > start && origins.get(&rows[i - 1].id) != origins.get(&m.id);
+        if i > start && (origin_changed || (m.role == "user" && !continues_batch)) {
             bounds.push((start, i));
             start = i;
         }
@@ -986,6 +1071,10 @@ pub fn turns_with_metrics(
         // The turn's anchor and remembered numbers are read before the
         // summary so the tally the live card showed can floor it (#2632).
         let anchor = format!("{}@{}", rows[s].role, rows[s].created_at.timestamp());
+        // The label the turn opens under. A turn cannot straddle two topics
+        // (the boundary above forbids it), so the first row speaks for the
+        // whole turn (#2762).
+        let origin = origins.get(&rows[s].id).cloned();
         let metrics = metrics.get(&anchor).copied();
         let mut summary = TurnSummary::default();
         for b in &blocks {
@@ -1032,6 +1121,7 @@ pub fn turns_with_metrics(
             anchor,
             blocks,
             final_idx,
+            origin,
         });
     }
     (hidden, out)
@@ -1320,6 +1410,34 @@ fn table_cell(cell: &markdown::MdCell, header: bool, selection: Option<&Selectio
         .px(px(RHYTHM_CELL_PAD_X))
         .py(px(RHYTHM_CELL_PAD_Y))
         .child(text)
+}
+
+/// The topic a run of rows belongs to, drawn above the first turn of that
+/// topic in a merged `All` view (#2762): the name, then a hairline out to the
+/// edge. `rule` is false only at the very top of the transcript, where nothing
+/// sits above the label to be separated from.
+fn origin_divider(label: &str, rule: bool) -> Div {
+    let mut row = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .w_full()
+        .min_w_0()
+        .pt(px(10.0))
+        .pb(px(2.0));
+    if rule {
+        row = row.border_t_1().border_color(rgb(palette::current().track));
+    }
+    row.child(
+        div()
+            .text_xs()
+            .font_weight(gpui::FontWeight::BOLD)
+            .text_color(rgb(palette::current().text_muted))
+            .flex_shrink_0()
+            .child(SharedString::from(label.to_string())),
+    )
+    .child(table_rule().flex_1())
 }
 
 /// A rule between two rows, drawn as its own element so no table depends on
@@ -3217,9 +3335,19 @@ pub fn view(
             .turns
             .last()
             .is_some_and(|turn| newest_live_turn_matches(turn, live));
+    // A merged read labels its rows by topic the way Telegram's All view does
+    // (#2762): the name shows once, then again whenever the topic changes. A
+    // single session carries no label, so nothing is drawn there.
+    let mut shown_origin: Option<&str> = None;
     for (ti, turn) in state.turns.iter().enumerate() {
         if persisted_turn_is_hidden(ti, last, newest_is_live) {
             continue;
+        }
+        if let Some(origin) = turn.origin.as_deref()
+            && shown_origin != Some(origin)
+        {
+            col = col.child(origin_divider(origin, shown_origin.is_some()));
+            shown_origin = Some(origin);
         }
         let folded = !state.expanded.contains(&turn.anchor);
         let full = state.details.contains(&turn.anchor);
@@ -5103,6 +5231,7 @@ mod tests {
             anchor: "a".into(),
             blocks: Vec::new(),
             final_idx: None,
+            origin: None,
         };
         assert_eq!(
             turn_footer_text(&turn).as_deref(),
@@ -5136,6 +5265,7 @@ mod tests {
             anchor: "b".into(),
             blocks: Vec::new(),
             final_idx: None,
+            origin: None,
         };
         assert_eq!(
             turn_footer_text(&measured).as_deref(),
@@ -5150,6 +5280,7 @@ mod tests {
             anchor: "c".into(),
             blocks: Vec::new(),
             final_idx: None,
+            origin: None,
         };
         assert!(
             turn_footer_text(&unmeasured).is_none(),
@@ -5177,6 +5308,7 @@ mod tests {
                 }],
             }],
             final_idx: None,
+            origin: None,
         };
         assert_eq!(
             settled_verdict(&dead_end),
@@ -5226,6 +5358,7 @@ mod tests {
                 anchor: "f".into(),
                 blocks,
                 final_idx: None,
+                origin: None,
             }
         }
 
@@ -5622,6 +5755,7 @@ mod tests {
                 forward: None,
             }],
             final_idx: None,
+            origin: None,
         };
         let turn = turn_with("audit the repo config", stamped.clone());
         assert!(
@@ -5697,6 +5831,7 @@ mod tests {
                 forward: None,
             }],
             final_idx: None,
+            origin: None,
         };
         let newest_is_live = newest_live_turn_matches(&turn, &live);
         assert!(

@@ -1752,12 +1752,16 @@ impl Dashboard {
                 // fetch for an abandoned click paints nothing.
                 if this.transcript.session == Some(id) {
                     match result {
-                        Ok((rows, total)) => {
-                            let (hidden, turns) =
-                                transcript::turns_with_metrics(&rows, total, &this.turn_metrics);
+                        Ok(loaded) => {
+                            let (hidden, turns) = transcript::turns_with_origins(
+                                &loaded.rows,
+                                loaded.total,
+                                &this.turn_metrics,
+                                &loaded.origins,
+                            );
                             this.transcript.hidden = hidden;
                             this.transcript.turns = turns;
-                            this.transcript.rows = rows;
+                            this.transcript.rows = loaded.rows;
                         }
                         Err(e) => this.transcript.error = Some(e.into()),
                     }
@@ -2896,12 +2900,16 @@ impl Dashboard {
             this.update(cx, |this, cx| {
                 if let Some(pane) = this.pane_states.get_mut(&id) {
                     match result {
-                        Ok((rows, total)) => {
-                            let (hidden, turns) =
-                                transcript::turns_with_metrics(&rows, total, &this.turn_metrics);
+                        Ok(loaded) => {
+                            let (hidden, turns) = transcript::turns_with_origins(
+                                &loaded.rows,
+                                loaded.total,
+                                &this.turn_metrics,
+                                &loaded.origins,
+                            );
                             pane.transcript.hidden = hidden;
                             pane.transcript.turns = turns;
-                            pane.transcript.rows = rows;
+                            pane.transcript.rows = loaded.rows;
                         }
                         Err(e) => pane.transcript.error = Some(e.into()),
                     }
@@ -5202,9 +5210,13 @@ impl Dashboard {
         cx.spawn(async move |this, cx| {
             let result = transcript::load_recent(db_path, session).await;
             this.update(cx, |this, cx| match result {
-                Ok((rows, total)) => {
-                    let (hidden, turns) =
-                        transcript::turns_with_metrics(&rows, total, &this.turn_metrics);
+                Ok(loaded) => {
+                    let (hidden, turns) = transcript::turns_with_origins(
+                        &loaded.rows,
+                        loaded.total,
+                        &this.turn_metrics,
+                        &loaded.origins,
+                    );
                     // The turn this leaf's card was watching has landed, so it
                     // takes the numbers it showed in flight before the rows are
                     // drawn (#2632).
@@ -8271,10 +8283,14 @@ impl Dashboard {
                     return;
                 }
                 match result {
-                    Ok((rows, total)) => {
-                        let (hidden, turns) =
-                            transcript::turns_with_metrics(&rows, total, &this.turn_metrics);
-                        let landed = settle_landed(expect, total);
+                    Ok(loaded) => {
+                        let (hidden, turns) = transcript::turns_with_origins(
+                            &loaded.rows,
+                            loaded.total,
+                            &this.turn_metrics,
+                            &loaded.origins,
+                        );
+                        let landed = settle_landed(expect, loaded.total);
                         this.transcript.hidden = hidden;
                         this.transcript.turns = turns;
                         // The rows now carry the question the card opened the
@@ -8299,7 +8315,7 @@ impl Dashboard {
                         // The ordered ids the selection resolves its ranges and
                         // its copy order against, which the visible turns alone
                         // cannot answer once they are folded (#2613).
-                        this.transcript.rows = rows;
+                        this.transcript.rows = loaded.rows;
                         if landed {
                             // The rows are in: the newest turn is the one
                             // that just answered, so it can claim the metrics
