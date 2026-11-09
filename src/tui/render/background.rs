@@ -98,3 +98,33 @@ fn humanize_elapsed(secs: u64) -> String {
         }
     }
 }
+
+/// The compact `/sessions` status badge for a session's detached commands, or
+/// `None` when nothing is running.
+///
+/// The session list is exactly one terminal row per conversation, so this
+/// cannot carry the command label the composer strip shows: it answers the
+/// only question the list needs, "is work still going here, and for how
+/// long". The oldest task names the duration because it is the one the
+/// operator has been waiting on longest.
+pub fn row_background_badge(tasks: &[(String, u64)]) -> Option<String> {
+    let (_, secs) = tasks.first()?;
+    let mut out = format!("\u{23f3} {}", compact_elapsed(*secs));
+    if tasks.len() > 1 {
+        out.push_str(&format!(" +{}", tasks.len() - 1));
+    }
+    Some(out)
+}
+
+/// Seconds as one short unit: `45s`, `16m`, `2h`.
+///
+/// Deliberately coarser than [`humanize_elapsed`]: the status column is
+/// capped at eighteen cells and already shares them with the spinner, the
+/// pending-approval mark and the pane index.
+fn compact_elapsed(secs: u64) -> String {
+    match secs {
+        s if s < 60 => format!("{s}s"),
+        s if s < 3600 => format!("{}m", s / 60),
+        s => format!("{}h", s / 3600),
+    }
+}

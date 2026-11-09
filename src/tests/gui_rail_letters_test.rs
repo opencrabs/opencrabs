@@ -2,10 +2,11 @@
 //!
 //! The window has no headless key harness, so these checks read source the
 //! same way `gui_split_render_test` does. Each rule below was broken once: the
-//! rail answered arrows and Enter but nothing else, so `r`, `t`, `c` and `z`
-//! did nothing in the window while the terminal answered all four, and the
-//! window's own help refused to list them because it only lists what it can
-//! answer.
+//! rail answered arrows and Enter but nothing else, so `r`, `t` and `c` did
+//! nothing in the window while the terminal answered them, and the window's
+//! own help refused to list them because it only lists what it can answer.
+//! `z` rides the same gate in the terminal, but the window lost its topic fold
+//! with #2701, so the window binds the three that still have a handler here.
 
 const GUI_MAIN: &str = include_str!("../gui/main.rs");
 
@@ -43,7 +44,7 @@ fn the_rail_answers_the_session_letters() {
             "the rail answers {letter}, gated on rail focus"
         );
     }
-    // The four letters reach the handlers their row menu items already call,
+    // The three letters reach the handlers their row menu items already call,
     // so the keyboard and the menu cannot drift apart.
     assert!(
         arm_body("\"r\" if self.rail_focused => {").contains("self.start_rename("),

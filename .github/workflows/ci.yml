@@ -841,7 +841,7 @@ jobs:
         #                      It never had an ignore: audit does not fail on
         #                      yanked, so it had been passing silently.
         #
-        # The eleven below are all blocked upstream: either the crate is at its
+        # The twelve below are all blocked upstream: either the crate is at its
         # latest published release (checked against crates.io on 2026-10-21) or
         # the release that would fix it cannot be reached from this tree. A
         # routine `cargo update` will not shift them; only an upstream release
@@ -868,7 +868,22 @@ jobs:
         #   0.26 line entirely, but kalosm-common 0.4.0 (latest) pins hf-hub
         #   ^0.3.0, so that move needs kalosm to release first. Remove this
         #   ignore when `cargo tree -i webpki-roots@0.26.11` prints nothing.
-        run: cargo audit --ignore RUSTSEC-2024-0436 --ignore RUSTSEC-2025-0119 --ignore RUSTSEC-2025-0134 --ignore RUSTSEC-2025-0141 --ignore RUSTSEC-2026-0002 --ignore RUSTSEC-2026-0173 --ignore RUSTSEC-2026-0192 --ignore RUSTSEC-2026-0253 --ignore RUSTSEC-2026-0258 --ignore RUSTSEC-2026-0367 --ignore RUSTSEC-2026-0368 --ignore RUSTSEC-2026-0369 --ignore RUSTSEC-2026-0381 --ignore RUSTSEC-2026-0429
+        # libsqlite3-sys 0.38.2 (RUSTSEC-2026-0459, #2736): 0.38.2 bundles
+        #   SQLite 3.53.2, which can return uninitialized page-cache bytes when
+        #   it opens a database beside a `-wal` written by someone else. The fix
+        #   is 0.39.0 (SQLite 3.54.0), and reaching it means rusqlite 0.41.
+        #   `cargo update -p libsqlite3-sys --precise 0.39.0` fails because
+        #   rusqlite 0.40.2 requires `libsqlite3-sys ^0.38.1`; moving rusqlite
+        #   to 0.41 fails because deadpool-sqlite 0.14.0 and rusqlite_migration
+        #   2.6.0 both pin `rusqlite ^0.40.0`, and both are at their latest
+        #   published release. MSRV is not the blocker (we are on 1.95). This
+        #   tree opens only its own database under the user's home, written by
+        #   the same user, so there is no untrusted `-wal` in the path; dropping
+        #   `bundled` would dodge the crate copy but bring back the 3.51.1
+        #   unix-VFS close deadlock (#1982). Remove this ignore when
+        #   `cargo update -p libsqlite3-sys --precise 0.39.0 --dry-run` stops
+        #   erroring.
+        run: cargo audit --ignore RUSTSEC-2024-0436 --ignore RUSTSEC-2025-0119 --ignore RUSTSEC-2025-0134 --ignore RUSTSEC-2025-0141 --ignore RUSTSEC-2026-0002 --ignore RUSTSEC-2026-0173 --ignore RUSTSEC-2026-0192 --ignore RUSTSEC-2026-0253 --ignore RUSTSEC-2026-0258 --ignore RUSTSEC-2026-0367 --ignore RUSTSEC-2026-0368 --ignore RUSTSEC-2026-0369 --ignore RUSTSEC-2026-0381 --ignore RUSTSEC-2026-0429 --ignore RUSTSEC-2026-0459
 
       # Fail fast from inside the job that failed (#2595): the fan-in `abort`
       # job cannot do it, because `needs` holds it until the run is over.

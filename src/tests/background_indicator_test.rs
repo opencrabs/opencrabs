@@ -3,7 +3,7 @@
 //! Rendered on the input box's top border, so the label has to fit beside the
 //! other border titles rather than run the width of a status bar.
 
-use crate::tui::render::background::{LABEL_CHARS, format_background_tasks};
+use crate::tui::render::background::{LABEL_CHARS, format_background_tasks, row_background_badge};
 
 fn tasks(pairs: &[(&str, u64)]) -> Vec<(String, u64)> {
     pairs.iter().map(|(l, s)| (l.to_string(), *s)).collect()
@@ -108,4 +108,53 @@ fn a_label_exactly_at_the_budget_is_not_marked() {
     let exact = "a".repeat(12);
     let out = format_background_tasks(&tasks(&[(&exact, 1)]), 12).expect("formats");
     assert_eq!(out, format!("{exact} 1s"));
+}
+
+#[test]
+fn the_sessions_badge_names_the_oldest_task_and_counts_the_rest() {
+    // The session list gets exactly one terminal row per conversation, so the
+    // command label cannot come along: only the duration and the overflow.
+    assert_eq!(
+        row_background_badge(&tasks(&[("cargo test", 16 * 60 + 16)])).as_deref(),
+        Some("\u{23f3} 16m"),
+        "one command shows the hourglass and its rounded age"
+    );
+
+    let three = tasks(&[("cargo test", 45), ("cargo build", 10), ("gh run watch", 3)]);
+    assert_eq!(
+        row_background_badge(&three).as_deref(),
+        Some("\u{23f3} 45s +2"),
+        "the oldest task is named and the others are counted, never listed"
+    );
+
+    assert_eq!(
+        row_background_badge(&[]),
+        None,
+        "an idle session adds no cell at all, so the column collapses"
+    );
+}
+
+#[test]
+fn the_sessions_badge_age_is_coarse_but_ordered() {
+    // Coarser than `humanize_elapsed` on purpose: the status column is capped
+    // at eighteen cells and shares them with the spinner and the pane index.
+    assert_eq!(
+        row_background_badge(&tasks(&[("x", 0)])).as_deref(),
+        Some("\u{23f3} 0s"),
+        "a task that just started reads as zero, not blank"
+    );
+    assert_eq!(
+        row_background_badge(&tasks(&[("x", 59)])).as_deref(),
+        Some("\u{23f3} 59s")
+    );
+    assert_eq!(
+        row_background_badge(&tasks(&[("x", 60)])).as_deref(),
+        Some("\u{23f3} 1m"),
+        "a minute is minutes, not 60s"
+    );
+    assert_eq!(
+        row_background_badge(&tasks(&[("x", 7_200)])).as_deref(),
+        Some("\u{23f3} 2h"),
+        "hours collapse too, because the cell budget is fixed"
+    );
 }

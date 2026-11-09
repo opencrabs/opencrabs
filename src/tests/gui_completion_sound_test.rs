@@ -86,10 +86,17 @@ fn the_chime_pass_walks_every_strip_through_one_seen_set() {
         body.contains("self.plan.document()"),
         "the window strip is walked: {body}"
     );
+    // The pass now walks the map with its keys, not `.values()`: a pane plan
+    // written before the hook stamped its session carries the nil id, and the
+    // pane's own key is the only honest fallback for the flash deadline.
     assert!(
-        body.contains("self.pane_states.values()") && body.contains("pane.plan.document()"),
+        body.contains("in &self.pane_states") && body.contains("pane.plan.document()"),
         "every pane strip is walked too: {body}"
     );
+    // The settle count and the OS banner share one dedupe: the helper reports
+    // how many of these plans newly resolved into the one window seen set, and
+    // its count is what arms the flash and the chime. A local count would drift
+    // from the banner and ring twice for one task.
     assert!(
         body.contains("announce_settled_tasks(seen, &plans)"),
         "the dedupe is the shared helper over one seen set, not a local count: {body}"

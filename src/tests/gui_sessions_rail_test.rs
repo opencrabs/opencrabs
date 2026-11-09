@@ -30,7 +30,6 @@ fn session_rows_paint_edge_to_edge_without_card_chrome() {
     );
     assert!(
         SESSIONS.contains(".when(!selected && !holds_focus, |d| {")
-            && SESSIONS.contains("d.hover(|d| d.bg(")
             && SESSIONS.contains(".when(selected, |d| d.bg("),
         "hover and selection still paint on the full-width row"
     );

@@ -11,10 +11,25 @@
 //!   each turn that fact into audio behind the same opt-in (#2691).
 
 use std::collections::HashSet;
+use std::time::{Duration, Instant};
 
 use uuid::Uuid;
 
 use crate::tui::plan::{PlanDocument, PlanStatus, TaskStatus};
+
+/// How long the rail's plan bar stays lit after a task settles.
+///
+/// Long enough to catch the eye from across the desk, short enough that a
+/// row which finished while the operator was reading something else stops
+/// shouting instead of blinking for minutes.
+pub const FLASH_MS: u64 = 6_000;
+
+/// The flash window itself, so callers add it once instead of rebuilding it.
+pub const FLASH_WINDOW: Duration = Duration::from_millis(FLASH_MS);
+
+/// How long each half of the blink lasts: six seconds is roughly thirteen
+/// on/off pairs, which reads as a pulse rather than a strobe.
+pub const FLASH_BLINK_MS: u64 = 450;
 
 /// The only asset this module plays: the notification chime the owner picked.
 #[cfg(feature = "notification-sound")]
@@ -81,6 +96,44 @@ pub fn resolved_task_ids(plan: Option<&PlanDocument>) -> HashSet<Uuid> {
         .collect()
 }
 
+/// Whether a flash window is still open at `now`.
+///
+/// Pure over the two instants, so the paint path never owns a timer: the rail
+/// stores the deadline once per session and asks this on every repaint.
+pub fn flash_lit(until: Option<Instant>, now: Instant) -> bool {
+    until.is_some_and(|end| now < end)
+}
+
+/// Whether the flash is in its lit half at `now`, which is what decides the
+/// colour: orange while lit, the normal accent while dark. `false` outside
+/// the window, so the caller's paint collapses to the resting look.
+///
+/// The phase is measured from the START of the window (the deadline minus
+/// [`FLASH_WINDOW`]) using saturating arithmetic, so a clock that moved
+/// backwards dims the bar instead of panicking on the paint path.
+pub fn flash_blink_on(until: Option<Instant>, now: Instant) -> bool {
+    let Some(end) = until else {
+        return false;
+    };
+    if now >= end {
+        return false;
+    }
+    let elapsed = FLASH_WINDOW.saturating_sub(end.saturating_duration_since(now));
+    (elapsed.as_millis() / u128::from(FLASH_BLINK_MS)).is_multiple_of(2)
+}
+
+/// How many tasks in this ONE plan settled that `seen` had not recorded yet.
+///
+/// Same dedupe as [`newly_resolved`], but reported per plan so the caller can
+/// say WHICH session's task finished. The rail flashes that row's plan bar,
+/// and the chime rings once for the batch: one event, two surfaces.
+pub fn newly_resolved_in(seen: &mut HashSet<Uuid>, plan: Option<&PlanDocument>) -> usize {
+    resolved_task_ids(plan)
+        .into_iter()
+        .filter(|id| seen.insert(*id))
+        .count()
+}
+
 /// How many tasks in `plans` settled that `seen` had not recorded yet, adding
 /// them to `seen` as it goes (#2574).
 ///
@@ -90,13 +143,7 @@ pub fn resolved_task_ids(plan: Option<&PlanDocument>) -> HashSet<Uuid> {
 /// first appeared count as new once, which is the honest reading: the operator
 /// never heard about them.
 pub fn newly_resolved(seen: &mut HashSet<Uuid>, plans: &[Option<&PlanDocument>]) -> usize {
-    let mut fresh = 0;
-    for plan in plans {
-        for id in resolved_task_ids(*plan) {
-            if seen.insert(id) {
-                fresh += 1;
-            }
-        }
-    }
-    fresh
+    plans
+        .iter()
+        .fold(0, |fresh, plan| fresh + newly_resolved_in(seen, *plan))
 }
