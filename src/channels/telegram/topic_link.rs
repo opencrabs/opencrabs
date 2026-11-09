@@ -150,6 +150,95 @@ pub async fn link_topic_session(
     }
 }
 
+/// The chat a Telegram forum-topic title belongs to, and the base title its
+/// parent row carries.
+///
+/// Titles are built by [`session_resolve::build_session_title`], so they read
+/// `Telegram: <chat title> / <topic name> [chat:<id>:topic:<tid>]` and the
+/// parent is the same string with the ` / <topic name>` segment and the topic
+/// suffix removed. The display label is best-effort: the suffix is the
+/// identity, so a title whose topic name itself contains ` / ` only costs a
+/// slightly long parent label, never a wrong link.
+///
+/// Returns `None` for anything that is not a Telegram topic title, which is
+/// what keeps the backfill off other channels' rows.
+pub fn telegram_base_title(title: &str) -> Option<(i64, String)> {
+    let rest = title.strip_prefix("Telegram: ")?;
+    let bracket = title.rfind("[chat:")?;
+    let suffix = &title[bracket..];
+    let inner = suffix.strip_prefix("[chat:")?.strip_suffix(']')?;
+    let (chat, thread) = inner.split_once(":topic:")?;
+    let chat_id: i64 = chat.parse().ok()?;
+    if thread.is_empty() || !thread.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+
+    let body = rest[..bracket.saturating_sub("Telegram: ".len())].trim_end();
+    let base_body = match body.rfind(" / ") {
+        Some(pos) => body[..pos].trim_end(),
+        None => body,
+    };
+    Some((chat_id, format!("Telegram: {base_body} [chat:{chat_id}]")))
+}
+
+/// What one backfill pass did, for the startup log line.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BackfillReport {
+    /// Topic sessions that now hang under a parent.
+    pub linked: usize,
+    /// Parent rows that had to be created for forums with no base session.
+    pub parents_created: usize,
+    /// Rows whose title was not a Telegram topic title.
+    pub skipped: usize,
+    /// Rows the database refused; each one is logged with its reason.
+    pub failed: usize,
+}
+
+impl BackfillReport {
+    /// Anything worth logging beyond "nothing to do".
+    pub fn did_work(&self) -> bool {
+        self.linked > 0 || self.failed > 0
+    }
+}
+
+/// One-shot repair for topic sessions that predate the link (#2603).
+///
+/// Every forum topic created before this fix sits at top level: 59 rows on the
+/// author's install, in 12 chats, none of which ever had a base `[chat:<id>]`
+/// row to hang from. Running once at bot start turns each of those chats into
+/// one group with its topics as chips.
+///
+/// Idempotent by construction: the candidate query only returns rows with
+/// `parent_id IS NULL`, so a second pass finds nothing and writes nothing.
+pub async fn backfill_forum_topic_links(session_svc: &SessionService) -> Result<BackfillReport> {
+    let repo = SessionRepository::new(session_svc.pool());
+    let candidates = repo.list_unlinked_topic_sessions().await?;
+    let mut report = BackfillReport::default();
+
+    for (id, title) in candidates {
+        let Some((chat_id, base_title)) = telegram_base_title(&title) else {
+            report.skipped += 1;
+            continue;
+        };
+        match link_topic_session(session_svc, chat_id, id, base_title).await {
+            Ok(linked) => {
+                report.linked += 1;
+                if linked.parent_created {
+                    report.parents_created += 1;
+                }
+            }
+            Err(e) => {
+                report.failed += 1;
+                tracing::warn!(
+                    "Telegram: backfill could not group session {id} \"{title}\": {e:#}"
+                );
+            }
+        }
+    }
+
+    Ok(report)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,5 +452,124 @@ mod tests {
         assert!(la.parent_created);
         assert!(!lb.parent_created);
         assert_eq!(parent_of(&db, a).await, parent_of(&db, b).await);
+    }
+
+    // ── title parsing (the backfill's input) ─────────────────────────────
+
+    #[test]
+    fn a_topic_title_yields_its_chat_and_parent_title() {
+        let (chat, base) =
+            telegram_base_title("Telegram: CrabsDev / Memes [chat:-1001234567890:topic:42]")
+                .expect("parsed");
+        assert_eq!(chat, -1001234567890);
+        assert_eq!(base, "Telegram: CrabsDev [chat:-1001234567890]");
+    }
+
+    #[test]
+    fn the_general_topic_parses_like_any_other() {
+        let (chat, base) =
+            telegram_base_title("Telegram: CrabsDev / General [chat:-100777:topic:1]")
+                .expect("parsed");
+        assert_eq!(chat, -100777);
+        assert_eq!(base, "Telegram: CrabsDev [chat:-100777]");
+    }
+
+    #[test]
+    fn a_base_session_title_is_not_a_topic_title() {
+        assert_eq!(
+            telegram_base_title("Telegram: CrabsDev [chat:-100777]"),
+            None
+        );
+        assert_eq!(telegram_base_title("GUI session"), None);
+        assert_eq!(
+            telegram_base_title("Telegram: DM Bob (7) [chat:5]"),
+            None,
+            "a DM never carries a topic key"
+        );
+    }
+
+    #[test]
+    fn a_malformed_topic_key_is_refused() {
+        assert_eq!(
+            telegram_base_title("Telegram: X / Y [chat:notanumber:topic:2]"),
+            None
+        );
+        assert_eq!(telegram_base_title("Telegram: X / Y [chat:5:topic:]"), None);
+        assert_eq!(
+            telegram_base_title("Telegram: X / Y [chat:5:topic:two]"),
+            None
+        );
+    }
+
+    // ── backfill ────────────────────────────────────────────────────────
+
+    /// Three orphan topic rows across two forums become two groups of chips,
+    /// and a second pass writes nothing.
+    #[tokio::test]
+    async fn backfill_groups_every_orphan_and_is_idempotent() {
+        let db = db().await;
+        let svc = svc(&db);
+
+        let crab = -1001111000001_i64;
+        let other = -1002222000002_i64;
+        let a = session(
+            &svc,
+            &format!(
+                "Telegram: CrabsDev / Memes {}",
+                session_resolve::chat_id_suffix(crab, Some(9))
+            ),
+        )
+        .await;
+        let b = session(
+            &svc,
+            &format!(
+                "Telegram: CrabsDev / General {}",
+                session_resolve::chat_id_suffix(crab, Some(1))
+            ),
+        )
+        .await;
+        let c = session(
+            &svc,
+            &format!(
+                "Telegram: Other {}",
+                session_resolve::chat_id_suffix(other, Some(3))
+            ),
+        )
+        .await;
+        // A DM is never a topic and must be left alone.
+        let dm = session(&svc, "Telegram: DM Bob (7) [chat:7]").await;
+
+        let report = backfill_forum_topic_links(&svc).await.expect("backfill");
+        assert_eq!(report.linked, 3, "three orphans now grouped");
+        assert_eq!(report.parents_created, 2, "one parent per forum");
+        assert_eq!(report.failed, 0);
+
+        let pa = parent_of(&db, a).await.expect("a grouped");
+        let pb = parent_of(&db, b).await.expect("b grouped");
+        let pc = parent_of(&db, c).await.expect("c grouped");
+        assert_eq!(pa, pb, "topics of one forum share the parent");
+        assert_ne!(pa, pc, "another forum is another group");
+        assert_eq!(parent_of(&db, dm).await, None, "the DM stays top-level");
+        assert_eq!(topics_enabled(&db, Uuid::parse_str(&pa).unwrap()).await, 1);
+
+        let again = backfill_forum_topic_links(&svc).await.expect("second pass");
+        assert_eq!(again, BackfillReport::default(), "nothing left to repair");
+    }
+
+    /// A row whose title is not a Telegram topic title is counted, never
+    /// touched: the repair is Telegram-scoped.
+    #[tokio::test]
+    async fn backfill_skips_foreign_topic_titles() {
+        let db = db().await;
+        let svc = svc(&db);
+        session(&svc, "Slack: Design / random [chat:42:topic:8]").await;
+
+        let report = backfill_forum_topic_links(&svc).await.expect("backfill");
+        assert_eq!(report.linked, 0);
+        assert_eq!(report.skipped, 1);
+        assert!(
+            !report.did_work(),
+            "a skipped row is not logged as a repair"
+        );
     }
 }

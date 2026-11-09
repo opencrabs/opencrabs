@@ -93,6 +93,24 @@ impl TelegramAgent {
                 cfg.voice_config().tts_enabled,
             );
 
+            // Repair topic sessions created before the parent link existed
+            // (#2603). Forums whose topics were opened before this fix have no
+            // base `[chat:<id>]` row and no `parent_id`, so they render as a
+            // flat pile of top-level sessions. Idempotent: the second start
+            // finds nothing and writes nothing. Runs before the network calls
+            // on purpose, so a Telegram outage never blocks the local repair.
+            match super::topic_link::backfill_forum_topic_links(&self.session_service).await {
+                Ok(report) if report.did_work() => tracing::info!(
+                    "Telegram: grouped {} topic session(s) under {} forum(s) ({} skipped, {} failed)",
+                    report.linked,
+                    report.parents_created,
+                    report.skipped,
+                    report.failed,
+                ),
+                Ok(_) => tracing::debug!("Telegram: no ungrouped topic sessions to repair"),
+                Err(e) => tracing::warn!("Telegram: topic backfill failed, continuing: {e:#}"),
+            }
+
             let bot = Bot::new(token.clone());
             // Kept for the raw-aware update listener (`token` itself is moved
             // into the shared deps as `bot_token` further down).
