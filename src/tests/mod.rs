@@ -42,6 +42,7 @@ pub mod agent_helpers_react_directive_test;
 pub mod agent_model_selection_test;
 pub mod agent_parallel_sessions_test;
 pub mod agent_queued_fold_1784_test;
+pub mod agent_queued_halt_2709_test;
 pub mod agent_service_augment_user_message_test;
 pub mod agent_service_mocks;
 pub mod agent_streaming_usage_test;

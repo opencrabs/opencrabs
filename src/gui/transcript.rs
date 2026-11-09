@@ -1017,6 +1017,18 @@ pub fn turns_with_metrics(
     (hidden, out)
 }
 
+/// Whether the persisted rows of one turn stay out of the conversation
+/// because the live card is already drawing that same exchange.
+///
+/// Only the newest turn can be the one on screen, and only while the card
+/// still owns it. Every other turn prints from its rows, including the turn
+/// the reader just finished: a new request sets `busy` for its whole
+/// duration, and keying this on `busy` alone hid the previous answer until
+/// the new turn ended (#2709).
+pub fn persisted_turn_is_hidden(ti: usize, last: usize, newest_is_live: bool) -> bool {
+    ti == last && newest_is_live
+}
+
 /// Whether this persisted turn is the exchange the live card is drawing.
 ///
 /// The window keeps a live turn beside the rows it reloads, so the newest
@@ -2266,6 +2278,22 @@ fn live_card(
         .child(head);
     if expanded {
         card = card.child(live_card_body(live, drag));
+    } else if let Some(paragraph) = collapsed_narration(live) {
+        // Narration stays in the card, never in the chat history. The collapsed
+        // card previews what the turn just said under its header, the way a
+        // summary rides beneath its title; opening the card prints every
+        // paragraph in order.
+        card = card.child(
+            div().px_2().pb_1().w_full().min_w_0().child(
+                selectable_styled_text(
+                    paragraph,
+                    small_style(SMALL_TEXT_SIZE, palette::current().text_muted),
+                    Vec::new(),
+                    None,
+                )
+                .line_clamp(3),
+            ),
+        );
     }
     if let Some(footer) = live_card_footer(live, ctx) {
         card = card.child(
@@ -2461,31 +2489,30 @@ fn live_block(
     )
 }
 
-/// A narration paragraph, drawn as the assistant speaking rather than as
-/// working-out: plain markdown, no bubble and no dim, and registered with the
-/// drag surfaces like every other row so the sentence can be copied.
-fn narration_row(text: &str, drag: Option<&Rc<CopyDrag>>) -> AnyElement {
-    let body = div().w_full().min_w_0().px_2().child(md_block(text, None));
-    let Some(d) = drag.filter(|_| !text.trim().is_empty()) else {
-        return body.into_any_element();
-    };
-    let copy = markdown_copy_text(text);
-    let ordinal = {
-        let mut texts = d.texts.borrow_mut();
-        texts.push(copy);
-        texts.len() - 1
-    };
-    let selection = SelectionContext::new(d, ordinal);
-    selectable_row(
-        d,
-        ordinal,
-        div()
-            .w_full()
-            .min_w_0()
-            .px_2()
-            .child(md_block(text, Some(&selection))),
-    )
-    .into_any_element()
+/// How much of the newest narration the collapsed card previews. The preview is
+/// a summary line, not the paragraph: the body carries the full text once the
+/// card is opened.
+const COLLAPSED_NARRATION_CHARS: usize = 280;
+
+/// The narration a collapsed card previews, char-safe clipped. Narration is the
+/// card's own prose and never a chat row of its own: a busy turn speaks between
+/// dozens of calls, and printing those paragraphs into the history turns one
+/// card into a wall. The body still prints every paragraph in order when the
+/// card is expanded.
+fn collapsed_narration(live: &LiveTurn) -> Option<String> {
+    live.narration()
+        .last()
+        .map(|text| {
+            // One source line only (#2731). gpui's line_clamp shapes each
+            // newline-separated line against the budget left over from the
+            // lines before it, and subtracts with overflow when an earlier
+            // line already wrapped past the clamp, aborting the window. A
+            // single source line is shaped once against the full budget, so
+            // collapsing every whitespace run to one space removes the trigger.
+            let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            fit(&flat, COLLAPSED_NARRATION_CHARS)
+        })
+        .filter(|text| !text.is_empty())
 }
 
 /// The running turn, drawn with the transcript's own block grammar: the
@@ -2570,16 +2597,6 @@ fn live_view(
             Some(row) => row,
             None => block_view(&block, content_width, handlers, None).into_any_element(),
         });
-    }
-    // The words the turn spoke between tool calls, readable while it runs.
-    // They used to live only in the card's body, which folds by default, so a
-    // turn with 27 calls showed a header and a count and no prose while the
-    // rail quoted the sentence from the same row. The body still prints them
-    // when it is open, so this only fills the folded case.
-    if !expanded {
-        for paragraph in live.narration() {
-            col = col.child(narration_row(paragraph, drag));
-        }
     }
     col
 }
@@ -3181,8 +3198,7 @@ pub fn view(
             .last()
             .is_some_and(|turn| newest_live_turn_matches(turn, live));
     for (ti, turn) in state.turns.iter().enumerate() {
-        let newest = ti == last;
-        if newest && newest_is_live {
+        if persisted_turn_is_hidden(ti, last, newest_is_live) {
             continue;
         }
         let folded = !state.expanded.contains(&turn.anchor);
@@ -3205,17 +3221,12 @@ pub fn view(
             if folded && !visible_when_folded(block, turn.final_idx, i) {
                 continue;
             }
-            // The live turn draws the running answer, and keeps drawing the
-            // settled one until the reload proves the row persisted. While it
-            // is on screen the persisted copy of that same answer stays out,
-            // so the conversation never shows it twice.
-            if (busy || !live.is_empty())
-                && newest
-                && let Block::Msg { role, .. } = block
-                && role == "assistant"
-            {
-                continue;
-            }
+            // Every row here belongs to a turn the live card is NOT drawing,
+            // which is why it is on screen at all. Narration and thinking stay
+            // inside the card; the answer a settled turn already produced
+            // draws here, and keeps drawing while the next request runs. The
+            // skip used to key on `busy` alone, so the previous answer
+            // disappeared for the whole duration of a new turn (#2709).
             let text = block_text(block);
             let mut selectable = None;
             let child: Div = match &drag {
@@ -5619,10 +5630,37 @@ mod tests {
         );
     }
 
-    /// The prose a turn speaks between tool calls is part of the answer the
-    /// reader is following, so it is reachable outside the folded card.
+    /// A finished answer keeps its place in the conversation while the next
+    /// request runs. The card owns one exchange at a time, so only the turn it
+    /// is drawing may be hidden; the previous turn prints from its rows even
+    /// though the new turn holds the busy flag for its whole duration (#2709).
     #[test]
-    fn narration_is_reachable_outside_the_card_body() {
+    fn the_previous_answer_is_drawn_while_the_next_turn_runs() {
+        // Four turns on screen, the fourth being the one the card draws.
+        let last = 3;
+        assert!(
+            !persisted_turn_is_hidden(2, last, true),
+            "the answer just finished must not vanish when a new request starts"
+        );
+        assert!(
+            !persisted_turn_is_hidden(0, last, true),
+            "older turns are never hidden by the live card"
+        );
+        assert!(
+            persisted_turn_is_hidden(last, last, true),
+            "the exchange the card is drawing stays out of the rows"
+        );
+        assert!(
+            !persisted_turn_is_hidden(last, last, false),
+            "with no card on screen the newest turn prints from its rows"
+        );
+    }
+
+    /// Narration is the card's own summary, never a chat row of its own: the
+    /// collapsed card previews the newest paragraph inside its frame, and the
+    /// body prints every paragraph in order once the card is opened.
+    #[test]
+    fn narration_previews_inside_the_collapsed_card() {
         let mut live = LiveTurn::default();
         live.begin("go".into());
         live.push_tool(ToolCall::running("bash".into(), "bash: ls".into()));
@@ -5638,9 +5676,61 @@ mod tests {
             "narration keeps the order it was spoken in"
         );
         assert_eq!(
+            collapsed_narration(&live).as_deref(),
+            Some("Then I'll check the runner setup."),
+            "the collapsed card previews the newest paragraph only"
+        );
+        assert_eq!(
             live.answer(),
             None,
             "narration is not the answer: the bubble below the card stays empty"
+        );
+
+        let mut quiet = LiveTurn::default();
+        quiet.begin("go".into());
+        quiet.push_tool(ToolCall::running("bash".into(), "bash: ls".into()));
+        assert_eq!(
+            collapsed_narration(&quiet),
+            None,
+            "a card that has said nothing previews nothing"
+        );
+    }
+
+    /// The preview clips on a character boundary, so a long paragraph in a
+    /// non-ASCII language never splits a glyph.
+    #[test]
+    fn a_collapsed_preview_clips_on_a_character_boundary() {
+        let mut live = LiveTurn::default();
+        live.begin("go".into());
+        live.push_narration(&"é".repeat(COLLAPSED_NARRATION_CHARS + 40));
+        let preview = collapsed_narration(&live).expect("a preview");
+        assert_eq!(
+            preview.chars().count(),
+            COLLAPSED_NARRATION_CHARS + 1,
+            "the budget plus the ellipsis"
+        );
+        assert!(preview.ends_with('\u{2026}'), "a clipped preview says so");
+    }
+
+    /// The preview renders under `.line_clamp(3)`. gpui shapes each
+    /// newline-separated line against the budget the earlier lines left, and
+    /// subtracts with overflow once a line wraps past the clamp, aborting the
+    /// window (#2731). The preview must stay a single source line so that
+    /// subtraction can never run.
+    #[test]
+    fn a_collapsed_preview_is_a_single_source_line() {
+        let mut live = LiveTurn::default();
+        live.begin("go".into());
+        let first = "word ".repeat(40);
+        live.push_narration(&format!("{first}\nand a second paragraph"));
+        let preview = collapsed_narration(&live).expect("a preview");
+        assert!(
+            !preview.contains('\n') && !preview.contains('\r'),
+            "a clamped preview carries no line break gpui could underflow on"
+        );
+        assert!(
+            !preview.contains("  "),
+            "whitespace runs collapse to a single space"
         );
     }
 }
