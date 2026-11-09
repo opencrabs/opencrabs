@@ -1806,6 +1806,10 @@ impl Dashboard {
         items.extend(find::channel_items());
         // Standalone actions share one catalog; execution stays in this window.
         items.extend(actions::items());
+        // The window-only rows: grouping sessions into topics is a window
+        // modal, so that row prints here and nowhere else (#2713). The split
+        // rows live in the shared catalog because both surfaces own panes.
+        items.extend(actions::gui_items());
         for skill in opencrabs::brain::skills::load_all_skills() {
             items.push(
                 PaletteItem::new(
@@ -2084,6 +2088,27 @@ impl Dashboard {
             PaletteAction::FavoriteToggle(id) => {
                 // The exact path the rail's pin button walks (#2487).
                 self.toggle_favorite(Uuid::from_u128(id), cx);
+            }
+            PaletteAction::GroupTopics => {
+                // Same card, same empty field, different purpose: the pick
+                // names the conversation that holds the topics (#2713).
+                self.finder = Some(PaletteState::picking(
+                    find::PickFor::GroupTopics,
+                    self.finder_items(),
+                ));
+                self.finder_channels = configured_channels();
+                self.refocus_overlay();
+                cx.notify();
+            }
+            PaletteAction::GroupTopicsOn(id) => {
+                // The exact path the rail row's right-click entry walks
+                // (#2713).
+                self.start_group_topics(Uuid::from_u128(id), cx);
+            }
+            PaletteAction::BeginSplit(layout) => {
+                // The same door the chord and the rail row menu walk, from the
+                // pane holding the caret (#2712).
+                self.begin_split(layout, cx);
             }
             PaletteAction::OpenDocs(path) => {
                 let url = docs::url(path);
@@ -16582,6 +16607,50 @@ mod tests {
         assert!(
             src.contains("pane_editor.downgrade()"),
             "the listener targets the pane's editor"
+        );
+    }
+
+    /// The Seeker prints the window-only rows and routes them into the doors
+    /// that already exist: the group modal and the split pick (#2712, #2713).
+    #[test]
+    fn the_seeker_prints_the_window_only_rows_and_routes_them() {
+        let code = include_str!("main.rs")
+            .split("\nmod tests {")
+            .next()
+            .expect("the production half of the file");
+        assert!(
+            code.contains("items.extend(actions::gui_items());"),
+            "the window adds the rows that need a window"
+        );
+        let finder = fn_body(code, "finder_items");
+        assert!(
+            finder.contains("actions::gui_items()"),
+            "the picker carries them"
+        );
+
+        // The arm is read from the glyph that follows the needle, never from
+        // the needle itself: the needle starts with `PaletteAction::`, so a
+        // bare `find` on the tail returns zero and proves nothing.
+        let group_pick = "PaletteAction::GroupTopicsOn(id) =>";
+        let handler = code.find(group_pick).expect("the group pick has a handler");
+        let tail = code
+            .get(handler + group_pick.len()..)
+            .expect("the arm starts on a glyph");
+        let arm = tail.split("PaletteAction::").next().expect("the arm body");
+        assert!(
+            arm.contains("start_group_topics(Uuid::from_u128(id), cx)"),
+            "the pick opens the same modal the rail menu opens"
+        );
+
+        let split_row = "PaletteAction::BeginSplit(layout) =>";
+        let split = code.find(split_row).expect("the split row has a handler");
+        let tail = code
+            .get(split + split_row.len()..)
+            .expect("the arm starts on a glyph");
+        let arm = tail.split("PaletteAction::").next().expect("the arm body");
+        assert!(
+            arm.contains("self.begin_split(layout, cx)"),
+            "the row walks the same split door the chord walks"
         );
     }
 
