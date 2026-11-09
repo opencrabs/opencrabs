@@ -357,7 +357,10 @@ fn the_post_tool_drain_is_guarded_by_the_halt_predicate() {
     let start = src
         .find(marker)
         .expect("the post-tool queue drain site exists");
-    let before = &src[start.saturating_sub(900)..start];
+    // 900 is an arbitrary context window, so the floor can land mid-character
+    // and the slice would panic. Snap down to a boundary first.
+    let context_start = src.floor_char_boundary(start.saturating_sub(900));
+    let before = &src[context_start..start];
 
     assert!(
         before.contains(
