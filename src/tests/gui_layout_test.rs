@@ -9,7 +9,8 @@ const MODEL_PICKER: &str = include_str!("../gui/model_picker.rs");
 #[test]
 fn the_hover_tint_is_not_applied_to_the_selected_row() {
     assert!(
-        SESSIONS.contains(".when(!selected, |d| d.hover("),
+        SESSIONS.contains(".when(!selected && !holds_focus, |d| {")
+            && SESSIONS.contains("d.hover(|d| d.bg("),
         "the hover tint applies only to rows that are not selected"
     );
 }
