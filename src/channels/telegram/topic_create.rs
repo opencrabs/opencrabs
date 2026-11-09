@@ -55,7 +55,10 @@ pub struct CreatedForumTopic {
 pub fn chat_of_base_title(title: &str) -> Option<(i64, String)> {
     title.strip_prefix("Telegram: ")?;
     let bracket = title.rfind("[chat:")?;
-    let inner = title.get(bracket..)?.strip_prefix("[chat:")?.strip_suffix(']')?;
+    let inner = title
+        .get(bracket..)?
+        .strip_prefix("[chat:")?
+        .strip_suffix(']')?;
     if inner.contains(":topic:") {
         return None;
     }
@@ -292,11 +295,9 @@ mod tests {
         let parent = Uuid::new_v4();
         seed_parent(&pool, parent, "Telegram: Memes [chat:-100]");
 
-        let created = write_forum_topic_row(
-            &svc, &repo, &pool, parent, -100, "Memes", 42, "Funny",
-        )
-        .await
-        .expect("the row should be written");
+        let created = write_forum_topic_row(&svc, &repo, &pool, parent, -100, "Memes", 42, "Funny")
+            .await
+            .expect("the row should be written");
 
         assert!(created.title.ends_with("[chat:-100:topic:42]"));
         assert_eq!(
@@ -305,7 +306,10 @@ mod tests {
             "the new topic must hang under its forum"
         );
         let row = svc.get_session(created.session).await.unwrap().unwrap();
-        assert_eq!(row.channel_chat_key.as_deref(), Some("[chat:-100:topic:42]"));
+        assert_eq!(
+            row.channel_chat_key.as_deref(),
+            Some("[chat:-100:topic:42]")
+        );
         let found = svc
             .find_session_by_channel_chat_key("[chat:-100:topic:42]")
             .await

@@ -258,12 +258,7 @@ mod tests {
     #[test]
     fn a_long_family_folds_the_tail_and_counts_it() {
         let root = id(1);
-        let plan = bar_plan(
-            root,
-            root,
-            &chips(&[2, 3, 4, 5, 6, 7, 8, 9], &[8]),
-            6,
-        );
+        let plan = bar_plan(root, root, &chips(&[2, 3, 4, 5, 6, 7, 8, 9], &[8]), 6);
         assert_eq!(plan.entries.len(), 7);
         assert_eq!(
             plan.overflow,
@@ -306,10 +301,7 @@ mod tests {
     fn a_zero_limit_still_draws_one_topic() {
         let root = id(1);
         let plan = bar_plan(root, root, &chips(&[2, 3], &[]), 0);
-        assert_eq!(
-            plan.entries,
-            vec![BarEntry::All, BarEntry::Topic(id(2))]
-        );
+        assert_eq!(plan.entries, vec![BarEntry::All, BarEntry::Topic(id(2))]);
         assert_eq!(plan.overflow.map(|o| o.hidden), Some(1));
     }
 }
