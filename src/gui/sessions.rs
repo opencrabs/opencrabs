@@ -1234,6 +1234,15 @@ pub fn topic_chips(id: uuid::Uuid, chips: Vec<Stateful<Div>>) -> Stateful<Div> {
     strip
 }
 
+/// Whether a rail row paints the left accent bar. The bar marks the open
+/// conversation, if and only if the row is selected: the keyboard cursor
+/// never draws it and gets no replacement cue. The owner overruled the
+/// two-state design from #2351 (#2717). Both flags come in so the contract
+/// stays testable across all four state combinations.
+fn accent_bar_visible(selected: bool, cursored: bool) -> bool {
+    matches!((selected, cursored), (true, _))
+}
+
 pub fn row(
     s: &Session,
     flags: RowFlags,
@@ -1377,10 +1386,10 @@ pub fn row(
         // inside one of its chips, so the parent shows where you are (#2701).
         .when(holds_focus, |d| d.bg(rgb(palette::current().focus)))
         .when(selected, |d| d.bg(rgb(palette::current().selection)))
-        // The keyboard's row reads as an accent bar on the left edge,
-        // distinct from the filled block that marks the open conversation:
-        // two different states, two different paints (#2351).
-        .when(cursored, |d| {
+        // The accent bar marks the open conversation, and only it: the
+        // keyboard cursor gets no bar and no replacement cue. Selection
+        // alone decides (#2717, overruling #2351's two-state design).
+        .when(accent_bar_visible(selected, cursored), |d| {
             d.border_l_2().border_color(rgb(palette::current().accent))
         })
         // The hover tint is for rows that are neither selected nor holding the
@@ -1639,8 +1648,8 @@ fn brand_header() -> Div {
 #[cfg(test)]
 mod tests {
     use super::{
-        Database, MenuKind, PREVIEW_CHARS, SessionsState, fit, load_sessions, palette, pin_mark,
-        preview_line, rail_menu_entries,
+        Database, MenuKind, PREVIEW_CHARS, SessionsState, accent_bar_visible, fit, load_sessions,
+        palette, pin_mark, preview_line, rail_menu_entries,
     };
     use opencrabs::db::models::Session;
 
@@ -2206,6 +2215,47 @@ mod tests {
         assert!(rail_source.contains(".px_2()"), "controls keep their inset");
         assert!(!rail_source.contains(".p_2()"));
         assert!(!rail_source.contains(".gap_1()"));
+    }
+
+    /// The bar is the open conversation's mark, never the cursor's: all
+    /// four flag combinations, selection alone decides (#2717).
+    #[test]
+    fn the_accent_bar_follows_selection_never_the_cursor() {
+        assert!(
+            accent_bar_visible(true, true),
+            "selected and cursored keeps the bar"
+        );
+        assert!(
+            accent_bar_visible(true, false),
+            "selected alone keeps the bar"
+        );
+        assert!(
+            !accent_bar_visible(false, true),
+            "a cursored row that is not the open session gets no bar"
+        );
+        assert!(!accent_bar_visible(false, false), "a quiet row gets no bar");
+    }
+
+    /// Structural pin: the row paints the bar through the selection-only
+    /// decision, and the old cursor-gated paint is gone (#2717).
+    #[test]
+    fn the_row_bar_is_gated_by_selection_not_the_cursor() {
+        let source = include_str!("sessions.rs");
+        let row_source = source
+            .split("pub fn row(")
+            .nth(1)
+            .expect("session row renderer")
+            .split("pub fn on_click(")
+            .next()
+            .expect("row source before click handler");
+        assert!(
+            row_source.contains(".when(accent_bar_visible(selected, cursored),"),
+            "the bar paints through the selection-only decision"
+        );
+        assert!(
+            !row_source.contains(".when(cursored,"),
+            "the cursor never gates a paint on the row"
+        );
     }
 
     /// Telegram-style topics: a parent card mounts its children as an inline
