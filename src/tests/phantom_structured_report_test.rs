@@ -23,7 +23,9 @@
 //!
 //! Fixtures are synthetic and carry no user identifiers.
 
-use crate::brain::agent::service::phantom::is_structured_report;
+use crate::brain::agent::service::phantom::{
+    has_phantom_tool_intent_no_tools, is_structured_report, structured_report_exempts,
+};
 
 const TOOL_LOOP_SRC: &str = include_str!("../brain/agent/service/tool_loop.rs");
 
@@ -297,5 +299,124 @@ fn the_turn_end_verdict_still_fires_for_genuine_prose_narration() {
     assert!(
         TOOL_LOOP_SRC.contains("final_text = \"I described actions"),
         "the #752 truthful note assignment is gone — prose phantoms would ship unchallenged"
+    );
+}
+
+// ─── delivery, not just retention (#2754) ────────────────────
+//
+// #1506 stopped the KILL gate from discarding a structured report, but the
+// PERSIST gate runs earlier and still stored the same iteration inside a
+// hidden `phantom_blocked` section. Both verdicts said "this is the answer";
+// only one of them made it visible. The owner hit this repeatedly on
+// 2026-11-09: "it just finishes and did not continue or give any feedback",
+// with a full report sitting in the row and nothing on screen.
+//
+// The contract: when a delivery exemption fires, the answer reaches the
+// surface. Structural sentinels below pin the wiring because the decision
+// lives inside the loop, not in a pure function.
+
+/// The shape the owner's GUI lost: a real report with a table and a sign-off
+/// that reads as a forward promise. The detectors fire on the sign-off; the
+/// genre is a structured report, so the verdict delivers it.
+const DATA_TABLE_WITH_SIGN_OFF: &str = "\
+## What I found\n\n\
+| Detector | Fired |\n\
+|---|---|\n\
+| persist gate | yes |\n\
+| kill gate | no |\n\n\
+Approve it and I'll finish the proof and file the issue.\n";
+
+#[test]
+fn a_report_with_a_table_and_a_sign_off_is_structured() {
+    assert!(
+        is_structured_report(DATA_TABLE_WITH_SIGN_OFF),
+        "a table plus a sign-off must classify as a structured report — this is the \
+         exact shape whose answer vanished"
+    );
+}
+
+#[test]
+fn the_sign_off_sentence_alone_reads_as_a_promise() {
+    // The exact closing line of the receipt turn. On its own the intent
+    // detector reads it as work promised and not done, which is why the
+    // persist gate wrapped the whole report that ended with it.
+    assert!(
+        has_phantom_tool_intent_no_tools(
+            "Approve it and I'll finish the proof and file the issue."
+        ),
+        "the sentence that hid the owner's report no longer fires, so the premise of \
+         the delivery fix moved"
+    );
+}
+
+#[test]
+fn a_structured_report_exempts_phrase_branches_only() {
+    // The branches that fired on the owner's turn are phrase matchers.
+    assert!(structured_report_exempts(
+        true,
+        &["intent_no_tools", "intent_full_text"]
+    ));
+    // A fact check is proof of fabrication and never yields (#2039).
+    assert!(!structured_report_exempts(true, &["uncalled_commands"]));
+    assert!(!structured_report_exempts(true, &["unbacked_facts"]));
+    // Non-structured text gets no exemption at all.
+    assert!(!structured_report_exempts(false, &["intent_full_text"]));
+}
+
+#[test]
+fn both_delivery_arms_mark_the_iteration_as_delivered() {
+    let marks = TOOL_LOOP_SRC
+        .matches("delivered_by_exemption = true;")
+        .count();
+    assert_eq!(
+        marks, 2,
+        "both delivery exemptions (option-surface sign-off, structured report) must record \
+         that the iteration is delivered, found {marks}"
+    );
+}
+
+#[test]
+fn a_delivered_exemption_re_persists_the_answer_visibly() {
+    assert!(
+        TOOL_LOOP_SRC.contains("async fn deliver_blocked_iteration("),
+        "the delivery path is gone: nothing un-hides an exempted answer"
+    );
+    let call = TOOL_LOOP_SRC
+        .split("if delivered_by_exemption {")
+        .nth(1)
+        .expect("the delivery call is not gated on the exemption verdict");
+    let call = call
+        .split(".await;")
+        .next()
+        .expect("unterminated delivery call");
+    assert!(
+        call.contains("deliver_blocked_iteration("),
+        "the exemption verdict does not re-persist the answer"
+    );
+    assert!(
+        call.contains("&iteration_text"),
+        "the delivery call does not pass the answer text, so it cannot un-hide it"
+    );
+    assert!(
+        call.contains("&mut accumulated_text"),
+        "the delivered answer never reaches accumulated_text, so the turn still ends empty"
+    );
+    assert!(
+        !call.contains("reasoning"),
+        "the delivery call re-persists the reasoning block the blocked copy already holds"
+    );
+}
+
+#[test]
+fn the_persist_gate_keeps_the_wrapped_copy_for_forensics() {
+    // The fix must not delete the blocked copy: it is the retry path's record
+    // and `strip_phantom_blocked` is what keeps it out of the model's context.
+    assert!(
+        TOOL_LOOP_SRC.contains("failed to persist phantom-blocked iteration"),
+        "the persist gate no longer keeps a copy of the blocked iteration"
+    );
+    assert!(
+        TOOL_LOOP_SRC.contains("<!-- phantom_blocked=1 -->"),
+        "the blocked wrapper itself is gone — a killed retry would now be visible"
     );
 }

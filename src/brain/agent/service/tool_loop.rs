@@ -316,6 +316,45 @@ pub(crate) fn is_duplicate_iteration_text(accumulated: &str, candidate: &str) ->
     !trimmed.is_empty() && accumulated.contains(trimmed)
 }
 
+/// Deliver an iteration the persist gate stored inside a hidden
+/// `phantom_blocked` section.
+///
+/// The persist gate decides whether an iteration is *stored hidden*; the kill
+/// gate decides whether it is *delivered*, and it carries two exemptions the
+/// persist gate cannot evaluate: a structured completion report (#1506) and a
+/// sign-off after an option-surface halt (#31). When either applies the answer
+/// is the turn's answer, so it is appended a second time WITHOUT the wrapper.
+/// Only the answer text is written: the blocked copy keeps the reasoning block
+/// for forensics, and `strip_phantom_blocked` removes that copy before the next
+/// turn's LLM context is built, so the model reads the answer once and every
+/// surface renders it once.
+///
+/// Without this the two decisions disagree in the exact way the owner kept
+/// reporting on 2026-11-09: "it just finishes and does not continue or give
+/// any feedback". The turn completed, the verdict delivered a 2 KB report,
+/// and the row carried it inside markers that render as folded thinking (#2754).
+async fn deliver_blocked_iteration(
+    message_service: &MessageService,
+    assistant_db_msg_id: Uuid,
+    accumulated_text: &mut String,
+    iteration_text: &str,
+) {
+    if is_duplicate_iteration_text(accumulated_text, iteration_text) {
+        return;
+    }
+    if !accumulated_text.is_empty() {
+        accumulated_text.push_str("\n\n");
+    }
+    accumulated_text.push_str(iteration_text);
+    let delivered = format!("{iteration_text}\n\n");
+    if let Err(e) = message_service
+        .append_content(assistant_db_msg_id, &delivered)
+        .await
+    {
+        tracing::warn!("failed to persist exempted (delivered) iteration: {e}");
+    }
+}
+
 /// What to do about a non-modification tool call that keeps recurring (#507).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RepeatLoopAction {
@@ -4783,6 +4822,14 @@ impl AgentService {
             // segment. Here we only rebuild accumulated_text from the ordered
             // segments (for the in-memory response) and append the reasoning
             // block, after a Flush barrier so trailing tool markers land first.
+            //
+            // The kill gate below owns the VISIBILITY verdict and carries two
+            // delivery exemptions this persist gate cannot evaluate (#1506
+            // structured reports, #31 option-surface sign-offs): when one
+            // applies the answer is persisted a second time there WITHOUT the
+            // wrapper, so "delivered" can never mean "hidden" (see
+            // `deliver_blocked_iteration`).
+
             if is_cli_provider {
                 // Interleaved text + tool markers from streaming events —
                 // display/accumulation only, the DB copy is already written.
@@ -5410,10 +5457,20 @@ impl AgentService {
                     && phantom_detections_total < MAX_PHANTOM_DETECTIONS_TOTAL
                     && phantom_eligible
                     && !fired_branches.is_empty();
+                // A delivery exemption is a verdict, not a log line (#2754).
+                // The persist gate above already stored this answer inside a
+                // hidden `phantom_blocked` section, and it cannot see either
+                // exemption. The turn was delivered, so the answer must be
+                // visible: `deliver_blocked_iteration` below writes it again
+                // without the wrapper. Owner's report, 2026-11-09: turns
+                // finished with no answer on the GUI while a full report sat
+                // invisible in the row.
+                let mut delivered_by_exemption = false;
                 if kill
                     && option_surface_halt_seen
                     && super::phantom::option_halt_exempts(&fired_branches)
                 {
+                    delivered_by_exemption = true;
                     tracing::warn!(
                         branches = ?fired_branches,
                         text_len = iteration_text.len(),
@@ -5423,6 +5480,7 @@ impl AgentService {
                 } else if kill
                     && super::phantom::structured_report_exempts(structured_report, &fired_branches)
                 {
+                    delivered_by_exemption = true;
                     tracing::warn!(
                         branches = ?fired_branches,
                         text_len = iteration_text.len(),
@@ -5503,6 +5561,21 @@ impl AgentService {
                     };
                     context.add_message(Message::user(nudge));
                     continue;
+                }
+
+                // The exemption arms above only log; this is where the answer
+                // actually reaches the surface (#2754). Re-persist it without
+                // the `phantom_blocked` wrapper so the GUI, the TUI and the
+                // next turn's context all carry the report the verdict chose
+                // to deliver. A no-op when the iteration was never blocked.
+                if delivered_by_exemption {
+                    deliver_blocked_iteration(
+                        &message_service,
+                        assistant_db_msg.id,
+                        &mut accumulated_text,
+                        &iteration_text,
+                    )
+                    .await;
                 }
 
                 // Cap hit and the fast-escalate block above couldn't swap (no
