@@ -8617,6 +8617,13 @@ impl Dashboard {
     /// window strip and every pane strip share one seen set, so a plan drawn
     /// twice rings once, and a reload of an unchanged file rings not at all.
     fn chime_settled_plan_tasks(&mut self) {
+        // A pane strip only re-reads its file when it is drawn, and this pass
+        // runs before the split body is built. Refresh here so a background
+        // pane that settled rings on this frame instead of the next redraw it
+        // happens to get (#2733). Each read is mtime-gated.
+        for pane in self.pane_states.values_mut() {
+            pane.plan.refresh();
+        }
         let seen = &mut self.announced_task_completions;
         let mut plans: Vec<Option<&opencrabs::tui::plan::PlanDocument>> =
             Vec::with_capacity(1 + self.pane_states.len());
