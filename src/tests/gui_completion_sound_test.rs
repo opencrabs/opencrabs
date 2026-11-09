@@ -91,8 +91,8 @@ fn the_chime_pass_walks_every_strip_through_one_seen_set() {
         "every pane strip is walked too: {body}"
     );
     assert!(
-        body.contains("newly_resolved(seen, &plans)"),
-        "the dedupe is the shared pure helper, not a local count: {body}"
+        body.contains("announce_settled_tasks(seen, &plans)"),
+        "the dedupe is the shared helper over one seen set, not a local count: {body}"
     );
     assert!(
         body.contains("Self::play_task_chime()"),
