@@ -1136,6 +1136,21 @@ impl PaletteState {
         self.cursor = Some(row.min(len - 1));
     }
 
+    /// Swap the row catalog while the card stays open, keeping the query and
+    /// caret. The Seeker's deep search rebuilds the conversation rows when
+    /// content hits land (#2721); the armed row and scroll re-clamp to the new
+    /// list so neither points past it. A refresh is not a typed edit, so it
+    /// keeps the user's place instead of disarming it.
+    pub fn refresh_items(&mut self, items: Vec<PaletteItem>) {
+        self.items = items;
+        let len = self.visible().len();
+        self.cursor = match self.cursor {
+            Some(ix) if len > 0 => Some(ix.min(len - 1)),
+            _ => None,
+        };
+        self.scroll = self.scroll.min(len.saturating_sub(1));
+    }
+
     /// Replace a character range and put the caret after the replacement.
     /// Every real edit funnels through here, so every edit also disarms the
     /// old result row and returns the list to its first page (#2534).
@@ -2070,6 +2085,105 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].item.kind, PaletteKind::Command);
         assert_eq!(rows[0].item.action, PaletteAction::RunSlash("/whisper"));
+    }
+
+    /// #2721: a session whose title never names the query still surfaces when
+    /// its messages do. The deep search hands the row the matching snippet as
+    /// its subtitle and the query as a keyword, so the engine ranks it in.
+    #[test]
+    fn seeker_content_only_session_surfaces_with_a_snippet() {
+        let snippet = "we shipped the kubernetes rollout today";
+        let mut state = PaletteState::new(vec![
+            PaletteItem::new(
+                "Deploy notes",
+                snippet,
+                PaletteKind::Session,
+                PaletteAction::OpenSession(42),
+            )
+            .with_keywords("kubernetes"),
+        ]);
+        state.insert_text("kubernetes");
+        let rows = state.visible();
+        let row = rows
+            .iter()
+            .find(|r| r.item.action == PaletteAction::OpenSession(42))
+            .expect("the content-only session surfaces");
+        assert_eq!(row.item.subtitle, snippet, "the snippet stands in");
+    }
+
+    /// #2721: a title match keeps its date subtitle and still ranks in. Deep
+    /// search adds content hits without changing how a named session is found.
+    #[test]
+    fn seeker_title_match_is_unchanged_by_deep_search() {
+        let mut state = PaletteState::new(vec![PaletteItem::new(
+            "kubernetes deploy",
+            "2026-11-05 12:00",
+            PaletteKind::Session,
+            PaletteAction::OpenSession(7),
+        )]);
+        state.insert_text("kubernetes");
+        let rows = state.visible();
+        let row = rows
+            .iter()
+            .find(|r| r.item.action == PaletteAction::OpenSession(7))
+            .expect("the title match surfaces");
+        assert_eq!(row.item.subtitle, "2026-11-05 12:00", "the date stays");
+    }
+
+    /// #2721: swapping the catalog keeps the query and caret, and re-clamps the
+    /// armed row so it never points past the shorter list.
+    #[test]
+    fn seeker_refresh_items_keeps_query_and_clamps_cursor() {
+        let mut state = PaletteState::new(vec![
+            item("alpha one", PaletteKind::Command),
+            item("alpha two", PaletteKind::Command),
+            item("alpha three", PaletteKind::Command),
+        ]);
+        state.insert_text("alpha");
+        state.arm(2);
+        assert_eq!(state.cursor, Some(2));
+        state.refresh_items(vec![item("alpha one", PaletteKind::Command)]);
+        assert_eq!(state.query(), "alpha", "the query survives");
+        assert_eq!(state.caret(), 5, "the caret survives");
+        assert_eq!(state.cursor, Some(0), "the cursor clamps to the list");
+    }
+
+    /// #2721: the card opens with title rows only, then the debounced content
+    /// read lands and refresh_items rebuilds the catalog. The late hit now
+    /// surfaces with its snippet while the typed query is left untouched.
+    #[test]
+    fn seeker_refresh_items_surfaces_a_late_content_hit() {
+        let mut state = PaletteState::new(vec![PaletteItem::new(
+            "Deploy notes",
+            "2026-11-05 12:00",
+            PaletteKind::Session,
+            PaletteAction::OpenSession(42),
+        )]);
+        state.insert_text("kubernetes");
+        assert!(
+            state
+                .visible()
+                .iter()
+                .all(|r| r.item.action != PaletteAction::OpenSession(42)),
+            "no title match before the content read"
+        );
+        let snippet = "we shipped the kubernetes rollout today";
+        state.refresh_items(vec![
+            PaletteItem::new(
+                "Deploy notes",
+                snippet,
+                PaletteKind::Session,
+                PaletteAction::OpenSession(42),
+            )
+            .with_keywords("kubernetes"),
+        ]);
+        let rows = state.visible();
+        let row = rows
+            .iter()
+            .find(|r| r.item.action == PaletteAction::OpenSession(42))
+            .expect("the late content hit surfaces");
+        assert_eq!(row.item.subtitle, snippet);
+        assert_eq!(state.query(), "kubernetes", "the query is untouched");
     }
 
     /// The favorite row answers to the words a user types (#2487).

@@ -653,6 +653,16 @@ struct Dashboard {
     /// a result only lands when its generation still matches, so a slow query
     /// for "nee" can never paint over the hits for "needle".
     rail_find_gen: u64,
+    /// Seeker deep search (#2721): content hits per trimmed query, cached so
+    /// re-opening the same query costs no second read. The card's rows are
+    /// rebuilt from this map when a debounced result lands.
+    seeker_find: HashMap<String, Vec<opencrabs::db::repository::ContentSearchRow>>,
+    /// Monotonic generation of the Seeker deep search, the rail's trick again:
+    /// a result only rebuilds the card when its generation still matches.
+    seeker_find_gen: u64,
+    /// The trimmed query the deep search was last scheduled for, so caret
+    /// moves and arrow navigation never rebuild the catalog (#2721).
+    seeker_scheduled_query: String,
     /// Parents whose topic chips are expanded past the first three. A chip
     /// strip shows three plus a "+N" pill by default; tapping it reveals the
     /// rest, and the collapse pill folds them back (Telegram topic style).
@@ -2020,17 +2030,45 @@ impl Dashboard {
                 .with_description(&skill.description),
             );
         }
+        // Deep search (#2721): when the query names message content, the
+        // conversation row carries the matching snippet in place of the date
+        // and the query as a keyword, so a session whose title never mentions
+        // the word still surfaces. With no content hit the row is unchanged.
+        let seeker_query = self
+            .finder
+            .as_ref()
+            .map(|state| state.query().trim().to_string())
+            .unwrap_or_default();
+        let snippets: HashMap<Uuid, String> = self
+            .seeker_find
+            .get(&seeker_query)
+            .map(|rows| {
+                rows.iter()
+                    .map(|row| (row.session_id, row.snippet.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
         for session in &self.sessions.items {
             let title = session
                 .title
                 .clone()
                 .unwrap_or_else(|| "Untitled conversation".to_string());
-            items.push(PaletteItem::new(
-                title,
-                session.updated_at.format("%Y-%m-%d %H:%M").to_string(),
-                PaletteKind::Session,
-                PaletteAction::OpenSession(session.id.as_u128()),
-            ));
+            let item = match snippets.get(&session.id) {
+                Some(snippet) if !seeker_query.is_empty() => PaletteItem::new(
+                    title,
+                    snippet.clone(),
+                    PaletteKind::Session,
+                    PaletteAction::OpenSession(session.id.as_u128()),
+                )
+                .with_keywords(&seeker_query),
+                _ => PaletteItem::new(
+                    title,
+                    session.updated_at.format("%Y-%m-%d %H:%M").to_string(),
+                    PaletteKind::Session,
+                    PaletteAction::OpenSession(session.id.as_u128()),
+                ),
+            };
+            items.push(item);
         }
         items
     }
@@ -2083,6 +2121,7 @@ impl Dashboard {
                 }
             }
         }
+        self.seeker_find_if_changed(cx);
         cx.notify();
     }
 
@@ -2145,6 +2184,7 @@ impl Dashboard {
                 }
             }
         }
+        self.seeker_find_if_changed(cx);
     }
 
     /// Translate a window point to the Seeker's character caret through the
@@ -7486,6 +7526,80 @@ impl Dashboard {
             .into_iter()
             .filter_map(|m| m.snippet.map(|snippet| (m.session_id, snippet)))
             .collect();
+    }
+
+    /// Schedule a deep read only when the trimmed query actually changed
+    /// (#2721). Both typing (finder_key) and the editing chords
+    /// (apply_finder_edit) funnel here, while caret moves and arrows leave the
+    /// query untouched and so never rebuild the catalog.
+    fn seeker_find_if_changed(&mut self, cx: &mut Context<Self>) {
+        let query = self
+            .finder
+            .as_ref()
+            .map(|state| state.query().trim().to_string())
+            .unwrap_or_default();
+        if query == self.seeker_scheduled_query {
+            return;
+        }
+        self.seeker_scheduled_query = query;
+        self.schedule_seeker_find(cx);
+    }
+
+    /// Seeker deep search (#2721): let the typing settle, then read which
+    /// sessions mention the query in their messages and rebuild the card's
+    /// rows with the snippets. Same generation guard as the rail's ctrl+f, so
+    /// the newest query wins even when an older read finishes last. A cached
+    /// query rebuilds at once; an empty query needs no read.
+    fn schedule_seeker_find(&mut self, cx: &mut Context<Self>) {
+        let query = self
+            .finder
+            .as_ref()
+            .map(|state| state.query().trim().to_string())
+            .unwrap_or_default();
+        if query.is_empty() {
+            return;
+        }
+        if self.seeker_find.contains_key(&query) {
+            self.refresh_seeker_items(cx);
+            return;
+        }
+        self.seeker_find_gen = self.seeker_find_gen.wrapping_add(1);
+        let generation = self.seeker_find_gen;
+        let db_path = self.db_path.clone();
+        cx.spawn(async move |this, cx| {
+            // A burst of keystrokes costs one query, not one per character.
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(250))
+                .await;
+            let stale = this
+                .update(cx, |this, _| this.seeker_find_gen != generation)
+                .unwrap_or(true);
+            if stale {
+                return;
+            }
+            match sessions::load_content_matches(db_path, query.clone()).await {
+                Ok(rows) => {
+                    let _ = this.update(cx, |this, cx| {
+                        if this.seeker_find_gen == generation {
+                            this.seeker_find.insert(query, rows);
+                            this.refresh_seeker_items(cx);
+                        }
+                    });
+                }
+                Err(e) => logging::error(&format!("seeker find: {e}")),
+            }
+        })
+        .detach();
+    }
+
+    /// Rebuild the open Seeker's rows from the current catalog (which now
+    /// folds in any cached content hits) without touching the query or caret.
+    fn refresh_seeker_items(&mut self, cx: &mut Context<Self>) {
+        let items = self.finder_items();
+        if let Some(state) = self.finder.as_mut() {
+            state.refresh_items(items);
+        }
+        cx.notify();
     }
 
     /// The bar that stands where the composer stands in select mode (#2613):
@@ -13054,6 +13168,9 @@ fn main() {
                         rail_clock: std::time::Instant::now(),
                         preview_refreshed_at: None,
                         rail_find_gen: 0,
+                        seeker_find: HashMap::new(),
+                        seeker_find_gen: 0,
+                        seeker_scheduled_query: String::new(),
                         rail_chips_expanded: std::collections::HashSet::new(),
                         rail_width: RAIL_DEFAULT_REM,
                         rail_open: true,
@@ -17093,6 +17210,51 @@ mod tests {
         let src = include_str!("main.rs");
         let chord = ["\"d\" if ev.keystroke.modifiers", ".control"].concat();
         assert!(src.contains(&chord), "ctrl+d must be bound on the rail");
+    }
+
+    /// #2721: the Seeker's deep search is wired end to end. The item builder
+    /// folds the cached content hits into snippet rows, a debounced generation
+    /// guarded read fills that cache, and both typing and the editing chords
+    /// schedule it only when the query changes. A source scan, because the
+    /// spawn needs a live event loop to exercise end to end.
+    #[test]
+    fn seeker_deep_search_wiring() {
+        let src = include_str!("main.rs");
+        let production = src
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .expect("the production half of the file");
+        assert!(
+            production.contains("fn schedule_seeker_find"),
+            "the debounced content read exists"
+        );
+        assert!(
+            production.contains("fn refresh_seeker_items"),
+            "the card rebuild hook exists"
+        );
+        assert!(
+            production.contains("state.refresh_items(items)"),
+            "the rebuild swaps the open card's catalog"
+        );
+        assert!(
+            production.contains("Some(snippet) if !seeker_query.is_empty()"),
+            "a content hit stands its snippet in for the date"
+        );
+        assert!(
+            production.contains(".with_keywords(&seeker_query)"),
+            "the query keyword surfaces a content-only session"
+        );
+        assert_eq!(
+            production
+                .matches("self.seeker_find_if_changed(cx);")
+                .count(),
+            2,
+            "typing and the editing chords both schedule on a query change"
+        );
+        assert!(
+            production.contains("this.seeker_find_gen == generation"),
+            "a stale read never rebuilds the card"
+        );
     }
 
     /// A conversation's turn belongs to that conversation, not to the window.
