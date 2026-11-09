@@ -5610,7 +5610,7 @@ mod tests {
             .map(|at| live_time(Some(at)))
             .unwrap_or_default();
         assert!(
-            newest_live_turn_matches(&turn_with("audit the repo config", drifted), &known),
+            newest_live_turn_matches(&turn_with("audit the repo config", drifted.clone()), &known),
             "a question already read back is this exchange however late it was stamped"
         );
         assert!(

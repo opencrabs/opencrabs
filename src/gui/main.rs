@@ -5023,6 +5023,7 @@ impl Dashboard {
             if let agent_bridge::TurnEvent::ProgressFor(
                 sid,
                 ProgressEvent::SuggestedOptions(items),
+                _,
             ) = &ev
             {
                 agent_bridge::set_options(*sid, items.clone());
