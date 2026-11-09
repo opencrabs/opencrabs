@@ -74,7 +74,7 @@ pub fn map_hits_to_sessions(
     // The repository returns hits newest-first, so first appearance already
     // orders sessions by recency; the stable sort makes that explicit and
     // keeps the mapping correct even for an unsorted input.
-    out.sort_by(|a, b| b.last_hit_at.cmp(&a.last_hit_at));
+    out.sort_by_key(|a| std::cmp::Reverse(a.last_hit_at));
     out.truncate(limit);
     out
 }
@@ -222,7 +222,10 @@ mod tests {
     #[test]
     fn content_search_map_snippet_centers_on_query() {
         let sid = Uuid::new_v4();
-        let body = format!("{} target word here {}", "x".repeat(120), "y".repeat(120));
+        // Both fillers outrun the snippet window on their own side, so the
+        // tail is genuinely cut and owes an ellipsis. With a short tail the
+        // window ran to the end of the body and the test proved nothing.
+        let body = format!("{} target word here {}", "x".repeat(200), "y".repeat(200));
         let hits = vec![hit(sid, &body, 1)];
         let rows = map_hits_to_sessions(&hits, &HashMap::new(), &["target"], 10);
         assert!(rows[0].snippet.contains("target"));
