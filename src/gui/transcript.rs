@@ -403,6 +403,19 @@ impl LiveTurn {
         self.sent_at = Some(chrono::Local::now());
     }
 
+    /// Start a turn the ledger already owns: a restart resumed it (#2740).
+    ///
+    /// The question's row was written before the previous process died, so this
+    /// card is drawing an exchange the rows can also produce. Saying so once, up
+    /// front, is the whole point: without it the card stamps the resume time,
+    /// the time window in [`newest_live_turn_matches`] misses a row that can be
+    /// minutes older, and the question is painted twice, once from the row and
+    /// once from the echo.
+    pub fn resume(&mut self, user: String) {
+        self.begin(user);
+        self.landed = true;
+    }
+
     /// The DB has the turn: drop the live copy.
     pub fn clear(&mut self) {
         self.user = None;
@@ -5628,6 +5641,65 @@ mod tests {
             !newest_live_turn_matches(&turn_with("something else", drifted), &known),
             "the text still decides, so a late stamp cannot hide another turn"
         );
+    }
+
+    /// A turn resumed after a restart is drawn from a row the previous process
+    /// already wrote, so the card has to claim that row from its first frame.
+    /// The row keeps the original send time while the card stamps the resume
+    /// time, which can be minutes later, and matching on seconds alone painted
+    /// the question twice: once from the row, once from the echo (#2740).
+    #[test]
+    fn a_resumed_turn_hides_the_question_it_already_owns() {
+        let mut live = LiveTurn::default();
+        live.resume("audit the repo config".into());
+        let resumed_at = live.sent_at.expect("a resumed turn is stamped");
+        let original = resumed_at
+            .checked_sub_signed(chrono::TimeDelta::minutes(2))
+            .map(|at| live_time(Some(at)))
+            .unwrap_or_default();
+        let turn = Turn {
+            header: None,
+            summary: TurnSummary::default(),
+            metrics: None,
+            preview: None,
+            anchor: format!("audit the repo config@{original}"),
+            blocks: vec![Block::Msg {
+                role: "user".into(),
+                content: "audit the repo config".into(),
+                time: original,
+                placeholder: false,
+                message_id: None,
+                forward: None,
+            }],
+            final_idx: None,
+        };
+        let newest_is_live = newest_live_turn_matches(&turn, &live);
+        assert!(
+            newest_is_live,
+            "the resumed card draws the row the crashed process already wrote"
+        );
+        assert!(
+            persisted_turn_is_hidden(0, 0, newest_is_live),
+            "the row stays out while the resumed card draws the same question"
+        );
+    }
+
+    /// Resuming is not a fresh send: the row exists, so the card says so once
+    /// and stops asking whether the newest persisted turn is its own.
+    #[test]
+    fn resume_marks_the_turn_landed_and_keeps_the_question() {
+        let mut live = LiveTurn::default();
+        assert!(!live.landed, "nothing is in flight yet");
+        live.resume("audit the repo config".into());
+        assert_eq!(live.user.as_deref(), Some("audit the repo config"));
+        assert!(live.landed, "the ledger already holds the resumed question");
+        assert!(
+            live.sent_at.is_some(),
+            "the card still shows when the turn resumed"
+        );
+        // A fresh send must keep asking: its row does not exist yet.
+        live.begin("audit the repo config".into());
+        assert!(!live.landed, "begin is a new send, not a resume");
     }
 
     /// A finished answer keeps its place in the conversation while the next

@@ -5649,7 +5649,12 @@ impl Dashboard {
                     // was idle would look exactly like the work being lost.
                     if self.transcript.session == Some(session) {
                         self.live = transcript::LiveTurn::default();
-                        self.live.begin(user_message);
+                        // The ledger already holds this question: the process
+                        // that asked it died after writing the row. Resuming is
+                        // not a fresh send, and starting it as one stamped the
+                        // resume time, missed the row in the identity window,
+                        // and painted the question twice (#2740).
+                        self.live.resume(user_message);
                         self.busy = true;
                         self.cancel = Some(cancel);
                         // No reload here on purpose: the turn's rows are
@@ -5660,7 +5665,10 @@ impl Dashboard {
                         // parks under its own session, which is where a switch
                         // brings it back whole (#2616).
                         let mut live = transcript::LiveTurn::default();
-                        live.begin(user_message);
+                        // Same rule as the on-screen branch: the parked copy
+                        // draws a row the ledger already has, so it starts as a
+                        // resumed turn, not a fresh one (#2740).
+                        live.resume(user_message);
                         self.stashed.insert(
                             session,
                             StashedTurn {
@@ -16610,8 +16618,17 @@ mod tests {
             .next()
             .expect("the end of the arm");
         assert!(
-            arm.contains("self.live.begin(user_message)"),
-            "the card names the message the killed process was answering"
+            arm.contains("self.live.resume(user_message)"),
+            "the card names the message the killed process was answering, and says its row is already written"
+        );
+        assert_eq!(
+            arm.matches("resume(user_message)").count(),
+            2,
+            "both the on-screen card and the parked copy are resumed: each draws a row the ledger already holds"
+        );
+        assert!(
+            !arm.contains("begin(user_message)"),
+            "a resumed turn that starts as a fresh one stamps the resume time and paints the question twice (#2740)"
         );
         assert!(arm.contains("self.busy = true"), "a recovered turn is busy");
         assert!(
