@@ -358,9 +358,13 @@ fn the_post_tool_drain_is_guarded_by_the_halt_predicate() {
         .find(marker)
         .expect("the post-tool queue drain site exists");
     // 900 is an arbitrary context window, so the floor can land mid-character
-    // and the slice would panic. Snap down to a boundary first.
+    // and the slice would panic. Snap down to a boundary first, then read it
+    // through `get`: indexing counts as a byte-slice ratchet site however safe
+    // the bound is, and `get` keeps this pin panic-free and out of the count.
     let context_start = src.floor_char_boundary(start.saturating_sub(900));
-    let before = &src[context_start..start];
+    let before = src
+        .get(context_start..start)
+        .expect("the drain-site window starts on a char boundary");
 
     assert!(
         before.contains(
