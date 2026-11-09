@@ -76,7 +76,7 @@ fn grouped_topics_are_compact_visible_pins_not_a_dropdown() {
         "no fold button joins the row chrome"
     );
     assert!(
-        GUI_MAIN.contains("sessions::row(s, flags, action, menu, chips)"),
+        GUI_MAIN.contains("sessions::row(s, flags, action, chips)"),
         "topic pins keep their click action, slide actions, and context menu"
     );
 }

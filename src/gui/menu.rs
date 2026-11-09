@@ -1,5 +1,6 @@
 //! The context-menu primitives every list in the gui draws with: a card, a
-//! row item, and the popover that pins a card inside a row.
+//! row item, and the popover that anchors a card beside the row that asked
+//! for it.
 //!
 //! They used to live in `sessions.rs` for historical reasons, which made the
 //! transcript depend on the session rail module to draw its own message menu
@@ -7,7 +8,10 @@
 
 use crate::palette;
 
-use gpui::{Div, InteractiveElement, SharedString, Stateful, Styled, div, prelude::*, rems, rgb};
+use gpui::{
+    AnyElement, Div, Edges, InteractiveElement, Pixels, Point, SharedString, Stateful, Styled,
+    anchored, div, point, prelude::*, px, rems, rgb,
+};
 
 /// Which row action a context-menu item performs.
 pub enum MenuKind {
@@ -75,12 +79,20 @@ pub fn menu_card(id: &'static str, items: Vec<Stateful<Div>>) -> Stateful<Div> {
     menu
 }
 
-/// A row's context menu: [`menu_card`] absolute inside the row, which is
-/// relative, so it tracks the row through rail scrolls without
-/// window-coordinate math.
-pub fn menu_popover(items: Vec<Stateful<Div>>) -> Stateful<Div> {
-    menu_card("rail-context-menu", items)
-        .absolute()
-        .right_1()
-        .top_1()
+/// A row's context menu: [`menu_card`] placed beside the row it was asked
+/// from, not on top of it (#2742).
+///
+/// The card used to be absolute inside the row at `right_1` / `top_1`, so a
+/// nine-rem card covered most of the row it belonged to, and on the last rows
+/// half of it hung below the window. Its anchor is the point the caller
+/// computed from the press, already clear of the rail, so the only offset here
+/// lifts the card level with the pointer rather than below it, and the card is
+/// snapped to the window margin whenever that would leave it off screen.
+pub fn menu_popover(items: Vec<Stateful<Div>>, at: Point<Pixels>) -> AnyElement {
+    anchored()
+        .position(at)
+        .offset(point(px(0.0), px(-10.0)))
+        .snap_to_window_with_margin(Edges::all(px(8.0)))
+        .child(menu_card("rail-context-menu", items))
+        .into_any_element()
 }

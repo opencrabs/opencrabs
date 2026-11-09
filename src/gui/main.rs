@@ -734,6 +734,10 @@ struct Dashboard {
     /// The row whose pin/delete strip is showing. One at a time: opening a
     /// row's actions closes the one before it.
     rail_actions: Option<Uuid>,
+    /// Where the right press that opened the rail's context menu landed, in
+    /// window coordinates. The card opens just past the rail at that
+    /// height instead of over the row it belongs to (#2742).
+    rail_menu_at: Option<gpui::Point<gpui::Pixels>>,
     /// A leftward slide in flight on a rail row: the session and the pointer
     /// x where the drag began. Past the threshold the row's strip opens.
     rail_swipe: Option<(Uuid, f32)>,
@@ -5946,7 +5950,12 @@ impl Dashboard {
     /// The context-menu popover for one rail row (or topic chip), built only
     /// when that id's menu is open. Shared by full rows and chips so a chip's
     /// right-click offers the same pin / rename / split / delete picks.
-    fn rail_menu_popover_for(&self, id: Uuid, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+    ///
+    /// The card opens just past the rail at the height of the press that asked
+    /// for it (#2742), so it never covers the row it belongs to. Chips and
+    /// rows both sit inside the rail, whose left edge is the window's, so the
+    /// rail width is the row's right edge.
+    fn rail_menu_popover_for(&self, id: Uuid, cx: &mut Context<Self>) -> Option<AnyElement> {
         if self.sessions.rail_menu != Some(id) {
             return None;
         }
@@ -5977,7 +5986,17 @@ impl Dashboard {
                 sessions::menu_item(entry.label).on_click(pick)
             })
             .collect::<Vec<_>>();
-        Some(sessions::menu_popover(items))
+        // The press names the row the card belongs to, and the card opens
+        // off that row's right edge instead of on top of it (#2742).
+        let origin = gpui::point(gpui::px(0.0), gpui::px(0.0));
+        let press = self.rail_menu_at.unwrap_or(origin);
+        let row = rail_menu_rect(
+            gpui::px(self.rail_width * self.rem),
+            press,
+            gpui::px(self.rem * 1.75),
+        );
+        let at = gpui::point(row.origin.x + row.size.width + gpui::px(8.0), row.origin.y);
+        Some(sessions::menu_popover(items, at))
     }
 
     /// The rail's badges for every row it is about to draw (#2636).
@@ -9444,16 +9463,14 @@ impl Render for Dashboard {
             // Right-click asks for the row's menu: pin and delete without
             // the slide gesture or a chord (#2354). It closes any open
             // strip first: one affordance at a time, the rail's own rule.
-            let ask_menu = cx.listener(move |this, _ev: &MouseDownEvent, _window, cx| {
+            let ask_menu = cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
                 this.sessions.rail_menu = Some(id);
+                // Where the card opens from: the row's own height, so it
+                // lands beside the row instead of over it (#2742).
+                this.rail_menu_at = Some(ev.position);
                 this.rail_actions = None;
                 cx.notify();
             });
-            // The menu overlays its row, so a pick must not fall through to
-            // the row's click (which opens the chat) or read as a dismissal.
-            // Shared with the topic chips: a chip's right-click builds the
-            // same popover through this helper.
-            let menu = self.rail_menu_popover_for(id, cx);
             let indented = self.sessions.is_indented(id);
             let closed = self.sessions.is_closed(id);
             // One glyph cell, from the window's shared clock, so a list of
@@ -9506,13 +9523,17 @@ impl Render for Dashboard {
                         this.close_rail_filter(cx);
                         this.open_session(kid_id, cx);
                     });
-                    let ask = cx.listener(move |this, _ev: &MouseDownEvent, _window, cx| {
+                    let ask = cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
                         cx.stop_propagation();
                         this.sessions.rail_menu = Some(kid_id);
+                        // A chip sits inside its parent's row, so the press
+                        // gives the card its height the same way a row's
+                        // does (#2742).
+                        this.rail_menu_at = Some(ev.position);
                         this.rail_actions = None;
                         cx.notify();
                     });
-                    let mut chip = sessions::topic_chip(
+                    let chip = sessions::topic_chip(
                         kid_id,
                         title,
                         live,
@@ -9522,9 +9543,6 @@ impl Render for Dashboard {
                     )
                     .on_click(open)
                     .on_mouse_down(MouseButton::Right, ask);
-                    if let Some(pop) = self.rail_menu_popover_for(kid_id, cx) {
-                        chip = chip.child(gpui::deferred(pop).with_priority(1));
-                    }
                     els.push(chip);
                 }
                 let hidden = kids.len().saturating_sub(limit);
@@ -9547,7 +9565,10 @@ impl Render for Dashboard {
                 }
                 sessions::topic_chips(id, els)
             });
-            let r = sessions::row(s, flags, action, menu, chips);
+            // No menu is passed in: the card is built once at the window
+            // root, because a child of the row would inherit the row's frame
+            // and the card is placed in window coordinates (#2742).
+            let r = sessions::row(s, flags, action, chips);
             // The press starts the slide and closes any other row's strip.
             let press = cx.listener(move |this, _ev: &MouseDownEvent, window, cx| {
                 this.rail_slide_opened = None;
@@ -12328,6 +12349,16 @@ impl Render for Dashboard {
                 find::channel_hint(state.query(), &self.finder_channels),
             ));
         }
+        // The rail's context menu lives here, at the window root, and not
+        // inside the row it was asked from (#2742). Its card is placed in
+        // window coordinates beside that row, and a row's own frame would
+        // translate those coordinates to the row's corner. Deferred, so it
+        // paints over the cards and the conversation it opens above.
+        if let Some(id) = self.sessions.rail_menu
+            && let Some(menu) = self.rail_menu_popover_for(id, cx)
+        {
+            root = root.child(gpui::deferred(menu).with_priority(2));
+        }
         // The theme modal is attached last, so it paints over every other
         // surface: while it is open it is what the user is looking at, and the
         // scrim is what the pointer meets (#2619).
@@ -12704,6 +12735,7 @@ fn main() {
                         drag_from: None,
                         drag_seen: None,
                         rail_actions: None,
+                        rail_menu_at: None,
                         rail_swipe: None,
                         rail_slide_opened: None,
                         confirm_delete: None,
@@ -14300,6 +14332,23 @@ fn command_popup_view(names: &[&'static str], selected: usize) -> Div {
                 names.len()
             ))),
     )
+}
+
+/// The strip of the row a right press landed on, in window coordinates
+/// (#2742).
+///
+/// The context menu used to be absolute inside the row, so a nine-rem card
+/// covered the row that asked for it. `rail_menu_rect` names that row instead:
+/// the rail's own width, one row tall, centered on the press. The card opens
+/// off its right edge and level with its top, which puts it beside the row and
+/// over the conversation, where a menu belongs.
+fn rail_menu_rect(
+    rail_width: gpui::Pixels,
+    press: gpui::Point<gpui::Pixels>,
+    row_height: gpui::Pixels,
+) -> gpui::Bounds<gpui::Pixels> {
+    let origin = gpui::point(gpui::px(0.0), press.y - row_height / 2.0);
+    gpui::Bounds::new(origin, gpui::size(rail_width, row_height))
 }
 
 /// Fold one progress event into a live card.
@@ -17177,6 +17226,78 @@ mod tests {
         rest.split(&close).next().unwrap_or(rest)
     }
 
+    #[test]
+    fn the_menu_opens_past_the_rail_at_the_press_height() {
+        // #2742: the card is placed from the row the press landed on instead
+        // of inside it. Its left edge clears the rail, so the card never
+        // covers the row text, and its top is level with that row.
+        let row = super::rail_menu_rect(
+            gpui::px(240.0),
+            gpui::point(gpui::px(120.0), gpui::px(400.0)),
+            gpui::px(28.0),
+        );
+        assert_eq!(row.origin.x, gpui::px(0.0));
+        assert_eq!(row.size.width, gpui::px(240.0));
+        assert_eq!(
+            row.origin.y,
+            gpui::px(386.0),
+            "one row tall and centered on the press, so the card faces the row"
+        );
+        let at = gpui::point(row.origin.x + row.size.width + gpui::px(8.0), row.origin.y);
+        assert_eq!(at.x, gpui::px(248.0), "the card opens past the rail");
+        assert_eq!(at.y, gpui::px(386.0), "and level with the row it names");
+    }
+
+    #[test]
+    fn the_rail_menu_opens_beside_the_row_it_was_asked_from() {
+        // #2742: the card was absolute inside the row at `right_1` / `top_1`,
+        // so it covered most of the row it belonged to and hung off the
+        // window on the last rows.
+        let menu = include_str!("menu.rs");
+        let popover = fn_body(menu, "menu_popover");
+        assert!(
+            popover.contains("anchored()"),
+            "the card is anchored in window coordinates, not absolute in the row"
+        );
+        assert!(
+            popover.contains(".position(at)"),
+            "the press point is the anchor it opens from"
+        );
+        assert!(
+            popover.contains(".snap_to_window_with_margin("),
+            "a card near the window edge is pulled back inside it"
+        );
+        let src = include_str!("main.rs");
+        // The window render builds it at the root: a row's own frame would
+        // translate the window coordinates to that row's corner.
+        let render = dashboard_render(src);
+        assert!(
+            render.contains("gpui::deferred(menu).with_priority(2)"),
+            "the menu is attached at the window root, above the content"
+        );
+        assert!(
+            render.contains("self.rail_menu_popover_for(id, cx)"),
+            "the root render is what builds the open row's card"
+        );
+        // Both entry points record where the press landed: a row and a chip.
+        // Counted inside the render, because this scan's own string holds the
+        // same text and a whole-file count would read three.
+        let asks = dashboard_render(src)
+            .matches("this.rail_menu_at = Some(ev.position);")
+            .count();
+        assert_eq!(
+            asks, 2,
+            "a rail row and a topic chip each record their press"
+        );
+        let builder = fn_body(src, "rail_menu_popover_for");
+        assert!(
+            builder.contains("self.rail_menu_at"),
+            "the card opens at the height of the press that asked for it"
+        );
+        assert!(
+            builder.contains("self.rail_width * self.rem"),
+            "and just past the rail, so it never covers the row"
+        );
     }
 
     #[test]

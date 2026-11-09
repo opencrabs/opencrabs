@@ -16,8 +16,8 @@ use std::collections::{HashMap, HashSet};
 
 use gpui::{
     AnyElement, AnyView, App, ClickEvent, Context, Div, InteractiveElement, Render, ScrollHandle,
-    SharedString, Stateful, Styled, Window, deferred, div, linear_color_stop, linear_gradient,
-    prelude::*, rems, rgb,
+    SharedString, Stateful, Styled, Window, div, linear_color_stop, linear_gradient, prelude::*,
+    rems, rgb,
 };
 
 use opencrabs::config::gui_theme;
@@ -1144,9 +1144,8 @@ pub struct RowFlags {
 /// spinner glyph while the child streams; `ring` paints a dot while it awaits
 /// the user. `plan` is the child's approved checklist as `(done, total)`: while
 /// it runs the chip itself fills left-to-right like a progress bar, the done
-/// share tinted teal over the chip's base. The caller attaches the open /
-/// context-menu handlers and the deferred popover, so this stays pure data
-/// plus paint.
+/// share tinted teal over the chip's base. The caller attaches the open and
+/// context-menu handlers, so this stays pure data plus paint.
 pub fn topic_chip(
     id: uuid::Uuid,
     title: &str,
@@ -1256,7 +1255,6 @@ pub fn row(
     s: &Session,
     flags: RowFlags,
     action: Option<Stateful<Div>>,
-    menu: Option<Stateful<Div>>,
     chips: Option<Stateful<Div>>,
 ) -> Stateful<Div> {
     let RowFlags {
@@ -1426,11 +1424,6 @@ pub fn row(
         .child(body);
     if let Some(action) = action {
         row = row.child(action);
-    }
-    // Deferred, so the menu paints above the rows below it: a plain child is
-    // covered by the later rows' text (#2386).
-    if let Some(menu) = menu {
-        row = row.child(deferred(menu).with_priority(1));
     }
     row
 }
