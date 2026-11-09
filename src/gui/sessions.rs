@@ -1123,6 +1123,11 @@ pub struct RowFlags {
     /// when there are. Timestamp and cost always ride the title line, so a
     /// card without a plan or a running task is at most three lines.
     pub preview: Option<SharedString>,
+    /// What the turn running in this session is doing right now (#2718): the
+    /// tool call in flight, else the thinking line. It takes the preview's
+    /// place while it lasts, so a card never grows a line for it, and the
+    /// persisted preview comes back untouched once the turn settles.
+    pub activity: Option<SharedString>,
     /// The session's approved plan progress as `(done, total)`, or `None`
     /// when there is no checklist to draw. Paints as a slim bar line under
     /// the preview, reusing the composer strip's own bar so the same plan
@@ -1266,6 +1271,7 @@ pub fn row(
         closed,
         badge,
         preview,
+        activity,
         plan,
         flash,
         running,
@@ -1358,6 +1364,15 @@ pub fn row(
         // (Telegram topic style). They never push a child out to its own row.
         .when_some(chips, |d, c| d.child(c))
         .when(!indented, |d| {
+            // A turn in flight says what it is doing, in the preview's own
+            // slot (#2718): the card would otherwise sit on the last
+            // persisted message while a new conversation runs its first tool
+            // calls, which reads as nothing happening at all. The line takes
+            // the accent colour while it is live, so the card never claims
+            // the preview is streaming, and it hands the slot back the
+            // moment the turn settles.
+            let live_line = activity.is_some();
+            let preview = activity.or(preview);
             // The message line is pure conversation context: it paints only
             // when a readable user/assistant message exists. The ledger
             // stamp lives on the title line, so a quiet card simply stops
@@ -1366,7 +1381,11 @@ pub fn row(
                 d.child(
                     div()
                         .text_xs()
-                        .text_color(rgb(palette::current().text_muted))
+                        .text_color(rgb(if live_line {
+                            palette::current().accent
+                        } else {
+                            palette::current().text_muted
+                        }))
                         .truncate()
                         .child(line),
                 )

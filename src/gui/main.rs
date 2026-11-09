@@ -738,6 +738,12 @@ struct Dashboard {
     /// window coordinates. The card opens just past the rail at that
     /// height instead of over the row it belongs to (#2742).
     rail_menu_at: Option<gpui::Point<gpui::Pixels>>,
+    /// The turn running in a session that has no leaf of its own (#2718), so
+    /// its rail card can say what it is doing instead of showing the last
+    /// message the ledger holds. Kept apart from the panes and the stash on
+    /// purpose: this is the only record of a turn nobody is looking at, and
+    /// the entry is dropped the moment that turn settles.
+    rail_live: HashMap<Uuid, transcript::LiveTurn>,
     /// A leftward slide in flight on a rail row: the session and the pointer
     /// x where the drag began. Past the threshold the row's strip opens.
     rail_swipe: Option<(Uuid, f32)>,
@@ -4854,6 +4860,34 @@ impl Dashboard {
         cx.notify();
     }
 
+    /// What this session's card should say it is doing right now (#2718), from
+    /// whichever owner holds its turn: a split leaf, a turn parked under a
+    /// conversation the user switched away from, the open turn, or a turn
+    /// running with no leaf at all. `None` when nothing is in flight, so the
+    /// card keeps the message the ledger holds.
+    ///
+    /// The four sources are checked in that order because a session can only
+    /// be in one of them, and the ones that own a card of their own are more
+    /// specific than the rail's own map.
+    fn rail_activity_for(&self, id: Uuid) -> Option<SharedString> {
+        let line = |live: &transcript::LiveTurn| {
+            let text = rail_activity_line(live);
+            (!text.is_empty()).then(|| SharedString::from(text))
+        };
+        if let Some(pane) = self.pane_states.get(&id)
+            && pane.busy
+        {
+            return line(&pane.live);
+        }
+        if let Some(turn) = self.stashed.get(&id) {
+            return line(&turn.live);
+        }
+        if self.busy && self.transcript.session == Some(id) {
+            return line(&self.live);
+        }
+        self.rail_live.get(&id).and_then(line)
+    }
+
     /// The progress of a pane's own turn, folded into that leaf's card
     /// (#2614). The window's live state is untouched: a split shows two turns
     /// streaming at once without either one bleeding into the other.
@@ -4884,9 +4918,37 @@ impl Dashboard {
         // A session with no leaf is what a sub-agent looks like: its
         // progress arrives with its own id and there is no pane to fold it
         // into. The event is the only trace of that turn the window holds,
-        // so the rail records it here instead of dropping it (#2636). A
-        // repeat does not repaint: only the first sighting changes a row.
-        if self.rail.observe_stream(session) {
+        // so the rail records it here instead of dropping it (#2636).
+        //
+        // The card also keeps the event, not just a flag (#2718): with no
+        // message persisted yet, a card that only knows "streaming" shows the
+        // last thing said in a previous turn, or nothing at all, while the
+        // turn is running tool calls. The same fold the panes use gives the
+        // card a line that is true right now.
+        let first = self.rail.observe_stream(session);
+        // Read the line before folding and after it, so the repaint happens
+        // when the sentence the card shows actually changes. The first
+        // sighting always repaints; a repeat that leaves the line alone does
+        // not (#2636), and one that moves the turn from a finished call to the
+        // next one does, or the card would freeze on the first tool it saw.
+        let before = self
+            .rail_live
+            .get(&session)
+            .map(rail_activity_line)
+            .unwrap_or_default();
+        match self.rail_live.get_mut(&session) {
+            Some(live) => fold_live(live, progress, at),
+            None => {
+                let mut live = transcript::LiveTurn::default();
+                fold_live(&mut live, progress, at);
+                self.rail_live.insert(session, live);
+            }
+        }
+        let moved = self
+            .rail_live
+            .get(&session)
+            .is_some_and(|live| rail_activity_line(live) != before);
+        if first || moved {
             cx.notify();
         }
     }
@@ -5654,6 +5716,10 @@ impl Dashboard {
                     context_tokens,
                     tokens_per_second,
                 } => {
+                    // The card's live line belongs to this turn (#2718), so
+                    // it retires with it: the preview under it is the ledger's
+                    // and stops representing the turn the moment it settles.
+                    self.rail_live.remove(&session);
                     // A settled turn is what moves a row up the rail (#2666).
                     // The ledger bumps `updated_at` beside the message insert
                     // and the rail paints that order, so without a refetch
@@ -5734,6 +5800,9 @@ impl Dashboard {
                     reload = self.transcript.session;
                 }
                 agent_bridge::TurnEvent::Failed { session, text } => {
+                    // Same as Done: the live line was this turn's, so it goes
+                    // with it (#2718).
+                    self.rail_live.remove(&session);
                     // A failure is still activity, so the row moves like a
                     // settled turn does (#2666).
                     self.refresh_rail(cx);
@@ -5783,6 +5852,9 @@ impl Dashboard {
                     reload = self.transcript.session;
                 }
                 agent_bridge::TurnEvent::Cancelled { session } => {
+                    // A stop ends the turn, so the card's live line does too
+                    // (#2718).
+                    self.rail_live.remove(&session);
                     // A stop dropped the turn where it stood (#2657), so no
                     // Done and no Failed follows. This is the settle, and it
                     // carries no text: whoever asked for the stop already said
@@ -9490,6 +9562,11 @@ impl Render for Dashboard {
                 // Already formatted in the loader: the paint only clones a
                 // shared string, so the shared clock costs no allocation.
                 preview: self.sessions.previews.get(&id).cloned(),
+                // A turn nobody has a pane for still gets a line on its card
+                // (#2718). The wording is the pane's own (#2326), so a split
+                // leaf and its rail row never describe the same turn two
+                // different ways.
+                activity: self.rail_activity_for(id),
                 plan: plan_progress.get(&id).copied(),
                 // The bar blinks orange for a few seconds after a task in
                 // this session's plan settles, on the same event that rings
@@ -12736,6 +12813,7 @@ fn main() {
                         drag_seen: None,
                         rail_actions: None,
                         rail_menu_at: None,
+                        rail_live: HashMap::new(),
                         rail_swipe: None,
                         rail_slide_opened: None,
                         confirm_delete: None,
@@ -14332,6 +14410,33 @@ fn command_popup_view(names: &[&'static str], selected: usize) -> Div {
                 names.len()
             ))),
     )
+}
+
+/// The card's single line for a turn running with no pane of its own (#2718).
+///
+/// The pane paints the lead in the accent colour and the tail muted, and a
+/// card line has one colour to spend, so the halves are joined with the same
+/// separator the terminal uses. Empty means the turn has said nothing yet: the
+/// card then keeps its preview instead of blanking a line to show a blank.
+fn rail_activity_line(live: &transcript::LiveTurn) -> String {
+    // `live_status_line` invents "OpenCrabs is thinking..." for a turn that has
+    // produced nothing at all, which on a card would out-shout the preview it
+    // is replacing. The rail waits for the first real event (#2718).
+    let idle = !live.thinking
+        && live.tools.is_empty()
+        && live.chunks == 0
+        && live.stream.is_empty()
+        && live.reasoning.is_empty();
+    if idle {
+        return String::new();
+    }
+    let (lead, tail) = transcript::live_status_line(live);
+    match (lead.is_empty(), tail.is_empty()) {
+        (true, true) => String::new(),
+        (true, false) => tail,
+        (false, true) => lead,
+        (false, false) => format!("{lead} \u{b7} {tail}"),
+    }
 }
 
 /// The strip of the row a right press landed on, in window coordinates
@@ -17224,6 +17329,82 @@ mod tests {
         let close = format!("\n{}}}", " ".repeat(indent));
         let rest = &src[at..];
         rest.split(&close).next().unwrap_or(rest)
+    }
+
+    #[test]
+    fn a_running_turn_says_what_it_is_doing_on_its_card() {
+        // #2718: the card drew only the last persisted message, so a
+        // conversation running its first tool calls claimed to be idle, and a
+        // sub-agent working with no pane at all said nothing anywhere.
+        let mut live = transcript::LiveTurn::default();
+        assert_eq!(
+            rail_activity_line(&live),
+            "",
+            "a turn with nothing to report leaves the preview in its slot"
+        );
+        live.thinking = true;
+        assert_eq!(
+            rail_activity_line(&live),
+            "OpenCrabs is thinking...",
+            "the pane's own wording, not a second one for the rail"
+        );
+        live.thinking = false;
+        live.tools.push(transcript::ToolCall::running(
+            "bash".to_string(),
+            "cargo test".to_string(),
+        ));
+        let line = rail_activity_line(&live);
+        assert!(
+            line.contains("cargo test"),
+            "the call in flight is what the card names: {line}"
+        );
+
+        let src = include_str!("main.rs");
+        // A session with no leaf keeps its turn here, folded by the same
+        // function the panes use, so the two cannot describe it differently.
+        let fold = fn_body(src, "fold_pane_progress");
+        assert!(
+            fold.contains("self.rail_live.get_mut(&session)"),
+            "the event is kept, not just a streaming flag"
+        );
+        assert!(
+            fold.contains("fold_live(live, progress, at)"),
+            "the pane's own fold gives the card its line"
+        );
+        // The card takes the activity over the preview while it lasts, and
+        // the render supplies it from the row map.
+        let sessions = include_str!("sessions.rs");
+        let row = fn_body(sessions, "row");
+        assert!(
+            row.contains("let preview = activity.or(preview);"),
+            "the live line takes the preview's own slot"
+        );
+        assert!(
+            row.contains("live_line"),
+            "and reads in the accent colour while it is live"
+        );
+        let render = dashboard_render(src);
+        assert!(
+            render.contains("activity: self.rail_activity_for(id)"),
+            "the render feeds the card from whichever owner holds the turn"
+        );
+        let lookup = fn_body(src, "rail_activity_for");
+        for source in [
+            "self.pane_states.get(&id)",
+            "self.stashed.get(&id)",
+            "self.busy && self.transcript.session == Some(id)",
+            "self.rail_live.get(&id)",
+        ] {
+            assert!(
+                lookup.contains(source),
+                "a turn can be held by any of the four owners: {source}"
+            );
+        }
+        // Every way a turn ends retires the line, or a card would keep
+        // claiming work after it stopped.
+        let poll = fn_body(src, "poll");
+        let retires = poll.matches("self.rail_live.remove(&session);").count();
+        assert_eq!(retires, 3, "Done, Failed and Cancelled each clear it");
     }
 
     #[test]

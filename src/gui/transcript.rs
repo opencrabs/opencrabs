@@ -2414,7 +2414,7 @@ fn activity_glyph(call: &ToolCall) -> &'static str {
 /// The turn's latest activity, worded like the card's leading segment
 /// (#2326): the call running now, else the last one that ran. `None` until a
 /// tool has started.
-fn live_activity(live: &LiveTurn) -> Option<String> {
+pub(crate) fn live_activity(live: &LiveTurn) -> Option<String> {
     let call = live
         .tools
         .iter()
@@ -2441,7 +2441,7 @@ fn tool_count_label(count: usize) -> String {
 /// that ran, else "OpenCrabs is thinking..." while nothing has arrived at all.
 /// The tail is how much it did (the call count) and the clock the terminal
 /// builds with `format_turn_spinner_meta`.
-fn live_status_line(live: &LiveTurn) -> (String, String) {
+pub(crate) fn live_status_line(live: &LiveTurn) -> (String, String) {
     let mut lead = live_activity(live);
     if lead.is_none()
         && live.tools.is_empty()
