@@ -1,4 +1,4 @@
-//! What a session's plan says that a session row draws (#2636, #2701).
+//! What a session's plan says that a session row draws (#2636, #2737).
 //!
 //! The GUI rail and the TUI session list answer the same two questions per
 //! session: does a plan wait for the owner, and how far along is it. The plan
@@ -9,7 +9,7 @@
 //! Nothing here draws. The index is file I/O plus the loader's own state rules,
 //! which is why it can live in `ui_core` and be linked by a terminal frontend.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 use uuid::Uuid;
 
@@ -141,6 +141,7 @@ pub fn progress_bar(done: usize, total: usize) -> (usize, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     fn sid(n: u128) -> Uuid {
         Uuid::from_u128(n)

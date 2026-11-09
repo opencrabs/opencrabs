@@ -207,7 +207,7 @@ impl SeenPlans {
 
 // The plan index itself lives in `ui_core::plan_index`: the rail and the TUI
 // session list ask the same questions of the same files, so the reading lives
-// once and neither surface can word the answer differently (#2636, #2701).
+// once and neither surface can word the answer differently (#2636, #2737).
 pub use opencrabs::ui_core::plan_index::{PlanEvidence, PlanIndex};
 
 /// One row's whole answer.
