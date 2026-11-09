@@ -99,7 +99,9 @@ pub fn new_shared_history(entries: Vec<String>) -> SharedHistory {
 /// the list itself is still intact, so recovering the guard is the right
 /// answer, not propagating the panic.
 pub fn lock_history(history: &SharedHistory) -> MutexGuard<'_, Vec<String>> {
-    history.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    history
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// `~/.opencrabs/history.txt`, the one file both surfaces read and write.

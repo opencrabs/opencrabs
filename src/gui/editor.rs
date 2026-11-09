@@ -330,18 +330,9 @@ pub fn notice_expired(shown_at: Instant, now: Instant, ttl: Duration) -> bool {
 }
 
 impl Editor {
-    /// A composer owning a private history loaded from disk. The window
-    /// builds its composers through [`Editor::new_with_history`] instead, so
-    /// they all walk one list; this stays correct on its own for anything
-    /// that builds a lone field.
-    pub fn new(cx: &mut Context<Self>) -> Self {
-        let path = composer::default_history_path();
-        let entries = composer::load_history(&path);
-        Self::new_with_history(composer::new_shared_history(entries), path, cx)
-    }
-
     /// A composer walking `history`, persisting every new entry to
-    /// `history_path`.
+    /// `history_path`. Every composer takes this path: the window hands its
+    /// own handle to each pane, so there is exactly one list on screen.
     pub fn new_with_history(
         history: SharedHistory,
         history_path: PathBuf,
@@ -789,13 +780,18 @@ impl Editor {
             self.move_to(target, cx);
             return;
         }
-        let entries = lock_history(&self.history);
-        if input_history_up(
-            entries.as_slice(),
-            &mut self.content,
-            &mut self.input_history_index,
-            &mut self.input_history_stash,
-        ) {
+        // The guard is released before anything else touches `self`: holding it
+        // across `move_to` would keep an immutable borrow of the editor alive.
+        let recalled = {
+            let entries = lock_history(&self.history);
+            input_history_up(
+                entries.as_slice(),
+                &mut self.content,
+                &mut self.input_history_index,
+                &mut self.input_history_stash,
+            )
+        };
+        if recalled {
             let end = self.content.len();
             self.selected_range = end..end;
             self.selection_reversed = false;
@@ -836,13 +832,16 @@ impl Editor {
             cx.notify();
             return;
         }
-        let entries = lock_history(&self.history);
-        if input_history_down(
-            entries.as_slice(),
-            &mut self.content,
-            &mut self.input_history_index,
-            &mut self.input_history_stash,
-        ) {
+        let recalled = {
+            let entries = lock_history(&self.history);
+            input_history_down(
+                entries.as_slice(),
+                &mut self.content,
+                &mut self.input_history_index,
+                &mut self.input_history_stash,
+            )
+        };
+        if recalled {
             let end = self.content.len();
             self.selected_range = end..end;
             self.selection_reversed = false;
@@ -2293,7 +2292,10 @@ mod tests {
         let write = ["composer::append_history(&self.", "history_path"].concat();
         assert!(src.contains(&write), "a sent entry reaches the shared file");
         let ctor = ["pub fn new_with_", "history("].concat();
-        assert!(src.contains(&ctor), "the handle is injected at construction");
+        assert!(
+            src.contains(&ctor),
+            "the handle is injected at construction"
+        );
     }
 
     /// The composer must not re-shape the draft on every frame: the shaping
