@@ -8668,6 +8668,14 @@ impl Dashboard {
     fn chime_settled_plan_tasks(&mut self) {
         let now = std::time::Instant::now();
 
+        // A pane strip only re-reads its file when it is drawn, and this pass
+        // runs before the split body is built. Refresh here so a background
+        // pane that settled rings on this frame instead of the next redraw it
+        // happens to get (#2733). Each read is mtime-gated.
+        for pane in self.pane_states.values_mut() {
+            pane.plan.refresh();
+        }
+
         // Every plan in this frame, each paired with the row that draws it, in
         // one order so a settled task reaches the chime, the banner, and the
         // flash from a single pass. A pre-init plan writes the nil session

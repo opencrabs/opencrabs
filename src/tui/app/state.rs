@@ -1396,7 +1396,23 @@ impl App {
     /// necessarily the one holding the keyboard. The config flag is read at the
     /// moment of the chime, so flipping
     /// `[agent] completion_notification_enabled` takes effect without a restart.
-    fn chime_settled_plan_tasks(&mut self) {
+    async fn chime_settled_plan_tasks(&mut self) {
+        if self.settle_plan_tasks().await == 0 {
+            return;
+        }
+        Self::play_task_chime();
+    }
+
+    /// Record the plan tasks that settled since the last tick and pulse the
+    /// pane that owns each one. Returns the count the chime responds to.
+    ///
+    /// Every pane is refreshed from its own file first. Reloading only the
+    /// focused pane left a background session's checklist frozen at the
+    /// moment it was opened, so its settle chimed minutes later, on the click
+    /// that finally reloaded it (#2733).
+    pub(crate) async fn settle_plan_tasks(&mut self) -> usize {
+        self.pane_manager.bind_missing_plan_paths().await;
+        self.pane_manager.refresh_plans_changed_on_disk();
         // Each pane's document is checked against ITS OWN session, so the
         // chime also knows which panel to blink (#2593). The window-level plan
         // is folded in afterwards for the case where no pane owns it; it has
@@ -1431,14 +1447,11 @@ impl App {
             &mut self.announced_task_completions,
             &[window_plan.as_ref()],
         );
-        if settled == 0 {
-            return;
-        }
         let now = std::time::Instant::now();
         for session_id in flashes {
             self.plan_completion_flash.insert(session_id, now);
         }
-        Self::play_task_chime();
+        settled
     }
 
     /// The chime itself, honouring the operator's opt-in and the build feature.
@@ -2453,7 +2466,7 @@ impl App {
                 // The tick is the right place: the plan file is written by
                 // the tool and re-read here, so no tool path has to know
                 // whether a sound is wanted.
-                self.chime_settled_plan_tasks();
+                self.chime_settled_plan_tasks().await;
             }
             TuiEvent::ToolApprovalRequested(request) => {
                 self.handle_approval_requested(request);

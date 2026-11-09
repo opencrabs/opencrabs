@@ -37,6 +37,10 @@ pub struct Pane {
     pub plan_document: Option<crate::tui::plan::PlanDocument>,
     /// Resolved plan JSON path for this pane's session, cached with the doc.
     pub plan_file_path: Option<std::path::PathBuf>,
+    /// mtime of `plan_file_path` when `plan_document` was read. The tick
+    /// compares it against the file so a pane the user is NOT looking at
+    /// still notices a task that settled there (#2733).
+    pub plan_mtime: Option<std::time::SystemTime>,
 }
 
 impl Pane {
@@ -51,6 +55,7 @@ impl Pane {
             input_history_index: None,
             plan_document: None,
             plan_file_path: None,
+            plan_mtime: None,
         }
     }
 
@@ -60,6 +65,15 @@ impl Pane {
         self.cursor_position = 0;
         self.input_history_index = None;
     }
+}
+
+/// The mtime of a plan file, or `None` when it cannot be read.
+///
+/// This is the reload gate for a pane's cached plan: compare it with the
+/// stored stamp and reload only on a real change.
+fn plan_stamp(path: Option<&std::path::Path>) -> Option<std::time::SystemTime> {
+    let path = path?;
+    std::fs::metadata(path).ok()?.modified().ok()
 }
 
 /// Serializable snapshot of the pane layout (for persistence across restarts).
@@ -177,10 +191,85 @@ impl PaneManager {
         path: Option<std::path::PathBuf>,
         doc: Option<crate::tui::plan::PlanDocument>,
     ) {
-        if let Some(pane) = self.focused_pane_mut() {
+        let focused = self.focused;
+        self.set_pane_plan(focused, path, doc);
+    }
+
+    /// Replace one pane's cached plan with a freshly loaded pair.
+    ///
+    /// The mtime is stamped here, at the read, because it is the only moment
+    /// that knows which version of the file the document came from.
+    pub fn set_pane_plan(
+        &mut self,
+        id: PaneId,
+        path: Option<std::path::PathBuf>,
+        doc: Option<crate::tui::plan::PlanDocument>,
+    ) {
+        if let Some(pane) = self.get_mut(id) {
+            pane.plan_mtime = plan_stamp(path.as_deref());
             pane.plan_file_path = path;
             pane.plan_document = doc;
         }
+    }
+
+    /// Reload every pane's plan document whose file changed since it was read.
+    ///
+    /// Returns how many documents were replaced. The mtime is the gate and it
+    /// matters: `load_plan_from_path` retires legacy terminal plans from disk
+    /// (archives Completed, deletes Cancelled), so reloading on every tick
+    /// would mutate plan files for no reason. An untouched file costs one
+    /// `stat` per pane.
+    pub fn refresh_plans_changed_on_disk(&mut self) -> usize {
+        let mut reloaded = 0;
+        for pane in &mut self.panes {
+            let Some(path) = pane.plan_file_path.clone() else {
+                continue;
+            };
+            let stamp = plan_stamp(Some(path.as_path()));
+            // A vanished file keeps the last document: there is nothing newer
+            // to draw, and clearing it would erase a finished checklist the
+            // user may still be reading.
+            let Some(stamp) = stamp else { continue };
+            if pane.plan_mtime == Some(stamp) {
+                continue;
+            }
+            pane.plan_document = crate::utils::plan_files::load_plan_from_path(&path);
+            pane.plan_mtime = Some(stamp);
+            reloaded += 1;
+        }
+        reloaded
+    }
+
+    /// Resolve a plan file for every pane that shows a session but has no
+    /// path yet.
+    ///
+    /// A split restored from `layout.json` comes back with session ids and an
+    /// empty plan cache, and only the focused pane resolves a path when its
+    /// session loads. Without this a background pane can never watch its own
+    /// plan, so its settle waits for the click that finally loads it (#2733).
+    pub async fn bind_missing_plan_paths(&mut self) -> usize {
+        let missing: Vec<(PaneId, Uuid)> = self
+            .panes
+            .iter()
+            .filter(|pane| pane.plan_file_path.is_none())
+            .filter_map(|pane| pane.session_id.map(|session| (pane.id, session)))
+            .collect();
+        let mut bound = 0;
+        for (id, session_id) in missing {
+            let path = crate::utils::plan_files::plan_json_read_path(session_id).await;
+            // Stamp before the read: a write that lands mid-read leaves the
+            // doc newer than the stamp, so the next tick reloads instead of
+            // trusting a document it cannot date.
+            let stamp = plan_stamp(Some(path.as_path()));
+            let doc = crate::utils::plan_files::load_plan_from_path(&path);
+            if let Some(pane) = self.get_mut(id) {
+                pane.plan_file_path = Some(path);
+                pane.plan_document = doc;
+                pane.plan_mtime = stamp;
+                bound += 1;
+            }
+        }
+        bound
     }
 
     /// Null the focused pane's cached plan document, keeping the resolved
