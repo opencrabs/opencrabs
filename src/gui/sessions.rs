@@ -2780,7 +2780,7 @@ mod tests {
         let human = Session::new(Some("Fix login".into()), None, None);
         let cron = Session::new(Some("recap [cron-job:1]".into()), None, None);
         let planned = Session::new(Some("Big refactor".into()), None, None);
-        let (hid, cid, pid) = (human.id, cron.id, planned.id);
+        let (hid, pid) = (human.id, planned.id);
         let mut state = SessionsState {
             items: vec![human, cron, planned],
             ..Default::default()
