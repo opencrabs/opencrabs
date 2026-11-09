@@ -87,6 +87,39 @@ async fn a_topic_is_created_under_a_session_and_listed_with_its_parent() {
 }
 
 #[tokio::test]
+async fn creating_a_topic_switches_topics_on_for_the_parent() {
+    let db = Database::connect_in_memory()
+        .await
+        .expect("in-memory DB should connect");
+    db.run_migrations().await.expect("migrations should apply");
+    let repo = SessionRepository::new(db.pool().clone());
+
+    let parent = Session::new(Some("p".to_string()), None, None);
+    repo.create(&parent).await.expect("create parent");
+    assert!(
+        !repo
+            .topic_enabled_ids()
+            .await
+            .expect("list")
+            .contains(&parent.id),
+        "topics start off"
+    );
+
+    repo.create_topic(parent.id, "Design")
+        .await
+        .expect("create topic");
+
+    assert!(
+        repo.topic_enabled_ids()
+            .await
+            .expect("list")
+            .contains(&parent.id),
+        "the parent reads back with topics on, so the chat topic bar and the \
+         rail menu agree with the tree"
+    );
+}
+
+#[tokio::test]
 async fn a_topic_can_be_renamed_and_its_info_is_read() {
     let db = Database::connect_in_memory()
         .await
