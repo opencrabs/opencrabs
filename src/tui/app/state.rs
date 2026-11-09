@@ -599,6 +599,16 @@ pub struct App {
     /// query change bumps it; a spawned read checks it before touching the
     /// database, and its result only lands while it still matches.
     pub(crate) session_search_gen: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Seeker deep-search cache (#2725): trimmed query to deduped content
+    /// hits, so a repeated query rebuilds the card at once without a read.
+    pub(crate) seeker_find:
+        std::collections::HashMap<String, Vec<crate::db::repository::ContentSearchRow>>,
+    /// Generation guard behind the Seeker's debounced read (#2725). Same
+    /// newest-query-wins rule as the session-list search.
+    pub(crate) seeker_find_gen: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// The query the Seeker read was last scheduled for (#2725). An unchanged
+    /// query never reschedules, so caret moves and arrows cost no read.
+    pub(crate) seeker_scheduled_query: String,
     /// Viewport scroll offset for session list (first visible session index)
     pub sessions_scroll: usize,
 
@@ -1112,6 +1122,9 @@ impl App {
             plan_index: crate::utils::plan_files::PlanIndex::default(),
             session_content_matches: Vec::new(),
             session_search_gen: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            seeker_find: std::collections::HashMap::new(),
+            seeker_find_gen: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            seeker_scheduled_query: String::new(),
             sessions_scroll: 0,
             ps: crate::tui::provider_selector::ProviderSelectorState::default(),
             input_history: Self::load_history(),
@@ -1353,6 +1366,72 @@ impl App {
                 }
             }
         });
+    }
+
+    /// Seeker deep search (#2725): schedule a content read for the open
+    /// card's query. Mirrors the GUI's `schedule_seeker_find`: an unchanged
+    /// query never reschedules, an empty query needs no read, and a cached
+    /// query rebuilds the rows at once. A fresh read lets the typing settle
+    /// 250ms, checks the generation before touching the database, and its
+    /// result only lands while the generation still matches.
+    pub(crate) fn schedule_seeker_content_search(&mut self) {
+        use std::sync::atomic::Ordering::SeqCst;
+        let query = self
+            .command_palette
+            .as_ref()
+            .map(|state| state.query().trim().to_string())
+            .unwrap_or_default();
+        if query == self.seeker_scheduled_query {
+            return;
+        }
+        self.seeker_scheduled_query = query.clone();
+        if query.is_empty() {
+            return;
+        }
+        if self.seeker_find.contains_key(&query) {
+            self.refresh_seeker_items();
+            return;
+        }
+        let generation = self.seeker_find_gen.fetch_add(1, SeqCst) + 1;
+        let search_gen = self.seeker_find_gen.clone();
+        let pool = self.session_service.pool();
+        let sender = self.event_sender();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            if search_gen.load(SeqCst) != generation {
+                return;
+            }
+            let messages = crate::db::repository::MessageRepository::new(pool.clone());
+            let sessions = crate::db::repository::SessionRepository::new(pool);
+            match crate::db::repository::search_session_content(&messages, &sessions, &query, 50)
+                .await
+            {
+                Ok(rows) => {
+                    let _ = sender.send(TuiEvent::SeekerContentSearchResult {
+                        generation,
+                        query,
+                        rows,
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!("seeker content search failed: {e}");
+                }
+            }
+        });
+    }
+
+    /// Rebuild the open Seeker's rows from the catalog (which now folds in
+    /// any cached content hits) without touching the query or caret (#2725).
+    /// A closed card has nothing to rebuild; the cache keeps the hits warm
+    /// for the next open.
+    fn refresh_seeker_items(&mut self) {
+        if self.command_palette.is_none() {
+            return;
+        }
+        let items = self.palette_items();
+        if let Some(state) = self.command_palette.as_mut() {
+            state.refresh_items(items);
+        }
     }
 
     /// The full-list index of the session the cursor is on, resolved through
@@ -3741,6 +3820,22 @@ impl App {
                     }
                 }
             }
+            TuiEvent::SeekerContentSearchResult {
+                generation,
+                query,
+                rows,
+            } => {
+                // Only the newest query's read may land; the cache keys by
+                // the exact query it answered (#2725).
+                if generation
+                    == self
+                        .seeker_find_gen
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    self.seeker_find.insert(query, rows);
+                    self.refresh_seeker_items();
+                }
+            }
         }
         Ok(())
     }
@@ -3802,17 +3897,45 @@ impl App {
                 .with_description(&skill.description),
             );
         }
+        // Deep search (#2725): when the query names message content, the
+        // conversation row carries the matching snippet in place of the date
+        // and the query as a keyword, so a session whose title never mentions
+        // the word still surfaces. With no content hit the row is unchanged.
+        let seeker_query = self
+            .command_palette
+            .as_ref()
+            .map(|state| state.query().trim().to_string())
+            .unwrap_or_default();
+        let snippets: std::collections::HashMap<Uuid, String> = self
+            .seeker_find
+            .get(&seeker_query)
+            .map(|rows| {
+                rows.iter()
+                    .map(|row| (row.session_id, row.snippet.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
         for session in &self.sessions {
             let title = session
                 .title
                 .clone()
                 .unwrap_or_else(|| "Untitled conversation".to_string());
-            items.push(PaletteItem::new(
-                title,
-                session.updated_at.format("%Y-%m-%d %H:%M").to_string(),
-                PaletteKind::Session,
-                PaletteAction::OpenSession(session.id.as_u128()),
-            ));
+            let item = match snippets.get(&session.id) {
+                Some(snippet) if !seeker_query.is_empty() => PaletteItem::new(
+                    title,
+                    snippet.clone(),
+                    PaletteKind::Session,
+                    PaletteAction::OpenSession(session.id.as_u128()),
+                )
+                .with_keywords(&seeker_query),
+                _ => PaletteItem::new(
+                    title,
+                    session.updated_at.format("%Y-%m-%d %H:%M").to_string(),
+                    PaletteKind::Session,
+                    PaletteAction::OpenSession(session.id.as_u128()),
+                ),
+            };
+            items.push(item);
         }
         items
     }
@@ -3826,20 +3949,30 @@ impl App {
             return Ok(());
         }
         let mut run = None;
+        let mut edited = false;
         if let Some(state) = self.command_palette.as_mut() {
             match event.code {
                 KeyCode::Enter => run = state.selected().map(|row| row.item.action),
                 KeyCode::Up => state.move_by(-1, crate::ui_core::palette::MAX_ROWS),
                 KeyCode::Down => state.move_by(1, crate::ui_core::palette::MAX_ROWS),
-                KeyCode::Backspace => state.backspace(),
+                KeyCode::Backspace => {
+                    state.backspace();
+                    edited = true;
+                }
                 KeyCode::Char(c)
                     if !event.modifiers.contains(KeyModifiers::CONTROL)
                         && !event.modifiers.contains(KeyModifiers::SUPER) =>
                 {
                     state.type_char(c);
+                    edited = true;
                 }
                 _ => {}
             }
+        }
+        // A typed edit re-runs the deep search; the scheduler dedupes an
+        // unchanged query, so caret moves and arrows never read (#2725).
+        if edited {
+            self.schedule_seeker_content_search();
         }
         if let Some(action) = run {
             self.command_palette = None;

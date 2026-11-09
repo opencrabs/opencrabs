@@ -320,6 +320,14 @@ pub enum TuiEvent {
         generation: u64,
         rows: Vec<crate::db::repository::ContentSearchRow>,
     },
+    /// Debounced Seeker deep-search read landed (#2725). Carries the query it
+    /// answered so the cache keys stay exact; only the newest generation may
+    /// land, same rule as the session-list search.
+    SeekerContentSearchResult {
+        generation: u64,
+        query: String,
+        rows: Vec<crate::db::repository::ContentSearchRow>,
+    },
 }
 
 /// Sudo password request from the bash tool
