@@ -93,12 +93,13 @@ fn the_chime_pass_walks_every_strip_through_one_seen_set() {
         body.contains("in &self.pane_states") && body.contains("pane.plan.document()"),
         "every pane strip is walked too: {body}"
     );
-    // One document at a time through the shared pure helper, which counts how
-    // many of that plan's tasks newly resolved into the one window seen set.
-    // `newly_resolved` itself is now a fold over this same helper.
+    // The settle count and the OS banner share one dedupe: the helper reports
+    // how many of these plans newly resolved into the one window seen set, and
+    // its count is what arms the flash and the chime. A local count would drift
+    // from the banner and ring twice for one task.
     assert!(
-        body.contains("newly_resolved_in(seen, Some(doc))"),
-        "the dedupe is the shared pure helper, not a local count: {body}"
+        body.contains("announce_settled_tasks(seen, &plans)"),
+        "the dedupe is the shared helper over one seen set, not a local count: {body}"
     );
     assert!(
         body.contains("Self::play_task_chime()"),
