@@ -16037,7 +16037,14 @@ fn pane_element(
                 .border_color(rgb(focus_ring_color(focused)))
                 .when(!focused, |d| d.opacity(UNFOCUSED_PANE_OPACITY))
                 .when(interactive, |d| {
-                    d.on_mouse_down(MouseButton::Left, take_keyboard)
+                    // Capture, not bubble. A transcript row stops the press
+                    // on its way up (`cx.stop_propagation()` in the text-row
+                    // handler), so a bubble-phase listener never ran for a
+                    // click on text, which is most of a pane: the caret
+                    // stayed on another leaf and ctrl+| split that one while
+                    // the window called the pane just clicked focused
+                    // (#2758).
+                    d.capture_any_mouse_down(take_keyboard)
                         // Every pane is a drop target (#2683). The half the
                         // pointer is nearest picks the axis and the side while
                         // the drag is still in flight, so the band under it is
@@ -18074,6 +18081,28 @@ mod tests {
         assert!(
             !body.contains(".plan.view()"),
             "no split pane draws the full checklist"
+        );
+    }
+
+    #[test]
+    fn a_click_anywhere_in_a_pane_takes_the_keyboard() {
+        // #2758: the pane took the keyboard in the BUBBLE phase, and a
+        // transcript text row stops the press on its way up, so a click on
+        // text never moved the caret and ctrl+| split whatever leaf the
+        // window still called focused instead of the pane just clicked.
+        let src = include_str!("main.rs");
+        let body = src
+            .split("fn pane_element(")
+            .nth(1)
+            .and_then(|rest| rest.split("\nfn ").next())
+            .expect("pane element");
+        assert!(
+            body.contains(".capture_any_mouse_down(take_keyboard)"),
+            "the pane takes the keyboard before a row can stop the press"
+        );
+        assert!(
+            !body.contains(".on_mouse_down(MouseButton::Left, take_keyboard)"),
+            "a bubble-phase listener never runs under a transcript row"
         );
     }
 
