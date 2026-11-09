@@ -2502,7 +2502,16 @@ const COLLAPSED_NARRATION_CHARS: usize = 280;
 fn collapsed_narration(live: &LiveTurn) -> Option<String> {
     live.narration()
         .last()
-        .map(|text| fit(text.trim(), COLLAPSED_NARRATION_CHARS))
+        .map(|text| {
+            // One source line only (#2731). gpui's line_clamp shapes each
+            // newline-separated line against the budget left over from the
+            // lines before it, and subtracts with overflow when an earlier
+            // line already wrapped past the clamp, aborting the window. A
+            // single source line is shaped once against the full budget, so
+            // collapsing every whitespace run to one space removes the trigger.
+            let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            fit(&flat, COLLAPSED_NARRATION_CHARS)
+        })
         .filter(|text| !text.is_empty())
 }
 
@@ -5701,5 +5710,27 @@ mod tests {
             "the budget plus the ellipsis"
         );
         assert!(preview.ends_with('\u{2026}'), "a clipped preview says so");
+    }
+
+    /// The preview renders under `.line_clamp(3)`. gpui shapes each
+    /// newline-separated line against the budget the earlier lines left, and
+    /// subtracts with overflow once a line wraps past the clamp, aborting the
+    /// window (#2731). The preview must stay a single source line so that
+    /// subtraction can never run.
+    #[test]
+    fn a_collapsed_preview_is_a_single_source_line() {
+        let mut live = LiveTurn::default();
+        live.begin("go".into());
+        let first = "word ".repeat(40);
+        live.push_narration(&format!("{first}\nand a second paragraph"));
+        let preview = collapsed_narration(&live).expect("a preview");
+        assert!(
+            !preview.contains('\n') && !preview.contains('\r'),
+            "a clamped preview carries no line break gpui could underflow on"
+        );
+        assert!(
+            !preview.contains("  "),
+            "whitespace runs collapse to a single space"
+        );
     }
 }
