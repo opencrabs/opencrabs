@@ -1086,13 +1086,14 @@ pub(super) fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
     //   - Persisted: when no live turn is active, keep showing the
     //     last finalized rate (from `finalize_tps` on response complete)
     //     until the next turn's first token replaces it.
+    // The same guard the service and the window footer use (#2703). A window
+    // that collapsed below the floor, or a rate no model produces, is not a
+    // measurement: the last finalized rate stays on screen instead.
     let live_tps = if app.is_processing && app.streaming_output_tokens > 0 {
-        let active = app.current_streaming_active_secs();
-        if active > 0.0 {
-            Some(app.streaming_output_tokens as f64 / active)
-        } else {
-            None
-        }
+        crate::ui_core::rate::credible_rate(
+            app.streaming_output_tokens,
+            app.current_streaming_active_secs(),
+        )
     } else {
         None
     };

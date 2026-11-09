@@ -4590,10 +4590,11 @@ impl Dashboard {
         &mut self,
         session: Uuid,
         progress: opencrabs::brain::agent::ProgressEvent,
+        at: std::time::Instant,
         cx: &mut Context<Self>,
     ) {
         if let Some(pane) = self.pane_states.get_mut(&session) {
-            fold_live(&mut pane.live, progress);
+            fold_live(&mut pane.live, progress, at);
             // Rows landing under a reader who scrolled up must not drag them
             // back to the bottom (#2685, #2698).
             Self::snap_pane_if_following(pane);
@@ -4605,7 +4606,7 @@ impl Dashboard {
         // the frame the switch left: opening it again shows the tool rows and
         // the counter the turn actually reached, not a stale snapshot.
         if let Some(turn) = self.stashed.get_mut(&session) {
-            fold_live(&mut turn.live, progress);
+            fold_live(&mut turn.live, progress, at);
             cx.notify();
             return;
         }
@@ -4962,10 +4963,10 @@ impl Dashboard {
             // This filter is also what keeps one conversation's tool rows off
             // another's card (#2616): only the session on screen reaches the
             // window's live turn below.
-            if let agent_bridge::TurnEvent::ProgressFor(sid, progress) = &ev
+            if let agent_bridge::TurnEvent::ProgressFor(sid, progress, at) = &ev
                 && self.transcript.session != Some(*sid)
             {
-                self.fold_pane_progress(*sid, progress.clone(), cx);
+                self.fold_pane_progress(*sid, progress.clone(), *at, cx);
                 continue;
             }
             match ev {
@@ -5182,15 +5183,24 @@ impl Dashboard {
                     }
                     cx.notify();
                 }
-                agent_bridge::TurnEvent::ProgressFor(_, ProgressEvent::Thinking) => {
+                agent_bridge::TurnEvent::ProgressFor(_, ProgressEvent::Thinking, _) => {
                     self.live.thinking = true;
                 }
-                agent_bridge::TurnEvent::ProgressFor(_, ProgressEvent::StreamingChunk { text }) => {
+                agent_bridge::TurnEvent::ProgressFor(
+                    _,
+                    ProgressEvent::StreamingChunk { text },
+                    at,
+                ) => {
                     // Counted, not just appended: the live line's token number
                     // comes from the chunk itself, so it moves as the answer
                     // streams instead of appearing with the final answer.
+                    //
+                    // Stamped with its ARRIVAL (#2703): `drain` hands this loop
+                    // a whole batch, so reading the clock here would stamp every
+                    // chunk in the batch with one instant and collapse the
+                    // window the rate is measured over.
                     self.live.thinking = false;
-                    self.live.note_chunk(&text);
+                    self.live.note_chunk_at(&text, at);
                     // The rail's preview follows the answer as it streams, at
                     // most one batched read a second.
                     self.refresh_previews_if_live(cx);
@@ -5198,6 +5208,7 @@ impl Dashboard {
                 agent_bridge::TurnEvent::ProgressFor(
                     _,
                     ProgressEvent::IntermediateText { text, reasoning },
+                    at,
                 ) => {
                     // Narration between tool calls is part of the answer the
                     // user is reading, so it joins the stream instead of
@@ -5210,7 +5221,7 @@ impl Dashboard {
                     // dedupe against what is already on screen.
                     self.live.thinking = false;
                     if let Some(reasoning) = reasoning {
-                        self.live.push_reasoning(&reasoning);
+                        self.live.push_reasoning_at(&reasoning, at);
                     }
                     self.live.push_narration(&text);
                 }
@@ -5221,6 +5232,7 @@ impl Dashboard {
                         tool_input,
                         ..
                     },
+                    _,
                 ) => {
                     self.live.thinking = false;
                     // The ledger's own wording (`tui::app::messaging`), so a
@@ -5235,6 +5247,7 @@ impl Dashboard {
                     ProgressEvent::ToolCompleted {
                         tool_name, success, ..
                     },
+                    _,
                 ) => {
                     // Close the newest open row this call opened; with no open
                     // row (an event lost across a mode switch) draw it closed
@@ -5271,11 +5284,12 @@ impl Dashboard {
                 agent_bridge::TurnEvent::ProgressFor(
                     sid,
                     ProgressEvent::QueuedUserMessage { text },
+                    _,
                 ) if self.transcript.session == Some(sid) => {
                     self.live.injected.push(text);
                     cx.notify();
                 }
-                agent_bridge::TurnEvent::ProgressFor(_, ProgressEvent::TokenCount(count)) => {
+                agent_bridge::TurnEvent::ProgressFor(_, ProgressEvent::TokenCount(count), _) => {
                     self.ctx_tokens = Some(count.min(u32::MAX as usize) as u32);
                 }
                 // A detached command's row lands synchronously, while the
@@ -5285,6 +5299,7 @@ impl Dashboard {
                 agent_bridge::TurnEvent::ProgressFor(
                     sid,
                     ProgressEvent::DetachedTaskStarted { task_id, label },
+                    _,
                 ) => {
                     if Some(sid) == self.transcript.session {
                         self.live.thinking = false;
@@ -5300,6 +5315,7 @@ impl Dashboard {
                         success,
                         elapsed_secs,
                     },
+                    _,
                 ) => {
                     // A finish with no row is not an error: the turn may have
                     // been settled, or the task outlived a restart. The receipt
@@ -5315,13 +5331,13 @@ impl Dashboard {
                 // that cannot be missed by a file read. The chime is opt-in
                 // and feature-gated, and no toast or desktop notification is
                 // raised, exactly as the terminal's arm.
-                agent_bridge::TurnEvent::ProgressFor(_, ProgressEvent::PlanCompleted { .. }) => {
+                agent_bridge::TurnEvent::ProgressFor(_, ProgressEvent::PlanCompleted { .. }, _) => {
                     Self::play_task_chime();
                 }
                 // Compaction notices and queue echoes: the phase-2 transcript
                 // mirror. They persist to the DB and show on the reload;
                 // nothing to draw live yet.
-                agent_bridge::TurnEvent::ProgressFor(_, _) => {}
+                agent_bridge::TurnEvent::ProgressFor(_, _, _) => {}
                 agent_bridge::TurnEvent::Done {
                     session,
                     content,
@@ -5375,6 +5391,11 @@ impl Dashboard {
                     // surface uses: the service's own tokens_per_second when
                     // it reported one, else the local active-streaming
                     // estimate. The footer and the settled card then agree.
+                    // Captured before finalize, which resets the accumulator:
+                    // the window is what turns a token count into a rate, and
+                    // a log that prints the count alone cannot tell a short
+                    // window from an inflated numerator (#2703).
+                    let active_secs = self.live.streaming_active_secs();
                     self.live.finalize(tokens_per_second);
                     // The answer stays on screen: the stream when chunks
                     // arrived, otherwise the response the turn returned. Live
@@ -5389,13 +5410,16 @@ impl Dashboard {
                     // from the log (chunks=0 means the provider never
                     // streamed, not that the window failed to draw).
                     logging::info(&format!(
-                        "turn done ({} chars, {} chunks, {} bytes, first {:?}, {}s, {} tok), reloading transcript",
+                        "turn done ({} chars, {} chunks, {} bytes, first {:?}, {}s elapsed, {:.2}s active, {} tok, rate {:.1} tok/s, service {:?}), reloading transcript",
                         content.len(),
                         self.live.chunks,
                         self.live.chunk_bytes,
                         self.live.first_chunk,
                         self.live.elapsed_secs(),
-                        self.live.tokens
+                        active_secs,
+                        self.live.tokens,
+                        self.live.tokens_per_sec(),
+                        tokens_per_second
                     ));
                     reload = self.transcript.session;
                 }
@@ -13568,18 +13592,24 @@ fn command_popup_view(names: &[&'static str], selected: usize) -> Div {
 /// a turn parked under a conversation the user switched away from (#2616). The
 /// fold has to be identical for both or the card would tell a different story
 /// depending on where the session happens to be sitting.
-fn fold_live(live: &mut transcript::LiveTurn, progress: opencrabs::brain::agent::ProgressEvent) {
+fn fold_live(
+    live: &mut transcript::LiveTurn,
+    progress: opencrabs::brain::agent::ProgressEvent,
+    at: std::time::Instant,
+) {
     use opencrabs::brain::agent::ProgressEvent;
     match progress {
         ProgressEvent::Thinking => live.thinking = true,
         ProgressEvent::StreamingChunk { text } => {
             live.thinking = false;
-            live.note_chunk(&text);
+            // The arrival stamp, so a batch folded in one loop still measures
+            // the time the provider actually spent streaming (#2703).
+            live.note_chunk_at(&text, at);
         }
         ProgressEvent::IntermediateText { text, reasoning } => {
             live.thinking = false;
             if let Some(reasoning) = reasoning {
-                live.push_reasoning(&reasoning);
+                live.push_reasoning_at(&reasoning, at);
             }
             live.push_narration(&text);
         }

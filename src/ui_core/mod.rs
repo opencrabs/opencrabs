@@ -27,6 +27,7 @@ pub mod pane_tree;
 pub mod plan_history;
 pub mod query;
 pub mod rail;
+pub mod rate;
 pub mod scroll;
 pub mod split;
 pub mod topic_bar;
