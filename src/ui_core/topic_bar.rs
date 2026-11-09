@@ -125,3 +125,191 @@ pub fn entry_mark(vertical: bool) -> EntryMark {
 pub fn chips_hug(_vertical: bool) -> bool {
     true
 }
+
+/// How many topic chips the bar draws before it folds the rest into one pill
+/// (#2762). A forum with twenty topics would otherwise push every chip off the
+/// edge of a narrow rail.
+pub const BAR_TOPICS_SHOWN: usize = 6;
+
+/// One topic as the bar sees it: the session it opens, and whether something is
+/// happening in it right now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TopicChip {
+    pub id: Uuid,
+    /// A turn is in flight in this topic. The window never learns "unread" for
+    /// a session it is not drawing, so activity is the honest signal it has.
+    pub activity: bool,
+}
+
+/// The pill that stands for the chips a narrow bar could not draw.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Overflow {
+    /// How many topics are folded away.
+    pub hidden: usize,
+    /// How many of those are busy right now, so the pill says when something
+    /// is happening inside the part of the family the reader cannot see.
+    pub activity: usize,
+}
+
+/// What the bar draws: the entries in order, and the overflow pill when the
+/// family is wider than the bar.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BarPlan {
+    pub entries: Vec<BarEntry>,
+    pub overflow: Option<Overflow>,
+}
+
+/// The entries a bar holds for a family of `chips`, capped at `limit` topics.
+///
+/// `open` is never folded away: a bar that hides the chip for the conversation
+/// on screen stops saying where the reader is, which is the defect the mark was
+/// added to fix. When the open topic falls past the cap it takes the last
+/// visible slot and the topic it displaced joins the overflow.
+///
+/// `limit` is clamped to at least one, so a caller cannot ask for a bar with no
+/// topics and no pill.
+pub fn bar_plan(root: Uuid, open: Uuid, chips: &[TopicChip], limit: usize) -> BarPlan {
+    let limit = limit.max(1);
+    let topics: Vec<TopicChip> = chips
+        .iter()
+        .copied()
+        .filter(|chip| chip.id != root)
+        .collect();
+    if topics.len() <= limit {
+        let mut entries = Vec::with_capacity(topics.len() + 1);
+        entries.push(BarEntry::All);
+        entries.extend(topics.iter().map(|chip| BarEntry::Topic(chip.id)));
+        return BarPlan {
+            entries,
+            overflow: None,
+        };
+    }
+    let mut shown: Vec<TopicChip> = topics[..limit].to_vec();
+    if let Some(pos) = topics.iter().position(|chip| chip.id == open)
+        && pos >= limit
+    {
+        shown[limit - 1] = topics[pos];
+    }
+    let hidden: Vec<&TopicChip> = topics
+        .iter()
+        .filter(|chip| !shown.iter().any(|shown| shown.id == chip.id))
+        .collect();
+    let mut entries = Vec::with_capacity(shown.len() + 1);
+    entries.push(BarEntry::All);
+    entries.extend(shown.iter().map(|chip| BarEntry::Topic(chip.id)));
+    BarPlan {
+        entries,
+        overflow: Some(Overflow {
+            hidden: hidden.len(),
+            activity: hidden.iter().filter(|chip| chip.activity).count(),
+        }),
+    }
+}
+
+/// The overflow pill's face: how much is folded away, and how much of it is
+/// busy.
+pub fn overflow_label(overflow: &Overflow) -> String {
+    match overflow.activity {
+        0 => format!("+{}", overflow.hidden),
+        activity => format!("+{} \u{b7} {} live", overflow.hidden, activity),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        BAR_TOPICS_SHOWN, BarEntry, BarPlan, Overflow, TopicChip, bar_entries, bar_plan,
+        overflow_label,
+    };
+    use uuid::Uuid;
+
+    fn id(n: u128) -> Uuid {
+        Uuid::from_u128(n)
+    }
+
+    fn chips(ids: &[u128], busy: &[u128]) -> Vec<TopicChip> {
+        ids.iter()
+            .map(|n| TopicChip {
+                id: id(*n),
+                activity: busy.contains(n),
+            })
+            .collect()
+    }
+
+    /// A family that fits keeps the shape the bar has always had: `All` first,
+    /// then every topic, no pill.
+    #[test]
+    fn a_short_family_has_no_overflow() {
+        let root = id(1);
+        let plan: BarPlan = bar_plan(root, root, &chips(&[2, 3], &[]), BAR_TOPICS_SHOWN);
+        assert_eq!(
+            plan.entries,
+            vec![
+                BarEntry::All,
+                BarEntry::Topic(id(2)),
+                BarEntry::Topic(id(3))
+            ]
+        );
+        assert_eq!(plan.overflow, None);
+        assert_eq!(plan.entries, bar_entries(root, &[id(2), id(3)]));
+    }
+
+    /// The long family folds its tail, and the pill counts what it hid.
+    #[test]
+    fn a_long_family_folds_the_tail_and_counts_it() {
+        let root = id(1);
+        let plan = bar_plan(
+            root,
+            root,
+            &chips(&[2, 3, 4, 5, 6, 7, 8, 9], &[8]),
+            6,
+        );
+        assert_eq!(plan.entries.len(), 7);
+        assert_eq!(
+            plan.overflow,
+            Some(Overflow {
+                hidden: 2,
+                activity: 1
+            })
+        );
+        assert_eq!(overflow_label(&plan.overflow.unwrap()), "+2 \u{b7} 1 live");
+    }
+
+    /// The open topic is never the one folded away, even when it sits past the
+    /// cap.
+    #[test]
+    fn the_open_topic_keeps_its_chip() {
+        let root = id(1);
+        let open = id(9);
+        let plan = bar_plan(root, open, &chips(&[2, 3, 4, 5, 6, 7, 8, 9], &[]), 6);
+        assert!(plan.entries.contains(&BarEntry::Topic(open)));
+        assert_eq!(plan.entries.len(), 7);
+        assert_eq!(plan.overflow.map(|o| o.hidden), Some(2));
+        assert!(!plan.entries.contains(&BarEntry::Topic(id(7))));
+    }
+
+    /// No activity anywhere means no number after the count: `+2 live` would
+    /// promise a running turn that is not there.
+    #[test]
+    fn a_quiet_overflow_says_only_how_many() {
+        assert_eq!(
+            overflow_label(&Overflow {
+                hidden: 4,
+                activity: 0
+            }),
+            "+4"
+        );
+    }
+
+    /// A caller cannot ask for a bar with nothing on it.
+    #[test]
+    fn a_zero_limit_still_draws_one_topic() {
+        let root = id(1);
+        let plan = bar_plan(root, root, &chips(&[2, 3], &[]), 0);
+        assert_eq!(
+            plan.entries,
+            vec![BarEntry::All, BarEntry::Topic(id(2))]
+        );
+        assert_eq!(plan.overflow.map(|o| o.hidden), Some(1));
+    }
+}

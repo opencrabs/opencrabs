@@ -7114,15 +7114,17 @@ impl Dashboard {
             return Vec::new();
         }
         // The topic store outranks the stored session name (#2490): a rename
-        // in Telegram reaches this label on the next refresh pass.
-        let title = |id: Uuid| {
+        // in Telegram reaches this label on the next refresh pass. With no live
+        // name yet, the chip strips the row's platform prefix and channel key
+        // instead of printing them (#2762).
+        let name = |id: Uuid| {
             let stored = self
                 .sessions
                 .items
                 .iter()
                 .find(|s| s.id == id)
                 .and_then(|s| s.title.as_deref());
-            rail::rail_title(
+            rail::chip_name(
                 stored,
                 self.sessions.topic_titles.get(&id).map(String::as_str),
             )
@@ -7139,63 +7141,91 @@ impl Dashboard {
         // rail the way it did before.
         let shape = topic_bar::chip_shape(self.topic_edge.is_vertical());
         let icon_rems = topic_tabs::style(self.topic_edge.is_vertical()).topic_icon_rems;
-        topic_bar::bar_entries(root, &topics)
-            .into_iter()
-            .map(|entry| {
-                let id = entry.session(root);
-                let current = entry.is_open(root, open);
-                let click = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
-                    cx.stop_propagation();
-                    match pane {
-                        Some(leaf) => this.open_topic_in_pane(leaf, id, cx),
-                        None => this.open_session(id, cx),
-                    }
-                });
-                // A right press on a tab opens the same menu the `...` draws,
-                // for the session that tab stands for (#2480). Before this it
-                // opened nothing at all, and the only way to edit a topic was
-                // to open it first and hunt the menu.
-                let open_menu = cx.listener(move |this, _ev: &MouseDownEvent, _window, cx| {
-                    cx.stop_propagation();
-                    this.topic_menu = Some(id);
-                    cx.notify();
-                });
-                // `All` has the same icon slot and cell geometry as a topic.
-                let (label, picture) = match entry {
-                    topic_bar::BarEntry::All => (
-                        "All".to_string(),
-                        topic_icons::tab_icon(
-                            topic_icons::store_name("general").as_str(),
-                            icon_rems,
-                        ),
-                    ),
-                    topic_bar::BarEntry::Topic(id) => {
-                        // The icon sits before the name and is not a word, so the
-                        // two-word shortening (#2477) is applied to the name alone.
-                        // A stored picture is drawn; a stored emoji stays text (#2478).
-                        let stored = self.sessions.topic_icons.get(&id).cloned();
-                        let picture = stored
-                            .as_deref()
-                            .and_then(|stored| topic_icons::tab_icon(stored, icon_rems));
-                        let glyph = match (&picture, stored.as_deref()) {
-                            (None, Some(icon)) => Some(topic_icons::tab_glyph(icon, icon_rems)),
-                            _ => None,
-                        };
-                        (topic_label(&title(id)), picture.or(glyph))
-                    }
-                };
+        // A wide family folds its tail into one pill, and the open topic keeps
+        // its chip either way (#2762).
+        let chips: Vec<topic_bar::TopicChip> = topics
+            .iter()
+            .map(|id| topic_bar::TopicChip {
+                id: *id,
+                activity: self.topic_is_busy(*id),
+            })
+            .collect();
+        let plan = topic_bar::bar_plan(root, open, &chips, topic_bar::BAR_TOPICS_SHOWN);
+        let mut cells: Vec<AnyElement> = Vec::with_capacity(plan.entries.len() + 1);
+        for entry in plan.entries {
+            let id = entry.session(root);
+            let current = entry.is_open(root, open);
+            let click = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
+                cx.stop_propagation();
+                match pane {
+                    Some(leaf) => this.open_topic_in_pane(leaf, id, cx),
+                    None => this.open_session(id, cx),
+                }
+            });
+            // A right press on a tab opens the same menu the `...` draws,
+            // for the session that tab stands for (#2480). Before this it
+            // opened nothing at all, and the only way to edit a topic was
+            // to open it first and hunt the menu.
+            let open_menu = cx.listener(move |this, _ev: &MouseDownEvent, _window, cx| {
+                cx.stop_propagation();
+                this.topic_menu = Some(id);
+                cx.notify();
+            });
+            // A busy topic is marked with a dot, the same signal the rail uses
+            // for work in flight.
+            let activity = chips.iter().any(|chip| chip.id == id && chip.activity);
+            // `All` has the same icon slot and cell geometry as a topic.
+            let (label, picture) = match entry {
+                topic_bar::BarEntry::All => (
+                    "All".to_string(),
+                    topic_icons::tab_icon(topic_icons::store_name("general").as_str(), icon_rems),
+                ),
+                topic_bar::BarEntry::Topic(id) => {
+                    // The icon sits before the name and is not a word, so the
+                    // two-word shortening (#2477) is applied to the name alone.
+                    // A stored picture is drawn; a stored emoji stays text (#2478).
+                    let stored = self.sessions.topic_icons.get(&id).cloned();
+                    let picture = stored
+                        .as_deref()
+                        .and_then(|stored| topic_icons::tab_icon(stored, icon_rems));
+                    let glyph = match (&picture, stored.as_deref()) {
+                        (None, Some(icon)) => Some(topic_icons::tab_glyph(icon, icon_rems)),
+                        _ => None,
+                    };
+                    (topic_label(&name(id)), picture.or(glyph))
+                }
+            };
+            cells.push(
                 topic_tab(
                     id,
                     label,
                     picture,
                     shape,
                     current,
+                    activity,
                     move |ev, window, app| click(ev, window, app),
                     move |ev, window, app| open_menu(ev, window, app),
                 )
-                .into_any_element()
-            })
-            .collect()
+                .into_any_element(),
+            );
+        }
+        if let Some(overflow) = plan.overflow {
+            cells.push(overflow_chip(topic_bar::overflow_label(&overflow), shape));
+        }
+        cells
+    }
+
+    /// Whether a turn is in flight in one topic (#2762).
+    ///
+    /// A leaf drawing that session knows outright. The window's own chat knows
+    /// for the conversation it has open. For a topic nobody is drawing there is
+    /// no signal: the store keeps no per-topic unread count, so the chip stays
+    /// quiet rather than inventing one.
+    fn topic_is_busy(&self, id: Uuid) -> bool {
+        match self.pane_states.get(&id) {
+            Some(pane) => pane.busy,
+            None => self.busy && self.transcript.session == Some(id),
+        }
     }
 
     /// Open the name prompt for a new topic under the open session (#2303).
@@ -15353,12 +15383,14 @@ fn topic_label(name: &str) -> String {
 ///
 /// Both marks reserve their space while inactive, so switching topics never
 /// changes the strip's geometry. The cells themselves stay transparent.
+#[allow(clippy::too_many_arguments)]
 fn topic_tab(
     id: Uuid,
     label: String,
     icon: Option<AnyElement>,
     shape: topic_bar::ChipShape,
     current: bool,
+    activity: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_right: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
@@ -15404,7 +15436,38 @@ fn topic_tab(
         .on_click(on_click)
         .on_mouse_down(MouseButton::Right, on_right)
         .children(icon)
+        // Work in flight in this topic: a dot after the name, in the accent
+        // the open chip uses, so the strip answers "is anything happening in
+        // there" without opening it (#2762).
+        .when(activity, |d| {
+            d.child(
+                div()
+                    .size(px(6.0))
+                    .flex_none()
+                    .rounded_full()
+                    .bg(rgb(topic_tabs::TELEGRAM_ACCENT)),
+            )
+        })
         .child(content)
+}
+
+/// The pill standing for the topics a narrow bar folded away (#2762). A label,
+/// not a control: it says how much of the family is off the edge, and how much
+/// of that is busy. Same cell geometry as a chip, so the row keeps one height.
+fn overflow_chip(label: String, shape: topic_bar::ChipShape) -> AnyElement {
+    let vertical = shape == topic_bar::ChipShape::IconAbove;
+    let style = topic_tabs::style(vertical);
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .text_sm()
+        .text_color(rgb(palette::current().text_faint))
+        .when(vertical, |d| d.size(rems(style.cell_rems)).p_1())
+        .when(!vertical, |d| d.flex_row().gap_1().px_2().py_0p5())
+        .child(SharedString::from(label))
+        .into_any_element()
 }
 
 /// The update dialog (#2406). The first stage asks whether to update by
