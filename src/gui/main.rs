@@ -17390,9 +17390,15 @@ mod tests {
             "the window starts on the chat, so the first frame is not a return"
         );
         // Sending is the other half of the contract: a send follows its own
-        // answer whatever the reader was doing before.
+        // answer whatever the reader was doing before. Since #2756 the send is
+        // two functions, the entry and the one that runs a turn, so the follow
+        // is pinned in the half that actually sends.
         assert!(
-            fn_body(src, "send_message").contains("self.rearm_transcript_follow();"),
+            fn_body(src, "send_message").contains("self.send_message_showing("),
+            "a send reaches the path that runs a turn"
+        );
+        assert!(
+            fn_body(src, "send_message_showing").contains("self.rearm_transcript_follow();"),
             "a send re-arms the follow"
         );
     }
