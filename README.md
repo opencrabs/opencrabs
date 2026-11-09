@@ -621,7 +621,7 @@ This solves the core UX problem in mention-only groups: previously, tagging the 
 | Feature | Description |
 |---------|-------------|
 | **Cursor Navigation** | Full cursor movement: Left/Right arrows, Ctrl+Left/Right word jump, Home/End, Delete, Backspace at position |
-| **Input History** | Persistent command history (`~/.opencrabs/history.txt`), loaded on startup, capped at 500 entries |
+| **Input History** | Persistent command history (`~/.opencrabs/history.txt`), loaded on startup, shared live with the window's composers, capped at 500 entries. A typed draft survives Arrow Up then Down, Esc twice, a pane focus change, and a session switch; see [Composer drafts and history](#composer-drafts-and-history) |
 | **Inline Tool Approval** | Claude Code-style `❯ Yes / Always / No` selector with arrow key navigation |
 | **Inline Plan Approval** | Interactive plan review selector (Approve / Reject / Request Changes / View Plan) |
 | **Session Management** | Create, rename, delete sessions with persistent SQLite storage; each session remembers its provider + model, and switching sessions auto-restores the provider (no manual `/models` needed); token counts and context % per session. New sessions auto-generate a meaningful title from the first user message (no more "New Chat"). `Ctrl+Shift+P` in the sessions list pins the selected session to the top with a ★ marker (the window answers `ctrl-shift-p` too); pins survive restarts, unpinning restores the real recency slot, and the order beneath the pins never changes. `Alt+Space` opens **Seeker** on both surfaces, one field that finds a conversation, a slash command, a screen, a skill, the matching docs.opencrabs.com page or the setup for a messaging channel and runs it on Enter; a channel that is not configured yet prints the steps it takes under the field. Typing `create topic` arms the same session list so the pick names a new topic under it, `favorite` pins the picked session through that list, and a query that matches nothing offers to start a session with your words as the request. The window also opens the same card with `cmd-k`, and `ctrl-f` there narrows the rail instead. Busy sessions carry a live activity line on both surfaces, naming the running tool, thinking, or responding as it happens. The rail filters: in the terminal `s` cycles the plan-state chip (all, in progress, finished, no plan), `a` shows or hides cron and RSI automation sessions (hidden by default), and `/` searches keywords across titles and stored message content, rendering the matching snippet beside the title; the window answers with the same filter menu and a `ctrl-f` rail search that reads message content too |
@@ -720,6 +720,19 @@ Prefer windows and buttons over the TUI? [MonoCode](https://github.com/hardbeat9
 A launch opens the conversation you were last in, on both surfaces, because the GUI and the terminal read and write the same `last_session` pointer. A first run, or a pointer at a conversation that has since been deleted, falls back to the newest session on the rail.
 
 Opening the window claims the profile the way the terminal does: whichever surface is running owns it, GUI, TUI or daemon, one at a time. The window therefore serves the channels and runs the scheduled jobs, so Telegram, Discord, Slack, WhatsApp and Trello answer while only the window is open, a scheduled job fires on time, and a key rotation or an allowlist edit reaches the running bots without a restart. A background instance holding the profile is shut down on start, exactly as the terminal already preempts the daemon, and the transcript names the process it took over.
+
+#### Composer drafts and history
+
+Both surfaces keep what you typed. The rules are the same in the terminal and in the window, and the state that enforces them lives in one place (`src/ui_core/composer.rs`), so the two cannot drift apart:
+
+| Situation | What happens |
+|---|---|
+| **Type, Arrow Up, Arrow Down** | The typed draft is stashed on the first Up and comes back exactly, caret included, when Down walks past the newest entry |
+| **Esc twice** | The field clears and the typed draft goes into the stash, so Arrow Up brings it back. Clearing a line recalled from history leaves that stash alone and ends the recall walk, instead of overwriting the draft with text you never typed |
+| **Switch conversations and come back** | The text is filed under the conversation it was typed in and restored when you return. Nothing carries into the conversation you switch to, and attachments are not carried either: a chip aimed at one conversation must never fly into another |
+| **Switch panes** (TUI split, GUI split) | Each pane keeps its own draft, its own recall position and its own stashed draft. Moving focus moves all three with the pane |
+
+History is one list, shared in real time. The terminal and the window read and write the same `~/.opencrabs/history.txt` (500 entries, consecutive duplicates collapsed), and inside the window the single composer and every split pane walk one in-memory list, so a message sent in a pane is recalled in the window and the other way round. A restart keeps the list.
 
 #### Theme modal
 
