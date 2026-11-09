@@ -214,6 +214,35 @@ impl SessionRepository {
             .map_err(|e| AttachTopicError::Db(interact_err(e)))?
     }
 
+    /// The session's parent when it is a topic, `None` for a top-level row.
+    ///
+    /// `parent_id` is deliberately absent from [`Session`] (the struct predates
+    /// topics and every channel path would have to carry it), so the rails and
+    /// the Telegram resolver read it through here instead of hand-rolling SQL.
+    pub async fn find_parent_id(&self, child: Uuid) -> Result<Option<Uuid>> {
+        let child_str = child.to_string();
+        let found: Option<Option<String>> = self
+            .pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                conn.query_row(
+                    "SELECT parent_id FROM sessions WHERE id = ?1",
+                    params![child_str],
+                    |r| r.get::<_, Option<String>>(0),
+                )
+                .optional()
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to read a session's parent")?;
+        found
+            .flatten()
+            .map(|s| Uuid::parse_str(&s).context("parent_id is not a uuid"))
+            .transpose()
+    }
+
     /// Release a topic back to a top-level session (`parent_id = NULL`). The
     /// depth trigger only fires on a non-null parent, so this always passes.
     pub async fn detach_topic(&self, child: Uuid) -> Result<()> {
