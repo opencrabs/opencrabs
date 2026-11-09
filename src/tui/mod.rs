@@ -37,6 +37,9 @@ pub mod provider_selector;
 pub mod remote_upload;
 pub mod render;
 pub mod runner;
+/// The session-list filter (plan chip + cron/RSI visibility) shared by the
+/// dialog's keys and its render (#2723).
+pub mod session_filter;
 pub mod theme_catalog;
 
 // Enhanced rendering modules

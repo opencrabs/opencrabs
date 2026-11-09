@@ -73,21 +73,9 @@ pub(super) fn render_sessions(f: &mut Frame, app: &App, area: Rect) {
     ])
     .areas(area);
 
-    // Compute filtered session indices based on search
-    let visible_indices: Vec<usize> = if app.session_search.is_empty() {
-        (0..app.sessions.len()).collect()
-    } else {
-        let search = app.session_search.to_lowercase();
-        app.sessions
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| {
-                let name = s.title.as_deref().unwrap_or("New Chat").to_lowercase();
-                name.contains(&search)
-            })
-            .map(|(i, _)| i)
-            .collect()
-    };
+    // One source of truth for the visible rows: the same search + plan chip +
+    // automation rule the input handler navigates and selects through (#2723).
+    let visible_indices = app.visible_session_indices();
 
     let mut lines: Vec<Line<'static>> = Vec::new();
 
@@ -136,6 +124,30 @@ pub(super) fn render_sessions(f: &mut Frame, app: &App, area: Rect) {
             ),
             Span::styled(
                 format!("  {} matches", visible_indices.len()),
+                Style::default().fg(theme::role(Role::GrayDim)),
+            ),
+        ]));
+    }
+
+    // Filter chip header, only while the browsing filter narrows the list and
+    // no search is overriding it (#2723). An explicit search spans every
+    // session (A1), so the chip would mislead there; the default list keeps
+    // its clean look because the chip stays hidden until a key moves it.
+    if app.session_filter.is_active() && app.session_search.is_empty() {
+        let automation = if app.session_filter.show_automation {
+            "automation shown"
+        } else {
+            "automation hidden"
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("  ▾ {} ", app.session_filter.plan.label()),
+                Style::default()
+                    .fg(theme::role(Role::AccentTeal))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" {automation}  ·  s: plan  a: automation"),
                 Style::default().fg(theme::role(Role::GrayDim)),
             ),
         ]));
@@ -1066,5 +1078,129 @@ mod tests {
             1,
             "idle session wrapped"
         );
+    }
+
+    // ── Session-list filter (#2723) ──────────────────────────────────────
+
+    use crate::tui::session_filter::{PlanChip, SessionFilter, session_filter_allows};
+    use crate::utils::plan_files::PlanFilterState;
+
+    #[test]
+    fn plan_chip_cycles_through_every_state() {
+        assert_eq!(PlanChip::All.next(), PlanChip::Wip);
+        assert_eq!(PlanChip::Wip.next(), PlanChip::Finished);
+        assert_eq!(PlanChip::Finished.next(), PlanChip::NoPlan);
+        assert_eq!(PlanChip::NoPlan.next(), PlanChip::All);
+    }
+
+    #[test]
+    fn filter_hides_cron_and_rsi_but_keeps_subagents_and_humans() {
+        let f = SessionFilter::default();
+        assert!(!f.show_automation, "automation must default to hidden (A1)");
+        assert!(!session_filter_allows(
+            &f,
+            "Recap [cron-job:x]",
+            PlanFilterState::None
+        ));
+        assert!(!session_filter_allows(
+            &f,
+            "RSI autonomous cycle",
+            PlanFilterState::None
+        ));
+        assert!(session_filter_allows(
+            &f,
+            "subagent: worker",
+            PlanFilterState::None
+        ));
+        assert!(session_filter_allows(
+            &f,
+            "Human chat",
+            PlanFilterState::None
+        ));
+    }
+
+    #[tokio::test]
+    async fn visible_indices_hide_automation_by_default() {
+        let mut app = app().await;
+        let human = session("Planning the roadmap");
+        let cron = session("Nightly recap [cron-job:x]");
+        let rsi = session("RSI autonomous cycle");
+        app.session_plan_states
+            .insert(human.id, PlanFilterState::Wip);
+        app.sessions = vec![human, cron, rsi];
+
+        // Default: automation hidden, chip All -> only the human row.
+        assert_eq!(app.visible_session_indices(), vec![0]);
+
+        // Toggle automation on -> all three.
+        app.session_filter.show_automation = true;
+        assert_eq!(app.visible_session_indices(), vec![0, 1, 2]);
+    }
+
+    #[tokio::test]
+    async fn visible_indices_plan_chip_narrows_by_state() {
+        let mut app = app().await;
+        let wip = session("Wip chat");
+        let done = session("Done chat");
+        let none = session("No plan chat");
+        app.session_plan_states.insert(wip.id, PlanFilterState::Wip);
+        app.session_plan_states
+            .insert(done.id, PlanFilterState::Finished);
+        app.session_plan_states
+            .insert(none.id, PlanFilterState::None);
+        app.sessions = vec![wip, done, none];
+
+        app.session_filter.plan = PlanChip::Wip;
+        assert_eq!(app.visible_session_indices(), vec![0]);
+        app.session_filter.plan = PlanChip::Finished;
+        assert_eq!(app.visible_session_indices(), vec![1]);
+        app.session_filter.plan = PlanChip::NoPlan;
+        assert_eq!(app.visible_session_indices(), vec![2]);
+        app.session_filter.plan = PlanChip::All;
+        assert_eq!(app.visible_session_indices(), vec![0, 1, 2]);
+    }
+
+    #[tokio::test]
+    async fn visible_indices_search_spans_automation() {
+        let mut app = app().await;
+        let human = session("Roadmap");
+        let cron = session("Roadmap recap [cron-job:x]");
+        app.sessions = vec![human, cron];
+
+        // Browsing hides the cron row.
+        assert_eq!(app.visible_session_indices(), vec![0]);
+        // An explicit search spans every session, automation included (A1).
+        app.session_search = "roadmap".to_string();
+        assert_eq!(app.visible_session_indices(), vec![0, 1]);
+    }
+
+    #[tokio::test]
+    async fn selected_index_resolves_through_the_filtered_view() {
+        let mut app = app().await;
+        let cron = session("Recap [cron-job:x]");
+        let human = session("Real chat");
+        app.sessions = vec![cron, human];
+
+        // Cron hidden by default: the only visible row is the human, which
+        // sits at full-list index 1. The cursor (display position 0) must
+        // resolve to 1, never open the hidden cron at index 0.
+        app.selected_session_index = 0;
+        assert_eq!(app.selected_session_actual_index(), Some(1));
+    }
+
+    #[tokio::test]
+    async fn filter_chip_header_shows_only_when_active() {
+        let mut app = app().await;
+        app.sessions = vec![session("Human chat")];
+
+        // Default filter: no chip header, the list keeps its clean look.
+        let buf = draw(&app, 100, 10);
+        assert_eq!(rows_containing(&buf, "automation hidden"), 0);
+
+        // Move the chip: the header names the chip and the automation state.
+        app.session_filter.plan = PlanChip::Wip;
+        let buf = draw(&app, 100, 10);
+        assert_eq!(rows_containing(&buf, "plan wip"), 1);
+        assert_eq!(rows_containing(&buf, "automation hidden"), 1);
     }
 }

@@ -2721,10 +2721,14 @@ impl App {
         } else if keys::is_up(&event) {
             self.selected_session_index = self.selected_session_index.saturating_sub(1);
         } else if keys::is_down(&event) {
+            let count = self.visible_session_indices().len();
             self.selected_session_index =
-                (self.selected_session_index + 1).min(self.sessions.len().saturating_sub(1));
+                (self.selected_session_index + 1).min(count.saturating_sub(1));
         } else if keys::is_enter(&event) {
-            if let Some(session) = self.sessions.get(self.selected_session_index) {
+            if let Some(session) = self
+                .selected_session_actual_index()
+                .and_then(|i| self.sessions.get(i))
+            {
                 let session_id = session.id;
 
                 if let Some(project_id) = self.assigning_to_project {
@@ -2771,7 +2775,7 @@ impl App {
         } else if event.code == KeyCode::Char('t') || event.code == KeyCode::Char('T') {
             // New topic under the selected session (#2306). The name is asked for
             // in the prompt above the list.
-            if self.sessions.get(self.selected_session_index).is_some() {
+            if self.selected_session_actual_index().is_some() {
                 self.topic_naming = true;
                 self.topic_name_buffer.clear();
             }
@@ -2784,7 +2788,10 @@ impl App {
             self.toggle_fold_selected().await?;
         } else if event.code == KeyCode::Char('r') || event.code == KeyCode::Char('R') {
             // Start renaming the selected session
-            if let Some(session) = self.sessions.get(self.selected_session_index) {
+            if let Some(session) = self
+                .selected_session_actual_index()
+                .and_then(|i| self.sessions.get(i))
+            {
                 self.session_renaming = true;
                 self.session_rename_buffer = session.title.clone().unwrap_or_default();
             }
@@ -2843,7 +2850,10 @@ impl App {
             // Stay on sessions screen — user picks which session goes in the new pane.
         } else if event.code == KeyCode::Char('d') || event.code == KeyCode::Char('D') {
             // Delete the selected session
-            if let Some(session) = self.sessions.get(self.selected_session_index) {
+            if let Some(session) = self
+                .selected_session_actual_index()
+                .and_then(|i| self.sessions.get(i))
+            {
                 let session_id = session.id;
                 let is_current = self
                     .current_session
@@ -2871,9 +2881,10 @@ impl App {
                     *self.shared_session_id.lock().await = None;
                 }
                 self.load_sessions().await?;
-                // Adjust index if it's now out of bounds
-                if self.selected_session_index >= self.sessions.len() {
-                    self.selected_session_index = self.sessions.len().saturating_sub(1);
+                // Adjust index if it's now out of bounds in the filtered view
+                let count = self.visible_session_indices().len();
+                if self.selected_session_index >= count {
+                    self.selected_session_index = count.saturating_sub(1);
                 }
             }
         } else if (event.code == KeyCode::Char('p') || event.code == KeyCode::Char('P'))
@@ -2948,6 +2959,22 @@ impl App {
                     self.notification_shown_at = Some(std::time::Instant::now());
                 }
             }
+        } else if (event.code == KeyCode::Char('s') || event.code == KeyCode::Char('S'))
+            && event.modifiers.is_empty()
+        {
+            // Cycle the plan-state chip: All -> Wip -> Finished -> NoPlan
+            // (#2723). Modifiers are excluded so a chord like Ctrl+S never
+            // lands here. The cursor returns to the top of the new view.
+            self.session_filter.plan = self.session_filter.plan.next();
+            self.selected_session_index = 0;
+        } else if (event.code == KeyCode::Char('a') || event.code == KeyCode::Char('A'))
+            && event.modifiers.is_empty()
+        {
+            // Show or hide the automation sessions (cron + RSI). Hidden by
+            // default per A1; an explicit keyword search still spans every
+            // session (#2723).
+            self.session_filter.show_automation = !self.session_filter.show_automation;
+            self.selected_session_index = 0;
         } else if event.code == KeyCode::Char('/') {
             // Activate session search
             self.session_search_active = true;

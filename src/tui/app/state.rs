@@ -579,6 +579,17 @@ pub struct App {
     /// Session search/filter state (activated with `/` in /sessions)
     pub session_search: String,
     pub session_search_active: bool,
+    /// Session-list filter: plan-state chip + cron/RSI visibility (#2723).
+    /// The default hides automation per A1 and leaves the chip on All.
+    pub session_filter: crate::tui::session_filter::SessionFilter,
+    /// Cached plan state per loaded session, refreshed on `load_sessions` so
+    /// the filter reads no filesystem on the paint path (#2723). A session
+    /// absent from the cache reads as no plan.
+    pub session_plan_states:
+        std::collections::HashMap<uuid::Uuid, crate::utils::plan_files::PlanFilterState>,
+    /// The shared plan index behind the cache (#2723). Read and classify only:
+    /// a sweep never archives or deletes a plan.
+    pub(crate) plan_index: crate::utils::plan_files::PlanIndex,
     /// Viewport scroll offset for session list (first visible session index)
     pub sessions_scroll: usize,
 
@@ -1087,6 +1098,9 @@ impl App {
             session_rename_buffer: String::new(),
             session_search: String::new(),
             session_search_active: false,
+            session_filter: crate::tui::session_filter::SessionFilter::default(),
+            session_plan_states: std::collections::HashMap::new(),
+            plan_index: crate::utils::plan_files::PlanIndex::default(),
             sessions_scroll: 0,
             ps: crate::tui::provider_selector::ProviderSelectorState::default(),
             input_history: Self::load_history(),
@@ -1229,23 +1243,45 @@ impl App {
         self.current_session.as_ref().map(|s| s.id) == Some(session_id)
     }
 
-    /// Returns indices into `self.sessions` that match the current search filter.
-    /// When no search is active, returns all indices.
+    /// Returns indices into `self.sessions` that the list should draw (#2723).
+    ///
+    /// One pure rule decides each row: an explicit keyword search spans every
+    /// session (A1), while the browsing list applies the plan chip and hides
+    /// cron/RSI unless the automation toggle is on. The plan state comes from
+    /// the cache `load_sessions` refreshes, so this reads no filesystem and the
+    /// same inputs always give the same view.
     pub(crate) fn visible_session_indices(&self) -> Vec<usize> {
-        if self.session_search.is_empty() {
-            (0..self.sessions.len()).collect()
-        } else {
-            let search = self.session_search.to_lowercase();
-            self.sessions
-                .iter()
-                .enumerate()
-                .filter(|(_, s)| {
-                    let name = s.title.as_deref().unwrap_or("New Chat").to_lowercase();
-                    name.contains(&search)
-                })
-                .map(|(i, _)| i)
-                .collect()
-        }
+        use crate::tui::session_filter::session_row_visible;
+        use crate::utils::plan_files::PlanFilterState;
+        self.sessions
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| {
+                let title = s.title.as_deref().unwrap_or("New Chat");
+                let plan = self
+                    .session_plan_states
+                    .get(&s.id)
+                    .copied()
+                    .unwrap_or(PlanFilterState::None);
+                session_row_visible(&self.session_filter, title, plan, &self.session_search)
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// The full-list index of the session the cursor is on, resolved through
+    /// the filtered view (#2723).
+    ///
+    /// `selected_session_index` is a position in the visible (searched +
+    /// filtered) list, the same space the render highlights and
+    /// `focus_current_session` anchors in. Acting on a session must resolve
+    /// through here, never index `sessions` with the raw cursor: once a filter
+    /// hides rows the two spaces differ and the raw index opens the wrong
+    /// session.
+    pub(crate) fn selected_session_actual_index(&self) -> Option<usize> {
+        self.visible_session_indices()
+            .get(self.selected_session_index)
+            .copied()
     }
 
     /// Put the picker cursor on the session the user is currently in.

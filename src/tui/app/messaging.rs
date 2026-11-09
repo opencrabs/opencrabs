@@ -873,6 +873,18 @@ impl App {
         let pins = &self.session_favorites;
         self.sessions.sort_by_key(|s| !pins.contains(&s.id));
 
+        // Snapshot each session's plan state for the list filter (#2723). The
+        // shared index throttles its directory sweep and caches parses by
+        // mtime, so a reload costs about one stat per row and the paint path
+        // reads only this cache. filter_state classifies without archiving or
+        // deleting, so drawing the list never touches somebody's history.
+        let now = std::time::Instant::now();
+        let mut plan_states = std::collections::HashMap::new();
+        for s in &self.sessions {
+            plan_states.insert(s.id, self.plan_index.filter_state(s.id, now));
+        }
+        self.session_plan_states = plan_states;
+
         // Topics follow their parent in the dialog (#2306), and closed topics
         // are remembered for the dim and the send guard (#2305). A pinned topic
         // stays at the top level, as in the window. A topic whose parent is not
@@ -989,7 +1001,11 @@ impl App {
             self.push_system_message("A topic needs a name.".to_string());
             return Ok(());
         }
-        let Some(parent) = self.sessions.get(self.selected_session_index).map(|s| s.id) else {
+        let Some(parent) = self
+            .selected_session_actual_index()
+            .and_then(|i| self.sessions.get(i))
+            .map(|s| s.id)
+        else {
             return Ok(());
         };
         let repo = crate::db::repository::SessionRepository::new(self.session_service.pool());
@@ -1003,7 +1019,11 @@ impl App {
     /// Close the selected topic, or reopen it if it is closed (#2305). Only a
     /// topic can be closed; a plain session gets a notice instead.
     pub(crate) async fn toggle_closed_selected(&mut self) -> Result<()> {
-        let Some(id) = self.sessions.get(self.selected_session_index).map(|s| s.id) else {
+        let Some(id) = self
+            .selected_session_actual_index()
+            .and_then(|i| self.sessions.get(i))
+            .map(|s| s.id)
+        else {
             return Ok(());
         };
         if !self.topic_parents.contains_key(&id) {
@@ -1025,7 +1045,11 @@ impl App {
     /// of the selected topic. Saved to the ledger, so the window shows the same
     /// tree (#2427).
     pub(crate) async fn toggle_fold_selected(&mut self) -> Result<()> {
-        let Some(selected) = self.sessions.get(self.selected_session_index).map(|s| s.id) else {
+        let Some(selected) = self
+            .selected_session_actual_index()
+            .and_then(|i| self.sessions.get(i))
+            .map(|s| s.id)
+        else {
             return Ok(());
         };
         let parent = self

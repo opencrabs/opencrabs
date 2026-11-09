@@ -573,6 +573,7 @@ struct SessionsProbe {
     searching: bool,
     panes: usize,
     favorites: usize,
+    filter: crate::tui::session_filter::SessionFilter,
 }
 
 fn probe(app: &App) -> SessionsProbe {
@@ -584,6 +585,7 @@ fn probe(app: &App) -> SessionsProbe {
         searching: app.session_search_active,
         panes: app.pane_manager.panes.len(),
         favorites: app.session_favorites.len(),
+        filter: app.session_filter,
     }
 }
 

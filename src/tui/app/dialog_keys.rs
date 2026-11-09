@@ -674,6 +674,16 @@ const TABLE_19: &[DialogKey] = &[
         verb: "split v",
     },
     DialogKey {
+        events: &[k(KeyCode::Char('s'))],
+        label: "s",
+        verb: "plan filter",
+    },
+    DialogKey {
+        events: &[k(KeyCode::Char('a'))],
+        label: "a",
+        verb: "automation",
+    },
+    DialogKey {
         events: &[k(KeyCode::Char('/'))],
         label: "/",
         verb: "search",
