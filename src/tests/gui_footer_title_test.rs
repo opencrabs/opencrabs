@@ -15,6 +15,15 @@ fn the_header_is_left_off_the_chat_screen() {
 
 #[test]
 fn the_footer_identity_starts_with_the_session_name() {
-    assert!(GUI_MAIN.contains("self.session_title().unwrap_or(\"chat\"),"));
-    assert!(GUI_MAIN.contains("\"{} · {}\","));
+    // The lazy fallback is the form clippy's `or_fun_call` requires, so the pin
+    // follows the call that exists instead of its older eager spelling (#2779).
+    // It still fails if the identity stops leading with the session name.
+    assert!(
+        GUI_MAIN.contains("self.session_title().unwrap_or_else(|| \"chat\".to_string()),"),
+        "the identity row puts the session name first"
+    );
+    assert!(
+        GUI_MAIN.contains("\"{} · {}\","),
+        "the identity keeps name-then-status"
+    );
 }

@@ -142,7 +142,7 @@ fn the_chat_screen_draws_no_title_row() {
         "the shortening helper existed only for that row"
     );
     assert!(
-        GUI_MAIN.contains("self.session_title().unwrap_or(\"chat\"),"),
+        GUI_MAIN.contains("self.session_title().unwrap_or_else(|| \"chat\".to_string()),"),
         "the footer still leads with the conversation's name"
     );
 }
