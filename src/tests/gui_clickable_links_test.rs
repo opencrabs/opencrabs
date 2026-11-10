@@ -45,14 +45,20 @@ impl Drop for Sandbox {
 }
 
 /// The body of the function whose signature starts with `header`, up to the
-/// closing brace on its own line. A sentinel reads one function, so an
-/// unrelated edit elsewhere in the file cannot satisfy it.
+/// closing brace that ends it. The brace is matched at the signature's own
+/// indentation, so a method reads as one method instead of running on to the
+/// end of its `impl`.
 fn body_of<'a>(src: &'a str, header: &str) -> &'a str {
     let start = src
         .find(header)
         .unwrap_or_else(|| panic!("{header} must exist"));
+    let line_start = src[..start].rfind('\n').map_or(0, |n| n + 1);
+    let indent = " ".repeat(start - line_start);
+    let close = format!("\n{indent}}}\n");
     let body = &src[start..];
-    &body[..body.find("\n}\n").expect("the function ends")]
+    &body[..body
+        .find(&close)
+        .unwrap_or_else(|| panic!("{header} has a closing brace"))]
 }
 
 #[test]
