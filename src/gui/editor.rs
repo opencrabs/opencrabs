@@ -570,7 +570,7 @@ impl Editor {
                 crab: Some(bytes),
             })
             .collect();
-        let room = EMOJI_ROWS.saturating_sub(rows.len());
+        let room = Self::EMOJI_ROWS.saturating_sub(rows.len());
         if room > 0 {
             rows.extend(
                 emojis::iter()
