@@ -15007,7 +15007,7 @@ fn popup_window(total: usize, selected: usize, visible: usize) -> Range<usize> {
 /// the terminal's `/help`.
 /// The emoji list under a `:query` (#2413): the glyph and its shortcode per row,
 /// the highlighted row marked as the command list marks its own.
-fn emoji_popup_view(items: &[(&'static str, &'static str)], selected: usize) -> Div {
+fn emoji_popup_view(items: &[editor::EmojiRow], selected: usize) -> Div {
     let mut col = div()
         .flex()
         .flex_col()
@@ -15017,8 +15017,14 @@ fn emoji_popup_view(items: &[(&'static str, &'static str)], selected: usize) -> 
         .border_1()
         .border_color(rgb(palette::current().panel_hi))
         .bg(glass_fill(palette::current().panel));
-    for (index, (glyph, code)) in items.iter().enumerate() {
+    for (index, row) in items.iter().enumerate() {
         let on = index == selected;
+        // A crab row is one of our pictures (#2769): it has no character to
+        // draw, so the row shows the picture the chat will receive.
+        let face: AnyElement = match row.crab {
+            Some(bytes) => topic_icons::picture(bytes, 1.6).into_any_element(),
+            None => SharedString::from(row.glyph.to_string()).into_any_element(),
+        };
         col = col.child(
             div()
                 .flex()
@@ -15035,8 +15041,8 @@ fn emoji_popup_view(items: &[(&'static str, &'static str)], selected: usize) -> 
                         .border_l_2()
                         .border_color(rgb(palette::current().accent))
                 })
-                .child(SharedString::from(glyph.to_string()))
-                .child(SharedString::from(format!(":{code}:"))),
+                .child(face)
+                .child(SharedString::from(format!(":{}:", row.shortcode))),
         );
     }
     col

@@ -11,6 +11,7 @@
 //! direct dependency).
 
 use crate::palette;
+use crate::topic_icons::CRAB_ICONS;
 use opencrabs::ui_core::card::{CARD_RADIUS, glass_fill};
 use opencrabs::ui_core::commands::completions;
 use opencrabs::ui_core::composer::{self, ComposerDraft, SharedHistory, lock_history};
@@ -80,6 +81,21 @@ const IMAGE_EXTENSIONS: &[&str] = &[
 const VIDEO_EXTENSIONS: &[&str] = &[
     ".mp4", ".m4v", ".mov", ".webm", ".mkv", ".avi", ".3gp", ".flv",
 ];
+
+/// One row of the composer's `:query` list (#2769).
+///
+/// A glyph row inserts its character. A crab row is one of our own pictures:
+/// it has no character to insert, so accepting it attaches the embedded PNG
+/// and the chat receives an image instead of a token.
+#[derive(Clone, Copy)]
+pub struct EmojiRow {
+    /// The character this row inserts. Empty for a crab, which attaches.
+    pub glyph: &'static str,
+    /// The shortcode shown and matched on, without its colons.
+    pub shortcode: &'static str,
+    /// The embedded PNG for a crab row.
+    pub crab: Option<&'static [u8]>,
+}
 
 /// A file waiting to be sent with the message: the GUI's twin of the TUI's
 /// `ImageAttachment`. `is_video` picks the marker the send pipeline appends,
@@ -534,6 +550,45 @@ impl Editor {
         }
     }
 
+    /// How many rows the `:query` list shows, the terminal's cap (#2413).
+    const EMOJI_ROWS: usize = 8;
+
+    /// The `:query` list for a query, our own pack first (#2769).
+    ///
+    /// The pack is a handful of pictures that only exist here, matched on the
+    /// same shortcode the glyphs use (`:ok:`, `:bolt:`, `:fire:`). Leading with
+    /// it is what makes it reachable: the eight-row cap buries anything that
+    /// sorts behind the thousands of glyphs.
+    fn emoji_rows(query: &str) -> Vec<EmojiRow> {
+        let mut rows: Vec<EmojiRow> = CRAB_ICONS
+            .iter()
+            .copied()
+            .filter(|(name, _)| name.contains(query))
+            .map(|(name, bytes)| EmojiRow {
+                glyph: "",
+                shortcode: name,
+                crab: Some(bytes),
+            })
+            .collect();
+        let room = EMOJI_ROWS.saturating_sub(rows.len());
+        if room > 0 {
+            rows.extend(
+                emojis::iter()
+                    .filter_map(|e| {
+                        e.shortcodes()
+                            .find(|sc| sc.contains(query))
+                            .map(|sc| EmojiRow {
+                                glyph: e.as_str(),
+                                shortcode: sc,
+                                crab: None,
+                            })
+                    })
+                    .take(room),
+            );
+        }
+        rows
+    }
+
     /// The `:query` the caret sits in: the colon's byte offset and the query,
     /// lower cased. None when the text before the caret is not one.
     fn emoji_query(&self) -> Option<(usize, String)> {
@@ -547,20 +602,14 @@ impl Editor {
     }
 
     /// The emoji list for the `:query` under the caret, as the terminal shows
-    /// it: up to eight glyphs with their shortcodes, and the highlighted row.
-    pub fn emoji_popup(&self) -> Option<(Vec<(&'static str, &'static str)>, usize)> {
+    /// it: up to eight rows with their shortcodes, and the highlighted row.
+    /// Our own pack is part of the list, not a separate picker (#2769).
+    pub fn emoji_popup(&self) -> Option<(Vec<EmojiRow>, usize)> {
         if self.emoji_dismissed {
             return None;
         }
         let (_, query) = self.emoji_query()?;
-        let items: Vec<(&'static str, &'static str)> = emojis::iter()
-            .filter_map(|e| {
-                e.shortcodes()
-                    .find(|sc| sc.contains(query.as_str()))
-                    .map(|sc| (e.as_str(), sc))
-            })
-            .take(8)
-            .collect();
+        let items = Self::emoji_rows(&query);
         if items.is_empty() {
             return None;
         }
@@ -587,16 +636,31 @@ impl Editor {
         true
     }
 
-    /// Replace `:query` with the highlighted glyph and keep typing after it.
+    /// Replace `:query` with the highlighted row and keep typing after it. A
+    /// crab has no character to insert, so it attaches its picture (#2769).
     fn accept_emoji(&mut self, cx: &mut Context<Self>) {
         let (Some((colon, _)), Some((items, index))) = (self.emoji_query(), self.emoji_popup())
         else {
             return;
         };
-        let glyph = items[index].0;
+        let row = items[index];
         let end = self.cursor_offset();
-        self.content.replace_range(colon..end, glyph);
-        let caret = colon + glyph.len();
+        let caret = match row.crab {
+            Some(bytes) => {
+                // The picture goes out the same door a pasted screenshot takes,
+                // so the send pipeline sees one kind of thing (#2769).
+                if let Some(path) = write_emoji_crab(row.shortcode, bytes) {
+                    self.attach_paths([path]);
+                }
+                // The shortcode goes away: the chip is what the message shows.
+                self.content.replace_range(colon..end, "");
+                colon
+            }
+            None => {
+                self.content.replace_range(colon..end, row.glyph);
+                colon + row.glyph.len()
+            }
+        };
         self.selected_range = caret..caret;
         self.selection_reversed = false;
         self.marked_range = None;
@@ -2254,6 +2318,19 @@ fn write_clipboard_image(image: &(ImageFormat, Vec<u8>)) -> Option<PathBuf> {
     Some(path)
 }
 
+/// Write one embedded crab to a scratch file so the attachment pipeline, which
+/// is path based, can carry it (#2769). The file outlives the send for the same
+/// reason a pasted image does: the transcript stores the path.
+fn write_emoji_crab(name: &str, bytes: &'static [u8]) -> Option<PathBuf> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_millis();
+    let path = std::env::temp_dir().join(format!("opencrabs-emoji-{name}-{stamp}.png"));
+    std::fs::write(&path, bytes).ok()?;
+    Some(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -2265,6 +2342,47 @@ mod tests {
     use gpui::ImageFormat;
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
+
+    /// The pack is embedded and used to be unreachable here (#2769): the list
+    /// was built from the glyph crate alone, so `:ok:` answered a unicode
+    /// character and never our own crab.
+    #[test]
+    fn the_emoji_list_leads_with_our_pack() {
+        let rows = super::Editor::emoji_rows("ok");
+        assert_eq!(rows[0].shortcode, "ok");
+        assert!(rows[0].crab.is_some(), "the pack row carries its picture");
+        assert_eq!(rows[0].glyph, "", "a crab inserts no character");
+    }
+
+    /// Every pack entry answers to the name it is stored under, and that name
+    /// is the bare shortcode (#2769). The files used to carry a `crab_` prefix
+    /// that nothing the user reads or types ever showed, so a row could be
+    /// reachable in one place and invisible in the other.
+    #[test]
+    fn every_pack_name_is_its_bare_shortcode_and_findable() {
+        for (name, _) in crate::topic_icons::CRAB_ICONS {
+            assert!(!name.starts_with("crab_"), "{name} still has a prefix");
+            let rows = super::Editor::emoji_rows(name);
+            assert_eq!(rows.first().map(|row| row.shortcode), Some(*name));
+            assert!(rows[0].crab.is_some(), "{name} is a picture row");
+        }
+    }
+
+    /// A query no crab answers still lists glyphs, unchanged by the pack.
+    #[test]
+    fn the_emoji_list_still_answers_plain_glyphs() {
+        let rows = super::Editor::emoji_rows("smile");
+        assert!(!rows.is_empty(), "a glyph query still answers");
+        assert!(rows.iter().all(|row| row.crab.is_none()));
+    }
+
+    /// The pack leads, but it does not grow the list: the eight-row cap is the
+    /// terminal's, and a popup that outgrew the composer would cover it.
+    #[test]
+    fn the_emoji_list_keeps_its_eight_row_cap() {
+        let rows = super::Editor::emoji_rows("a");
+        assert_eq!(rows.len(), 8);
+    }
 
     /// A throwaway directory with real files in it: the classifier stats the
     /// path, so a made-up path would prove nothing about what a drop attaches.
