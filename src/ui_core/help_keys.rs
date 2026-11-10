@@ -402,7 +402,7 @@ pub const ROWS: &[HelpRow] = &[
         "ctrl+d",
         "D",
         Some("ctrl-d"),
-        "Delete the selected session (asks first)",
+        "Delete session (asks first)",
     ),
     row(
         HelpSection::Sessions,
@@ -431,14 +431,14 @@ pub const ROWS: &[HelpRow] = &[
         "t",
         "T",
         Some("t"),
-        "Topics on, then a new topic under this session",
+        "Topics on, then a new topic",
     ),
     row(
         HelpSection::Sessions,
         "g",
         "G",
         None,
-        "Group existing sessions under this one",
+        "Group sessions under this one",
     ),
     row(
         HelpSection::Sessions,
