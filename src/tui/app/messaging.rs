@@ -1136,12 +1136,12 @@ impl App {
             // `live` says a turn is in flight, which keeps a stale plan from
             // ringing: the row already shows the spinner.
             let live = self.processing_sessions.contains(&id);
-            if let Some(evidence) = self.plan_index.evidence(id, live, now)
+            if let Some(evidence) = self.plan_row_index.evidence(id, live, now)
                 && evidence.ready
             {
                 self.session_plan_ready.insert(id);
             }
-            if let Some(progress) = self.plan_index.progress(id, now) {
+            if let Some(progress) = self.plan_row_index.progress(id, now) {
                 self.session_plan_progress.insert(id, progress);
             }
         }

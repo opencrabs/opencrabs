@@ -405,7 +405,7 @@ pub struct App {
     /// Reader for the plan files under the agents root. Holds an mtime cache,
     /// so re-reading on a sweep is cheap; `None` roots never archive or
     /// delete, they only look.
-    pub(crate) plan_index: crate::ui_core::plan_index::PlanIndex,
+    pub(crate) plan_row_index: crate::ui_core::plan_index::PlanIndex,
     /// When the plan sweep last ran; throttles the refresh below.
     pub(crate) plan_sweep_at: Option<std::time::Instant>,
     /// The chat's topic bar (#2701): present when the conversation on screen
@@ -1079,7 +1079,7 @@ impl App {
             session_previews: super::session_cards::PreviewMap::new(),
             session_plan_progress: HashMap::new(),
             session_plan_ready: HashSet::new(),
-            plan_index: crate::ui_core::plan_index::PlanIndex::default(),
+            plan_row_index: crate::ui_core::plan_index::PlanIndex::default(),
             plan_sweep_at: None,
             chat_topic_bar: None,
             chat_topic_bar_hidden: false,
