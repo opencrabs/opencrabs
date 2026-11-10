@@ -73,7 +73,7 @@ pub fn platform_of(stored: Option<&str>) -> Option<&'static str> {
 fn body_of(stored: &str) -> &str {
     let trimmed = stored.trim();
     let base = match trimmed.rfind("[chat:") {
-        Some(i) if trimmed.ends_with(']') => trimmed[..i].trim_end(),
+        Some(i) if trimmed.ends_with(']') => trimmed.get(..i).unwrap_or(trimmed).trim_end(),
         _ => trimmed,
     };
     match base.split_once(':') {

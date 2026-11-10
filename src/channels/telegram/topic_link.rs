@@ -164,8 +164,12 @@ pub async fn link_topic_session(
 /// what keeps the backfill off other channels' rows.
 pub fn telegram_base_title(title: &str) -> Option<(i64, String)> {
     let rest = title.strip_prefix("Telegram: ")?;
-    let bracket = title.rfind("[chat:")?;
-    let suffix = &title[bracket..];
+    // Index `rest` throughout: the offset `rfind` returns is a boundary in the
+    // string it searched, and mixing that offset across the prefix strip is how
+    // a byte index lands mid-character (#2220). Every slice below is taken from
+    // the same string the search ran on, and `get` keeps it panic-free.
+    let bracket = rest.rfind("[chat:")?;
+    let suffix = rest.get(bracket..)?;
     let inner = suffix.strip_prefix("[chat:")?.strip_suffix(']')?;
     let (chat, thread) = inner.split_once(":topic:")?;
     let chat_id: i64 = chat.parse().ok()?;
@@ -173,9 +177,9 @@ pub fn telegram_base_title(title: &str) -> Option<(i64, String)> {
         return None;
     }
 
-    let body = rest[..bracket.saturating_sub("Telegram: ".len())].trim_end();
+    let body = rest.get(..bracket)?.trim_end();
     let base_body = match body.rfind(" / ") {
-        Some(pos) => body[..pos].trim_end(),
+        Some(pos) => body.get(..pos).unwrap_or(body).trim_end(),
         None => body,
     };
     Some((chat_id, format!("Telegram: {base_body} [chat:{chat_id}]")))
