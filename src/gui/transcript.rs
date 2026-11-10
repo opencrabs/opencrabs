@@ -1672,11 +1672,13 @@ const CRAB_INLINE_SIZE: f32 = 1.1;
 /// The crab a line of text draws at: the size of that line's own glyphs, a
 /// little taller, so a heading keeps its scale.
 fn inline_crab_size(style: &TextStyle) -> f32 {
+    // The picture is laid out in rems, so a pixel size is converted at the
+    // 16px base and a rem size is already in the unit the picture wants.
     match style.font_size {
-        Some(AbsoluteLength::Pixels(pixels)) => {
+        AbsoluteLength::Pixels(pixels) => {
             (f32::from(pixels) * 1.15 / 16.0).max(CRAB_INLINE_SIZE)
         }
-        _ => CRAB_INLINE_SIZE,
+        AbsoluteLength::Rems(rems) => (rems.0 * 1.15).max(CRAB_INLINE_SIZE),
     }
 }
 
