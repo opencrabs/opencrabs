@@ -638,8 +638,6 @@ impl Column {
                             .add_modifier(Modifier::BOLD),
                     ));
                 }
-                    ));
-                }
                 if is_current {
                     spans.push(Span::styled(
                         " *",
