@@ -18380,13 +18380,18 @@ mod tests {
         // #2760: a chip stops propagation, so the parent row's picker never
         // ran and the topic opened in the chat leaf while the split waited
         // for a session nobody was going to pick.
+        // Only the render counts for the chip: the whole file holds this
+        // test's own quoted names, so a plain scan reads its own strings as
+        // the chip's (#2741). The helper is defined outside the render, so the
+        // body scan below still needs the whole file.
         let src = include_str!("main.rs");
+        let render = dashboard_render(src);
         assert!(
-            !src.contains("this.open_session(kid_id, cx)"),
+            !render.contains("this.open_session(kid_id, cx)"),
             "the chip must not open the topic directly"
         );
         assert!(
-            src.contains("this.pick_or_open(kid_id, cx)"),
+            render.contains("this.pick_or_open(kid_id, cx)"),
             "the chip answers the picker the way a row does"
         );
         let helper = fn_body(src, "pick_or_open");
@@ -18640,7 +18645,7 @@ mod tests {
     fn the_hint_never_survives_a_draft() {
         let editor = include_str!("editor.rs");
         assert!(
-            editor.contains("let display = if empty { placeholder } else { content.clone() };"),
+            editor.contains("let display = if empty { placeholder } else { content };"),
             "the field paints the placeholder only while it is empty"
         );
         assert!(
@@ -19017,7 +19022,7 @@ mod tests {
             ("enter", "Open the highlighted session"),
             ("ctrl+f", "Find a session"),
             ("ctrl+shift+p", "Pin the selected session"),
-            ("ctrl+d", "Delete the selected session"),
+            ("ctrl+d", "Delete session (asks first)"),
             ("ctrl+g", "Session files"),
             ("esc", "Cancel or step back"),
             // The session letters the rail answers now (#2670). p is absent on
@@ -19026,7 +19031,7 @@ mod tests {
             // fold tree with chips that always paint, so the window answers no
             // z and must not advertise one.
             ("r", "Rename the selected session"),
-            ("t", "New topic under this session"),
+            ("t", "Topics on, then a new topic"),
             ("c", "Close or reopen the selected topic"),
         ];
         let sessions: Vec<_> = help_keys::section_rows(HelpSection::Sessions).collect();
