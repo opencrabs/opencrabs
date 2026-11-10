@@ -17,6 +17,7 @@
 //! truncation everywhere (#2271).
 
 use crate::palette;
+use crate::topic_icons;
 use opencrabs::services::message::{CompletedPlanPayload, PLAN_COMPLETED_ROLE};
 use opencrabs::ui_core::card::{CARD_RADIUS, concentric_radius, glass_fill};
 use opencrabs::ui_core::copy_select::{self, TextPoint};
@@ -1377,7 +1378,7 @@ fn md_line(l: &markdown::MdLine, selection: Option<&SelectionContext>) -> Div {
     let size = heading_size(l.heading_level);
     let mut style = body_style(size);
     style.font_weight = heading_weight(l.heading_level);
-    let text = selectable_styled_text(l.text.clone(), style, l.highlights.clone(), selection);
+    let text = inline_crabs(l.text.clone(), style, l.highlights.clone(), selection);
     let base = div().pl(rems(f32::from(l.indent) * 0.9));
     if l.heading {
         base.mt(px(RHYTHM_HEADING_ABOVE))
@@ -1652,18 +1653,140 @@ fn md_block(src: &str, selection: Option<&SelectionContext>) -> Div {
 }
 
 /// User/system content stays plain: the TUI renders input verbatim, markdown
-/// styling is an answer-text treatment.
+/// styling is an answer-text treatment. A line whose shortcodes name the crab
+/// pack still draws those pictures (#2771), so a user who picks an emoji from
+/// the composer sees the emoji, not its name.
 fn plain_block(content: &str, size: f32, selection: Option<&SelectionContext>) -> Div {
     let mut lines = div().flex().flex_col().gap_0p5();
     for line in content.split('\n') {
-        lines = lines.child(selectable_styled_text(
-            line.to_string(),
-            body_style(size),
-            Vec::new(),
-            selection,
-        ));
+        let style = body_style(size);
+        lines = lines.child(inline_crabs(line.to_string(), style, Vec::new(), selection));
     }
     lines
+}
+
+/// An inline crab is a touch larger than the body text it sits in, so it reads
+/// as an emoji rather than a character glued into the line (#2771).
+const CRAB_INLINE_SIZE: f32 = 1.1;
+
+/// The crab a line of text draws at: the size of that line's own glyphs, a
+/// little taller, so a heading keeps its scale.
+fn inline_crab_size(style: &TextStyle) -> f32 {
+    match style.font_size {
+        Some(AbsoluteLength::Pixels(pixels)) => {
+            (f32::from(pixels) * 1.15 / 16.0).max(CRAB_INLINE_SIZE)
+        }
+        _ => CRAB_INLINE_SIZE,
+    }
+}
+
+/// Draw one line of text, with the shortcodes that name a crab pack emoji
+/// standing in as pictures (#2771).
+///
+/// A line with no token takes the plain `StyledText` path untouched, so nothing
+/// about an ordinary row changes. A line that does carry tokens is laid out as
+/// a wrapping flex row: a run of words is one text segment, and a token is the
+/// pack's picture sitting in the text flow. Code fences and table cells keep
+/// calling `selectable_styled_text` directly: a shortcode inside a fence is
+/// source, not an emoji.
+///
+/// Every segment declares the length the whole line would have given it, never
+/// its own byte count, because `SelectionContext` separates its segments with
+/// one byte each: splitting a line into three pieces would otherwise move every
+/// later offset down by two and drag-select would copy the wrong characters.
+fn inline_crabs(
+    text: String,
+    style: TextStyle,
+    highlights: Vec<(Range<usize>, HighlightStyle)>,
+    selection: Option<&SelectionContext>,
+) -> Div {
+    let Some(pieces) = topic_icons::inline_pieces(&text) else {
+        return selectable_styled_text(text, style, highlights, selection);
+    };
+    let mut row = div().flex().flex_wrap().items_center();
+    let crab_size = inline_crab_size(&style);
+    for piece in pieces {
+        if let Some(bytes) = piece.crab {
+            // A picture is not a segment: the run ahead of it already claims
+            // the token's bytes, and one extra separator here would shift
+            // every offset after the picture.
+            row = row.child(topic_icons::picture(bytes, crab_size));
+            continue;
+        }
+        if piece.range.is_empty() {
+            // The spacer draws nothing: it only carries the bytes the pictures
+            // ahead of the first word took.
+            if let Some(context) = selection {
+                context.begin_segment(piece.accounted);
+            }
+            continue;
+        }
+        let chunks = inline_chunks(&text, piece.range.clone(), piece.accounted);
+        for (range, length) in chunks {
+            let covered = local_highlights(&highlights, &range);
+            let chunk = text[range].to_string();
+            let drawn = selectable_text_segment(chunk, length, &style, covered, selection);
+            // An unbreakable word longer than the pane (a pasted URL) shrinks
+            // and wraps inside its own chunk instead of pushing the row wide.
+            row = row.child(drawn.min_w_0());
+        }
+    }
+    row
+}
+
+/// One chunk of a run of text: the bytes it draws, and the length the selection
+/// accounting consumes for it (#2771).
+type Chunk = (Range<usize>, usize);
+
+/// Cut one run of an inline-crab line into word-sized chunks, each with the
+/// length the selection accounting must consume for it (#2771).
+///
+/// A flex row breaks between its children, never inside one, so a single long
+/// run would overflow the pane instead of wrapping. Cutting at the spaces puts
+/// the breaks where the text itself would have wrapped. A chunk ends after its
+/// space, so a break never eats the gap between two words.
+fn inline_chunks(text: &str, span: Range<usize>, accounted: usize) -> Vec<Chunk> {
+    let (start, end) = (span.start, span.end);
+    let mut chunks = Vec::new();
+    let mut cursor = start;
+    for (offset, byte) in text[start..end].bytes().enumerate() {
+        if byte == b' ' {
+            let cut = start + offset + 1;
+            chunks.push(cursor..cut);
+            cursor = cut;
+        }
+    }
+    if cursor < end {
+        chunks.push(cursor..end);
+    }
+    // The run ends where its own accounting says it does: one byte short of
+    // the next segment, or at the end of the line for the last run on it.
+    let run_end = start + accounted;
+    let accounting: Vec<usize> = chunks
+        .iter()
+        .enumerate()
+        .map(|(index, chunk)| match chunks.get(index + 1) {
+            Some(next) => next.start.saturating_sub(chunk.start + 1),
+            None => run_end.saturating_sub(chunk.start),
+        })
+        .collect();
+    chunks.into_iter().zip(accounting).collect()
+}
+
+/// Keep the highlights that fall inside one chunk, rebased onto it, so a bold
+/// span that crosses a crab keeps its weight on both sides of it (#2771).
+fn local_highlights(
+    highlights: &[(Range<usize>, HighlightStyle)],
+    range: &Range<usize>,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    highlights
+        .iter()
+        .filter_map(|(span, style)| {
+            let from = span.start.max(range.start);
+            let to = span.end.min(range.end);
+            (from < to).then(|| (from - range.start..to - range.start, *style))
+        })
+        .collect()
 }
 
 /// Only the user message paints a bubble. The assistant answer is drawn
@@ -2967,14 +3090,30 @@ pub(crate) fn selectable_styled_text(
     highlights: Vec<(Range<usize>, HighlightStyle)>,
     selection: Option<&SelectionContext>,
 ) -> Div {
-    let segment_start = selection.map(|context| context.begin_segment(text.len()));
+    let accounted = text.len();
+    selectable_text_segment(text, accounted, &style, highlights, selection)
+}
+
+/// The same, for a segment that draws less text than the row's copy string
+/// accounts for (#2771). A line split around a crab picture hands each run the
+/// length the whole line would have given it, so the offsets after the picture
+/// still land on the characters the unsplit line put there. `accounted` only
+/// moves the bookkeeping; hit testing stays inside the text that is drawn.
+fn selectable_text_segment(
+    text: String,
+    accounted: usize,
+    style: &TextStyle,
+    highlights: Vec<(Range<usize>, HighlightStyle)>,
+    selection: Option<&SelectionContext>,
+) -> Div {
+    let segment_start = selection.map(|context| context.begin_segment(accounted));
     let selected = selection.and_then(|context| {
         context
             .drag
             .segment_range(context.row, segment_start?, text.len())
     });
     let highlights = highlights_with_selection(text.len(), highlights, selected);
-    let styled = StyledText::new(text.clone()).with_default_highlights(&style, highlights);
+    let styled = StyledText::new(text.clone()).with_default_highlights(style, highlights);
     let layout = styled.layout().clone();
     let base = div().child(styled);
     let Some(context) = selection else {
@@ -5963,5 +6102,85 @@ mod tests {
             !preview.contains("  "),
             "whitespace runs collapse to a single space"
         );
+    }
+
+    /// One drawn text segment of an inline-crab line: the offset the row's copy
+    /// string gives it. This is the transcript's own `begin_segment` rule,
+    /// written out so the arithmetic below can be replayed without a window.
+    fn segment_start(offset: &mut usize, segments: &mut usize, accounted: usize) -> usize {
+        let start = if *segments == 0 { 0 } else { *offset + 1 };
+        *offset = start + accounted;
+        *segments += 1;
+        start
+    }
+
+    /// A flex row breaks between children, never inside one, so a long run of
+    /// words is cut at its spaces (#2771). Each chunk ends after its space, and
+    /// the chunk lengths are what the selection accounting consumes.
+    #[test]
+    fn an_inline_line_wraps_at_its_spaces() {
+        let chunks = inline_chunks("one two three", 0..13, 13);
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].0, 0..4);
+        assert_eq!(chunks[1].0, 4..8);
+        assert_eq!(chunks[2].0, 8..13);
+        // The drawn bytes of the run are exactly the chunks, in order.
+        assert_eq!(chunks.iter().map(|(range, _)| range.len()).sum::<usize>(), 13);
+        // A single word is one chunk that claims the whole run.
+        assert_eq!(inline_chunks("hi ", 0..3, 3), vec![(0..3, 3)]);
+    }
+
+    /// The reason `inline_chunks` carries lengths at all: replay what
+    /// `inline_crabs` declares to `SelectionContext` and every text chunk must
+    /// start at the offset the whole, unsplit line puts it at. A picture takes
+    /// no segment, and its bytes ride on the run ahead of it. Drift here moves
+    /// drag-select and copy by one character per split.
+    #[test]
+    fn split_chunks_keep_the_offsets_of_the_whole_line() {
+        for line in [
+            "hi :cry: there",
+            "one two :ok: three four five",
+            ":cry: a long line of words still wraps",
+            "a :ok: b",
+            ":cry:",
+            "plain words only",
+        ] {
+            let Some(pieces) = topic_icons::inline_pieces(line) else {
+                continue;
+            };
+            let mut offset = 0;
+            let mut segments = 0;
+            for piece in pieces {
+                if piece.crab.is_some() {
+                    continue;
+                }
+                if piece.range.is_empty() {
+                    segment_start(&mut offset, &mut segments, piece.accounted);
+                    continue;
+                }
+                let chunks = inline_chunks(line, piece.range.clone(), piece.accounted);
+                assert!(!chunks.is_empty(), "{line}: a run draws nothing");
+                for (range, accounted) in chunks {
+                    let start = segment_start(&mut offset, &mut segments, accounted);
+                    assert_eq!(
+                        start, range.start,
+                        "{line}: a chunk starts at {start}, not {}",
+                        range.start
+                    );
+                }
+            }
+            assert_eq!(offset, line.len(), "{line}: the row ends short");
+        }
+    }
+
+    /// A bold span crossing a crab stays bold on both sides of it: each chunk
+    /// keeps the part of the span it covers, moved onto its own bytes (#2771).
+    #[test]
+    fn a_highlight_follows_the_chunk_it_lands_in() {
+        let bold = HighlightStyle::default();
+        let highlights = vec![(0..9, bold)];
+        assert!(local_highlights(&highlights, &(9..12)).is_empty());
+        assert_eq!(local_highlights(&highlights, &(4..9)), vec![(0..5, bold)]);
+        assert_eq!(local_highlights(&highlights, &(2..6)), vec![(0..4, bold)]);
     }
 }
