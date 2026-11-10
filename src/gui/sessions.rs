@@ -1910,9 +1910,9 @@ fn brand_header() -> Div {
 #[cfg(test)]
 mod tests {
     use super::{
-        Database, FindMatch, MenuKind, PlanFilter, RailFilter, SessionsState,
-        accent_bar_visible, fit, load_sessions, merge_find_results, palette, pin_mark,
-        preview_line, rail_filter_allows, rail_menu_entries,
+        Database, FindMatch, MenuKind, PlanFilter, RailFilter, SessionsState, accent_bar_visible,
+        fit, load_sessions, merge_find_results, palette, pin_mark, preview_line,
+        rail_filter_allows, rail_menu_entries,
     };
     use opencrabs::db::models::Session;
     use opencrabs::db::repository::ContentSearchRow;
