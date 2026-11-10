@@ -1471,7 +1471,7 @@ const BUSY_REPAINT_TICKS: u64 = 4;
 /// True on the poll tick that paints a live turn's animation. Pure, so the
 /// cadence stays a rule rather than an accident of where the counter is bumped.
 fn busy_repaint_due(tick: u64) -> bool {
-    tick % BUSY_REPAINT_TICKS == 0
+    tick.is_multiple_of(BUSY_REPAINT_TICKS)
 }
 
 impl Dashboard {
