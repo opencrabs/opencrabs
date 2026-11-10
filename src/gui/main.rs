@@ -10691,8 +10691,7 @@ impl Render for Dashboard {
                         // name is not printed twice anywhere (#2578).
                         let identity = format!(
                             "{} · {}",
-                            self.session_title()
-                                .unwrap_or_else(|| "chat".to_string()),
+                            self.session_title().unwrap_or_else(|| "chat".to_string()),
                             status_identity(
                                 &provider,
                                 &model,
