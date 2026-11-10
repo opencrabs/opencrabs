@@ -15883,6 +15883,15 @@ fn pane_composer_dim(
         .id(SharedString::from(format!("pane-composer-{session}")))
         .flex()
         .flex_none()
+        // A pane that does not own the keyboard still shows the draft of the
+        // session it holds, and a long draft used to widen the whole pane
+        // instead of staying inside it: `flex_none` with no width floor lets
+        // the row refuse to shrink below its text, and the column grew with
+        // it (#2688). The dim row is one line by definition, so it takes the
+        // pane's width, clamps to it and ellipsises the rest.
+        .w_full()
+        .min_w_0()
+        .truncate()
         .min_h(px(44.))
         .p_3()
         .rounded(px(CARD_RADIUS))
