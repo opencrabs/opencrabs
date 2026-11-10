@@ -1459,9 +1459,7 @@ pub fn row(
         Some(title) => rail::chat_name(Some(title)),
         None => "(untitled)".to_string(),
     };
-    let mark = stored
-        .filter(|_| !indented)
-        .and_then(rail::platform_of)
+    let mark = rail::platform_of(stored.filter(|_| !indented))
         .and_then(|platform| platform_icons::platform_icon(platform, 1.0));
     let title_text = div()
         // A closed topic reads dimmed: still there, no longer taking work.
