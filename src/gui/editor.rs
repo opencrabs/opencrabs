@@ -28,7 +28,7 @@ use gpui::{
     Element, ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
     Focusable, Font, GlobalElementId, ImageFormat, KeyBinding, LayoutId, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, PathPromptOptions, Pixels, Point,
-    SharedString, Style, TextAlign, TextRun, UTF16Selection, Window, WrappedLine,
+    ScrollHandle, SharedString, Style, TextAlign, TextRun, UTF16Selection, Window, WrappedLine,
     actions, div, fill, img, point, prelude::*, px, relative, rgb, rgba, size,
 };
 
@@ -331,7 +331,23 @@ pub struct Editor {
     notice_generation: u64,
     /// Last shaped draft, reused while its key holds still (#2688).
     shaped_draft: Option<ShapedDraft>,
+    /// The box's own scroll position, so a draft taller than
+    /// `COMPOSER_MAX_ROWS` moves under the field instead of painting over the
+    /// pane below it (#2773).
+    scroll: ScrollHandle,
+    /// Where the caret wants the box scrolled, decided during prepaint and
+    /// applied on the next frame. `None` means "leave the box where the user
+    /// put it": this is how a wheel scroll is not yanked back by a caret blink.
+    reveal: Option<Pixels>,
+    /// (cursor offset, content length) the last reveal was computed for, so a
+    /// repaint that moved neither leaves the scroll position alone.
+    reveal_key: (usize, usize),
 }
+
+/// Rows the composer shows before it scrolls instead of growing. Ten rows is
+/// about a third of a laptop window: enough to read a paragraph back, never
+/// enough to cover the conversation behind it (#2773).
+const COMPOSER_MAX_ROWS: usize = 10;
 
 /// One transient line inside the composer (#2587). The terminal keeps the same
 /// notice on the input border for two seconds, so the GUI says it where the
@@ -396,6 +412,9 @@ impl Editor {
             notice: None,
             notice_generation: 0,
             shaped_draft: None,
+            scroll: ScrollHandle::new(),
+            reveal: None,
+            reveal_key: (0, 0),
         }
     }
 
@@ -1800,6 +1819,27 @@ impl Element for EditorElement {
 
         let layout: Vec<WrappedLine> = rows.iter().map(|row| row.line.clone()).collect();
         let tops: Vec<(Pixels, Pixels)> = rows.iter().map(|row| (row.top, row.height)).collect();
+        // Where the caret sits inside the draft, and where the box is scrolled
+        // to right now. A caret that wandered out of a box capped at
+        // `COMPOSER_MAX_ROWS` asks for a scroll; a frame that moved neither the
+        // caret nor the draft asks for nothing, so a wheel scroll survives the
+        // caret's next blink (#2773).
+        let caret_top = rows
+            .iter()
+            .find_map(|row| row.cursor.map(|caret| row.top + caret.y));
+        let (current_scroll, key) = {
+            let input = self.input.read(cx);
+            (-input.scroll.offset().y, (cursor, content.len()))
+        };
+        let reveal = (key != self.input.read(cx).reveal_key).then(|| {
+            reveal_scroll(
+                top,
+                line_height * COMPOSER_MAX_ROWS as f32,
+                caret_top,
+                line_height,
+                current_scroll,
+            )
+        });
         self.input.update(cx, |input, cx| {
             let resized = input.wrap_width != wrap_width;
             input.wrap_width = wrap_width;
@@ -1807,6 +1847,10 @@ impl Element for EditorElement {
             input.last_tops = tops;
             input.last_bounds = Some(bounds);
             input.last_line_height = line_height;
+            if let Some(target) = reveal {
+                input.reveal = Some(target);
+                input.reveal_key = key;
+            }
             // Height is measured before bounds are known, so the width that
             // just became real only takes effect on the next frame. Re-render
             // once when it changes; two frames later the width is stable.
@@ -1882,6 +1926,15 @@ impl Render for Editor {
             self.focus_pending = false;
             window.focus(&self.focus_handle);
         }
+        // The box is capped at `COMPOSER_MAX_ROWS`, so a caret below the fold
+        // asked prepaint for a scroll. Applying it here, where the handle
+        // lives, keeps the height question and the scroll question on the
+        // frames that own them (#2773).
+        if let Some(target) = self.reveal.take()
+            && -self.scroll.offset().y != target
+        {
+            self.scroll.set_offset(point(Pixels::ZERO, -target));
+        }
         // Chips above the text, the paperclip beside it: the input stays the
         // biggest thing in the box and the attachment row never pushes the
         // caret around.
@@ -1909,6 +1962,13 @@ impl Render for Editor {
                         .flex_1()
                         .min_w_0()
                         .pl_1()
+                        // A draft taller than the box scrolls inside it. Without
+                        // the cap the field grew with every line and painted
+                        // over the pane below, the overlap the owner saw
+                        // (#2773).
+                        .max_h(window.line_height() * COMPOSER_MAX_ROWS as f32)
+                        .overflow_y_scroll()
+                        .track_scroll(&self.scroll)
                         .child(EditorElement { input: cx.entity() }),
                 )
                 .child(paperclip(cx)),
@@ -2206,6 +2266,32 @@ fn shaped_rows(lines: Option<&Vec<WrappedLine>>, display: &str) -> usize {
         })
         .unwrap_or_else(|| display.split('\n').count())
         .max(1)
+}
+
+/// Where the box scrolls so the caret stays visible. `total` is the height of
+/// the whole draft, `view` the height of the capped box, `caret_top` the
+/// caret's own offset inside the draft. A draft that fits never scrolls at all,
+/// which is what keeps a short field pinned to its top edge (#2773).
+fn reveal_scroll(
+    total: Pixels,
+    view: Pixels,
+    caret_top: Option<Pixels>,
+    line_height: Pixels,
+    current: Pixels,
+) -> Pixels {
+    let max = (total - view).max(Pixels::ZERO);
+    if max <= Pixels::ZERO {
+        return Pixels::ZERO;
+    }
+    let mut offset = current.max(Pixels::ZERO).min(max);
+    if let Some(caret) = caret_top {
+        if caret < offset {
+            offset = caret;
+        } else if caret + line_height > offset + view {
+            offset = caret + line_height - view;
+        }
+    }
+    offset.max(Pixels::ZERO).min(max)
 }
 
 /// Visual rows the text occupies at `wrap_width`.
@@ -2525,6 +2611,55 @@ mod tests {
         assert_eq!(super::shaped_rows(None, ""), 1);
         // A trailing newline is a real empty row the caret can sit on.
         assert_eq!(super::shaped_rows(None, "a\n"), 2);
+    }
+
+    /// The box caps its height and scrolls inside itself. Without the cap the
+    /// field grew with the draft and painted over the pane below it, which is
+    /// the overlap the owner reported on a long paste (#2773).
+    #[test]
+    fn composer_caps_its_height_and_scrolls_inside_the_box() {
+        let src = include_str!("editor.rs");
+        // Split so this assertion cannot match its own literal.
+        let cap = concat!(
+            ".max_h(window.line_height() * ",
+            "COMPOSER_MAX_ROWS as f32)"
+        );
+        let scroll = concat!(
+            ".overflow_y_scroll()",
+            "\n                        .track_scroll(&"
+        );
+        assert!(src.contains(cap), "the composer must cap its height");
+        assert!(
+            src.contains(scroll),
+            "the composer must scroll inside itself"
+        );
+    }
+
+    /// A draft that fits is never scrolled; one that overflows follows the
+    /// caret, and never scrolls past its own end.
+    #[test]
+    fn reveal_scroll_keeps_the_caret_in_the_capped_box() {
+        let line = px(22.);
+        // Short draft: the box stays at its top edge.
+        assert_eq!(
+            super::reveal_scroll(px(44.), px(220.), Some(px(0.)), line, px(0.)),
+            px(0.)
+        );
+        // Caret below the fold: scroll just enough to show it.
+        assert_eq!(
+            super::reveal_scroll(px(440.), px(220.), Some(px(418.)), line, px(0.)),
+            px(220.)
+        );
+        // Caret above the fold: pull the box up to it.
+        assert_eq!(
+            super::reveal_scroll(px(440.), px(220.), Some(px(22.)), line, px(198.)),
+            px(22.)
+        );
+        // Never past the end of the draft.
+        assert_eq!(
+            super::reveal_scroll(px(440.), px(220.), None, line, px(999.)),
+            px(220.)
+        );
     }
 
     #[test]
