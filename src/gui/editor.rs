@@ -608,6 +608,10 @@ impl Editor {
                 crab: Some(bytes),
             })
             .collect();
+        // The name that was typed answers first: `:yes:` listed `eyes` above
+        // `yes`, because both carry the query and the pack is ordered by file
+        // name. The sort is stable, so the rest keep their order.
+        rows.sort_by_key(|row| row.shortcode != query);
         let room = Self::EMOJI_ROWS.saturating_sub(rows.len());
         if room > 0 {
             rows.extend(
