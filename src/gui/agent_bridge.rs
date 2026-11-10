@@ -364,6 +364,87 @@ static SURFACE_RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync
 static SURFACE_STACK: std::sync::OnceLock<opencrabs::services::surface::SurfaceServices> =
     std::sync::OnceLock::new();
 
+/// The window must exist before the GUI claims the profile (#2784). Claiming
+/// preempts (SIGTERMs) the running TUI/daemon, so doing it before the window
+/// opened meant a window that failed to open left the user with no surface at
+/// all. Bootstrap and window-open race: whichever finishes last releases the
+/// claim, exactly once.
+static SURFACE_GATE: SurfaceGate<(Config, opencrabs::services::surface::SurfaceDeps)> =
+    SurfaceGate::new();
+
+/// Coordination for the deferred surface claim. Generic over the payload so the
+/// ordering invariant is unit-testable without booting real channels.
+struct SurfaceGate<T> {
+    window_up: std::sync::atomic::AtomicBool,
+    pending: std::sync::Mutex<Option<T>>,
+}
+
+impl<T> SurfaceGate<T> {
+    const fn new() -> Self {
+        Self {
+            window_up: std::sync::atomic::AtomicBool::new(false),
+            pending: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Bootstrap finished: hold the deps until the window is up.
+    fn set_pending(&self, deps: T) {
+        *self.pending.lock().unwrap() = Some(deps);
+    }
+
+    /// The window opened successfully.
+    fn mark_window_up(&self) {
+        self.window_up.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Take the deps only once the window is up. The `.take()` under the lock
+    /// means exactly one caller ever receives them, whichever side wins the race.
+    fn take_if_ready(&self) -> Option<T> {
+        if !self.window_up.load(std::sync::atomic::Ordering::SeqCst) {
+            return None;
+        }
+        self.pending.lock().unwrap().take()
+    }
+}
+
+/// Boot the surface (claim the profile, serve channels) once the window is up
+/// AND bootstrap has produced the deps. Called from both sides of the race.
+fn maybe_boot_surface() {
+    // The deps only exist once build() has run on SURFACE_RUNTIME, so if there
+    // is something to take, the runtime is already initialised.
+    let Some(runtime) = SURFACE_RUNTIME.get() else {
+        return;
+    };
+    let Some((config, deps)) = SURFACE_GATE.take_if_ready() else {
+        return;
+    };
+    runtime.spawn(async move {
+        match opencrabs::services::surface::boot_surface(&config, deps).await {
+            Ok(services) => {
+                crate::logging::info(&format!(
+                    "surface services ready: cron={} a2a={} preempted={}",
+                    services.cron_spawned,
+                    services.a2a_ready,
+                    services.preempted.len()
+                ));
+                let _ = SURFACE_STACK.set(services);
+            }
+            Err(e) => {
+                // The window keeps working; only the background half is off.
+                crate::logging::error(&format!("surface services failed: {e:#}"));
+            }
+        }
+    });
+}
+
+/// Called by the window once `cx.open_window` has succeeded (#2784). Releases
+/// the surface claim that bootstrap deferred until the window exists, so a
+/// failed window never takes the running TUI/daemon down with it.
+pub fn window_is_up() {
+    SURFACE_GATE.mark_window_up();
+    maybe_boot_surface();
+}
+
 /// One-shot holder so the service (and its tokio-internal pieces) survive
 /// the bootstrap thread. `OnceLock` semantics, no unsafe.
 struct OnceBridge(std::sync::OnceLock<AgentBridge>);
@@ -480,28 +561,17 @@ async fn build(config: Config, sink: EventSink) -> Result<AgentBridge, String> {
         // now, the same claim the TUI makes.
         headless: false,
     };
-    // Detached on purpose: connecting the channels can take a few seconds and a
-    // slow gateway waits up to 30s, and the window must not sit on a boot
-    // screen for that. Services come up behind an already usable chat.
+    // Claim the profile only once the window exists (#2784). Claiming preempts
+    // the running TUI/daemon, so doing it here, before cx.open_window has run,
+    // meant a window that failed to open killed the user's running surface and
+    // left nothing behind. Stash the deps and let the window-open side release
+    // the claim; whichever of the two finishes last boots the surface, once.
+    // Still detached: connecting channels can take a few seconds and a slow
+    // gateway waits up to 30s, so services come up behind an already usable chat.
     {
         let boot_config = config.clone();
-        tokio::spawn(async move {
-            match opencrabs::services::surface::boot_surface(&boot_config, deps).await {
-                Ok(services) => {
-                    crate::logging::info(&format!(
-                        "surface services ready: cron={} a2a={} preempted={}",
-                        services.cron_spawned,
-                        services.a2a_ready,
-                        services.preempted.len()
-                    ));
-                    let _ = SURFACE_STACK.set(services);
-                }
-                Err(e) => {
-                    // The window keeps working; only the background half is off.
-                    crate::logging::error(&format!("surface services failed: {e:#}"));
-                }
-            }
-        });
+        SURFACE_GATE.set_pending((boot_config, deps));
+        maybe_boot_surface();
     }
 
     let service = AgentService::new(provider, context.clone(), &config)
@@ -2040,6 +2110,33 @@ async fn run_text_command(
 mod tests {
     use super::*;
     use opencrabs::brain::tools::suggest_options::SuggestionStyle;
+
+    /// The surface claim must wait for the window and fire exactly once,
+    /// whichever side of the race finishes first (#2784). A claim before the
+    /// window is up would preempt the running TUI/daemon, and a failed window
+    /// would then leave the user with no surface at all.
+    #[test]
+    fn surface_claim_waits_for_the_window_and_fires_once() {
+        // Bootstrap first: deps ready, window still down -> no claim.
+        let gate: SurfaceGate<u32> = SurfaceGate::new();
+        gate.set_pending(1);
+        assert!(
+            gate.take_if_ready().is_none(),
+            "must not claim the profile before the window is up"
+        );
+        // Window opens -> the claim fires exactly once.
+        gate.mark_window_up();
+        assert_eq!(gate.take_if_ready(), Some(1), "the window releases the claim");
+        assert!(gate.take_if_ready().is_none(), "must not claim twice");
+
+        // Window first: window up, deps not built yet -> no claim.
+        let gate2: SurfaceGate<u32> = SurfaceGate::new();
+        gate2.mark_window_up();
+        assert!(gate2.take_if_ready().is_none(), "no deps yet, nothing to claim");
+        gate2.set_pending(2);
+        assert_eq!(gate2.take_if_ready(), Some(2), "bootstrap releases the claim");
+        assert!(gate2.take_if_ready().is_none(), "must not claim twice");
+    }
 
     /// Up brings the WHOLE queue into the composer in one take, oldest first
     /// (#2696), and the take empties the queue: a recall the user abandons must

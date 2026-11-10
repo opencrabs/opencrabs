@@ -13691,6 +13691,10 @@ fn main() {
             },
         )
         .expect("failed to open the gpui window");
+        // The window exists: only now may the GUI claim the profile and preempt
+        // the running TUI/daemon. Claiming before open_window meant a window
+        // that failed to open left the user with no surface at all (#2784).
+        agent_bridge::window_is_up();
         cx.activate(true);
     });
 }
