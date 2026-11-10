@@ -9,7 +9,9 @@
 //! brand mark in `icon.rs`: the binary carries its icons and never reads the
 //! checkout it was built from.
 
-use gpui::{AnyElement, Image, ImageFormat, IntoElement, ObjectFit, Styled, img, rems};
+use gpui::{
+    AnyElement, Image, ImageFormat, IntoElement, ObjectFit, Styled, StyledImage, img, rems,
+};
 use std::sync::Arc;
 
 /// The literal every mark carries where the brand colour goes. One asset can
