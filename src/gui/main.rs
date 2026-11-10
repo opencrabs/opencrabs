@@ -931,6 +931,11 @@ struct Dashboard {
     /// Half-typed text keyed by the conversation it was typed in. Switching
     /// away and back returns the same draft instead of throwing it away.
     drafts: composer::DraftStore,
+    /// Poll ticks counted since the last repaint that a live turn asked for.
+    /// The spinner and the clock are the only things moving in that branch, and
+    /// rebuilding every pane's transcript 20 times a second to advance them is
+    /// what made a split screen crawl (#2688).
+    anim_tick: u64,
     /// Agent-side state (task 5). Events from the bridge's bootstrap and
     /// turn threads land in the receiver; the poll tick drains it.
     agent_rx: std::sync::mpsc::Receiver<agent_bridge::TurnEvent>,
@@ -1455,6 +1460,18 @@ fn wheel_dy(delta: &ScrollDelta) -> f32 {
         ScrollDelta::Pixels(d) => f32::from(d.y),
         ScrollDelta::Lines(d) => d.y * WHEEL_LINE_PX,
     }
+}
+
+/// Poll ticks between repaints a live turn asks for. The poll runs at 20 Hz;
+/// the only things moving in that branch are a spinner and a clock, and every
+/// one of those repaints walks every pane's transcript (#2688). Five frames a
+/// second keeps the animation alive at a quarter of the rebuilds.
+const BUSY_REPAINT_TICKS: u64 = 4;
+
+/// True on the poll tick that paints a live turn's animation. Pure, so the
+/// cadence stays a rule rather than an accident of where the counter is bumped.
+fn busy_repaint_due(tick: u64) -> bool {
+    tick % BUSY_REPAINT_TICKS == 0
 }
 
 impl Dashboard {
@@ -5624,7 +5641,14 @@ impl Dashboard {
                 // window is open, and stop the moment it closes.
                 || flash_active
             {
-                cx.notify();
+                // Only the spinner, the clock and the flash move in this
+                // branch, so they repaint on a slower cadence than the poll
+                // itself. At 20 Hz this walked every pane's transcript five
+                // times as often as the animation needed (#2688).
+                self.anim_tick = self.anim_tick.wrapping_add(1);
+                if busy_repaint_due(self.anim_tick) {
+                    cx.notify();
+                }
             }
             return;
         }
@@ -13575,6 +13599,7 @@ fn main() {
                         editor,
                         history: dashboard_history,
                         drafts: composer::DraftStore::new(),
+                        anim_tick: 0,
                         agent_rx,
                         sink: agent_sink,
                         agent_ready: false,
@@ -17154,6 +17179,19 @@ fn cd_entries_for(dir: &std::path::Path, show_hidden: bool) -> Vec<std::path::Pa
 #[cfg(test)]
 mod tests {
     use super::{CHAT_MEASURE_PX, cd_entries_for, pick_initial_session, remember_open_session};
+
+    /// A live turn repaints on every fourth poll tick, not on every one. The
+    /// spinner and the clock are the only things moving in that branch, and at
+    /// 20 Hz each repaint rebuilt every pane's transcript (#2688).
+    #[test]
+    fn a_live_turn_repaints_on_every_fourth_poll_tick() {
+        assert!(super::busy_repaint_due(4));
+        assert!(super::busy_repaint_due(0));
+        assert!(!super::busy_repaint_due(1));
+        assert!(!super::busy_repaint_due(2));
+        assert!(!super::busy_repaint_due(3));
+        assert!(super::busy_repaint_due(8));
+    }
 
     /// The conversation caps at a readable measure in a single pane, and any
     /// pane narrower than the cap draws at its own width (#2586).
