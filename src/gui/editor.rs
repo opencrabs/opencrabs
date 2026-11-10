@@ -21,6 +21,7 @@ use opencrabs::ui_core::input_history::{
 use opencrabs::ui_core::palette::{next_word_end, previous_word_start};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
@@ -301,7 +302,10 @@ pub struct Editor {
     selected_range: Range<usize>,
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
-    last_layout: Vec<WrappedLine>,
+    /// The shaped lines the last frame painted, shared with the prepaint
+    /// state instead of copied: a deep clone of every glyph is the most
+    /// expensive thing a frame could do twice (#2688).
+    last_layout: Arc<Vec<WrappedLine>>,
     /// (top, height) of every logical line once wrapped, in field-local
     /// pixels. Mouse mapping needs the row's own origin, not the field's.
     last_tops: Vec<(Pixels, Pixels)>,
@@ -399,7 +403,7 @@ impl Editor {
             selected_range: 0..0,
             selection_reversed: false,
             marked_range: None,
-            last_layout: Vec::new(),
+            last_layout: Arc::new(Vec::new()),
             last_tops: Vec::new(),
             last_bounds: None,
             last_line_height: px(20.0),
@@ -1572,7 +1576,10 @@ struct RowPaint {
 /// frame: the cache below then saved nothing on the frames it was built for.
 struct ShapedDraft {
     key: (String, Pixels, Pixels, Font, [f32; 4]),
-    lines: Option<Vec<WrappedLine>>,
+    /// One `Arc` for the whole shaping, so a hit is a pointer bump and both
+    /// the prepaint state and `last_layout` can hold the same lines. Cloning
+    /// the `Vec` copied every glyph of the draft, twice per frame (#2688).
+    lines: Option<Arc<Vec<WrappedLine>>>,
     rows: usize,
 }
 
@@ -1593,8 +1600,9 @@ impl IntoElement for EditorElement {
 struct EditorPrepaint {
     rows: Vec<RowPaint>,
     /// The shaped lines the rows index into, held once instead of cloned per
-    /// row and per frame (#2688).
-    layout: Vec<WrappedLine>,
+    /// row and per frame (#2688), and shared with `last_layout` rather than
+    /// deep-copied into it (#2688).
+    layout: Arc<Vec<WrappedLine>>,
 }
 
 impl Element for EditorElement {
@@ -1657,8 +1665,8 @@ impl Element for EditorElement {
                 // the same draft a second time (#2688). Keeping the lines hands
                 // prepaint the work it was about to repeat, so that frame pays
                 // one shaping instead of two.
-                let lines = shape_draft(&content, wrap_width, window);
-                let rows = shaped_rows(lines.as_ref(), &content);
+                let lines = shape_draft(&content, wrap_width, window).map(Arc::new);
+                let rows = shaped_rows(lines.as_deref(), &content);
                 // The cache holds the shaping as an `Option` because shaping
                 // can fail; the lines move in whole, so the miss path costs one
                 // shaping and prepaint finds it waiting.
@@ -1727,7 +1735,11 @@ impl Element for EditorElement {
         // width the parent handed us, which is what makes a resize reflow.
         let wrap_width = bounds.size.width;
 
-        let display = if empty { placeholder } else { content.clone() };
+        // The draft is cloned once, when it is painted, not twice: the copy
+        // the shape key needed is the copy the paint loop already holds
+        // (#2688). Only its length is needed after this point.
+        let content_len = content.len();
+        let display = if empty { placeholder } else { content };
         let run_color = if empty {
             hsla_from(palette::current().text_faint)
         } else {
@@ -1774,10 +1786,11 @@ impl Element for EditorElement {
                         None,
                     )
                     .ok()
-                    // shape_text hands back a SmallVec; settle it into the
-                    // plain Vec the cache stores so both match arms agree.
-                    .map(|lines| lines.into_vec());
-                let rows = shaped_rows(lines.as_ref(), &display);
+                    // shape_text hands back a SmallVec; settle it into one
+                    // shared Vec so the cache, the prepaint state and
+                    // `last_layout` all point at the same glyphs (#2688).
+                    .map(|lines| Arc::new(lines.into_vec()));
+                let rows = shaped_rows(lines.as_deref(), &display);
                 self.input.update(cx, |input, _| {
                     input.shaped_draft = Some(ShapedDraft {
                         key,
@@ -1847,7 +1860,7 @@ impl Element for EditorElement {
 
         // The shaped lines already hold everything a row paints, so the layout
         // is taken from them once instead of rebuilt from copies (#2688).
-        let layout: Vec<WrappedLine> = shaped.unwrap_or_default();
+        let layout: Arc<Vec<WrappedLine>> = shaped.unwrap_or_else(|| Arc::new(Vec::new()));
         let tops: Vec<(Pixels, Pixels)> = rows.iter().map(|row| (row.top, row.height)).collect();
         // Where the caret sits inside the draft, and where the box is scrolled
         // to right now. A caret that wandered out of a box capped at
@@ -1859,7 +1872,7 @@ impl Element for EditorElement {
             .find_map(|row| row.cursor.map(|caret| row.top + caret.y));
         let (current_scroll, key) = {
             let input = self.input.read(cx);
-            (-input.scroll.offset().y, (cursor, content.len()))
+            (-input.scroll.offset().y, (cursor, content_len))
         };
         let reveal = (key != self.input.read(cx).reveal_key).then(|| {
             reveal_scroll(
@@ -1873,7 +1886,7 @@ impl Element for EditorElement {
         self.input.update(cx, |input, cx| {
             let resized = input.wrap_width != wrap_width;
             input.wrap_width = wrap_width;
-            input.last_layout = layout.clone();
+            input.last_layout = Arc::clone(&layout);
             input.last_tops = tops;
             input.last_bounds = Some(bounds);
             input.last_line_height = line_height;
@@ -2660,6 +2673,28 @@ mod tests {
         assert!(
             layout.contains("input.shaped_draft = Some(ShapedDraft { key, lines, rows })"),
             "the miss path keeps the lines it shaped for prepaint"
+        );
+    }
+
+    /// The shaped lines are one allocation shared by the cache, the prepaint
+    /// state and `last_layout`. Caching the shaping but deep-copying it into
+    /// `last_layout` and back out of the cache still copied every glyph of the
+    /// draft twice per frame, which is why a long draft stayed heavy after the
+    /// shape call itself was cached (#2688).
+    #[test]
+    fn composer_shares_its_shaped_lines_between_frames() {
+        let src = include_str!("editor.rs");
+        assert!(
+            src.contains("lines: Option<Arc<Vec<WrappedLine>>>"),
+            "the cache holds one shaping the frame can share"
+        );
+        assert!(
+            src.contains("input.last_layout = Arc::clone(&layout)"),
+            "the frame's layout is shared with the field, not copied into it"
+        );
+        assert!(
+            src.contains("let layout: Arc<Vec<WrappedLine>>"),
+            "prepaint hands its layout to paint instead of rebuilding it"
         );
     }
 
