@@ -118,6 +118,22 @@ SYSTEM_DLLS = {
     # dynamic-CRT, which is a size/style question, not a crash.
     "ucrtbase.dll",
     "api-ms-win-crt-runtime-l1-1-0.dll",
+    # Imports of the desktop client. gpui draws with Direct2D/Direct3D over a
+    # DirectComposition surface, so its import table asks for the graphics
+    # stack the compositor itself runs on. Every one of these is part of
+    # Windows, not a redistributable: leaving them out reported a clean
+    # opencrabs-gui.exe as broken and failed the Windows leg of the
+    # pre-release build (run 42354135362).
+    "d3d11.dll",  # Direct3D 11, Windows 7+
+    "dcomp.dll",  # DirectComposition, Windows 8+
+    "dwmapi.dll",  # Desktop Window Manager, Windows Vista+
+    "dwrite.dll",  # DirectWrite, Windows 7+
+    "dxgi.dll",  # DirectX Graphics Infrastructure, Windows Vista+
+    "imm32.dll",  # Input Method Manager, shipped since Windows XP
+    # International Components for Unicode, in the OS since Windows 10 1703
+    # (split icuuc/icuin; combined into icu.dll from 1903). The gate's own
+    # premise is Windows 10/11, which is the range where this DLL is present.
+    "icuuc.dll",
 }
 
 SYSTEM_PREFIXES = ("api-ms-win-", "ext-ms-win-")
