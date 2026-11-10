@@ -1547,7 +1547,10 @@ impl EventEmitter<EditorEvent> for Editor {}
 /// One logical line, already shaped and wrapped to the field width, plus the
 /// y offset it paints at and the quads that belong to it.
 struct RowPaint {
-    line: WrappedLine,
+    /// Which shaped line this row paints. The lines themselves live once, in
+    /// the prepaint state, so a frame no longer clones the whole layout per
+    /// row and then again per frame (#2688).
+    line_ix: usize,
     /// Distance from the top of the field to this line's first visual row.
     top: Pixels,
     /// Total height of this line, every wrapped row counted.
@@ -1589,6 +1592,9 @@ impl IntoElement for EditorElement {
 
 struct EditorPrepaint {
     rows: Vec<RowPaint>,
+    /// The shaped lines the rows index into, held once instead of cloned per
+    /// row and per frame (#2688).
+    layout: Vec<WrappedLine>,
 }
 
 impl Element for EditorElement {
@@ -1617,33 +1623,49 @@ impl Element for EditorElement {
         // below is the one prepaint writes, so a frame that changed nothing
         // answers in one comparison. An empty field has no content key (its
         // cache holds the placeholder), and costs nothing to fall back on.
-        let (content, wrap_width, cached_rows) = {
+        let (content, wrap_width, cached_rows, key) = {
             let input = self.input.read(cx);
             let wrap_width = input.wrap_width;
-            let cached = (!input.content.is_empty() && wrap_width > Pixels::ZERO)
-                .then(|| {
-                    let style = window.text_style();
-                    let font_size = style.font_size.to_pixels(window.rem_size());
-                    let color = style.color;
-                    let key = (
-                        input.content.clone(),
-                        font_size,
-                        wrap_width,
-                        style.font(),
-                        [color.h, color.s, color.l, color.a],
-                    );
-                    input
-                        .shaped_draft
-                        .as_ref()
-                        .filter(|cache| cache.key == key)
-                        .map(|cache| cache.rows)
-                })
-                .flatten();
-            (input.content.clone(), wrap_width, cached)
+            let key = (!input.content.is_empty() && wrap_width > Pixels::ZERO).then(|| {
+                let style = window.text_style();
+                let font_size = style.font_size.to_pixels(window.rem_size());
+                let color = style.color;
+                (
+                    input.content.clone(),
+                    font_size,
+                    wrap_width,
+                    style.font(),
+                    [color.h, color.s, color.l, color.a],
+                )
+            });
+            let cached = key.as_ref().and_then(|key| {
+                input
+                    .shaped_draft
+                    .as_ref()
+                    .filter(|cache| &cache.key == key)
+                    .map(|cache| cache.rows)
+            });
+            (input.content.clone(), wrap_width, cached, key)
         };
-        let rows = match cached_rows {
-            Some(rows) => rows.max(1),
-            None => wrapped_row_count(&content, wrap_width, window),
+        let rows = match (cached_rows, key) {
+            (Some(rows), _) => rows.max(1),
+            (None, None) => wrapped_row_count(&content, wrap_width, window),
+            (None, Some(key)) => {
+                // A keystroke changes the content, so the cache misses on
+                // exactly the frame that has to feel instant. Shaping here just
+                // to count rows used to be thrown away and prepaint then shaped
+                // the same draft a second time (#2688). Keeping the lines hands
+                // prepaint the work it was about to repeat, so that frame pays
+                // one shaping instead of two.
+                let lines = shape_draft(&content, wrap_width, window);
+                let rows = shaped_rows(lines.as_ref(), &content);
+                if let Some(lines) = lines {
+                    self.input.update(cx, |input, _| {
+                        input.shaped_draft = Some(ShapedDraft { key, lines, rows });
+                    });
+                }
+                rows.max(1)
+            }
         };
         let mut style = Style::default();
         style.size.width = relative(1.).into();
@@ -1767,13 +1789,16 @@ impl Element for EditorElement {
         let mut rows = Vec::new();
         let mut line_start = 0usize;
         let mut top = Pixels::ZERO;
+        // A line the shape pass did not return still paints its own height, so
+        // the field never collapses; the line itself is borrowed instead of
+        // cloned, and each row records only which line it paints (#2688).
+        let blank = WrappedLine::default();
         for (index, text) in display.split('\n').enumerate() {
             let line_end = line_start + text.len();
             let line = shaped
                 .as_ref()
                 .and_then(|lines| lines.get(index))
-                .cloned()
-                .unwrap_or_default();
+                .unwrap_or(&blank);
             let height = line_height * (line.wrap_boundaries().len() + 1) as f32;
 
             // A selection only maps onto a real line when the field has
@@ -1788,7 +1813,7 @@ impl Element for EditorElement {
             {
                 let sel_start = selected.start.clamp(line_start, line_end) - line_start;
                 let sel_end = selected.end.clamp(line_start, line_end) - line_start;
-                for (seg_start, seg_end) in visual_segments(&line, text.len()) {
+                for (seg_start, seg_end) in visual_segments(line, text.len()) {
                     let lo = sel_start.max(seg_start);
                     let hi = sel_end.min(seg_end);
                     if lo >= hi {
@@ -1807,7 +1832,7 @@ impl Element for EditorElement {
             }
 
             rows.push(RowPaint {
-                line,
+                line_ix: index,
                 top,
                 height,
                 selection,
@@ -1817,7 +1842,9 @@ impl Element for EditorElement {
             line_start = line_end + 1; // past the '\n'
         }
 
-        let layout: Vec<WrappedLine> = rows.iter().map(|row| row.line.clone()).collect();
+        // The shaped lines already hold everything a row paints, so the layout
+        // is taken from them once instead of rebuilt from copies (#2688).
+        let layout: Vec<WrappedLine> = shaped.unwrap_or_default();
         let tops: Vec<(Pixels, Pixels)> = rows.iter().map(|row| (row.top, row.height)).collect();
         // Where the caret sits inside the draft, and where the box is scrolled
         // to right now. A caret that wandered out of a box capped at
@@ -1843,7 +1870,7 @@ impl Element for EditorElement {
         self.input.update(cx, |input, cx| {
             let resized = input.wrap_width != wrap_width;
             input.wrap_width = wrap_width;
-            input.last_layout = layout;
+            input.last_layout = layout.clone();
             input.last_tops = tops;
             input.last_bounds = Some(bounds);
             input.last_line_height = line_height;
@@ -1859,7 +1886,7 @@ impl Element for EditorElement {
             }
         });
 
-        EditorPrepaint { rows }
+        EditorPrepaint { rows, layout }
     }
 
     fn paint(
@@ -1882,6 +1909,9 @@ impl Element for EditorElement {
         let focused = focus_handle.is_focused(window);
         let rows = std::mem::take(&mut prepaint.rows);
         for row in rows.iter() {
+            let Some(line) = prepaint.layout.get(row.line_ix) else {
+                continue;
+            };
             let y = bounds.top() + row.top;
             for (from, to) in &row.selection {
                 window.paint_quad(fill(
@@ -1895,16 +1925,15 @@ impl Element for EditorElement {
                     rgba(0x3311ff30),
                 ));
             }
-            row.line
-                .paint(
-                    bounds.origin + point(px(0.), row.top),
-                    line_height,
-                    TextAlign::Left,
-                    Some(bounds),
-                    window,
-                    cx,
-                )
-                .unwrap();
+            line.paint(
+                bounds.origin + point(px(0.), row.top),
+                line_height,
+                TextAlign::Left,
+                Some(bounds),
+                window,
+                cx,
+            )
+            .unwrap();
             if focused && let Some(caret) = row.cursor {
                 window.paint_quad(fill(
                     Bounds::new(
@@ -2307,10 +2336,18 @@ fn reveal_scroll(
 /// honest fallback; the first prepaint stores the real width and asks for
 /// one more frame.
 fn wrapped_row_count(content: &str, wrap_width: Pixels, window: &Window) -> usize {
-    let logical = content.split('\n').count().max(1);
     if wrap_width <= Pixels::ZERO {
-        return logical;
+        return content.split('\n').count().max(1);
     }
+    shaped_rows(shape_draft(content, wrap_width, window).as_ref(), content)
+}
+
+/// Shape the draft with the same inputs the field paints with: the style the
+/// window hands down, the width it was given, no forced line limit. The caller
+/// decides whether the lines are worth keeping. Both the height question and
+/// the paint question ask this, so the shape call itself lives in one place
+/// (#2688).
+fn shape_draft(content: &str, wrap_width: Pixels, window: &Window) -> Option<Vec<WrappedLine>> {
     let style = window.text_style();
     let font_size = style.font_size.to_pixels(window.rem_size());
     let run = TextRun {
@@ -2330,14 +2367,8 @@ fn wrapped_row_count(content: &str, wrap_width: Pixels, window: &Window) -> usiz
             Some(wrap_width),
             None,
         )
-        .map(|lines| {
-            lines
-                .iter()
-                .map(|line| line.wrap_boundaries().len() + 1)
-                .sum::<usize>()
-        })
-        .unwrap_or(logical)
-        .max(1)
+        .ok()
+        .map(|lines| lines.into_vec())
 }
 
 /// Byte ranges, relative to the logical line, that each visual row covers
@@ -2604,6 +2635,28 @@ mod tests {
         assert!(
             layout.contains("wrapped_row_count(&content, wrap_width, window)"),
             "the uncached measure survives only as the miss path"
+        );
+    }
+
+    /// The miss path is the keystroke path, and it used to shape the draft to
+    /// count rows and then throw the shaping away, leaving prepaint to shape
+    /// the same draft again. Keeping the lines is what makes a typed character
+    /// cost one shaping instead of two (#2688).
+    #[test]
+    fn composer_layout_hands_its_shaping_to_prepaint() {
+        let src = include_str!("editor.rs");
+        let layout = src
+            .split("fn request_layout(")
+            .nth(1)
+            .and_then(|rest| rest.split("fn prepaint(").next())
+            .expect("editor request layout");
+        assert!(
+            layout.contains("shape_draft(&content, wrap_width, window)"),
+            "the miss path shapes through the shared helper"
+        );
+        assert!(
+            layout.contains("input.shaped_draft = Some(ShapedDraft { key, lines, rows })"),
+            "the miss path keeps the lines it shaped for prepaint"
         );
     }
 
