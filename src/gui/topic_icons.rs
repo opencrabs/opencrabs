@@ -640,8 +640,11 @@ mod tests {
                 continue;
             };
             let mut offset = 0;
-            let mut segments = 0;
-            for piece in pieces.iter().filter(|piece| piece.crab.is_none()) {
+            for (segments, piece) in pieces
+                .iter()
+                .filter(|piece| piece.crab.is_none())
+                .enumerate()
+            {
                 let start = if segments == 0 { 0 } else { offset + 1 };
                 assert_eq!(
                     start, piece.range.start,
