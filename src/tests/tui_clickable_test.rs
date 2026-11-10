@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::tui::app::clickable::{self, ClickTarget};
+use crate::ui_core::links::{ClickTarget, target_at_with};
 
 /// A temp dir unique per test, holding `files`, used as fake cwd or fake home.
 struct Sandbox {
@@ -41,7 +41,7 @@ impl Drop for Sandbox {
 }
 
 fn resolve(line: &str, col: usize, cwd: &Path, home: Option<&Path>) -> Option<ClickTarget> {
-    clickable::target_at_with(line, col, cwd, home)
+    target_at_with(line, col, cwd, home)
 }
 
 /// Char index of the middle of the first occurrence of `needle` in `hay`.

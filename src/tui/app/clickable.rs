@@ -10,23 +10,12 @@
 
 use std::path::Path;
 
-pub(crate) use crate::ui_core::links::ClickTarget;
+use crate::ui_core::links::ClickTarget;
 
 /// Resolve the openable token at `col`, a character index into the rendered
 /// line, against the process cwd and the user's home directory.
 pub(crate) fn target_at(line: &str, col: usize) -> Option<ClickTarget> {
     crate::ui_core::links::target_at(line, col)
-}
-
-/// Injectable-cwd/home core, so tests resolve against tempdirs instead of the
-/// real filesystem layout of whoever runs them.
-pub(crate) fn target_at_with(
-    line: &str,
-    col: usize,
-    cwd: &Path,
-    home: Option<&Path>,
-) -> Option<ClickTarget> {
-    crate::ui_core::links::target_at_with(line, col, cwd, home)
 }
 
 /// Launch the target with the system default handler, detached (#2170).
