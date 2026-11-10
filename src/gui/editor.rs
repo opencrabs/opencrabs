@@ -2474,7 +2474,7 @@ mod tests {
         message_with_markers, next_word_end, notice_expired, previous_word_start, strip_markers,
         vertical_row_target, write_clipboard_image,
     };
-    use gpui::ImageFormat;
+    use gpui::{ImageFormat, px};
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
