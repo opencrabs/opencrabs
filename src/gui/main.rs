@@ -44,6 +44,7 @@ mod models;
 mod onboard;
 mod palette;
 mod plan_strip;
+mod platform_icons;
 mod preview;
 mod rail_activity;
 mod screen_keys;
@@ -1478,13 +1479,18 @@ impl Dashboard {
     }
 
     /// Title of the conversation the chat pane is on, if the rail knows it.
-    fn session_title(&self) -> Option<&str> {
+    /// The name of the conversation on screen, as every surface prints it
+    /// (#2766). One parse lives behind this: the platform is the card's mark
+    /// and the channel key is bookkeeping, so neither belongs in a header, a
+    /// pane border or the footer identity.
+    fn session_title(&self) -> Option<String> {
         self.transcript.session.and_then(|id| {
             self.sessions
                 .items
                 .iter()
                 .find(|s| s.id == id)
                 .and_then(|s| s.title.as_deref())
+                .map(|stored| rail::chip_name(Some(stored), None))
         })
     }
 
@@ -9604,7 +9610,7 @@ impl Dashboard {
             return chat;
         }
         let title = match self.session_title() {
-            Some(title) => SharedString::from(title.to_string()),
+            Some(title) => SharedString::from(title),
             None => SharedString::from("Chat"),
         };
         // Every pane carries its own status row (#2593). Resolved once here, from
@@ -9996,10 +10002,16 @@ impl Render for Dashboard {
             if chip_children.contains(&s.id)
                 && let Some(p) = self.sessions.parents.get(&s.id)
             {
-                children_by_parent
-                    .entry(*p)
-                    .or_default()
-                    .push((s.id, s.title.clone().unwrap_or_default()));
+                children_by_parent.entry(*p).or_default().push((
+                    s.id,
+                    // A chip names its own topic, never the chat plus the
+                    // topic plus the channel key (#2766): the card above it
+                    // already says the chat.
+                    rail::chip_name(
+                        s.title.as_deref(),
+                        self.sessions.topic_titles.get(&s.id).map(String::as_str),
+                    ),
+                ));
             }
         }
         // Pinned rows first, the rest untouched: the TUI's own order.
@@ -10348,7 +10360,7 @@ impl Render for Dashboard {
             Screen::MissionControl => "OpenCrabs \u{b7} mission control".to_string(),
             Screen::Chat => format!(
                 "OpenCrabs \u{b7} {}",
-                self.session_title().unwrap_or("chat")
+                self.session_title().unwrap_or_else(|| "chat".to_string())
             ),
         };
         window.set_window_title(&label);
@@ -10613,7 +10625,8 @@ impl Render for Dashboard {
                         // name is not printed twice anywhere (#2578).
                         let identity = format!(
                             "{} · {}",
-                            self.session_title().unwrap_or("chat"),
+                            self.session_title()
+                                .unwrap_or_else(|| "chat".to_string()),
                             status_identity(
                                 &provider,
                                 &model,

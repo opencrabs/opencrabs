@@ -21,6 +21,7 @@ use opencrabs::services::message::{CompletedPlanPayload, PLAN_COMPLETED_ROLE};
 use opencrabs::ui_core::card::{CARD_RADIUS, concentric_radius, glass_fill};
 use opencrabs::ui_core::copy_select::{self, TextPoint};
 use opencrabs::ui_core::plan_history::CompletedPlanView;
+use opencrabs::ui_core::rail;
 use opencrabs::utils::is_internal_system_message;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -815,16 +816,21 @@ pub async fn load_recent(
     }
 }
 
-/// What a stored session title reads as once the channel key is off it. The
-/// key is bookkeeping (`[chat:-100:topic:42]`), not a name, and `All` labels
-/// every topic with this.
+/// What a stored session title reads as once the bookkeeping is off it. `All`
+/// labels every row with this, and the label names the conversation the row
+/// came from, never the transport (#2766): a topic reads `Memes`, and a row
+/// from the base chat reads `OpenCrabs Dev`. Before this the platform word and
+/// its key came through whole, so every divider printed `Telegram: OpenCrabs
+/// Dev / Memes [chat:-100:topic:42]` above the rows it was labelling.
 fn topic_family_label(title: &str) -> Option<String> {
     let trimmed = title.trim();
-    let base = match trimmed.rfind("[chat:") {
-        Some(i) if trimmed.ends_with(']') => trimmed[..i].trim_end(),
-        _ => trimmed,
-    };
-    (!base.is_empty()).then(|| base.to_string())
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(topic) = rail::topic_name(Some(trimmed)) {
+        return Some(topic);
+    }
+    Some(rail::chat_name(Some(trimmed)))
 }
 
 /// A model-switch receipt used to be persisted with the user role. Draw the
