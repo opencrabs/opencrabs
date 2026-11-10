@@ -11,7 +11,7 @@
 //! builds each row's handler in its own loop turn, then hands the finished
 //! rows to `rail`.
 
-use crate::{icon, palette};
+use crate::{icon, palette, platform_icons};
 use std::collections::{HashMap, HashSet};
 
 use gpui::{
@@ -28,6 +28,7 @@ use opencrabs::db::repository::session::{
 };
 use opencrabs::db::repository::session_favorites::SessionFavoritesRepository;
 use opencrabs::db::repository::{ContentSearchRow, MessageRepository, PREVIEW_CHARS};
+use opencrabs::ui_core::rail;
 
 // The menu primitives moved to `menu.rs` (#2613) so the transcript can draw
 // its own context menu without depending on the session rail. Re-exported
@@ -1449,6 +1450,20 @@ pub fn row(
         flash,
         running,
     } = flags;
+    // A channel card says the chat once: the platform prints as its mark, not
+    // as a word, and the topic segment belongs to the chip under the card, not
+    // to the card itself (#2766). A row indented under a card is a topic, so it
+    // prints its own topic name and no second mark.
+    let stored = s.title.as_deref();
+    let label = match stored {
+        Some(title) if indented => rail::chip_name(Some(title), None),
+        Some(title) => rail::chat_name(Some(title)),
+        None => "(untitled)".to_string(),
+    };
+    let mark = stored
+        .filter(|_| !indented)
+        .and_then(rail::platform_of)
+        .and_then(|platform| platform_icons::platform_icon(platform, 1.0));
     let title_text = div()
         // A closed topic reads dimmed: still there, no longer taking work.
         .text_color(rgb(if closed {
@@ -1457,10 +1472,7 @@ pub fn row(
             palette::current().text
         }))
         .truncate()
-        .child(SharedString::from(fit(
-            s.title.as_deref().unwrap_or("(untitled)"),
-            42,
-        )));
+        .child(SharedString::from(fit(&label, 42)));
     let title_text = if indented {
         title_text.text_xs()
     } else {
@@ -1477,6 +1489,7 @@ pub fn row(
         // and the glyph parks right after the name (#2636 follow-up).
         .w_full()
         .when(indented, |d| d.child(topic_pin_mark()))
+        .when_some(mark, |d, mark| d.child(mark))
         .child({
             let (mark, colour) = pin_mark(favorited);
             div()
