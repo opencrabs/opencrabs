@@ -1675,7 +1675,13 @@ fn plain_block(content: &str, size: f32, selection: Option<&SelectionContext>) -
     let mut lines = div().flex().flex_col().gap_0p5();
     for line in content.split('\n') {
         let style = body_style(size);
-        lines = lines.child(inline_crabs(line.to_string(), style, Vec::new(), &[], selection));
+        lines = lines.child(inline_crabs(
+            line.to_string(),
+            style,
+            Vec::new(),
+            &[],
+            selection,
+        ));
     }
     lines
 }

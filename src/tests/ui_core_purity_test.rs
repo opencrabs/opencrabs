@@ -15,14 +15,29 @@ fn sources() -> [(&'static str, &'static str); 39] {
             "ui_core/channel_status.rs",
             include_str!("../ui_core/channel_status.rs"),
         ),
-        ("ui_core/copy_select.rs", include_str!("../ui_core/copy_select.rs")),
-        ("ui_core/composer.rs", include_str!("../ui_core/composer.rs")),
+        (
+            "ui_core/copy_select.rs",
+            include_str!("../ui_core/copy_select.rs"),
+        ),
+        (
+            "ui_core/composer.rs",
+            include_str!("../ui_core/composer.rs"),
+        ),
         ("ui_core/docs.rs", include_str!("../ui_core/docs.rs")),
         ("ui_core/mod.rs", include_str!("../ui_core/mod.rs")),
         ("ui_core/palette.rs", include_str!("../ui_core/palette.rs")),
-        ("ui_core/plan_history.rs", include_str!("../ui_core/plan_history.rs")),
-        ("ui_core/plan_index.rs", include_str!("../ui_core/plan_index.rs")),
-        ("ui_core/pane_tree.rs", include_str!("../ui_core/pane_tree.rs")),
+        (
+            "ui_core/plan_history.rs",
+            include_str!("../ui_core/plan_history.rs"),
+        ),
+        (
+            "ui_core/plan_index.rs",
+            include_str!("../ui_core/plan_index.rs"),
+        ),
+        (
+            "ui_core/pane_tree.rs",
+            include_str!("../ui_core/pane_tree.rs"),
+        ),
         ("ui_core/query.rs", include_str!("../ui_core/query.rs")),
         ("ui_core/split.rs", include_str!("../ui_core/split.rs")),
         ("ui_core/rail.rs", include_str!("../ui_core/rail.rs")),
@@ -32,17 +47,32 @@ fn sources() -> [(&'static str, &'static str); 39] {
             "ui_core/session_preview.rs",
             include_str!("../ui_core/session_preview.rs"),
         ),
-        ("ui_core/topic_bar.rs", include_str!("../ui_core/topic_bar.rs")),
-        ("ui_core/commands.rs", include_str!("../ui_core/commands.rs")),
-        ("ui_core/help_keys.rs", include_str!("../ui_core/help_keys.rs")),
-        ("ui_core/input_history.rs", include_str!("../ui_core/input_history.rs")),
+        (
+            "ui_core/topic_bar.rs",
+            include_str!("../ui_core/topic_bar.rs"),
+        ),
+        (
+            "ui_core/commands.rs",
+            include_str!("../ui_core/commands.rs"),
+        ),
+        (
+            "ui_core/help_keys.rs",
+            include_str!("../ui_core/help_keys.rs"),
+        ),
+        (
+            "ui_core/input_history.rs",
+            include_str!("../ui_core/input_history.rs"),
+        ),
         ("ui_core/keys.rs", include_str!("../ui_core/keys.rs")),
         ("ui_core/links.rs", include_str!("../ui_core/links.rs")),
         (
             "ui_core/message_select.rs",
             include_str!("../ui_core/message_select.rs"),
         ),
-        ("ui_core/model_layout.rs", include_str!("../ui_core/model_layout.rs")),
+        (
+            "ui_core/model_layout.rs",
+            include_str!("../ui_core/model_layout.rs"),
+        ),
         (
             "ui_core/model_selector/mod.rs",
             include_str!("../ui_core/model_selector/mod.rs"),
@@ -67,9 +97,18 @@ fn sources() -> [(&'static str, &'static str); 39] {
             "ui_core/model_selector/order.rs",
             include_str!("../ui_core/model_selector/order.rs"),
         ),
-        ("ui_core/usage/mod.rs", include_str!("../ui_core/usage/mod.rs")),
-        ("ui_core/usage/data.rs", include_str!("../ui_core/usage/data.rs")),
-        ("ui_core/usage/pricing.rs", include_str!("../ui_core/usage/pricing.rs")),
+        (
+            "ui_core/usage/mod.rs",
+            include_str!("../ui_core/usage/mod.rs"),
+        ),
+        (
+            "ui_core/usage/data.rs",
+            include_str!("../ui_core/usage/data.rs"),
+        ),
+        (
+            "ui_core/usage/pricing.rs",
+            include_str!("../ui_core/usage/pricing.rs"),
+        ),
         (
             "ui_core/usage/categorizer.rs",
             include_str!("../ui_core/usage/categorizer.rs"),
@@ -78,8 +117,14 @@ fn sources() -> [(&'static str, &'static str); 39] {
             "ui_core/usage/view_model.rs",
             include_str!("../ui_core/usage/view_model.rs"),
         ),
-        ("ui_core/usage/input.rs", include_str!("../ui_core/usage/input.rs")),
-        ("ui_core/usage/loader.rs", include_str!("../ui_core/usage/loader.rs")),
+        (
+            "ui_core/usage/input.rs",
+            include_str!("../ui_core/usage/input.rs"),
+        ),
+        (
+            "ui_core/usage/loader.rs",
+            include_str!("../ui_core/usage/loader.rs"),
+        ),
     ]
 }
 

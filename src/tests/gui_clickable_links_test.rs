@@ -8,9 +8,7 @@
 //! link's destination, the press recording what it landed on, the release
 //! opening only after a copy found nothing) is read from source.
 
-use crate::ui_core::links::{
-    ClickTarget, target_at_byte_with, target_at_with, target_for_click,
-};
+use crate::ui_core::links::{ClickTarget, target_at_byte_with, target_at_with, target_for_click};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
