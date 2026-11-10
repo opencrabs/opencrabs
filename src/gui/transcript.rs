@@ -1675,9 +1675,7 @@ fn inline_crab_size(style: &TextStyle) -> f32 {
     // The picture is laid out in rems, so a pixel size is converted at the
     // 16px base and a rem size is already in the unit the picture wants.
     match style.font_size {
-        AbsoluteLength::Pixels(pixels) => {
-            (f32::from(pixels) * 1.15 / 16.0).max(CRAB_INLINE_SIZE)
-        }
+        AbsoluteLength::Pixels(pixels) => (f32::from(pixels) * 1.15 / 16.0).max(CRAB_INLINE_SIZE),
         AbsoluteLength::Rems(rems) => (rems.0 * 1.15).max(CRAB_INLINE_SIZE),
     }
 }
@@ -6127,7 +6125,10 @@ mod tests {
         assert_eq!(chunks[1].0, 4..8);
         assert_eq!(chunks[2].0, 8..13);
         // The drawn bytes of the run are exactly the chunks, in order.
-        assert_eq!(chunks.iter().map(|(range, _)| range.len()).sum::<usize>(), 13);
+        assert_eq!(
+            chunks.iter().map(|(range, _)| range.len()).sum::<usize>(),
+            13
+        );
         // A single word is one chunk that claims the whole run.
         assert_eq!(inline_chunks("hi ", 0..3, 3), vec![(0..3, 3)]);
     }
