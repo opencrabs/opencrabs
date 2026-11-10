@@ -23,6 +23,17 @@ pub const GRID_THREE_COL_MIN: u16 = 90;
 /// Width at which a card grid gets two columns.
 pub const GRID_TWO_COL_MIN: u16 = 56;
 
+/// Width at which a footer earns its right-aligned context label.
+///
+/// Below it the footer is narrow enough that the label would cost the key
+/// guide whole bindings the user actually needs ("Esc: back" disappears
+/// before "1 sessions" is worth reading), so the keys win and the label is
+/// dropped. From here up the row is roomy enough that the label is the more
+/// useful half, and the key tail yields to it instead (#2777). Tied to the
+/// two-column breakpoint so a footer and a card grid never disagree about
+/// where "narrow" begins.
+pub const FOOTER_LABEL_MIN: u16 = GRID_TWO_COL_MIN;
+
 /// Columns a card grid should use at this width: three when there is room
 /// for them, two when there is some, one when there is not.
 pub fn grid_cols(width: u16) -> usize {

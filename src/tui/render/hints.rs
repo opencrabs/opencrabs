@@ -136,11 +136,15 @@ pub fn footer_line_fitting(
 /// Footer with a dim right-aligned context label ("38 sessions",
 /// "104 commands") on the same row.
 ///
-/// The label is drawn only when it fits beside the fitted bindings with at
-/// least one blank cell between them, so the two can never collide or
-/// overwrite each other; when it does not fit the footer renders alone. Both
-/// ends inset by [`responsive::EDGE_INSET`] so the footer shares the margin of
-/// the rows above it (#2175).
+/// The label is drawn when the row has room for it beside the bindings: the
+/// bindings are fitted into the space the label leaves, so a keymap that has
+/// outgrown the row loses its tail bindings rather than the context label
+/// (#2777). Below [`responsive::FOOTER_LABEL_MIN`] the row is too narrow for
+/// that trade, so the label yields to the key guide instead. The two never
+/// collide or overwrite each other: one blank cell always separates them, and
+/// the label is dropped entirely rather than squeezed when not even one
+/// binding fits beside it. Both ends inset by [`responsive::EDGE_INSET`] so the
+/// footer shares the margin of the rows above it (#2175).
 pub fn render_footer_with_context(
     frame: &mut Frame,
     area: Rect,
@@ -158,12 +162,28 @@ pub fn render_footer_with_context(
         width: area.width - inset * 2,
         ..area
     };
-    let line = footer_line_fitting("", keys, inner.width);
-    let footer_width: usize = line.spans.iter().map(|s| s.content.width()).sum();
+    // Narrow rows spend their columns on the key guide: the label would cost
+    // whole bindings ("Esc: back" before "1 sessions"), and the footer's
+    // whole-binding prefix contract only holds while the label is absent.
+    if right_label.is_empty() || area.width < responsive::FOOTER_LABEL_MIN {
+        let line = footer_line_fitting("", keys, inner.width);
+        frame.render_widget(Paragraph::new(line), inner);
+        return;
+    }
     let label_width = right_label.width();
+    // Fit the bindings into the room the label leaves. Fitting them to the
+    // whole row first meant a grown keymap silently dropped the context label
+    // instead of its own tail (#2777).
+    let reserve = if right_label.is_empty() {
+        0
+    } else {
+        label_width + 1
+    };
+    let line = footer_line_fitting("", keys, inner.width.saturating_sub(reserve as u16));
+    let footer_width: usize = line.spans.iter().map(|s| s.content.width()).sum();
     // One blank cell between the keys and the label, inside the insets.
-    // Without room for all of it the label is dropped, never squeezed against
-    // the keys.
+    // Without room for a single binding plus the label, the label is dropped,
+    // never squeezed against the keys.
     let needed = footer_width + label_width + 1;
     if right_label.is_empty() || needed > inner.width as usize {
         frame.render_widget(Paragraph::new(line), inner);
