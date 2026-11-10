@@ -1659,7 +1659,10 @@ impl Element for EditorElement {
                 // one shaping instead of two.
                 let lines = shape_draft(&content, wrap_width, window);
                 let rows = shaped_rows(lines.as_ref(), &content);
-                if let Some(lines) = lines {
+                // The cache holds the shaping as an `Option` because shaping
+                // can fail; the lines move in whole, so the miss path costs one
+                // shaping and prepaint finds it waiting.
+                if lines.is_some() {
                     self.input.update(cx, |input, _| {
                         input.shaped_draft = Some(ShapedDraft { key, lines, rows });
                     });
