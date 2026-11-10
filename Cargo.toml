@@ -31,21 +31,10 @@ crossterm = { version = "0.29", features = ["event-stream"] }
 
 # Native desktop client (experimental, phase 0). Zed's GPU-accelerated UI
 # framework. Optional on purpose: the TUI binary, the release build, and CI
-# never pull this tree.
-#
-# `runtime_shaders` instead of the default build-time shader compile: this
-# machine has Command Line Tools but no full Xcode, so `xcrun metal` does not
-# exist and gpui's build script would fail. With runtime shaders the Metal
-# source is embedded and compiled when the app starts.
-#
-# `font-kit` must stay enabled: without it mac platform.rs swaps in
-# NoopTextSystem, which fakes font metrics so layout and colors still work
-# but rasterize_glyph returns zero bytes and every string paints as blank
-# space (found 2026-10-30, first GUI run had no text at all).
-gpui = { version = "0.2.2", default-features = false, features = [
-    "runtime_shaders",
-    "font-kit",
-], optional = true }
+# never pull this tree. Declared per target below (macOS / Linux / Windows)
+# because the Linux window backend lives behind gpui's `wayland` and `x11`
+# features (#2765): one all-target declaration carrying only the macOS
+# features left Linux on gpui's HeadlessClient, so the window never opened.
 
 # Database (deadpool-sqlite uses rusqlite 0.40, single libsqlite3-sys build).
 # rusqlite 0.40 bundles SQLite 3.53.2: 3.51.1's unix VFS took the inode lock
@@ -271,6 +260,35 @@ rwhisper = { version = "0.4", optional = true, features = ["metal", "accelerate"
 objc2 = { version = "0.6", optional = true }
 objc2-foundation = { version = "0.3", optional = true, features = ["NSData"] }
 objc2-app-kit = { version = "0.3", optional = true, features = ["NSApplication", "NSImage"] }
+# gpui on macOS: exactly the historical feature set.
+#
+# `runtime_shaders` instead of the default build-time shader compile: this
+# machine has Command Line Tools but no full Xcode, so `xcrun metal` does not
+# exist and gpui's build script would fail. With runtime shaders the Metal
+# source is embedded and compiled when the app starts.
+#
+# `font-kit` must stay enabled: without it mac platform.rs swaps in
+# NoopTextSystem, which fakes font metrics so layout and colors still work
+# but rasterize_glyph returns zero bytes and every string paints as blank
+# space (found 2026-10-30, first GUI run had no text at all).
+gpui = { version = "0.2.2", default-features = false, features = ["runtime_shaders", "font-kit"], optional = true }
+
+# Linux needs gpui's `wayland` and `x11` features or guess_compositor() has no
+# backend arm and returns Headless, whose open_window bails with "neither
+# DISPLAY nor WAYLAND_DISPLAY is set" even when both are set (#2765). `x11`
+# matters on a Wayland session too: a DISPLAY-only session (X11, XWayland,
+# ssh -X) would otherwise fall back to Headless. These pull the blade/Vulkan
+# renderer and the wayland/x11/xkbcommon stack, so Cargo.lock gains those
+# crates on the next resolve.
+[target.'cfg(target_os = "linux")'.dependencies]
+gpui = { version = "0.2.2", default-features = false, features = ["runtime_shaders", "font-kit", "wayland", "x11"], optional = true }
+
+# Windows keeps the historical feature set unchanged: gpui's Windows platform
+# is not behind wayland/x11, so the old all-target declaration already built
+# it. Declaring it here too keeps `dep:gpui` resolvable when the gui feature
+# is on for a Windows prerelease build (#2679).
+[target.'cfg(target_os = "windows")'.dependencies]
+gpui = { version = "0.2.2", default-features = false, features = ["runtime_shaders", "font-kit"], optional = true }
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
 winresource = "0.1"
