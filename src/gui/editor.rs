@@ -1967,6 +1967,11 @@ impl Render for Editor {
                         // over the pane below, the overlap the owner saw
                         // (#2773).
                         .max_h(window.line_height() * COMPOSER_MAX_ROWS as f32)
+                        // The scroll methods live on a stateful element, so
+                        // the box carries an id before it asks to scroll at
+                        // all. A plain div has neither method and the gui
+                        // binary stopped compiling without this (#2773).
+                        .id("composer-input")
                         .overflow_y_scroll()
                         .track_scroll(&self.scroll)
                         .child(EditorElement { input: cx.entity() }),
@@ -2628,10 +2633,20 @@ mod tests {
             ".overflow_y_scroll()",
             "\n                        .track_scroll(&"
         );
+        // The scroll methods are on a stateful element, so an id has to come
+        // first. Without it the gui binary does not compile (#2773).
+        let stateful = concat!(
+            ".id(\"composer-input\")",
+            "\n                        .overflow_y_scroll()"
+        );
         assert!(src.contains(cap), "the composer must cap its height");
         assert!(
             src.contains(scroll),
             "the composer must scroll inside itself"
+        );
+        assert!(
+            src.contains(stateful),
+            "the scroll box must be stateful or its scroll methods do not exist"
         );
     }
 
