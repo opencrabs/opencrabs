@@ -26,6 +26,10 @@ use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 pub struct MdLine {
     pub text: String,
     pub highlights: Vec<(Range<usize>, HighlightStyle)>,
+    /// Every link label on this line, as a byte range into `text` and the
+    /// destination it pointed at (#2317). The label alone carries no url, so
+    /// without this a click on `[docs](https://x)` has nothing to open.
+    pub links: Vec<(Range<usize>, String)>,
     pub mono: bool,
     pub indent: u8,
     pub heading: bool,
@@ -37,6 +41,9 @@ pub struct MdLine {
 pub struct MdCell {
     pub text: String,
     pub highlights: Vec<(Range<usize>, HighlightStyle)>,
+    /// Link labels inside the cell, ranges relative to `text` like the
+    /// highlights above (#2317).
+    pub links: Vec<(Range<usize>, String)>,
 }
 
 /// A whole table, header row first. Column count is `header.len()` (or the
@@ -73,6 +80,9 @@ struct Inline {
     emphasis: usize,
     strike: bool,
     link: bool,
+    /// The destination of the link currently open, kept so the renderer can
+    /// open it when the label is clicked (#2317).
+    link_dest: Option<String>,
     heading: bool,
     heading_level: u8,
 }
@@ -109,6 +119,7 @@ struct Builder {
     out: Vec<MdBlock>,
     buf: String,
     hl: Vec<(Range<usize>, HighlightStyle)>,
+    links: Vec<(Range<usize>, String)>,
     mono: bool,
     indent: u8,
     inline: Inline,
@@ -165,11 +176,17 @@ impl Builder {
         if styled {
             self.hl.push((start..self.buf.len(), style));
         }
+        // A link label's own bytes are what a click lands on, so the range is
+        // recorded where the text is written, not derived later.
+        if let Some(dest) = &self.inline.link_dest {
+            self.links.push((start..self.buf.len(), dest.clone()));
+        }
     }
 
     fn flush(&mut self) {
         let text = std::mem::take(&mut self.buf);
         let hl = std::mem::take(&mut self.hl);
+        let links = std::mem::take(&mut self.links);
         let mono = self.mono;
         let indent = self.indent;
         let heading = self.inline.heading;
@@ -178,7 +195,7 @@ impl Builder {
             return;
         }
         if let Some(table) = &mut self.table {
-            let cell = cell_from(text, hl);
+            let cell = cell_from(text, hl, links);
             if table.in_head {
                 table.header.push(cell);
             } else {
@@ -189,6 +206,7 @@ impl Builder {
         self.out.push(MdBlock::Line(MdLine {
             text,
             highlights: hl,
+            links,
             mono,
             indent,
             heading,
@@ -201,6 +219,7 @@ impl Builder {
         self.out.push(MdBlock::Line(MdLine {
             text: "────────────────────────".into(),
             highlights: Vec::new(),
+            links: Vec::new(),
             mono: false,
             indent: self.indent,
             heading: false,
@@ -211,7 +230,11 @@ impl Builder {
 
 /// Turn a finished buffer into a cell, moving highlight offsets with the
 /// leading whitespace the trim removes.
-fn cell_from(text: String, hl: Vec<(Range<usize>, HighlightStyle)>) -> MdCell {
+fn cell_from(
+    text: String,
+    hl: Vec<(Range<usize>, HighlightStyle)>,
+    links: Vec<(Range<usize>, String)>,
+) -> MdCell {
     let trimmed = text.trim();
     let lead = text.len() - text.trim_start().len();
     let lo = lead;
@@ -224,9 +247,18 @@ fn cell_from(text: String, hl: Vec<(Range<usize>, HighlightStyle)>) -> MdCell {
             moved.push((start - lo..end - lo, style));
         }
     }
+    let mut moved_links = Vec::with_capacity(links.len());
+    for (range, dest) in links {
+        let start = range.start.max(lo);
+        let end = range.end.min(hi);
+        if start < end {
+            moved_links.push((start - lo..end - lo, dest));
+        }
+    }
     MdCell {
         text: trimmed.to_string(),
         highlights: moved,
+        links: moved_links,
     }
 }
 
@@ -251,6 +283,7 @@ pub fn blocks(src: &str) -> Vec<MdBlock> {
         out: Vec::new(),
         buf: String::new(),
         hl: Vec::new(),
+        links: Vec::new(),
         mono: false,
         indent: 0,
         inline: Inline::default(),
@@ -352,7 +385,10 @@ fn start_tag(b: &mut Builder, tag: Tag) {
         Tag::Strong => b.inline.strong += 1,
         Tag::Emphasis => b.inline.emphasis += 1,
         Tag::Strikethrough => b.inline.strike = true,
-        Tag::Link { .. } => b.inline.link = true,
+        Tag::Link { dest_url, .. } => {
+            b.inline.link = true;
+            b.inline.link_dest = Some(dest_url.to_string());
+        }
         // A table is collected as a table, never as lines: the window draws
         // the grid, and flattening here is what made cells look like a list.
         Tag::Table(_) => {
@@ -418,7 +454,10 @@ fn end_tag(b: &mut Builder, tag: TagEnd) {
         TagEnd::Strong => b.inline.strong = b.inline.strong.saturating_sub(1),
         TagEnd::Emphasis => b.inline.emphasis = b.inline.emphasis.saturating_sub(1),
         TagEnd::Strikethrough => b.inline.strike = false,
-        TagEnd::Link => b.inline.link = false,
+        TagEnd::Link => {
+            b.inline.link = false;
+            b.inline.link_dest = None;
+        }
         TagEnd::TableHead => {
             b.flush();
             b.inline.strong = b.inline.strong.saturating_sub(1);
@@ -459,5 +498,73 @@ fn end_tag(b: &mut Builder, tag: TagEnd) {
         | TagEnd::Subscript
         | TagEnd::HtmlBlock
         | TagEnd::Image => b.flush(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every link label parsed out of `src`, in order.
+    fn links_of(src: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for block in blocks(src) {
+            if let MdBlock::Line(line) = block {
+                for (range, dest) in line.links {
+                    out.push(format!("{} -> {dest}", &line.text[range]));
+                }
+            }
+        }
+        out
+    }
+
+    /// A link used to keep only its styling, so a click on the label had no
+    /// destination to open (#2317). The range is the label's own bytes, which
+    /// is exactly what the pointer lands on.
+    #[test]
+    fn a_link_keeps_the_destination_it_points_at() {
+        assert_eq!(
+            links_of("see [docs](https://opencrabs.com) for more"),
+            vec!["docs -> https://opencrabs.com".to_string()]
+        );
+    }
+
+    #[test]
+    fn two_links_on_one_line_keep_their_own_destinations() {
+        assert_eq!(
+            links_of("[a](https://a.example) and [b](https://b.example)"),
+            vec![
+                "a -> https://a.example".to_string(),
+                "b -> https://b.example".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_line_without_a_link_carries_none() {
+        assert!(links_of("plain text with no link at all").is_empty());
+    }
+
+    /// A cell is trimmed after the fact, so its link range has to move with
+    /// the text the same way its highlights do.
+    #[test]
+    fn a_table_cell_link_points_inside_the_trimmed_cell() {
+        let blocks = blocks("| a |\n|---|\n| [d](https://x.example) |");
+        let mut found = None;
+        for block in blocks {
+            if let MdBlock::Table(table) = block {
+                for row in table.rows {
+                    for cell in row {
+                        for (range, dest) in cell.links {
+                            found = Some((cell.text[range].to_string(), dest));
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            found,
+            Some(("d".to_string(), "https://x.example".to_string()))
+        );
     }
 }

@@ -21,6 +21,7 @@ use crate::topic_icons;
 use opencrabs::services::message::{CompletedPlanPayload, PLAN_COMPLETED_ROLE};
 use opencrabs::ui_core::card::{CARD_RADIUS, concentric_radius, glass_fill};
 use opencrabs::ui_core::copy_select::{self, TextPoint};
+use opencrabs::ui_core::links::{self, ClickTarget};
 use opencrabs::ui_core::plan_history::CompletedPlanView;
 use opencrabs::ui_core::rail;
 use opencrabs::utils::is_internal_system_message;
@@ -1378,7 +1379,13 @@ fn md_line(l: &markdown::MdLine, selection: Option<&SelectionContext>) -> Div {
     let size = heading_size(l.heading_level);
     let mut style = body_style(size);
     style.font_weight = heading_weight(l.heading_level);
-    let text = inline_crabs(l.text.clone(), style, l.highlights.clone(), selection);
+    let text = inline_crabs(
+        l.text.clone(),
+        style,
+        l.highlights.clone(),
+        &l.links,
+        selection,
+    );
     let base = div().pl(rems(f32::from(l.indent) * 0.9));
     if l.heading {
         base.mt(px(RHYTHM_HEADING_ABOVE))
@@ -1403,7 +1410,13 @@ fn table_cell(cell: &markdown::MdCell, header: bool, selection: Option<&Selectio
         font_size: AbsoluteLength::Pixels(px(13.0)),
         ..Default::default()
     };
-    let text = selectable_styled_text(cell.text.clone(), style, cell.highlights.clone(), selection);
+    let text = selectable_styled_text(
+        cell.text.clone(),
+        style,
+        cell.highlights.clone(),
+        &cell.links,
+        selection,
+    );
     div()
         .flex_1()
         .min_w_0()
@@ -1458,6 +1471,7 @@ fn md_table(t: &markdown::MdTable, selection: Option<&SelectionContext>) -> Div 
     let empty = markdown::MdCell {
         text: String::new(),
         highlights: Vec::new(),
+        links: Vec::new(),
     };
     let mut grid = div()
         .flex()
@@ -1634,6 +1648,7 @@ fn md_block(src: &str, selection: Option<&SelectionContext>) -> Div {
                                 l.text.clone(),
                                 mono_style(),
                                 l.highlights.clone(),
+                                &[],
                                 selection,
                             ));
                             i += 1;
@@ -1660,7 +1675,7 @@ fn plain_block(content: &str, size: f32, selection: Option<&SelectionContext>) -
     let mut lines = div().flex().flex_col().gap_0p5();
     for line in content.split('\n') {
         let style = body_style(size);
-        lines = lines.child(inline_crabs(line.to_string(), style, Vec::new(), selection));
+        lines = lines.child(inline_crabs(line.to_string(), style, Vec::new(), &[], selection));
     }
     lines
 }
@@ -1698,10 +1713,11 @@ fn inline_crabs(
     text: String,
     style: TextStyle,
     highlights: Vec<(Range<usize>, HighlightStyle)>,
+    links: &[(Range<usize>, String)],
     selection: Option<&SelectionContext>,
 ) -> Div {
     let Some(pieces) = topic_icons::inline_pieces(&text) else {
-        return selectable_styled_text(text, style, highlights, selection);
+        return selectable_styled_text(text, style, highlights, links, selection);
     };
     let mut row = div().flex().flex_wrap().items_center();
     let crab_size = inline_crab_size(&style);
@@ -1724,8 +1740,10 @@ fn inline_crabs(
         let chunks = inline_chunks(&text, piece.range.clone(), piece.accounted);
         for (range, length) in chunks {
             let covered = local_highlights(&highlights, &range);
+            let chunk_links = local_links(links, &range);
             let chunk = text[range].to_string();
-            let drawn = selectable_text_segment(chunk, length, &style, covered, selection);
+            let drawn =
+                selectable_text_segment(chunk, length, &style, covered, &chunk_links, selection);
             // An unbreakable word longer than the pane (a pasted URL) shrinks
             // and wraps inside its own chunk instead of pushing the row wide.
             row = row.child(drawn.min_w_0());
@@ -1785,6 +1803,26 @@ fn local_highlights(
             let from = span.start.max(range.start);
             let to = span.end.min(range.end);
             (from < to).then(|| (from - range.start..to - range.start, *style))
+        })
+        .collect()
+}
+
+/// Keep the link labels that fall inside one chunk, rebased onto it, so a link
+/// split across a crab picture still opens from either side of it (#2317).
+fn local_links(
+    links: &[(Range<usize>, String)],
+    range: &Range<usize>,
+) -> Vec<(Range<usize>, String)> {
+    links
+        .iter()
+        .filter_map(|(span, dest)| {
+            let from = span.start.max(range.start);
+            let to = span.end.min(range.end);
+            if from < to {
+                Some((from - range.start..to - range.start, dest.clone()))
+            } else {
+                None
+            }
         })
         .collect()
 }
@@ -2114,6 +2152,7 @@ fn tools_block(calls: &[ToolCall], selection: Option<&SelectionContext>) -> Div 
                     tool_line(call),
                     small_style(SMALL_TEXT_SIZE, color),
                     Vec::new(),
+                    &[],
                     selection,
                 )),
         );
@@ -2442,6 +2481,7 @@ fn live_card_line(line: LiveCardLine, selection: Option<&SelectionContext>) -> A
             format!("{mark} {text}"),
             small_style(SMALL_TEXT_SIZE, color),
             Vec::new(),
+            &[],
             selection,
         )
         .into_any_element(),
@@ -2450,6 +2490,7 @@ fn live_card_line(line: LiveCardLine, selection: Option<&SelectionContext>) -> A
             text,
             small_style(SMALL_TEXT_SIZE, palette::current().text_muted),
             Vec::new(),
+            &[],
             selection,
         )
         .into_any_element(),
@@ -2549,6 +2590,7 @@ fn live_card(
                     paragraph,
                     small_style(SMALL_TEXT_SIZE, palette::current().text_muted),
                     Vec::new(),
+                    &[],
                     None,
                 )
                 .line_clamp(3),
@@ -2875,6 +2917,48 @@ fn selection_rgba() -> u32 {
 /// What a successful copy tells the view that owns the composer (#2587).
 type CopiedListener = Rc<dyn Fn(&mut App)>;
 
+/// The press that may turn into an open (#2317): the text under the pointer,
+/// the link labels on it, and the byte offset the press landed on.
+///
+/// Resolving at press time and opening at release is what keeps the gesture
+/// honest. Opening on press would fire before a drag had a chance to start,
+/// so selecting a url to copy it would also launch the browser. Only a press
+/// that ends without a selection opens anything.
+struct PendingClick {
+    /// The drawn text the pointer was over, so a click offset can be turned
+    /// back into a token without re-rendering the row.
+    text: String,
+    /// Link labels on that text with their destinations, already rebased onto
+    /// it. A label wins over token resolution because `docs` carries no url.
+    links: Vec<(Range<usize>, String)>,
+    /// Byte offset into `text`, as the shaped layout reported it.
+    offset: usize,
+}
+
+impl PendingClick {
+    /// The destination this press named, if any: the label it landed on
+    /// first, then any path or url the token at that offset resolves to.
+    fn target(&self) -> Option<ClickTarget> {
+        for (range, dest) in &self.links {
+            if range.contains(&self.offset) {
+                return Some(ClickTarget::Url(dest.clone()));
+            }
+        }
+        links::target_at_byte(&self.text, self.offset)
+    }
+
+    /// The word the pointer was on, for the log line a miss writes. Clipped by
+    /// characters, never by bytes (#2271).
+    fn word(&self) -> String {
+        let start = self.offset.min(self.text.len());
+        let tail = self.text.get(start..).unwrap_or_default();
+        tail.chars()
+            .take_while(|c| !c.is_whitespace())
+            .take(40)
+            .collect()
+    }
+}
+
 /// Drag-to-copy over transcript rows (#2383) and their UTF-8 text ranges
 /// (#2529). Each row records the text its selectable segments render. GPUI's
 /// `TextLayout` turns a pointer into a byte offset; this state orders the two
@@ -2882,6 +2966,8 @@ type CopiedListener = Rc<dyn Fn(&mut App)>;
 #[derive(Default)]
 pub struct CopyDrag {
     texts: RefCell<Vec<String>>,
+    /// The press under the pointer, cleared by every release (#2317).
+    pending_click: RefCell<Option<PendingClick>>,
     anchor: Cell<Option<TextPoint>>,
     end: Cell<Option<TextPoint>>,
     dragging: Cell<bool>,
@@ -2942,8 +3028,40 @@ impl CopyDrag {
         ));
         if copied {
             self.announce_copied(app);
+        } else {
+            // Nothing was selected, so the press was a click: open whatever it
+            // landed on. A drag that copied must never also launch (#2317).
+            self.open_clicked_target();
         }
         window.refresh();
+    }
+
+    /// Open the target the press under the pointer named (#2317). Returns
+    /// whether anything opened, so a caller can tell a miss from a hit.
+    ///
+    /// The pending press is taken whether or not it resolves, so one press can
+    /// never open twice and a stale candidate cannot survive to the next
+    /// click.
+    pub fn open_clicked_target(&self) -> bool {
+        let Some(pending) = self.pending_click.borrow_mut().take() else {
+            return false;
+        };
+        let Some(target) = pending.target() else {
+            // A click that found nothing still gets a line, so "I clicked and
+            // nothing happened" can be told apart from a click that never
+            // arrived instead of guessed at.
+            crate::logging::info(&format!(
+                "transcript link: nothing to open at {:?}",
+                pending.word()
+            ));
+            return false;
+        };
+        crate::logging::info(&format!("transcript link: open {}", target.label()));
+        match &target {
+            ClickTarget::Url(url) => crate::preview::launch(&crate::preview::url_command(url)),
+            ClickTarget::File(path) => crate::preview::launch(&crate::preview::open_command(path)),
+        }
+        true
     }
 
     fn points(&self) -> Option<(TextPoint, TextPoint)> {
@@ -3088,10 +3206,11 @@ pub(crate) fn selectable_styled_text(
     text: String,
     style: TextStyle,
     highlights: Vec<(Range<usize>, HighlightStyle)>,
+    links: &[(Range<usize>, String)],
     selection: Option<&SelectionContext>,
 ) -> Div {
     let accounted = text.len();
-    selectable_text_segment(text, accounted, &style, highlights, selection)
+    selectable_text_segment(text, accounted, &style, highlights, links, selection)
 }
 
 /// The same, for a segment that draws less text than the row's copy string
@@ -3104,6 +3223,7 @@ fn selectable_text_segment(
     accounted: usize,
     style: &TextStyle,
     highlights: Vec<(Range<usize>, HighlightStyle)>,
+    links: &[(Range<usize>, String)],
     selection: Option<&SelectionContext>,
 ) -> Div {
     let segment_start = selection.map(|context| context.begin_segment(accounted));
@@ -3124,9 +3244,19 @@ fn selectable_text_segment(
     let len = text.len();
     let begin = context.drag.clone();
     let extend = context.drag.clone();
+    let pressed = context.drag.clone();
     let move_layout = layout.clone();
+    // What the pointer is over, kept for the release so a click can open it.
+    let click_text = text.clone();
+    let click_links = links.to_vec();
     base.on_mouse_down(MouseButton::Left, move |event, window, cx| {
-        let offset = start + layout_offset(&layout, event.position, len);
+        let local = layout_offset(&layout, event.position, len);
+        *pressed.pending_click.borrow_mut() = Some(PendingClick {
+            text: click_text.clone(),
+            links: click_links.clone(),
+            offset: local,
+        });
+        let offset = start + local;
         begin.anchor.set(Some(TextPoint::new(row, offset)));
         begin.end.set(Some(TextPoint::new(row, offset)));
         begin.dragging.set(true);
@@ -3267,6 +3397,7 @@ fn selectable_row<E: gpui::IntoElement>(
         .id(SharedString::from(format!("tblock-{ordinal}")))
         .when(selected, |d| d.bg(rgba(selection_rgba())))
         .on_mouse_down(MouseButton::Left, move |_ev, window, _app| {
+            start.pending_click.borrow_mut().take();
             start.anchor.set(Some(TextPoint::new(ordinal, 0)));
             start.end.set(Some(TextPoint::new(ordinal, 0)));
             start.dragging.set(true);
@@ -6228,5 +6359,137 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+/// Clicking a path or url opens it (#2317). These pin the three parts that
+/// have to agree: what the press records, what it resolves to, and that only
+/// a press that copied nothing ever launches anything.
+#[cfg(test)]
+mod click_tests {
+    use super::*;
+
+    /// A temp file whose name is unique per test, so a resolver test has a
+    /// real path to find on disk.
+    fn fixture(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("oc-transcript-click-{tag}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let file = dir.join("notes.md");
+        std::fs::write(&file, b"fixture").expect("fixture write");
+        file
+    }
+
+    /// A press on a link label opens the destination the parser kept, because
+    /// the label text alone (`docs`) names nothing.
+    #[test]
+    fn a_press_on_a_link_label_names_its_destination() {
+        let text = "read docs first".to_string();
+        let label = text.find("docs").expect("label");
+        let click = PendingClick {
+            text,
+            links: vec![(label..label + 4, "https://opencrabs.com".to_string())],
+            offset: label + 1,
+        };
+        assert_eq!(
+            click.target(),
+            Some(ClickTarget::Url("https://opencrabs.com".to_string()))
+        );
+    }
+
+    /// Off the label, the same press resolves nothing: a link must not make
+    /// its whole line clickable.
+    #[test]
+    fn a_press_beside_the_label_names_nothing() {
+        let text = "read docs first".to_string();
+        let label = text.find("docs").expect("label");
+        let click = PendingClick {
+            text,
+            links: vec![(label..label + 4, "https://opencrabs.com".to_string())],
+            offset: 0,
+        };
+        assert_eq!(click.target(), None);
+    }
+
+    /// A plain rendered path is opened from the token under the pointer, which
+    /// is the case in the screenshot: the path was inline code, not a link.
+    #[test]
+    fn a_press_on_a_rendered_path_names_the_file() {
+        let file = fixture("path");
+        let text = format!("saved to {} just now", file.display());
+        let offset = text.find("notes.md").expect("name in the line");
+        let click = PendingClick {
+            text,
+            links: Vec::new(),
+            offset,
+        };
+        assert_eq!(click.target(), Some(ClickTarget::File(file.clone())));
+        let _ = std::fs::remove_dir_all(file.parent().expect("parent"));
+    }
+
+    /// The gesture rule: the release opens only on the branch where the copy
+    /// found nothing. Opening on press would launch a url the reader was
+    /// trying to select.
+    #[test]
+    fn the_release_opens_only_when_nothing_was_copied() {
+        let src = include_str!("transcript.rs");
+        let start = src
+            .find("pub fn release(&self, window: &mut Window, app: &mut App)")
+            .expect("the release path exists");
+        let body = &src[start..];
+        let body = &body[..body.find("\n    }\n").expect("the release ends")];
+        let copy = body.find("finish_copy(app)").expect("the release copies");
+        let open = body
+            .find("open_clicked_target()")
+            .expect("the release opens a click");
+        assert!(
+            copy < open,
+            "the click must be opened after the copy is known"
+        );
+        let guard = body
+            .find("} else {")
+            .expect("the opener sits on the not-copied branch");
+        assert!(
+            copy < guard && guard < open,
+            "opening must be the else of the copy branch, so a drag that copied never launches"
+        );
+    }
+
+    /// The press has to record what is under it; a release cannot resolve a
+    /// token it never saw.
+    #[test]
+    fn the_press_records_the_text_it_landed_on() {
+        let src = include_str!("transcript.rs");
+        let start = src
+            .find("fn selectable_text_segment(")
+            .expect("the text segment builder exists");
+        let body = &src[start..];
+        let body = &body[..body.find("\n}\n").expect("the builder ends")];
+        let press = body
+            .find("on_mouse_down(MouseButton::Left")
+            .expect("the segment takes a press");
+        let record = body[press..]
+            .find("pending_click.borrow_mut() = Some(PendingClick")
+            .expect("the press records a candidate");
+        assert!(
+            record > 0,
+            "the candidate is recorded inside the press handler"
+        );
+    }
+
+    /// A press on a row's padding is not a text click, so it must drop any
+    /// candidate an earlier press left behind.
+    #[test]
+    fn a_press_on_padding_leaves_no_candidate() {
+        let src = include_str!("transcript.rs");
+        let start = src
+            .find("fn selectable_row<E: gpui::IntoElement>(")
+            .expect("the row builder exists");
+        let body = &src[start..];
+        let body = &body[..body.find("\n}\n").expect("the row builder ends")];
+        assert!(
+            body.contains("pending_click.borrow_mut().take()"),
+            "the row press clears the candidate"
+        );
     }
 }

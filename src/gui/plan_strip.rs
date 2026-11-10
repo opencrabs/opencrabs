@@ -602,6 +602,7 @@ pub fn completed_plan_card(
             format!("\u{2611} {}", plan.header()),
             small_style(SMALL_TEXT_SIZE, palette::current().teal),
             Vec::new(),
+            &[],
             selection,
         ));
 
@@ -612,6 +613,7 @@ pub fn completed_plan_card(
             format!("  \u{2611} {}. {}", task.order, task.title),
             small_style(SMALL_TEXT_SIZE, palette::current().text_muted),
             Vec::new(),
+            &[],
             selection,
         ));
     }
@@ -620,6 +622,7 @@ pub fn completed_plan_card(
         COMPLETED_PLAN_FOOTER.to_string(),
         small_style(SMALL_TEXT_SIZE, palette::current().text_faint),
         Vec::new(),
+        &[],
         selection,
     ))
 }
