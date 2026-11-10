@@ -60,17 +60,35 @@ fn create_new_session_binds_focused_pane_to_new_session_id() {
     let body = &rest[..body_end];
 
     assert!(
-        body.contains("pane.session_id = Some(session.id)"),
+        body.contains("self.bind_focused_pane_session(session.id);"),
         "create_new_session must bind the focused pane to the new session id. \
          Without this, the pane keeps pointing at the previous session and \
          Tab-away + Tab-back loads the pre-Ctrl+N session, making the new \
          session appear to vanish (issue #165)."
     );
+    // The sync itself moved into one helper when drafts started travelling
+    // with the pane, so the assignment is pinned where it now lives (#2780).
+    // Pinning both halves still fails if either the call or the assignment
+    // goes away.
+    let helper_marker = "fn bind_focused_pane_session(&mut self, session_id: Uuid) {";
+    let helper_start = src
+        .find(helper_marker)
+        .expect("bind_focused_pane_session must carry the pane's session sync");
+    let helper_body = &src[helper_start + helper_marker.len()..];
+    let helper_end = helper_body
+        .find("\n    pub(crate) async fn")
+        .unwrap_or(helper_body.len());
+    let helper = &helper_body[..helper_end];
     assert!(
-        body.contains("focused_pane_mut()"),
-        "create_new_session must reach for `focused_pane_mut()` to perform the \
-         pane.session_id sync — pinning the access path so a future refactor \
-         that drops the mutable access also breaks this test."
+        helper.contains("focused_pane_mut()"),
+        "bind_focused_pane_session must reach for `focused_pane_mut()` to \
+         perform the pane.session_id sync, pinning the access path so a future \
+         refactor that drops the mutable access also breaks this test."
+    );
+    assert!(
+        helper.contains("pane.session_id = Some(session_id)"),
+        "bind_focused_pane_session must assign the pane's session_id. Without \
+         it the pane keeps pointing at the conversation it left (#165)."
     );
 }
 
