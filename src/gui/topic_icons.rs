@@ -18,6 +18,7 @@ use gpui::{
     AnyElement, Image, ImageFormat, IntoElement, ObjectFit, ParentElement, SharedString, Styled,
     StyledImage, div, img, rems,
 };
+use std::ops::Range;
 use std::sync::Arc;
 
 /// The icon a topic tab shows, as the picker offers it (#2414, #2478).
@@ -304,6 +305,142 @@ pub fn crab_icon(name: &str) -> Option<&'static [u8]> {
         .map(|(_, bytes)| *bytes)
 }
 
+/// The `:name:` tokens in `text` that name a crab, left to right, with the
+/// bytes of the picture each one stands for (#2771).
+///
+/// The name is matched the way the composer matches it, without regard to
+/// case, and it has to look like a shortcode: letters, digits, `_` and `-`,
+/// nothing else. A token the pack does not know is left as text, and the scan
+/// resumes after the colon that opened it so `:a:b:` still finds `:b:`.
+pub fn crab_tokens(text: &str) -> Vec<(Range<usize>, &'static [u8])> {
+    let mut tokens = Vec::new();
+    let mut cursor = 0;
+    while let Some(open) = text[cursor..].find(':') {
+        let open = cursor + open;
+        let Some(close) = text[open + 1..].find(':') else {
+            break;
+        };
+        let close = open + 1 + close;
+        let name = &text[open + 1..close];
+        let shortcode = name.len() <= 32
+            && !name.is_empty()
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-');
+        match shortcode.then(|| crab_icon(name)).flatten() {
+            Some(bytes) => {
+                tokens.push((open..close + 1, bytes));
+                cursor = close + 1;
+            }
+            None => cursor = open + 1,
+        }
+    }
+    tokens
+}
+
+/// One piece of a line that a picture splits (#2771).
+pub struct InlinePiece {
+    /// The bytes of the line this piece covers. Empty for the spacer that only
+    /// exists so the selection offsets stay honest.
+    pub range: Range<usize>,
+    /// The picture to draw, or None for a run of text (and for a spacer).
+    pub crab: Option<&'static [u8]>,
+    /// What the selection accounting must consume for this piece.
+    ///
+    /// Drawing a line as several segments costs one separator per segment, and
+    /// a picture takes bytes out of the text, so the lengths the transcript
+    /// reports cannot be the plain string lengths. `accounted` is the length
+    /// that makes the segment offsets of a split line equal the offsets the
+    /// unsplit line had, which is what drag-select and copy read.
+    pub accounted: usize,
+}
+
+/// How to draw `text` when it carries crab tokens: one piece per run of words
+/// and one per picture, in source order. None when there is nothing to draw
+/// but the text itself.
+pub fn inline_pieces(text: &str) -> Option<Vec<InlinePiece>> {
+    let tokens = crab_tokens(text);
+    if tokens.is_empty() {
+        return None;
+    }
+    // The runs of text between the tokens.
+    let mut runs = Vec::with_capacity(tokens.len() + 1);
+    let mut cursor = 0;
+    for (token, _) in &tokens {
+        if cursor < token.start {
+            runs.push(cursor..token.start);
+        }
+        cursor = token.end;
+    }
+    if cursor < text.len() {
+        runs.push(cursor..text.len());
+    }
+    // Runs and tokens in source order: a run always sits before the token that
+    // follows it, and no run ever spans one.
+    let mut ordered: Vec<(Range<usize>, Option<&'static [u8]>)> = Vec::new();
+    let mut runs = runs.into_iter().peekable();
+    for (token, bytes) in tokens {
+        if runs.peek().is_some_and(|run| run.start < token.start)
+            && let Some(run) = runs.next()
+        {
+            ordered.push((run, None));
+        }
+        ordered.push((token, Some(bytes)));
+    }
+    ordered.extend(runs.map(|run| (run, None)));
+    let mut pieces: Vec<InlinePiece> = ordered
+        .into_iter()
+        .map(|(range, crab)| InlinePiece {
+            range,
+            crab,
+            accounted: 0,
+        })
+        .collect();
+
+    // A line that opens on a picture has bytes ahead of its first run, and a
+    // line that is nothing but pictures has no run at all. Both still have to
+    // move the accounting past those bytes, so one empty piece carries them.
+    let first_start = pieces
+        .iter()
+        .find(|piece| piece.crab.is_none())
+        .map(|piece| piece.range.start);
+    match first_start {
+        Some(0) => {}
+        Some(_) => pieces.insert(
+            0,
+            InlinePiece {
+                range: 0..0,
+                crab: None,
+                accounted: 0,
+            },
+        ),
+        None => pieces.insert(
+            0,
+            InlinePiece {
+                range: 0..0,
+                crab: None,
+                accounted: text.len(),
+            },
+        ),
+    }
+    // Every piece that draws text is one segment: it runs up to the next one,
+    // less the separator, and the last one runs to the end of the line.
+    let calls: Vec<usize> = pieces
+        .iter()
+        .enumerate()
+        .filter(|(_, piece)| piece.crab.is_none())
+        .map(|(index, _)| index)
+        .collect();
+    for (position, &index) in calls.iter().enumerate() {
+        let start = pieces[index].range.start;
+        pieces[index].accounted = match calls.get(position + 1) {
+            Some(&next) => pieces[next].range.start.saturating_sub(start + 1),
+            None => text.len().saturating_sub(start),
+        };
+    }
+    Some(pieces)
+}
+
 const ORIENTATION_ICON_SVG: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/src/assets/topic-orientation.svg"
@@ -438,5 +575,83 @@ mod tests {
         assert!(svg.contains("stroke-linejoin=\"round\""));
         assert!(svg.contains("<path"));
         assert!(!svg.contains("<rect"));
+    }
+
+    /// A shortcode written in a message is the emoji, whatever case it was
+    /// typed in (#2771).
+    #[test]
+    fn a_crab_token_is_found_without_case() {
+        let tokens = crab_tokens("ship it :Cry:");
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].0, 8..13);
+        assert_eq!(Some(tokens[0].1), crab_icon("cry"));
+    }
+
+    /// A name the pack does not know stays what it is, text, and a word that
+    /// merely holds colons is not a shortcode either.
+    #[test]
+    fn only_the_pack_turns_into_pictures() {
+        assert!(crab_tokens(":nope: and :warning:").is_empty());
+        assert!(crab_tokens("ship 10:30:00").is_empty());
+        assert!(crab_tokens("no tokens here").is_empty());
+    }
+
+    /// Two tokens side by side are two pictures, and the second colon of the
+    /// first is not the opener of the second.
+    #[test]
+    fn adjacent_tokens_do_not_overlap() {
+        let tokens = crab_tokens(":ok::cry:");
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(tokens[0].0, 0..4);
+        assert_eq!(tokens[1].0, 4..9);
+    }
+
+    /// The pieces a line is drawn from: words where there are words, a picture
+    /// where a token names one, and one empty piece ahead of a line that opens
+    /// on a picture.
+    #[test]
+    fn a_line_splits_into_words_and_pictures() {
+        let pieces = inline_pieces("hi :cry: there").expect("a token");
+        assert_eq!(pieces.len(), 3);
+        assert_eq!(pieces[0].range, 0..3);
+        assert!(pieces[0].crab.is_none());
+        assert_eq!(pieces[1].range, 3..8);
+        assert_eq!(Some(pieces[1].crab.unwrap()), crab_icon("cry"));
+        assert_eq!(pieces[2].range, 8..14);
+        assert!(inline_pieces("no token").is_none());
+    }
+
+    /// The reason `accounted` exists: replay the segment accounting the
+    /// transcript does and the offsets must land where the whole line puts
+    /// them, whatever the split. A drift here silently moves every row's
+    /// drag-select and copy by the width of a token.
+    #[test]
+    fn planned_offsets_match_the_whole_line() {
+        for line in [
+            "hi :cry: there",
+            ":cry: hi",
+            "hi :cry:",
+            ":ok::cry:",
+            "a :ok: b :cry: c",
+            ":cry:",
+            "plain words only",
+        ] {
+            let Some(pieces) = inline_pieces(line) else {
+                continue;
+            };
+            let mut offset = 0;
+            let mut segments = 0;
+            for piece in pieces.iter().filter(|piece| piece.crab.is_none()) {
+                let start = if segments == 0 { 0 } else { offset + 1 };
+                assert_eq!(
+                    start, piece.range.start,
+                    "{line}: segment starts at {start}, not {}",
+                    piece.range.start
+                );
+                offset = start + piece.accounted;
+                segments += 1;
+            }
+            assert_eq!(offset, line.len(), "{line}: the line ends short");
+        }
     }
 }
