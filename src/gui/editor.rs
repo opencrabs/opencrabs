@@ -28,8 +28,8 @@ use gpui::{
     Element, ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
     Focusable, Font, GlobalElementId, ImageFormat, KeyBinding, LayoutId, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, PathPromptOptions, Pixels, Point,
-    SharedString, Style, TextAlign, TextRun, UTF16Selection, Window, WrappedLine, actions, div,
-    fill, img, point, prelude::*, px, relative, rgb, rgba, size,
+    SharedString, Style, TextAlign, TextRun, UTF16Selection, Window, WrappedLine,
+    actions, div, fill, img, point, prelude::*, px, relative, rgb, rgba, size,
 };
 
 use unicode_segmentation::UnicodeSegmentation;
@@ -1543,9 +1543,15 @@ struct RowPaint {
 /// Shaping is the expensive half of a composer frame; a caret blink, a
 /// selection, a notice timer or a streaming answer re-renders the field without
 /// changing the draft, size, width, font or color, so those frames reuse this.
+///
+/// `rows` rides along because the height that shaping implies is the other
+/// half of the same question. `request_layout` runs before prepaint and used to
+/// answer it by shaping the whole draft a second time, uncached, on every
+/// frame: the cache below then saved nothing on the frames it was built for.
 struct ShapedDraft {
     key: (String, Pixels, Pixels, Font, [f32; 4]),
     lines: Option<Vec<WrappedLine>>,
+    rows: usize,
 }
 
 /// The custom element: shapes every row during prepaint, paints rows and
@@ -1585,11 +1591,41 @@ impl Element for EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let (content, wrap_width) = {
+        // The height comes from the shaping prepaint already paid for (#2688).
+        // `text_system().shape_text` keeps no cache of its own, so asking it
+        // here meant every frame shaped the whole draft again, caret blinks and
+        // notice timers included, and the prepaint cache saved nothing. The key
+        // below is the one prepaint writes, so a frame that changed nothing
+        // answers in one comparison. An empty field has no content key (its
+        // cache holds the placeholder), and costs nothing to fall back on.
+        let (content, wrap_width, cached_rows) = {
             let input = self.input.read(cx);
-            (input.content.clone(), input.wrap_width)
+            let wrap_width = input.wrap_width;
+            let cached = (!input.content.is_empty() && wrap_width > Pixels::ZERO)
+                .then(|| {
+                    let style = window.text_style();
+                    let font_size = style.font_size.to_pixels(window.rem_size());
+                    let color = style.color;
+                    let key = (
+                        input.content.clone(),
+                        font_size,
+                        wrap_width,
+                        style.font(),
+                        [color.h, color.s, color.l, color.a],
+                    );
+                    input
+                        .shaped_draft
+                        .as_ref()
+                        .filter(|cache| cache.key == key)
+                        .map(|cache| cache.rows)
+                })
+                .flatten();
+            (input.content.clone(), wrap_width, cached)
         };
-        let rows = wrapped_row_count(&content, wrap_width, window);
+        let rows = match cached_rows {
+            Some(rows) => rows.max(1),
+            None => wrapped_row_count(&content, wrap_width, window),
+        };
         let mut style = Style::default();
         style.size.width = relative(1.).into();
         style.size.height = (window.line_height() * rows as f32).into();
@@ -1697,10 +1733,12 @@ impl Element for EditorElement {
                     // shape_text hands back a SmallVec; settle it into the
                     // plain Vec the cache stores so both match arms agree.
                     .map(|lines| lines.into_vec());
+                let rows = shaped_rows(lines.as_ref(), &display);
                 self.input.update(cx, |input, _| {
                     input.shaped_draft = Some(ShapedDraft {
                         key,
                         lines: lines.clone(),
+                        rows,
                     });
                 });
                 lines
@@ -2154,6 +2192,22 @@ fn line_count(content: &str) -> usize {
     content.split('\n').count()
 }
 
+/// Rows the shaped lines cover: one per wrap boundary plus one per logical
+/// line, which is the same height `wrapped_row_count` answers. A failed
+/// shaping falls back to the logical lines, so the field keeps its own height
+/// instead of collapsing to one row.
+fn shaped_rows(lines: Option<&Vec<WrappedLine>>, display: &str) -> usize {
+    lines
+        .map(|lines| {
+            lines
+                .iter()
+                .map(|line| line.wrap_boundaries().len() + 1)
+                .sum::<usize>()
+        })
+        .unwrap_or_else(|| display.split('\n').count())
+        .max(1)
+}
+
 /// Visual rows the text occupies at `wrap_width`.
 ///
 /// `request_layout` has to answer a height before it is handed its own
@@ -2439,6 +2493,38 @@ mod tests {
         assert!(prepaint.contains(".filter(|cache| cache.key == key)"));
         assert!(prepaint.contains("let shaped = match cached"));
         assert!(prepaint.contains("input.shaped_draft = Some(ShapedDraft"));
+    }
+
+    /// The layout pass answers its height out of the same cache prepaint
+    /// fills. Without that, `request_layout` shaped the whole draft again on
+    /// every frame and the cache above bought nothing (#2688).
+    #[test]
+    fn composer_layout_reads_the_cached_rows() {
+        let src = include_str!("editor.rs");
+        let layout = src
+            .split("fn request_layout(")
+            .nth(1)
+            .and_then(|rest| rest.split("fn prepaint(").next())
+            .expect("editor request layout");
+        assert!(
+            layout.contains("input.shaped_draft") && layout.contains(".map(|cache| cache.rows)"),
+            "request_layout must answer from the shaped cache"
+        );
+        assert!(
+            layout.contains("wrapped_row_count(&content, wrap_width, window)"),
+            "the uncached measure survives only as the miss path"
+        );
+    }
+
+    /// The cached height is the height the shaped lines cover. Shaping that
+    /// failed keeps the logical line count, so a long draft never collapses to
+    /// one row.
+    #[test]
+    fn cached_rows_match_the_shaped_lines() {
+        assert_eq!(super::shaped_rows(None, "a\nb\nc"), 3);
+        assert_eq!(super::shaped_rows(None, ""), 1);
+        // A trailing newline is a real empty row the caret can sit on.
+        assert_eq!(super::shaped_rows(None, "a\n"), 2);
     }
 
     #[test]
