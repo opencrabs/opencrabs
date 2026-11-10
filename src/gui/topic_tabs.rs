@@ -195,11 +195,26 @@ mod tests {
             .expect("topic renderer body");
         assert!(!tab.contains(".when(current, |d| d.bg("));
         assert!(!tab.contains(".hover(|d| d.bg("));
-        assert!(tab.contains(".children(icon)\n        .child(content)"));
+        assert!(tab.contains(".children(icon)"));
+        assert!(tab.contains(".child(content)"));
         assert!(tab.contains(".size(rems(style.cell_rems))"));
         assert!(tab.contains(".border_l(px(style.focus_bar_px))"));
         assert!(tab.contains(".border_b(px(style.focus_bar_px))"));
-        assert!(!tab.contains(".rounded_full()"));
+        // The one circle in the cell is the activity dot (#2762). The cell
+        // itself is never a filled pill, which the two bg bans above hold.
+        let dot = tab
+            .split(".when(activity, |d| {")
+            .nth(1)
+            .expect("the activity dot")
+            .split(".child(content)")
+            .next()
+            .expect("the activity dot body");
+        assert!(dot.contains(".rounded_full()"), "the dot is a circle");
+        assert_eq!(
+            tab.matches(".rounded_full()").count(),
+            1,
+            "and the cell is never a filled pill"
+        );
         assert!(tab.contains("focus_color"));
 
         let strip = src
