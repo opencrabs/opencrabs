@@ -84,17 +84,32 @@ const VIDEO_EXTENSIONS: &[&str] = &[
 
 /// One row of the composer's `:query` list (#2769).
 ///
-/// A glyph row inserts its character. A crab row is one of our own pictures:
-/// it has no character to insert, so accepting it attaches the embedded PNG
-/// and the chat receives an image instead of a token.
+/// A glyph row inserts its character. A crab row is one of our own pictures and
+/// inserts its shortcode instead: the token is what the transcript draws as
+/// that picture, so the message carries an emoji as text and never a file
+/// (#2771).
 #[derive(Clone, Copy)]
 pub struct EmojiRow {
-    /// The character this row inserts. Empty for a crab, which attaches.
+    /// The character this row inserts. Empty for a crab, which inserts its
+    /// shortcode in colons.
     pub glyph: &'static str,
     /// The shortcode shown and matched on, without its colons.
     pub shortcode: &'static str,
     /// The embedded PNG for a crab row.
     pub crab: Option<&'static [u8]>,
+}
+
+/// What accepting a row writes into the draft: the glyph as it is, or, for a
+/// crab, its shortcode between colons (#2771).
+///
+/// The token is the emoji's text form. It is what the transcript reads back and
+/// draws as the pack picture, so a crab never needs a file and the message
+/// keeps its words around it.
+fn emoji_insertion(row: &EmojiRow) -> String {
+    match row.crab {
+        Some(_) => format!(":{}:", row.shortcode),
+        None => row.glyph.to_string(),
+    }
 }
 
 /// A file waiting to be sent with the message: the GUI's twin of the TUI's
@@ -637,30 +652,18 @@ impl Editor {
     }
 
     /// Replace `:query` with the highlighted row and keep typing after it. A
-    /// crab has no character to insert, so it attaches its picture (#2769).
+    /// glyph inserts its character; a crab inserts its shortcode, which the
+    /// transcript draws as the pack picture, so the emoji travels as text and
+    /// nothing is attached (#2771).
     fn accept_emoji(&mut self, cx: &mut Context<Self>) {
         let (Some((colon, _)), Some((items, index))) = (self.emoji_query(), self.emoji_popup())
         else {
             return;
         };
-        let row = items[index];
+        let insert = emoji_insertion(&items[index]);
         let end = self.cursor_offset();
-        let caret = match row.crab {
-            Some(bytes) => {
-                // The picture goes out the same door a pasted screenshot takes,
-                // so the send pipeline sees one kind of thing (#2769).
-                if let Some(path) = write_emoji_crab(row.shortcode, bytes) {
-                    self.attach_paths([path]);
-                }
-                // The shortcode goes away: the chip is what the message shows.
-                self.content.replace_range(colon..end, "");
-                colon
-            }
-            None => {
-                self.content.replace_range(colon..end, row.glyph);
-                colon + row.glyph.len()
-            }
-        };
+        self.content.replace_range(colon..end, insert.as_str());
+        let caret = colon + insert.len();
         self.selected_range = caret..caret;
         self.selection_reversed = false;
         self.marked_range = None;
@@ -2318,19 +2321,6 @@ fn write_clipboard_image(image: &(ImageFormat, Vec<u8>)) -> Option<PathBuf> {
     Some(path)
 }
 
-/// Write one embedded crab to a scratch file so the attachment pipeline, which
-/// is path based, can carry it (#2769). The file outlives the send for the same
-/// reason a pasted image does: the transcript stores the path.
-fn write_emoji_crab(name: &str, bytes: &'static [u8]) -> Option<PathBuf> {
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_millis();
-    let path = std::env::temp_dir().join(format!("opencrabs-emoji-{name}-{stamp}.png"));
-    std::fs::write(&path, bytes).ok()?;
-    Some(path)
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
@@ -2374,6 +2364,24 @@ mod tests {
         let rows = super::Editor::emoji_rows("smile");
         assert!(!rows.is_empty(), "a glyph query still answers");
         assert!(rows.iter().all(|row| row.crab.is_none()));
+    }
+
+    /// A crab is an emoji written as text (#2771). Accepting one writes its
+    /// shortcode, which the transcript draws as the picture, so nothing reaches
+    /// the attachment pipeline and the message keeps its words.
+    #[test]
+    fn a_crab_is_inserted_as_its_shortcode() {
+        for (name, _) in crate::topic_icons::CRAB_ICONS {
+            let row = *super::Editor::emoji_rows(name)
+                .iter()
+                .find(|row| row.shortcode == *name)
+                .expect("the pack row is listed");
+            assert!(row.crab.is_some(), "{name} is a picture row");
+            assert_eq!(super::emoji_insertion(&row), format!(":{name}:"));
+        }
+        let glyph = super::Editor::emoji_rows("smile")[0];
+        assert!(glyph.crab.is_none());
+        assert_eq!(super::emoji_insertion(&glyph), glyph.glyph);
     }
 
     /// The pack leads, but it does not grow the list: the eight-row cap is the
