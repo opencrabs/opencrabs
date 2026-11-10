@@ -6383,7 +6383,7 @@ mod click_tests {
     /// A press on a link label opens the destination the parser kept, because
     /// the label text alone (`docs`) names nothing.
     #[test]
-    fn a_press_on_a_link_label_names_its_destination() {
+    fn open_target_from_a_link_label() {
         let text = "read docs first".to_string();
         let label = text.find("docs").expect("label");
         let click = PendingClick {
@@ -6400,7 +6400,7 @@ mod click_tests {
     /// Off the label, the same press resolves nothing: a link must not make
     /// its whole line clickable.
     #[test]
-    fn a_press_beside_the_label_names_nothing() {
+    fn open_target_is_inert_beside_the_label() {
         let text = "read docs first".to_string();
         let label = text.find("docs").expect("label");
         let click = PendingClick {
@@ -6414,9 +6414,25 @@ mod click_tests {
     /// A plain rendered path is opened from the token under the pointer, which
     /// is the case in the screenshot: the path was inline code, not a link.
     #[test]
-    fn a_press_on_a_rendered_path_names_the_file() {
+    fn open_target_from_a_rendered_path() {
         let file = fixture("path");
         let text = format!("saved to {} just now", file.display());
+        let offset = text.find("notes.md").expect("name in the line");
+        let click = PendingClick {
+            text,
+            links: Vec::new(),
+            offset,
+        };
+        assert_eq!(click.target(), Some(ClickTarget::File(file.clone())));
+        let _ = std::fs::remove_dir_all(file.parent().expect("parent"));
+    }
+
+    /// `src/gui/main.rs:1012` names a file plus a line to jump to. The line
+    /// number is not part of the name, so the file still opens.
+    #[test]
+    fn open_target_from_a_path_with_a_line_suffix() {
+        let file = fixture("line");
+        let text = format!("see {}:1012 for the handler", file.display());
         let offset = text.find("notes.md").expect("name in the line");
         let click = PendingClick {
             text,
@@ -6431,7 +6447,7 @@ mod click_tests {
     /// found nothing. Opening on press would launch a url the reader was
     /// trying to select.
     #[test]
-    fn the_release_opens_only_when_nothing_was_copied() {
+    fn open_target_only_when_the_copy_found_nothing() {
         let src = include_str!("transcript.rs");
         let start = src
             .find("pub fn release(&self, window: &mut Window, app: &mut App)")
@@ -6458,7 +6474,7 @@ mod click_tests {
     /// The press has to record what is under it; a release cannot resolve a
     /// token it never saw.
     #[test]
-    fn the_press_records_the_text_it_landed_on() {
+    fn open_target_press_records_what_it_landed_on() {
         let src = include_str!("transcript.rs");
         let start = src
             .find("fn selectable_text_segment(")
@@ -6480,7 +6496,7 @@ mod click_tests {
     /// A press on a row's padding is not a text click, so it must drop any
     /// candidate an earlier press left behind.
     #[test]
-    fn a_press_on_padding_leaves_no_candidate() {
+    fn open_target_press_on_padding_leaves_no_candidate() {
         let src = include_str!("transcript.rs");
         let start = src
             .find("fn selectable_row<E: gpui::IntoElement>(")

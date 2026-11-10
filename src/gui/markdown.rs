@@ -522,7 +522,7 @@ mod tests {
     /// destination to open (#2317). The range is the label's own bytes, which
     /// is exactly what the pointer lands on.
     #[test]
-    fn a_link_keeps_the_destination_it_points_at() {
+    fn open_target_keeps_the_link_destination() {
         assert_eq!(
             links_of("see [docs](https://opencrabs.com) for more"),
             vec!["docs -> https://opencrabs.com".to_string()]
@@ -530,7 +530,7 @@ mod tests {
     }
 
     #[test]
-    fn two_links_on_one_line_keep_their_own_destinations() {
+    fn open_target_two_links_on_one_line() {
         assert_eq!(
             links_of("[a](https://a.example) and [b](https://b.example)"),
             vec![
@@ -541,14 +541,14 @@ mod tests {
     }
 
     #[test]
-    fn a_line_without_a_link_carries_none() {
+    fn open_target_absent_without_a_link() {
         assert!(links_of("plain text with no link at all").is_empty());
     }
 
     /// A cell is trimmed after the fact, so its link range has to move with
     /// the text the same way its highlights do.
     #[test]
-    fn a_table_cell_link_points_inside_the_trimmed_cell() {
+    fn open_target_table_cell_after_the_trim() {
         let blocks = blocks("| a |\n|---|\n| [d](https://x.example) |");
         let mut found = None;
         for block in blocks {
