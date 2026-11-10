@@ -50,13 +50,15 @@ fn body_of<'a>(src: &'a str, header: &str) -> &'a str {
     let start = src
         .find(header)
         .unwrap_or_else(|| panic!("{header} must exist"));
-    let line_start = src[..start].rfind('\n').map_or(0, |n| n + 1);
+    let head = src.get(..start).unwrap_or_default();
+    let line_start = head.rfind('\n').map_or(0, |n| n + 1);
     let indent = " ".repeat(start - line_start);
     let close = format!("\n{indent}}}\n");
-    let body = &src[start..];
-    &body[..body
+    let body = src.get(start..).unwrap_or_default();
+    let cut = body
         .find(&close)
-        .unwrap_or_else(|| panic!("{header} has a closing brace"))]
+        .unwrap_or_else(|| panic!("{header} has a closing brace"));
+    body.get(..cut).unwrap_or_default()
 }
 
 #[test]
@@ -238,8 +240,9 @@ fn open_target_press_records_what_it_landed_on() {
     let press = segment
         .find("on_mouse_down(MouseButton::Left")
         .expect("the segment takes a press");
+    let after = segment.get(press..).unwrap_or_default();
     assert!(
-        segment[press..].contains("pending_click.borrow_mut() = Some(PendingClick"),
+        after.contains("pending_click.borrow_mut() = Some(PendingClick"),
         "the press records the candidate inside its own handler"
     );
     assert!(

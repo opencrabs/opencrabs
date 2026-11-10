@@ -95,7 +95,7 @@ fn char_col(text: &str, byte: usize) -> usize {
     while cut > 0 && !text.is_char_boundary(cut) {
         cut -= 1;
     }
-    text[..cut].chars().count()
+    text.get(..cut).unwrap_or_default().chars().count()
 }
 
 /// The destination a click at `offset` names, given the link labels drawn on
@@ -137,7 +137,7 @@ fn token_at(line: &str, col: usize) -> Option<&str> {
     }
     let start = chars[a].0;
     let end = chars[b].0 + chars[b].1.len_utf8();
-    Some(&line[start..end])
+    line.get(start..end)
 }
 
 /// Strip rendering wrapper noise around a token.
@@ -152,7 +152,7 @@ fn clean_token(raw: &str) -> &str {
         // Balanced outer wrappers: "(https://x)", "[a.md]", "{p}".
         for (open, close) in [('(', ')'), ('[', ']'), ('{', '}')] {
             if s.len() > 2 && s.starts_with(open) && s.ends_with(close) {
-                s = &s[1..s.len() - 1];
+                s = s.get(1..s.len() - 1).unwrap_or(s);
                 break;
             }
         }
@@ -162,7 +162,7 @@ fn clean_token(raw: &str) -> &str {
         // but a URL with a balanced inner "(bar)" keeps its ")".
         for (open, close) in [('(', ')'), ('[', ']'), ('{', '}')] {
             if s.ends_with(close) && !s.contains(open) {
-                s = &s[..s.len() - close.len_utf8()];
+                s = s.get(..s.len() - close.len_utf8()).unwrap_or(s);
             }
         }
         if s == prev {
@@ -181,14 +181,15 @@ fn classify(raw: &str, cwd: &Path, home: Option<&Path>) -> Option<ClickTarget> {
     if lower.starts_with("http://") || lower.starts_with("https://") {
         // Require something host-shaped after the scheme: "https://" alone
         // (or "https://." from prose) must not launch the browser.
-        let rest = &token[lower.find("://").unwrap() + 3..];
+        let scheme_end = lower.find("://").unwrap() + 3;
+        let rest = token.get(scheme_end..)?;
         if rest.contains('.') || rest.contains(':') || rest.eq_ignore_ascii_case("localhost") {
             return Some(ClickTarget::Url(token.to_string()));
         }
         return None;
     }
     if lower.starts_with("file://") {
-        let path = &token["file://".len()..];
+        let path = token.get("file://".len()..)?;
         return resolve_path(path, cwd, home);
     }
     if lower.starts_with("mailto:") && token.contains('@') {
