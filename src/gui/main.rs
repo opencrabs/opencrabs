@@ -12957,12 +12957,15 @@ impl Render for Dashboard {
                     });
                     div()
                         .id(SharedString::from(format!("topic-icon-{name}")))
-                        .p_0p5()
-                        .rounded(px(4.0))
+                        // A pick is a picture, not a bullet (#2768): at the
+                        // old 1.5rem the eight badges were specks and picking
+                        // one was guesswork.
+                        .p_1()
+                        .rounded(px(6.0))
                         .cursor_pointer()
                         .hover(|d| d.bg(rgb(palette::current().panel_hi)))
                         .on_click(pick)
-                        .child(topic_icons::picture(bytes, 1.5))
+                        .child(topic_icons::picture(bytes, 2.6))
                 })
                 .collect();
             root = root.child(topic_prompt_overlay(label, &draft, &icon, picks, cancel));
@@ -16626,10 +16629,12 @@ fn topic_prompt_overlay(
     // stored glyph when the row predates the picture set (#2478).
     let picture = topic_icons::topic_icon(icon)
         .or_else(|| topic_icons::crab_icon(icon))
-        .map(|bytes| topic_icons::picture(bytes, 1.6).into_any_element());
+        .map(|bytes| topic_icons::picture(bytes, 2.4).into_any_element());
     let icon_badge = div()
         .flex_none()
-        .size(rems(2.4))
+        // The badge carries the same picture the picker showed, so it has to
+        // be big enough to recognise (#2768).
+        .size(rems(3.2))
         .flex()
         .items_center()
         .justify_center()
@@ -16647,7 +16652,7 @@ fn topic_prompt_overlay(
         .flex()
         .flex_col()
         .gap_3()
-        .w(rems(28.0))
+        .w(rems(30.0))
         .p_4()
         .rounded(px(CARD_RADIUS))
         .border_1()
