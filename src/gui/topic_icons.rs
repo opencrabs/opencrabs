@@ -652,9 +652,56 @@ mod tests {
                     piece.range.start
                 );
                 offset = start + piece.accounted;
-                segments += 1;
             }
             assert_eq!(offset, line.len(), "{line}: the line ends short");
+        }
+    }
+
+    /// A line can hold accented text, an emoji and CJK next to a shortcode, so
+    /// every range the scan reports has to land on a char boundary. The
+    /// transcript slices the line by those ranges, and an offset one byte into
+    /// a multi-byte character panics at paint time rather than failing a test
+    /// (#2771, #2298).
+    #[test]
+    fn multi_byte_lines_report_ranges_on_char_boundaries() {
+        for line in [
+            "olá :cry: 日本語",
+            ":cry: ação",
+            "emoji :ok: 🦀 tail",
+            "ção :ok::cry: fim",
+            "🦀:cry:🦀",
+        ] {
+            for (range, _) in crab_tokens(line) {
+                assert!(
+                    line.is_char_boundary(range.start),
+                    "{line}: token starts mid-character at {}",
+                    range.start
+                );
+                assert!(
+                    line.is_char_boundary(range.end),
+                    "{line}: token ends mid-character at {}",
+                    range.end
+                );
+            }
+            let Some(pieces) = inline_pieces(line) else {
+                continue;
+            };
+            for piece in pieces {
+                assert!(
+                    line.is_char_boundary(piece.range.start),
+                    "{line}: piece starts mid-character at {}",
+                    piece.range.start
+                );
+                assert!(
+                    line.is_char_boundary(piece.range.end),
+                    "{line}: piece ends mid-character at {}",
+                    piece.range.end
+                );
+                // The slice the transcript takes of this piece, taken the safe
+                // way so the test itself adds no byte-slice site.
+                line.get(piece.range)
+                    .unwrap_or_else(|| panic!("{line}: piece range is not a slice"));
+            }
         }
     }
 }

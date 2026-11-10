@@ -6186,4 +6186,47 @@ mod tests {
         assert_eq!(local_highlights(&highlights, &(4..9)), vec![(0..5, bold)]);
         assert_eq!(local_highlights(&highlights, &(2..6)), vec![(0..4, bold)]);
     }
+
+    /// Cutting a run at its spaces must keep every chunk on a char boundary: a
+    /// chunk range becomes a slice of the line at paint time, and accented text
+    /// or an emoji sitting next to a crab would panic there instead of failing
+    /// here (#2771, #2298).
+    #[test]
+    fn multi_byte_runs_cut_on_char_boundaries() {
+        for line in [
+            "ação pedaço 🦀 fim",
+            "日本語 と :cry: と 漢字",
+            "olá :cry: mundo",
+        ] {
+            for chunks in [
+                inline_chunks(line, 0..line.len(), line.len()),
+                topic_icons::inline_pieces(line)
+                    .map(|pieces| {
+                        pieces
+                            .iter()
+                            .filter(|piece| piece.crab.is_none() && !piece.range.is_empty())
+                            .flat_map(|piece| {
+                                inline_chunks(line, piece.range.clone(), piece.accounted)
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            ] {
+                for (range, _) in chunks {
+                    assert!(
+                        line.is_char_boundary(range.start),
+                        "{line}: a chunk starts mid-character at {}",
+                        range.start
+                    );
+                    assert!(
+                        line.is_char_boundary(range.end),
+                        "{line}: a chunk ends mid-character at {}",
+                        range.end
+                    );
+                    line.get(range.clone())
+                        .unwrap_or_else(|| panic!("{line}: chunk range is not a slice"));
+                }
+            }
+        }
+    }
 }
