@@ -95,182 +95,182 @@ pub const CRAB_ICONS: &[(&str, &[u8])] = &[
         "100",
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/src/assets/emojis/crab_100.png"
+            "/src/assets/emojis/100.png"
         )),
     ),
     (
         "bolt",
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/src/assets/emojis/crab_bolt.png"
+            "/src/assets/emojis/bolt.png"
         )),
     ),
     (
         "bug",
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/src/assets/emojis/crab_bug.png"
+            "/src/assets/emojis/bug.png"
         )),
     ),
     (
         "clap",
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/src/assets/emojis/crab_clap.png"
+            "/src/assets/emojis/clap.png"
         )),
     ),
     (
         "coffee",
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/src/assets/emojis/crab_coffee.png"
+            "/src/assets/emojis/coffee.png"
         )),
     ),
     (
         "cry",
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/src/assets/emojis/crab_cry.png"
+            "/src/assets/emojis/cry.png"
         )),
     ),
     (
         "dead",
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/src/assets/emojis/crab_dead.png"
+            "/src/assets/emojis/dead.png"
         )),
     ),
     (
         "eyes",
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/src/assets/emojis/crab_eyes.png"
+            "/src/assets/emojis/eyes.png"
         )),
     ),
     (
         "fire",
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/src/assets/emojis/crab_fire.png"
+            "/src/assets/emojis/fire.png"
         )),
     ),
     (
         "gg",
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/src/assets/emojis/crab_gg.png"
+            "/src/assets/emojis/gg.png"
         )),
     ),
     (
         "laugh",
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/src/assets/emojis/crab_laugh.png"
+            "/src/assets/emojis/laugh.png"
         )),
     ),
     (
         "loading",
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/src/assets/emojis/crab_loading.png"
+            "/src/assets/emojis/loading.png"
         )),
     ),
     (
         "merge",
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/src/assets/emojis/crab_merge.png"
+            "/src/assets/emojis/merge.png"
         )),
     ),
     (
         "mindblow",
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/src/assets/emojis/crab_mindblow.png"
+            "/src/assets/emojis/mindblow.png"
         )),
     ),
     (
         "no",
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/src/assets/emojis/crab_no.png"
+            "/src/assets/emojis/no.png"
         )),
     ),
     (
         "ok",
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/src/assets/emojis/crab_ok.png"
+            "/src/assets/emojis/ok.png"
         )),
     ),
     (
         "party",
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/src/assets/emojis/crab_party.png"
+            "/src/assets/emojis/party.png"
         )),
     ),
     (
         "please",
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/src/assets/emojis/crab_please.png"
+            "/src/assets/emojis/please.png"
         )),
     ),
     (
         "rocket",
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/src/assets/emojis/crab_rocket.png"
+            "/src/assets/emojis/rocket.png"
         )),
     ),
     (
         "salute",
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/src/assets/emojis/crab_salute.png"
+            "/src/assets/emojis/salute.png"
         )),
     ),
     (
         "shrug",
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/src/assets/emojis/crab_shrug.png"
+            "/src/assets/emojis/shrug.png"
         )),
     ),
     (
         "smug",
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/src/assets/emojis/crab_smug.png"
+            "/src/assets/emojis/smug.png"
         )),
     ),
     (
         "sweat",
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/src/assets/emojis/crab_sweat.png"
+            "/src/assets/emojis/sweat.png"
         )),
     ),
     (
         "think",
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/src/assets/emojis/crab_think.png"
+            "/src/assets/emojis/think.png"
         )),
     ),
     (
         "trophy",
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/src/assets/emojis/crab_trophy.png"
+            "/src/assets/emojis/trophy.png"
         )),
     ),
     (
         "yes",
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/src/assets/emojis/crab_yes.png"
+            "/src/assets/emojis/yes.png"
         )),
     ),
 ];
