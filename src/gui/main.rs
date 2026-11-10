@@ -1338,6 +1338,44 @@ mod sidebar_action_tests {
     }
 
     #[test]
+    fn an_overlay_never_leaves_the_caret_in_the_composer() {
+        // #2767: the repair ran one way only. With the topic prompt open the
+        // owner was the prompt, the composer kept the caret, so the name typed
+        // into the field also landed in the message field and Enter submitted
+        // the message instead of creating the topic.
+        let src = include_str!("main.rs");
+        let render = dashboard_render(src);
+        assert!(
+            render.contains("caret -> root repaired now={}"),
+            "the other direction leaves a receipt too"
+        );
+        assert!(
+            render.contains("let leaked = composer.read(cx).focus_handle.is_focused(window)"),
+            "the drift is the composer holding keys it no longer owns"
+        );
+        assert!(
+            render.contains("an overlay or a screen took the keys while the composer"),
+            "the repair is a branch with two arms, never one"
+        );
+    }
+
+    #[test]
+    fn a_send_is_refused_while_an_overlay_owns_the_keys() {
+        // #2767: the second half. Even with the caret repaired, a send must
+        // not reach the agent while a prompt is waiting for its own Enter.
+        let src = include_str!("main.rs");
+        let body = fn_body(src, "send_from_pane");
+        assert!(
+            body.contains("send refused"),
+            "a refused send leaves a receipt naming the owner"
+        );
+        assert!(
+            body.contains("self.open_overlays()"),
+            "the refusal asks the one owner decision"
+        );
+    }
+
+    #[test]
     fn sidebar_actions_existing_toggle_uses_the_same_transition() {
         let source = include_str!("main.rs");
         let body = source
@@ -4977,6 +5015,19 @@ impl Dashboard {
     ) {
         let text = text.trim().to_string();
         if text.is_empty() {
+            return;
+        }
+        // A send under an open overlay is the composer answering keys nobody
+        // gave it (#2767). The caret repair keeps the composer out of the
+        // dispatch path, and this refuses the one path that got around it: a
+        // name typed into the topic prompt was submitted here instead, so the
+        // topic was never created and the name reached the agent as a message.
+        let overlays = self.open_overlays();
+        if !overlays.is_empty() && matches!(self.screen, Screen::Chat) {
+            logging::debug(&format!(
+                "send refused: {:?} owns the keyboard",
+                overlays.last()
+            ));
             return;
         }
         // A send ends that pane's offer, the same rule the window's own
@@ -9897,6 +9948,21 @@ impl Render for Dashboard {
                 window.focus(&handle);
                 logging::debug(&format!(
                     "caret -> composer repaired now={}",
+                    self.caret_owner_name(window, cx)
+                ));
+            }
+        } else {
+            // The mirror of the repair above, and the half that was missing
+            // (#2767): an overlay or a screen took the keys while the composer
+            // kept the caret, so everything typed into the prompt also landed
+            // in the message field and Enter submitted it. A field the overlay
+            // owns is not this drift; only the composer is.
+            let composer = self.composer_entity();
+            let leaked = composer.read(cx).focus_handle.is_focused(window);
+            if leaked {
+                window.focus(&self.focus);
+                logging::debug(&format!(
+                    "caret -> root repaired now={}",
                     self.caret_owner_name(window, cx)
                 ));
             }
