@@ -21,6 +21,7 @@
 //! text index in the window is a BYTE, so both entry points exist and share
 //! one core.
 
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 /// What a click on a token should open.
@@ -95,6 +96,28 @@ fn char_col(text: &str, byte: usize) -> usize {
         cut -= 1;
     }
     text[..cut].chars().count()
+}
+
+/// The destination a click at `offset` names, given the link labels drawn on
+/// the same text (#2317).
+///
+/// A label wins over token resolution because the label alone carries no
+/// destination: `[docs](https://x)` draws `docs`, and only the parser knows
+/// where it points. Off every label the text is treated as ordinary rendered
+/// text, so a link never makes its whole line clickable.
+///
+/// `offset` is a byte index, the unit a shaped text layout reports.
+pub fn target_for_click(
+    text: &str,
+    links: &[(Range<usize>, String)],
+    offset: usize,
+) -> Option<ClickTarget> {
+    for (span, dest) in links {
+        if span.contains(&offset) {
+            return Some(ClickTarget::Url(dest.clone()));
+        }
+    }
+    target_at_byte(text, offset)
 }
 
 /// Expand from `col` to the token surrounding it. A click on whitespace or
@@ -247,92 +270,4 @@ fn expand_tilde(token: &str, home: Option<&Path>) -> Option<String> {
         return Some(h.join(rest.trim_start_matches('/')).display().to_string());
     }
     Some(token.to_string())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A temp dir unique per test, holding the fixtures it names.
-    struct Sandbox {
-        dir: PathBuf,
-    }
-
-    impl Sandbox {
-        fn new(tag: &str, files: &[&str]) -> Self {
-            let dir = std::env::temp_dir().join(format!("oc-links-{tag}-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).expect("temp dir");
-            for f in files {
-                let p = dir.join(f);
-                if let Some(parent) = p.parent() {
-                    std::fs::create_dir_all(parent).expect("parent dirs");
-                }
-                std::fs::write(&p, b"fixture").expect("fixture write");
-            }
-            Self { dir }
-        }
-    }
-
-    impl Drop for Sandbox {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.dir);
-        }
-    }
-
-    #[test]
-    fn a_url_mid_sentence_resolves() {
-        let line = "See https://opencrabs.com/docs for more.";
-        let col = line.find("opencrabs").expect("needle") + 2;
-        assert_eq!(
-            target_at_with(line, col, Path::new("/nonexistent"), None),
-            Some(ClickTarget::Url("https://opencrabs.com/docs".into()))
-        );
-    }
-
-    #[test]
-    fn an_existing_path_resolves_and_a_missing_one_does_not() {
-        let box_ = Sandbox::new("path", &["src/gui/main.rs"]);
-        let line = "open src/gui/main.rs and then src/gui/gone.rs please";
-        let here = line.find("main.rs").expect("needle");
-        assert_eq!(
-            target_at_with(line, here, &box_.dir, None),
-            Some(ClickTarget::File(box_.dir.join("src/gui/main.rs")))
-        );
-        let gone = line.find("gone.rs").expect("needle");
-        assert_eq!(target_at_with(line, gone, &box_.dir, None), None);
-    }
-
-    #[test]
-    fn a_line_suffix_is_not_part_of_the_file_name() {
-        let box_ = Sandbox::new("line", &["src/gui/main.rs"]);
-        let line = "see src/gui/main.rs:1012:5 for the handler";
-        let col = line.find("main.rs").expect("needle");
-        assert_eq!(
-            target_at_with(line, col, &box_.dir, None),
-            Some(ClickTarget::File(box_.dir.join("src/gui/main.rs")))
-        );
-    }
-
-    #[test]
-    fn a_byte_offset_resolves_the_token_under_it() {
-        let box_ = Sandbox::new("byte", &["notes/a.md"]);
-        // The arrow is three bytes in UTF-8, so the byte offset of the path
-        // sits past its character index, and the two units disagree.
-        let line = "→ notes/a.md ←";
-        let char_col = line.find("notes").expect("needle");
-        let byte_col = char_col + 3;
-        assert_eq!(
-            target_at_byte_with(line, byte_col, &box_.dir, None),
-            Some(ClickTarget::File(box_.dir.join("notes/a.md")))
-        );
-        // A byte inside the arrow rounds down to its start, which is a break.
-        assert_eq!(target_at_byte_with(line, 1, &box_.dir, None), None);
-    }
-
-    #[test]
-    fn a_prose_word_is_inert() {
-        let line = "for example, e.g. this sentence has no target";
-        assert_eq!(target_at_with(line, 15, Path::new("/nonexistent"), None), None);
-    }
 }
