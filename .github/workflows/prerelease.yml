@@ -427,3 +427,17 @@ jobs:
               --target "${{ github.sha }}"
           fi
           gh release upload --clobber nightly release-assets/*
+
+          # Upload first, prune second. Asset names carry the version and short
+          # SHA, so a new build does not overwrite the previous one: without
+          # this loop the release accumulates a stale archive set on every run,
+          # and a tester downloading from it gets a build from months ago.
+          # Pruning after a successful upload means a failure still leaves the
+          # previous set in place instead of an empty release.
+          keep="$(cd release-assets && ls)"
+          for asset in $(gh release view nightly --json assets --jq '.assets[].name'); do
+            if ! printf '%s\n' "$keep" | grep -qxF "$asset"; then
+              echo "pruning stale asset: $asset"
+              gh release delete-asset nightly "$asset" --yes
+            fi
+          done
