@@ -16,9 +16,15 @@
 #     --binary target/aarch64-apple-darwin/release/opencrabs \
 #     --rtk    target/aarch64-apple-darwin/release/rtk \
 #     --version 0.5.11 \
-#     --out    dist
+#     --out    dist \
+#     [--gui   target/aarch64-apple-darwin/release/opencrabs-gui]
 #
 # Writes dist/OpenCrabs.app.
+#
+# --gui is optional so the script keeps working for a TUI-only bundle. When it
+# is given, the desktop client lands in Contents/MacOS/ beside the terminal
+# binary. CFBundleExecutable stays `opencrabs` either way: /evolve replaces
+# Contents/MacOS/opencrabs in place, and moving that name would break it.
 
 set -euo pipefail
 
@@ -26,6 +32,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ICNS="$REPO_ROOT/src/assets/icon.icns"
 
 BINARY=""
+GUI=""
 RTK=""
 VERSION=""
 OUT=""
@@ -38,6 +45,7 @@ die() {
 while [ $# -gt 0 ]; do
     case "$1" in
         --binary)  BINARY="${2:-}";  shift 2 ;;
+        --gui)     GUI="${2:-}";     shift 2 ;;
         --rtk)     RTK="${2:-}";     shift 2 ;;
         --version) VERSION="${2:-}"; shift 2 ;;
         --out)     OUT="${2:-}";     shift 2 ;;
@@ -55,6 +63,9 @@ done
 [ -n "$OUT" ]     || die "--out is required"
 
 [ -f "$BINARY" ] || die "binary not found: $BINARY"
+if [ -n "$GUI" ]; then
+    [ -f "$GUI" ] || die "gui binary not found: $GUI"
+fi
 [ -f "$RTK" ]    || die "rtk not found: $RTK"
 [ -f "$ICNS" ]   || die "icon not found: $ICNS"
 
@@ -68,6 +79,9 @@ mkdir -p "$MACOS" "$RESOURCES"
 
 # rtk must sit beside the binary: evolve resolves it as a sibling of exe_path.
 install -m 0755 "$BINARY" "$MACOS/opencrabs"
+if [ -n "$GUI" ]; then
+    install -m 0755 "$GUI" "$MACOS/opencrabs-gui"
+fi
 install -m 0755 "$RTK" "$MACOS/rtk"
 install -m 0644 "$ICNS" "$RESOURCES/icon.icns"
 
