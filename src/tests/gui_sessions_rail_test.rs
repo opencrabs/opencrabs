@@ -163,7 +163,7 @@ fn grouped_topics_are_compact_visible_pins_not_a_dropdown() {
 }
 
 #[test]
-fn rail_header_has_no_kebab_and_shares_one_line() {
+fn rail_header_has_no_kebab_and_the_stamp_owns_its_own_line() {
     assert!(
         !SESSIONS.contains("dropbar") && !GUI_MAIN.contains("dropbar"),
         "the empty menu row and its renderer are gone"
@@ -186,9 +186,11 @@ fn rail_header_has_no_kebab_and_shares_one_line() {
         "the stamp fills its own line and hugs the card's right edge"
     );
     let title = block(row, "let title = div()", "let body = div()");
-    let trailing = title
-        .split(".ml_auto()")
-        .nth(1)
+    // The cluster opens before `ml_auto` pushes it to the edge, so its shape
+    // is read on the head and its contents on the tail. Slicing only the tail
+    // left `flex_row`/`gap_2` behind the split and the shape check unreachable.
+    let (cluster_head, trailing) = title
+        .split_once(".ml_auto()")
         .expect("right-aligned mark cluster");
     assert!(
         trailing.contains(".when_some(pin_toggle,") && trailing.contains(".when_some(badge,"),
@@ -199,7 +201,7 @@ fn rail_header_has_no_kebab_and_shares_one_line() {
         "the stamp no longer shares a line with the title it used to overlap"
     );
     assert!(
-        trailing.contains(".flex_row()") && trailing.contains(".gap_2()"),
+        cluster_head.trim_end().ends_with(".flex_none()") && cluster_head.contains(".gap_2()"),
         "the pin and the unread badge form one horizontal cluster"
     );
     assert!(
@@ -243,9 +245,14 @@ fn rail_pin_toggles_without_opening_the_card() {
         "one wired control serves both full and compact rows"
     );
 
+    // Anchor on the listener's own signature, not the bare binding: main.rs
+    // names that binding in its own source-anchor test, and `split_once` takes
+    // the first hit, so the bare form sliced 417k chars of the file and the
+    // `pick_or_open` guard below fired on the row's click handler instead of
+    // this one.
     let handler = block(
         GUI_MAIN,
-        "let toggle_pin = cx.listener",
+        "let toggle_pin = cx.listener(move",
         "let flags = sessions::RowFlags",
     );
     assert!(handler.contains("cx.stop_propagation();"));
@@ -272,7 +279,7 @@ fn selected_topic_owns_the_parent_activity_line() {
         "let progress_id = children_by_parent",
         "let toggle_pin = cx.listener",
     );
-    assert!(resolution.contains("children_by_parent.get(&id)"));
+    assert!(resolution.contains(".get(&id).map_or(id,"));
     assert!(resolution.contains("self.sessions"));
     assert!(resolution
         .contains("progress_id(id, kids.iter().map(|(kid_id, _)| *kid_id))"));
@@ -295,7 +302,14 @@ fn selected_topic_owns_the_parent_activity_line() {
     assert!(flags.contains("plan: plan_progress.get(&id).copied()"));
     assert!(flags.contains("running: running_tasks.get(&id).cloned()"));
 
-    let body = block(SESSIONS, "let body = div()", "let mut row = div()");
+    // The body block ends where the row div starts. It used to end on
+    // `let mut row = div()`, which went away when the builder became the
+    // function's tail expression, so the anchor is the row's own id now.
+    let body = block(
+        SESSIONS,
+        "let body = div()",
+        ".id(SharedString::from(s.id.to_string()))",
+    );
     let chips = body.find(".when_some(chips,").expect("chip strip");
     let fallback = body
         .find("let preview = activity.or(preview);")
