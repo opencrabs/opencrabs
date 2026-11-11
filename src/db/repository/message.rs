@@ -700,14 +700,33 @@ impl MessageRepository {
         for chunk in ids.chunks(CHUNK) {
             let keys: Vec<String> = chunk.iter().map(Uuid::to_string).collect();
             let placeholders = vec!["?"; keys.len()].join(",");
+            // The newest row per session, found by index and read once
+            // (#2817). Ranking every row of every session with a window
+            // function made SQLite sort each partition, and it had to read
+            // `content` for all ~40k rows to do it: 1.3-2.1 s per call on the
+            // live ledger, every second, while anything streamed. Asking the
+            // index for `MAX(sequence)` first and joining back touches only
+            // the rows that can win: 0.06 s, same 200 answers.
+            //
+            // The outer window only ranks the handful of rows that tied on
+            // `MAX(sequence)` (164 such pairs exist in the live ledger), so
+            // one session still yields exactly one preview and the winner is
+            // the same one on every call.
             let sql = format!(
                 "SELECT session_id, role, content FROM ( \
-                    SELECT session_id, role, content, \
+                    SELECT m.session_id, m.role, m.content, \
                            ROW_NUMBER() OVER ( \
-                               PARTITION BY session_id ORDER BY sequence DESC \
+                               PARTITION BY m.session_id \
+                               ORDER BY m.sequence DESC, m.created_at DESC, m.id DESC \
                            ) AS rn \
-                    FROM messages WHERE session_id IN ({placeholders}) \
-                        AND role IN ('user', 'assistant') \
+                    FROM messages m \
+                    JOIN ( \
+                        SELECT session_id, MAX(sequence) AS seq FROM messages \
+                        WHERE session_id IN ({placeholders}) \
+                            AND role IN ('user', 'assistant') \
+                        GROUP BY session_id \
+                    ) last ON last.session_id = m.session_id AND last.seq = m.sequence \
+                    WHERE m.role IN ('user', 'assistant') \
                 ) WHERE rn = 1"
             );
             let rows: Vec<(String, String, String)> = self
