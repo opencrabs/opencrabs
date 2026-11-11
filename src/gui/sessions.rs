@@ -1708,7 +1708,7 @@ pub fn row(s: &Session, flags: RowFlags, chips: Option<Stateful<Div>>) -> Statef
                 )
             })
         });
-    let row = div()
+    div()
         .id(SharedString::from(s.id.to_string()))
         .w_full()
         .relative()
@@ -1734,8 +1734,7 @@ pub fn row(s: &Session, flags: RowFlags, chips: Option<Stateful<Div>>) -> Statef
         // The hover tint is for rows that are not selected: on the open one
         // it would paint over the state and hide which conversation is open.
         .when(!selected, |d| d.hover(|d| d.bg(rgb(palette::current().bg))))
-        .child(body);
-    row
+        .child(body)
 }
 
 /// One glyph cell at the right edge of a row's name line (#2636).
