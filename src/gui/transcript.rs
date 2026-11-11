@@ -4116,8 +4116,16 @@ mod tests {
             cell.contains("crate::thumbs::picture(") && cell.contains("px(concentric_radius(1.0))"),
             "the tile paints the square crop at the concentric radius"
         );
+        // The comment above the call names `Cover` while explaining why it was
+        // wrong, so the guard has to read code rather than prose. Same trap the
+        // #2793 scans hit, one layer down.
+        let code = cell
+            .lines()
+            .map(|line| line.split_once("//").map_or(line, |(code, _)| code))
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(
-            !cell.contains("Cover"),
+            !code.contains("Cover"),
             "a cover fit paints outside the tile, whatever radius it is given"
         );
         assert_eq!(concentric_radius(1.0), CARD_RADIUS - 1.0);
