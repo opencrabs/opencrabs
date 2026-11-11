@@ -541,7 +541,7 @@ pub fn image_pick_allowed(path: &std::path::Path, bytes: u64) -> bool {
         .extension()
         .and_then(|e| e.to_str())
         .map(|e| e.to_ascii_lowercase());
-    let known = ext.is_some_and(|e| IMAGE_EXTENSIONS.contains(&e));
+    let known = ext.is_some_and(|e| IMAGE_EXTENSIONS.contains(&e.as_str()));
     known && bytes <= MAX_IMAGE_BYTES
 }
 
