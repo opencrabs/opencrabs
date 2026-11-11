@@ -53,6 +53,7 @@ mod rail_activity;
 mod screen_keys;
 mod sessions;
 mod skills_view;
+mod status;
 mod telegram_topics;
 mod text_commands;
 mod theme;
@@ -73,6 +74,7 @@ use crate::screen_keys::{
     ChordMods, FocusTarget, KeyboardOwner, OverlayId, ScreenAction, focus_target, keyboard_owner,
     screen_chord,
 };
+use crate::status::{git_branch, help_rows, status_identity, tilde_path};
 use crate::theme::{BASE_REM, Size, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP, text};
 use opencrabs::db::models::Message;
 use opencrabs::ui_core::actions;
@@ -15066,77 +15068,6 @@ fn task_strip(text: String) -> Div {
         )
 }
 
-/// The footer's identity line: who is answering, from where, on what branch,
-/// and how fast this turn is streaming. Every field is read live; a field
-/// with no value prints a dash instead of a guess.
-fn status_identity(provider: &str, model: &str, cwd: &str, branch: &str, tps: f32) -> String {
-    if tps > 0.0 {
-        format!("{provider} · {model} · {cwd} · {branch} · {tps:.1} tok/s")
-    } else {
-        format!("{provider} · {model} · {cwd} · {branch}")
-    }
-}
-
-/// A path with the home directory collapsed to `~`, the way a shell prompt
-/// prints it. The home prefix is compared as a whole component, so
-/// `/Users/al` never matches `/Users/adolfousierstudio`.
-fn tilde_path(p: &std::path::Path) -> String {
-    let Some(home) = dirs::home_dir() else {
-        return p.display().to_string();
-    };
-    match p.strip_prefix(&home) {
-        Ok(rest) if rest.as_os_str().is_empty() => "~".to_string(),
-        Ok(rest) => format!("~/{}", rest.display()),
-        Err(_) => p.display().to_string(),
-    }
-}
-
-/// The checkout's branch name, or `None` when the directory is not a repo.
-/// Run once at startup: this is a footer label, not a per-frame subprocess.
-fn git_branch(dir: &std::path::Path) -> Option<String> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if name.is_empty() { None } else { Some(name) }
-}
-
-/// The key reference, painted over everything else (#2320).
-///
-/// Rows come from `ui_core::help_keys`, the table the terminal's `/help`
-/// prints, and only the rows this window actually answers are listed: `gui`
-/// is `None` for a chord whose port has not landed yet, and a help screen
-/// that advertises a dead chord is worse than one that stays quiet.
-/// The rows the overlay paints, in display order: every row whose `gui`
-/// spelling exists, section by section (#2320).
-///
-/// A function rather than a loop inside the renderer, so a test can compare
-/// the painted list with the shared table without building a window. The
-/// window answers a chord or it does not, and a row the window ignores is a
-/// row it must not advertise.
-fn help_rows() -> Vec<(
-    opencrabs::ui_core::help_keys::HelpSection,
-    &'static opencrabs::ui_core::help_keys::HelpRow,
-)> {
-    use opencrabs::ui_core::help_keys::{self, HelpSection};
-
-    let mut out = Vec::new();
-    for section in HelpSection::ALL {
-        out.extend(
-            help_keys::section_rows(section)
-                .filter(|row| row.gui.is_some())
-                .map(|row| (section, row)),
-        );
-    }
-    out
-}
-
 /// The name prompt above the input, while a topic is being named (#2303).
 /// The topic row (#2400, #2402): the leading button that moves it and the
 /// tabs. Across the top or bottom it is one row; down a side it is one column.
@@ -16909,6 +16840,7 @@ fn cd_entries_for(dir: &std::path::Path, show_hidden: bool) -> Vec<std::path::Pa
 mod tests {
     use super::{CHAT_MEASURE_PX, cd_entries_for, pick_initial_session, remember_open_session};
     use crate::composer_view::{composer_hint_for, queue_rows};
+    use crate::status::help_rows;
 
     /// A live turn repaints on every fourth poll tick, not on every one. The
     /// spinner and the clock are the only things moving in that branch, and at
@@ -19286,9 +19218,11 @@ mod tests {
                 "the footer must not advertise {needle} any more"
             );
         }
-        // The identity line survives: it is live state, which the strip was not.
-        assert!(src.contains("fn status_identity"));
-        assert!(src.contains("fn ctx_footer"));
+        // The identity line survives: it is live state, which the strip was
+        // not. It lives in `status.rs` now (#2817 follow-up), so the scan names
+        // that file. The ctx budget that used to sit beside it is gone on
+        // purpose (#2628): the tool block's own footer already prints it.
+        assert!(include_str!("status.rs").contains("fn status_identity"));
     }
 
     /// The manager is born in ONE setter, and the bridge calls it. A second
