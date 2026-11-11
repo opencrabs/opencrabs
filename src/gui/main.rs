@@ -10753,6 +10753,12 @@ impl Render for Dashboard {
                 // stamp of its own, which makes the card the only place the
                 // money under it can be summed.
                 cost: self.sessions.grouped_cost(s.total_cost, id),
+                // A card stands for its topics here too (#2815): a message
+                // written to a topic touches only that topic's ledger row, so
+                // the card's own stamp would freeze at the last message
+                // addressed to the card itself while its chips ran minutes
+                // ago. Folded over the same children the cost is.
+                stamp_at: self.sessions.grouped_activity(s.updated_at, id),
                 // The stored icon leads the row (#2790), resolved exactly
                 // like the topic tab resolves it: an embedded mark, a
                 // custom image from the view's cache, or a legacy glyph.

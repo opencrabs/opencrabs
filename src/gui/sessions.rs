@@ -142,10 +142,36 @@ impl SessionsState {
             .fold(own, |total, s| total + s.total_cost)
     }
 
-    /// Pinned first, then everything else, each group keeping the ledger's
-    /// order. TUI parity: `SessionService::session_favorites` feeds a stable
-    /// `sort_by_key(|s| !pins.contains(&s.id))`, so a pin moves a chat to the
-    /// top without disturbing the order inside either group.
+    /// When a rail card last saw work (#2815): its own ledger row or the newest
+    /// message in any topic grouped under it. A message is written to the
+    /// session it was addressed to, so a topic's activity never touches the
+    /// parent row's `updated_at`, and the card kept the date of the last
+    /// message sent to the parent itself while its topics ran minutes ago.
+    /// Grouped at paint time the way `grouped_cost` already groups spend,
+    /// rather than writing through to the parent on every topic message.
+    pub fn grouped_activity(
+        &self,
+        own: chrono::DateTime<chrono::Utc>,
+        parent: uuid::Uuid,
+    ) -> chrono::DateTime<chrono::Utc> {
+        self.items
+            .iter()
+            .filter(|s| self.parents.get(&s.id) == Some(&parent))
+            .fold(own, |latest, s| latest.max(s.updated_at))
+    }
+
+    /// The instant a card sorts by (#2815): the same grouped stamp it paints,
+    /// so the rail can never order rows by a different clock than it prints.
+    fn activity_of(&self, s: &Session) -> chrono::DateTime<chrono::Utc> {
+        self.grouped_activity(s.updated_at, s.id)
+    }
+
+    /// Pinned first, then everything else, each group newest activity first.
+    /// The key is the same grouped stamp the card paints (#2815): the parent's
+    /// own row folded together with its topics, because a message is written
+    /// to the session it was addressed to and the ledger's order therefore
+    /// reads the parent alone. `sort_by_key` is stable, so equal stamps keep
+    /// the ledger's order.
     ///
     /// A topic sits directly under its parent when that parent is in view
     /// (#2303). A pinned topic stays a chip under its parent: the pin orders
@@ -154,11 +180,13 @@ impl SessionsState {
         let visible: Vec<&Session> = self.visible().collect();
         let in_view = |id: uuid::Uuid| visible.iter().any(|s| s.id == id);
         let grouped = |s: &Session| self.parents.get(&s.id).is_some_and(|p| in_view(*p));
-        let (mut pinned, rest): (Vec<&Session>, Vec<&Session>) = visible
+        let (mut pinned, mut rest): (Vec<&Session>, Vec<&Session>) = visible
             .iter()
             .copied()
             .filter(|s| !grouped(s))
             .partition(|s| self.is_favorite(s.id));
+        pinned.sort_by_key(|s| std::cmp::Reverse(self.activity_of(*s)));
+        rest.sort_by_key(|s| std::cmp::Reverse(self.activity_of(*s)));
         pinned.extend(rest);
         let mut out: Vec<&Session> = Vec::with_capacity(visible.len());
         for top in pinned {
@@ -1444,6 +1472,13 @@ pub struct RowFlags {
     /// as chips (#2807). The row never reads `s.total_cost` itself, so a
     /// grouped card cannot print a number that leaves its children out.
     pub cost: f64,
+    /// The instant the card's stamp prints (#2815), already rolled up over the
+    /// topics it hides as chips the way `cost` is. A topic's message lands on
+    /// the topic's own ledger row, so the parent's `updated_at` stays at the
+    /// last message addressed to the parent itself; the view folds the two
+    /// together so a card whose topics ran minutes ago does not print an old
+    /// date and sit below quieter cards.
+    pub stamp_at: chrono::DateTime<chrono::Utc>,
     /// The session's stored icon, already built by the view (#2790): an
     /// embedded mark, a custom image or a legacy glyph. It leads the optional
     /// channel mark rather than replacing it (#2800). The module never reads
@@ -1702,6 +1737,7 @@ pub fn row(s: &Session, flags: RowFlags, chips: Option<Stateful<Div>>) -> Statef
         flash,
         running,
         cost,
+        stamp_at,
         icon,
     } = flags;
     // A channel card says the chat once: the platform prints as its mark, not
@@ -1788,7 +1824,7 @@ pub fn row(s: &Session, flags: RowFlags, chips: Option<Stateful<Div>>) -> Statef
             .text_color(rgb(palette::current().text_muted))
             .child(SharedString::from(format!(
                 "{} · {}",
-                rail_stamp(s.updated_at, chrono::Local::now()),
+                rail_stamp(stamp_at, chrono::Local::now()),
                 rail_cost(cost)
             )))
     });
@@ -2163,10 +2199,10 @@ mod tests {
     /// only, and the topic stays grouped (and indented) under its parent.
     #[test]
     fn a_pinned_topic_stays_a_chip_under_its_parent() {
-        let a = Session::new(Some("A".into()), None, None);
-        let b = Session::new(Some("B".into()), None, None);
-        let a1 = Session::new(Some("A topic".into()), None, None);
-        let c = Session::new(Some("C".into()), None, None);
+        let a = stamped(30, "A");
+        let b = stamped(20, "B");
+        let a1 = stamped(25, "A topic");
+        let c = stamped(10, "C");
         let (a_id, b_id, a1_id, c_id) = (a.id, b.id, a1.id, c.id);
         let mut state = SessionsState {
             items: vec![a, b, a1, c],
@@ -2208,9 +2244,9 @@ mod tests {
     /// never blank the chip strip (the CrabsDev card showed no chips at all).
     #[test]
     fn topics_always_stay_listed_under_their_parent() {
-        let a = Session::new(Some("A".into()), None, None);
-        let a1 = Session::new(Some("A topic".into()), None, None);
-        let b = Session::new(Some("B".into()), None, None);
+        let a = stamped(30, "A");
+        let a1 = stamped(20, "A topic");
+        let b = stamped(10, "B");
         let (a_id, a1_id, b_id) = (a.id, a1.id, b.id);
         let mut state = SessionsState {
             items: vec![a, a1, b],
@@ -2389,13 +2425,23 @@ mod tests {
         }
     }
 
-    /// TUI parity: pins go on top through a stable partition, so a pin moves
-    /// that one chat and leaves every other row where the ledger put it.
+    /// A session stamped at a fixed instant, so an ordering test never depends
+    /// on how fast the fixture loop ran. `Session::new` calls `Utc::now()`, and
+    /// two rows created microseconds apart would then sort by creation speed
+    /// instead of by the stamp the test set (#2815).
+    fn stamped(secs: i64, title: &str) -> Session {
+        let mut s = Session::new(Some(title.to_string()), None, None);
+        s.updated_at = chrono::DateTime::from_timestamp(1_700_000_000 + secs, 0)
+            .expect("a fixed stamp is valid");
+        s
+    }
+
+    /// TUI parity on the pin: pins go on top through a stable partition, so a
+    /// pin moves that one chat and leaves every other row in activity order.
     /// Sorting by title or id instead would reshuffle the rail under the
-    /// cursor, which is why the rule is "pinned first, ledger order inside
-    /// each group" and not "sort".
+    /// cursor, which is why the key is the stamp, never a display field.
     #[test]
-    fn favorites_pin_to_the_top_and_leave_the_rest_in_ledger_order() {
+    fn favorites_pin_to_the_top_and_the_rest_follow_activity() {
         let mut state = SessionsState {
             items: vec![
                 session(3, "newest"),
@@ -2553,6 +2599,103 @@ mod tests {
             state.grouped_cost(100.0, uuid::Uuid::from_u128(9)),
             100.0,
             "a card with no topics prints only its own spend"
+        );
+    }
+
+    /// A grouped card is stamped by the newest thing under it (#2815): a
+    /// message lands on the session it was addressed to, so a topic that spoke
+    /// a minute ago never touches the parent's row and the card printed a date
+    /// from before its own chips ran.
+    #[test]
+    fn grouped_activity_takes_the_newest_stamp_over_the_topics() {
+        let parent_row = session(1, "OCDevCore");
+        let busy = session(5, "busy topic");
+        let quiet = session(2, "quiet topic");
+        let (parent_id, parent_stamp, busy_stamp) =
+            (parent_row.id, parent_row.updated_at, busy.updated_at);
+        let mut state = SessionsState {
+            items: vec![parent_row, busy, quiet],
+            ..Default::default()
+        };
+        state.parents.insert(uuid::Uuid::from_u128(5), parent_id);
+        state.parents.insert(uuid::Uuid::from_u128(2), parent_id);
+
+        assert_eq!(
+            state.grouped_activity(parent_stamp, parent_id),
+            busy_stamp,
+            "the newest topic stamp is what the card prints, not the parent's own row"
+        );
+
+        // A card whose topics are all older than its own last message keeps its
+        // own stamp: grouping can only ever move a card forward in time.
+        let mut quiet_only = SessionsState {
+            items: vec![session(1, "OCDevCore"), session(2, "quiet topic")],
+            ..Default::default()
+        };
+        quiet_only
+            .parents
+            .insert(uuid::Uuid::from_u128(2), uuid::Uuid::from_u128(1));
+        assert_eq!(
+            quiet_only.grouped_activity(session(1, "x").updated_at, uuid::Uuid::from_u128(1)),
+            session(1, "x").updated_at,
+            "a quieter topic never pulls the card back in time"
+        );
+    }
+
+    /// The rail's slot follows the same grouped stamp (#2815): a card whose
+    /// topics are running right now outranks a card that spoke more recently on
+    /// its own row, which is what "last activity" means once topics count.
+    #[test]
+    fn ordered_puts_a_card_with_a_busy_topic_first() {
+        // Ledger order (newest own row first) is the chat, then the card, then
+        // the card's topic. Grouped, the card's key is the topic's stamp, so it
+        // leads, and the topic still follows it.
+        let chat = session(30, "chat");
+        let card = session(10, "OCDevCore");
+        let topic = session(40, "busy topic");
+        let (chat_id, card_id, topic_id) = (chat.id, card.id, topic.id);
+        let mut state = SessionsState {
+            items: vec![chat, card, topic],
+            ..Default::default()
+        };
+        state.parents.insert(topic_id, card_id);
+
+        let order: Vec<_> = state.ordered().map(|s| s.id).collect();
+        assert_eq!(
+            order,
+            vec![card_id, topic_id, chat_id],
+            "the card leads on its topic's stamp, and the topic stays under it"
+        );
+    }
+
+    /// The card paints the grouped stamp and the card builder folds the topics
+    /// in (#2815). Structural because swapping the field back to the row's own
+    /// `updated_at` would compile and read perfectly well in review.
+    #[test]
+    fn the_card_paints_the_grouped_stamp_not_its_own_row() {
+        let source = include_str!("sessions.rs");
+        let row_source = source
+            .split("pub fn row(")
+            .nth(1)
+            .expect("session row renderer")
+            .split("pub fn on_click(")
+            .next()
+            .expect("row source before click handler");
+        assert!(
+            row_source.contains("rail_stamp(stamp_at"),
+            "the stamp reads the grouped flag"
+        );
+        assert!(
+            !row_source.contains("rail_stamp(s.updated_at"),
+            "the card's own ledger row never stamps it"
+        );
+        let wired = include_str!("main.rs")
+            .split("stamp_at:")
+            .nth(1)
+            .expect("the card builder wires stamp_at");
+        assert!(
+            wired.trim_start().starts_with("self.sessions.grouped_activity("),
+            "the builder folds the topics into the stamp it hands the row"
         );
     }
 
@@ -3149,8 +3292,8 @@ mod tests {
             .next()
             .expect("title line before the chip strip");
         assert!(
-            title_line.contains("rail_stamp(s.updated_at"),
-            "the stamp reads the shared day-or-clock formatter"
+            title_line.contains("rail_stamp(stamp_at"),
+            "the stamp reads the shared day-or-clock formatter on the grouped stamp"
         );
         assert!(
             title_line.contains("rail_cost(cost)"),
