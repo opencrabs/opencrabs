@@ -90,7 +90,7 @@ use crate::screen_keys::{
     ChordMods, FocusTarget, KeyboardOwner, OverlayId, ScreenAction, focus_target, keyboard_owner,
     screen_chord,
 };
-use crate::status::{git_branch, help_rows, status_identity, tilde_path};
+use crate::status::{git_branch, status_identity, tilde_path};
 use crate::theme::{BASE_REM, Size, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP, text};
 use crate::topic_bar_view::{overflow_chip, topic_label, topic_strip, topic_tab};
 use opencrabs::db::models::Message;
@@ -126,7 +126,7 @@ use gpui::{
     Entity, ExternalPaths, FocusHandle, Image, KeyDownEvent, KeystrokeEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Point, ScrollDelta,
     ScrollHandle, ScrollWheelEvent, SharedString, Stateful, TitlebarOptions, Window, WindowBounds,
-    WindowOptions, div, point, prelude::*, px, relative, rems, rgb, rgba, size,
+    WindowOptions, div, point, prelude::*, px, rems, rgb, rgba, size,
 };
 use opencrabs::brain::agent::ProgressEvent;
 use opencrabs::brain::tools::suggest_options::SuggestionItem;
@@ -136,7 +136,6 @@ use std::rc::Rc;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use opencrabs::brain::mission_control::McAnalytics;
 use opencrabs::config::Config;
 use opencrabs::config::GuiTheme;
 use opencrabs::config::gui_font;
@@ -15202,6 +15201,7 @@ mod tests {
     use crate::composer_view::{composer_hint_for, queue_rows};
     use crate::status::help_rows;
     use crate::topic_bar_view::topic_label;
+    use opencrabs::brain::mission_control::McAnalytics;
 
     /// A leaf is its own view now (#2805): its state and the transcript it
     /// draws are scanned here, not in the crate root.
