@@ -1482,12 +1482,7 @@ fn accent_bar_visible(selected: bool, cursored: bool) -> bool {
     matches!((selected, cursored), (true, _))
 }
 
-pub fn row(
-    s: &Session,
-    flags: RowFlags,
-    dropbar: Option<Stateful<Div>>,
-    chips: Option<Stateful<Div>>,
-) -> Stateful<Div> {
+pub fn row(s: &Session, flags: RowFlags, chips: Option<Stateful<Div>>) -> Stateful<Div> {
     let RowFlags {
         selected,
         cursored,
@@ -1564,35 +1559,27 @@ pub fn row(
                 .flex()
                 .flex_row()
                 .items_center()
+                .gap_2()
                 .flex_none()
                 .ml_auto()
                 .when(!indented, |d| {
-                    // Telegram's quiet column (#2788): the date/cost stamp
-                    // above, the pushpin below, both right-aligned. The
-                    // message line below stays pure conversation context.
+                    // Telegram's quiet metadata shares the title line (#2802):
+                    // date/cost, then the pin, with no second stamp row.
                     d.child(
                         div()
-                            .flex()
-                            .flex_col()
-                            .items_end()
                             .flex_none()
                             .pl_1()
-                            .gap_0p5()
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .text_xs()
-                                    .text_color(rgb(palette::current().text_muted))
-                                    .child(SharedString::from(format!(
-                                        "{} · ${:.2}",
-                                        s.updated_at
-                                            .with_timezone(&chrono::Local)
-                                            .format("%m-%d %H:%M"),
-                                        s.total_cost
-                                    ))),
-                            )
-                            .child(pin_icon(favorited, 0.9)),
+                            .text_xs()
+                            .text_color(rgb(palette::current().text_muted))
+                            .child(SharedString::from(format!(
+                                "{} · ${:.2}",
+                                s.updated_at
+                                    .with_timezone(&chrono::Local)
+                                    .format("%m-%d %H:%M"),
+                                s.total_cost
+                            ))),
                     )
+                    .child(pin_icon(favorited, 0.9))
                 })
                 // A grouped topic row keeps its compact pin inline, without
                 // the ledger metadata repeated on every child (#2788).
@@ -1613,9 +1600,6 @@ pub fn row(
         .gap_0p5()
         .flex_1()
         .min_w_0()
-        // The dropbar is the card's first row, above the title (#2797): the
-        // kebab lives on its own line so the title keeps the full card width.
-        .when_some(dropbar, |d, bar| d.child(bar))
         .child(title)
         // Topic chips ride inline under the title, on the parent card itself
         // (Telegram topic style). They never push a child out to its own row.
@@ -1756,25 +1740,6 @@ pub fn on_click(
     handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
     row.on_click(handler)
-}
-
-/// The rail card's dropbar (#2797): one quiet kebab on its own line above the
-/// title. It opens the same rail menu the right-click and the swipe open, so
-/// pin, topic and delete live in one popover instead of a strip that eats the
-/// title's width. The card hides it while its topic chips are expanded.
-pub fn dropbar_button(id: uuid::Uuid) -> Stateful<Div> {
-    div()
-        .id(SharedString::from(format!("session-dropbar-{id}")))
-        .flex()
-        .flex_none()
-        .items_center()
-        .justify_center()
-        .size(rems(1.4))
-        .rounded_sm()
-        .cursor_pointer()
-        .text_color(rgb(palette::current().text_muted))
-        .hover(|d| d.bg(rgb(palette::current().panel_hi)))
-        .child(SharedString::from("\u{22EE}"))
 }
 
 const RAIL_FILTER_SVG: &[u8] = include_bytes!(concat!(
@@ -2319,9 +2284,9 @@ mod tests {
     }
 
     /// The pin contract (#2788): one pushpin per row, in the trailing
-    /// cluster and never before the name. A full row stacks the stamp above
-    /// the pin, an indented topic keeps it inline, and the star glyphs are
-    /// gone from the module.
+    /// cluster and never before the name. A full row keeps the stamp and pin
+    /// on one line, an indented topic keeps the pin inline, and the star
+    /// glyphs are gone from the module.
     #[test]
     fn the_pin_rides_the_trailing_cluster_not_the_title() {
         let source = include_str!("sessions.rs");
@@ -2359,14 +2324,18 @@ mod tests {
         let stamp = cluster.find("%m-%d %H:%M").expect("date/cost stamp");
         let pin = cluster
             .find("pin_icon(favorited, 0.9)")
-            .expect("pushpin under the stamp");
+            .expect("pushpin after the stamp");
         assert!(
             stamp < pin,
-            "the stamp paints above the pin on a full row, Telegram style"
+            "the stamp paints before the pin on the same full-row line"
         );
         assert!(
-            cluster.contains(".flex_col()") && cluster.contains(".items_end()"),
-            "a full row stacks the stamp above the pin, Telegram style"
+            cluster.contains(".flex_row()") && cluster.contains(".gap_2()"),
+            "the full-row metadata and pin share one horizontal cluster"
+        );
+        assert!(
+            !cluster.contains(".flex_col()") && !cluster.contains(".items_end()"),
+            "no vertical stamp or second metadata row remains"
         );
         assert!(
             !source.contains('\u{2605}') && !source.contains('\u{2606}'),
@@ -2376,33 +2345,7 @@ mod tests {
             !source.contains("pub fn pin_button(")
                 && !source.contains("pub fn topic_button(")
                 && !source.contains("pub fn delete_button("),
-            "the slide-out strip is gone: the dropbar kebab opens the rail menu (#2797)"
-        );
-    }
-
-    #[test]
-    fn rail_dropbar_sits_above_the_title() {
-        let source = include_str!("sessions.rs");
-        let row_source = source
-            .split("pub fn row(")
-            .nth(1)
-            .expect("session row renderer")
-            .split("pub fn on_click(")
-            .next()
-            .expect("row source before click handler");
-        assert!(
-            row_source.contains(".when_some(dropbar,"),
-            "the card mounts a dropbar slot"
-        );
-        let bar = row_source.find(".when_some(dropbar,").expect("dropbar mount");
-        let title = row_source.find(".child(title)").expect("title mount");
-        assert!(
-            bar < title,
-            "the dropbar paints above the title, never beside it"
-        );
-        assert!(
-            !row_source.contains("row.child(action)"),
-            "the trailing slide-out strip no longer appends to the row"
+            "the slide-out strip stays removed; right-click and slide open the menu"
         );
     }
 
@@ -2778,17 +2721,6 @@ mod tests {
         assert!(
             count_source.contains(".hover(|d| d.bg(rgb(palette::current().panel_hi)))"),
             "the overflow pill hovers at panel_hi too"
-        );
-        let dropbar_source = source
-            .split("pub fn dropbar_button(")
-            .nth(1)
-            .expect("dropbar button renderer")
-            .split("pub fn filter_icon(")
-            .next()
-            .expect("dropbar source before the funnel icon");
-        assert!(
-            dropbar_source.contains(".hover(|d| d.bg(rgb(palette::current().panel_hi)))"),
-            "the dropbar kebab hovers at panel_hi too"
         );
         let filter_source = source
             .split("fn filter_chip(")

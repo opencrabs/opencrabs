@@ -136,7 +136,43 @@ fn grouped_topics_are_compact_visible_pins_not_a_dropdown() {
         "no fold button joins the row chrome"
     );
     assert!(
-        GUI_MAIN.contains("sessions::row(s, flags, dropbar, chips)"),
-        "topic pins keep their click action, dropbar menu, and context menu"
+        GUI_MAIN.contains("sessions::row(s, flags, chips)"),
+        "topic pins keep their click action and context menu"
+    );
+}
+
+#[test]
+fn rail_header_has_no_kebab_and_shares_one_line() {
+    assert!(
+        !SESSIONS.contains("dropbar") && !GUI_MAIN.contains("dropbar"),
+        "the empty menu row and its renderer are gone"
+    );
+    assert!(
+        !SESSIONS.contains('\u{22EE}'),
+        "no vertical-dots glyph remains on the rail"
+    );
+
+    let row = block(SESSIONS, "pub fn row(", "pub fn on_click(");
+    let title = block(row, "let title = div()", "let body = div()");
+    let trailing = title
+        .split(".ml_auto()")
+        .nth(1)
+        .expect("right-aligned metadata cluster");
+    let stamp = trailing.find("%m-%d %H:%M").expect("timestamp");
+    let pin = trailing
+        .find("pin_icon(favorited, 0.9)")
+        .expect("pin after timestamp");
+    assert!(stamp < pin, "timestamp and pin share the title line");
+    assert!(
+        trailing.contains(".flex_row()") && trailing.contains(".gap_2()"),
+        "timestamp, cost, pin and unread badge form one horizontal cluster"
+    );
+    assert!(
+        !trailing.contains(".flex_col()") && !trailing.contains(".items_end()"),
+        "no second stacked metadata line remains"
+    );
+    assert!(
+        !row.contains("row.child(action)"),
+        "the removed slide-out strip does not return"
     );
 }

@@ -1263,7 +1263,7 @@ mod sidebar_action_tests {
         // #2798: the window root armed the rail from the press's own x
         // position, so every press in the column that did not commit a pick
         // (the empty space under the rows, the scrollbar, the header, a
-        // kebab, a filter chip) left the composer without its caret until
+        // filter chip) left the composer without its caret until
         // Esc. A press is not a walk: only a key arms the rail.
         let src = include_str!("main.rs");
         let render = dashboard_render(src);
@@ -1324,7 +1324,7 @@ mod sidebar_action_tests {
 
     #[test]
     fn a_rail_affordance_that_stops_the_press_hands_the_keys_back() {
-        // #2798: these three stop the press before it reaches the window
+        // #2798: these two stop the press before it reaches the window
         // root, so the root cannot hand the caret back for them. Each one
         // does it itself, or a press that only opens a card or a menu leaves
         // the composer waiting for an Esc.
@@ -1332,7 +1332,6 @@ mod sidebar_action_tests {
         let render = dashboard_render(src);
         for (anchor, why) in [
             ("let ask_menu = cx.listener", "a row's right press"),
-            ("let kebab = cx.listener", "the dropbar kebab"),
             ("let ask = cx.listener", "a topic chip's right press"),
         ] {
             let (_head, tail) = render
@@ -2233,7 +2232,7 @@ impl Dashboard {
     /// Esc, Tab or a committed row gave the keys back. Every affordance the
     /// pointer touched without committing a pick cost an Esc before the
     /// composer would take a character: the empty space under the rows, the
-    /// scrollbar, the brand header, the kebab, a filter chip. A press is not
+    /// scrollbar, the brand header, a filter chip. A press is not
     /// a walk (#2798): the rail keeps the keys only while a key put it there,
     /// and a split still waiting for its pane keeps them because its dialog
     /// answers N and Esc.
@@ -9440,7 +9439,7 @@ impl Dashboard {
         // Deleting a conversation has no chord. ctrl+backspace is the editor's
         // word delete (#2313), so a window binding on it would break typing,
         // and the command key is macOS-only. The row menu's delete, behind
-        // the confirm dialog, is the one path: the dropbar and the slide reveal it.
+        // the confirm dialog, is the one path: right-click and slide reveal it.
         // Esc twice stops the running turn, the TUI's own gesture. It sits
         // before the editor gate because the editor owns the keyboard while
         // typing and would swallow it.
@@ -10750,40 +10749,10 @@ impl Render for Dashboard {
                 }
                 sessions::topic_chips(id, els)
             });
-            // The dropbar: one quiet kebab above the title, on its own line
-            // so the name keeps the full card width (#2797). It opens the
-            // same rail menu the right-click and the swipe open. A topic row
-            // keeps its parent's affordance, and a card with its chips
-            // expanded hides the bar so the chips own the space.
-            let dropbar = if !indented && !self.rail_chips_expanded.contains(&id) {
-                let kebab = cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
-                    cx.stop_propagation();
-                    this.sessions.rail_menu = Some(id);
-                    this.rail_menu_at = Some(ev.position);
-                    // The press stopped here, so the window root never sees
-                    // it: the bar hands the keys back itself (#2798).
-                    this.rail_hands_back();
-                    cx.notify();
-                });
-                Some(
-                    div()
-                        .id(SharedString::from(format!("session-dropbar-row-{id}")))
-                        .flex()
-                        .flex_row()
-                        .justify_end()
-                        .w_full()
-                        .child(
-                            sessions::dropbar_button(id)
-                                .on_mouse_down(MouseButton::Left, kebab),
-                        ),
-                )
-            } else {
-                None
-            };
             // No menu is passed in: the card is built once at the window
             // root, because a child of the row would inherit the row's frame
             // and the card is placed in window coordinates (#2742).
-            let r = sessions::row(s, flags, dropbar, chips);
+            let r = sessions::row(s, flags, chips);
             // The press starts the slide that opens the card's menu.
             let press = cx.listener(move |this, _ev: &MouseDownEvent, window, cx| {
                 this.rail_slide_opened = None;
@@ -18962,15 +18931,15 @@ mod tests {
             "the root render is what builds the open row's card"
         );
         // Every entry point records where the press landed: a row, a chip,
-        // the dropbar kebab and the swipe (#2797). Counted inside the render,
-        // because this scan's own string holds the same text and a
-        // whole-file count would read one more.
+        // and the swipe (#2797). Counted inside the render, because this
+        // scan's own string holds the same text and a whole-file count would
+        // read one more.
         let asks = dashboard_render(src)
             .matches("this.rail_menu_at = Some(ev.position);")
             .count();
         assert_eq!(
-            asks, 4,
-            "a rail row, a topic chip, the dropbar kebab and the swipe each record their press"
+            asks, 3,
+            "a rail row, a topic chip and the swipe each record their press"
         );
         let builder = fn_body(src, "rail_menu_popover_for");
         assert!(
@@ -19021,34 +18990,6 @@ mod tests {
         assert!(
             slide.contains("this.rail_slide_opened = Some(id);"),
             "the release that ends a slide must not pick the row"
-        );
-    }
-
-    #[test]
-    fn rail_dropbar_hides_when_chips_expanded() {
-        // #2797: the owner's rule, "Chips open hides bar". The bar is built
-        // only for full cards whose chips are folded; it returns when the
-        // chips fold back. The menu being open does not hide it.
-        let src = include_str!("main.rs");
-        let build = dashboard_render(src)
-            .split("let dropbar = if ")
-            .nth(1)
-            .expect("the dropbar build")
-            .split("let r = sessions::row(")
-            .next()
-            .expect("the dropbar block before the row call");
-        assert!(
-            build.starts_with("!indented && !self.rail_chips_expanded.contains(&id)"),
-            "the bar hides while the card's chips are expanded, and a topic row keeps its parent's affordance"
-        );
-        let condition = build.split(" {").next().expect("the visibility condition");
-        assert!(
-            !condition.contains("rail_menu"),
-            "the bar stays visible while its own menu is open"
-        );
-        assert!(
-            build.contains("sessions::dropbar_button(id)"),
-            "the visible bar carries the kebab that opens the rail menu"
         );
     }
 
