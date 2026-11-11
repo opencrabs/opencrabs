@@ -38,6 +38,62 @@ impl OnboardingWizard {
         self.persist_progress();
     }
 
+    /// Commit the model step and advance.
+    ///
+    /// The one path for both an Enter keypress on the model list and the
+    /// automatic advance of a one-model provider (#2782), so the two can never
+    /// disagree about which model gets committed.
+    pub fn commit_model_step(&mut self) -> WizardAction {
+        // Commit the user's pick before advancing. If the filter matches at
+        // least one entry, `selected_model_name()` resolves
+        // `filtered[selected_model]`. If the filter matched NOTHING but is
+        // non-empty, the typed text is a manual model name (the user typed
+        // `MiniMax-M3` on a build that still ships M2.7 / M2.5 / M2.1 as
+        // suggestions), so push it into `models` and point the selection at it.
+        // Mirrors the custom-provider populated-model branch at input.rs:818.
+        let filter = self.ps.model_filter.trim().to_string();
+        let filtered_count = self.ps.filtered_model_names().len();
+        if filtered_count == 0 && !filter.is_empty() {
+            if !self.ps.models.iter().any(|m| m == &filter) {
+                self.ps.models.push(filter.clone());
+            }
+            if let Some(idx) = self.ps.models.iter().position(|m| m == &filter) {
+                self.ps.selected_model = idx;
+            }
+            self.ps.model_filter.clear();
+        }
+        // The built-in provider has no key to type. Its install token is
+        // requested first, and the app advances once it is stored (#2047).
+        if self.ps.provider_id() == "opencrabs"
+            && crate::brain::provider::opencrabs_store::load().is_none()
+        {
+            return WizardAction::AcquireBuiltinToken;
+        }
+        self.next_step();
+        WizardAction::None
+    }
+
+    /// Leave the model step on its own when the provider offers exactly one
+    /// model, so a one-model provider never parks the user on a screen whose
+    /// only choice is already made (#2782).
+    ///
+    /// Returns `None` when the screen has to stay: zero models, several models,
+    /// a typed filter, a provider still owing an API key, or a step other than
+    /// the model list. `Some(action)` means the commit ran; dispatch the action,
+    /// which is [`WizardAction::AcquireBuiltinToken`] when the built-in
+    /// provider still needs its token. The caller in the event loop cannot
+    /// dispatch that action, and there the step deliberately stays up.
+    pub fn advance_past_sole_model(&mut self) -> Option<WizardAction> {
+        if self.auth_field != AuthField::Model {
+            return None;
+        }
+        self.ps.sole_model_choice()?;
+        // One model, empty filter: the rendered order has a single entry, so
+        // the index the commit resolves through is 0.
+        self.ps.selected_model = 0;
+        Some(self.commit_model_step())
+    }
+
     fn next_step_inner(&mut self) {
         self.error_message = None;
         self.focused_field = 0;

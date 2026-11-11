@@ -15,7 +15,7 @@ pub use order::sort_newest_first;
 pub use state::{
     CUSTOM_INSTANCES_START, CUSTOM_PROVIDER_IDX, CodexDeviceFlowStatus, EXISTING_KEY_SENTINEL,
     FetchLifecycle, FetchOutcome, FetchRequest, PROVIDERS, ProviderInfo, ProviderSelectorState,
-    index_of_provider,
+    index_of_provider, single_model_choice,
 };
 
 /// Execute one immutable request and preserve its identity for stale checks.

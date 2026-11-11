@@ -572,6 +572,14 @@ impl OnboardingWizard {
                         self.ps.config_models = crate::tui::provider_selector::load_default_models(
                             self.ps.provider_id(),
                         );
+                        // A provider whose list holds one model has no decision
+                        // on this screen, so Enter leaves it on its own (#2782).
+                        // Tab only moves focus and must not commit config.
+                        if matches!(event.code, KeyCode::Enter)
+                            && let Some(action) = self.advance_past_sole_model()
+                        {
+                            return action;
+                        }
                     } else if self.ps.provider_id() == "opencode" {
                         // OpenCode: Go or Zen plan first, then API key (#2040)
                         self.auth_field = AuthField::OpenCodeEndpointType;
@@ -636,6 +644,14 @@ impl OnboardingWizard {
                         );
                         self.ps.selected_model = 0;
                     }
+                    // Enter is a commit, so a provider whose catalogue holds a
+                    // single model skips the picker it has no decision on
+                    // (#2782). Tab and Down only move focus and never commit.
+                    if matches!(event.code, KeyCode::Enter)
+                        && let Some(action) = self.advance_past_sole_model()
+                    {
+                        return action;
+                    }
                 }
                 KeyCode::BackTab | KeyCode::Up => {
                     if self.ps.provider_id() == "zai" {
@@ -677,39 +693,7 @@ impl OnboardingWizard {
                     }
                 }
                 KeyCode::Enter => {
-                    // Commit the user's pick before advancing. If the
-                    // filter matches at least one entry, the existing
-                    // `selected_model_name()` resolution picks
-                    // `filtered[selected_model]` — same behaviour as
-                    // before. If the filter matched NOTHING but is
-                    // non-empty, treat the typed text as a manual model
-                    // name (the user typed `MiniMax-M3` on a build that
-                    // still ships M2.7 / M2.5 / M2.1 as suggestions) and
-                    // push it into `models` so future renders / the
-                    // config write resolve to it. Mirrors the custom-
-                    // provider populated-model branch at input.rs:818-823.
-                    let filter = self.ps.model_filter.trim().to_string();
-                    let filtered_count = self.ps.filtered_model_names().len();
-                    if filtered_count == 0 && !filter.is_empty() {
-                        if !self.ps.models.iter().any(|m| m == &filter) {
-                            self.ps.models.push(filter.clone());
-                        }
-                        // Point selected_model at the just-pushed entry
-                        // so `selected_model_name()` resolves to it once
-                        // we clear the filter on the next step.
-                        if let Some(idx) = self.ps.models.iter().position(|m| m == &filter) {
-                            self.ps.selected_model = idx;
-                        }
-                        self.ps.model_filter.clear();
-                    }
-                    // The built-in provider has no key to type. Its install token is
-                    // requested first, and the app advances once it is stored (#2047).
-                    if self.ps.provider_id() == "opencrabs"
-                        && crate::brain::provider::opencrabs_store::load().is_none()
-                    {
-                        return WizardAction::AcquireBuiltinToken;
-                    }
-                    self.next_step();
+                    return self.commit_model_step();
                 }
                 KeyCode::BackTab => {
                     if self.ps.is_keyless() {

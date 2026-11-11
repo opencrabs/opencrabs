@@ -150,7 +150,9 @@ fn empty_everything_returns_empty_string() {
 
 // ── Source-level sentinels for the Enter handler + render ──
 
-const INPUT_SRC: &str = include_str!("../tui/onboarding/input.rs");
+// The model-step Enter commit lives in navigation.rs since #2782 moved it
+// onto the shared `commit_model_step` path; input.rs only routes Enter there.
+const NAV_SRC: &str = include_str!("../tui/onboarding/navigation.rs");
 const RENDER_SRC: &str = include_str!("../tui/onboarding_render.rs");
 
 #[test]
@@ -161,12 +163,12 @@ fn auth_field_model_enter_commits_typed_text_into_models_list() {
     // would erase the typed name before `apply_config` reads it.
     let pattern = "if filtered_count == 0 && !filter.is_empty()";
     assert!(
-        INPUT_SRC.contains(pattern),
-        "AuthField::Model Enter handler must check filtered_count == 0 \
+        NAV_SRC.contains(pattern),
+        "commit_model_step (navigation.rs) must check filtered_count == 0 \
          AND non-empty filter to trigger the typed-as-name commit"
     );
     assert!(
-        INPUT_SRC.contains("self.ps.models.push(filter.clone());"),
+        NAV_SRC.contains("self.ps.models.push(filter.clone());"),
         "Enter handler must push the typed text into models so it \
          survives filter resets in later wizard steps"
     );

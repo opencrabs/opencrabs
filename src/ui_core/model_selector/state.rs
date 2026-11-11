@@ -461,6 +461,16 @@ impl ProviderSelectorState {
         self.is_cli() || (!self.is_custom() && self.current_provider().key_label.is_empty())
     }
 
+    /// Whether the current provider still owes the user an API key.
+    ///
+    /// A picker that advances past this state would commit a provider with no
+    /// credentials and no way back to the key field, so every automatic
+    /// advance checks it first (#2782). Custom providers answer `false`: their
+    /// key lives in `CustomApiKey`, and a local endpoint legitimately has none.
+    pub fn needs_api_key(&self) -> bool {
+        !self.is_custom() && !self.is_keyless() && self.api_key_input.is_empty()
+    }
+
     /// z.ai provider (canonical id `zai`, legacy `zhipu`).
     pub fn is_zhipu(&self) -> bool {
         self.provider_id() == "zai"
@@ -489,6 +499,26 @@ impl ProviderSelectorState {
 /// positions so reordering the array doesn't cascade into the TUI.
 pub fn index_of_provider(id: &str) -> Option<usize> {
     PROVIDERS.iter().position(|p| p.id == id)
+}
+
+/// The model a provider tile may switch to without a second screen.
+///
+/// A picker listing exactly one model has nothing to choose: the tile the
+/// user just tapped IS the choice. v0.5.15 answered that tap with a second
+/// screen holding the one model already marked ✓ (it is the active one), so
+/// the tap read as dead. The built-in `opencrabs` provider has exactly one
+/// model, which is how it surfaced. Returns `None` for zero or several
+/// models, where the list is a real choice and must still be shown.
+///
+/// The single decision point for "one model means no choice" (#2782): the
+/// channel pickers, the GUI provider row and the TUI wizard all resolve
+/// through it, so no two surfaces can disagree about what a one-model
+/// provider is. `channels::commands` re-exports it for the channel callers.
+pub fn single_model_choice(models: &[String]) -> Option<&str> {
+    match models {
+        [only] => Some(only.as_str()),
+        _ => None,
+    }
 }
 
 impl ProviderSelectorState {
@@ -978,6 +1008,25 @@ impl ProviderSelectorState {
             }
         }
         out
+    }
+
+    /// The single model this provider offers, when the picker can be skipped.
+    ///
+    /// `None` for zero or several models, for a typed filter (the user is
+    /// searching, so the list is theirs to narrow), and for a provider that
+    /// still owes an API key. One model and nothing else means the only
+    /// possible choice is already made, so asking again is a screen with no
+    /// decision on it (#2782).
+    pub fn sole_model_choice(&self) -> Option<String> {
+        if self.is_custom() || self.needs_api_key() || !self.model_filter.trim().is_empty() {
+            return None;
+        }
+        let offered: Vec<String> = self
+            .all_model_names()
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect();
+        single_model_choice(&offered).map(str::to_string)
     }
 
     /// Model names filtered by `model_filter` (case-insensitive substring match).

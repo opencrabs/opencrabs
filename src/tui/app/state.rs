@@ -7,7 +7,7 @@ use super::events::{
     SudoPasswordResponse, ToolApprovalRequest, ToolApprovalResponse, TuiEvent,
 };
 
-use super::onboarding::OnboardingWizard;
+use super::onboarding::{OnboardingWizard, WizardAction};
 use crate::brain::agent::AgentService;
 use crate::brain::provider::Provider;
 use crate::brain::{BrainLoader, CommandLoader, SelfUpdater, UserCommand};
@@ -3501,6 +3501,16 @@ impl App {
                         outcome.models
                     };
                     wizard.ps.resolve_selected_model_index();
+                    // A provider whose live catalogue holds a single model never
+                    // needs the picker: commit it and advance (#2782). A
+                    // non-`None` action is the built-in install token, which only
+                    // the key handler can dispatch, so the step stays up there
+                    // and Enter takes it (#2047).
+                    if let Some(action) = wizard.advance_past_sole_model()
+                        && matches!(action, WizardAction::None)
+                    {
+                        tracing::debug!("[onboarding] advanced past the sole-model step");
+                    }
                 }
             }
             TuiEvent::GitHubDeviceCode(code) => {

@@ -736,6 +736,7 @@ pub mod onboarding_no_silent_commit_test;
 pub mod onboarding_qr_popup_size_test;
 pub mod onboarding_setup_gaps_test;
 pub mod onboarding_shift_tab_hint_test;
+pub mod onboarding_sole_model_skip_test;
 pub mod onboarding_step_save_test;
 pub mod onboarding_tts_api_test;
 pub mod onboarding_types_test;

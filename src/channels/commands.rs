@@ -2237,18 +2237,10 @@ pub fn apply_all_prompt_text(provider_name: &str, model: &str, sessions: usize) 
 
 /// The model a provider tile may switch to without a second screen.
 ///
-/// A picker listing exactly one model has nothing to choose: the tile the
-/// user just tapped IS the choice. v0.5.15 answered that tap with a second
-/// screen holding the one model already marked ✓ (it is the active one), so
-/// the tap read as dead. The built-in `opencrabs` provider has exactly one
-/// model, which is how it surfaced. Returns `None` for zero or several
-/// models, where the list is a real choice and must still be shown.
-pub fn single_model_choice(models: &[String]) -> Option<&str> {
-    match models {
-        [only] => Some(only.as_str()),
-        _ => None,
-    }
-}
+/// The decision lives in `ui_core` beside the catalogue, so the TUI, the GUI
+/// and every channel resolve through the same rule (#2782). Re-exported here
+/// because the channel callers and their tests reach it at this path.
+pub use crate::ui_core::model_selector::single_model_choice;
 
 /// Build the Telegram `callback_data` for a model button, guaranteed to fit
 /// Telegram's 64-byte limit. Uses the literal `model:<provider>|<name>` when
