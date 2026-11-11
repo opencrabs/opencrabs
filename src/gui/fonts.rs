@@ -60,7 +60,10 @@ pub fn installed() -> Arc<Vec<String>> {
 
 /// Whether the enumeration has run. The window asks once and never again.
 pub fn loaded() -> bool {
-    INSTALLED.read().map(|names| names.is_some()).unwrap_or(false)
+    INSTALLED
+        .read()
+        .map(|names| names.is_some())
+        .unwrap_or(false)
 }
 
 /// Keep the families the platform reported. The mono walk re-runs against the

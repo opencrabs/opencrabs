@@ -19361,7 +19361,10 @@ mod tests {
         let send = production
             .split("    fn send_from_pane(")
             .nth(1)
-            .and_then(|rest| rest.split("        // A send ends that pane's offer").next())
+            .and_then(|rest| {
+                rest.split("        // A send ends that pane's offer")
+                    .next()
+            })
             .expect("send_from_pane");
         assert!(
             send.contains("origin: SendOrigin,"),
