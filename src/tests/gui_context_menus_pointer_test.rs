@@ -74,7 +74,9 @@ fn every_right_press_records_the_point_it_happened_at() {
     // One right press on the composer: the field is one target, so a second
     // handler would mean two menus for one click.
     assert_eq!(
-        code(EDITOR).matches("on_mouse_down(MouseButton::Right").count(),
+        code(EDITOR)
+            .matches("on_mouse_down(MouseButton::Right")
+            .count(),
         1,
         "the composer answers a right press exactly once"
     );
@@ -180,7 +182,8 @@ fn the_composer_menu_offers_the_four_edits_and_disables_what_it_cannot_do() {
         );
     }
     assert!(
-        menu.contains("menu_item_disabled(\"Cut\")") && menu.contains("menu_item_disabled(\"Copy\")"),
+        menu.contains("menu_item_disabled(\"Cut\")")
+            && menu.contains("menu_item_disabled(\"Copy\")"),
         "with nothing selected, Cut and Copy are drawn disabled"
     );
     assert!(

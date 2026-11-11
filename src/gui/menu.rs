@@ -111,11 +111,7 @@ pub fn menu_card(id: &'static str, items: Vec<Stateful<Div>>) -> Stateful<Div> {
 /// away from the click. The press point is window coordinates, which is what
 /// [`anchored`] takes, and the card is snapped to the window margin whenever
 /// that would leave it off screen.
-pub fn menu_popover(
-    id: &'static str,
-    items: Vec<Stateful<Div>>,
-    at: Point<Pixels>,
-) -> AnyElement {
+pub fn menu_popover(id: &'static str, items: Vec<Stateful<Div>>, at: Point<Pixels>) -> AnyElement {
     anchored()
         .position(at)
         .offset(point(px(2.0), px(2.0)))

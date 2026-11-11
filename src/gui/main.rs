@@ -6508,7 +6508,9 @@ impl Dashboard {
             .collect::<Vec<_>>();
         // The press point is the anchor: the card opens under the pointer
         // that asked for it, whichever row or chip that was (#2690).
-        let at = self.rail_menu_at.unwrap_or(gpui::point(gpui::px(0.0), gpui::px(0.0)));
+        let at = self
+            .rail_menu_at
+            .unwrap_or(gpui::point(gpui::px(0.0), gpui::px(0.0)));
         Some(sessions::menu_popover("rail-context-menu", items, at))
     }
 
@@ -7335,7 +7337,9 @@ impl Dashboard {
         // rail uses. The card used to sit at the column's top corner, which is
         // where the header used to be: not where the user clicked, and in a
         // split not even the pane whose tab was pressed.
-        let at = self.topic_menu_at.unwrap_or(gpui::point(gpui::px(0.0), gpui::px(0.0)));
+        let at = self
+            .topic_menu_at
+            .unwrap_or(gpui::point(gpui::px(0.0), gpui::px(0.0)));
         Some(sessions::menu_popover("chat-menu", items, at))
     }
 
