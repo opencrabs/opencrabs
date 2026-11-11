@@ -346,6 +346,10 @@ pub struct Editor {
     /// (cursor offset, content length) the last reveal was computed for, so a
     /// repaint that moved neither leaves the scroll position alone.
     reveal_key: (usize, usize),
+    /// The window point a right press opened the composer's menu at, or `None`
+    /// while it is closed (#2749). Window coordinates, never field-local: the
+    /// card is placed at the press, and the field's own origin would move it.
+    ctx_menu_at: Option<Point<Pixels>>,
 }
 
 /// Rows the composer shows before it scrolls instead of growing. Ten rows is
@@ -419,6 +423,7 @@ impl Editor {
             scroll: ScrollHandle::new(),
             reveal: None,
             reveal_key: (0, 0),
+            ctx_menu_at: None,
         }
     }
 
@@ -1213,6 +1218,70 @@ impl Editor {
 
     // Mouse ----------------------------------------------------------------
 
+    /// A right press opens the composer's own menu at the pointer (#2749).
+    ///
+    /// It does not move the caret: Cut and Copy act on what is selected, and a
+    /// press that collapsed the selection first would leave both with nothing
+    /// to act on.
+    fn on_right_press(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&self.focus_handle);
+        cx.stop_propagation();
+        self.ctx_menu_at = Some(event.position);
+        cx.notify();
+    }
+
+    /// Close the composer's context menu, if one is open (#2749). The window
+    /// calls this on a left press anywhere, and the card stops its own
+    /// presses, so a press that gets here is a press outside it.
+    pub fn close_context_menu(&mut self, cx: &mut Context<Self>) {
+        if self.ctx_menu_at.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// The composer's context menu: the four edits a text field is expected to
+    /// offer, drawn at the press that asked for them (#2749).
+    ///
+    /// Cut and Copy are drawn disabled rather than dropped while nothing is
+    /// selected, so the card keeps one shape under the pointer. Paste is the
+    /// action's own path, which means a screenshot on the clipboard still
+    /// attaches as an image (#2479) instead of pasting nothing.
+    fn context_menu(&self, at: Point<Pixels>, cx: &mut Context<Self>) -> AnyElement {
+        let has_selection = self.has_selection();
+        let mut rows: Vec<gpui::Stateful<Div>> = Vec::new();
+        if has_selection {
+            let cut = cx.listener(|this, _ev: &ClickEvent, window, cx| {
+                this.ctx_menu_at = None;
+                this.cut(&Cut, window, cx);
+            });
+            rows.push(crate::menu::menu_item("Cut").on_click(cut));
+            let copy = cx.listener(|this, _ev: &ClickEvent, window, cx| {
+                this.ctx_menu_at = None;
+                this.copy(&Copy, window, cx);
+            });
+            rows.push(crate::menu::menu_item("Copy").on_click(copy));
+        } else {
+            rows.push(crate::menu::menu_item_disabled("Cut"));
+            rows.push(crate::menu::menu_item_disabled("Copy"));
+        }
+        let paste = cx.listener(|this, _ev: &ClickEvent, window, cx| {
+            this.ctx_menu_at = None;
+            this.paste(&Paste, window, cx);
+        });
+        rows.push(crate::menu::menu_item("Paste").on_click(paste));
+        let select_all = cx.listener(|this, _ev: &ClickEvent, window, cx| {
+            this.ctx_menu_at = None;
+            this.select_all(&SelectAll, window, cx);
+        });
+        rows.push(crate::menu::menu_item("Select all").on_click(select_all));
+        crate::menu::menu_popover("composer-context-menu", rows, at)
+    }
+
     fn on_mouse_down(
         &mut self,
         event: &MouseDownEvent,
@@ -1220,6 +1289,10 @@ impl Editor {
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus_handle);
+        // A left press in the field is a press outside the card, so it goes
+        // with it (#2749). The card itself stops its presses before they get
+        // here.
+        self.ctx_menu_at = None;
         self.is_selecting = true;
         if event.modifiers.shift {
             self.select_to(self.index_for_mouse_position(event.position), cx);
@@ -1251,6 +1324,14 @@ impl Editor {
         if ev.keystroke.key == "escape" && self.marked_range.is_some() {
             window.prevent_default();
             cx.stop_propagation();
+            return;
+        }
+        // Esc closes the card before anything above the field acts on the key
+        // (#2749).
+        if ev.keystroke.key == "escape" && self.ctx_menu_at.take().is_some() {
+            window.prevent_default();
+            cx.stop_propagation();
+            cx.notify();
         }
     }
 
@@ -2030,7 +2111,7 @@ impl Render for Editor {
         if let Some(notice) = notice_row_text {
             body = body.child(notice_row(&notice));
         }
-        div()
+        let root = div()
             .flex()
             .flex_col()
             .justify_center()
@@ -2060,6 +2141,7 @@ impl Render for Editor {
             .on_action(cx.listener(Self::newline))
             .on_action(cx.listener(Self::accept_command))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+            .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_press))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
@@ -2075,7 +2157,15 @@ impl Render for Editor {
             .text_size(px(14.))
             .text_color(rgb(palette::current().text))
             .min_h(px(44.))
-            .child(body)
+            .child(body);
+        // Deferred, so the card paints over the field that opened it and the
+        // conversation above it rather than under the next sibling (#2690).
+        match self.ctx_menu_at {
+            Some(at) => root
+                .child(gpui::deferred(self.context_menu(at, cx)).with_priority(2))
+                .into_any_element(),
+            None => root.into_any_element(),
+        }
     }
 }
 

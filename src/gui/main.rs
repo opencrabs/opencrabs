@@ -722,6 +722,10 @@ struct Dashboard {
     /// The row whose message menu is open (#2613). One at a time, like the
     /// rail's: opening another closes the first.
     msg_menu: Option<Uuid>,
+    /// Where that row's right press landed, in window coordinates (#2690).
+    /// The card opens under the pointer instead of pinned to the row's top
+    /// corner, so a long message cannot put it half a screen away.
+    msg_menu_at: Option<gpui::Point<gpui::Pixels>>,
     /// Select mode (#2613). The picks live in the model, keyed by message id,
     /// so a scroll or a refresh never drops one; `is_active` is what the
     /// selection bar answers to.
@@ -808,6 +812,10 @@ struct Dashboard {
     /// It carries the id, never a bare flag: a right press on a topic tab
     /// opens the same menu for a session that is not the one on screen.
     topic_menu: Option<uuid::Uuid>,
+    /// Where that right press landed, in window coordinates (#2690). The card
+    /// opens under the pointer instead of at the column's top corner, which in
+    /// a split was not even the pane whose tab was pressed.
+    topic_menu_at: Option<gpui::Point<gpui::Pixels>>,
     /// The topic name being typed, while the name prompt is open (#2303).
     topic_draft: Option<String>,
     /// The pick the window has to explain before it goes on (#2605): the
@@ -6434,10 +6442,10 @@ impl Dashboard {
     /// when that id's menu is open. Shared by full rows and chips so a chip's
     /// right-click offers the same pin / rename / split / delete picks.
     ///
-    /// The card opens just past the rail at the height of the press that asked
-    /// for it (#2742), so it never covers the row it belongs to. Chips and
-    /// rows both sit inside the rail, whose left edge is the window's, so the
-    /// rail width is the row's right edge.
+    /// The card opens at the press that asked for it (#2690). Rows and chips
+    /// both record their press point, so the card lands under the pointer
+    /// rather than beside the rail: a chip sits mid-row, and the row's right
+    /// edge is not where the click happened.
     fn rail_menu_popover_for(&self, id: Uuid, cx: &mut Context<Self>) -> Option<AnyElement> {
         if self.sessions.rail_menu != Some(id) {
             return None;
@@ -6469,17 +6477,21 @@ impl Dashboard {
                 sessions::menu_item(entry.label).on_click(pick)
             })
             .collect::<Vec<_>>();
-        // The press names the row the card belongs to, and the card opens
-        // off that row's right edge instead of on top of it (#2742).
-        let origin = gpui::point(gpui::px(0.0), gpui::px(0.0));
-        let press = self.rail_menu_at.unwrap_or(origin);
-        let row = rail_menu_rect(
-            gpui::px(self.rail_width * self.rem),
-            press,
-            gpui::px(self.rem * 1.75),
-        );
-        let at = gpui::point(row.origin.x + row.size.width + gpui::px(8.0), row.origin.y);
-        Some(sessions::menu_popover(items, at))
+        // The press point is the anchor: the card opens under the pointer
+        // that asked for it, whichever row or chip that was (#2690).
+        let at = self.rail_menu_at.unwrap_or(gpui::point(gpui::px(0.0), gpui::px(0.0)));
+        Some(sessions::menu_popover("rail-context-menu", items, at))
+    }
+
+    /// Drop every composer's context menu: a press outside the card is the
+    /// press that closes it (#2749). Every field is checked, because a split
+    /// pane has its own and only one of them opened the card.
+    fn close_composer_menus(&mut self, cx: &mut Context<Self>) {
+        let mut editors = vec![self.editor.clone()];
+        editors.extend(self.pane_states.values().map(|pane| pane.editor.clone()));
+        for editor in editors {
+            editor.update(cx, |editor, cx| editor.close_context_menu(cx));
+        }
     }
 
     /// The rail's badges for every row it is about to draw (#2636).
@@ -7290,17 +7302,12 @@ impl Dashboard {
             this.request_delete(target, cx);
         });
         items.push(sessions::menu_item(delete_label).on_click(delete));
-        Some(
-            // Anchored to the column, not the transcript: the column is the
-            // positioning context that paints last. px_6 puts the card's right
-            // edge one 1.5rem in, and top_3 lines it up with the first line of
-            // the conversation now that no header sits above it (#2596).
-            sessions::menu_card("chat-menu", items)
-                .absolute()
-                .right_6()
-                .top_3()
-                .into_any_element(),
-        )
+        // Under the press that opened it (#2690), through the same popover the
+        // rail uses. The card used to sit at the column's top corner, which is
+        // where the header used to be: not where the user clicked, and in a
+        // split not even the pane whose tab was pressed.
+        let at = self.topic_menu_at.unwrap_or(gpui::point(gpui::px(0.0), gpui::px(0.0)));
+        Some(sessions::menu_popover("chat-menu", items, at))
     }
 
     /// The tab strip for the open chat's topic family (#2400, #2480): `All`
@@ -7376,9 +7383,12 @@ impl Dashboard {
             // for the session that tab stands for (#2480). Before this it
             // opened nothing at all, and the only way to edit a topic was
             // to open it first and hunt the menu.
-            let open_menu = cx.listener(move |this, _ev: &MouseDownEvent, _window, cx| {
+            let open_menu = cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
                 cx.stop_propagation();
                 this.topic_menu = Some(id);
+                // The press point, so the card opens under the click rather
+                // than at the column's top corner (#2690).
+                this.topic_menu_at = Some(ev.position);
                 cx.notify();
             });
             // A busy topic is marked with a dot, the same signal the rail uses
@@ -8358,12 +8368,14 @@ impl Dashboard {
             .collect()
     }
 
-    /// Open the message menu on a stored row (#2613).
-    fn msg_menu_open(&mut self, id: Uuid, cx: &mut Context<Self>) {
+    /// Open the message menu on a stored row (#2613), at the press that
+    /// asked for it (#2690).
+    fn msg_menu_open(&mut self, id: Uuid, at: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
         // One menu at a time: the rail's open menu closes, and so does any
         // other row's.
         self.sessions.close_rail_menu();
         self.msg_menu = Some(id);
+        self.msg_menu_at = Some(at);
         cx.notify();
     }
 
@@ -10788,18 +10800,12 @@ impl Render for Dashboard {
                 });
                 message_click.insert(id, std::rc::Rc::new(handler));
             }
-            let handler = cx.listener(move |this, _ev: &MouseDownEvent, _window, cx| {
+            let handler = cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
                 cx.stop_propagation();
-                this.msg_menu_open(id, cx);
+                this.msg_menu_open(id, ev.position, cx);
             });
             message_press.insert(id, std::rc::Rc::new(handler));
         }
-        // The open menu, resolved once: its items are the same list whatever
-        // pane draws the transcript.
-        let message_menu = self.msg_menu.map(|id| transcript::MessageMenu {
-            id,
-            items: self.msg_menu_items(id, cx),
-        });
         // A left press anywhere in the transcript dismisses the message menu
         // (#2613): the press is elsewhere, so the menu goes with it, the same
         // rule the rail applies to its own menu (#2354). The card and the rows
@@ -10816,6 +10822,12 @@ impl Render for Dashboard {
         // re-arms it the moment the reader is back at the bottom.
         let wheel: transcript::ScrollHandler =
             Rc::new(cx.listener(|this, ev: &ScrollWheelEvent, _window, cx| {
+                // The card is pinned to a window point, not to its row, so a
+                // scroll leaves it floating over a row it no longer names
+                // (#2690). The wheel closes it.
+                if this.msg_menu.take().is_some() {
+                    cx.notify();
+                }
                 if !wheel_releases_follow(wheel_dy(&ev.delta)) {
                     return;
                 }
@@ -10899,7 +10911,6 @@ impl Render for Dashboard {
                         live_click: Some(live_click.clone()),
                         message_click: message_click.clone(),
                         message_press: message_press.clone(),
-                        message_menu: message_menu.clone(),
                         selection: select_on.then(|| msg_picked.clone()),
                         menu_dismiss: Some(msg_dismiss.clone()),
                     },
@@ -12804,13 +12815,6 @@ impl Render for Dashboard {
             Screen::MissionControl => right.child(footer),
         };
 
-        // The card is the column's LAST child on purpose. Children paint in
-        // order, so a menu drawn inside the header is painted before the
-        // transcript and the conversation covers it.
-        if let Some(menu) = self.chat_menu(cx) {
-            right = right.child(menu);
-        }
-
         let mut root = div()
             .flex()
             .flex_row()
@@ -12833,6 +12837,16 @@ impl Render for Dashboard {
                     if this.sessions.rail_menu.take().is_some() {
                         cx.notify();
                     }
+                    if this.topic_menu.take().is_some() {
+                        cx.notify();
+                    }
+                    // A message card is pinned to a window point now, so it is
+                    // not the transcript's to dismiss any more: every card
+                    // closes on the same press, wherever it landed (#2690).
+                    if this.msg_menu.take().is_some() {
+                        cx.notify();
+                    }
+                    this.close_composer_menus(cx);
                 }),
             )
             // The drag lives on the root so it survives the pointer leaving
@@ -13414,15 +13428,29 @@ impl Render for Dashboard {
                 find::channel_hint(state.query(), &self.finder_channels),
             ));
         }
-        // The rail's context menu lives here, at the window root, and not
-        // inside the row it was asked from (#2742). Its card is placed in
-        // window coordinates beside that row, and a row's own frame would
-        // translate those coordinates to the row's corner. Deferred, so it
-        // paints over the cards and the conversation it opens above.
+        // Both context menus live here, at the window root, never inside the
+        // row or column that asked for them (#2690). Their cards are placed at
+        // the press point in window coordinates, and a parent's own frame would
+        // translate those coordinates to its corner. Deferred, so they paint
+        // over the cards and the conversation they open above.
+        if let Some(menu) = self.chat_menu(cx) {
+            root = root.child(gpui::deferred(menu).with_priority(2));
+        }
         if let Some(id) = self.sessions.rail_menu
             && let Some(menu) = self.rail_menu_popover_for(id, cx)
         {
             root = root.child(gpui::deferred(menu).with_priority(2));
+        }
+        // The message menu is a window-level card too (#2690): it used to be a
+        // child of its row, so a long message pushed it far from the press and
+        // a split pane's frame moved it again.
+        if let Some(id) = self.msg_menu
+            && let Some(at) = self.msg_menu_at
+        {
+            let items = self.msg_menu_items(id, cx);
+            root = root.child(
+                gpui::deferred(transcript::message_menu_popover(&items, at)).with_priority(2),
+            );
         }
         // The theme modal is attached last, so it paints over every other
         // surface: while it is open it is what the user is looking at, and the
@@ -13812,6 +13840,7 @@ fn main() {
                         split_pick: None,
                         split_creating: false,
                         msg_menu: None,
+                        msg_menu_at: None,
                         msg_select: Selection::new(),
                         forward_pick: None,
                         forward_query: String::new(),
@@ -13839,6 +13868,7 @@ fn main() {
                         preview_video: None,
                         help_open: false,
                         topic_menu: None,
+                        topic_menu_at: None,
                         topic_draft: None,
                         topic_warning: None,
                         topic_edge: topic_tabs::Edge::from_config(
@@ -15465,23 +15495,6 @@ fn rail_activity_line(live: &transcript::LiveTurn) -> String {
         (false, true) => lead,
         (false, false) => format!("{lead} \u{b7} {tail}"),
     }
-}
-
-/// The strip of the row a right press landed on, in window coordinates
-/// (#2742).
-///
-/// The context menu used to be absolute inside the row, so a nine-rem card
-/// covered the row that asked for it. `rail_menu_rect` names that row instead:
-/// the rail's own width, one row tall, centered on the press. The card opens
-/// off its right edge and level with its top, which puts it beside the row and
-/// over the conversation, where a menu belongs.
-fn rail_menu_rect(
-    rail_width: gpui::Pixels,
-    press: gpui::Point<gpui::Pixels>,
-    row_height: gpui::Pixels,
-) -> gpui::Bounds<gpui::Pixels> {
-    let origin = gpui::point(gpui::px(0.0), press.y - row_height / 2.0);
-    gpui::Bounds::new(origin, gpui::size(rail_width, row_height))
 }
 
 /// Fold one progress event into a live card.
@@ -18579,32 +18592,32 @@ mod tests {
     }
 
     #[test]
-    fn the_menu_opens_past_the_rail_at_the_press_height() {
-        // #2742: the card is placed from the row the press landed on instead
-        // of inside it. Its left edge clears the rail, so the card never
-        // covers the row text, and its top is level with that row.
-        let row = super::rail_menu_rect(
-            gpui::px(240.0),
-            gpui::point(gpui::px(120.0), gpui::px(400.0)),
-            gpui::px(28.0),
+    fn the_menu_opens_at_the_pointer_that_asked_for_it() {
+        // #2690: the press point is the anchor. The card used to be placed
+        // beside the rail at the press height, which is not where the click
+        // happened: a chip sits mid-row, and in a split the rail edge is not
+        // the pane the user was looking at.
+        let src = include_str!("main.rs");
+        let builder = fn_body(src, "rail_menu_popover_for");
+        assert!(
+            builder.contains("self.rail_menu_at"),
+            "the press the row recorded is what places the card"
         );
-        assert_eq!(row.origin.x, gpui::px(0.0));
-        assert_eq!(row.size.width, gpui::px(240.0));
-        assert_eq!(
-            row.origin.y,
-            gpui::px(386.0),
-            "one row tall and centered on the press, so the card faces the row"
+        assert!(
+            !builder.contains("rail_width"),
+            "the rail's width no longer decides where the card opens"
         );
-        let at = gpui::point(row.origin.x + row.size.width + gpui::px(8.0), row.origin.y);
-        assert_eq!(at.x, gpui::px(248.0), "the card opens past the rail");
-        assert_eq!(at.y, gpui::px(386.0), "and level with the row it names");
+        assert!(
+            builder.contains("sessions::menu_popover(\"rail-context-menu\", items, at)"),
+            "the card goes through the one pointer-anchored popover"
+        );
     }
 
     #[test]
-    fn the_rail_menu_opens_beside_the_row_it_was_asked_from() {
-        // #2742: the card was absolute inside the row at `right_1` / `top_1`,
-        // so it covered most of the row it belonged to and hung off the
-        // window on the last rows.
+    fn the_rail_menu_is_anchored_at_the_press_through_one_popover() {
+        // #2690: the card was absolute inside the row at `right_1` / `top_1`
+        // (#2742), then placed beside the rail at the press height. Both
+        // answered "where is the row"; the pointer is what the user clicked.
         let menu = include_str!("menu.rs");
         let popover = fn_body(menu, "menu_popover");
         assert!(
@@ -18644,11 +18657,11 @@ mod tests {
         let builder = fn_body(src, "rail_menu_popover_for");
         assert!(
             builder.contains("self.rail_menu_at"),
-            "the card opens at the height of the press that asked for it"
+            "the card opens at the point the press recorded"
         );
         assert!(
-            builder.contains("self.rail_width * self.rem"),
-            "and just past the rail, so it never covers the row"
+            !builder.contains("rail_width"),
+            "and not at the rail's edge, which is not where the click landed"
         );
     }
 

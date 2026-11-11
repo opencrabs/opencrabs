@@ -32,8 +32,8 @@ use std::rc::Rc;
 
 use gpui::{
     AbsoluteLength, AnyElement, App, ClickEvent, Div, HighlightStyle, MouseButton, ObjectFit,
-    ScrollHandle, SharedString, Stateful, Styled, StyledText, TextLayout, TextStyle, Window, div,
-    img, prelude::*, px, rems, rgb, rgba,
+    Pixels, Point, ScrollHandle, SharedString, Stateful, Styled, StyledText, TextLayout, TextStyle,
+    Window, div, img, prelude::*, px, rems, rgb, rgba,
 };
 
 use opencrabs::db::Database;
@@ -159,15 +159,6 @@ pub type PressHandler = std::rc::Rc<dyn Fn(&gpui::MouseDownEvent, &mut Window, &
 /// for the same reason as [`ClickHandler`]: only it holds the state to change.
 pub type ScrollHandler =
     std::rc::Rc<dyn Fn(&gpui::ScrollWheelEvent, &mut Window, &mut App) + 'static>;
-
-/// The open message menu (#2613): the row it belongs to and its resolved
-/// items. The window mints each pick, because the actions live on the window's
-/// own state; the transcript only draws the card over the row that asked.
-#[derive(Clone)]
-pub struct MessageMenu {
-    pub id: uuid::Uuid,
-    pub items: Vec<(String, ClickHandler)>,
-}
 
 /// A rendered piece of the conversation. The TUI's `DisplayMessage` kinds,
 /// narrowed to what the gui pane draws.
@@ -3275,23 +3266,21 @@ fn selectable_text_segment(
     })
 }
 
-/// One stored message row: its own menu anchor and select-mode checkbox
-/// (#2613).
+/// One stored message row: its own right-press handler and select-mode
+/// checkbox (#2613).
 ///
-/// The row is `relative` because the menu card is an absolutely positioned
-/// child of it: the card belongs to the row that opened it, so it moves with
-/// the scroll instead of floating over the pane at a stale offset.
+/// The row owns no menu card: the open menu is drawn at the window root, at
+/// the point the press landed (#2690), so it is never pushed around by the
+/// row's own frame.
 fn message_row(
     id: uuid::Uuid,
     child: Div,
     click: Option<&ClickHandler>,
     press: Option<&PressHandler>,
-    menu: &Option<MessageMenu>,
     picked: Option<bool>,
 ) -> Stateful<Div> {
     let mut row = div()
         .id(SharedString::from(format!("msg-{id}")))
-        .relative()
         .flex()
         .flex_row()
         .items_start()
@@ -3335,17 +3324,13 @@ fn message_row(
         });
     }
     row = row.child(body);
-    // The card is the last child so it paints over the row it belongs to.
-    if let Some(open) = menu.as_ref().filter(|m| m.id == id) {
-        row = row.child(message_menu_card(&open.items));
-    }
     row
 }
 
-/// The menu card itself: one row per resolved item, drawn over the message it
-/// belongs to. It reuses the rail's card so the two menus are one surface, and
-/// only the id and the anchor differ.
-fn message_menu_card(items: &[(String, ClickHandler)]) -> AnyElement {
+/// The menu card itself: one row per resolved item, drawn at the pointer that
+/// opened it. It reuses the rail's card and popover so every menu is one
+/// surface with one placement rule (#2690).
+pub fn message_menu_popover(items: &[(String, ClickHandler)], at: Point<Pixels>) -> AnyElement {
     let palette = palette::current();
     let rows: Vec<Stateful<Div>> = items
         .iter()
@@ -3364,20 +3349,10 @@ fn message_menu_card(items: &[(String, ClickHandler)]) -> AnyElement {
                 .on_click(move |ev, window, app| pick(ev, window, app))
         })
         .collect();
-    // The card swallows a left press so the window's click-outside dismiss
-    // (#2613) does not remove it before its own item's click lands: the pick
-    // fires on mouse-up, the dismiss on mouse-down.
-    let card = crate::menu::menu_card("message-context-menu", rows);
-    div()
-        .id("message-context-menu-card")
-        .on_mouse_down(gpui::MouseButton::Left, |_ev, _window, cx| {
-            cx.stop_propagation();
-        })
-        .child(card)
-        .absolute()
-        .right_2()
-        .top_1()
-        .into_any_element()
+    // The card stops its own presses, so the transcript's dismiss handler
+    // never removes it before its item's click lands: the pick fires on
+    // mouse-up, the dismiss on mouse-down (#2613).
+    crate::menu::menu_popover("message-context-menu", rows, at)
 }
 
 /// A row that takes part in a drag. Text segments provide exact offsets; these
@@ -3490,8 +3465,6 @@ pub struct ViewHooks {
     pub message_click: HashMap<uuid::Uuid, ClickHandler>,
     /// Right press per stored message row: opens the message menu (#2613).
     pub message_press: HashMap<uuid::Uuid, PressHandler>,
-    /// The row whose menu is open, with its items. `None` closes it.
-    pub message_menu: Option<MessageMenu>,
     /// The picked rows while select mode is on, or `None` when it is off.
     pub selection: Option<HashSet<uuid::Uuid>>,
     /// A left press on the transcript's own background, so an open message
@@ -3524,7 +3497,6 @@ pub fn view(
         live_click,
         message_click,
         message_press,
-        message_menu,
         selection: selected,
         menu_dismiss,
     } = hooks;
@@ -3683,7 +3655,6 @@ pub fn view(
                         child,
                         message_click.get(id),
                         message_press.get(id),
-                        &message_menu,
                         picked,
                     )
                     .into_any_element();

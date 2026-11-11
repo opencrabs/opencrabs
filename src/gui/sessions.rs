@@ -34,7 +34,7 @@ use opencrabs::ui_core::rail;
 // The menu primitives moved to `menu.rs` (#2613) so the transcript can draw
 // its own context menu without depending on the session rail. Re-exported
 // here because every rail call site still says `sessions::menu_*`.
-pub use crate::menu::{MenuEntry, MenuKind, menu_card, menu_item, menu_popover};
+pub use crate::menu::{MenuEntry, MenuKind, menu_item, menu_popover};
 
 /// The rail's live state, owned by the window's view.
 #[derive(Default)]
