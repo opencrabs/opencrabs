@@ -19,6 +19,7 @@ use gpui::{
 use opencrabs::ui_core::card::{CARD_RADIUS, glass_fill};
 use opencrabs::ui_core::split::Layout;
 
+use crate::palette;
 use crate::sessions;
 use crate::status::help_rows;
 use crate::topic_icons;
