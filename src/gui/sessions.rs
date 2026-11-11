@@ -237,6 +237,19 @@ impl SessionsState {
         self.rail_target()
     }
 
+    /// Which conversation owns a parent card's activity/preview line (#2804).
+    /// A selected child takes its own parent's line. Cursor is deliberately not
+    /// an input, and a selection owned by another card leaves this parent alone.
+    pub fn progress_id(
+        &self,
+        parent: uuid::Uuid,
+        children: impl IntoIterator<Item = uuid::Uuid>,
+    ) -> uuid::Uuid {
+        self.selected
+            .filter(|selected| children.into_iter().any(|child| child == *selected))
+            .unwrap_or(parent)
+    }
+
     /// What Enter in the find field opens: the armed row while it still
     /// matches the query, else the top match. Resolving it here keeps the
     /// rule out of the window's key handler, so it is tested without one
@@ -2412,6 +2425,44 @@ mod tests {
             state.pin_target(),
             Some(cursored),
             "the row the keyboard is on wins over the open chat"
+        );
+    }
+
+    #[test]
+    fn topic_cursor_alone_does_not_switch_activity() {
+        let parent = uuid::Uuid::from_u128(11);
+        let child = uuid::Uuid::from_u128(12);
+        let sibling = uuid::Uuid::from_u128(13);
+        let another_parent = uuid::Uuid::from_u128(14);
+        let mut state = SessionsState::default();
+
+        state.selected = Some(child);
+        assert_eq!(
+            state.progress_id(parent, [child, sibling]),
+            child,
+            "a selected child owns its parent's activity and preview"
+        );
+
+        state.selected = Some(parent);
+        state.cursor = Some(child);
+        assert_eq!(
+            state.progress_id(parent, [child, sibling]),
+            parent,
+            "a cursor on the child cannot steal the selected parent's line"
+        );
+
+        state.selected = Some(another_parent);
+        assert_eq!(
+            state.progress_id(parent, [child, sibling]),
+            parent,
+            "a selection owned by another parent leaves this card alone"
+        );
+
+        state.selected = None;
+        assert_eq!(
+            state.progress_id(parent, [child, sibling]),
+            parent,
+            "cursor alone never switches the line"
         );
     }
 

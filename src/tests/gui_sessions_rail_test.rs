@@ -250,3 +250,52 @@ fn rail_pin_toggles_without_opening_the_card() {
     );
     assert!(flags.contains("pin_toggle: Some(pin_toggle)"));
 }
+
+#[test]
+fn selected_topic_owns_the_parent_activity_line() {
+    let resolution = block(
+        GUI_MAIN,
+        "let progress_id = children_by_parent",
+        "let toggle_pin = cx.listener",
+    );
+    assert!(resolution.contains("children_by_parent.get(&id)"));
+    assert!(resolution.contains("self.sessions"));
+    assert!(resolution
+        .contains("progress_id(id, kids.iter().map(|(kid_id, _)| *kid_id))"));
+    assert!(
+        !resolution.contains(".cursor"),
+        "keyboard cursor is not an input to the progress owner"
+    );
+
+    let flags = block(
+        GUI_MAIN,
+        "let flags = sessions::RowFlags",
+        "// A parent card carries",
+    );
+    assert_eq!(
+        flags.matches(".get(&progress_id)").count(),
+        2,
+        "both content match and persisted preview belong to the selected child"
+    );
+    assert!(flags.contains("activity: self.rail_activity_for(progress_id)"));
+    assert!(flags.contains("plan: plan_progress.get(&id).copied()"));
+    assert!(flags.contains("running: running_tasks.get(&id).cloned()"));
+
+    let body = block(SESSIONS, "let body = div()", "let mut row = div()");
+    let chips = body.find(".when_some(chips,").expect("chip strip");
+    let fallback = body
+        .find("let preview = activity.or(preview);")
+        .expect("live activity wins over the selected topic's preview");
+    let activity = body
+        .find(".when_some(preview,")
+        .expect("the existing activity/preview line");
+    assert!(
+        chips < fallback && fallback < activity,
+        "the selected topic's line stays below the chips"
+    );
+    assert_eq!(
+        body.matches(".when_some(preview,").count(),
+        1,
+        "one existing renderer serves parents and selected topics"
+    );
+}

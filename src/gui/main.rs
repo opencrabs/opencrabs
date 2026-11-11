@@ -10628,6 +10628,12 @@ impl Render for Dashboard {
             let badge = state
                 .badge
                 .map(|_| rail_activity::frame(self.rail_clock.elapsed()));
+            // A selected topic owns its parent's existing activity/preview slot
+            // (#2804). Cursor, plan progress and running tasks stay with the parent.
+            let progress_id = children_by_parent.get(&id).map_or(id, |kids| {
+                self.sessions
+                    .progress_id(id, kids.iter().map(|(kid_id, _)| *kid_id))
+            });
             // The visible pin and the context menu share one favorite writer
             // (#2803). Stopping the press keeps the row closed and prevents a slide.
             let toggle_pin = cx.listener(move |this, _ev: &MouseDownEvent, _window, cx| {
@@ -10652,15 +10658,15 @@ impl Render for Dashboard {
                 preview: self
                     .sessions
                     .content_matches
-                    .get(&id)
+                    .get(&progress_id)
                     .filter(|_| self.sessions.filter_active)
                     .map(|snippet| SharedString::from(snippet.clone()))
-                    .or_else(|| self.sessions.previews.get(&id).cloned()),
+                    .or_else(|| self.sessions.previews.get(&progress_id).cloned()),
                 // A turn nobody has a pane for still gets a line on its card
                 // (#2718). The wording is the pane's own (#2326), so a split
                 // leaf and its rail row never describe the same turn two
                 // different ways.
-                activity: self.rail_activity_for(id),
+                activity: self.rail_activity_for(progress_id),
                 plan: plan_progress.get(&id).copied(),
                 // The bar blinks orange for a few seconds after a task in
                 // this session's plan settles, on the same event that rings
