@@ -3087,7 +3087,7 @@ impl Dashboard {
         }
         cx.subscribe(&pane_editor, move |this, _editor, event, cx| match event {
             editor::EditorEvent::Sent(text) => {
-                this.send_from_pane(id, text.clone(), None, cx);
+                this.send_from_pane(id, text.clone(), None, SendOrigin::Composer, cx);
             }
             editor::EditorEvent::Preview(path) => this.open_preview(path.clone(), cx),
         })
@@ -5163,6 +5163,7 @@ impl Dashboard {
         session: Uuid,
         text: String,
         display: Option<String>,
+        origin: SendOrigin,
         cx: &mut Context<Self>,
     ) {
         let text = text.trim().to_string();
@@ -5174,8 +5175,16 @@ impl Dashboard {
         // dispatch path, and this refuses the one path that got around it: a
         // name typed into the topic prompt was submitted here instead, so the
         // topic was never created and the name reached the agent as a message.
+        // Only a composer's own send is that case. The window mints turns of
+        // its own for a named session (the plan card's Approve and Discard,
+        // a command's reply turn), and chrome is not theirs to refuse: a plan
+        // waiting on approval kept its tap landing nowhere while the overlay
+        // that ate it stayed up.
         let overlays = self.open_overlays();
-        if !overlays.is_empty() && matches!(self.screen, Screen::Chat) {
+        if origin == SendOrigin::Composer
+            && !overlays.is_empty()
+            && matches!(self.screen, Screen::Chat)
+        {
             logging::debug(&format!(
                 "send refused: {:?} owns the keyboard",
                 overlays.last()
@@ -5539,7 +5548,9 @@ impl Dashboard {
         if Some(session) == self.transcript.session {
             self.send_message_showing(text, display, cx);
         } else {
-            self.send_from_pane(session, text, display, cx);
+            // The window asked for this turn, not a field: the overlay gate
+            // belongs to composer sends and must not eat it (#2795).
+            self.send_from_pane(session, text, display, SendOrigin::Window, cx);
         }
     }
 
@@ -16260,6 +16271,25 @@ fn pane_footer(id: SharedString, text: Option<SharedString>, focused: bool) -> A
         .into_any_element()
 }
 
+/// Who asked for a send.
+///
+/// Window chrome owns the keyboard, so a composer that sends while an overlay
+/// is up is answering keys nobody gave it (#2767). A turn the window minted
+/// itself is the opposite case: the plan card's Approve tap and a command's
+/// own turn come from a click, not from a field. They were refused all the
+/// same, because the gate read the window's chrome and the chrome has no
+/// session in it: a plan waiting on approval sat there with its tap landing
+/// nowhere, while every other session's composer stayed dead behind the same
+/// overlay until the window was restarted (#2795). The origin travels with the
+/// send so the gate can tell the two apart.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SendOrigin {
+    /// Typed into a composer: the overlay gate applies.
+    Composer,
+    /// Minted by the window for a named session: chrome cannot refuse it.
+    Window,
+}
+
 /// A pane's composer while another pane holds the keyboard (#2530): the draft
 /// it keeps, dimmed and inert. Clicking it hands the keyboard to that pane, so
 /// the next frame draws the real field in the same spot and the typed text
@@ -19198,6 +19228,53 @@ mod tests {
         assert!(
             drain.contains("agent_bridge::spawn_turn("),
             "the flush sends the joined turn"
+        );
+    }
+
+    /// Chrome may not refuse a turn the window minted for a named session
+    /// (#2795).
+    ///
+    /// `open_overlays()` is window state with no session in it, so the overlay
+    /// gate in `send_from_pane` used to refuse every pane send while any
+    /// overlay was open. The plan card's Approve and Discard taps, and a
+    /// command's own reply turn, are exactly that shape: a click for one
+    /// session, refused because another part of the window held the keyboard.
+    /// The plan then sat in Editing with a dead button, and the composer of
+    /// every other session stayed dead behind the same overlay until restart.
+    /// The gate now reads the send's origin, and the window's own path names
+    /// itself.
+    #[test]
+    fn the_overlay_gate_only_refuses_a_composers_own_send() {
+        let src = include_str!("main.rs");
+        let production = src
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .expect("production source before the test module");
+        let send = production
+            .split("    fn send_from_pane(")
+            .nth(1)
+            .and_then(|rest| rest.split("        // A send ends that pane's offer").next())
+            .expect("send_from_pane");
+        assert!(
+            send.contains("origin: SendOrigin,"),
+            "the send carries who asked for it"
+        );
+        assert!(
+            send.contains("origin == SendOrigin::Composer"),
+            "the overlay gate is keyed on the composer, not on the window"
+        );
+        let turn = production
+            .split("    fn send_turn_to(")
+            .nth(1)
+            .and_then(|rest| rest.split("    /// Dispatch the one turn").next())
+            .expect("send_turn_to");
+        assert!(
+            turn.contains("SendOrigin::Window"),
+            "a turn the window minted is never refused by chrome"
+        );
+        assert!(
+            production.contains("None, SendOrigin::Composer, cx)"),
+            "a pane composer's own send keeps the gate"
         );
     }
 
