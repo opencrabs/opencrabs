@@ -18,7 +18,9 @@
 
 use crate::palette;
 use crate::topic_icons;
-use opencrabs::services::message::{CompletedPlanPayload, PLAN_COMPLETED_ROLE};
+use opencrabs::services::message::{
+    CompletedPlanPayload, PLAN_COMPLETED_ROLE, TURN_STOPPED_ROLE,
+};
 use opencrabs::ui_core::card::{CARD_RADIUS, concentric_radius, glass_fill};
 use opencrabs::ui_core::copy_select::{self, TextPoint};
 use opencrabs::ui_core::links::{self, ClickTarget};
@@ -335,6 +337,12 @@ pub struct LiveTurn {
     /// the reload proves the row is persisted, so a turn that streamed
     /// nothing still shows its answer instead of blanking the pane.
     pub settled: Option<String>,
+    /// The user stopped this turn (#2811). A stopped turn reports neither
+    /// `Done` nor `Failed`: the turn's future is dropped where it stood, so
+    /// nothing else on the card would say it was cut short. The flag freezes
+    /// the head on a stop glyph instead of a spinner for a turn nobody is
+    /// running, and the reload reads the same fact back from its own row.
+    pub stopped: bool,
     /// Output tokens produced this turn, counted with the same tokenizer the
     /// TUI runs over every chunk (`brain::tokenizer`), so the live counter and
     /// the TUI's agree instead of being two estimates.
@@ -379,6 +387,7 @@ impl LiveTurn {
             && self.notices.is_empty()
             && self.injected.is_empty()
             && self.settled.is_none()
+            && !self.stopped
     }
 
     /// The model has not said anything yet: no reasoning, no text, no tool
@@ -428,6 +437,7 @@ impl LiveTurn {
         self.entries.clear();
         self.notices.clear();
         self.settled = None;
+        self.stopped = false;
         self.tokens = 0;
         self.started = None;
         self.chunks = 0;
@@ -1076,6 +1086,7 @@ pub fn turns_with_origins(
                     summary.failed += calls.iter().filter(|c| !c.success).count();
                 }
                 Block::Msg { role, .. } if role == "error" => summary.has_error = true,
+                Block::Msg { role, .. } if role == TURN_STOPPED_ROLE => summary.stopped = true,
                 _ => {}
             }
         }
@@ -2326,7 +2337,13 @@ fn settled_card(turn: &Turn, folded: bool, body: Vec<AnyElement>) -> Option<Stat
 /// failure? A failed call with assistant text after it was answered, and the
 /// footer still reports the count for anyone who wants it.
 fn settled_verdict(turn: &Turn) -> (&'static str, &'static str) {
-    if turn.summary.has_error || (turn.summary.failed > 0 && !answered_after_the_last_failure(turn))
+    // A stop is the user's decision, not the turn's outcome (#2811), and it is
+    // asked first: a turn stopped after a self-corrected failure is still a
+    // stop, and a stopped turn that never answered must never read as Finished.
+    if turn.summary.stopped {
+        ("\u{23f9}", "Stopped")
+    } else if turn.summary.has_error
+        || (turn.summary.failed > 0 && !answered_after_the_last_failure(turn))
     {
         ("\u{274c}", "Failed")
     } else {
@@ -2522,7 +2539,12 @@ fn live_card(
     ctx: (Option<u32>, u32),
     drag: Option<&Rc<CopyDrag>>,
 ) -> Stateful<Div> {
-    let frame = if live.settled.is_some() {
+    // A stop ends the turn where it stood (#2811). A spinner says work is
+    // happening and nothing is, so the head keeps a stop glyph and the card
+    // reads as ended instead of frozen mid-frame.
+    let frame = if live.stopped {
+        "\u{23f9}".to_string()
+    } else if live.settled.is_some() {
         "\u{2705}".to_string()
     } else {
         match live.started {
@@ -2740,7 +2762,15 @@ fn tool_count_label(count: usize) -> String {
 /// The tail is how much it did (the call count) and the clock the terminal
 /// builds with `format_turn_spinner_meta`.
 pub(crate) fn live_status_line(live: &LiveTurn) -> (String, String) {
-    let mut lead = live_activity(live);
+    // A stopped turn says so in the lead (#2811). The fallback below would
+    // otherwise keep printing "OpenCrabs is thinking..." over a turn nobody is
+    // running, which is the frozen look the report described. The tail still
+    // prints, so the call count and the frozen clock stay readable.
+    let mut lead = if live.stopped {
+        Some("Stopped".to_string())
+    } else {
+        live_activity(live)
+    };
     if lead.is_none()
         && live.tools.is_empty()
         && live.chunks == 0
@@ -5722,6 +5752,48 @@ mod tests {
             settled_verdict(&errored),
             ("\u{274c}", "Failed"),
             "a harness error row still means Failed, whatever came after it"
+        );
+    }
+
+    /// #2811: the reload reads the stop back from its own row, so a turn the
+    /// user stopped still settles as Stopped after a restart, a switch or a
+    /// reload. Without this the card came back as `✅ Finished` ten seconds
+    /// after the user had stopped it.
+    #[test]
+    fn a_stopped_row_settles_the_turn_as_stopped() {
+        let rows = vec![
+            row("user", "do the thing", 1),
+            row("assistant", "partway through", 2),
+            row(TURN_STOPPED_ROLE, "Stopped.", 3),
+        ];
+        let (_, built) = turns(&rows, 3);
+        assert_eq!(built.len(), 1, "one turn: the question and its stop");
+        let turn = &built[0];
+        assert!(
+            turn.summary.stopped,
+            "the row carries the stop into the summary"
+        );
+        assert!(!turn.summary.has_error, "a stop is not an error");
+        assert_eq!(settled_verdict(turn), ("\u{23f9}", "Stopped"));
+    }
+
+    /// The stop is asked first (#2811): a turn the user stopped after an error
+    /// row is still a stop, because the user ended it and the card must say so
+    /// rather than blame the turn.
+    #[test]
+    fn a_stop_outranks_an_error_row_in_the_verdict() {
+        let rows = vec![
+            row("user", "do the thing", 1),
+            row("error", "the provider dropped the stream", 2),
+            row(TURN_STOPPED_ROLE, "Stopped.", 3),
+        ];
+        let (_, built) = turns(&rows, 3);
+        let turn = &built[0];
+        assert!(turn.summary.has_error && turn.summary.stopped);
+        assert_eq!(
+            settled_verdict(turn),
+            ("\u{23f9}", "Stopped"),
+            "the user ended this turn, so the cross would blame the wrong thing"
         );
     }
 

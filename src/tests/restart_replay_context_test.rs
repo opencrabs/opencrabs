@@ -78,3 +78,42 @@ fn plan_completed_excluded_from_provider_context() {
         })
     }));
 }
+
+/// #2811: the stop row is history for the reader, never context for the
+/// model. The builder maps an unknown role to `Role::User`, so an unskipped
+/// row would be sent as something the user said, and the next turn would be
+/// answering a stop the model itself had no part in.
+#[test]
+fn the_stop_row_never_reaches_the_model() {
+    let session = Uuid::new_v4();
+    let rows = vec![
+        row(session, "user", "do the thing", 1),
+        row(session, "assistant", "partway through", 2),
+        row(
+            session,
+            crate::services::message::TURN_STOPPED_ROLE,
+            "Stopped.",
+            3,
+        ),
+    ];
+    let context = AgentContext::from_db_messages(session, rows, 100_000);
+    assert_eq!(
+        context.messages.len(),
+        2,
+        "the stop is not a message the model reads"
+    );
+    assert!(
+        context.messages.iter().all(|m| m
+            .content
+            .iter()
+            .all(|b| !matches!(b, ContentBlock::Text { text } if text.contains("Stopped.")))),
+        "no surface of the stop may reach the provider"
+    );
+    assert!(
+        context
+            .messages
+            .iter()
+            .all(|m| m.role == Role::User || m.role == Role::Assistant),
+        "an unknown role must never fall through to a made-up turn"
+    );
+}

@@ -12,6 +12,13 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub const PLAN_COMPLETED_ROLE: &str = "plan_completed";
+/// A turn the user stopped before it answered (#2811).
+///
+/// Its own role, because the alternative is a lie: a cancelled turn writes no
+/// error row, so every surface that asks "did this turn end badly?" answered
+/// "no" and the card settled as Finished. The context builder skips this role,
+/// so the row never reaches the model.
+pub const TURN_STOPPED_ROLE: &str = "turn_stopped";
 const PLAN_COMPLETED_PAYLOAD_VERSION: u8 = 1;
 
 /// Versioned, structured history for a plan that reached its completion seam.
@@ -210,6 +217,21 @@ impl MessageService {
         repo.find_by_session(session_id)
             .await
             .context("Failed to list messages for session")
+    }
+
+    /// Record that the user stopped a turn (#2811).
+    ///
+    /// The cancel drops the turn's future where it stood: no `Done`, no
+    /// `Failed`, and therefore no row that says the turn was cut short. This is
+    /// that row, written after the fact so the verdict survives a reload, a
+    /// session switch and a restart.
+    pub async fn record_turn_stopped(&self, session_id: Uuid) -> Result<Message> {
+        self.create_message(
+            session_id,
+            TURN_STOPPED_ROLE.to_string(),
+            "Stopped.".to_string(),
+        )
+        .await
     }
 
     /// The newest `limit` messages of a session, oldest-first. Reads only the

@@ -1455,6 +1455,11 @@ impl App {
         // unanswered query doesn't linger and duplicate on resend
         // (#698). Only when the input is empty (don't clobber a
         // new draft) and the trailing message is that user query.
+        //
+        // A handed-back question is not a stopped turn (#2811): the user got
+        // the question back to resend, so there is nothing to mark. `handed_back`
+        // keeps the stop row below from claiming otherwise.
+        let mut handed_back = false;
         if should_restore_cancelled_query(
             has_visible_text,
             has_visible_reasoning,
@@ -1464,6 +1469,7 @@ impl App {
             && self.messages.last().is_some_and(|m| m.role == "user")
         {
             if let Some(m) = self.messages.pop() {
+                handed_back = true;
                 // Scrub like every other buffer write: a queued message
                 // captured before the gate existed could still carry a
                 // burst (#1983).
@@ -1509,6 +1515,42 @@ impl App {
                 });
                 approval.state = ApprovalState::Denied("Operation cancelled".to_string());
             }
+        }
+        // The stop is part of the turn's record (#2811). Without a row the
+        // reloaded transcript holds a turn that ended with nothing, so every
+        // surface reads it as finished: that is how a stopped turn settled as
+        // `Finished` ten seconds later, and how it came back looking like it
+        // had never been stopped after a session switch. The row is written
+        // even when nothing was said, because the stop itself is the news; the
+        // context builder skips this role, so the model never sees it.
+        if !handed_back
+            && let Some(session_id) = self.current_session.as_ref().map(|s| s.id)
+        {
+            if let Err(e) = self
+                .message_service
+                .record_turn_stopped(session_id)
+                .await
+            {
+                tracing::error!("Failed to record the stopped turn: {e}");
+            }
+            // The same row in memory, so the header reads `Stopped` before any
+            // reload lands. Content matches what the writer persists, so the
+            // in-memory view and the reloaded one say the same thing.
+            self.messages.push(DisplayMessage {
+                id: Uuid::new_v4(),
+                role: crate::services::message::TURN_STOPPED_ROLE.to_string(),
+                content: "Stopped.".to_string(),
+                timestamp: chrono::Utc::now(),
+                token_count: None,
+                cost: None,
+                approval: None,
+                approve_menu: None,
+                details: None,
+                expanded: false,
+                expanded_full: false,
+                tool_group: None,
+                duration_secs: None,
+            });
         }
     }
 
@@ -2036,7 +2078,6 @@ impl App {
                 self.slash_suggestions_active = false;
                 self.dismiss_emoji_picker();
                 self.abort_active_turn().await;
-                self.push_system_message("Operation cancelled.".to_string());
                 return Ok(());
             }
 
@@ -2192,6 +2233,9 @@ impl App {
             if self.is_processing {
                 if let Some(pending_at) = self.escape_pending_at {
                     if pending_at.elapsed() < std::time::Duration::from_secs(3) {
+                        // The abort records the stop itself (#2811), so this
+                        // path prints nothing of its own: a second line here
+                        // would say the same thing twice.
                         self.abort_active_turn().await;
                         // Reload session from DB so tool calls appear inline
                         // (matching the persisted order from expand_message) instead
@@ -2200,10 +2244,10 @@ impl App {
                             let session_id = session.id;
                             self.load_session(session_id).await?;
                         }
-                        // Only claimed once the turn is actually torn down: this
-                        // used to print on the expired path too, telling the user
-                        // the operation had stopped while it kept running (#1343).
-                        self.push_system_message("Operation cancelled.".to_string());
+                        // The abort already recorded the stop and pushed its
+                        // row, so nothing is claimed here: the old claim was
+                        // printed on the expired path too, telling the user the
+                        // operation had stopped while it kept running (#1343).
                     } else {
                         // Expired — treat as a first Escape again. Without this the
                         // stale timestamp made every later Escape take the expired

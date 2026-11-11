@@ -241,6 +241,13 @@ pub struct TurnSummary {
     pub duration_secs: i64,
     /// Whether the turn produced an error row.
     pub has_error: bool,
+    /// Whether the user stopped the turn before it answered (#2811).
+    ///
+    /// Its own flag, never an error: a stop is not a failure of the turn, it is
+    /// the user ending it. Both surfaces printed a tick for a stopped turn
+    /// because a cancel writes no error row and this summary had no other way
+    /// to know.
+    pub stopped: bool,
 }
 
 /// Summarise a turn for its header (#759). Pure.
@@ -254,6 +261,9 @@ pub(crate) fn turn_summary(messages: &[DisplayMessage], turn: TurnRange) -> Turn
         }
         if m.role == "error" {
             s.has_error = true;
+        }
+        if m.role == crate::services::message::TURN_STOPPED_ROLE {
+            s.stopped = true;
         }
     }
     // Prefer the duration stamped at turn end (#964). The fallback below
@@ -278,9 +288,16 @@ pub(crate) fn turn_summary(messages: &[DisplayMessage], turn: TurnRange) -> Turn
 /// absent because it already lives in the footer under the input (#744).
 pub fn format_turn_header(summary: TurnSummary, steps: usize) -> Option<String> {
     if steps == 0 && summary.tool_calls == 0 {
-        return None;
+        // A stopped turn still earns a head (#2811). The stop IS the story of
+        // the turn, and without one the card would vanish on the reload and
+        // take the verdict with it.
+        return summary.stopped.then(|| "\u{23f9} Stopped".to_string());
     }
-    let status = if summary.has_error || summary.failed > 0 {
+    let status = if summary.stopped {
+        // Neither a success nor a failure (#2811): the user ended the turn, so
+        // a tick would claim it delivered something.
+        "\u{23f9}"
+    } else if summary.has_error || summary.failed > 0 {
         "✗"
     } else {
         "✓"
@@ -531,6 +548,10 @@ pub(crate) fn visible_when_folded(
         // "rows the fold hides", it also reported a turn that did no work as
         // having taken a step (#786).
         "user" | "error" | "history_marker" | "system" => true,
+        // How the turn ended is not working-out, so a stopped row survives the
+        // fold (#2811). Hiding it would leave a folded turn reading as a turn
+        // that simply stopped talking.
+        r if r == crate::services::message::TURN_STOPPED_ROLE => true,
         // A substantial report survives the fold even when it is not the single
         // final answer (#904). The fold kept exactly one assistant row, so a
         // turn that produced a real deliverable and then said anything after it
@@ -1126,6 +1147,25 @@ pub(crate) fn render_chat(f: &mut Frame, app: &mut App, area: Rect) {
                 spans.push(Span::styled(text_line.to_string(), body_style));
                 lines.push(Line::from(spans));
             }
+            lines.push(Line::from(""));
+            for _ in lines_before..lines.len() {
+                line_to_msg.push(Some(msg_idx));
+            }
+            continue;
+        }
+
+        if app.messages[msg_idx].role == crate::services::message::TURN_STOPPED_ROLE {
+            // A stop is how the turn ended, so it prints as one muted line
+            // (#2811). Without this branch it fell through to the assistant
+            // path and read as text the model wrote.
+            let stop_style = Style::default()
+                .fg(theme::role(Role::GrayMid))
+                .add_modifier(Modifier::ITALIC);
+            lines.push(Line::from(vec![
+                Span::styled("  ", Style::default()),
+                Span::styled("\u{23f9} ", stop_style),
+                Span::styled(app.messages[msg_idx].content.clone(), stop_style),
+            ]));
             lines.push(Line::from(""));
             for _ in lines_before..lines.len() {
                 line_to_msg.push(Some(msg_idx));

@@ -517,14 +517,23 @@ fn channel_chip_line_from(names: &[String]) -> Option<SharedString> {
 /// mid-turn on its own. Turn state therefore travels with the session:
 /// switching conversations parks the card, its cancel handle, the reload
 /// handshake and the last prompt size here, and coming back puts them on
-/// screen again. Entries exist only while a turn is in flight, so a profile
-/// with thousands of conversations costs nothing.
+/// screen again. An entry exists while a turn is in flight, and also while a
+/// card has ended but the reload has not replaced it yet, so a profile with
+/// thousands of conversations still costs nothing.
 struct StashedTurn {
     live: transcript::LiveTurn,
     cancel: Option<tokio_util::sync::CancellationToken>,
     settle_expect: Option<usize>,
     settle_retries: u8,
     ctx_tokens: Option<u32>,
+    /// Whether the turn was still running when the window parked it (#2811).
+    ///
+    /// Restored verbatim instead of assumed. A card the user stopped has
+    /// nothing left to animate, so forcing `busy` back on would put a spinner
+    /// over a turn nobody is running, which is the frozen look the report
+    /// described. The rail and the queue ask this flag rather than the entry's
+    /// presence, so a parked stop reads as idle in both.
+    busy: bool,
 }
 
 /// Whether a rail preview refresh can actually change a line.
@@ -1819,6 +1828,24 @@ impl Dashboard {
                 &mut self.settle_retries,
                 &mut self.ctx_tokens,
             );
+            // Every switch says who it left, who it arrived on and whether a
+            // card was parked (#2811). The report that started this had only
+            // screenshots to work from: a switch left no trace at all, so "the
+            // state vanished" could not be told apart from "it was never
+            // parked". One line makes the next repro greppable.
+            logging::info(&format!(
+                "session switch {:?} -> {id}: {}",
+                self.transcript.session,
+                if self
+                    .transcript
+                    .session
+                    .is_some_and(|from| self.stashed.contains_key(&from))
+                {
+                    "card parked"
+                } else {
+                    "nothing parked"
+                }
+            ));
             // Metrics belong to the turn they settled, never to the session
             // the user just switched to.
             self.pending_metrics.clear();
@@ -3631,6 +3658,10 @@ impl Dashboard {
         cancel.cancel();
         pane.busy = false;
         pane.live.thinking = false;
+        // The card ends here, not when the service's event lands (#2811): the
+        // user asked for the stop and the pane must stop claiming a turn is
+        // running before the cancellation unwinds.
+        pane.live.stopped = true;
         pane.live.notices.push("Operation cancelled.".to_string());
         // The stop names its session and what is still waiting, so the flush
         // that lands with the cancellation event can be paired to it (#2695).
@@ -3667,6 +3698,7 @@ impl Dashboard {
         cancel.cancel();
         self.busy = false;
         self.live.thinking = false;
+        self.live.stopped = true;
         self.live.notices.push("Operation cancelled.".to_string());
         logging::info("turn cancelled by /stop");
         cx.notify();
@@ -6551,6 +6583,14 @@ impl Dashboard {
                     // "Operation cancelled", so a second line would be noise.
                     self.refresh_rail(cx);
                     self.pending_metrics.remove(&session);
+                    // The verdict needs a row (#2811). A cancelled turn writes
+                    // no error and no answer, so without this the turn settles
+                    // as Finished and the stop vanishes on the next reload.
+                    // Written for the cancelled session, whichever one is on
+                    // screen, because the turn was real where it ran.
+                    if let Some(bridge) = agent_bridge::bridge() {
+                        agent_bridge::spawn_record_turn_stopped(bridge.service.clone(), session);
+                    }
                     if self.transcript.session == Some(session) {
                         // No reload on purpose. The dropped future cannot
                         // promise the ledger has the text it streamed, and a
@@ -6560,6 +6600,10 @@ impl Dashboard {
                         self.live.finalize(None);
                         self.busy = false;
                         self.live.thinking = false;
+                        // The stop is the settle (#2811): the card keeps its
+                        // stream and now says it was stopped, instead of
+                        // waiting on a spinner that will never turn again.
+                        self.live.stopped = true;
                         self.cancel = None;
                         logging::info("turn settled after the stop dropped it");
                     } else {
@@ -6569,6 +6613,7 @@ impl Dashboard {
                         if let Some(pane) = self.pane_states.get_mut(&session) {
                             pane.live.finalize(None);
                             pane.live.thinking = false;
+                            pane.live.stopped = true;
                             pane.busy = false;
                             pane.cancel = None;
                         }
@@ -6578,9 +6623,13 @@ impl Dashboard {
                         self.drain_pane_pending(session, cx);
                     }
                     // The turn is gone, so its rail spinner goes with it.
-                    if self.rail.clear(session) {
-                        cx.notify();
-                    }
+                    self.rail.clear(session);
+                    // Unconditional (#2811): a card that just stopped has to
+                    // paint its stop glyph once. It is static from here, so
+                    // this is the only repaint it needs, and the animation
+                    // gate stays off instead of repainting an idle window five
+                    // times a second for a turn nobody is running.
+                    cx.notify();
                 }
                 agent_bridge::TurnEvent::TurnReverted { session } => {
                     // The stopped turn's rows are deleted and its question is
@@ -6629,6 +6678,8 @@ impl Dashboard {
                                 settle_expect: None,
                                 settle_retries: 0,
                                 ctx_tokens: None,
+                                // Recovered mid-flight, so the turn is running.
+                                busy: true,
                             },
                         );
                     }
@@ -6789,9 +6840,12 @@ impl Dashboard {
                 // The open session's turn, plus any turn parked under its own
                 // session: a switched-away turn keeps running, so its rail row
                 // must keep its spinner instead of claiming idle work (#2616).
-                // Split leaves keep their own flag.
+                // Split leaves keep their own flag. A parked card that has
+                // ended is NOT live (#2811): the entry outlives the turn so the
+                // stop survives the switch, and reading presence as work would
+                // spin a row for a turn nobody is running.
                 (self.busy && self.transcript.session == Some(id))
-                    || self.stashed.contains_key(&id),
+                    || self.stashed.get(&id).is_some_and(|turn| turn.busy),
                 self.pane_states.get(&id).is_some_and(|pane| pane.busy),
                 manager.as_ref().is_some_and(|mgr| mgr.running_for(id) > 0),
             );
@@ -6972,7 +7026,10 @@ impl Dashboard {
         if self.pane_states.get(&session).is_some_and(|p| p.busy) {
             return true;
         }
-        self.stashed.contains_key(&session)
+        // A parked card that has ended is not work in flight (#2811). Its
+        // entry outlives the turn so the stop survives a switch, and reading
+        // presence as work would queue the completion instead of resuming it.
+        self.stashed.get(&session).is_some_and(|turn| turn.busy)
     }
 
     /// Start the turn a completion asks for on a conversation nobody is
@@ -7011,6 +7068,8 @@ impl Dashboard {
                 settle_expect: None,
                 settle_retries: 0,
                 ctx_tokens: None,
+                // A task completion just started this turn.
+                busy: true,
             },
         );
         let attached = editor::marker_paths(&context_text);
@@ -9702,6 +9761,12 @@ impl Dashboard {
             // it to stop, and the service's own Failed event lands afterwards.
             self.busy = false;
             self.live.thinking = false;
+            // Only a turn that still has something to show keeps the stop
+            // (#2811): a handed-back question already cleared the card, and
+            // marking that one stopped would draw an empty card with no text.
+            if !returned {
+                self.live.stopped = true;
+            }
             self.cancel = None;
             let waiting = self.queued_for_strip().len();
             if waiting > 0 {
@@ -15864,6 +15929,13 @@ fn fold_live(
 /// spinner nor the counters jump to a conversation that never sent anything
 /// (#2616). A session with nothing in flight gets an empty slot, which is
 /// what makes a switch to an idle conversation paint as idle.
+///
+/// A card that has ended is parked too (#2811). Gating the park on `busy` alone
+/// dropped every turn the moment it stopped running, so a turn the user had
+/// just stopped came back as an empty slot and the stop, the stream and the
+/// verdict went with it. What decides the park is whether the card holds
+/// anything the ledger cannot draw yet, which is `!live.is_empty()`; `busy`
+/// rides along so the restored card knows whether anything is still moving.
 #[allow(clippy::too_many_arguments)]
 fn swap_visible_turn(
     stashed: &mut std::collections::HashMap<Uuid, StashedTurn>,
@@ -15880,7 +15952,7 @@ fn swap_visible_turn(
         return;
     }
     if let Some(from) = from
-        && *busy
+        && (*busy || !live.is_empty())
     {
         stashed.insert(
             from,
@@ -15890,6 +15962,7 @@ fn swap_visible_turn(
                 settle_expect: settle_expect.take(),
                 settle_retries: std::mem::take(settle_retries),
                 ctx_tokens: ctx_tokens.take(),
+                busy: *busy,
             },
         );
     }
@@ -15900,7 +15973,9 @@ fn swap_visible_turn(
             *settle_expect = turn.settle_expect;
             *settle_retries = turn.settle_retries;
             *ctx_tokens = turn.ctx_tokens;
-            *busy = true;
+            // The flag travels with the card (#2811): a stopped turn comes
+            // back stopped, not "running again".
+            *busy = turn.busy;
         }
         None => {
             *live = transcript::LiveTurn::default();
@@ -18420,6 +18495,108 @@ mod tests {
         assert!(busy);
     }
 
+    /// #2811: stopping a turn clears `busy` immediately, and the park used to
+    /// be gated on `busy` alone. A turn the user had just stopped was therefore
+    /// dropped on the way out of the session and came back as an empty pane,
+    /// which is why the stop looked like it had never happened.
+    #[test]
+    fn a_stopped_card_survives_a_switch_without_claiming_it_is_running() {
+        let a = uuid::Uuid::new_v4();
+        let b = uuid::Uuid::new_v4();
+        let mut stashed: std::collections::HashMap<uuid::Uuid, super::StashedTurn> =
+            std::collections::HashMap::new();
+        let mut live = super::transcript::LiveTurn::default();
+        live.begin("ask A".to_string());
+        live.stream = "half an answer".to_string();
+        live.stopped = true;
+        // What the stop already did: nothing is running any more.
+        let mut busy = false;
+        let mut cancel: Option<tokio_util::sync::CancellationToken> = None;
+        let mut settle_expect: Option<usize> = None;
+        let mut settle_retries: u8 = 0;
+        let mut ctx_tokens: Option<u32> = None;
+
+        super::swap_visible_turn(
+            &mut stashed,
+            Some(a),
+            b,
+            &mut live,
+            &mut busy,
+            &mut cancel,
+            &mut settle_expect,
+            &mut settle_retries,
+            &mut ctx_tokens,
+        );
+
+        assert_eq!(
+            stashed.len(),
+            1,
+            "the stopped card is parked, never dropped for not running"
+        );
+        assert!(
+            !stashed[&a].busy,
+            "it is parked knowing nothing is running, so it cannot spin on return"
+        );
+        assert!(stashed[&a].live.stopped, "and knowing it was stopped");
+
+        super::swap_visible_turn(
+            &mut stashed,
+            Some(b),
+            a,
+            &mut live,
+            &mut busy,
+            &mut cancel,
+            &mut settle_expect,
+            &mut settle_retries,
+            &mut ctx_tokens,
+        );
+
+        assert_eq!(
+            live.stream, "half an answer",
+            "the stream the user saw came back with the card"
+        );
+        assert!(live.stopped, "and so did the fact it was stopped");
+        assert!(
+            !busy,
+            "a restored stop must not claim the turn is running: that is the frozen spinner"
+        );
+        assert!(stashed.is_empty(), "the card moved back onto the screen");
+    }
+
+    /// The park condition is about the card, not the turn: an idle
+    /// conversation still parks nothing (#2616), so switching around a profile
+    /// cannot accumulate empty entries (#2811).
+    #[test]
+    fn an_idle_conversation_parks_nothing() {
+        let a = uuid::Uuid::new_v4();
+        let b = uuid::Uuid::new_v4();
+        let mut stashed: std::collections::HashMap<uuid::Uuid, super::StashedTurn> =
+            std::collections::HashMap::new();
+        let mut live = super::transcript::LiveTurn::default();
+        let mut busy = false;
+        let mut cancel: Option<tokio_util::sync::CancellationToken> = None;
+        let mut settle_expect: Option<usize> = None;
+        let mut settle_retries: u8 = 0;
+        let mut ctx_tokens: Option<u32> = None;
+
+        super::swap_visible_turn(
+            &mut stashed,
+            Some(a),
+            b,
+            &mut live,
+            &mut busy,
+            &mut cancel,
+            &mut settle_expect,
+            &mut settle_retries,
+            &mut ctx_tokens,
+        );
+
+        assert!(
+            stashed.is_empty(),
+            "nothing was on screen, so nothing had to travel"
+        );
+    }
+
     /// The window keeps exactly one live turn, so every paint hands it over
     /// directly: no owner check can disagree with what is on screen, because
     /// the swap already did the deciding (#2616).
@@ -19451,6 +19628,38 @@ mod tests {
         assert!(
             drain.contains("agent_bridge::spawn_turn("),
             "the flush sends the joined turn"
+        );
+    }
+
+    /// #2811: the cancel arm is the only place a stop is recorded, so three
+    /// things have to stay true there. The card says it was stopped (otherwise
+    /// a spinner turns over a turn nobody is running), the stream the user saw
+    /// is left alone (the dropped future cannot promise the ledger has it, so a
+    /// reload would wipe it), and the row that makes the verdict survive a
+    /// reload is written.
+    #[test]
+    fn the_cancel_arm_records_the_stop_and_keeps_the_stream() {
+        let src = include_str!("main.rs");
+        let production = src
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .expect("production source before the test module");
+        let cancelled = production
+            .split("agent_bridge::TurnEvent::Cancelled { session } =>")
+            .nth(1)
+            .and_then(|rest| rest.split("agent_bridge::TurnEvent::TurnReverted").next())
+            .expect("the Cancelled branch");
+        assert!(
+            cancelled.contains("self.live.stopped = true;"),
+            "the card must say the turn was stopped instead of spinning"
+        );
+        assert!(
+            cancelled.contains("agent_bridge::spawn_record_turn_stopped("),
+            "and the stop must outlive the card as a row"
+        );
+        assert!(
+            !cancelled.contains("reload = Some(session);"),
+            "no reload here: the dropped future cannot promise the ledger has the text"
         );
     }
 

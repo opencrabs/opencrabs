@@ -209,6 +209,7 @@ fn header_singularises_one_call_and_omits_zero_duration() {
         failed: 0,
         duration_secs: 0,
         has_error: false,
+        stopped: false,
     };
     // Both counts now, always: steps and tool calls are separate facts.
     assert_eq!(format_turn_header(s, 0).unwrap(), "✓ 0 steps · 1 tool call");
@@ -222,6 +223,7 @@ fn header_humanises_duration() {
         failed: 0,
         duration_secs: secs,
         has_error: false,
+        stopped: false,
     };
     assert!(format_turn_header(mk(45), 0).unwrap().ends_with("45s"));
     assert!(format_turn_header(mk(90), 0).unwrap().ends_with("1m 30s"));
@@ -598,6 +600,7 @@ fn a_turn_that_ran_no_tools_says_so_instead_of_hiding_it() {
         failed: 0,
         duration_secs: 0,
         has_error: false,
+        stopped: false,
     };
     assert_eq!(
         format_turn_header(s, 17).unwrap(),
@@ -614,6 +617,7 @@ fn nothing_to_report_still_gets_no_header() {
         failed: 0,
         duration_secs: 0,
         has_error: false,
+        stopped: false,
     };
     assert_eq!(format_turn_header(s, 0), None);
 }
@@ -668,5 +672,68 @@ fn real_work_is_still_counted_alongside_status() {
         turn_hideable_count(&msgs, turn, fin),
         2,
         "tool group and narration count; the status notice does not"
+    );
+}
+
+// ── A stopped turn is not a finished one (#2811) ────────────────────────────
+// The cancel writes a `turn_stopped` row and nothing else: no error, no
+// answer. Without these arms every surface asked "did this end badly?", got
+// "no", and settled a turn the user had just stopped as `✓ Finished`.
+
+#[test]
+fn a_stopped_turn_settles_as_stopped_not_finished() {
+    let msgs = vec![
+        msg("user", "do the thing"),
+        msg("assistant", "partway through"),
+        msg(crate::services::message::TURN_STOPPED_ROLE, "Stopped."),
+    ];
+    let s = turn_summary(&msgs, turn_ranges(&msgs)[0]);
+    assert!(s.stopped, "the row says the user ended the turn");
+    assert!(!s.has_error, "a stop is the user's decision, not a failure");
+    let h = format_turn_header(s, 1).expect("a stopped turn has a head");
+    assert!(
+        h.starts_with('\u{23f9}'),
+        "a stop must not wear the tick that claims delivery: {h}"
+    );
+    assert!(
+        !h.contains('\u{2713}') && !h.contains('\u{2717}'),
+        "neither a tick nor a cross: the user ended this turn: {h}"
+    );
+    assert!(
+        h.contains("1 step"),
+        "the work it did is still worth reading: {h}"
+    );
+}
+
+#[test]
+fn a_stopped_turn_with_no_work_still_earns_a_header() {
+    // A turn stopped before it did anything has no steps and no calls, and
+    // the plain rule would give it no head at all. The stop is the story of
+    // that turn, so it is the one case where an empty turn gets one.
+    let msgs = vec![
+        msg("user", "never mind"),
+        msg(crate::services::message::TURN_STOPPED_ROLE, "Stopped."),
+    ];
+    let s = turn_summary(&msgs, turn_ranges(&msgs)[0]);
+    assert!(s.stopped);
+    assert_eq!(s.tool_calls, 0);
+    assert_eq!(format_turn_header(s, 0).as_deref(), Some("\u{23f9} Stopped"));
+}
+
+#[test]
+fn a_stopped_row_survives_the_fold() {
+    // How the turn ended is not working-out (#2811). Folding it away would
+    // leave a collapsed turn reading as one that simply stopped talking.
+    let msgs = vec![
+        msg("user", "do it"),
+        msg("assistant", "some narration"),
+        msg("assistant", "the answer"),
+        msg(crate::services::message::TURN_STOPPED_ROLE, "Stopped."),
+    ];
+    let turn = turn_ranges(&msgs)[0];
+    let fin = final_answer_idx(&msgs, turn);
+    assert!(
+        visible_when_folded(&msgs, 3, fin),
+        "the stop is the last word on how the turn ended"
     );
 }

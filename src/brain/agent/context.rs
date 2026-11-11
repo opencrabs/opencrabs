@@ -99,6 +99,12 @@ impl AgentContext {
             if db_msg.role == crate::services::message::PLAN_COMPLETED_ROLE {
                 continue;
             }
+            // A stop is history for the reader, not context for the model
+            // (#2811). The fallback below maps an unknown role to `Role::User`,
+            // so an unskipped row would be sent as something the user said.
+            if db_msg.role == crate::services::message::TURN_STOPPED_ROLE {
+                continue;
+            }
             // Skip messages with empty content AND no captured reasoning —
             // Anthropic rejects empty text blocks. A non-empty thinking
             // column alone still justifies keeping the row so downstream

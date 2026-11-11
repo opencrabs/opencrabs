@@ -1727,6 +1727,39 @@ pub fn spawn_undo_last_turn(service: Arc<AgentService>, session_id: Uuid, sink: 
     }
 }
 
+/// Record a stopped turn in the session's history (#2811).
+///
+/// A cancel drops the turn's future, so nothing inside the turn writes the row
+/// that says it was stopped. The verdict needs that row: with no error and no
+/// answer, every surface that derives a turn's outcome from its rows answered
+/// "Finished", and the stop disappeared the moment the transcript reloaded.
+pub fn spawn_record_turn_stopped(service: Arc<AgentService>, session_id: Uuid) {
+    let spawned = std::thread::Builder::new()
+        .stack_size(1024 * 1024)
+        .name("gui-turn-stopped".into())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    crate::logging::error(&format!("turn stopped runtime: {e}"));
+                    return;
+                }
+            };
+            runtime.block_on(async move {
+                let messages = opencrabs::services::MessageService::new(service.context().clone());
+                if let Err(e) = messages.record_turn_stopped(session_id).await {
+                    crate::logging::error(&format!("turn stopped row: {e}"));
+                }
+            });
+        });
+    if let Err(e) = spawned {
+        crate::logging::error(&format!("turn stopped thread: {e}"));
+    }
+}
+
 /// Generate the personalized brain files from the onboarding notes.
 ///
 /// A direct port of the terminal's `generate_brain_files_background`
