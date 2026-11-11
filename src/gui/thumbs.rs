@@ -322,14 +322,17 @@ mod tests {
     /// not reuse the thumbnail of the file it replaced.
     #[test]
     fn a_rewritten_picture_gets_its_own_thumbnail() {
-        let home = Path::new("/home/crabs");
-        let source = Path::new("/tmp/shot.png");
+        let home = Path::new("home/crabs");
+        // Relative fixtures: `thumb_cache_path` hashes the path string and
+        // never touches the filesystem, and a POSIX `/tmp` literal in a module
+        // that ships on Windows trips the windows-footgun scan.
+        let source = Path::new("shots/shot.png");
         assert_ne!(
             thumb_cache_path(home, source, 1_700_000_000),
             thumb_cache_path(home, source, 1_700_000_001)
         );
         assert_ne!(
-            thumb_cache_path(home, Path::new("/tmp/other.png"), 1_700_000_000),
+            thumb_cache_path(home, Path::new("shots/other.png"), 1_700_000_000),
             thumb_cache_path(home, source, 1_700_000_000)
         );
     }
