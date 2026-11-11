@@ -1650,7 +1650,10 @@ pub fn row(s: &Session, flags: RowFlags, chips: Option<Stateful<Div>>) -> Statef
         .flex()
         .flex_row()
         .items_center()
-        .gap_3()
+        // The media needs real air before the name (#2800): at `gap_3` the
+        // picture read as glued to the first letter, worst on the widest
+        // rail where there is no shortage of room.
+        .gap_4()
         .min_w_0()
         // The name line fills the body so the trailing cluster's `ml_auto`
         // has free space to push against. Without this it shrinks to its text
