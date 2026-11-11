@@ -17564,7 +17564,7 @@ mod tests {
     }
 
     #[test]
-    fn help_overlay_paints_one_row_per_entry_in_the_shared_table() {
+    fn the_help_screen_paints_one_row_per_entry() {
         use opencrabs::ui_core::help_keys::{self, HelpSection};
 
         // One painted row per entry of the collection the window reads, and
@@ -17704,7 +17704,7 @@ mod tests {
     }
 
     #[test]
-    fn help_overlay_opens_on_ctrl_h_and_cmd_question() {
+    fn the_help_screen_opens_on_ctrl_h_and_cmd_question() {
         // A source scan, because the handler needs a window and a key event
         // to exercise. The rule here is wiring: both doors land on the same
         // toggle, Esc closes the panel before it reaches anything behind it,
