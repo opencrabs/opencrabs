@@ -3469,9 +3469,13 @@ fn selectable_row<E: gpui::IntoElement>(
 /// separated by one newline in the copy coordinate space.
 fn markdown_copy_text(src: &str) -> String {
     let mut segments = Vec::new();
-    for block in markdown::blocks(src) {
+    // The same parse `md_block` already did for these pixels (#2817). Calling
+    // `markdown::blocks` here parsed every assistant answer a second time on
+    // every paint, which on a 4 MB window was ~80 MB/s of throwaway strings
+    // per pane; the cache makes the copy text free once the row has rendered.
+    for block in md_blocks(src).iter() {
         match block {
-            markdown::MdBlock::Line(line) => segments.push(line.text),
+            markdown::MdBlock::Line(line) => segments.push(line.text.clone()),
             markdown::MdBlock::Table(table) => {
                 let cols = table.columns().max(1);
                 for i in 0..cols {
@@ -3483,7 +3487,7 @@ fn markdown_copy_text(src: &str) -> String {
                             .to_string(),
                     );
                 }
-                for row in table.rows {
+                for row in &table.rows {
                     for i in 0..cols {
                         segments.push(row.get(i).map_or("", |cell| cell.text.as_str()).to_string());
                     }
@@ -3681,10 +3685,14 @@ pub fn view(
             // draws here, and keeps drawing while the next request runs. The
             // skip used to key on `busy` alone, so the previous answer
             // disappeared for the whole duration of a new turn (#2709).
-            let text = block_text(block);
+            // The copy text only exists when drag-to-copy is armed. Building it
+            // unconditionally parsed every block on every paint just to answer
+            // "does this carry text", for a `Div` that comes out the same
+            // either way (#2817).
             let mut selectable = None;
-            let child: Div = match &drag {
-                Some(d) if !text.trim().is_empty() => {
+            let copy_text = drag.as_ref().map(|_| block_text(block));
+            let child: Div = match (&drag, copy_text) {
+                (Some(d), Some(text)) if !text.trim().is_empty() => {
                     let ordinal = {
                         let mut texts = d.texts.borrow_mut();
                         texts.push(text);
