@@ -131,39 +131,50 @@ impl SessionsState {
         })
     }
 
-    /// The spend a rail card stands for (#2807): its own ledger row plus every
-    /// topic grouped under it. A topic keeps its own row in the table and
-    /// paints no stamp, so without this the card showed the parent's spend
-    /// alone and the money spent in its chips disappeared from the rail.
-    pub fn grouped_cost(&self, own: f64, parent: uuid::Uuid) -> f64 {
-        self.items
-            .iter()
-            .filter(|s| self.parents.get(&s.id) == Some(&parent))
-            .fold(own, |total, s| total + s.total_cost)
-    }
-
-    /// When a rail card last saw work (#2815): its own ledger row or the newest
-    /// message in any topic grouped under it. A message is written to the
-    /// session it was addressed to, so a topic's activity never touches the
-    /// parent row's `updated_at`, and the card kept the date of the last
-    /// message sent to the parent itself while its topics ran minutes ago.
-    /// Grouped at paint time the way `grouped_cost` already groups spend,
-    /// rather than writing through to the parent on every topic message.
-    pub fn grouped_activity(
-        &self,
-        own: chrono::DateTime<chrono::Utc>,
-        parent: uuid::Uuid,
-    ) -> chrono::DateTime<chrono::Utc> {
-        self.items
-            .iter()
-            .filter(|s| self.parents.get(&s.id) == Some(&parent))
-            .fold(own, |latest, s| latest.max(s.updated_at))
-    }
-
     /// The instant a card sorts by (#2815): the same grouped stamp it paints,
     /// so the rail can never order rows by a different clock than it prints.
-    fn activity_of(&self, s: &Session) -> chrono::DateTime<chrono::Utc> {
-        self.grouped_activity(s.updated_at, s.id)
+    /// Every card's grouped stamp in one pass (#2817): the sort and the card
+    /// both ask this per row, and answering it per row scanned the whole rail
+    /// each time.
+    pub fn grouped_activities(&self) -> HashMap<uuid::Uuid, chrono::DateTime<chrono::Utc>> {
+        let mut stamps: HashMap<uuid::Uuid, chrono::DateTime<chrono::Utc>> =
+            self.items.iter().map(|s| (s.id, s.updated_at)).collect();
+        for s in &self.items {
+            if let Some(parent) = self.parents.get(&s.id)
+                && let Some(at) = stamps.get_mut(parent)
+            {
+                *at = (*at).max(s.updated_at);
+            }
+        }
+        stamps
+    }
+
+    /// Every card's grouped spend in one pass (#2817), for the same reason.
+    pub fn grouped_costs(&self) -> HashMap<uuid::Uuid, f64> {
+        let mut costs: HashMap<uuid::Uuid, f64> =
+            self.items.iter().map(|s| (s.id, s.total_cost)).collect();
+        for s in &self.items {
+            if let Some(parent) = self.parents.get(&s.id)
+                && let Some(total) = costs.get_mut(parent)
+            {
+                *total += s.total_cost;
+            }
+        }
+        costs
+    }
+
+    /// The rows that indent this frame (#2817): a topic whose parent is in
+    /// view. Resolved once per frame instead of scanning the visible set per
+    /// row.
+    pub fn indented_ids(&self) -> HashSet<uuid::Uuid> {
+        let visible: HashSet<uuid::Uuid> = self.visible().map(|s| s.id).collect();
+        // The parent must be in view, not the topic itself: a topic whose chat
+        // the filter hid has no card to sit under, exactly as before (#2817).
+        self.parents
+            .iter()
+            .filter(|(_, parent)| visible.contains(parent))
+            .map(|(id, _)| *id)
+            .collect()
     }
 
     /// Pinned first, then everything else, each group newest activity first.
@@ -178,44 +189,57 @@ impl SessionsState {
     /// top-level rows only, it never ejects a topic to the top level (#2701).
     pub fn ordered(&self) -> impl Iterator<Item = &Session> {
         let visible: Vec<&Session> = self.visible().collect();
-        let in_view = |id: uuid::Uuid| visible.iter().any(|s| s.id == id);
-        let grouped = |s: &Session| self.parents.get(&s.id).is_some_and(|p| in_view(*p));
+        // Membership once, not once per row (#2817): `in_view` used to scan
+        // the whole visible set for every session, and the topic pass scanned
+        // it again for every parent, which is what made a 200-row rail cost
+        // ~700k item visits per call.
+        let visible_ids: HashSet<uuid::Uuid> = visible.iter().map(|s| s.id).collect();
+        // The sort key, grouped over each card's topics, computed once per
+        // session. `sort_by_key` re-evaluates its key on every comparison and
+        // `grouped_activity` scans every item, so the sort alone was
+        // O(n^2 log n). Folded over `items`, not `visible`, so the order reads
+        // the same stamp the card prints.
+        let activity = self.grouped_activities();
+        let grouped = |s: &Session| {
+            self.parents
+                .get(&s.id)
+                .is_some_and(|p| visible_ids.contains(p))
+        };
         let (mut pinned, mut rest): (Vec<&Session>, Vec<&Session>) = visible
             .iter()
             .copied()
             .filter(|s| !grouped(s))
             .partition(|s| self.is_favorite(s.id));
-        pinned.sort_by_key(|s| std::cmp::Reverse(self.activity_of(s)));
-        rest.sort_by_key(|s| std::cmp::Reverse(self.activity_of(s)));
+        let key = |s: &&Session| {
+            std::cmp::Reverse(activity.get(&s.id).copied().unwrap_or(s.updated_at))
+        };
+        pinned.sort_by_cached_key(key);
+        rest.sort_by_cached_key(key);
         pinned.extend(rest);
+        // Parent -> children in one pass, in the ledger's own order, instead
+        // of a scan of the whole rail per parent.
+        let mut children: HashMap<uuid::Uuid, Vec<&Session>> = HashMap::new();
+        for s in &visible {
+            if grouped(s)
+                && let Some(parent) = self.parents.get(&s.id)
+            {
+                children.entry(*parent).or_default().push(*s);
+            }
+        }
         let mut out: Vec<&Session> = Vec::with_capacity(visible.len());
         for top in pinned {
             out.push(top);
             // Topic pins are always visible beneath their parent. The arrow
             // keys walk this exact order, so no cursor can target a hidden row.
-            out.extend(
-                visible
-                    .iter()
-                    .copied()
-                    .filter(|s| self.parents.get(&s.id) == Some(&top.id) && grouped(s)),
-            );
+            if let Some(kids) = children.get(&top.id) {
+                out.extend(kids.iter().copied());
+            }
         }
         out.into_iter()
     }
 
-    /// Whether a row is a topic shown under its parent, so it is indented.
     pub fn is_closed(&self, id: uuid::Uuid) -> bool {
         self.closed.contains(&id)
-    }
-
-    pub fn is_indented(&self, id: uuid::Uuid) -> bool {
-        // Indentation tracks chip-strip membership, not the pin: a pinned
-        // topic is still a topic of its parent, so the favorite flag must not
-        // drop its indent (#2670 regression). The pin keeps its role in
-        // ordering only (pinned first), never in whether a row is grouped.
-        self.parents
-            .get(&id)
-            .is_some_and(|p| self.visible().any(|s| s.id == *p))
     }
 
     /// Whether this session is pinned right now.
@@ -2216,8 +2240,8 @@ mod tests {
             vec![a_id, a1_id, b_id, c_id],
             "the topic follows its parent"
         );
-        assert!(state.is_indented(a1_id));
-        assert!(!state.is_indented(a_id));
+        assert!(state.indented_ids().contains(&a1_id));
+        assert!(!state.indented_ids().contains(&a_id));
         assert_eq!(
             state.cursor_step(Some(a_id), 1),
             Some(a1_id),
@@ -2233,7 +2257,7 @@ mod tests {
         );
         assert_eq!(order[0], a_id, "the parent, not the pinned topic, leads");
         assert!(
-            state.is_indented(a1_id),
+            state.indented_ids().contains(&a1_id),
             "a pinned topic is still a topic of its parent: the pin never drops the indent"
         );
     }
@@ -2590,14 +2614,15 @@ mod tests {
         state.parents.insert(uuid::Uuid::from_u128(2), parent);
         state.parents.insert(uuid::Uuid::from_u128(3), parent);
 
+        let costs = state.grouped_costs();
         assert_eq!(
-            state.grouped_cost(100.0, parent),
-            175.5,
+            costs.get(&parent).copied(),
+            Some(175.5),
             "the card adds both topics and ignores a chat it does not own"
         );
         assert_eq!(
-            state.grouped_cost(100.0, uuid::Uuid::from_u128(9)),
-            100.0,
+            costs.get(&uuid::Uuid::from_u128(9)).copied(),
+            None,
             "a card with no topics prints only its own spend"
         );
     }
@@ -2621,8 +2646,8 @@ mod tests {
         state.parents.insert(uuid::Uuid::from_u128(2), parent_id);
 
         assert_eq!(
-            state.grouped_activity(parent_stamp, parent_id),
-            busy_stamp,
+            state.grouped_activities().get(&parent_id).copied(),
+            Some(busy_stamp),
             "the newest topic stamp is what the card prints, not the parent's own row"
         );
 
@@ -2636,8 +2661,11 @@ mod tests {
             .parents
             .insert(uuid::Uuid::from_u128(2), uuid::Uuid::from_u128(1));
         assert_eq!(
-            quiet_only.grouped_activity(session(1, "x").updated_at, uuid::Uuid::from_u128(1)),
-            session(1, "x").updated_at,
+            quiet_only
+                .grouped_activities()
+                .get(&uuid::Uuid::from_u128(1))
+                .copied(),
+            Some(session(1, "x").updated_at),
             "a quieter topic never pulls the card back in time"
         );
     }
@@ -2694,7 +2722,7 @@ mod tests {
             .nth(1)
             .expect("the card builder wires stamp_at");
         assert!(
-            wired.trim_start().starts_with("self.sessions.grouped_activity("),
+            wired.trim_start().starts_with("grouped_stamps.get(&id)"),
             "the builder folds the topics into the stamp it hands the row"
         );
     }

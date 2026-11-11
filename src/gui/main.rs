@@ -10683,6 +10683,13 @@ impl Render for Dashboard {
         let searching = !self.sessions.filter.trim().is_empty();
         let visible_ids: std::collections::HashSet<Uuid> =
             self.sessions.visible().map(|s| s.id).collect();
+        // The grouped stamp, spend and indent of every card, one pass each.
+        // The row loop asked per row and every ask scanned the whole rail, so
+        // a 200-row rail paid ~80k item visits a frame for numbers that only
+        // change when a message lands (#2817).
+        let grouped_stamps = self.sessions.grouped_activities();
+        let grouped_costs = self.sessions.grouped_costs();
+        let indented_ids = self.sessions.indented_ids();
         let chip_children: std::collections::HashSet<Uuid> = if searching {
             std::collections::HashSet::new()
         } else {
@@ -10732,7 +10739,7 @@ impl Render for Dashboard {
                 this.rail_hands_back();
                 cx.notify();
             });
-            let indented = self.sessions.is_indented(id);
+            let indented = indented_ids.contains(&id);
             let closed = self.sessions.is_closed(id);
             // One glyph cell, from the window's shared clock, so a list of
             // busy rows blinks as one spinner instead of ten (#2636).
@@ -10794,13 +10801,13 @@ impl Render for Dashboard {
                 // (#2807). A topic keeps its own ledger row and paints no
                 // stamp of its own, which makes the card the only place the
                 // money under it can be summed.
-                cost: self.sessions.grouped_cost(s.total_cost, id),
+                cost: grouped_costs.get(&id).copied().unwrap_or(s.total_cost),
                 // A card stands for its topics here too (#2815): a message
                 // written to a topic touches only that topic's ledger row, so
                 // the card's own stamp would freeze at the last message
                 // addressed to the card itself while its chips ran minutes
                 // ago. Folded over the same children the cost is.
-                stamp_at: self.sessions.grouped_activity(s.updated_at, id),
+                stamp_at: grouped_stamps.get(&id).copied().unwrap_or(s.updated_at),
                 // The stored icon leads the row (#2790), resolved exactly
                 // like the topic tab resolves it: an embedded mark, a
                 // custom image from the view's cache, or a legacy glyph.
