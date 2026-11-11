@@ -97,8 +97,8 @@ fn rail_card_media_is_large_dual_and_the_title_is_bold() {
 
     let title = block(row, "let title = div()", "let body = div()");
     assert!(
-        media.contains(".mr_2()"),
-        "the media slot carries its own air before the name, so the spacing cannot collapse"
+        !media.contains(".mr_2()"),
+        "the media slot adds no margin of its own: one 8px gap carries the air"
     );
     assert!(
         title.contains(".gap_2()") && title.contains(".when_some(marks, |d, marks| d.child(marks))"),
