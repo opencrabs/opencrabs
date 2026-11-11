@@ -1543,7 +1543,7 @@ pub fn row(
         .flex()
         .flex_row()
         .items_center()
-        .gap_1()
+        .gap_2()
         .min_w_0()
         // The name line fills the body so the trailing cluster's `ml_auto`
         // has free space to push against. Without this it shrinks to its text
