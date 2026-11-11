@@ -253,13 +253,17 @@ mod tests {
             .join(format!("{PLAN_PREFIX}{session}{PLAN_SUFFIX}"));
         std::fs::write(&path, serde_json::to_string(&doc).expect("json")).expect("write");
         let mut index = PlanIndex::with_roots(vec![tmp.path().to_path_buf()]);
-        assert_eq!(index.progress(session, Instant::now()), Some((1, 2)));
+        let opened = Instant::now();
+        assert_eq!(index.progress(session, opened), Some((1, 2)));
 
         // A design draft has no checklist, so it draws no bar.
         doc.status = PlanStatus::Editing;
         doc.tasks.clear();
         std::fs::write(&path, serde_json::to_string(&doc).expect("json")).expect("write");
-        assert_eq!(index.progress(session, Instant::now()), None);
+        // The index reuses a file's stat for a fifth of a second (#2817), so
+        // ask past that window or the rewrite is answered from the old parse.
+        let after_the_stat_window = opened + Duration::from_millis(500);
+        assert_eq!(index.progress(session, after_the_stat_window), None);
     }
 
     #[test]
