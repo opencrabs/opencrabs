@@ -12403,6 +12403,9 @@ impl Render for Dashboard {
                     // keep working from the provider the hand just chose.
                     let first = row.first;
                     let count = row.count;
+                    // A provider with one model has nothing left to choose, so
+                    // its tile is the switch itself (#2782).
+                    let single = models::single_model_pair(&visible, row);
                     let mut entry = div()
                         .id(SharedString::from(format!("models-provider-{id}")))
                         .flex()
@@ -12439,6 +12442,12 @@ impl Render for Dashboard {
                         move |this, _ev, _window, cx| {
                             this.models_provider = Some(id.clone());
                             this.models_index = first;
+                            // One model in view means the click is the pick:
+                            // the picker used to stay open on a list with a
+                            // single row and nothing to confirm.
+                            if let Some(pair) = single.clone() {
+                                this.switch_model(pair, cx);
+                            }
                             cx.notify();
                         },
                     )));
