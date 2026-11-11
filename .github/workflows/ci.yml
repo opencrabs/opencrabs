@@ -687,10 +687,14 @@ jobs:
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Install mold + ALSA dev (Linux)
+      - name: Install mold + ALSA + XCB dev (Linux)
         # Linux-only toolchain extras; macOS uses the Xcode linker.
+        # libxcb1-dev: #2765 gave Linux gpui's x11 backend, and x11rb's
+        # xcb_ffi carries `#[link(name = "xcb")]`. Without the dev package
+        # mold dies with "library not found: xcb" while linking the example
+        # binaries, so the leg fails before a single test runs.
         if: runner.os == 'Linux'
-        run: sudo apt-get update -qq && sudo apt-get install -y mold clang libasound2-dev
+        run: sudo apt-get update -qq && sudo apt-get install -y mold clang libasound2-dev libxcb1-dev
 
       - name: Run tests
         env:

@@ -321,9 +321,12 @@ jobs:
 
       - name: Install Linux dependencies
         if: contains(matrix.os, 'ubuntu')
+        # libxcb1-dev: #2765 gave Linux gpui's x11 backend, and x11rb's
+        # xcb_ffi carries `#[link(name = "xcb")]`. The build is
+        # --all-features, so the release link needs it too.
         run: |
           sudo apt-get update
-          sudo apt-get install -y libasound2-dev
+          sudo apt-get install -y libasound2-dev libxcb1-dev
 
       # Pinned to a released tag and an explicit tool version: the action
       # defaults cmakeVersion to "latest" and resolves it at run time.

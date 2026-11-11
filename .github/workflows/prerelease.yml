@@ -152,7 +152,9 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+        # libxcb1-dev: #2765 gave Linux gpui's x11 backend, and x11rb's
+        # xcb_ffi carries `#[link(name = "xcb")]`.
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libxcb1-dev
 
       - name: Build
         shell: bash
