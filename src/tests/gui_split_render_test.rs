@@ -55,9 +55,9 @@ fn pane_element() -> &'static str {
         .split("fn pane_element(")
         .nth(1)
         .expect("pane_element is defined")
-        .split("fn split_pick_overlay(")
+        .split("\n#[cfg(test)]\nmod tests {")
         .next()
-        .expect("the walk comes before the pick overlay")
+        .expect("the walk comes before the test module")
 }
 
 /// The body that draws the chat screen's pane tree (#2530): where each pane's

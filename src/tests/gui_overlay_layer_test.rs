@@ -9,6 +9,11 @@
 
 const GUI_MAIN: &str = include_str!("../gui/main.rs");
 
+/// The dialogs themselves, which live in their own module (#2817 follow-up).
+/// The order guards above read the render in the crate root, where each one is
+/// attached; the guards below read the dialog they pin.
+const OVERLAYS: &str = include_str!("../gui/overlays.rs");
+
 fn position(needle: &str) -> usize {
     GUI_MAIN
         .find(needle)
@@ -70,8 +75,10 @@ fn the_key_reference_fills_the_window() {
     // panel this guard used to watch). What has to hold now is that the screen
     // covers the window and takes the pointer, so a click lands in the
     // reference and not on a pane behind it.
-    let screen = position(".id(\"help-screen\")");
-    let after = GUI_MAIN
+    let screen = OVERLAYS
+        .find(".id(\"help-screen\")")
+        .expect("the help screen names itself");
+    let after = OVERLAYS
         .get(screen..)
         .expect("the help screen marker is a char boundary");
     let header = after
