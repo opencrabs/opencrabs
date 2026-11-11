@@ -32,6 +32,7 @@ mod breakdown;
 mod command_palette;
 mod commands;
 mod editor;
+mod fonts;
 mod icon;
 mod layout_store;
 mod logging;
@@ -111,6 +112,7 @@ use uuid::Uuid;
 use opencrabs::brain::mission_control::{McActivity, McAnalytics, McInboxItem, McScheduleItem};
 use opencrabs::config::Config;
 use opencrabs::config::GuiTheme;
+use opencrabs::config::gui_font;
 use opencrabs::config::gui_theme;
 use opencrabs::tui::app::mission_control::log_viewer::LogViewerState;
 use opencrabs::ui_core::keys::UiKey;
@@ -849,6 +851,13 @@ struct Dashboard {
     /// The saturation and brightness tracks' boxes, recorded the same way.
     themes_sat_track: std::rc::Rc<std::cell::RefCell<Option<[f32; 4]>>>,
     themes_val_track: std::rc::Rc<std::cell::RefCell<Option<[f32; 4]>>>,
+    /// Whether the font list under the cards is open (#2786). Closed by
+    /// default, because the list is the machine's whole family catalog and the
+    /// modal is small.
+    fonts_open: bool,
+    /// Whether the installed families have been read. The enumeration walks
+    /// CoreText on macOS and keeps no cache, so it runs once per process.
+    fonts_loaded: bool,
     /// The /cd picker's browse state (#2527): the directory on screen, its
     /// subdirectories read at open and on every descend, the row the
     /// keyboard stands on, and whether dotfile directories are listed.
@@ -4621,6 +4630,7 @@ impl Dashboard {
     fn close_themes(&mut self, cx: &mut Context<Self>) {
         self.themes_drag = None;
         self.themes_open = false;
+        self.fonts_open = false;
         palette::adopt(palette::saved());
         self.refocus_overlay();
         cx.notify();
@@ -4644,7 +4654,16 @@ impl Dashboard {
             GuiTheme::Auto,
         ];
         match ks.key.as_str() {
-            "escape" => self.close_themes(cx),
+            "escape" => {
+                // The font list is the innermost surface, so Escape closes it
+                // before the modal (#2786).
+                if self.fonts_open {
+                    self.fonts_open = false;
+                    cx.notify();
+                } else {
+                    self.close_themes(cx);
+                }
+            }
             "left" | "up" => {
                 self.themes_card = (self.themes_card + 3) % 4;
                 let card = CARDS[self.themes_card];
@@ -4889,16 +4908,87 @@ impl Dashboard {
                 ))
                 .into_any_element()
         });
+        // The font row (#2786): the family in force, and the machine's
+        // families under it once the row is opened. The rows are built here
+        // because only this `cx` can mint a click listener, and only while the
+        // list is open: the catalog is the whole machine, so a closed row must
+        // not build three hundred elements on every frame.
+        let shown = palette::current();
+        let current_font = fonts::current_ui();
+        let font_picks: Vec<Stateful<Div>> = if self.fonts_open {
+            fonts::picker_rows()
+                .into_iter()
+                .map(|family| {
+                    let selected = family.eq_ignore_ascii_case(&current_font);
+                    // The id and the label are read before the family moves
+                    // into the listener, which is the only thing that needs it
+                    // after the row is built.
+                    let id = SharedString::from(format!("theme-font-{family}"));
+                    let label = SharedString::from(gui_font::row_label(&family));
+                    let pick = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
+                        this.pick_font(&family, cx);
+                    });
+                    div()
+                        .id(id)
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .w_full()
+                        .px_2()
+                        .py_1()
+                        .rounded(px(4.0))
+                        .cursor_pointer()
+                        .hover(|d| d.bg(rgb(shown.panel_hi)))
+                        .text_xs()
+                        .text_color(rgb(if selected {
+                            shown.accent
+                        } else {
+                            shown.text_normal
+                        }))
+                        .child(label)
+                        .on_click(pick)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let font_toggle = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+            this.toggle_fonts(cx);
+        });
+        let font_row =
+            themes_view::font_row(&current_font, self.fonts_open, font_toggle, font_picks);
         let dismiss = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
             this.close_themes(cx);
         });
         themes_view::modal(
             cards,
             accent_row,
+            font_row,
             "A click saves the card at once; the arrows walk them and Enter picks.",
             dismiss,
         )
         .into_any_element()
+    }
+
+    /// Open or close the font list under the theme cards (#2786).
+    fn toggle_fonts(&mut self, cx: &mut Context<Self>) {
+        self.fonts_open = !self.fonts_open;
+        cx.notify();
+    }
+
+    /// Keep a family from the font list (#2786). A pick saves at once, the way
+    /// a theme card does, and closes the list so the modal stays the size it
+    /// was. The whole window repaints in the new family on the next frame.
+    fn pick_font(&mut self, family: &str, cx: &mut Context<Self>) {
+        match fonts::keep_ui(family) {
+            Ok(()) => logging::info(&format!(
+                "fonts: kept '{}' as [gui] font",
+                fonts::current_ui()
+            )),
+            Err(e) => logging::error(&format!("fonts: could not save '{family}': {e}")),
+        }
+        self.fonts_open = false;
+        cx.notify();
     }
 
     /// `/cd` with no argument: the directory picker screen (#2527). The
@@ -10215,6 +10305,14 @@ impl Dashboard {
 
 impl Render for Dashboard {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The machine's font catalog is read once, on the first paint (#2786):
+        // `all_font_names` walks CoreText on macOS and keeps no cache of its
+        // own, so asking it per frame would re-enumerate every installed
+        // family on every paint.
+        if !self.fonts_loaded {
+            self.fonts_loaded = true;
+            fonts::remember_installed(cx.text_system().all_font_names());
+        }
         // Focus follows the keyboard owner, decided here because this is the
         // only place holding a window to focus through. A transition that
         // forgot to ask would leave the composer answering under an open
@@ -12908,6 +13006,13 @@ impl Render for Dashboard {
             .size_full()
             .bg(rgb(palette::current().bg))
             .text_color(rgb(palette::current().text))
+            // One family for the window (#2786): `font_family` sets the family
+            // of this element and its children, so the composer, the
+            // transcript and every bare label inherit the pick instead of each
+            // one naming a face. The transcript's own `TextStyle`s name it
+            // explicitly, because `TextStyle::default()` fills the field with
+            // the platform font and would pin it.
+            .font_family(fonts::current_ui())
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
             // A context menu closes when its row is left alone: any left
@@ -13981,6 +14086,8 @@ fn main() {
                         themes_wheel: std::rc::Rc::new(std::cell::RefCell::new(None)),
                         themes_sat_track: std::rc::Rc::new(std::cell::RefCell::new(None)),
                         themes_val_track: std::rc::Rc::new(std::cell::RefCell::new(None)),
+                        fonts_open: false,
+                        fonts_loaded: false,
                         cd_dir: std::env::current_dir().unwrap_or_default(),
                         cd_entries: Vec::new(),
                         cd_selected: 0,

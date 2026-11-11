@@ -2604,6 +2604,20 @@ pub struct GuiConfig {
     /// Unset or unknown means top.
     #[serde(default)]
     pub topic_tabs: Option<String>,
+
+    /// The family the window draws text in (#2786). Unset, empty or `system`
+    /// means the platform's own UI font, which is what the window has always
+    /// drawn. Anything else is a family the machine has installed, picked in
+    /// the theme modal.
+    #[serde(default)]
+    pub font: Option<String>,
+
+    /// The family code blocks draw in (#2786). Unset, empty or `auto` means
+    /// the first installed family from `config::gui_font::MONO_CANDIDATES`.
+    /// A saved family that is not installed falls back to that walk, because a
+    /// proportional face in a code block loses column alignment.
+    #[serde(default)]
+    pub mono_font: Option<String>,
 }
 
 /// Debug configuration options

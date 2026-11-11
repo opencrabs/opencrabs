@@ -1321,6 +1321,7 @@ fn message_surface(role: &str) -> u32 {
 
 fn body_style(size: f32) -> TextStyle {
     TextStyle {
+        font_family: crate::fonts::current_ui().into(),
         color: rgb(palette::current().text).into(),
         font_size: AbsoluteLength::Pixels(px(size)),
         ..Default::default()
@@ -1331,6 +1332,7 @@ fn body_style(size: f32) -> TextStyle {
 /// tool calls, the completed plan card, the live card's ledger.
 pub(crate) fn small_style(size: f32, color: u32) -> TextStyle {
     TextStyle {
+        font_family: crate::fonts::current_ui().into(),
         color: rgb(color).into(),
         font_size: AbsoluteLength::Pixels(px(size)),
         ..Default::default()
@@ -1339,7 +1341,11 @@ pub(crate) fn small_style(size: f32, color: u32) -> TextStyle {
 
 fn mono_style() -> TextStyle {
     TextStyle {
-        font_family: "Menlo".into(),
+        // The mono walk, not a fixed name (#2786): `Menlo` ships on macOS
+        // only, and the platform resolves an unknown family through a chain
+        // whose entries are proportional, so a code block used to lose column
+        // alignment on Windows and Linux.
+        font_family: crate::fonts::current_mono().into(),
         color: rgb(palette::current().text_normal).into(),
         font_size: AbsoluteLength::Pixels(px(12.0)),
         ..Default::default()
@@ -1392,6 +1398,7 @@ fn md_line(l: &markdown::MdLine, selection: Option<&SelectionContext>) -> Div {
 /// gets wide columns, a narrow one wraps the text instead of clipping it.
 fn table_cell(cell: &markdown::MdCell, header: bool, selection: Option<&SelectionContext>) -> Div {
     let style = TextStyle {
+        font_family: crate::fonts::current_ui().into(),
         color: rgb(if header {
             palette::current().text_strong
         } else {

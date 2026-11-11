@@ -832,6 +832,15 @@ allowed_users = []                      # Trello member IDs allowed to @mention 
 # The accent "custom" paints, as #RRGGBB. Unset or unparsable means the
 # palette's own orange.
 # custom_accent = "#FF7A1A"
+# The family the window draws text in, picked in the theme modal (ctrl+shift+t).
+# Unset or "system" means the platform's own UI font, which is what the window
+# has always drawn. Any other value is a family the machine has installed.
+# font = "system"
+# The family code blocks draw in. Unset or "auto" walks a candidate list and
+# keeps the first one the machine has: JetBrains Mono, SF Mono, Menlo, Consolas,
+# Cascadia Code, DejaVu Sans Mono, Noto Sans Mono, Liberation Mono, Courier New.
+# A saved family that is not installed falls back to that walk.
+# mono_font = "auto"
 
 # ========================================
 # Daemon Mode (systemd / launchd service)

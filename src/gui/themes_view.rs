@@ -14,6 +14,7 @@ use gpui::{
     point, prelude::*, px, rgb, rgba,
 };
 use opencrabs::config::GuiTheme;
+use opencrabs::config::gui_font;
 use opencrabs::config::gui_theme::{self, LIGHT, ORGN, Palette};
 use opencrabs::ui_core::card::concentric_radius;
 
@@ -468,11 +469,83 @@ pub struct AccentAreas {
     pub value: SliderArea,
 }
 
+/// The font row under the cards (#2786): the family in force, and, while the
+/// list is open, the machine's families in a column that scrolls.
+///
+/// It sits inside the card, so a click on a row never reaches the scrim's
+/// dismiss handler: the card stops propagation. The rows arrive already built,
+/// because only the dashboard's context can mint a click listener.
+pub fn font_row(
+    current: &str,
+    open: bool,
+    toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    rows: Vec<Stateful<Div>>,
+) -> Div {
+    let shown = crate::palette::current();
+    let mut column = div().flex().flex_col().gap_1().w_full().child(
+        div()
+            .id("theme-font-head")
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .w_full()
+            .py_1()
+            .cursor_pointer()
+            .on_click(toggle)
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(shown.text_muted))
+                    .child("Font"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(shown.text))
+                            .child(SharedString::from(gui_font::row_label(current))),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(shown.text_faint))
+                            .child(if open { "close" } else { "change" }),
+                    ),
+            ),
+    );
+    if open {
+        // A bounded height with a scroll, because the catalog is every family
+        // the machine has: a few hundred on a stock macOS install.
+        column = column.child(
+            div()
+                .id("theme-font-list")
+                .flex()
+                .flex_col()
+                .w_full()
+                .max_h(px(150.0))
+                .overflow_y_scroll()
+                .border_1()
+                .border_color(rgb(shown.panel_hi))
+                .rounded(px(concentric_radius(10.0)))
+                .p_1()
+                .children(rows),
+        );
+    }
+    column
+}
+
 /// The modal itself: a scrim that dismisses, and a centred card that does
 /// not. `accent` is the custom row, present only while Custom is in force.
 pub fn modal(
     cards: Vec<Stateful<Div>>,
     accent: Option<AnyElement>,
+    fonts: Div,
     footer: &str,
     dismiss: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
@@ -530,6 +603,7 @@ pub fn modal(
         )
         .child(rows)
         .children(accent)
+        .child(fonts)
         .child(
             div()
                 .text_xs()
