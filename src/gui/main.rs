@@ -10773,7 +10773,10 @@ impl Render for Dashboard {
             let chips = children_by_parent.get(&id).map(|kids| {
                 let expanded = self.rail_chips_expanded.contains(&id);
                 let limit = if expanded { kids.len() } else { 3 };
-                let mut els: Vec<Stateful<Div>> = Vec::new();
+                // Each chip is measured as it is built: the strip places the
+                // chips itself so the first row can stop short of the pin while
+                // the rows below keep the full card width (#2809).
+                let mut els: Vec<(Stateful<Div>, f32)> = Vec::new();
                 for (kid_id, title) in kids.iter().take(limit) {
                     let kid_id = *kid_id;
                     let st = activity.get(&kid_id).copied().unwrap_or_default();
@@ -10813,27 +10816,48 @@ impl Render for Dashboard {
                     )
                     .on_click(open)
                     .on_mouse_down(MouseButton::Right, ask);
-                    els.push(chip);
+                    let width = sessions::chip_width(
+                        &*window,
+                        title,
+                        live.is_some() || st.ring,
+                        sel,
+                    );
+                    els.push((chip, width));
                 }
                 let hidden = kids.len().saturating_sub(limit);
                 if hidden > 0 {
                     let label = SharedString::from(format!("+{hidden}"));
+                    let width = sessions::count_chip_width(&*window, &label);
                     let expand = cx.listener(move |this, _ev, _window, cx| {
                         cx.stop_propagation();
                         this.rail_chips_expanded.insert(id);
                         cx.notify();
                     });
-                    els.push(sessions::count_chip(id, label).on_click(expand));
+                    els.push((sessions::count_chip(id, label).on_click(expand), width));
                 } else if expanded && kids.len() > 3 {
                     let label = SharedString::from("\u{2212}");
+                    let width = sessions::count_chip_width(&*window, &label);
                     let collapse = cx.listener(move |this, _ev, _window, cx| {
                         cx.stop_propagation();
                         this.rail_chips_expanded.remove(&id);
                         cx.notify();
                     });
-                    els.push(sessions::count_chip(id, label).on_click(collapse));
+                    els.push((sessions::count_chip(id, label).on_click(collapse), width));
                 }
-                sessions::topic_chips(id, els)
+                // The pin floats at the strip's right edge, so the first row
+                // hands it the space and every row below runs edge to edge
+                // (#2809). The strip is packed here, where the widths and the
+                // card's own width are both known.
+                let widths: Vec<f32> = els.iter().map(|(_, width)| *width).collect();
+                let rem = self.rem;
+                let (first, rest) = sessions::strip_budgets(rem, self.rail_width * rem);
+                let counts = sessions::pack_rows(&widths, rem * 0.25, first, rest);
+                let mut chips = els.into_iter().map(|(chip, _)| chip);
+                let rows: Vec<Vec<Stateful<Div>>> = counts
+                    .into_iter()
+                    .map(|count| chips.by_ref().take(count).collect())
+                    .collect();
+                sessions::topic_chips(id, rows)
             });
             // No menu is passed in: the card is built once at the window
             // root, because a child of the row would inherit the row's frame

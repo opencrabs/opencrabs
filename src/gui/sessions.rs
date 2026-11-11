@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 
 use gpui::{
     AnyElement, App, ClickEvent, Div, Image, ImageFormat, InteractiveElement,
-    ObjectFit, ScrollHandle, SharedString, Stateful, Styled, Window, div, img,
+    ObjectFit, ScrollHandle, SharedString, Stateful, Styled, TextRun, Window, div, img,
     linear_color_stop, linear_gradient, prelude::*, rems, rgb,
 };
 use std::sync::Arc;
@@ -1233,6 +1233,13 @@ fn fit(s: &str, max_chars: usize) -> String {
     out
 }
 
+/// The label a topic chip prints, cut to the chip's character budget. The strip
+/// measures this same string when it places the chips (#2809), so the width and
+/// the paint can never disagree about what a chip says.
+pub fn chip_label(title: &str) -> String {
+    fit(title, 14)
+}
+
 /// The card's preview line: who spoke, then the flattened text cut to fit.
 ///
 /// The prefix names the speaker the way the reader thinks of them, not the
@@ -1302,6 +1309,11 @@ const PIN_OUTLINE_SVG: &[u8] = include_bytes!(concat!(
     "/src/assets/pin-outline.svg"
 ));
 
+/// The pin's square, in rems (#2803). The chip strip reserves exactly this
+/// band at the right end of its first row, so a chip never lands under the pin
+/// (#2809).
+pub const PIN_REMS: f32 = 1.4;
+
 /// The row's pushpin (#2788), drawn from an embedded vector so the tilted
 /// silhouette stays crisp on retina, which a font glyph cannot promise.
 pub fn pin_icon(favorited: bool, size: f32) -> impl IntoElement {
@@ -1326,7 +1338,7 @@ pub fn pin_toggle(id: uuid::Uuid, favorited: bool) -> Stateful<Div> {
         .flex_none()
         .items_center()
         .justify_center()
-        .size(rems(1.4))
+        .size(rems(PIN_REMS))
         .rounded_sm()
         .cursor_pointer()
         .hover(|d| d.bg(rgb(palette::current().panel_hi)))
@@ -1510,7 +1522,11 @@ pub fn topic_chip(
                 .child("\u{25CF}"),
         );
     }
-    chip.child(div().truncate().child(SharedString::from(fit(title, 14))))
+    chip.child(
+        div()
+            .truncate()
+            .child(SharedString::from(chip_label(title))),
+    )
 }
 
 /// The overflow pill: "+N" expands a parent's hidden chips, the collapse
@@ -1533,20 +1549,132 @@ pub fn count_chip(id: uuid::Uuid, label: SharedString) -> Stateful<Div> {
         .child(label)
 }
 
-/// The chip strip under a parent card's title: the visible topic chips on one
-/// wrapping line. The parent id keys the strip so two parents never share an
-/// element id.
-pub fn topic_chips(id: uuid::Uuid, chips: Vec<Stateful<Div>>) -> Stateful<Div> {
+/// The pixel width of a string at the chip's type size, measured against the
+/// live text system. Falls back to a per-character estimate only if the shaper
+/// refuses the run, which keeps a chip placeable rather than collapsing it.
+fn text_width(window: &Window, text: &str) -> f32 {
+    let style = window.text_style();
+    let size = window.rem_size() * 0.75;
+    let run = TextRun {
+        len: text.len(),
+        font: style.font(),
+        color: style.color,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    window
+        .text_system()
+        .shape_text(
+            SharedString::from(text.to_string()),
+            size,
+            &[run],
+            None,
+            None,
+        )
+        .ok()
+        .and_then(|lines| lines.into_iter().next())
+        .map(|line| f32::from(line.width()))
+        .unwrap_or_else(|| text.chars().count() as f32 * f32::from(size) * 0.7)
+}
+
+/// The width one topic chip takes on the strip, measured from the label it
+/// prints. The strip places the chips itself so the pin can hold the right end
+/// of the first row alone (#2809), and a hand-placed chip needs its own width.
+pub fn chip_width(window: &Window, title: &str, glyph: bool, selected: bool) -> f32 {
+    let rem = f32::from(window.rem_size());
+    chip_width_at(rem, text_width(window, &chip_label(title)), glyph, selected)
+}
+
+/// A chip's width from its measured label: the pill's padding on both sides,
+/// the live glyph slot when it has one, the accent ring when it is focused, and
+/// a hair of slack so a rounded glyph never reaches the pin.
+fn chip_width_at(rem: f32, text: f32, glyph: bool, selected: bool) -> f32 {
+    let mut width = rem + text + rem * 0.1;
+    if glyph {
+        width += rem * 0.125 + rem * 0.75;
+    }
+    if selected {
+        width += 2.0;
+    }
+    width
+}
+
+/// The width the overflow pill takes: the chip padding, its short label, and
+/// the same slack a topic chip keeps.
+pub fn count_chip_width(window: &Window, label: &str) -> f32 {
+    let rem = f32::from(window.rem_size());
+    rem + text_width(window, label) + rem * 0.1
+}
+
+/// The strip's two pixel budgets (#2809). The strip sits in a card's body, and
+/// the row spends 0.5rem of padding on each side, 1.75rem on the media slot and
+/// 0.25rem between them, so the body is 3rem narrower than the rail. The first
+/// row gives up the pin's band as well, because the pin floats at its right
+/// end; every row below runs the whole body width.
+pub fn strip_budgets(rem: f32, rail: f32) -> (f32, f32) {
+    let body = rail - rem * 3.0;
+    // A chip stops one gap short of the pin, plus the same slack it keeps
+    // everywhere else.
+    let first = body - rem * (PIN_REMS + 0.25) - rem * 0.1;
+    (first, body - rem * 0.1)
+}
+
+/// Split chips into rows against a pixel budget, the way a wrapping flex row
+/// would, but with a narrower first row. Counts per row, in order. A chip wider
+/// than its whole budget still takes a row of its own rather than vanishing.
+pub fn pack_rows(widths: &[f32], gap: f32, first: f32, rest: f32) -> Vec<usize> {
+    let mut rows = Vec::new();
+    let mut count = 0usize;
+    let mut used = 0.0f32;
+    let mut budget = first;
+    for width in widths {
+        let needed = if count == 0 {
+            *width
+        } else {
+            used + gap + *width
+        };
+        if count > 0 && needed > budget {
+            rows.push(count);
+            count = 0;
+            used = *width;
+            budget = rest;
+        } else {
+            used = needed;
+        }
+        count += 1;
+    }
+    if count > 0 {
+        rows.push(count);
+    }
+    rows
+}
+
+/// The chip strip under a parent card's title. The caller packs the chips into
+/// rows, so the first row can stop short of the pin while the rows below take
+/// the full card width (#2809). A row never holds one chip per line: the chips
+/// ride inline under the title, the way Telegram stacks its topics. The parent
+/// id keys the strip so two parents never share an element id.
+pub fn topic_chips(id: uuid::Uuid, rows: Vec<Vec<Stateful<Div>>>) -> Stateful<Div> {
     let mut strip = div()
         .id(SharedString::from(format!("topic-chips-{id}")))
         .flex()
-        .flex_row()
-        .flex_wrap()
-        .items_center()
+        .flex_col()
         .gap_1()
-        .w_full();
-    for chip in chips {
-        strip = strip.child(chip);
+        .w_full()
+        .min_w_0();
+    for chips in rows {
+        let mut line = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .w_full()
+            .min_w_0();
+        for chip in chips {
+            line = line.child(chip);
+        }
+        strip = strip.child(line);
     }
     strip
 }
@@ -1713,11 +1841,10 @@ pub fn row(s: &Session, flags: RowFlags, chips: Option<Stateful<Div>>) -> Statef
         );
     // The pin rides the strip's first line at the card's right edge, the way
     // Telegram pins a row (#2809). It floats over the strip instead of taking
-    // a column beside it: a wrapping flex row cannot reserve the right end of
-    // its first line alone, so a sibling column charged the pin's width to
-    // every wrapped row (a 28-topic card lost about 30px on all eleven rows)
-    // while a line of its own pushed the whole strip down. Overlaid, the pin
-    // costs no width, so the chips wrap against the whole card on every row.
+    // a column beside it: a column charged the pin's width to every row (a
+    // 28-topic card lost about 30px on all eleven) while a line of its own
+    // pushed the whole strip down. The strip packs its own rows, so the first
+    // one stops short of the pin and the rows below run edge to edge.
     let footer = match (chips, footer_pin) {
         (Some(strip), Some(pin)) => Some(
             div()
@@ -2102,6 +2229,59 @@ mod tests {
             Some(a1_id),
             "the arrow steps into the topic, never over it"
         );
+    }
+
+    /// The first row is narrower because the pin floats at its right end, and
+    /// every row after it takes the whole width (#2809). The counts are what
+    /// the strip slices the chips by, so a wrong one drops or repeats a chip.
+    #[test]
+    fn pack_rows_gives_the_pin_its_band_on_the_first_row_only() {
+        let widths = [100.0; 7];
+        // With the pin's band spent, the first row stops at two chips.
+        assert_eq!(pack_rows(&widths, 4.0, 250.0, 400.0), vec![2, 3, 2]);
+        // The same chips pack three to a row when the first row is as wide as
+        // the rest: the band is the only difference the pin makes.
+        assert_eq!(pack_rows(&widths, 4.0, 400.0, 400.0), vec![3, 3, 1]);
+        // A chip wider than its whole budget still takes a row, never nothing.
+        assert_eq!(pack_rows(&[500.0, 100.0], 4.0, 200.0, 200.0), vec![1, 1]);
+        assert_eq!(pack_rows(&[], 4.0, 200.0, 200.0), Vec::<usize>::new());
+    }
+
+    /// A chip is its label plus padding; the live glyph and the focus ring are
+    /// the only things that widen it (#2809). Measuring short is what put a chip
+    /// under the pin, so every part of the box has to be counted.
+    #[test]
+    fn chip_width_counts_the_padding_the_glyph_and_the_ring() {
+        let plain = chip_width_at(16.0, 40.0, false, false);
+        assert!(
+            plain > 16.0 + 40.0,
+            "a chip carries padding on both sides: {plain}"
+        );
+        let glyph = chip_width_at(16.0, 40.0, true, false);
+        assert!(glyph > plain, "a live glyph takes its own slot: {glyph}");
+        let focused = chip_width_at(16.0, 40.0, false, true);
+        assert!(
+            (focused - plain - 2.0).abs() < 0.001,
+            "the focus ring is a pixel a side: {focused}"
+        );
+    }
+
+    /// The strip's width comes from the card, not from the chips: the row's
+    /// padding, the media slot and the gap are spent before the chips see any
+    /// space, and the first row spends the pin's band too (#2809).
+    #[test]
+    fn strip_budgets_leave_the_pin_its_band_on_the_first_row() {
+        let (first, rest) = strip_budgets(16.0, 300.0);
+        // 300 less 48 (row padding, media slot, gap) is the body.
+        assert!(
+            rest <= 252.0 && rest > 240.0,
+            "rows below use the whole body: {rest}"
+        );
+        assert!(
+            first < rest - 22.4,
+            "the first row keeps the pin's square clear: {first} vs {rest}"
+        );
+        assert!(first > 0.0, "a normal rail still fits a chip: {first}");
     }
 
     /// #2271's whole class, seated: truncation walks chars, never bytes. Any
@@ -2825,9 +3005,10 @@ mod tests {
             .next()
             .expect("strip source before the row renderer");
         assert!(
-            strip_source.contains(".flex_wrap()"),
-            "chips wrap on one line"
+            !strip_source.contains(".flex_wrap()"),
+            "the strip packs its own rows, so the first one can stop short of the pin (#2809)"
         );
+        assert!(strip_source.contains(".flex_col()"));
         assert!(strip_source.contains(".flex_row()"));
 
         let chip_source = source
@@ -2839,8 +3020,8 @@ mod tests {
             .expect("chip source before the overflow pill");
         assert!(chip_source.contains(".text_xs()"), "a chip is compact");
         assert!(
-            chip_source.contains("fit(title, 14)"),
-            "chip title truncates"
+            chip_source.contains("chip_label(title)"),
+            "chip title truncates to the chip budget"
         );
         assert!(
             chip_source.contains("linear_gradient("),

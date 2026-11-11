@@ -241,7 +241,7 @@ fn rail_pin_toggles_without_opening_the_card() {
     );
     for affordance in [
         "session-pin-toggle-{id}",
-        ".size(rems(1.4))",
+        ".size(rems(PIN_REMS))",
         ".rounded_sm()",
         ".cursor_pointer()",
         ".child(pin_icon(favorited, 0.9))",
@@ -251,6 +251,10 @@ fn rail_pin_toggles_without_opening_the_card() {
             "the pin control keeps its target and artwork: {affordance}"
         );
     }
+    assert!(
+        SESSIONS.contains("pub const PIN_REMS: f32 = 1.4;"),
+        "the pin keeps its 1.4rem square, the band the chip strip reserves (#2809)"
+    );
     assert!(
         control.contains(".hover(|d| d.bg(rgb(palette::current().panel_hi)))"),
         "the pin hover uses the rail's panel_hi"
