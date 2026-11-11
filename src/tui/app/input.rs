@@ -2326,9 +2326,12 @@ impl App {
                 before,
                 self.scroll_offset
             );
-            // Load more history when paging up if hidden messages exist
+            // Page up into the hidden history. No total cap: the 2,000-row
+            // ceiling made the start of a long session unreachable, which is
+            // the one thing a history pager must never do (#2818). Each press
+            // asks for the next span and the span grows, so nothing loads that
+            // the reader did not page toward.
             if self.hidden_older_messages > 0
-                && self.messages.len() < Self::MAX_DISPLAYED_MESSAGES
                 && let Err(e) = self.load_more_history().await
             {
                 tracing::warn!(error = %e, "failed to load more history");

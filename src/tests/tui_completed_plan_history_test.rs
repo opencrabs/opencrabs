@@ -170,6 +170,35 @@ async fn tui_completed_plan_history_settles_after_answer_once() {
     assert!(reloaded.contains(COMPLETED_PLAN_FOOTER));
 }
 
+/// A session short enough to fit one read opens complete (#2818). Opening
+/// used to stop at the display window whatever the session held, so the first
+/// thing a reader saw of a 300-message conversation was its last 200 rows.
+#[tokio::test(flavor = "current_thread")]
+async fn a_short_session_opens_whole_with_no_history_marker() {
+    let (mut app, messages, sessions) = test_app().await;
+    let session = sessions
+        .create_session(Some("short session".to_string()))
+        .await
+        .unwrap();
+    for index in 0..50 {
+        messages
+            .create_message(session.id, "user".to_string(), format!("row {index}"))
+            .await
+            .unwrap();
+    }
+
+    app.load_session(session.id).await.unwrap();
+    assert_eq!(app.hidden_older_messages, 0, "nothing sits behind the window");
+    assert_eq!(app.messages.len(), 50, "every row the session holds is here");
+    assert!(
+        !app.messages
+            .iter()
+            .any(|message| message.role == "history_marker"),
+        "a complete transcript shows no paging marker"
+    );
+    assert_eq!(app.messages.first().unwrap().content, "row 0");
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn tui_completed_plan_history_reloads_pages_and_renders() {
     let (mut app, messages, sessions) = test_app().await;
@@ -181,7 +210,9 @@ async fn tui_completed_plan_history_reloads_pages_and_renders() {
         .record_completed_plan(&completed_plan(session.id))
         .await
         .unwrap();
-    for index in 0..App::DISPLAY_MESSAGE_WINDOW - 1 {
+    // Long enough that opening windows it: a session under the full-load
+    // limit now opens whole, and paging is what this test is about (#2818).
+    for index in 0..App::FULL_LOAD_LIMIT + 1 {
         messages
             .create_message(session.id, "user".to_string(), format!("older {index}"))
             .await
@@ -193,16 +224,24 @@ async fn tui_completed_plan_history_reloads_pages_and_renders() {
         .unwrap();
 
     app.load_session(session.id).await.unwrap();
-    assert_eq!(app.hidden_older_messages, 1);
-    assert_eq!(app.messages.len(), App::DISPLAY_MESSAGE_WINDOW + 1);
+    assert!(app.hidden_older_messages > 0);
+    assert_eq!(app.messages.len(), App::DISPLAY_MESSAGE_WINDOW);
     assert!(
         !app.messages
             .iter()
             .any(|message| message.id == completed.id)
     );
 
-    app.load_more_history().await.unwrap();
-    assert_eq!(app.hidden_older_messages, 0);
+    // Page until the session is whole. Each press asks for a longer span than
+    // the last, so a session this long takes a handful of them, never one per
+    // window (#2818).
+    let mut presses = 0;
+    while app.hidden_older_messages > 0 {
+        app.load_more_history().await.unwrap();
+        presses += 1;
+        assert!(presses < 16, "paging never reached the start of the session");
+    }
+    assert!(presses > 1, "a windowed session takes more than one press");
     assert_eq!(app.messages.first().unwrap().id, completed.id);
     assert!(
         app.messages

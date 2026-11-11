@@ -781,9 +781,18 @@ impl App {
         self.pane_message_cache.insert(session_id, expanded);
     }
 
-    /// The newest `DISPLAY_MESSAGE_WINDOW` rows of a session plus how many
-    /// older rows sit behind them. Reads a count and a LIMIT-bounded tail, so
-    /// the cost is independent of how long the session has grown (#2281).
+    /// A session's rows on open: all of them while the session is short, the
+    /// newest `DISPLAY_MESSAGE_WINDOW` of it when it is long, plus how many
+    /// older rows sit behind that window. Reads a count and a LIMIT-bounded
+    /// tail, so the cost is independent of how long the session has grown
+    /// (#2281).
+    ///
+    /// Opening used to stop at the window whatever the session held, so a
+    /// 300-message conversation arrived as its last 200 rows and the only way
+    /// to the rest was a pager most readers never found (#2818). A session
+    /// under `FULL_LOAD_LIMIT` now opens complete, and the marker appears only
+    /// where there is genuinely more history than one screen of work should
+    /// pay for.
     async fn load_display_window(
         &self,
         session_id: Uuid,
@@ -792,13 +801,17 @@ impl App {
             .message_service
             .count_messages_in_session(session_id)
             .await?;
+        let total = usize::try_from(total).unwrap_or(0);
+        let want = if total <= Self::FULL_LOAD_LIMIT {
+            total
+        } else {
+            Self::DISPLAY_MESSAGE_WINDOW
+        };
         let rows = self
             .message_service
-            .list_recent_messages_for_session(session_id, Self::DISPLAY_MESSAGE_WINDOW)
+            .list_recent_messages_for_session(session_id, want)
             .await?;
-        let hidden = usize::try_from(total)
-            .unwrap_or(0)
-            .saturating_sub(rows.len());
+        let hidden = total.saturating_sub(rows.len());
         Ok((rows, hidden))
     }
 
@@ -815,13 +828,11 @@ impl App {
     /// remains reachable through PageUp paging.
     pub(crate) const DISPLAY_MESSAGE_WINDOW: usize = 200;
 
-    /// Upper bound on how many rows PageUp paging will load in total. A count
-    /// for the same reason the window is one: the old guard stopped paging
-    /// once `display_token_count` passed 300k, and a single tool-ledger row can
-    /// pass that on its own, which left every older message unreachable
-    /// (#2155). This bound still keeps a very long session from loading itself
-    /// entirely into memory.
-    pub(crate) const MAX_DISPLAYED_MESSAGES: usize = 2_000;
+    /// A session this short opens complete instead of windowed. A count, not a
+    /// token budget, for the same reason the window is one (#2155): one
+    /// persisted tool-ledger row can carry hundreds of thousands of tokens, so
+    /// a budget would window a short session and show a long one whole.
+    pub(crate) const FULL_LOAD_LIMIT: usize = 1_000;
 
     /// Build the dim italic history marker shown at the top of the message list.
     fn make_history_marker(count: usize) -> DisplayMessage {
@@ -863,13 +874,15 @@ impl App {
         // One more window of rows strictly older than the oldest displayed
         // one, read from SQL with LIMIT (#2281). Rows still hidden after this
         // page come from the running count, not from a full reload.
+        // Each page is at least as long as everything already on screen, so
+        // paging walks back geometrically: a 10k-row session is four presses
+        // from its start, not fifty (#2818). The reader asked for history, so
+        // the answer arrives in one read rather than in windows they have to
+        // keep pressing through.
+        let page = self.messages.len().max(Self::DISPLAY_MESSAGE_WINDOW);
         let to_add = self
             .message_service
-            .list_messages_before_sequence(
-                session_id,
-                self.oldest_displayed_sequence,
-                Self::DISPLAY_MESSAGE_WINDOW,
-            )
+            .list_messages_before_sequence(session_id, self.oldest_displayed_sequence, page)
             .await?;
         let tokens: usize = to_add
             .iter()
