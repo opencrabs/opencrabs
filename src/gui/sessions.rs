@@ -1236,10 +1236,7 @@ pub fn pin_mark(favorited: bool) -> (bool, u32) {
     }
 }
 
-const PIN_SVG: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/src/assets/pin.svg"
-));
+const PIN_SVG: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/assets/pin.svg"));
 const PIN_OUTLINE_SVG: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/src/assets/pin-outline.svg"
@@ -1681,9 +1678,7 @@ pub fn row(
         })
         // The hover tint is for rows that are not selected: on the open one
         // it would paint over the state and hide which conversation is open.
-        .when(!selected, |d| {
-            d.hover(|d| d.bg(rgb(palette::current().bg)))
-        })
+        .when(!selected, |d| d.hover(|d| d.bg(rgb(palette::current().bg))))
         .child(body);
     if let Some(action) = action {
         row = row.child(action);

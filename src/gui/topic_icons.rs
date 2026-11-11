@@ -636,8 +636,14 @@ mod tests {
     fn image_format_maps_extensions() {
         assert!(matches!(image_format("img:a.png"), Some(ImageFormat::Png)));
         assert!(matches!(image_format("img:a.JPG"), Some(ImageFormat::Jpeg)));
-        assert!(matches!(image_format("img:a.jpeg"), Some(ImageFormat::Jpeg)));
-        assert!(matches!(image_format("img:a.webp"), Some(ImageFormat::Webp)));
+        assert!(matches!(
+            image_format("img:a.jpeg"),
+            Some(ImageFormat::Jpeg)
+        ));
+        assert!(matches!(
+            image_format("img:a.webp"),
+            Some(ImageFormat::Webp)
+        ));
         assert!(matches!(image_format("img:a.svg"), Some(ImageFormat::Svg)));
         assert!(image_format("img:a.exe").is_none());
         assert!(image_format("img:noext").is_none());
