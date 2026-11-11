@@ -394,7 +394,8 @@ impl<T> SurfaceGate<T> {
 
     /// The window opened successfully.
     fn mark_window_up(&self) {
-        self.window_up.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.window_up
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Take the deps only once the window is up. The `.take()` under the lock
@@ -2126,15 +2127,26 @@ mod tests {
         );
         // Window opens -> the claim fires exactly once.
         gate.mark_window_up();
-        assert_eq!(gate.take_if_ready(), Some(1), "the window releases the claim");
+        assert_eq!(
+            gate.take_if_ready(),
+            Some(1),
+            "the window releases the claim"
+        );
         assert!(gate.take_if_ready().is_none(), "must not claim twice");
 
         // Window first: window up, deps not built yet -> no claim.
         let gate2: SurfaceGate<u32> = SurfaceGate::new();
         gate2.mark_window_up();
-        assert!(gate2.take_if_ready().is_none(), "no deps yet, nothing to claim");
+        assert!(
+            gate2.take_if_ready().is_none(),
+            "no deps yet, nothing to claim"
+        );
         gate2.set_pending(2);
-        assert_eq!(gate2.take_if_ready(), Some(2), "bootstrap releases the claim");
+        assert_eq!(
+            gate2.take_if_ready(),
+            Some(2),
+            "bootstrap releases the claim"
+        );
         assert!(gate2.take_if_ready().is_none(), "must not claim twice");
     }
 
