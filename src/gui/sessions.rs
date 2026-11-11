@@ -15,10 +15,11 @@ use crate::{icon, palette, platform_icons};
 use std::collections::{HashMap, HashSet};
 
 use gpui::{
-    AnyElement, AnyView, App, ClickEvent, Context, Div, InteractiveElement, Render, ScrollHandle,
-    SharedString, Stateful, Styled, Window, div, linear_color_stop, linear_gradient, prelude::*,
-    rems, rgb,
+    AnyElement, AnyView, App, ClickEvent, Context, Div, Image, ImageFormat, InteractiveElement,
+    ObjectFit, Render, ScrollHandle, SharedString, Stateful, Styled, Window, div, img,
+    linear_color_stop, linear_gradient, prelude::*, rems, rgb,
 };
+use std::sync::Arc;
 
 use opencrabs::config::gui_theme;
 use opencrabs::db::Database;
@@ -94,6 +95,11 @@ pub struct SessionsState {
     /// automation sessions (cron + RSI) show. It lives on the state so it
     /// survives every repaint, and resets to its default when the rail closes.
     pub rail_filter: RailFilter,
+    /// Whether the filter chip row is open (#2787). The funnel button toggles
+    /// it; the chips themselves are unchanged. Closed by default, and it
+    /// resets with the filter when the rail closes, so a reopened rail never
+    /// shows a stale panel.
+    pub rail_filter_open: bool,
     /// Plan checklist progress `(done, total)` for every session, snapshotted
     /// once per paint before `visible()` filters. The plan chip decides each
     /// row from this map, so the filter never reads a plan file inside the
@@ -347,6 +353,13 @@ impl Default for RailFilter {
             show_automation: false,
         }
     }
+}
+
+/// Whether the rail filter deviates from its default (#2787). The funnel
+/// button wears the accent while this is true, so a filter that hides rows
+/// is never invisible behind a closed panel.
+pub fn filter_is_active(filter: &RailFilter) -> bool {
+    filter.plan != PlanFilter::All || filter.show_automation
 }
 
 /// Whether one row passes the rail filter menu (#2719). Pure: the title's
@@ -1787,6 +1800,24 @@ pub fn delete_button() -> Stateful<Div> {
     )
 }
 
+const RAIL_FILTER_SVG: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/src/assets/rail-filter.svg"
+));
+
+/// The rail's funnel button (#2787). An embedded vector stays crisp at any
+/// size and takes the palette colour the same way the orientation icon does.
+pub fn filter_icon(size: f32, colour: u32) -> impl IntoElement {
+    let svg = String::from_utf8_lossy(RAIL_FILTER_SVG)
+        .replace("#8a8a8a", &format!("#{colour:06x}"))
+        .into_bytes();
+    img(Arc::new(Image::from_bytes(ImageFormat::Svg, svg)))
+        .w(rems(size))
+        .h(rems(size))
+        .flex_none()
+        .object_fit(ObjectFit::Contain)
+}
+
 /// One chip of the rail filter menu (#2719). Pure styling: the view attaches
 /// the click that flips the filter. The selected chip wears the accent so the
 /// active rule reads at a glance; the rest stay quiet.
@@ -2786,6 +2817,80 @@ mod tests {
     /// `visible()` wires both gates: the ctrl+f query and the filter menu.
     /// The plan snapshot decides the plan chip without a per-row file read,
     /// and the menu state lives on the struct so a repaint keeps it.
+    /// The funnel's accent rule (#2787): only a filter that deviates from
+    /// the default lights the button, so a closed panel never hides rows in
+    /// silence.
+    #[test]
+    fn filter_is_active_only_when_the_rule_deviates() {
+        assert!(!filter_is_active(&RailFilter::default()));
+        assert!(filter_is_active(&RailFilter {
+            plan: PlanFilter::Active,
+            ..Default::default()
+        }));
+        assert!(filter_is_active(&RailFilter {
+            plan: PlanFilter::Done,
+            ..Default::default()
+        }));
+        assert!(filter_is_active(&RailFilter {
+            plan: PlanFilter::NoPlan,
+            ..Default::default()
+        }));
+        assert!(filter_is_active(&RailFilter {
+            show_automation: true,
+            ..Default::default()
+        }));
+    }
+
+    /// The funnel contract (#2787): the chip row paints only while the panel
+    /// is open, the funnel click toggles it, the accent follows the filter,
+    /// and both Escape and a rail close shut the panel. The find query is a
+    /// separate surface and stays untouched by the panel's Escape.
+    #[test]
+    fn rail_filter_panel_opens_from_the_funnel_only() {
+        let main_source = include_str!("main.rs");
+        let control = main_source
+            .split("let rail_filter = self.sessions.rail_filter;")
+            .nth(1)
+            .expect("filter control block")
+            .split("let rail = sessions::rail(")
+            .next()
+            .expect("control before the rail call");
+        assert!(
+            control.contains("if self.sessions.rail_filter_open {"),
+            "the chip row paints only while the panel is open"
+        );
+        assert!(
+            control.contains("sessions::filter_is_active(&rail_filter)"),
+            "the funnel wears the accent while a non-default filter hides rows"
+        );
+        assert!(
+            control.contains("this.sessions.rail_filter_open = !this.sessions.rail_filter_open"),
+            "the funnel click toggles the panel"
+        );
+        let state_source = include_str!("sessions.rs");
+        assert!(
+            state_source.contains("pub rail_filter_open: bool"),
+            "the panel state lives on the rail state, so it survives repaints"
+        );
+        let reset = main_source
+            .split("fn set_rail_open_state(")
+            .nth(1)
+            .expect("rail open state")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("reset body");
+        assert!(
+            reset.contains("sessions.rail_filter_open = false;"),
+            "closing the rail shuts the panel"
+        );
+        assert!(
+            main_source.contains(
+                "if self.sessions.rail_filter_open && ev.keystroke.key.as_str() == \"escape\""
+            ),
+            "Escape closes the open panel before the find field sees it"
+        );
+    }
+
     #[test]
     fn rail_filter_visible_wires_query_and_menu() {
         let human = Session::new(Some("Fix login".into()), None, None);

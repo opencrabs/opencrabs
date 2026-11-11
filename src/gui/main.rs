@@ -1036,6 +1036,8 @@ fn set_rail_open_state(
         // The filter menu clears with the rail (#2719): a reopened rail
         // starts from the default rule, never a stale chip from last time.
         sessions.rail_filter = sessions::RailFilter::default();
+        // The open chip panel folds with the rail too (#2787).
+        sessions.rail_filter_open = false;
         // The deep hits clear with the rail too (#2720): a reopened rail
         // starts unsearched, never showing snippets from the last query.
         sessions.content_matches.clear();
@@ -8899,6 +8901,13 @@ impl Dashboard {
             }
             return;
         }
+        // The open filter panel takes Escape first (#2787): it closes the
+        // chips without touching the find query underneath.
+        if self.sessions.rail_filter_open && ev.keystroke.key.as_str() == "escape" {
+            self.sessions.rail_filter_open = false;
+            cx.notify();
+            return;
+        }
         if self.sessions.filter_active {
             let ks = &ev.keystroke;
             match ks.key.as_str() {
@@ -10300,6 +10309,9 @@ impl Render for Dashboard {
                 // A left press on the rail dismisses a context menu: the
                 // press is elsewhere, so the menu goes with it (#2354).
                 this.sessions.close_rail_menu();
+                // The filter panel folds on a row press too (#2787): the
+                // reader picked a chat, the chips have done their job.
+                this.sessions.rail_filter_open = false;
                 // Same rule for a transcript row's menu (#2613): the rail is
                 // outside the transcript, so the press closes it too.
                 this.msg_menu = None;
@@ -10385,43 +10397,77 @@ impl Render for Dashboard {
             )
             .into_any_element()
         });
-        // The rail filter menu (#2719): plan-state chips plus the cron/RSI
-        // toggle, pinned top-right. Each chip flips one field on the state and
-        // repaints; the state lives on `sessions`, so it survives the repaint
-        // and only resets when the rail closes.
+        // The rail filter menu (#2719, #2787): one funnel button top-right.
+        // Click opens the plan-state chips plus the cron/RSI toggle; click
+        // again closes them. The funnel wears the accent while a non-default
+        // filter hides rows, so a closed panel never silently filters. The
+        // state lives on `sessions`, so it survives the repaint and resets
+        // when the rail closes.
         let rail_filter = self.sessions.rail_filter;
-        let plan_chips: [(&'static str, &'static str, sessions::PlanFilter); 4] = [
-            ("rail-filter-all", "all", sessions::PlanFilter::All),
-            ("rail-filter-active", "active", sessions::PlanFilter::Active),
-            ("rail-filter-done", "done", sessions::PlanFilter::Done),
-            (
-                "rail-filter-noplan",
-                "no plan",
-                sessions::PlanFilter::NoPlan,
-            ),
-        ];
+        let pal = palette::current();
+        let toggle = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+            this.sessions.rail_filter_open = !this.sessions.rail_filter_open;
+            cx.notify();
+        });
         let mut control = div()
             .id("rail-filter-menu")
             .flex()
-            .flex_row()
-            .items_center()
-            .gap_0p5();
-        for (id, label, plan) in plan_chips {
-            let pick = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
-                this.sessions.rail_filter.plan = plan;
+            .flex_col()
+            .items_end()
+            .gap_0p5()
+            .child(
+                div()
+                    .id("rail-filter-toggle")
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .p_1()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .hover(|d| d.bg(rgb(pal.panel_hi)))
+                    .child(sessions::filter_icon(
+                        1.0,
+                        if sessions::filter_is_active(&rail_filter) {
+                            pal.accent
+                        } else {
+                            pal.text_muted
+                        },
+                    ))
+                    .on_click(toggle),
+            );
+        if self.sessions.rail_filter_open {
+            let plan_chips: [(&'static str, &'static str, sessions::PlanFilter); 4] = [
+                ("rail-filter-all", "all", sessions::PlanFilter::All),
+                ("rail-filter-active", "active", sessions::PlanFilter::Active),
+                ("rail-filter-done", "done", sessions::PlanFilter::Done),
+                (
+                    "rail-filter-noplan",
+                    "no plan",
+                    sessions::PlanFilter::NoPlan,
+                ),
+            ];
+            let mut chips = div().flex().flex_row().items_center().gap_0p5();
+            for (id, label, plan) in plan_chips {
+                let pick = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
+                    this.sessions.rail_filter.plan = plan;
+                    cx.notify();
+                });
+                chips = chips.child(
+                    sessions::filter_chip(id, label, rail_filter.plan == plan).on_click(pick),
+                );
+            }
+            let auto = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
+                this.sessions.rail_filter.show_automation =
+                    !this.sessions.rail_filter.show_automation;
                 cx.notify();
             });
-            control = control
-                .child(sessions::filter_chip(id, label, rail_filter.plan == plan).on_click(pick));
+            chips = chips.child(
+                sessions::filter_chip("rail-filter-auto", "auto", rail_filter.show_automation)
+                    .on_click(auto),
+            );
+            control = control.child(chips);
         }
-        let toggle = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
-            this.sessions.rail_filter.show_automation = !this.sessions.rail_filter.show_automation;
-            cx.notify();
-        });
-        control = control.child(
-            sessions::filter_chip("rail-filter-auto", "auto", rail_filter.show_automation)
-                .on_click(toggle),
-        );
         let rail = sessions::rail(
             &self.sessions,
             rail_rows,
@@ -13285,6 +13331,7 @@ fn main() {
             filter: String::new(),
             filter_active: false,
             rail_filter: sessions::RailFilter::default(),
+            rail_filter_open: false,
             plan_progress: HashMap::new(),
             content_matches: HashMap::new(),
         },
@@ -13304,6 +13351,7 @@ fn main() {
             filter: String::new(),
             filter_active: false,
             rail_filter: sessions::RailFilter::default(),
+            rail_filter_open: false,
             plan_progress: HashMap::new(),
             content_matches: HashMap::new(),
         },
