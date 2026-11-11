@@ -1708,7 +1708,7 @@ pub fn row(s: &Session, flags: RowFlags, chips: Option<Stateful<Div>>) -> Statef
                 )
             })
         });
-    let mut row = div()
+    let row = div()
         .id(SharedString::from(s.id.to_string()))
         .w_full()
         .relative()
