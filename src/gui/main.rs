@@ -8037,6 +8037,38 @@ impl Dashboard {
         Some(sessions::menu_popover("chat-menu", items, at))
     }
 
+    /// One pane's topic strip (#2686, #2687), or none when that pane does not
+    /// carry the family. A pane builds this in its own render through the
+    /// window handle, and `panes_body` builds the chat leaf's through the same
+    /// function, so both wear one strip.
+    fn pane_topics(&mut self, session: Uuid, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let leaves = self
+            .panes
+            .as_ref()
+            .map(|tree| tree.leaves())
+            .unwrap_or_default();
+        let pane_root = self
+            .sessions
+            .parents
+            .get(&session)
+            .copied()
+            .unwrap_or(session);
+        // In a split the strip belongs to the pane that carries the family,
+        // not to every topic inside it: a wall of topic panes repeated the
+        // same bar once per pane (#2761).
+        let carries_topics = leaves.len() == 1 || pane_root == session;
+        if !carries_topics || !self.sessions.is_topic_enabled(pane_root) {
+            return None;
+        }
+        let pane_key = session.to_string();
+        let tabs = self.topic_tabs(Some(session), cx);
+        let toggle_edge = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+            cx.stop_propagation();
+            this.cycle_topic_edge(cx);
+        });
+        Some(topic_strip(&pane_key, topic_tabs::Edge::Top, toggle_edge, tabs).into_any_element())
+    }
+
     /// The tab strip for the open chat's topic family (#2400, #2480): `All`
     /// first, then each of its topics in list order. The open one is marked,
     /// and a click opens that session.
@@ -10686,18 +10718,22 @@ impl Dashboard {
         // One owner for the keyboard, resolved the same way the drop handler
         // and the caret resolve it (#2620).
         let focus = self.split_focus();
+        // The chat leaf's status row (#2593). A split pane writes its own from
+        // the same text in its own render (#2805), so only this leaf's is
+        // built here.
         let mut footers: HashMap<Uuid, SharedString> = HashMap::new();
-        for (i, session) in leaves.iter().enumerate() {
+        if let Some(chat) = self.transcript.session
+            && let Some(i) = leaves.iter().position(|session| *session == chat)
+        {
             footers.insert(
-                *session,
-                SharedString::from(self.pane_footer_text(*session, i + 1, count)),
+                chat,
+                SharedString::from(self.pane_footer_text(chat, i + 1, count)),
             );
         }
         // Per-pane chrome (#2530): every pane carries its own plan strip,
-        // queue and composer, exactly as the terminal's panes do. Built here
-        // because a leaf walk has no Context and the plan strips need a
-        // re-read. The themes preview draws the same tree without panes
-        // owning the keyboard, so it keeps the shared chrome off.
+        // queue and composer, exactly as the terminal's panes do. A pane
+        // builds that column in its own render (#2805); what is built here is
+        // the chat leaf's, because its state is the window's own.
         let mut chrome: HashMap<Uuid, AnyElement> = HashMap::new();
         // One topic strip per pane, in that pane's own chrome (#2686): the
         // strip used to resolve `self.transcript.session`, so every pane in a
@@ -10707,34 +10743,20 @@ impl Dashboard {
         if interactive {
             for session in &leaves {
                 let is_chat = Some(*session) == self.transcript.session;
-                let focused = if is_chat {
-                    focus.is_none()
-                } else {
-                    focus == Some(*session)
-                };
-                // This pane's own topics, resolved from its own session.
-                // The root is the pane's parent when the pane holds a topic,
-                // so the open chip is that pane's session rather than the
-                // chat's. In a split the strip belongs to the pane that
-                // carries the family, not to every topic inside it: a wall of
-                // topic panes repeated the same bar once per pane (#2761).
-                let pane_root = self
-                    .sessions
-                    .parents
-                    .get(session)
-                    .copied()
-                    .unwrap_or(*session);
-                let carries_topics = leaves.len() == 1 || pane_root == *session;
-                if carries_topics && self.sessions.is_topic_enabled(pane_root) {
-                    let pane_key = session.to_string();
-                    let tabs = self.topic_tabs(Some(*session), cx);
-                    let toggle_edge = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
-                        cx.stop_propagation();
-                        this.cycle_topic_edge(cx);
-                    });
-                    let strip = topic_strip(&pane_key, topic_tabs::Edge::Top, toggle_edge, tabs);
-                    tops.insert(*session, strip.into_any_element());
+                // The pane builds its own topics, plan strip, queue, offers,
+                // running task line and composer (#2805). The window's chrome
+                // below is for the chat leaf alone, whose state is the
+                // window's own.
+                if !is_chat {
+                    continue;
                 }
+                // The chat leaf's topics, resolved from its own session, the
+                // same way a pane resolves its own.
+                if let Some(strip) = self.pane_topics(*session, cx) {
+                    tops.insert(*session, strip);
+                }
+                // The chat leaf owns the keyboard exactly when no pane does.
+                let focused = focus.is_none();
                 // Each pane's plan and queue, read from that pane's session.
                 // The plan is the terminal's three-line pane strip (#2622):
                 // a split pane is a fraction of the window, and the full
@@ -10759,7 +10781,7 @@ impl Dashboard {
                 // A plan waiting on approval is the one card a pane must not
                 // lose in a split (#2755): it is the only place the tap lives.
                 let actions = self.plan_actions(*session, cx);
-                let (plan_view, queued, editor) = if is_chat {
+                let (plan_view, queued, editor) = {
                     self.plan.refresh();
                     (
                         self.plan
@@ -10768,22 +10790,6 @@ impl Dashboard {
                         self.queued_for_strip(),
                         self.editor.clone(),
                     )
-                } else {
-                    let Some(pane) = self.pane_states.get(session).cloned() else {
-                        continue;
-                    };
-                    // The strip is built from the leaf's own state, inside the
-                    // leaf (#2805). A view is owned, so it crosses the handle.
-                    pane.update(cx, |pane, _| {
-                        pane.plan.refresh();
-                        (
-                            pane.plan
-                                .editing_view(Some(&actions))
-                                .or_else(|| pane.plan.pane_view(density, expanded)),
-                            agent_bridge::queue_snapshot(*session),
-                            pane.editor.clone(),
-                        )
-                    })
                 };
                 let mut col = div().flex().flex_col().flex_none().gap_2();
                 if let Some(view) = plan_view {
@@ -15197,10 +15203,6 @@ mod tests {
     use crate::status::help_rows;
     use crate::topic_bar_view::topic_label;
 
-    /// The pane walk lives in its own module now (#2817 follow-up), so a scan
-    /// of the renderer reads that file instead of the crate root.
-    const PANE_LAYOUT: &str = include_str!("pane_layout.rs");
-
     /// A leaf is its own view now (#2805): its state and the transcript it
     /// draws are scanned here, not in the crate root.
     const PANE_VIEW: &str = include_str!("pane_view.rs");
@@ -15249,14 +15251,13 @@ mod tests {
     #[test]
     fn no_measure_cap_reaches_a_split_pane() {
         let src = include_str!("main.rs");
-        let (_, rest) = PANE_LAYOUT
-            .split_once(concat!("fn pane_", "element("))
-            .expect("split leaf renderer exists");
-        let (leaf, _) = rest
-            .split_once("let close_session = *session;")
-            .expect("pane leaf body ends before its close handler");
+        // The leaf's own render, from the pane's frame down to its helpers: a
+        // split pane builds its whole box there (#2805).
+        let (_, rest) = PANE_VIEW
+            .split_once(concat!("impl Render for ", "PaneView {"))
+            .expect("the pane draws itself");
         assert!(
-            !leaf.contains("chat_measure") && !leaf.contains("CHAT_MEASURE_PX"),
+            !rest.contains("chat_measure") && !rest.contains("CHAT_MEASURE_PX"),
             "a split pane draws at its own full width, never at the measure"
         );
 
@@ -16078,13 +16079,8 @@ mod tests {
         // row text is stored by ordinal, and two panes plus the window all
         // count rows from zero.
         let src = include_str!("main.rs");
-        let pane = PANE_LAYOUT
-            .split("fn pane_element(")
-            .nth(1)
-            .and_then(|rest| rest.split("\nfn ").next())
-            .expect("pane element");
         assert!(
-            !pane.contains("ViewHooks::default()"),
+            !PANE_VIEW.contains("ViewHooks::default()"),
             "a pane must hand its transcript a drag state"
         );
         // The hooks are the leaf's own now (#2805), built where the leaf
@@ -16727,13 +16723,19 @@ mod tests {
             body.contains("self.plan.pane_view(density, expanded)"),
             "the chat leaf in a split draws the compact strip"
         );
+        // A split pane builds its own strip in its own render (#2805), so the
+        // density shape is read where that leaf draws.
         assert!(
-            body.contains("pane.plan.pane_view(density, expanded)"),
+            PANE_VIEW.contains("self.plan.pane_view(density, expanded)"),
             "every pane draws the compact strip"
         );
         assert!(
             body.contains("plan_strip::pane_density(count, pane_width)"),
             "the shape follows the pane count and the pane's own width"
+        );
+        assert!(
+            PANE_VIEW.contains("plan_strip::pane_density(panes, self.width)"),
+            "a pane reads the same shape from its own width"
         );
         assert!(
             body.contains("toggle_pane_plan"),
@@ -16751,12 +16753,10 @@ mod tests {
         // transcript text row stops the press on its way up, so a click on
         // text never moved the caret and ctrl+| split whatever leaf the
         // window still called focused instead of the pane just clicked.
-        let src = PANE_LAYOUT;
-        let body = src
-            .split("fn pane_element(")
+        let body = PANE_VIEW
+            .split("let mut node = div()")
             .nth(1)
-            .and_then(|rest| rest.split("\nfn ").next())
-            .expect("pane element");
+            .expect("the leaf builds its own box");
         assert!(
             body.contains(".capture_any_mouse_down(take_keyboard)"),
             "the pane takes the keyboard before a row can stop the press"
@@ -16772,14 +16772,14 @@ mod tests {
         // #2759: gpui hands every `on_drag_move` listener every move while a
         // drag is live, hovered or not, so each pane answered with its own
         // bounds and the last pane painted put the band on itself.
-        let src = PANE_LAYOUT;
+        let src = PANE_VIEW;
         let body = src
             .split(".on_drag_move::<PaneDrag>(")
             .nth(1)
             .and_then(|rest| rest.split(".on_drop::<PaneDrag>(").next())
             .expect("the drag-move listener");
         assert!(
-            body.contains("let inside = x >= bounds[0]"),
+            body.contains("x >= bounds[0] && x <= bounds[2]"),
             "the pane checks the pointer is inside its own bounds"
         );
         assert!(
@@ -16795,7 +16795,7 @@ mod tests {
             "the half still comes from the same bounds and pointer"
         );
         assert!(
-            body.contains(".is_some_and(|(target, _)| target == hover_session)"),
+            body.contains(".is_some_and(|(target, _)| target == session)"),
             "a pane clears only the band it owns"
         );
     }
@@ -16805,19 +16805,17 @@ mod tests {
         // #2624: the transcript takes the slack and the strips keep their
         // height. Without this the plan card was squeezed to zero in a short
         // pane, which is why it only ever vanished in a split.
-        let src = PANE_LAYOUT;
-        let body = src
-            .split("fn pane_element(")
+        let body = PANE_VIEW
+            .split("let mut node = div()")
             .nth(1)
-            .and_then(|rest| rest.split("\nfn ").next())
-            .expect("pane element");
+            .expect("the leaf builds its own box");
         assert!(
             body.contains(".flex_none().min_w_0().child(chrome)"),
             "the chrome stack is not shrinkable"
         );
         assert!(
             body.contains(
-                "div()\n                        .flex()\n                        .flex_col()\n                        .flex_1()\n                        .min_w_0()\n                        .min_h_0()\n                        .child(body)"
+                "div()\n                .flex()\n                .flex_col()\n                .flex_1()\n                .min_w_0()\n                .min_h_0()\n                .child(body)"
             ),
             "the body is the child that shrinks, and it can"
         );

@@ -8,9 +8,9 @@
 const GUI_MAIN: &str = include_str!("../gui/main.rs");
 const TRANSCRIPT: &str = include_str!("../gui/transcript.rs");
 
-/// The pane walk, in its own module since #2817 follow-up: where a leaf takes
-/// its own topic row off the context it was handed.
-const PANE_LAYOUT: &str = include_str!("../gui/pane_layout.rs");
+/// The pane's own render (#2805): where a leaf asks the window for its own
+/// topic row instead of reading one the walk handed it.
+const PANE_VIEW: &str = include_str!("../gui/pane_view.rs");
 
 /// The render pass, up to the rail: the only place the window holds a real
 /// viewport to measure a scroll offset from.
@@ -65,12 +65,12 @@ fn a_pane_draws_its_own_topic_strip() {
     // The strip used to be one window row built from the chat leaf (#2686,
     // #2687), so it named the wrong conversation over every other pane.
     assert!(
-        PANE_LAYOUT.contains("tops: &'a mut HashMap<Uuid, AnyElement>"),
-        "each pane carries its own topic row into the leaf walk"
+        PANE_VIEW.contains("win.pane_topics(session, cx)"),
+        "each pane asks for its own topic row, keyed by its own session"
     );
     assert!(
-        PANE_LAYOUT.contains("ctx.tops.remove(session)"),
-        "a leaf draws the row for its own session"
+        PANE_VIEW.contains("let topics = window.update(cx,"),
+        "the row is rebuilt in the pane's own render, so a pane that only redraws itself keeps it"
     );
     assert!(
         GUI_MAIN.contains("fn topic_tabs(&self, pane: Option<Uuid>"),

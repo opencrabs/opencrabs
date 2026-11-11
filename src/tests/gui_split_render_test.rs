@@ -150,18 +150,20 @@ fn the_second_pane_is_composed_in_one_place() {
         "a pane draws its own transcript from its own state, not the chat's"
     );
     assert!(
-        walk.contains("let element = pane_element(child, ctx, path, child_width);"),
+        walk.contains("let element = pane_element(child, ctx, cx, path);"),
         "a split recurses, which is how a split can split again (#2472)"
     );
 }
 
 #[test]
 fn both_panes_carry_a_header_and_a_close_button() {
-    let walk = pane_element();
+    let frame = flat(PANE_VIEW);
     // Only the second pane used to have a header, so one session read as a
-    // named session and the other as a nameless strip (#2474).
+    // named session and the other as a nameless strip (#2474). A pane draws
+    // its own frame now, and the chat leaf is drawn by the same function
+    // (#2805).
     assert!(
-        walk.contains("pane_header(") && walk.contains("format!(\"pane-close-{session}\")"),
+        frame.contains("pane_header(") && frame.contains("format!(\"pane-close-{session}\")"),
         "every leaf builds its own header and its own close button"
     );
     assert!(
@@ -169,7 +171,8 @@ fn both_panes_carry_a_header_and_a_close_button() {
         "one helper draws every header, so they cannot drift"
     );
     assert!(
-        walk.contains("ctx.focus.is_none()") && walk.contains("ctx.focus == Some(*session)"),
+        pane_element().contains("ctx.focus.is_none()")
+            && frame.contains("win.split_focus() == Some(session)"),
         "the caret sits on the chat when no pane took it, and the accent follows it"
     );
 }
@@ -473,20 +476,23 @@ fn the_chord_is_read_through_one_place() {
 #[test]
 fn each_pane_owns_composer_plan_and_queue() {
     let body = flat(panes_body());
+    let pane = flat(PANE_VIEW);
     assert!(
         body.contains("chrome.insert(*session, col.into_any_element())"),
-        "each leaf gets a chrome column of its own"
+        "the chat leaf gets a chrome column of its own"
     );
+    // A split pane builds that column in its own render (#2805), from its own
+    // session and through the window handle it reports through.
     assert!(
-        body.contains("agent_bridge::queue_snapshot(*session)"),
+        pane.contains("agent_bridge::queue_snapshot(session)"),
         "the queue is read from that pane's session, not the window's"
     );
     assert!(
-        body.contains("pane.plan.refresh()"),
+        pane.contains("self.plan.refresh()"),
         "each pane's plan strip is re-read for its own session"
     );
     assert!(
-        body.contains("pane_composer_dim(draft, *session, is_chat, cx.entity().downgrade())"),
+        pane.contains("pane_composer_dim(draft, session, false, self.window.clone())"),
         "an unfocused pane shows the draft it holds, dimmed"
     );
 }
@@ -566,9 +572,9 @@ fn an_unfocused_composer_is_dimmed_and_hands_the_keyboard_back() {
 
 #[test]
 fn a_leaf_draws_its_chrome_above_its_own_footer() {
-    let walk = flat(pane_element());
+    let walk = flat(PANE_VIEW);
     let chrome_at = walk
-        .find("if let Some(chrome) = ctx.chrome.remove(session)")
+        .find("if let Some(chrome) = chrome")
         .expect("the leaf takes its chrome");
     let footer_at = walk
         .find("node.child(pane_footer(")
@@ -638,7 +644,7 @@ fn the_keyboard_follows_the_caret_between_panes() {
 
 #[test]
 fn a_pane_wears_a_ring_and_the_unfocused_ones_are_drawn_back() {
-    let walk = flat(pane_element());
+    let walk = flat(PANE_VIEW);
     assert!(
         walk.contains("border_color(rgb(focus_ring_color(focused)))"),
         "the leaf that owns the keyboard wears the accent ring"

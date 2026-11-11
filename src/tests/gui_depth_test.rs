@@ -6,8 +6,8 @@
 const GUI_MAIN: &str = include_str!("../gui/main.rs");
 const EDITOR: &str = include_str!("../gui/editor.rs");
 
-/// The pane walk, which lives in its own module since #2817 follow-up.
-const PANE_LAYOUT: &str = include_str!("../gui/pane_layout.rs");
+/// The pane's own render (#2805): the frame a leaf draws for itself.
+const PANE_VIEW: &str = include_str!("../gui/pane_view.rs");
 
 #[test]
 fn the_header_has_a_panel_background_and_a_divider() {
@@ -39,16 +39,14 @@ fn the_input_has_a_panel_background_and_a_shadow() {
     assert!(root.contains(".shadow_sm()"));
 }
 
-/// The leaf arm of the pane walk, from its panel down to the split arm
-/// (#2472, #2581).
+/// One leaf's frame, from its box down to its status row (#2472, #2581,
+/// #2805): a pane draws it in its own render, and the chat leaf's is built by
+/// the same function.
 fn leaf_arm() -> &'static str {
-    PANE_LAYOUT
+    PANE_VIEW
         .split("let mut node = div()")
         .nth(1)
-        .expect("a leaf is built in pane_element")
-        .split("PaneTree::Split {")
-        .next()
-        .expect("the leaf arm comes before the split arm")
+        .expect("a leaf is built in leaf_box")
 }
 
 #[test]
@@ -59,7 +57,7 @@ fn a_split_panel_carries_its_own_composer_and_footer() {
         "the transcript still opens the panel"
     );
     assert!(
-        leaf.contains("if let Some(chrome) = ctx.chrome.remove(session)"),
+        leaf.contains("if let Some(chrome) = chrome"),
         "the panel draws its own composer and plan, not the window's"
     );
     let chrome_at = leaf
