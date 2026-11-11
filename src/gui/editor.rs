@@ -2553,7 +2553,7 @@ fn crab_picture(bytes: &[u8]) -> Option<Arc<RenderImage>> {
         .into_rgba8();
     let (width, height) = rgba.dimensions();
     let mut bgra = rgba.into_raw();
-    for pixel in bgra.chunks_exact_mut(4) {
+    for pixel in bgra.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
     }
     let buffer = image::RgbaImage::from_raw(width, height, bgra)?;
