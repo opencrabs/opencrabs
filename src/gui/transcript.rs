@@ -31,9 +31,9 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use gpui::{
-    AbsoluteLength, AnyElement, App, ClickEvent, Div, HighlightStyle, MouseButton, ScrollHandle,
-    SharedString, Stateful, Styled, StyledText, TextLayout, TextStyle, Window, div, prelude::*, px,
-    rems, rgb, rgba,
+    AbsoluteLength, AnyElement, App, ClickEvent, Div, HighlightStyle, MouseButton, Pixels, Point,
+    ScrollHandle, SharedString, Stateful, Styled, StyledText, TextLayout, TextStyle, Window, div,
+    prelude::*, px, rems, rgb, rgba,
 };
 
 use opencrabs::db::Database;

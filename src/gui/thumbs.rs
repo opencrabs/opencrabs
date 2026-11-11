@@ -215,6 +215,7 @@ fn remember_failure(source: &Path, stamp: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use image::GenericImageView;
 
     fn scratch(tag: &str) -> PathBuf {
         let unique = std::time::SystemTime::now()

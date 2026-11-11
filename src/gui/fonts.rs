@@ -45,7 +45,7 @@ pub fn current_mono() -> String {
     }
     let saved = Config::current().gui.mono_font.clone();
     let family = gui_font::resolve_mono(saved.as_deref(), &installed());
-    set_mono(family.clone());
+    set_mono(Some(family.clone()));
     family
 }
 
