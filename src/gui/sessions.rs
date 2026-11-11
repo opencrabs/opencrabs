@@ -185,8 +185,8 @@ impl SessionsState {
             .copied()
             .filter(|s| !grouped(s))
             .partition(|s| self.is_favorite(s.id));
-        pinned.sort_by_key(|s| std::cmp::Reverse(self.activity_of(*s)));
-        rest.sort_by_key(|s| std::cmp::Reverse(self.activity_of(*s)));
+        pinned.sort_by_key(|s| std::cmp::Reverse(self.activity_of(s)));
+        rest.sort_by_key(|s| std::cmp::Reverse(self.activity_of(s)));
         pinned.extend(rest);
         let mut out: Vec<&Session> = Vec::with_capacity(visible.len());
         for top in pinned {
