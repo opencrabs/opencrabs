@@ -1032,7 +1032,16 @@ pub struct PlanIndex {
     archived: HashSet<Uuid>,
     swept_at: Option<Instant>,
     docs: HashMap<PathBuf, (SystemTime, CachedPlan)>,
+    /// The last `stat` of each session's plan file, and when it was read. The
+    /// rail asks two questions about the same file every frame (does the row
+    /// ring, and how far along is its bar), and a plan file does not move
+    /// twice in a fifth of a second, so the second question reuses the first
+    /// answer instead of walking the filesystem again (#2817).
+    stamps: HashMap<Uuid, (Instant, SystemTime)>,
 }
+
+/// How long a resolved stamp is reused before the file is stat'ed again.
+const STAT_TTL: Duration = Duration::from_millis(200);
 
 impl PlanIndex {
     /// An index over explicit roots. Tests and alternate profiles use it;
@@ -1115,6 +1124,7 @@ impl PlanIndex {
         }
         self.paths = paths;
         self.archived = archived;
+        self.stamps.clear();
         self.swept_at = Some(now);
         // A long-lived window sees sessions come and go; keeping every document
         // it ever parsed would leak one small struct per conversation.
@@ -1161,7 +1171,14 @@ impl PlanIndex {
             }
         }
         let path = self.paths.get(&session)?.clone();
-        let stamp = mtime(&path)?;
+        let stamp = match self.stamps.get(&session) {
+            Some((at, stamp)) if now.duration_since(*at) < STAT_TTL => *stamp,
+            _ => {
+                let stamp = mtime(&path)?;
+                self.stamps.insert(session, (now, stamp));
+                stamp
+            }
+        };
         Some((path, stamp))
     }
 
