@@ -15606,7 +15606,7 @@ fn composer_hint_for(busy: bool, queued: usize) -> SharedString {
     match (busy, queued) {
         (true, 0) => SharedString::from("esc stops · typing queues"),
         (true, n) => SharedString::from(format!("queued {n} · ↑ recalls · esc stops")),
-        (false, 0) => SharedString::from("Message OpenCrabs…"),
+        (false, 0) => SharedString::from("Talk to the crab…"),
         (false, n) => SharedString::from(format!("{n} queued · sending now")),
     }
 }
@@ -16481,7 +16481,7 @@ fn pane_composer_dim(
 ) -> AnyElement {
     let empty = draft.trim().is_empty();
     let shown: SharedString = if empty {
-        SharedString::from("Message OpenCrabs\u{2026}")
+        SharedString::from("Talk to the crab\u{2026}")
     } else {
         SharedString::from(draft.replace('\n', " "))
     };
@@ -19290,7 +19290,7 @@ mod tests {
     fn the_composer_hint_names_the_queue_while_a_turn_runs() {
         assert_eq!(
             composer_hint_for(false, 0).as_ref(),
-            "Message OpenCrabs…",
+            "Talk to the crab…",
             "an idle composer keeps its own prompt"
         );
         let running = composer_hint_for(true, 0);
@@ -19324,7 +19324,7 @@ mod tests {
         );
         assert_eq!(
             composer_hint_for(false, 0).as_ref(),
-            "Message OpenCrabs…",
+            "Talk to the crab…",
             "an empty idle field keeps the product's own prompt"
         );
     }

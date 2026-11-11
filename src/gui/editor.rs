@@ -417,7 +417,7 @@ impl Editor {
             input_history_stash: String::new(),
             recall: None,
             attachments: Vec::new(),
-            placeholder: "Message OpenCrabs…".into(),
+            placeholder: "Talk to the crab…".into(),
             selected_range: 0..0,
             selection_reversed: false,
             marked_range: None,
