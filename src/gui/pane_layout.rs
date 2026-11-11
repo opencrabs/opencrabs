@@ -73,12 +73,12 @@ pub(crate) struct PanesCtx<'a> {
 /// leaf draws the chat untouched, which is the unsplit window the window has
 /// always had.
 ///
-/// `cx` is read-only: a leaf's state is its own entity (#2805), so the walk
-/// only decides where each leaf sits. Nothing here mutates the pane map.
+/// A leaf's state is its own entity (#2805), so the walk only decides where
+/// each leaf sits: it takes no `App` because there is nothing left here to
+/// read from one. Nothing in this module mutates the pane map.
 pub(crate) fn pane_element(
     tree: &PaneTree,
     ctx: &mut PanesCtx,
-    cx: &App,
     path: &mut Vec<usize>,
 ) -> AnyElement {
     match tree {
@@ -150,7 +150,7 @@ pub(crate) fn pane_element(
                 });
             for (ix, child) in children.iter().enumerate() {
                 path.push(ix);
-                let element = pane_element(child, ctx, cx, path);
+                let element = pane_element(child, ctx, path);
                 path.pop();
                 row = row.child(
                     div()

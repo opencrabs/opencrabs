@@ -150,7 +150,7 @@ fn the_second_pane_is_composed_in_one_place() {
         "a pane draws its own transcript from its own state, not the chat's"
     );
     assert!(
-        walk.contains("let element = pane_element(child, ctx, cx, path);"),
+        walk.contains("let element = pane_element(child, ctx, path);"),
         "a split recurses, which is how a split can split again (#2472)"
     );
 }

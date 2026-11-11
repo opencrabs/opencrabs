@@ -10901,7 +10901,7 @@ impl Dashboard {
         };
         let mut path = Vec::new();
         let tree = self.panes.as_ref().expect("checked a moment ago");
-        pane_element(tree, &mut ctx, cx, &mut path)
+        pane_element(tree, &mut ctx, &mut path)
     }
 }
 
