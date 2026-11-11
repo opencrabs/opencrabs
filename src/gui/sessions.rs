@@ -1217,17 +1217,42 @@ pub fn preview_line(role: &str, text: &str) -> SharedString {
 /// screen. A pinned row carries the star the owner asked
 /// for, in the accent colour, so "why is this one on top" is answered by the
 /// row itself.
-/// The pin mark a row carries: the filled star once pinned, an outline
-/// before first use. Without the outline a first-time user saw no star, no
-/// button and no hint, so pinning looked like it did not exist (#2353).
-/// The colour rides along: accent when the pin is on, muted while the
-/// outline is only an invitation.
-pub fn pin_mark(favorited: bool) -> (&'static str, u32) {
+/// The pin mark a row carries (#2788): a quiet Telegram-style pushpin,
+/// filled once pinned, outline before first use. Without the outline a
+/// first-time user saw no mark, no button and no hint, so pinning looked
+/// like it did not exist (#2353). The colour rides along: muted when the
+/// pin is on, faint while the outline is only an invitation. Never the
+/// accent: the pin is a quiet mark, not a highlight.
+pub fn pin_mark(favorited: bool) -> (bool, u32) {
     if favorited {
-        ("\u{2605}", palette::current().accent)
+        (true, palette::current().text_muted)
     } else {
-        ("\u{2606}", palette::current().text_muted)
+        (false, palette::current().text_faint)
     }
+}
+
+const PIN_SVG: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/src/assets/pin.svg"
+));
+const PIN_OUTLINE_SVG: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/src/assets/pin-outline.svg"
+));
+
+/// The row's pushpin (#2788), drawn from an embedded vector so the tilted
+/// silhouette stays crisp on retina, which a font glyph cannot promise.
+pub fn pin_icon(favorited: bool, size: f32) -> impl IntoElement {
+    let (filled, colour) = pin_mark(favorited);
+    let bytes = if filled { PIN_SVG } else { PIN_OUTLINE_SVG };
+    let svg = String::from_utf8_lossy(bytes)
+        .replace("#8a8a8a", &format!("#{colour:06x}"))
+        .into_bytes();
+    img(Arc::new(Image::from_bytes(ImageFormat::Svg, svg)))
+        .w(rems(size))
+        .h(rems(size))
+        .flex_none()
+        .object_fit(ObjectFit::Contain)
 }
 
 /// The menu's contents, resolved from the row's pin state. Pure, so the
@@ -1500,19 +1525,12 @@ pub fn row(
         .w_full()
         .when(indented, |d| d.child(topic_pin_mark()))
         .when_some(mark, |d, mark| d.child(mark))
-        .child({
-            let (mark, colour) = pin_mark(favorited);
-            div()
-                .flex_none()
-                .text_xs()
-                .text_color(rgb(colour))
-                .child(SharedString::from(mark))
-        })
         .child(title_text)
-        // Timestamp, cost and the activity glyph share ONE right-aligned
-        // cluster: a single auto margin carries the whole group to the edge.
-        // Two auto margins (stamp and badge each their own) would split the
-        // free space and park the stamp mid-row on a streaming session.
+        // Timestamp, cost, the pin and the activity glyph share ONE
+        // right-aligned cluster: a single auto margin carries the whole
+        // group to the edge. Two auto margins (stamp and badge each their
+        // own) would split the free space and park the stamp mid-row on a
+        // streaming session.
         .child(
             div()
                 .flex()
@@ -1521,24 +1539,36 @@ pub fn row(
                 .flex_none()
                 .ml_auto()
                 .when(!indented, |d| {
-                    // The message line below stays pure conversation context,
-                    // and a grouped topic row keeps its compact pin without
-                    // the ledger metadata repeated on every child.
+                    // Telegram's quiet column (#2788): the date/cost stamp
+                    // above, the pushpin below, both right-aligned. The
+                    // message line below stays pure conversation context.
                     d.child(
                         div()
+                            .flex()
+                            .flex_col()
+                            .items_end()
                             .flex_none()
                             .pl_1()
-                            .text_xs()
-                            .text_color(rgb(palette::current().text_muted))
-                            .child(SharedString::from(format!(
-                                "{} · ${:.2}",
-                                s.updated_at
-                                    .with_timezone(&chrono::Local)
-                                    .format("%m-%d %H:%M"),
-                                s.total_cost
-                            ))),
+                            .gap_0p5()
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_xs()
+                                    .text_color(rgb(palette::current().text_muted))
+                                    .child(SharedString::from(format!(
+                                        "{} · ${:.2}",
+                                        s.updated_at
+                                            .with_timezone(&chrono::Local)
+                                            .format("%m-%d %H:%M"),
+                                        s.total_cost
+                                    ))),
+                            )
+                            .child(pin_icon(favorited, 0.9)),
                     )
                 })
+                // A grouped topic row keeps its compact pin inline, without
+                // the ledger metadata repeated on every child (#2788).
+                .when(indented, |d| d.child(pin_icon(favorited, 0.9)))
                 // The activity glyph closes the cluster at the right edge
                 // (#2636). `flex_none` keeps it its width when a long title
                 // truncates.
@@ -1733,12 +1763,7 @@ impl Render for IconTip {
     }
 }
 
-fn action_icon(
-    id: &'static str,
-    glyph: &'static str,
-    color: u32,
-    label: &'static str,
-) -> Stateful<Div> {
+fn action_icon(id: &'static str, icon: AnyElement, label: &'static str) -> Stateful<Div> {
     div()
         .id(id)
         .tooltip(move |_window, cx| -> AnyView {
@@ -1750,31 +1775,31 @@ fn action_icon(
         .justify_center()
         .size(rems(1.6))
         .rounded_sm()
-        .text_sm()
-        .text_color(rgb(color))
         .cursor_pointer()
         .hover(|d| d.bg(rgb(palette::current().focus)))
-        .child(SharedString::from(glyph))
+        .child(icon)
 }
 
-/// The pin icon of a row's slide-out strip. A hollow star pins, a filled one
-/// unpins.
+/// A text glyph shaped for the slide-out strip, so the vector icons and the
+/// glyph icons share one cell style.
+fn glyph_icon(glyph: &'static str, color: u32) -> AnyElement {
+    div()
+        .text_sm()
+        .text_color(rgb(color))
+        .child(SharedString::from(glyph))
+        .into_any_element()
+}
+
+/// The pin icon of a row's slide-out strip (#2788): the same quiet pushpin
+/// the row carries, filled and muted once pinned, outline and faint before.
+/// The tooltip names the action the click performs, matching the rail menu.
 pub fn pin_button(favorited: bool) -> Stateful<Div> {
-    if favorited {
-        action_icon(
-            "session-unpin",
-            "\u{26B2}",
-            palette::current().accent,
-            "Favorite",
-        )
+    let (id, label) = if favorited {
+        ("session-unpin", "Unpin")
     } else {
-        action_icon(
-            "session-pin",
-            "\u{26B2}",
-            palette::current().text_muted,
-            "Favorite",
-        )
-    }
+        ("session-pin", "Pin")
+    };
+    action_icon(id, pin_icon(favorited, 1.0).into_any_element(), label)
 }
 
 /// The topic icon of a row's slide-out strip. With topics off it turns them
@@ -1785,7 +1810,7 @@ pub fn topic_button(topics_on: bool) -> Stateful<Div> {
     } else {
         palette::current().text_muted
     };
-    action_icon("session-topic", "\u{2442}", color, "Topic")
+    action_icon("session-topic", glyph_icon("\u{2442}", color), "Topic")
 }
 
 /// The delete icon of a row's slide-out strip. It never deletes on its own:
@@ -1794,8 +1819,7 @@ pub fn topic_button(topics_on: bool) -> Stateful<Div> {
 pub fn delete_button() -> Stateful<Div> {
     action_icon(
         "session-delete",
-        "\u{2715}",
-        palette::current().red,
+        glyph_icon("\u{2715}", palette::current().red),
         "Delete",
     )
 }
@@ -2289,31 +2313,90 @@ mod tests {
 
     #[test]
     fn pin_mark_is_filled_only_when_favorited() {
-        let (mark, colour) = pin_mark(true);
-        assert_eq!(mark, "\u{2605}", "a pinned row carries the filled star");
+        let (filled, colour) = pin_mark(true);
+        assert!(filled, "a pinned row carries the filled pushpin");
         assert_eq!(
             colour,
+            palette::current().text_muted,
+            "the pin stays a quiet mark at the date text's visual weight"
+        );
+        assert_ne!(
+            colour,
             palette::current().accent,
-            "the pin borrows the accent so the row says why it is on top"
+            "the pin never borrows the accent (#2788)"
         );
         assert_ne!(
             pin_mark(false).0,
-            mark,
+            filled,
             "an unpinned row must never look pinned"
         );
     }
 
     #[test]
     fn hover_mark_is_the_outline() {
-        // Before the first pin there was no star, no button and no hint, so
-        // the row itself has to carry the invitation: the outline star in
-        // the quiet colour, which turns filled the moment it is used.
-        let (mark, colour) = pin_mark(false);
-        assert_eq!(mark, "\u{2606}", "an unpinned row shows the outline star");
+        // Before the first pin there was no mark, no button and no hint, so
+        // the row itself has to carry the invitation: the outline pushpin in
+        // the faint colour, which turns filled the moment it is used (#2353).
+        let (filled, colour) = pin_mark(false);
+        assert!(!filled, "an unpinned row shows the outline pushpin");
         assert_eq!(
             colour,
-            palette::current().text_muted,
+            palette::current().text_faint,
             "the invitation stays quieter than the pin"
+        );
+    }
+
+    /// The pin contract (#2788): the pushpin rides the one trailing cluster,
+    /// never the title line, the full row stacks the stamp above it, and the
+    /// star glyphs are gone from the module.
+    #[test]
+    fn the_pin_rides_the_trailing_cluster_not_the_title() {
+        let source = include_str!("sessions.rs");
+        let row_source = source
+            .split("pub fn row(")
+            .nth(1)
+            .expect("session row renderer")
+            .split("pub fn on_click(")
+            .next()
+            .expect("row source before click handler");
+        let title_line = row_source
+            .split(".when_some(chips,")
+            .next()
+            .expect("title line before the chip strip");
+        assert!(
+            !title_line.contains("= pin_mark(favorited)"),
+            "the title line never paints the pin before the name"
+        );
+        let cluster = title_line
+            .split(".ml_auto()")
+            .nth(1)
+            .expect("trailing cluster");
+        assert!(
+            cluster.contains("pin_icon(favorited, 0.9)"),
+            "the pin rides the one right-aligned cluster"
+        );
+        assert!(
+            cluster.contains(".flex_col()") && cluster.contains(".items_end()"),
+            "a full row stacks the stamp above the pin, Telegram style"
+        );
+        assert!(
+            !source.contains('\u{2605}') && !source.contains('\u{2606}'),
+            "the star glyphs are gone: the pushpin replaces them"
+        );
+        let button = source
+            .split("pub fn pin_button(")
+            .nth(1)
+            .expect("pin button")
+            .split("pub fn topic_button(")
+            .next()
+            .expect("button before the topic button");
+        assert!(
+            button.contains("pin_icon(favorited, 1.0)"),
+            "the strip speaks the same pin language as the row"
+        );
+        assert!(
+            button.contains("\"Unpin\"") && button.contains("\"Pin\""),
+            "the tooltip names the action, matching the rail menu"
         );
     }
 
