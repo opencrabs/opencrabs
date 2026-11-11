@@ -1360,10 +1360,11 @@ pub struct RowFlags {
     /// nothing runs. Paints as the card's last line, under the plan bar, so a
     /// row says "work is still going here" without being opened.
     pub running: Option<SharedString>,
-    /// The session's custom image icon, already built by the view (#2790).
-    /// When set it wins over the platform mark in the leading slot. The
-    /// module never reads files: the view owns the image cache and hands
-    /// over the finished element.
+    /// The session's stored icon, already built by the view (#2790): an
+    /// embedded mark, a custom image or a legacy glyph. When set it wins
+    /// over the platform mark in the leading slot. The module never reads
+    /// files: the view owns the image cache and hands over the finished
+    /// element.
     pub icon: Option<AnyElement>,
 }
 
@@ -1517,9 +1518,9 @@ pub fn row(
         Some(title) => rail::chat_name(Some(title)),
         None => "(untitled)".to_string(),
     };
-    // A custom image icon wins over the platform mark (#2790): the owner
-    // picked it for this session, so it leads the row. Without one, a
-    // channel card still prints its platform; a topic row has no mark.
+    // The stored icon wins over the platform mark (#2790): the owner picked
+    // it for this session, so it leads the row. Without one, a channel card
+    // still prints its platform; a row without a pick has no mark.
     let mark = icon.or_else(|| {
         rail::platform_of(stored.filter(|_| !indented))
             .and_then(|platform| platform_icons::platform_icon(platform, 1.0))

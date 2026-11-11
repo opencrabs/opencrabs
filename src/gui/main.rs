@@ -1336,6 +1336,35 @@ mod sidebar_action_tests {
         );
     }
 
+    /// The rail card draws the stored icon, not just custom images (#2790):
+    /// the same resolver the topic tab uses, so a pick in the rename dialog
+    /// reaches the card. Scoped to the window render: this test module sits
+    /// above it, so a bare split would land in the test's own strings.
+    #[test]
+    fn rail_card_resolves_the_stored_icon() {
+        let src = include_str!("main.rs");
+        let render = dashboard_render(src);
+        let wiring = render
+            .split("icon: self")
+            .nth(1)
+            .expect("rail icon wiring")
+            .split("};")
+            .next()
+            .expect("wiring before the flags close");
+        assert!(
+            wiring.contains("topic_icons::tab_icon(stored, 1.0)"),
+            "an embedded mark renders on the card, same as on the tab"
+        );
+        assert!(
+            wiring.contains("self.custom_icon_picture(stored, 1.0)"),
+            "a custom image renders from the view's cache"
+        );
+        assert!(
+            wiring.contains("topic_icons::tab_glyph(stored, 1.0)"),
+            "a legacy glyph keeps its text slot"
+        );
+    }
+
     #[test]
     fn a_topic_switch_hands_the_caret_back() {
         // #2741: a click on a topic chip took the caret and never asked for it
@@ -10433,14 +10462,19 @@ impl Render for Dashboard {
                 // The card's last line: whatever detached command is still
                 // running here, formatted exactly as the composer strip does.
                 running: running_tasks.get(&id).cloned(),
-                // A custom image icon leads the row when the session has one
-                // (#2790). Built from the view's cache, so the paint never
-                // reads a file.
-                icon: self
-                    .sessions
-                    .topic_icons
-                    .get(&id)
-                    .and_then(|stored| self.custom_icon_picture(stored, 1.0)),
+                // The stored icon leads the row (#2790), resolved exactly
+                // like the topic tab resolves it: an embedded mark, a
+                // custom image from the view's cache, or a legacy glyph.
+                // A pick in the rename dialog reaches the card without a
+                // restart, and the paint never reads a file.
+                icon: self.sessions.topic_icons.get(&id).and_then(|stored| {
+                    topic_icons::tab_icon(stored, 1.0)
+                        .or_else(|| self.custom_icon_picture(stored, 1.0))
+                        .or_else(|| {
+                            (!stored.starts_with(topic_icons::IMG_PREFIX))
+                                .then(|| topic_icons::tab_glyph(stored, 1.0))
+                        })
+                }),
             };
             // A parent card carries its topics as inline chips: three by
             // default, a "+N" pill expands the rest, a collapse pill folds
