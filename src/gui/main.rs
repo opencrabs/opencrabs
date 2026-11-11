@@ -11258,7 +11258,7 @@ impl Render for Dashboard {
                                     .gap_3()
                                     .text_xs()
                                     .text_color(rgb(palette::current().text_muted))
-                                    .child("ctrl+h · help"),
+                                    .child("alt+space · seek help"),
                             )
                             .child(
                                 div()
@@ -11429,7 +11429,7 @@ impl Render for Dashboard {
                         div()
                             .text_xs()
                             .text_color(rgb(palette::current().text_muted))
-                            .child("ctrl+h · help"),
+                            .child("alt+space · seek help"),
                     );
                 (scroller.into_any_element(), footer.into_any_element())
             }
@@ -11463,7 +11463,7 @@ impl Render for Dashboard {
                         div()
                             .text_xs()
                             .text_color(rgb(palette::current().text_muted))
-                            .child("ctrl+h · help"),
+                            .child("alt+space · seek help"),
                     );
                 (scroller.into_any_element(), footer.into_any_element())
             }
@@ -19936,15 +19936,15 @@ mod tests {
     }
 
     #[test]
-    fn chat_footer_points_at_the_key_reference() {
+    fn chat_footer_points_at_the_seeker() {
         // The footer stopped being a hand-maintained keymap (#2321). It carries
         // live state (provider, model, directory, branch, tokens per second,
-        // ctx budget) and exactly one hint: the door to the key reference. A
+        // ctx budget) and exactly one hint: the door to the Seeker card. A
         // strip of chords taught keys the window no longer binds and went
         // stale the moment a binding moved, so every screen answers with the
         // same three words instead.
         let src = include_str!("main.rs");
-        let door = ["\"ctrl+h · ", "help\""].concat();
+        let door = ["\"alt+space · ", "seek help\""].concat();
         assert_eq!(
             src.matches(&door).count(),
             3,
