@@ -2975,6 +2975,11 @@ pub struct CopyDrag {
     anchor: Cell<Option<TextPoint>>,
     end: Cell<Option<TextPoint>>,
     dragging: Cell<bool>,
+    /// Set by the first release of a gesture. The row under the pointer, the
+    /// pane behind it and the pointer-out path all see the same mouse-up, and
+    /// each used to run the whole release again: one click logged three times
+    /// and refreshed the window three times (#2805).
+    released: Cell<bool>,
     /// Fired once a release or a copy chord actually put text on the
     /// clipboard, so the composer can say so (#2587). Empty until the view
     /// that owns the composer hands one over.
@@ -3024,6 +3029,14 @@ impl CopyDrag {
     /// element guaranteed to still be hovered at mouse up. Calls after a copy
     /// find the selection already cleared, so one gesture copies once.
     pub fn release(&self, window: &mut Window, app: &mut App) {
+        // One gesture, one release. gpui delivers the same mouse-up to the row
+        // under the pointer, to the pane behind it and to the pointer-out
+        // path, and each call ran the whole thing: the click opened once (the
+        // pending press is taken) but logged and refreshed the window once per
+        // element (#2805).
+        if self.released.replace(true) {
+            return;
+        }
         self.dragging.set(false);
         let held = self.copied_text().map_or(0, |text| text.chars().count());
         let copied = self.finish_copy(app);
@@ -3264,6 +3277,7 @@ fn selectable_text_segment(
         begin.anchor.set(Some(TextPoint::new(row, offset)));
         begin.end.set(Some(TextPoint::new(row, offset)));
         begin.dragging.set(true);
+        begin.released.set(false);
         crate::logging::info(&format!("transcript drag start: row={row} offset={offset}"));
         cx.stop_propagation();
         window.refresh();
@@ -3389,6 +3403,7 @@ fn selectable_row<E: gpui::IntoElement>(
             start.anchor.set(Some(TextPoint::new(ordinal, 0)));
             start.end.set(Some(TextPoint::new(ordinal, 0)));
             start.dragging.set(true);
+            start.released.set(false);
             window.refresh();
         })
         .on_mouse_move(move |_ev, window, _app| {
