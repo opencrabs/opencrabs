@@ -11,7 +11,7 @@ fn the_hover_tint_is_not_applied_to_the_selected_row() {
     // #2792 removed the focus wash: every card paints the same panel, so the
     // gate is selection alone and the pointer never paints over the open row.
     assert!(
-        SESSIONS.contains(".when(!selected, |d| {")
+        SESSIONS.contains(".when(!selected, |d| d.hover(")
             && SESSIONS.contains("d.hover(|d| d.bg(rgb(palette::current().bg)))"),
         "the hover tint applies only to rows that are not selected"
     );
