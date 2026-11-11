@@ -1259,6 +1259,104 @@ mod sidebar_action_tests {
     }
 
     #[test]
+    fn a_press_on_the_sidebar_never_takes_the_keyboard() {
+        // #2798: the window root armed the rail from the press's own x
+        // position, so every press in the column that did not commit a pick
+        // (the empty space under the rows, the scrollbar, the header, a
+        // kebab, a filter chip) left the composer without its caret until
+        // Esc. A press is not a walk: only a key arms the rail.
+        let src = include_str!("main.rs");
+        let render = dashboard_render(src);
+        assert!(
+            !render.contains("ev.position.x) <= this.rail_width"),
+            "no pointer press decides who owns the keys"
+        );
+        // The window root's key handler is followed by the one press listener
+        // it owns, and the drag handler comes after it: that slice is the
+        // press, with nothing of the rows' listeners in it.
+        let root_press = render
+            .split(".on_key_down(cx.listener(Self::on_key))")
+            .nth(1)
+            .and_then(|rest| rest.split(".on_mouse_move(").next())
+            .unwrap_or_else(|| panic!("the root still listens for a press"));
+        assert!(
+            root_press.contains("this.rail_hands_back();"),
+            "a press anywhere hands the keys back to the composer"
+        );
+        assert!(
+            !root_press.contains("rail_focused ="),
+            "a press never decides who owns the keys"
+        );
+        assert!(
+            root_press.contains("this.sessions.rail_menu.take()"),
+            "the same press still dismisses the rail's menu"
+        );
+        let helper = fn_body(src, "rail_hands_back");
+        assert!(
+            helper.contains("self.rail_focused = false"),
+            "the rail lets go of the keys"
+        );
+        assert!(
+            helper.contains("self.refocus_screen()"),
+            "the press asks for the caret once the rail lets go"
+        );
+        assert!(
+            helper.find("self.rail_focused = false") < helper.find("self.refocus_screen()"),
+            "the rail has to let go before focus is derived"
+        );
+        assert!(
+            helper.contains("self.split_pick.is_some()"),
+            "a split waiting for its pane keeps the keys its dialog answers"
+        );
+        // The walk still arms without a press, or the arrows and Tab would
+        // have nothing left to open with.
+        let open = fn_body(src, "set_rail_open_state");
+        assert!(
+            open.contains("*rail_focused = true"),
+            "opening the rail still arms the walk"
+        );
+        // Leaving the find field hands the caret back, whichever way it exits.
+        assert!(
+            fn_body(src, "close_rail_filter").contains("self.refocus_screen()"),
+            "closing the filter and the find field asks for the caret"
+        );
+    }
+
+    #[test]
+    fn a_rail_affordance_that_stops_the_press_hands_the_keys_back() {
+        // #2798: these three stop the press before it reaches the window
+        // root, so the root cannot hand the caret back for them. Each one
+        // does it itself, or a press that only opens a card or a menu leaves
+        // the composer waiting for an Esc.
+        let src = include_str!("main.rs");
+        let render = dashboard_render(src);
+        for (anchor, why) in [
+            ("let ask_menu = cx.listener", "a row's right press"),
+            ("let kebab = cx.listener", "the dropbar kebab"),
+            ("let ask = cx.listener", "a topic chip's right press"),
+        ] {
+            let (_head, tail) = render
+                .split_once(anchor)
+                .unwrap_or_else(|| panic!("{why} still opens its card from here"));
+            let listener = tail.split("});").next().unwrap_or("");
+            assert!(
+                listener.contains("this.rail_hands_back();"),
+                "{why} hands the keys back before it opens the card"
+            );
+        }
+        // A row press is not a pick yet, and the caret does not wait for the
+        // release to find out what it was.
+        let (_head, tail) = render
+            .split_once("this.rail_slide_opened = None;")
+            .unwrap_or_else(|| panic!("the row press still starts the slide"));
+        let listener = tail.split("});").next().unwrap_or("");
+        assert!(
+            listener.contains("this.rail_hands_back();"),
+            "a press on a row hands the keys back whether or not it commits"
+        );
+    }
+
+    #[test]
     fn an_attached_file_asks_for_the_caret_back() {
         // #2665: the platform picker holds the keyboard while it is open, so
         // attaching is the moment to ask for it back. Deferred to render
@@ -2125,6 +2223,25 @@ impl Dashboard {
     /// call site reads as taking the keyboard rather than re-labelling the
     /// screen.
     fn refocus_overlay(&mut self) {
+        self.refocus_screen();
+    }
+
+    /// A pointer gesture on the sidebar hands the keys back to the composer.
+    ///
+    /// The rail used to take the keyboard from the press's own x position
+    /// (`x <= rail_width`), so every press in the column armed it and only
+    /// Esc, Tab or a committed row gave the keys back. Every affordance the
+    /// pointer touched without committing a pick cost an Esc before the
+    /// composer would take a character: the empty space under the rows, the
+    /// scrollbar, the brand header, the kebab, a filter chip. A press is not
+    /// a walk (#2798): the rail keeps the keys only while a key put it there,
+    /// and a split still waiting for its pane keeps them because its dialog
+    /// answers N and Esc.
+    fn rail_hands_back(&mut self) {
+        if !self.rail_focused || self.split_pick.is_some() {
+            return;
+        }
+        self.rail_focused = false;
         self.refocus_screen();
     }
 
@@ -10500,6 +10617,9 @@ impl Render for Dashboard {
                 // Where the card opens from: the row's own height, so it
                 // lands beside the row instead of over it (#2742).
                 this.rail_menu_at = Some(ev.position);
+                // The card takes the pointer, not the keyboard: the composer
+                // keeps its caret while the menu is open (#2798).
+                this.rail_hands_back();
                 cx.notify();
             });
             let indented = self.sessions.is_indented(id);
@@ -10590,6 +10710,10 @@ impl Render for Dashboard {
                         // gives the card its height the same way a row's
                         // does (#2742).
                         this.rail_menu_at = Some(ev.position);
+                        // The press stopped at the chip, so the caret comes
+                        // back from here rather than from the window root
+                        // (#2798).
+                        this.rail_hands_back();
                         cx.notify();
                     });
                     let chip = sessions::topic_chip(
@@ -10634,6 +10758,9 @@ impl Render for Dashboard {
                     cx.stop_propagation();
                     this.sessions.rail_menu = Some(id);
                     this.rail_menu_at = Some(ev.position);
+                    // The press stopped here, so the window root never sees
+                    // it: the bar hands the keys back itself (#2798).
+                    this.rail_hands_back();
                     cx.notify();
                 });
                 Some(
@@ -10668,6 +10795,10 @@ impl Render for Dashboard {
                 // Same rule for a transcript row's menu (#2613): the rail is
                 // outside the transcript, so the press closes it too.
                 this.msg_menu = None;
+                // A press is not a pick yet, and the caret does not wait for
+                // one: whatever the release does, the keys are the composer's
+                // from the press on (#2798).
+                this.rail_hands_back();
                 cx.notify();
             });
             let handler = cx.listener(move |this, _ev, _window, cx| {
@@ -12974,12 +13105,13 @@ impl Render for Dashboard {
             // in their own press listener first (#2354).
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, ev: &MouseDownEvent, _window, cx| {
-                    // A press on the sidebar gives it the keyboard; a press
-                    // anywhere else hands the keys back to the composer (#2417).
-                    if this.rail_open {
-                        this.rail_focused = f32::from(ev.position.x) <= this.rail_width * this.rem;
-                    }
+                cx.listener(|this, _ev: &MouseDownEvent, _window, cx| {
+                    // A press anywhere is a press on the conversation unless a
+                    // key put the rail in front (#2798). Arming from the
+                    // pointer's x made every uncommitted press in the column
+                    // take the keyboard, so the composer needed an Esc before
+                    // it would type again.
+                    this.rail_hands_back();
                     if this.sessions.rail_menu.take().is_some() {
                         cx.notify();
                     }
