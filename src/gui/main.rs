@@ -1306,6 +1306,28 @@ mod sidebar_action_tests {
         );
     }
 
+    /// A rename keeps the session's icon (#2791): the dialog seeds the draft
+    /// from the stored value, and the submit path writes it back only when
+    /// the helper says the draft changed it.
+    #[test]
+    fn rename_seeds_and_persists_the_icon() {
+        let src = include_str!("main.rs");
+        let start = fn_body(src, "start_rename");
+        assert!(
+            start.contains("self.topic_draft_icon = self.sessions.topic_icons.get(&id).cloned()"),
+            "the rename dialog opens on the session's own icon"
+        );
+        let submit = fn_body(src, "submit_topic");
+        assert!(
+            submit.contains("sessions::icon_write_needed("),
+            "the rename branch asks the helper before writing"
+        );
+        assert!(
+            submit.contains("sessions::set_topic_icon(db_path, target, draft_icon)"),
+            "the rename branch persists the changed icon"
+        );
+    }
+
     #[test]
     fn a_topic_switch_hands_the_caret_back() {
         // #2741: a click on a topic chip took the caret and never asked for it
@@ -7120,6 +7142,10 @@ impl Dashboard {
         self.topic_menu = None;
         self.topic_rename = Some(id);
         self.topic_draft = Some(current);
+        // The dialog opens on the session's own icon, so a rename that never
+        // touches the picker keeps it (#2791). No stored icon means None, and
+        // the default the badge shows is never written back over nothing.
+        self.topic_draft_icon = self.sessions.topic_icons.get(&id).cloned();
         cx.notify();
     }
 
@@ -7468,13 +7494,36 @@ impl Dashboard {
         // A rename prompt renames the topic in place and changes nothing else.
         if let Some(target) = self.topic_rename {
             let db_path = self.db_path.clone();
+            // The icon rides along with the rename (#2791): the draft was
+            // seeded from the stored value, so only a real change writes.
+            let stored_icon = self.sessions.topic_icons.get(&target).cloned();
+            let draft_icon = self.topic_draft_icon.clone();
             cx.spawn(async move |this, cx| {
-                match sessions::rename_session(db_path, target, name).await {
+                match sessions::rename_session(db_path.clone(), target, name).await {
                     Ok(()) => {
+                        let icon_err = if sessions::icon_write_needed(
+                            stored_icon.as_deref(),
+                            draft_icon.as_deref(),
+                        ) {
+                            sessions::set_topic_icon(db_path, target, draft_icon)
+                                .await
+                                .err()
+                        } else {
+                            None
+                        };
                         this.update(cx, |this, cx| {
+                            if let Some(e) = icon_err {
+                                logging::error(&format!("rename icon {target}: {e}"));
+                                this.live.notices.push(format!("rename icon: {e}"));
+                            }
                             this.topic_draft = None;
                             this.topic_rename = None;
+                            this.topic_draft_icon = None;
                             this.refresh_rail(cx);
+                            // The stored icon may have changed, so the tabs
+                            // and the rail read it back with the rest of the
+                            // topic state, images included (#2791).
+                            this.refresh_topic_state(cx);
                             // The prompt closed, so the caret goes back to the
                             // input the rename was asked from (#2665).
                             this.rail_focused = false;

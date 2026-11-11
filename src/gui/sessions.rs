@@ -1074,6 +1074,17 @@ pub async fn load_telegram_topic_titles(
     }
 }
 
+/// Whether a rename has to write the icon (#2791). The draft is seeded from
+/// the stored value when the dialog opens, so only a real change writes: a
+/// None draft keeps whatever is stored and never overwrites it with the
+/// default, and an equal draft skips the write entirely.
+pub fn icon_write_needed(stored: Option<&str>, draft: Option<&str>) -> bool {
+    match draft {
+        None => false,
+        Some(draft) => stored != Some(draft),
+    }
+}
+
 /// Give one topic an icon, or clear it with None. The caller re-reads afterwards.
 pub async fn set_topic_icon(
     db_path: std::path::PathBuf,
@@ -2320,6 +2331,25 @@ mod tests {
             state.cursor_visible(),
             "a refetch that keeps the row keeps the cursor"
         );
+    }
+
+    /// A rename writes the icon only on a real change (#2791): a None draft
+    /// keeps the stored icon, an equal draft skips, a different one writes.
+    #[test]
+    fn icon_write_needed_only_on_a_real_change() {
+        // A None draft never overwrites the stored icon with the default.
+        assert!(!icon_write_needed(Some("topic:ops"), None));
+        assert!(!icon_write_needed(None, None));
+        // The seeded draft equals the stored value: no write.
+        assert!(!icon_write_needed(Some("topic:ops"), Some("topic:ops")));
+        assert!(!icon_write_needed(
+            Some("img:crab.png"),
+            Some("img:crab.png")
+        ));
+        // A change writes, including the first icon on a bare session.
+        assert!(icon_write_needed(Some("topic:ops"), Some("topic:dev")));
+        assert!(icon_write_needed(None, Some("topic:ops")));
+        assert!(icon_write_needed(Some("topic:ops"), Some("img:crab.png")));
     }
 
     #[test]
