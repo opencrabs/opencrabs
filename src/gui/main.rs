@@ -9953,38 +9953,29 @@ impl Dashboard {
                     cx.notify();
                     return;
                 }
-                // The session letters the terminal answers, on the same keys
-                // (#2670). Each one routes to the handler its row menu item
-                // already calls, so the two paths cannot drift apart. They sit
-                // behind the same rail_focused gate the arrows use, so a letter
-                // typed with the composer focused stays text.
-                "r" if self.rail_focused => {
-                    // Rename the row the keyboard stands on (#2304).
-                    if let Some(id) = self.sessions.rail_target() {
-                        self.start_rename(id, cx);
+                // A printable character with the rail focused starts a search
+                // (#2812). The field arms itself and takes the character, so
+                // the list narrows as a name is typed instead of asking for
+                // ctrl+f first. The letters the terminal answers (r, t, c) are
+                // not spent here: the first keystroke of "rust" cannot also be
+                // the rename command, so the window keeps them on the row menu
+                // and the terminal keeps the bare keys.
+                _ if self.rail_focused => {
+                    let ks = &ev.keystroke;
+                    if ks.modifiers.control || ks.modifiers.platform || ks.modifiers.alt {
+                        // A chord keeps its own meaning; only bare typing
+                        // opens the field.
+                    } else if let Some(ch) = ks.key_char.as_deref().and_then(|s| s.chars().next())
+                        && !ch.is_control()
+                        && !ch.is_whitespace()
+                    {
+                        self.arm_rail_filter(cx);
+                        self.sessions.filter.push(ch);
+                        self.schedule_rail_find(cx);
+                        self.normalize_cursor();
+                        return;
                     }
-                    cx.notify();
-                    return;
                 }
-                "t" if self.rail_focused => {
-                    // New topic under that row (#2397). The prompt works on the
-                    // open chat, so the row is opened first, as the menu does.
-                    if let Some(id) = self.sessions.rail_target() {
-                        self.open_session(id, cx);
-                        self.start_topic_draft(cx);
-                    }
-                    cx.notify();
-                    return;
-                }
-                "c" if self.rail_focused => {
-                    // Close the topic, or reopen it if it is closed (#2305).
-                    if let Some(id) = self.sessions.rail_target() {
-                        self.toggle_closed_topic(id, cx);
-                    }
-                    cx.notify();
-                    return;
-                }
-                _ => {}
             }
         }
         // Chat owns no usage keys. Esc included: backing out of the
@@ -19983,7 +19974,10 @@ mod tests {
         // them: each one appears exactly once, under SESSIONS, with a
         // window chord (#2355). ctrl+u is absent on purpose: the usage
         // ledger already documents it once, in GLOBAL. ctrl+s likewise:
-        // GLOBAL's "List sessions" row is that command.
+        // GLOBAL's "List sessions" row is that command. p and z are absent on
+        // purpose: the window has no projects screen (#2669) and answers no z
+        // since the fold tree became chips (#2701), so neither advertises a
+        // window chord.
         let wanted = [
             ("up/down", "Move the highlight in the list"),
             ("enter", "Open the highlighted session"),
@@ -19992,14 +19986,6 @@ mod tests {
             ("ctrl+d", "Delete session (asks first)"),
             ("ctrl+g", "Session files"),
             ("esc", "Cancel or step back"),
-            // The session letters the rail answers now (#2670). p is absent on
-            // purpose: the window has no projects screen yet (#2669), so its
-            // row carries no window chord. z is absent too: #2701 replaced the
-            // fold tree with chips that always paint, so the window answers no
-            // z and must not advertise one.
-            ("r", "Rename the selected session"),
-            ("t", "Topics on, then a new topic"),
-            ("c", "Close or reopen the selected topic"),
         ];
         let sessions: Vec<_> = help_keys::section_rows(HelpSection::Sessions).collect();
         for (chord, description) in wanted {
@@ -20021,11 +20007,61 @@ mod tests {
                 "{chord} must carry the window's spelling"
             );
         }
+        // r, t and c are terminal-only now (#2812): the window spends its bare
+        // characters on the rail's find field, so a typed name cannot double as
+        // a command. Each row stays in the table, with no window chord, so the
+        // terminal keeps its keys and the window points at the row menu.
+        for (chord, description) in [
+            ("r", "Rename the selected session"),
+            ("t", "Topics on, then a new topic"),
+            ("c", "Close or reopen the selected topic"),
+        ] {
+            let hits: Vec<_> = sessions.iter().filter(|row| row.neutral == chord).collect();
+            assert_eq!(hits.len(), 1, "{chord} must be listed exactly once");
+            let row = hits[0];
+            assert_eq!(row.description, description, "{chord} changed its words");
+            assert_eq!(row.gui, None, "{chord} must not advertise a window chord");
+        }
         // Rows with a window chord are the rail's commands, and those are what
         // must match the list above. Terminal-only rows (the topic keys in
         // /sessions) carry no window chord and are checked by their own tests.
         let rail: Vec<_> = sessions.iter().filter(|row| row.gui.is_some()).collect();
         assert_eq!(rail.len(), wanted.len(), "SESSIONS lists nothing else");
+    }
+
+    #[test]
+    fn a_typed_character_on_the_rail_opens_the_filter() {
+        // A source scan, because the handler needs a window and a key event to
+        // exercise. The rule here is wiring (#2812): the first printable
+        // character arms the field and types itself, and the window no longer
+        // spends bare letters on commands that would swallow it.
+        let src = include_str!("main.rs");
+        let block = src
+            .split_once("if self.screen == Screen::Chat && self.rail_open {")
+            .expect("the rail key block moved")
+            .1;
+        let block = block
+            .split_once("if self.screen == Screen::Chat {")
+            .expect("the rail key block lost its end")
+            .0;
+        assert!(
+            block.contains("_ if self.rail_focused =>"),
+            "a typed character must reach the rail's find field"
+        );
+        assert!(
+            block.contains("self.arm_rail_filter(cx);"),
+            "typing must arm the same field ctrl+f arms"
+        );
+        assert!(
+            block.contains("self.sessions.filter.push(ch);"),
+            "the character that opened the field must also land in it"
+        );
+        for key in ["\"r\"", "\"t\"", "\"c\""] {
+            assert!(
+                !block.contains(&format!("{key} if self.rail_focused")),
+                "{key} must not answer bare on the window's rail"
+            );
+        }
     }
 
     #[test]

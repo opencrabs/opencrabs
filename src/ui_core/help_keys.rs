@@ -411,11 +411,15 @@ pub const ROWS: &[HelpRow] = &[
         Some("ctrl-g"),
         "Session files",
     ),
+    // r, t and c answer in the terminal only (#2812). The window spends its
+    // bare characters on the rail's find field, so the first letter of a
+    // session name cannot also be a command. Rename, New topic and Close topic
+    // stay on the row menu there.
     row(
         HelpSection::Sessions,
         "r",
         "R",
-        Some("r"),
+        None,
         "Rename the selected session",
     ),
     row(HelpSection::Sessions, "p", "P", None, "Browse projects"),
@@ -430,7 +434,7 @@ pub const ROWS: &[HelpRow] = &[
         HelpSection::Sessions,
         "t",
         "T",
-        Some("t"),
+        None,
         "Topics on, then a new topic",
     ),
     row(
@@ -444,7 +448,7 @@ pub const ROWS: &[HelpRow] = &[
         HelpSection::Sessions,
         "c",
         "C",
-        Some("c"),
+        None,
         "Close or reopen the selected topic",
     ),
     row(
