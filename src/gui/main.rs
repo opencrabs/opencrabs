@@ -1336,6 +1336,44 @@ mod sidebar_action_tests {
         );
     }
 
+    /// The session image is the upload trigger (#2790): the badge in the
+    /// prompt carries a click that opens the file picker, and the add-image
+    /// cell keeps its own. Rename and creation share the overlay, so both
+    /// get the trigger.
+    #[test]
+    fn the_session_image_opens_the_picker() {
+        let src = include_str!("main.rs");
+        let overlay = fn_body(src, "topic_prompt_overlay");
+        assert!(
+            overlay.contains(".id(\"topic-prompt-image\")"),
+            "the badge is a click target, not a static picture"
+        );
+        assert!(
+            overlay.contains(".on_click(pick_image)"),
+            "clicking the session image opens the file picker"
+        );
+        assert!(
+            overlay.contains(".cursor_pointer()"),
+            "the badge shows it can be clicked"
+        );
+        let render = dashboard_render(src);
+        let badge_pick = render
+            .split("let pick_image = cx.listener")
+            .nth(1)
+            .expect("the badge listener")
+            .split("});")
+            .next()
+            .expect("listener body");
+        assert!(
+            badge_pick.contains("this.pick_icon_image(cx)"),
+            "the badge opens the same picker the add-image cell opens"
+        );
+        assert!(
+            render.contains(".id(\"topic-icon-add-image\")"),
+            "the add-image cell stays in the picker row"
+        );
+    }
+
     /// The rail card draws the stored icon, not just custom images (#2790):
     /// the same resolver the topic tab uses, so a pick in the rename dialog
     /// reaches the card. Scoped to the window render: this test module sits
@@ -13332,12 +13370,18 @@ impl Render for Dashboard {
             // The badge previews a custom pick from the same cache the rail
             // and tabs draw from (#2790).
             let custom_picture = self.custom_icon_picture(&icon, 3.2);
+            // The session image itself opens the picker, the same handler
+            // the add-image cell uses (#2790).
+            let pick_image = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                this.pick_icon_image(cx);
+            });
             root = root.child(topic_prompt_overlay(
                 label,
                 &draft,
                 &icon,
                 picks,
                 custom_picture,
+                pick_image,
                 cancel,
             ));
         }
@@ -17010,6 +17054,7 @@ fn topic_prompt_overlay(
     icon: &str,
     picks: Vec<Stateful<Div>>,
     custom_picture: Option<AnyElement>,
+    pick_image: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     cancel: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     let field = div()
@@ -17032,7 +17077,11 @@ fn topic_prompt_overlay(
             .or_else(|| topic_icons::crab_icon(icon))
             .map(|bytes| topic_icons::picture(bytes, 3.2).into_any_element())
     });
+    // The badge is the session's own image, so it doubles as the upload
+    // trigger: clicking it opens the same file picker the add-image cell
+    // opens (#2790). The picture itself is the button, Telegram style.
     let icon_badge = div()
+        .id("topic-prompt-image")
         .flex_none()
         // The badge carries the same picture the picker showed, so it has to
         // be big enough to recognise (#2768, #2789).
@@ -17043,6 +17092,9 @@ fn topic_prompt_overlay(
         .rounded(px(CARD_RADIUS))
         .bg(glass_fill(palette::current().bg))
         .text_size(rems(1.4))
+        .cursor_pointer()
+        .hover(|d| d.bg(rgb(palette::current().panel_hi)))
+        .on_click(pick_image)
         .when(
             picture.is_none() && !icon.starts_with(topic_icons::IMG_PREFIX),
             |d| d.child(SharedString::from(icon.to_string())),
