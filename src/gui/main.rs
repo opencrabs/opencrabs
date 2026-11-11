@@ -10323,13 +10323,6 @@ impl Render for Dashboard {
             }
             let selected = self.sessions.selected == Some(id);
             let cursored = self.sessions.cursor == Some(id);
-            // The open conversation may live inside this card as a topic chip:
-            // then the parent carries the focus tint so the rail shows where
-            // you are even though the parent row itself is not selected (#2701).
-            let holds_focus = children_by_parent.get(&id).is_some_and(|kids| {
-                kids.iter()
-                    .any(|(kid_id, _)| self.sessions.selected == Some(*kid_id))
-            });
             let favorite = self.sessions.is_favorite(id);
             // A row's actions stay out of sight until asked for. There is no
             // always-visible delete: an ✕ on every row reads as "close" and
@@ -10396,7 +10389,6 @@ impl Render for Dashboard {
             let flags = sessions::RowFlags {
                 selected,
                 cursored,
-                holds_focus,
                 favorited: favorite,
                 indented,
                 closed,

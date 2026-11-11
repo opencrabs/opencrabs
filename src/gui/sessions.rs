@@ -1328,10 +1328,6 @@ pub fn rail_menu_entries(favorited: bool, topics_enabled: bool) -> Vec<MenuEntry
 pub struct RowFlags {
     pub selected: bool,
     pub cursored: bool,
-    /// This card holds the open conversation as one of its topic chips: the
-    /// parent itself is not selected, but the active session lives inside it,
-    /// so the card carries the focus tint to show where you are (#2701).
-    pub holds_focus: bool,
     pub favorited: bool,
     pub indented: bool,
     pub closed: bool,
@@ -1387,7 +1383,10 @@ pub fn topic_chip(
     plan: Option<(usize, usize)>,
 ) -> Stateful<Div> {
     let pal = palette::current();
-    let base = if selected { pal.selection } else { pal.panel };
+    // The focused chip sits one visible step away from the panel in both
+    // themes (#2792): track, not the old selection wash, plus an accent ring
+    // below. Hover can never equal this fill.
+    let base = if selected { pal.track } else { pal.panel };
     let chip = div()
         .id(SharedString::from(format!("topic-chip-{id}")))
         .relative()
@@ -1417,7 +1416,12 @@ pub fn topic_chip(
         }
         _ => chip.bg(rgb(base)),
     };
-    let mut chip = chip.hover(|d| d.bg(rgb(palette::current().focus)));
+    let mut chip = chip.hover(|d| d.bg(rgb(pal.panel_hi)));
+    // The ring is the "you are here" mark on the focused chip (#2792): a
+    // 1px accent outline over the track fill, never a colour field.
+    if selected {
+        chip = chip.border_1().border_color(rgb(pal.accent));
+    }
     if let Some(glyph) = live {
         chip = chip.child(
             div()
@@ -1452,7 +1456,7 @@ pub fn count_chip(id: uuid::Uuid, label: SharedString) -> Stateful<Div> {
         .text_xs()
         .text_color(rgb(palette::current().text_muted))
         .bg(rgb(palette::current().panel))
-        .hover(|d| d.bg(rgb(palette::current().focus)))
+        .hover(|d| d.bg(rgb(palette::current().panel_hi)))
         .child(label)
 }
 
@@ -1492,7 +1496,6 @@ pub fn row(
     let RowFlags {
         selected,
         cursored,
-        holds_focus,
         favorited,
         indented,
         closed,
@@ -1672,20 +1675,19 @@ pub fn row(
         .p_2()
         .when(indented, |d| d.pl_4().pr_2().py_1())
         .cursor_pointer()
-        // A card that holds the open topic carries the focus tint: you are
-        // inside one of its chips, so the parent shows where you are (#2701).
-        .when(holds_focus, |d| d.bg(rgb(palette::current().focus)))
-        .when(selected, |d| d.bg(rgb(palette::current().selection)))
+        // Every card paints the same soft panel, focused or not (#2792):
+        // state reads from the small marks, never a big colour field. The
+        // accent bar below is the only "you are here" cue, Telegram style.
+        .bg(rgb(palette::current().panel))
         // The accent bar marks the open conversation, and only it: the
         // keyboard cursor gets no bar and no replacement cue. Selection
         // alone decides (#2717, overruling #2351's two-state design).
         .when(accent_bar_visible(selected, cursored), |d| {
             d.border_l_2().border_color(rgb(palette::current().accent))
         })
-        // The hover tint is for rows that are neither selected nor holding the
-        // open topic. On either it would paint over the state and hide which
-        // conversation is open.
-        .when(!selected && !holds_focus, |d| {
+        // The hover tint is for rows that are not selected: on the open one
+        // it would paint over the state and hide which conversation is open.
+        .when(!selected, |d| {
             d.hover(|d| d.bg(rgb(palette::current().bg)))
         })
         .child(body);
@@ -1798,7 +1800,7 @@ fn action_icon(id: &'static str, icon: AnyElement, label: &'static str) -> State
         .size(rems(1.6))
         .rounded_sm()
         .cursor_pointer()
-        .hover(|d| d.bg(rgb(palette::current().focus)))
+        .hover(|d| d.bg(rgb(palette::current().panel_hi)))
         .child(icon)
 }
 
@@ -1886,7 +1888,7 @@ pub fn filter_chip(id: &'static str, label: &'static str, active: bool) -> State
         .bg(rgb(bg))
         .text_color(rgb(fg))
         .cursor_pointer()
-        .hover(|d| d.bg(rgb(shown.focus)))
+        .hover(|d| d.bg(rgb(shown.panel_hi)))
         .child(SharedString::from(label))
 }
 
@@ -2726,8 +2728,8 @@ mod tests {
             "a running plan fills the chip like a progress bar (#2701)"
         );
         assert!(
-            row_source.contains(".when(holds_focus,"),
-            "a parent card tints when it holds the open topic (#2701)"
+            !row_source.contains(".when(holds_focus,"),
+            "the focus wash is gone: every card paints the same panel (#2792)"
         );
 
         // The paint loop drops a chip child from the row stream, so it never
@@ -2756,8 +2758,85 @@ mod tests {
             "the chip set never hides a folded parent's topics: chips always paint"
         );
         assert!(
-            main_source.contains("let holds_focus = children_by_parent"),
-            "the rail resolves parent focus from the open topic (#2701)"
+            !main_source.contains("let holds_focus"),
+            "the parent focus computation is removed, not masked (#2792)"
+        );
+    }
+
+    /// Honest focus states (#2792): three clearly separate levels. Every
+    /// card paints panel; hover is panel_hi on the chips and icons; the
+    /// focused chip is track plus a 1px accent ring. No card background is
+    /// painted from focus or selection.
+    #[test]
+    fn focus_states_are_small_marks_not_colour_fields() {
+        let source = include_str!("sessions.rs");
+        let row_source = source
+            .split("pub fn row(")
+            .nth(1)
+            .expect("session row renderer")
+            .split("pub fn on_click(")
+            .next()
+            .expect("row source before click handler");
+        assert!(
+            row_source.contains(".bg(rgb(palette::current().panel))"),
+            "every card paints the same soft panel"
+        );
+        assert!(
+            !row_source.contains("palette::current().focus")
+                && !row_source.contains("palette::current().selection"),
+            "no card background comes from the focus or selection wash"
+        );
+        let chip_source = source
+            .split("pub fn topic_chip(")
+            .nth(1)
+            .expect("topic chip renderer")
+            .split("pub fn count_chip(")
+            .next()
+            .expect("chip source before the overflow pill");
+        assert!(
+            chip_source.contains("if selected { pal.track } else { pal.panel }"),
+            "the focused chip fills with track, one step off the panel"
+        );
+        assert!(
+            chip_source.contains(".border_1().border_color(rgb(pal.accent))"),
+            "the focused chip carries a 1px accent ring"
+        );
+        assert!(
+            chip_source.contains(".hover(|d| d.bg(rgb(pal.panel_hi)))"),
+            "chip hover is panel_hi, never the focused fill"
+        );
+        let count_source = source
+            .split("pub fn count_chip(")
+            .nth(1)
+            .expect("overflow pill renderer")
+            .split("pub fn topic_chips(")
+            .next()
+            .expect("pill source before the strip");
+        assert!(
+            count_source.contains(".hover(|d| d.bg(rgb(palette::current().panel_hi)))"),
+            "the overflow pill hovers at panel_hi too"
+        );
+        let action_source = source
+            .split("fn action_icon(")
+            .nth(1)
+            .expect("action icon renderer")
+            .split("fn glyph_icon(")
+            .next()
+            .expect("action source before the glyph helper");
+        assert!(
+            action_source.contains(".hover(|d| d.bg(rgb(palette::current().panel_hi)))"),
+            "the slide-out icons hover at panel_hi too"
+        );
+        let filter_source = source
+            .split("fn filter_chip(")
+            .nth(1)
+            .expect("filter chip renderer")
+            .split("pub fn rail(")
+            .next()
+            .expect("filter source before the rail column");
+        assert!(
+            filter_source.contains(".hover(|d| d.bg(rgb(shown.panel_hi)))"),
+            "the filter chips hover at panel_hi too"
         );
     }
 

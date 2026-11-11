@@ -29,9 +29,9 @@ fn session_rows_paint_edge_to_edge_without_card_chrome() {
         "the rail adds no outer gutter or gap around its rows"
     );
     assert!(
-        SESSIONS.contains(".when(!selected && !holds_focus, |d| {")
-            && SESSIONS.contains(".when(selected, |d| d.bg("),
-        "hover and selection still paint on the full-width row"
+        SESSIONS.contains(".when(!selected, |d| {")
+            && SESSIONS.contains(".bg(rgb(palette::current().panel))"),
+        "hover still paints on the full-width row, and every card paints the same panel (#2792)"
     );
 }
 

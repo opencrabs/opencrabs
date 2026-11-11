@@ -8,12 +8,12 @@ const MODEL_PICKER: &str = include_str!("../gui/model_picker.rs");
 
 #[test]
 fn the_hover_tint_is_not_applied_to_the_selected_row() {
-    // #2717 widened the gate: a row that holds the open topic also skips the
-    // hover tint, so the focus wash is never painted over by the pointer.
+    // #2792 removed the focus wash: every card paints the same panel, so the
+    // gate is selection alone and the pointer never paints over the open row.
     assert!(
-        SESSIONS.contains(".when(!selected && !holds_focus, |d| {")
+        SESSIONS.contains(".when(!selected, |d| {")
             && SESSIONS.contains("d.hover(|d| d.bg(rgb(palette::current().bg)))"),
-        "the hover tint applies only to rows that are neither selected nor focused"
+        "the hover tint applies only to rows that are not selected"
     );
 }
 
