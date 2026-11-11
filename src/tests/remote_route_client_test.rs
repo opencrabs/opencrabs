@@ -15,7 +15,15 @@ fn store() -> (tempfile::TempDir, RouteStore) {
     (dir, st)
 }
 
-/// Minimal HTTP responder: fixed body for any GET, optional delay.
+/// Minimal HTTP responder: fixed body for any GET.
+///
+/// Reads the request head before answering. That is not politeness: a socket
+/// closed with unread bytes still sitting in its receive buffer is reset
+/// instead of finished, so the client's in-flight exchange dies with a
+/// transport error instead of the response it was sent. Leaving the request
+/// unread is what made `harvest_*` pass on macOS and fail on the Linux CI leg
+/// (the two stacks disagree on what close() does with unread data). The
+/// sibling `a2a_transport_cause_test` reads first for the same reason.
 async fn mock_server(body: String) -> (String, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -23,7 +31,23 @@ async fn mock_server(body: String) -> (String, tokio::task::JoinHandle<()>) {
         while let Ok((mut sock, _)) = listener.accept().await {
             let body = body.clone();
             tokio::spawn(async move {
-                use tokio::io::AsyncWriteExt;
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                // Drain the request head. Bounded so a client that never
+                // sends the terminator cannot hang the responder.
+                let mut req = [0u8; 2048];
+                let mut seen = 0usize;
+                while seen < req.len() {
+                    match sock.read(&mut req[seen..]).await {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            seen += n;
+                            if req[..seen].windows(4).any(|w| w == b"\r\n\r\n") {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
                 let head = format!(
                     "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
                     body.len()
