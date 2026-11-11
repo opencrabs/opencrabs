@@ -19,6 +19,7 @@ use opencrabs::ui_core::input_history::{
     input_history_down, input_history_up, record_input_history,
 };
 use opencrabs::ui_core::palette::{next_word_end, previous_word_start};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -214,7 +215,14 @@ pub fn marker_paths(text: &str) -> Vec<PathBuf> {
 /// The message text without its `<<IMG:...>>` / `<<VID:...>>` markers. Those
 /// files are drawn as thumbnails, so leaving the raw marker in the bubble
 /// would print the same attachment twice, once as pixels and once as text.
-pub fn strip_markers(text: &str) -> String {
+///
+/// Borrowed when the text carries no marker, which is nearly every row: the
+/// transcript asks this of every message on every frame, so copying each one
+/// into a fresh `String` was pure garbage on the paint path (#2805).
+pub fn strip_markers(text: &str) -> Cow<'_, str> {
+    if !text.contains("<<") {
+        return Cow::Borrowed(text.trim());
+    }
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(start) = rest.find("<<") {
@@ -238,7 +246,7 @@ pub fn strip_markers(text: &str) -> String {
         rest = after.get(end + 2..).unwrap_or_default();
     }
     out.push_str(rest);
-    out.trim().to_string()
+    Cow::Owned(out.trim().to_string())
 }
 
 /// The file name of a path, for chips built from stored messages.

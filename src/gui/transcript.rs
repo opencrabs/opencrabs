@@ -3452,7 +3452,7 @@ fn block_text(block: &Block) -> String {
             if role == "assistant" {
                 markdown_copy_text(&text)
             } else {
-                text
+                text.into_owned()
             }
         }
         Block::Thinking { content } => content.trim().to_string(),
