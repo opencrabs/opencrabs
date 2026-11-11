@@ -349,8 +349,9 @@ fn selected_topic_owns_the_parent_activity_line() {
 /// Telegram puts the pin beside the topic cards, not on the name line (#2803).
 /// A card with topics therefore hands the pin to its chip block, and a card
 /// without topics keeps it on the name line so no empty row is invented.
-/// The pin caps the block from its own line (#2809): a column beside the strip
-/// took the pin's width out of every wrapped row.
+/// The pin floats on the strip's first line (#2809): a column beside the strip
+/// took its width out of every wrapped row, and a line of its own pushed the
+/// chips down.
 #[test]
 fn the_pin_rides_the_chip_line_when_a_card_has_topics() {
     let row = block(SESSIONS, "pub fn row(", "pub fn on_click(");
@@ -368,12 +369,15 @@ fn the_pin_rides_the_chip_line_when_a_card_has_topics() {
         "the chip block mounts the pin at its right edge"
     );
     assert!(
-        footer.contains(".flex_col()"),
-        "the pin takes its own line above the strip instead of a column beside it"
+        footer.contains(".relative()")
+            && footer.contains(".absolute()")
+            && footer.contains(".top_0()")
+            && footer.contains(".right_0()"),
+        "the pin floats on the strip's first line at the card's right edge"
     );
     assert!(
-        footer.contains(".justify_end()"),
-        "the pin line holds the card's right edge"
+        !footer.contains(".flex_col()"),
+        "the pin never takes a line of its own above the chips"
     );
     assert!(
         footer.contains("div().w_full().min_w_0().child(strip)"),

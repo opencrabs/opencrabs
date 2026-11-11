@@ -1664,9 +1664,9 @@ pub fn row(s: &Session, flags: RowFlags, chips: Option<Stateful<Div>>) -> Statef
                 rail_cost(cost)
             )))
     });
-    // The pin rides the card's last line, the way Telegram puts it beside the
-    // topic cards (#2803). With topics attached that line is the chip strip,
-    // where the pin keeps the card's right edge; a card with no topics keeps
+    // The pin rides the card's chip line, the way Telegram puts it beside the
+    // topic cards (#2803, #2809). With topics attached it floats over the
+    // strip's first line at the card's right edge; a card with no topics keeps
     // the pin on its name line so it never invents an empty row.
     let (title_pin, footer_pin) = if chips.is_some() {
         (None, pin_toggle)
@@ -1711,29 +1711,21 @@ pub fn row(s: &Session, flags: RowFlags, chips: Option<Stateful<Div>>) -> Statef
                 // (#2636).
                 .when_some(badge, |d, glyph| d.child(badge_cell(glyph))),
         );
-    // The pin caps the chip block from its own line at the card's right edge
-    // (#2809). Held beside the strip in a flex row, the pin took its width out
-    // of every wrapped line: a 28-topic card lost about 30px of chip width on
-    // all eleven rows, and the rows below the first one left a dead column
-    // under the glyph. Above the strip the pin keeps the card's right edge and
-    // costs no width, so the chips wrap against the whole card and the rows
-    // under it use the space the pin would have eaten.
+    // The pin rides the strip's first line at the card's right edge, the way
+    // Telegram pins a row (#2809). It floats over the strip instead of taking
+    // a column beside it: a wrapping flex row cannot reserve the right end of
+    // its first line alone, so a sibling column charged the pin's width to
+    // every wrapped row (a 28-topic card lost about 30px on all eleven rows)
+    // while a line of its own pushed the whole strip down. Overlaid, the pin
+    // costs no width, so the chips wrap against the whole card on every row.
     let footer = match (chips, footer_pin) {
         (Some(strip), Some(pin)) => Some(
             div()
-                .flex()
-                .flex_col()
+                .relative()
                 .w_full()
                 .min_w_0()
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .justify_end()
-                        .w_full()
-                        .child(pin),
-                )
-                .child(div().w_full().min_w_0().child(strip)),
+                .child(div().w_full().min_w_0().child(strip))
+                .child(div().absolute().top_0().right_0().child(pin)),
         ),
         (Some(strip), None) => Some(div().w_full().child(strip)),
         (None, _) => None,
