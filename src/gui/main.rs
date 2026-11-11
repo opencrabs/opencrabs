@@ -10678,6 +10678,11 @@ impl Render for Dashboard {
                 // The card's last line: whatever detached command is still
                 // running here, formatted exactly as the composer strip does.
                 running: running_tasks.get(&id).cloned(),
+                // A card stands for its topics, so its stamp adds their spend
+                // (#2807). A topic keeps its own ledger row and paints no
+                // stamp of its own, which makes the card the only place the
+                // money under it can be summed.
+                cost: self.sessions.grouped_cost(s.total_cost, id),
                 // The stored icon leads the row (#2790), resolved exactly
                 // like the topic tab resolves it: an embedded mark, a
                 // custom image from the view's cache, or a legacy glyph.

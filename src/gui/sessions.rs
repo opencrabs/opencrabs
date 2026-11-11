@@ -131,6 +131,17 @@ impl SessionsState {
         })
     }
 
+    /// The spend a rail card stands for (#2807): its own ledger row plus every
+    /// topic grouped under it. A topic keeps its own row in the table and
+    /// paints no stamp, so without this the card showed the parent's spend
+    /// alone and the money spent in its chips disappeared from the rail.
+    pub fn grouped_cost(&self, own: f64, parent: uuid::Uuid) -> f64 {
+        self.items
+            .iter()
+            .filter(|s| self.parents.get(&s.id) == Some(&parent))
+            .fold(own, |total, s| total + s.total_cost)
+    }
+
     /// Pinned first, then everything else, each group keeping the ledger's
     /// order. TUI parity: `SessionService::session_favorites` feeds a stable
     /// `sort_by_key(|s| !pins.contains(&s.id))`, so a pin moves a chat to the
@@ -1417,6 +1428,10 @@ pub struct RowFlags {
     /// nothing runs. Paints as the card's last line, under the plan bar, so a
     /// row says "work is still going here" without being opened.
     pub running: Option<SharedString>,
+    /// The spend the card prints, already rolled up over the topics it hides
+    /// as chips (#2807). The row never reads `s.total_cost` itself, so a
+    /// grouped card cannot print a number that leaves its children out.
+    pub cost: f64,
     /// The session's stored icon, already built by the view (#2790): an
     /// embedded mark, a custom image or a legacy glyph. It leads the optional
     /// channel mark rather than replacing it (#2800). The module never reads
@@ -1558,6 +1573,7 @@ pub fn row(s: &Session, flags: RowFlags, chips: Option<Stateful<Div>>) -> Statef
         plan,
         flash,
         running,
+        cost,
         icon,
     } = flags;
     // A channel card says the chat once: the platform prints as its mark, not
@@ -1651,7 +1667,7 @@ pub fn row(s: &Session, flags: RowFlags, chips: Option<Stateful<Div>>) -> Statef
             .child(SharedString::from(format!(
                 "{} · {}",
                 rail_stamp(s.updated_at, chrono::Local::now()),
-                rail_cost(s.total_cost)
+                rail_cost(cost)
             )))
     });
     // The pin rides the card's last line, the way Telegram puts it beside the
@@ -2332,6 +2348,39 @@ mod tests {
         assert_eq!(state.cursor_step(Some(last), 1), Some(last));
     }
 
+    /// A grouped card prints what it stands for (#2807): its own ledger row
+    /// plus every topic grouped under it, so the money spent inside the chips
+    /// shows on the card instead of vanishing from the rail.
+    #[test]
+    fn a_grouped_card_adds_its_topics_cost() {
+        let parent = uuid::Uuid::from_u128(1);
+        let mut parent_row = session(1, "OCDevCore");
+        parent_row.total_cost = 100.0;
+        let mut first = session(2, "topic one");
+        first.total_cost = 50.0;
+        let mut second = session(3, "topic two");
+        second.total_cost = 25.5;
+        let mut stray = session(4, "another chat");
+        stray.total_cost = 900.0;
+        let mut state = SessionsState {
+            items: vec![parent_row, first, second, stray],
+            ..Default::default()
+        };
+        state.parents.insert(uuid::Uuid::from_u128(2), parent);
+        state.parents.insert(uuid::Uuid::from_u128(3), parent);
+
+        assert_eq!(
+            state.grouped_cost(100.0, parent),
+            175.5,
+            "the card adds both topics and ignores a chat it does not own"
+        );
+        assert_eq!(
+            state.grouped_cost(100.0, uuid::Uuid::from_u128(9)),
+            100.0,
+            "a card with no topics prints only its own spend"
+        );
+    }
+
     /// A cursor on a row that is gone (deleted, filtered out) disarms
     /// instead of arming a ghost; a cursor on a surviving row stays put.
     #[test]
@@ -2928,7 +2977,7 @@ mod tests {
             "the stamp reads the shared day-or-clock formatter"
         );
         assert!(
-            title_line.contains("rail_cost(s.total_cost)"),
+            title_line.contains("rail_cost(cost)"),
             "the cost reads the shared compact formatter"
         );
         assert!(

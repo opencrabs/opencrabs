@@ -183,8 +183,8 @@ fn rail_header_has_no_kebab_and_one_right_aligned_metadata_cluster() {
     // trailing cluster leaves.
     let stamp = block(row, "let stamp = (!indented)", "let title = div()");
     assert!(
-        stamp.contains("rail_stamp(s.updated_at") && stamp.contains("rail_cost(s.total_cost)"),
-        "the stamp is the shared day-or-clock plus compact cost"
+        stamp.contains("rail_stamp(s.updated_at") && stamp.contains("rail_cost(cost)"),
+        "the stamp is the shared day-or-clock plus the rolled-up compact cost"
     );
     assert!(
         stamp.contains(".text_xs()") && stamp.contains(".flex_none()"),
