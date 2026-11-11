@@ -151,7 +151,11 @@ fn mc_analytics_cards(
 /// analytics numbers are a label and a value, so the value sits flush right
 /// and the label ellipsizes before it, which keeps the columns readable at any
 /// card width.
-enum McRow {
+///
+/// `pub(crate)` because the phantom card's rows cross the module boundary: a
+/// helper that hands back `Vec<McRow>` is reachable from the crate root, so
+/// the row type has to be too or the lint gate stops the build.
+pub(crate) enum McRow {
     /// A whole line, truncated when the card is narrower than it.
     Line(String, u32),
     /// A label on the left, a value flush against the right.
