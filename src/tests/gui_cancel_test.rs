@@ -10,15 +10,19 @@
 //! `pane.busy` set. The behaviour of `race_turn` itself is pinned by the bin
 //! suite (`gui_cancel_race_*`); the wiring is the contract here.
 
-const GUI_MAIN: &str = include_str!("../gui/main.rs");
 const AGENT_BRIDGE: &str = include_str!("../gui/agent_bridge.rs");
+/// The handler, the key reader and the settle arm moved into modules of their
+/// own (#2822), so each region below reads the file it lives in.
+const DASHBOARD_KEYS: &str = include_str!("../gui/dashboard_keys.rs");
+const DASHBOARD_COMMANDS: &str = include_str!("../gui/dashboard_commands.rs");
+const DASHBOARD_TURNS: &str = include_str!("../gui/dashboard_turns.rs");
 
 /// The Esc branch, cut at the line where a stopped turn reports itself.
 fn esc_stop_block() -> &'static str {
-    let start = GUI_MAIN
+    let start = DASHBOARD_KEYS
         .find("if ev.keystroke.key == \"escape\" {")
         .expect("on_key has an escape branch");
-    let tail = GUI_MAIN
+    let tail = DASHBOARD_KEYS
         .get(start..)
         .expect("the escape branch starts on a char boundary");
     tail.split_once("logging::info(\"turn cancelled by Esc\")")
@@ -26,25 +30,24 @@ fn esc_stop_block() -> &'static str {
         .0
 }
 
-/// `stop_turn`, cut where its body ends and the next handler's doc begins.
+/// `stop_turn`, from its signature to the end of the file. It is the last
+/// handler in its module (#2822), so the slice ends there rather than at the
+/// next handler's doc comment, which now lives in another module.
 fn stop_turn_body() -> &'static str {
-    let start = GUI_MAIN
+    let start = DASHBOARD_COMMANDS
         .find("fn stop_turn(")
         .expect("the window handles /stop");
-    GUI_MAIN
+    DASHBOARD_COMMANDS
         .get(start..)
         .expect("the handler starts on a char boundary")
-        .split("/// `/models` with no argument")
-        .next()
-        .expect("stop_turn ends before the picker handler")
 }
 
 /// The arm that settles a turn whose future was dropped.
 fn cancelled_arm() -> &'static str {
-    let start = GUI_MAIN
+    let start = DASHBOARD_TURNS
         .find("agent_bridge::TurnEvent::Cancelled { session } => {")
         .expect("the window settles a dropped turn");
-    GUI_MAIN
+    DASHBOARD_TURNS
         .get(start..)
         .expect("the settle arm starts on a char boundary")
         .split("agent_bridge::TurnEvent::TurnReverted")

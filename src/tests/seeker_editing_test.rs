@@ -104,7 +104,8 @@ fn seeker_editing_cut_and_paste_replace_the_live_selection() {
 
 #[test]
 fn seeker_editing_gui_uses_clipboard_shaped_hits_and_selection_paint() {
-    let main = include_str!("../gui/main.rs");
+    // The window's seeker handlers moved with the dashboard impl (#2822).
+    let main = crate::tests::gui_dashboard_source::DASHBOARD;
     assert!(main.contains("ClipboardItem::new_string"));
     assert!(main.contains("cx.read_from_clipboard()"));
     assert!(main.contains("fn seeker_index_for_position"));

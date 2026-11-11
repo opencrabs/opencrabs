@@ -4,6 +4,8 @@
 //! data half is real: the icons the tabs paint are the rows
 //! `SessionRepository::topic_icons` returns, which is the call boot now makes.
 
+use crate::tests::gui_dashboard_source::DASHBOARD;
+
 const GUI_MAIN: &str = include_str!("../gui/main.rs");
 const SESSIONS: &str = include_str!("../gui/sessions.rs");
 // The card, its item and the popover moved out of the session rail so the
@@ -20,11 +22,11 @@ const TOPIC_BAR: &str = include_str!("../gui/topic_bar_view.rs");
 #[tokio::test]
 async fn boot_reads_the_icon_rows_instead_of_starting_with_an_empty_map() {
     assert!(
-        !GUI_MAIN.contains("topic_icons: HashMap::new()"),
+        !DASHBOARD.contains("topic_icons: HashMap::new()"),
         "boot fills topic_icons from the database, never with an empty map"
     );
     assert!(
-        GUI_MAIN.contains("sessions::load_topic_icons("),
+        DASHBOARD.contains("sessions::load_topic_icons("),
         "boot loads the icons it paints"
     );
 
@@ -85,15 +87,15 @@ fn the_menu_floats_as_a_card_and_the_strip_nothing_grows_from() {
         "the rail re-exports the primitives it still draws with"
     );
     assert!(
-        GUI_MAIN.contains("sessions::menu_popover(\"chat-menu\", items, at)"),
+        DASHBOARD.contains("sessions::menu_popover(\"chat-menu\", items, at)"),
         "the chat menu draws the same card, at the press that asked for it"
     );
     assert!(
-        !GUI_MAIN.contains("fn topic_bar("),
+        !DASHBOARD.contains("fn topic_bar("),
         "the strip used to hold the button and its items; it holds neither"
     );
     assert!(
-        GUI_MAIN
+        DASHBOARD
             .contains("let strip = topic_strip(\"window\", self.topic_edge, toggle_edge, tabs);"),
         "the strip takes a key, the tabs and the edge button, nothing else"
     );
@@ -121,15 +123,15 @@ fn a_right_press_on_a_tab_and_on_the_chat_opens_the_same_card() {
         "a topic tab answers a right press"
     );
     assert!(
-        GUI_MAIN.contains(".on_mouse_down(MouseButton::Right, ask_menu)"),
+        DASHBOARD.contains(".on_mouse_down(MouseButton::Right, ask_menu)"),
         "the conversation answers a right press"
     );
     assert!(
-        GUI_MAIN.contains("this.topic_menu = Some(id);"),
+        DASHBOARD.contains("this.topic_menu = Some(id);"),
         "a tab's press opens the card for that tab's session, not for whatever is on screen"
     );
     assert!(
-        !GUI_MAIN.contains("chat-menu-button"),
+        !DASHBOARD.contains("chat-menu-button"),
         "the row that held the `...` is gone, so the card opens from a right press (#2596)"
     );
 }
@@ -139,19 +141,19 @@ fn a_right_press_on_a_tab_and_on_the_chat_opens_the_same_card() {
 #[test]
 fn the_chat_screen_draws_no_title_row() {
     assert!(
-        !GUI_MAIN.contains("let mut header = div()"),
+        !DASHBOARD.contains("let mut header = div()"),
         "no title row above the transcript"
     );
     assert!(
-        !GUI_MAIN.contains("fn session_title(name: &str)"),
+        !DASHBOARD.contains("fn session_title(name: &str)"),
         "the row's title helper went with it"
     );
     assert!(
-        !GUI_MAIN.contains("fn header_name("),
+        !DASHBOARD.contains("fn header_name("),
         "the shortening helper existed only for that row"
     );
     assert!(
-        GUI_MAIN.contains("self.session_title().unwrap_or_else(|| \"chat\".to_string()),"),
+        DASHBOARD.contains("self.session_title().unwrap_or_else(|| \"chat\".to_string()),"),
         "the footer still leads with the conversation's name"
     );
 }

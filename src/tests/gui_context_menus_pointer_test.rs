@@ -8,7 +8,11 @@
 //! user click". A long message pushed its menu far from the press, and in a
 //! split the pane's own frame moved it again.
 
+use crate::tests::gui_dashboard_source::DASHBOARD;
+
 const GUI_MAIN: &str = include_str!("../gui/main.rs");
+/// The window's menu doors moved into a module of their own (#2822).
+const DASHBOARD_RAIL: &str = include_str!("../gui/dashboard_rail.rs");
 const TRANSCRIPT: &str = include_str!("../gui/transcript.rs");
 const EDITOR: &str = include_str!("../gui/editor.rs");
 const MENU: &str = include_str!("../gui/menu.rs");
@@ -54,18 +58,18 @@ fn every_right_press_records_the_point_it_happened_at() {
     // Three entry points on the rail: a row's right press, a topic chip's
     // right press, and the left swipe (#2797).
     assert_eq!(
-        code(GUI_MAIN)
+        code(DASHBOARD)
             .matches("this.rail_menu_at = Some(ev.position);")
             .count(),
         3,
         "a rail row, a topic chip and the swipe each record their press"
     );
     assert!(
-        code(GUI_MAIN).contains("this.topic_menu_at = Some(ev.position);"),
+        code(DASHBOARD).contains("this.topic_menu_at = Some(ev.position);"),
         "a topic tab records its press too"
     );
     assert!(
-        code(GUI_MAIN).contains("this.msg_menu_open(id, ev.position, cx);"),
+        code(DASHBOARD).contains("this.msg_menu_open(id, ev.position, cx);"),
         "a stored message row opens its menu at the press"
     );
     assert!(
@@ -120,7 +124,7 @@ fn every_menu_goes_through_the_one_pointer_popover() {
         "sessions::menu_popover(\"rail-context-menu\", items, at)",
         "sessions::menu_popover(\"chat-menu\", items, at)",
     ] {
-        assert!(GUI_MAIN.contains(call), "the window draws {call}");
+        assert!(DASHBOARD.contains(call), "the window draws {call}");
     }
     assert!(
         TRANSCRIPT.contains("crate::menu::menu_popover(\"message-context-menu\", rows, at)"),
@@ -234,7 +238,7 @@ fn the_composer_menu_closes_on_escape_and_on_a_press_outside_it() {
         EDITOR.contains("pub fn close_context_menu("),
         "the window can close it without reaching into the field"
     );
-    let close = fn_body(GUI_MAIN, "close_composer_menus");
+    let close = fn_body(DASHBOARD_RAIL, "close_composer_menus");
     assert!(
         close.contains("editor.close_context_menu(cx)"),
         "the window closes the composer's card through its own door"

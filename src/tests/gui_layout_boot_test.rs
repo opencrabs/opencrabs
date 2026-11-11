@@ -7,13 +7,14 @@
 //! hold the fix: the layout names the boot conversation, and the save
 //! records which leaf was the window's own chat.
 
-const GUI_MAIN: &str = include_str!("../gui/main.rs");
+use crate::tests::gui_dashboard_source::DASHBOARD;
+
 const LAYOUT_STORE: &str = include_str!("../gui/layout_store.rs");
 
 #[test]
 fn the_boot_pick_comes_from_the_saved_layout_first() {
     assert!(
-        GUI_MAIN.contains("layout_store::boot_session(saved, &known)"),
+        DASHBOARD.contains("layout_store::boot_session(saved, &known)"),
         "the launch asks the saved layout which conversation to open"
     );
 }
@@ -21,7 +22,7 @@ fn the_boot_pick_comes_from_the_saved_layout_first() {
 #[test]
 fn the_launch_still_falls_back_to_the_normal_pick() {
     assert!(
-        GUI_MAIN.contains("pick_initial_session("),
+        DASHBOARD.contains("pick_initial_session("),
         "no layout or no surviving leaf keeps the old boot pick"
     );
 }
@@ -41,7 +42,7 @@ fn the_saved_layout_carries_the_chat_leaf_field() {
 #[test]
 fn the_restore_still_checks_the_chat_is_a_pane() {
     assert!(
-        GUI_MAIN.contains("if !tree.contains(chat)"),
+        DASHBOARD.contains("if !tree.contains(chat)"),
         "the safety net stays: a wrong window is worse than a plain one"
     );
 }

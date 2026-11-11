@@ -5,6 +5,11 @@
 //! could not move between panes, and a split that could not split again.
 
 const GUI_MAIN: &str = include_str!("../gui/main.rs");
+/// The dashboard's inherent impl split into modules by concern (#2822). Each
+/// region below reads the one file the code it pins now lives in.
+const DASHBOARD_KEYS: &str = include_str!("../gui/dashboard_keys.rs");
+const DASHBOARD_PANES: &str = include_str!("../gui/dashboard_panes.rs");
+const DASHBOARD_TURNS: &str = include_str!("../gui/dashboard_turns.rs");
 
 /// The pane chrome and the split's geometry, which live in their own module
 /// (#2817 follow-up). The rules below still read source, because the window has
@@ -38,13 +43,13 @@ fn composer_arm() -> &'static str {
         .expect("the chat arm comes before the footer-only arms")
 }
 
-/// The key handler, from its opening to the next method on the window.
+/// The key handler, from its opening to the next method in its module (#2822).
 fn on_key() -> &'static str {
-    GUI_MAIN
+    DASHBOARD_KEYS
         .split("fn on_key(")
         .nth(1)
         .expect("on_key is defined")
-        .split("\n    fn ")
+        .split("\n    pub(crate) fn ")
         .next()
         .expect("the handler has a body")
 }
@@ -69,13 +74,10 @@ fn pane_element() -> &'static str {
 /// The body that draws the chat screen's pane tree (#2530): where each pane's
 /// own plan, queue and composer are built before the walk paints them.
 fn panes_body() -> &'static str {
-    GUI_MAIN
+    DASHBOARD_PANES
         .split("fn panes_body(")
         .nth(1)
         .expect("panes_body is defined")
-        .split("impl Render for Dashboard {")
-        .next()
-        .expect("the body closes before the window's render")
 }
 
 /// The dimmed composer an unfocused pane shows (#2530).
@@ -122,7 +124,7 @@ fn a_split_widens_nothing_when_it_is_absent() {
         "two panes share the content width through split_pane_width, which subtracts the gap and the handle"
     );
     assert!(
-        GUI_MAIN.contains("if tree.leaves().len() < 2 {\n            return chat;"),
+        DASHBOARD_PANES.contains("if tree.leaves().len() < 2 {\n            return chat;"),
         "a tree of one leaf hands the chat back untouched, which is the unsplit window"
     );
 }
@@ -213,7 +215,7 @@ fn choosing_a_session_repaints_before_the_transcript_loads() {
     // restored layout both call, so the store and its repaint live there
     // (#2675). The ordering it has to keep is unchanged: paint the pane, then
     // load its transcript.
-    let pane = GUI_MAIN
+    let pane = DASHBOARD_PANES
         .split("fn open_pane_state(")
         .nth(1)
         .expect("open_pane_state is defined");
@@ -230,7 +232,7 @@ fn choosing_a_session_repaints_before_the_transcript_loads() {
         painted < tail.find("cx.spawn").unwrap_or(painted + 1),
         "the repaint happens before the transcript load is spawned"
     );
-    let choose = GUI_MAIN
+    let choose = DASHBOARD_PANES
         .split("fn choose_split(")
         .nth(1)
         .expect("choose_split is defined");
@@ -313,7 +315,7 @@ fn the_divider_resizes_both_panes() {
         "each split records its own box under its path, so a nested rule maps onto its pane"
     );
     assert!(
-        GUI_MAIN.contains("self.split_drag = Some(DividerDrag {"),
+        DASHBOARD_PANES.contains("self.split_drag = Some(DividerDrag {"),
         "pressing the rule starts a drag that remembers its path and its divider"
     );
     assert!(
@@ -323,7 +325,7 @@ fn the_divider_resizes_both_panes() {
     // The reset is answered before the borrow that starts the drag, so the
     // even pair can be written down for the next launch (#2675).
     assert!(
-        GUI_MAIN.contains("tree.even_divider(path, divider)"),
+        DASHBOARD_PANES.contains("tree.even_divider(path, divider)"),
         "a double click puts the pair back to even"
     );
     assert!(
@@ -378,11 +380,11 @@ fn alt_tab_rotates_the_panes_and_bare_tab_does_not() {
             && flat(helper).contains("ks.modifiers.shift,"),
         "alt is required and the other modifiers are handed over so they can be refused"
     );
-    let cycle_fn = GUI_MAIN
+    let cycle_fn = DASHBOARD_PANES
         .split("fn cycle_pane_focus(")
         .nth(1)
         .expect("cycle_pane_focus is defined")
-        .split("\n    fn ")
+        .split("\n    pub(crate) fn ")
         .next()
         .expect("the caret fn has a body");
     // The slice starts after the name, so the parameters are checked as the
@@ -437,7 +439,7 @@ fn ctrl_x_closes_the_pane_holding_the_caret() {
             && arm.contains("self.close_focused_pane(cx);"),
         "ctrl+x closes the pane holding the caret, and only while there are panes to close"
     );
-    let close = GUI_MAIN
+    let close = DASHBOARD_PANES
         .split("fn close_pane(")
         .nth(1)
         .expect("close_pane is defined")
@@ -468,7 +470,7 @@ fn the_chord_is_read_through_one_place() {
         "the window reads the chord in one place, not inline at the call site"
     );
     assert!(
-        GUI_MAIN.contains("if let Some(layout) = split_chord(ks)"),
+        DASHBOARD_KEYS.contains("if let Some(layout) = split_chord(ks)"),
         "opening a split goes through that reader"
     );
 }
@@ -598,11 +600,11 @@ fn drop_handler() -> &'static str {
 
 /// The rotation, from its signature to the next method on the window.
 fn cycle_pane_focus() -> &'static str {
-    GUI_MAIN
+    DASHBOARD_PANES
         .split("fn cycle_pane_focus(")
         .nth(1)
         .expect("the rotation is defined")
-        .split("\n    fn ")
+        .split("\n    pub(crate) fn ")
         .next()
         .expect("the rotation has a body")
 }
@@ -674,11 +676,11 @@ fn keystrokes_are_not_written_to_the_log() {
 #[test]
 fn a_pane_send_stays_in_its_own_leaf() {
     let send = flat(
-        GUI_MAIN
+        DASHBOARD_TURNS
             .split("fn send_from_pane(")
             .nth(1)
             .expect("the pane send is defined")
-            .split("\n    fn ")
+            .split("\n    pub(crate) fn ")
             .next()
             .expect("the send has a body"),
     );
@@ -701,11 +703,11 @@ fn a_pane_send_stays_in_its_own_leaf() {
 #[test]
 fn a_pane_turn_settles_its_own_leaf() {
     let poll = flat(
-        GUI_MAIN
+        DASHBOARD_TURNS
             .split("fn poll(")
             .nth(1)
             .expect("the poll loop is defined")
-            .split("\n    fn ")
+            .split("\n    pub(crate) fn ")
             .next()
             .expect("the poll loop has a body"),
     );

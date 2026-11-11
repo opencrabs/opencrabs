@@ -13,8 +13,11 @@
 //! receives it, the body that must stop re-deriving it, and the seeded turn
 //! that carries it back out.
 
-const GUI_MAIN: &str = include_str!("../gui/main.rs");
 const AGENT_BRIDGE: &str = include_str!("../gui/agent_bridge.rs");
+/// The command runner and the turn arms moved into modules of their own
+/// (#2822), so each link of the chain reads the file it now lives in.
+const DASHBOARD_COMMANDS: &str = include_str!("../gui/dashboard_commands.rs");
+const DASHBOARD_TURNS: &str = include_str!("../gui/dashboard_turns.rs");
 
 /// The file up to its own test module. The prose down there quotes this bug,
 /// and a scan that reads its own explanation proves nothing.
@@ -86,7 +89,7 @@ fn between<'a>(src: &'a str, from: &str, to: &str) -> &'a str {
 
 #[test]
 fn the_door_hands_the_pane_session_to_the_text_runner() {
-    let src = production(GUI_MAIN);
+    let src = production(DASHBOARD_COMMANDS);
     assert!(
         src.contains("self.run_text_command(command, arg, session, cx)"),
         "`GuiAction::Text` must hand the session it was given to the text runner (#2672)"
@@ -95,7 +98,7 @@ fn the_door_hands_the_pane_session_to_the_text_runner() {
 
 #[test]
 fn the_text_runner_takes_the_session_it_was_handed() {
-    let src = production(GUI_MAIN);
+    let src = production(DASHBOARD_COMMANDS);
     let signature = src
         .find("fn run_text_command(")
         .expect("run_text_command exists");
@@ -123,7 +126,7 @@ fn the_seeded_turn_carries_the_session_it_belongs_to() {
         !src.contains("CommandTurn("),
         "no constructor may keep the session-less shape (#2672)"
     );
-    let main = production(GUI_MAIN);
+    let main = production(DASHBOARD_TURNS);
     let body = arm_body(main, "TurnEvent::CommandTurn {");
     assert!(
         body.contains("self.send_turn_to(session, text, display, cx)"),
@@ -154,7 +157,7 @@ fn every_reply_names_the_side_it_answers_for() {
 
 #[test]
 fn the_reply_lands_on_the_strip_of_the_session_that_asked() {
-    let src = production(GUI_MAIN);
+    let src = production(DASHBOARD_TURNS);
     let body = arm_body(src, "TurnEvent::CommandReply {");
     assert!(
         body.contains("self.push_session_notice(id, text, cx)"),
@@ -168,7 +171,7 @@ fn the_reply_lands_on_the_strip_of_the_session_that_asked() {
 
 #[test]
 fn the_compaction_and_goal_turns_carry_the_pane_session() {
-    let src = production(GUI_MAIN);
+    let src = production(DASHBOARD_COMMANDS);
     for (from, to) in [
         ("C::Compact =>", "C::Cowork =>"),
         ("C::Cowork =>", "C::Goal =>"),

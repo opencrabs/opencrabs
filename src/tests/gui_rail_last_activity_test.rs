@@ -12,7 +12,9 @@
 //! wiring that keeps the snapshot fresh. The ordering itself is exercised by
 //! the repository tests and by `gui/sessions.rs`.
 
-const GUI_MAIN: &str = include_str!("../gui/main.rs");
+/// The turn arms moved into a module of their own (#2822): the refetch below
+/// is read where it now lives.
+const DASHBOARD_TURNS: &str = include_str!("../gui/dashboard_turns.rs");
 
 fn block<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
     let (_, tail) = source.split_once(start).expect("source block starts");
@@ -23,7 +25,7 @@ fn block<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
 #[test]
 fn a_settled_turn_refreshes_the_rail() {
     let done = block(
-        GUI_MAIN,
+        DASHBOARD_TURNS,
         "agent_bridge::TurnEvent::Done {",
         "agent_bridge::TurnEvent::Failed {",
     );
@@ -38,7 +40,7 @@ fn a_settled_turn_refreshes_the_rail() {
 #[test]
 fn a_failed_turn_refreshes_the_rail_too() {
     let failed = block(
-        GUI_MAIN,
+        DASHBOARD_TURNS,
         "agent_bridge::TurnEvent::Failed {",
         "agent_bridge::TurnEvent::TurnReverted {",
     );

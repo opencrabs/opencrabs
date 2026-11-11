@@ -152,7 +152,7 @@ fn create_topic_walks_the_begin_conversation_door() {
     // the create-topic path opens the new conversation through open_session,
     // open_session delegates every per-conversation reset to
     // begin_conversation, and that door clears the budget readout.
-    let src = include_str!("../gui/main.rs");
+    let src = crate::tests::gui_dashboard_source::DASHBOARD;
     assert!(
         src.contains("fn begin_conversation(&mut self, id: Uuid"),
         "the one door must exist"

@@ -4,6 +4,8 @@
 //! layout wiring. The ordering and keyboard behaviour are exercised by the
 //! real `SessionsState` tests in `gui/sessions.rs`.
 
+use crate::tests::gui_dashboard_source::DASHBOARD;
+
 const SESSIONS: &str = include_str!("../gui/sessions.rs");
 const GUI_MAIN: &str = include_str!("../gui/main.rs");
 
@@ -162,7 +164,7 @@ fn grouped_topics_are_compact_visible_pins_not_a_dropdown() {
         "compact topic pins omit repeated date and cost metadata"
     );
     assert!(
-        !SESSIONS.contains("pub fn fold_button(") && !GUI_MAIN.contains("sessions::fold_button("),
+        !SESSIONS.contains("pub fn fold_button(") && !DASHBOARD.contains("sessions::fold_button("),
         "no fold button joins the row chrome"
     );
     assert!(
@@ -174,7 +176,7 @@ fn grouped_topics_are_compact_visible_pins_not_a_dropdown() {
 #[test]
 fn rail_header_has_no_kebab_and_one_right_aligned_metadata_cluster() {
     assert!(
-        !SESSIONS.contains("dropbar") && !GUI_MAIN.contains("dropbar"),
+        !SESSIONS.contains("dropbar") && !DASHBOARD.contains("dropbar"),
         "the empty menu row and its renderer are gone"
     );
     assert!(

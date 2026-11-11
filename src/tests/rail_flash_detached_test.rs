@@ -22,6 +22,8 @@ use uuid::Uuid;
 const SESSIONS_RS: &str = include_str!("../tui/render/sessions.rs");
 const GUI_SESSIONS_RS: &str = include_str!("../gui/sessions.rs");
 const GUI_MAIN_RS: &str = include_str!("../gui/main.rs");
+/// The rail's per frame reads moved into a module of their own (#2822).
+const DASHBOARD_RAIL: &str = include_str!("../gui/dashboard_rail.rs");
 
 fn block<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
     let (_, tail) = source.split_once(start).expect("source block starts");
@@ -210,7 +212,11 @@ fn the_rail_supplies_both_facts_per_frame() {
         GUI_MAIN_RS.contains("plan_flash_until"),
         "each session's flash deadline is stored, so the blink survives a repaint"
     );
-    let map = block(GUI_MAIN_RS, "fn rail_running_map(", "\n    fn ");
+    let map = block(
+        DASHBOARD_RAIL,
+        "pub(crate) fn rail_running_map(",
+        "\n    pub(crate) fn ",
+    );
     assert!(
         map.contains("format_background_tasks("),
         "the card's detached line reuses the composer strip's formatter"

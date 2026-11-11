@@ -5,7 +5,12 @@
 use crate::tui::render::theme_names;
 use crate::ui_core::help_keys;
 
-const GUI_MAIN: &str = include_str!("../gui/main.rs");
+use crate::tests::gui_dashboard_source::DASHBOARD;
+
+/// The key handler and the modal's own reader moved into modules of their own
+/// (#2822), so each region below reads the file it lives in.
+const DASHBOARD_KEYS: &str = include_str!("../gui/dashboard_keys.rs");
+const DASHBOARD_SCREENS: &str = include_str!("../gui/dashboard_screens.rs");
 
 /// Source with every run of whitespace folded to one space, so an assertion
 /// pins a statement rather than the indentation `rustfmt` happened to pick.
@@ -16,7 +21,7 @@ fn flat(src: &str) -> String {
 /// The top of the key handler, from its opening to the Seeker card's block:
 /// whatever answers here answers before every other reader in the window.
 fn on_key_head() -> &'static str {
-    GUI_MAIN
+    DASHBOARD_KEYS
         .split("fn on_key(")
         .nth(1)
         .expect("on_key is defined")
@@ -27,11 +32,11 @@ fn on_key_head() -> &'static str {
 
 /// The modal's own key handler, up to the next method on the window.
 fn modal_key() -> &'static str {
-    GUI_MAIN
+    DASHBOARD_SCREENS
         .split("fn theme_modal_key(")
         .nth(1)
         .expect("theme_modal_key is defined")
-        .split("\n    fn ")
+        .split("\n    pub(crate) fn ")
         .next()
         .expect("the handler has a body")
 }
@@ -64,15 +69,15 @@ fn ctrl_shift_t_is_listed_in_the_help_table_for_the_window() {
 #[test]
 fn the_modal_is_an_overlay_and_not_a_screen() {
     assert!(
-        !GUI_MAIN.contains("Screen::Themes"),
+        !DASHBOARD.contains("Screen::Themes"),
         "the themes screen is gone: the modal opens over the current screen"
     );
     assert!(
-        GUI_MAIN.contains("themes_open: bool"),
+        DASHBOARD.contains("themes_open: bool"),
         "the modal keeps its own open flag"
     );
     assert!(
-        GUI_MAIN.contains("return vec![OverlayId::Themes];"),
+        DASHBOARD.contains("return vec![OverlayId::Themes];"),
         "the overlay is in the keyboard stack, so it outranks every screen"
     );
 }
@@ -122,7 +127,7 @@ fn esc_closes_the_modal_without_restoring_a_draft() {
         "the font list is the innermost surface, so it closes first"
     );
     assert!(
-        !GUI_MAIN.contains(".id(\"themes-keep\")"),
+        !DASHBOARD.contains(".id(\"themes-keep\")"),
         "there is no Keep button: a pick saves at once"
     );
 }
@@ -133,20 +138,20 @@ fn esc_closes_the_modal_without_restoring_a_draft() {
 #[test]
 fn a_pick_writes_the_theme_key_and_only_four_names() {
     assert!(
-        GUI_MAIN.contains(&["Config::write_key_string(\"gui\", \"theme\", ", "name)"].concat())
+        DASHBOARD.contains(&["Config::write_key_string(\"gui\", \"theme\", ", "name)"].concat())
     );
     for name in ["\"orgn\"", "\"light\"", "\"custom\"", "\"auto\""] {
-        assert!(GUI_MAIN.contains(name), "the modal offers {name}");
+        assert!(DASHBOARD.contains(name), "the modal offers {name}");
     }
     for gone in ["\"dark_theme\"", "\"light_theme\""] {
-        assert!(!GUI_MAIN.contains(gone), "the old key {gone} is gone");
+        assert!(!DASHBOARD.contains(gone), "the old key {gone} is gone");
     }
 }
 
 #[test]
 fn the_modal_is_reachable_by_its_chord() {
-    assert!(GUI_MAIN.contains("ev.keystroke.modifiers.shift && ev.keystroke.key == \"t\""));
-    assert!(GUI_MAIN.contains("self.toggle_themes(cx);"));
+    assert!(DASHBOARD.contains("ev.keystroke.modifiers.shift && ev.keystroke.key == \"t\""));
+    assert!(DASHBOARD.contains("self.toggle_themes(cx);"));
 }
 
 /// The wheel is the custom accent's control, and it is recorded where it is
@@ -157,11 +162,11 @@ fn the_accent_wheel_records_its_own_box() {
     let records = "recorded .borrow_mut() .replace([x0, y0, x0 + width, y0 + height])";
     assert!(view.contains(records), "the wheel records its painted box");
     assert!(
-        GUI_MAIN.contains("this.themes_press_at(x, y)"),
+        DASHBOARD.contains("this.themes_press_at(x, y)"),
         "a press is turned into a hue through that box"
     );
     assert!(
-        GUI_MAIN.contains("accent::wheel_hit(bounds, x, y)"),
+        DASHBOARD.contains("accent::wheel_hit(bounds, x, y)"),
         "the box to hue maths is the tested one, not a copy"
     );
     // The tracks record their boxes the same way the wheel does, so a click on
@@ -197,7 +202,7 @@ fn the_arrows_preview_a_theme_and_only_enter_saves_it() {
 #[test]
 fn closing_returns_to_the_saved_palette() {
     assert!(
-        GUI_MAIN.contains("palette::adopt(palette::saved());"),
+        DASHBOARD.contains("palette::adopt(palette::saved());"),
         "closing re-adopts what the config holds"
     );
 }

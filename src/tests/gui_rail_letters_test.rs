@@ -8,15 +8,19 @@
 //! (#2701). The window has no headless key harness, so these checks read source
 //! the same way `gui_split_render_test` does.
 
-const GUI_MAIN: &str = include_str!("../gui/main.rs");
+use crate::tests::gui_dashboard_source::DASHBOARD;
 
-/// The key handler, from its opening to the next method on the window.
+const GUI_MAIN: &str = include_str!("../gui/main.rs");
+/// The key handler moved into a module of its own (#2822).
+const DASHBOARD_KEYS: &str = include_str!("../gui/dashboard_keys.rs");
+
+/// The key handler, from its opening to the next method in its module (#2822).
 fn on_key() -> &'static str {
-    GUI_MAIN
+    DASHBOARD_KEYS
         .split("fn on_key(")
         .nth(1)
         .expect("on_key is defined")
-        .split("\n    fn ")
+        .split("\n    pub(crate) fn ")
         .next()
         .expect("the handler ends at the next method")
 }
@@ -58,7 +62,7 @@ fn the_rail_spends_its_bare_letters_on_the_find_field() {
         "z is retired with the fold tree, not silently dead"
     );
     assert!(
-        !GUI_MAIN.contains("fn toggle_fold_topic("),
+        !DASHBOARD.contains("fn toggle_fold_topic("),
         "the handler left with the key that called it"
     );
 }

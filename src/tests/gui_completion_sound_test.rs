@@ -11,10 +11,14 @@
 //! CI has no output device.
 
 const GUI_MAIN: &str = include_str!("../gui/main.rs");
+/// The event arms moved into a module of their own (#2822).
+const DASHBOARD_TURNS: &str = include_str!("../gui/dashboard_turns.rs");
+/// So did the chime pass and the player it calls.
+const DASHBOARD_KEYS: &str = include_str!("../gui/dashboard_keys.rs");
 
 /// The body of one function, from its signature to the next top-level item.
-fn fn_body(signature: &str) -> &'static str {
-    GUI_MAIN
+fn fn_body(source: &'static str, signature: &str) -> &'static str {
+    source
         .split(signature)
         .nth(1)
         .unwrap_or_else(|| panic!("{signature} exists in the GUI"))
@@ -28,10 +32,10 @@ fn fn_body(signature: &str) -> &'static str {
 /// and the arm has to sit BEFORE the catch-all or it is unreachable.
 #[test]
 fn the_gui_arms_plan_completed_before_the_catch_all() {
-    let arm = GUI_MAIN
+    let arm = DASHBOARD_TURNS
         .find("ProgressEvent::PlanCompleted")
         .expect("the GUI matches PlanCompleted");
-    let catch_all = GUI_MAIN
+    let catch_all = DASHBOARD_TURNS
         .find("TurnEvent::ProgressFor(_, _, _) => {}")
         .expect("the progress catch-all exists");
     assert!(
@@ -40,7 +44,7 @@ fn the_gui_arms_plan_completed_before_the_catch_all() {
     );
     // Split, never index: a byte slice of a str is a ratchet site, and the
     // two needles are all this needs to carve the arm body out.
-    let body = GUI_MAIN
+    let body = DASHBOARD_TURNS
         .split("ProgressEvent::PlanCompleted")
         .nth(1)
         .and_then(|tail| tail.split("TurnEvent::ProgressFor(_, _, _) => {}").next())
@@ -77,7 +81,10 @@ fn the_render_path_chimes_after_the_strip_refresh() {
 /// task, and a count instead of a set would ring on every re-read.
 #[test]
 fn the_chime_pass_walks_every_strip_through_one_seen_set() {
-    let body = fn_body("fn chime_settled_plan_tasks(&mut self, cx: &mut Context<Self>) {");
+    let body = fn_body(
+        DASHBOARD_KEYS,
+        "pub(crate) fn chime_settled_plan_tasks(&mut self, cx: &mut Context<Self>) {",
+    );
     assert!(
         body.contains("&mut self.announced_task_completions"),
         "the pass uses the window's single seen set: {body}"
@@ -112,8 +119,8 @@ fn the_chime_pass_walks_every_strip_through_one_seen_set() {
 /// a restart, which is how the terminal's arm behaves.
 #[test]
 fn the_player_stays_behind_the_opt_in_and_the_feature() {
-    let gated = GUI_MAIN
-        .split("#[cfg(feature = \"notification-sound\")]\n    fn play_task_chime() {")
+    let gated = DASHBOARD_KEYS
+        .split("#[cfg(feature = \"notification-sound\")]\n    pub(crate) fn play_task_chime() {")
         .nth(1)
         .expect("play_task_chime is feature-gated");
     let body = gated.split("\n    }").next().expect("the player body");
@@ -126,8 +133,8 @@ fn the_player_stays_behind_the_opt_in_and_the_feature() {
         "the enabled path reaches the embedded WAV: {body}"
     );
     assert!(
-        GUI_MAIN
-            .contains("#[cfg(not(feature = \"notification-sound\"))]\n    fn play_task_chime() {}"),
+        DASHBOARD_KEYS
+            .contains("#[cfg(not(feature = \"notification-sound\"))]\n    pub(crate) fn play_task_chime() {}"),
         "a build without the feature still compiles, with a silent no-op"
     );
 }

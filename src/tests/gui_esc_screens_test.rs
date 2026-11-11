@@ -8,13 +8,16 @@
 //! the contract here, so a busy turn cannot hold a screen open and a refactor
 //! cannot silently drop the route (#2356).
 
-const GUI_MAIN: &str = include_str!("../gui/main.rs");
+/// The key reader and the action arm moved into modules of their own (#2822),
+/// so each region below reads the file it lives in.
+const DASHBOARD_KEYS: &str = include_str!("../gui/dashboard_keys.rs");
+const DASHBOARD_FINDER: &str = include_str!("../gui/dashboard_finder.rs");
 
 fn escape_branch() -> &'static str {
-    let start = GUI_MAIN
+    let start = DASHBOARD_KEYS
         .find("if ev.keystroke.key == \"escape\" {")
         .expect("on_key has an escape branch");
-    GUI_MAIN
+    DASHBOARD_KEYS
         .get(start..)
         .expect("the escape branch starts on a char boundary")
         .split("if !self.busy {")
@@ -23,10 +26,10 @@ fn escape_branch() -> &'static str {
 }
 
 fn screen_action_arm() -> &'static str {
-    let start = GUI_MAIN
+    let start = DASHBOARD_FINDER
         .find("fn apply_screen_action")
         .expect("the window applies screen actions through one arm");
-    GUI_MAIN
+    DASHBOARD_FINDER
         .get(start..)
         .expect("the action arm starts on a char boundary")
 }

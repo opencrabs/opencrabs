@@ -5,6 +5,8 @@
 //! topic strip that named the chat leaf over every pane, and a markdown render
 //! that re-parsed the whole conversation on every frame.
 
+use crate::tests::gui_dashboard_source::DASHBOARD;
+
 const GUI_MAIN: &str = include_str!("../gui/main.rs");
 const TRANSCRIPT: &str = include_str!("../gui/transcript.rs");
 
@@ -73,7 +75,7 @@ fn a_pane_draws_its_own_topic_strip() {
         "the row is rebuilt in the pane's own render, so a pane that only redraws itself keeps it"
     );
     assert!(
-        GUI_MAIN.contains("fn topic_tabs(&self, pane: Option<Uuid>"),
+        DASHBOARD.contains("fn topic_tabs(&self, pane: Option<Uuid>"),
         "the strip resolves a session instead of reading the chat leaf"
     );
     // The window row stands down only for the unsplit window.
@@ -88,16 +90,16 @@ fn a_topic_click_moves_the_pane_that_drew_it() {
     // Opening a chip through the window door moved the chat leaf, which is the
     // conversation the user was not reading.
     assert!(
-        GUI_MAIN.contains("fn open_topic_in_pane(&mut self, pane: Uuid, id: Uuid"),
+        DASHBOARD.contains("fn open_topic_in_pane(&mut self, pane: Uuid, id: Uuid"),
         "a pane-local door exists"
     );
     assert!(
-        GUI_MAIN.contains("this.open_topic_in_pane(leaf, id, cx)"),
+        DASHBOARD.contains("this.open_topic_in_pane(leaf, id, cx)"),
         "a pane's chip goes through it"
     );
     // A new topic hangs under the focused leaf, not the chat leaf.
     assert!(
-        GUI_MAIN.contains("fn topic_parent(&self) -> Option<Uuid>"),
+        DASHBOARD.contains("fn topic_parent(&self) -> Option<Uuid>"),
         "the parent of a new topic is resolved from the focus"
     );
 }
