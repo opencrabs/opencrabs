@@ -1254,6 +1254,37 @@ pub const RAIL_MARK_REMS: f32 = 1.75;
 const RAIL_CHANNEL_BADGE_REMS: f32 = 0.75;
 const RAIL_CHANNEL_GLYPH_REMS: f32 = 0.45;
 
+/// The card's quiet stamp, Telegram style: a session touched today shows its
+/// clock alone, and anything older collapses to its calendar day. A rail only
+/// ever lists recent work, so printing the year, or a date that is obviously
+/// today, is noise.
+fn rail_stamp(
+    updated_at: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Local>,
+) -> String {
+    let local = updated_at.with_timezone(&chrono::Local);
+    if local.date_naive() == now.date_naive() {
+        local.format("%H:%M").to_string()
+    } else {
+        local.format("%m-%d").to_string()
+    }
+}
+
+/// Cost at rail scale: cents are noise beside a name, so a card prints whole
+/// dollars and shortens four-digit sums to one decimal of thousands. Only a
+/// sub-dollar session keeps its cents, where they are the whole story.
+fn rail_cost(cost: f64) -> String {
+    if cost >= 1_000.0 {
+        format!("${:.1}k", cost / 1_000.0)
+    } else if cost >= 1.0 {
+        format!("${:.0}", cost)
+    } else if cost > 0.0 {
+        format!("${:.2}", cost)
+    } else {
+        "$0".to_string()
+    }
+}
+
 const PIN_SVG: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/assets/pin.svg"));
 const PIN_OUTLINE_SVG: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -1595,6 +1626,26 @@ pub fn row(s: &Session, flags: RowFlags, chips: Option<Stateful<Div>>) -> Statef
             .text_sm()
             .font_weight(gpui::FontWeight::BOLD)
     };
+    // The stamp sits on a line of its own, right-aligned above the name
+    // (#2802 follow-up). Sharing the title line meant a long name and a long
+    // sum fought for the same pixels, and on a wide rail the date painted
+    // straight over the title. Its own line cannot collide, and its right
+    // edge is the card edge on every row, so the whole rail reads as one
+    // column instead of a ragged one.
+    let stamp = (!indented).then(|| {
+        div()
+            .flex()
+            .flex_none()
+            .w_full()
+            .justify_end()
+            .text_xs()
+            .text_color(rgb(palette::current().text_muted))
+            .child(SharedString::from(format!(
+                "{} · {}",
+                rail_stamp(s.updated_at, chrono::Local::now()),
+                rail_cost(s.total_cost)
+            )))
+    });
     let title = div()
         .flex()
         .flex_row()
@@ -1607,11 +1658,9 @@ pub fn row(s: &Session, flags: RowFlags, chips: Option<Stateful<Div>>) -> Statef
         .w_full()
         .when_some(marks, |d, marks| d.child(marks))
         .child(title_text)
-        // Timestamp, cost, the pin and the activity glyph share ONE
-        // right-aligned cluster: a single auto margin carries the whole
-        // group to the edge. Two auto margins (stamp and badge each their
-        // own) would split the free space and park the stamp mid-row on a
-        // streaming session.
+        // The pin and the activity glyph keep the right edge of the name
+        // line. `ml_auto` carries them there in one group, and `flex_none`
+        // holds their width while a long title truncates.
         .child(
             div()
                 .flex()
@@ -1620,29 +1669,10 @@ pub fn row(s: &Session, flags: RowFlags, chips: Option<Stateful<Div>>) -> Statef
                 .gap_2()
                 .flex_none()
                 .ml_auto()
-                .when(!indented, |d| {
-                    // Telegram's quiet metadata shares the title line (#2802):
-                    // date/cost, then the pin, with no second stamp row.
-                    d.child(
-                        div()
-                            .flex_none()
-                            .pl_1()
-                            .text_xs()
-                            .text_color(rgb(palette::current().text_muted))
-                            .child(SharedString::from(format!(
-                                "{} · ${:.2}",
-                                s.updated_at
-                                    .with_timezone(&chrono::Local)
-                                    .format("%m-%d %H:%M"),
-                                s.total_cost
-                            ))),
-                    )
-                })
                 // Full and compact rows share one wired pin control (#2803).
                 .when_some(pin_toggle, |d, pin| d.child(pin))
                 // The activity glyph closes the cluster at the right edge
-                // (#2636). `flex_none` keeps it its width when a long title
-                // truncates.
+                // (#2636).
                 .when_some(badge, |d, glyph| d.child(badge_cell(glyph))),
         );
     // A grouped topic is a compact pin beneath its session. Its title stays
@@ -1656,6 +1686,9 @@ pub fn row(s: &Session, flags: RowFlags, chips: Option<Stateful<Div>>) -> Statef
         .gap_0p5()
         .flex_1()
         .min_w_0()
+        // The stamp leads the card, above the name, so the date and the sum
+        // never share a line with the title they used to overlap (#2802).
+        .when_some(stamp, |d, stamp| d.child(stamp))
         .child(title)
         // Topic chips ride inline under the title, on the parent card itself
         // (Telegram topic style). They never push a child out to its own row.
@@ -1940,7 +1973,7 @@ mod tests {
     use super::{
         Database, FindMatch, MenuKind, PlanFilter, RailFilter, SessionsState, accent_bar_visible,
         filter_is_active, fit, icon_write_needed, load_sessions, merge_find_results, palette,
-        pin_mark, preview_line, rail_filter_allows, rail_menu_entries,
+        pin_mark, preview_line, rail_cost, rail_filter_allows, rail_menu_entries, rail_stamp,
     };
     use opencrabs::db::models::Session;
     use opencrabs::db::repository::ContentSearchRow;
@@ -2830,13 +2863,14 @@ mod tests {
         );
     }
 
-    /// Card contract: line one is the title with timestamp and cost aligned
-    /// right on the SAME line; the message context is its own line below
-    /// (under the chip strip when topics are attached). No date fallback
-    /// masquerading as a message. An approved plan may add one slim bar line
-    /// after the message; nothing else grows the card.
+    /// Card contract: the stamp (clock today, calendar day before) rides its
+    /// own right-aligned line above the title, the name line carries only the
+    /// media, the name and the right-edge marks, and the message context is a
+    /// line below (under the chip strip when topics are attached). Sharing
+    /// the stamp with the title is what painted the date over the name
+    /// (#2802), so the two must never be one row again.
     #[test]
-    fn card_meta_rides_title_line_and_preview_is_own_line() {
+    fn card_stamp_is_its_own_line_above_the_title() {
         let source = include_str!("sessions.rs");
         let row_source = source
             .split("pub fn row(")
@@ -2850,16 +2884,28 @@ mod tests {
             .next()
             .expect("title line before the chip strip");
         assert!(
-            title_line.contains("%m-%d %H:%M"),
-            "the timestamp paints on the title line"
+            title_line.contains("rail_stamp(s.updated_at"),
+            "the stamp reads the shared day-or-clock formatter"
         );
         assert!(
-            title_line.contains("s.total_cost"),
-            "the cost paints on the title line"
+            title_line.contains("rail_cost(s.total_cost)"),
+            "the cost reads the shared compact formatter"
         );
         assert!(
-            title_line.contains(".ml_auto()"),
-            "timestamp and cost align right"
+            title_line.contains(".justify_end()"),
+            "the stamp hugs the card's right edge on its own line"
+        );
+        assert!(
+            !title_line.contains("%m-%d %H:%M"),
+            "the title line never carries the stamp again"
+        );
+        let title_block = title_line
+            .split(".child(title)")
+            .nth(1)
+            .expect("the title row after the stamp line");
+        assert!(
+            !title_block.contains("s.total_cost"),
+            "the cost does not paint beside the name"
         );
         assert!(
             row_source.contains(".when_some(preview,"),
@@ -2869,6 +2915,45 @@ mod tests {
             !row_source.contains("None => SharedString::from(format!("),
             "no date/cost fallback on the message line"
         );
+    }
+
+    /// A card prints the clock for a session touched today and the calendar
+    /// day for anything older: a rail lists recent work only, so a year and a
+    /// date that is obviously today are noise.
+    #[test]
+    fn rail_stamp_shows_the_clock_today_and_the_day_before() {
+        use chrono::TimeZone as _;
+        let now = chrono::Local
+            .with_ymd_and_hms(2026, 11, 11, 15, 5, 0)
+            .unwrap();
+        let today = chrono::Local
+            .with_ymd_and_hms(2026, 11, 11, 9, 5, 0)
+            .unwrap();
+        assert_eq!(rail_stamp(today.with_timezone(&chrono::Utc), now), "09:05");
+        let yesterday = chrono::Local
+            .with_ymd_and_hms(2026, 11, 10, 7, 5, 0)
+            .unwrap();
+        assert_eq!(
+            rail_stamp(yesterday.with_timezone(&chrono::Utc), now),
+            "11-10"
+        );
+        let older = chrono::Local
+            .with_ymd_and_hms(2026, 9, 1, 1, 0, 0)
+            .unwrap();
+        assert_eq!(rail_stamp(older.with_timezone(&chrono::Utc), now), "09-01");
+    }
+
+    /// Cost is printed at rail scale: whole dollars, thousands shortened to
+    /// one decimal of thousands, and cents kept only where they are the whole
+    /// number.
+    #[test]
+    fn rail_cost_drops_cents_and_shortens_thousands() {
+        assert_eq!(rail_cost(0.0), "$0");
+        assert_eq!(rail_cost(2101.59), "$2.1k");
+        assert_eq!(rail_cost(1000.0), "$1.0k");
+        assert_eq!(rail_cost(107.51), "$108");
+        assert_eq!(rail_cost(28.61), "$29");
+        assert_eq!(rail_cost(0.45), "$0.45");
     }
 
     /// An approved plan paints as the strip's own progress bar on a slim line

@@ -95,7 +95,7 @@ fn rail_card_media_is_large_dual_and_the_title_is_bold() {
         "the side-by-side double-icon group is gone"
     );
 
-    let title = block(row, "let title = div()", "// Timestamp, cost");
+    let title = block(row, "let title = div()", "let body = div()");
     assert!(
         title.contains(".gap_3()") && title.contains(".when_some(marks, |d, marks| d.child(marks))"),
         "the single media slot has 12px separation from the title"
@@ -174,19 +174,33 @@ fn rail_header_has_no_kebab_and_shares_one_line() {
     );
 
     let row = block(SESSIONS, "pub fn row(", "pub fn on_click(");
+    // The stamp owns a full line above the name (#2802): sharing the title
+    // line is exactly what let the date paint over the title on a wide rail.
+    let stamp = block(row, "let stamp = (!indented)", "let title = div()");
+    assert!(
+        stamp.contains("rail_stamp(s.updated_at") && stamp.contains("rail_cost(s.total_cost)"),
+        "the stamp is the shared day-or-clock plus compact cost"
+    );
+    assert!(
+        stamp.contains(".w_full()") && stamp.contains(".justify_end()"),
+        "the stamp fills its own line and hugs the card's right edge"
+    );
     let title = block(row, "let title = div()", "let body = div()");
     let trailing = title
         .split(".ml_auto()")
         .nth(1)
-        .expect("right-aligned metadata cluster");
-    let stamp = trailing.find("%m-%d %H:%M").expect("timestamp");
-    let pin = trailing
-        .find(".when_some(pin_toggle,")
-        .expect("pin after timestamp");
-    assert!(stamp < pin, "timestamp and pin share the title line");
+        .expect("right-aligned mark cluster");
+    assert!(
+        trailing.contains(".when_some(pin_toggle,") && trailing.contains(".when_some(badge,"),
+        "the pin and the activity glyph keep the right edge of the name line"
+    );
+    assert!(
+        !trailing.contains("s.total_cost") && !trailing.contains("%m-%d %H:%M"),
+        "the stamp no longer shares a line with the title it used to overlap"
+    );
     assert!(
         trailing.contains(".flex_row()") && trailing.contains(".gap_2()"),
-        "timestamp, cost, pin and unread badge form one horizontal cluster"
+        "the pin and the unread badge form one horizontal cluster"
     );
     assert!(
         !trailing.contains(".flex_col()") && !trailing.contains(".items_end()"),
