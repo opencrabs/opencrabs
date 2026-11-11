@@ -100,12 +100,26 @@ fn the_modal_owns_every_key_on_every_screen() {
 /// Esc closes the modal and nothing else: the pick was already saved, so there
 /// is no draft to restore. It is answered by the modal's gate, which is why a
 /// busy turn cannot hold the modal open.
+///
+/// The font list is the one surface nested inside the modal, so Esc has to
+/// close that first and leave the modal standing (#2786). Closing the modal
+/// out from under the list would cost the reader the theme they were browsing.
 #[test]
 fn esc_closes_the_modal_without_restoring_a_draft() {
     let keys = flat(modal_key());
     assert!(
-        keys.contains("\"escape\" => self.close_themes(cx)"),
-        "Esc on the modal closes it: the choice is already in the config"
+        keys.contains("\"escape\" => {"),
+        "the modal answers Escape itself"
+    );
+    let font_list = keys
+        .find("if self.fonts_open {")
+        .expect("Escape closes the font list before the modal (#2786)");
+    let modal = keys
+        .find("self.close_themes(cx)")
+        .expect("Esc on the modal closes it: the choice is already in the config");
+    assert!(
+        font_list < modal,
+        "the font list is the innermost surface, so it closes first"
     );
     assert!(
         !GUI_MAIN.contains(".id(\"themes-keep\")"),
