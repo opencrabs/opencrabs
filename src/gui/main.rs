@@ -549,6 +549,18 @@ fn previews_can_move(busy: bool, stashed_live: bool, streaming: usize) -> bool {
     busy || stashed_live || streaming > 0
 }
 
+/// Holds a rail preview read's in-flight slot, and gives it back on drop.
+///
+/// A detached task whose view has gone away still unwinds through this, so the
+/// slot can never be wedged by a cancelled read (#2817).
+struct PreviewSlot(std::rc::Rc<std::cell::Cell<usize>>);
+
+impl Drop for PreviewSlot {
+    fn drop(&mut self) {
+        self.0.set(self.0.get().saturating_sub(1));
+    }
+}
+
 /// The phase 1 window. Every string on screen is real data or the real error.
 struct Dashboard {
     /// Which pane the right side draws: chat by default, usage on ctrl+u.
@@ -664,6 +676,12 @@ struct Dashboard {
     /// When the rail's live previews were last re-read, so a stream of chunks
     /// costs at most one query a second instead of one per token.
     preview_refreshed_at: Option<std::time::Instant>,
+    /// How many preview reads are in flight, and whether another was asked for
+    /// while one ran. A busy ledger made a read outlast the one-second tick,
+    /// so the next tick stacked a second thread and a second connection on the
+    /// same 1.2 GB file (#2817). One read at a time, and the last ask wins.
+    previews_in_flight: std::rc::Rc<std::cell::Cell<usize>>,
+    previews_dirty: std::rc::Rc<std::cell::Cell<bool>>,
     /// Monotonic generation of the ctrl+f deep search (#2720). Each keystroke
     /// bumps it and spawns a debounced content query that carries the value;
     /// a result only lands when its generation still matches, so a slow query
@@ -8253,24 +8271,48 @@ impl Dashboard {
     /// rail repaints on a shared clock, so asking per row there would be a
     /// query per card per frame.
     fn refresh_previews(&mut self, cx: &mut Context<Self>) {
+        // One read at a time (#2817). A rail refetch and a streaming tick can
+        // land in the same frame, and each one spawns a thread with its own
+        // runtime and its own connection; on a busy ledger both waited long
+        // enough to overlap. A request that arrives mid-read is remembered and
+        // re-run when the read lands, so a new session still gets its line.
+        if self.previews_in_flight.get() > 0 {
+            self.previews_dirty.set(true);
+            return;
+        }
         let ids: Vec<uuid::Uuid> = self.sessions.items.iter().map(|s| s.id).collect();
         if ids.is_empty() {
             self.sessions.previews.clear();
             return;
         }
+        self.previews_in_flight
+            .set(self.previews_in_flight.get().saturating_add(1));
+        let in_flight = self.previews_in_flight.clone();
+        let dirty = self.previews_dirty.clone();
         let db_path = self.db_path.clone();
-        cx.spawn(
-            async move |this, cx| match sessions::load_previews(db_path, ids).await {
+        cx.spawn(async move |this, cx| {
+            // Released on drop, so a task whose view went away still frees the
+            // slot instead of wedging previews for the rest of the run.
+            let _slot = PreviewSlot(in_flight.clone());
+            match sessions::load_previews(db_path, ids).await {
                 Ok(pairs) => {
                     this.update(cx, |this, cx| {
                         this.sessions.previews = pairs;
+                        // A request that arrived while this one ran is served
+                        // now, from the same completion, never from a timer.
+                        if dirty.replace(false) {
+                            this.refresh_previews(cx);
+                        }
                         cx.notify();
                     })
                     .ok();
                 }
-                Err(e) => logging::error(&format!("rail previews: {e}")),
-            },
-        )
+                Err(e) => {
+                    dirty.set(false);
+                    logging::error(&format!("rail previews: {e}"));
+                }
+            }
+        })
         .detach();
     }
 
@@ -14194,6 +14236,8 @@ fn main() {
                         )),
                         rail_clock: std::time::Instant::now(),
                         preview_refreshed_at: None,
+                        previews_in_flight: std::rc::Rc::new(std::cell::Cell::new(0)),
+                        previews_dirty: std::rc::Rc::new(std::cell::Cell::new(false)),
                         rail_find_gen: 0,
                         seeker_find: HashMap::new(),
                         seeker_find_gen: 0,
