@@ -6825,16 +6825,14 @@ impl Dashboard {
         }
     }
 
-    fn rail_plan_progress_map(&mut self) -> HashMap<Uuid, (usize, usize)> {
-        let rows: Vec<Uuid> = self.sessions.ordered().map(|s| s.id).collect();
-        let now = std::time::Instant::now();
-        let mut map = HashMap::new();
-        for id in rows {
-            if let Some(progress) = self.rail_index.progress(id, now) {
-                map.insert(id, progress);
-            }
-        }
-        map
+    /// The plan bar's counts for every rail row, taken from the snapshot the
+    /// frame already built.
+    ///
+    /// Resolving them a second time walked every session again, one `stat` and
+    /// doc lookup each, for a map the frame already had (#2805). The snapshot
+    /// is keyed on all sessions, so it covers every row `ordered()` can yield.
+    fn rail_plan_progress_map(&self) -> HashMap<Uuid, (usize, usize)> {
+        self.sessions.plan_progress.clone()
     }
 
     /// The detached commands every rail row is running, formatted once per
