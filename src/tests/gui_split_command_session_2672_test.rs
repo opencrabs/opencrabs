@@ -157,7 +157,7 @@ fn the_reply_lands_on_the_strip_of_the_session_that_asked() {
     let src = production(GUI_MAIN);
     let body = arm_body(src, "TurnEvent::CommandReply {");
     assert!(
-        body.contains("self.push_session_notice(id, text)"),
+        body.contains("self.push_session_notice(id, text, cx)"),
         "an answered command belongs in the strip of the session that asked (#2672)"
     );
     assert!(

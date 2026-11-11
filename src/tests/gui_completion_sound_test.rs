@@ -64,7 +64,7 @@ fn the_render_path_chimes_after_the_strip_refresh() {
         .find("self.plan.refresh();")
         .expect("render re-reads the window plan");
     let chime = render
-        .find("self.chime_settled_plan_tasks();")
+        .find("self.chime_settled_plan_tasks(cx);")
         .expect("render runs the chime pass");
     assert!(
         refresh < chime,
@@ -77,7 +77,7 @@ fn the_render_path_chimes_after_the_strip_refresh() {
 /// task, and a count instead of a set would ring on every re-read.
 #[test]
 fn the_chime_pass_walks_every_strip_through_one_seen_set() {
-    let body = fn_body("fn chime_settled_plan_tasks(&mut self) {");
+    let body = fn_body("fn chime_settled_plan_tasks(&mut self, cx: &mut Context<Self>) {");
     assert!(
         body.contains("&mut self.announced_task_completions"),
         "the pass uses the window's single seen set: {body}"
@@ -90,15 +90,15 @@ fn the_chime_pass_walks_every_strip_through_one_seen_set() {
     // written before the hook stamped its session carries the nil id, and the
     // pane's own key is the only honest fallback for the flash deadline.
     assert!(
-        body.contains("in &self.pane_states") && body.contains("pane.plan.document()"),
-        "every pane strip is walked too: {body}"
+        body.contains("in &self.pane_states") && body.contains("pane.read(cx).plan.document()"),
+        "every pane strip is walked too, read through its own handle: {body}"
     );
     // The settle count and the OS banner share one dedupe: the helper reports
     // how many of these plans newly resolved into the one window seen set, and
     // its count is what arms the flash and the chime. A local count would drift
     // from the banner and ring twice for one task.
     assert!(
-        body.contains("announce_settled_tasks(seen, &plans)"),
+        body.contains("announce_settled_tasks(seen, &borrowed)"),
         "the dedupe is the shared helper over one seen set, not a local count: {body}"
     );
     assert!(

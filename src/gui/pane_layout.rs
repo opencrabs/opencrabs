@@ -14,12 +14,11 @@
 //! handler the leaf could not build.
 
 use gpui::{
-    AnyElement, App, ClickEvent, IntoElement, MouseDownEvent, ScrollWheelEvent, SharedString,
-    Window, div, prelude::*, px, rgb,
+    AnyElement, App, ClickEvent, Entity, IntoElement, MouseDownEvent, SharedString, Window, div,
+    prelude::*, px, rgb,
 };
 use opencrabs::ui_core::card::CARD_RADIUS;
 use opencrabs::ui_core::pane_tree::{DropHalf, PaneTree, drop_half};
-use opencrabs::ui_core::scroll::wheel_releases_follow;
 use opencrabs::ui_core::split::Layout;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -27,11 +26,9 @@ use uuid::Uuid;
 
 use crate::pane_chrome::{
     UNFOCUSED_PANE_OPACITY, drop_indicator, focus_ring_color, pane_footer, pane_header,
-    split_divider, split_pane_width,
+    split_divider,
 };
 use crate::pane_view::PaneView;
-use crate::wheel_dy;
-use crate::transcript;
 use crate::{Dashboard, PaneDrag};
 
 /// Everything the pane walk needs to draw one leaf or one split: the chat
@@ -42,9 +39,8 @@ pub(crate) struct PanesCtx<'a> {
     pub(crate) chat: Option<AnyElement>,
     pub(crate) chat_session: Option<Uuid>,
     pub(crate) chat_title: SharedString,
-    pub(crate) states: &'a HashMap<Uuid, PaneView>,
+    pub(crate) states: &'a HashMap<Uuid, Entity<PaneView>>,
     pub(crate) focus: Option<Uuid>,
-    pub(crate) content: f32,
     pub(crate) areas: &'a Rc<std::cell::RefCell<HashMap<Vec<usize>, [f32; 4]>>>,
     pub(crate) entity: gpui::WeakEntity<Dashboard>,
     /// Whether the dividers take the pointer. The themes preview draws the
@@ -74,11 +70,15 @@ pub(crate) struct PanesCtx<'a> {
 /// from a single window-wide ratio, so a nested split divides only the pane it
 /// grew from. A tree of one leaf draws the chat untouched, which is the
 /// unsplit window the window has always had.
+///
+/// `cx` is read-only: a leaf's state is its own entity (#2805), so the walk
+/// hands each leaf its handle and reads a title through it. Nothing here
+/// mutates the pane map.
 pub(crate) fn pane_element(
     tree: &PaneTree,
     ctx: &mut PanesCtx,
+    cx: &App,
     path: &mut Vec<usize>,
-    width_share: f32,
 ) -> AnyElement {
     match tree {
         PaneTree::Leaf { session, .. } => {
@@ -92,54 +92,18 @@ pub(crate) fn pane_element(
                 ctx.chat_title.clone()
             } else {
                 match ctx.states.get(session) {
-                    Some(pane) => SharedString::from(pane.title.clone()),
+                    Some(pane) => SharedString::from(pane.read(cx).title.clone()),
                     None => SharedString::from("(untitled)"),
                 }
             };
-            // The pane's own wheel, so a tick up releases only this pane's
-            // follow and never the window's (#2698).
-            let wheel_weak = ctx.entity.clone();
-            let wheel_session = *session;
-            let wheel = move |ev: &ScrollWheelEvent, _window: &mut Window, cx: &mut App| {
-                if !wheel_releases_follow(wheel_dy(&ev.delta)) {
-                    return;
-                }
-                let _ = wheel_weak.update(cx, |this, cx| {
-                    this.release_pane_follow(wheel_session);
-                    cx.notify();
-                });
-            };
+            // A leaf draws itself: its own transcript, its own drag-to-copy
+            // state and its own wheel hook all live on the pane (#2805). The
+            // walk only decides where it sits.
             let body: AnyElement = if is_chat {
                 ctx.chat.take().unwrap_or_else(|| div().into_any_element())
             } else {
                 match ctx.states.get(session) {
-                    Some(pane) => div()
-                        .flex()
-                        .flex_col()
-                        .flex_1()
-                        .min_w_0()
-                        .min_h_0()
-                        .child(transcript::view(
-                            &pane.transcript,
-                            &pane.scroll,
-                            &pane.live,
-                            false,
-                            if width_share < 1.0 {
-                                split_pane_width(ctx.content, false, width_share)
-                            } else {
-                                ctx.content
-                            },
-                            HashMap::new(),
-                            transcript::ViewHooks {
-                                // The pane's own drag-to-copy (#2623): the
-                                // gesture was dead in every split because this
-                                // was `default()`, which leaves `drag: None`.
-                                drag: Some(pane.copy_drag.clone()),
-                                wheel: Some(Rc::new(wheel)),
-                                ..Default::default()
-                            },
-                        ))
-                        .into_any_element(),
+                    Some(pane) => pane.clone().into_any_element(),
                     None => div().into_any_element(),
                 }
             };
@@ -363,12 +327,7 @@ pub(crate) fn pane_element(
                 });
             for (ix, child) in children.iter().enumerate() {
                 path.push(ix);
-                let child_width = if stacked {
-                    width_share
-                } else {
-                    width_share * child.share()
-                };
-                let element = pane_element(child, ctx, path, child_width);
+                let element = pane_element(child, ctx, cx, path);
                 path.pop();
                 row = row.child(
                     div()

@@ -34,7 +34,7 @@ fn every_frame_follows_the_chat_transcript() {
         "render asks the chat transcript to follow its bottom"
     );
     assert!(
-        head.contains("self.follow_pane(session)"),
+        head.contains("self.follow_pane(session, cx)"),
         "render re-judges every pane's follow too"
     );
 }

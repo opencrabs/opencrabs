@@ -320,7 +320,7 @@ fn selected_topic_owns_the_parent_activity_line() {
         2,
         "both content match and persisted preview belong to the selected child"
     );
-    assert!(flags.contains("activity: self.rail_activity_for(progress_id)"));
+    assert!(flags.contains("activity: self.rail_activity_for(progress_id, cx)"));
     assert!(flags.contains("plan: plan_progress.get(&id).copied()"));
     assert!(flags.contains("running: running_tasks.get(&id).cloned()"));
 

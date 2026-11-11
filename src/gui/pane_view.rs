@@ -19,16 +19,16 @@ use gpui::{
     App, Context, Entity, IntoElement, Render, ScrollHandle, ScrollWheelEvent, WeakEntity, Window,
     div, prelude::*,
 };
-use opencrabs::ui_core::scroll::{Follow, wheel_releases_follow};
+use opencrabs::ui_core::scroll::{Follow, scrolled_from_top, wheel_releases_follow};
 use std::collections::HashMap;
 use std::rc::Rc;
 use uuid::Uuid;
 
+use crate::Dashboard;
 use crate::editor;
 use crate::plan_strip;
 use crate::transcript::{self, CopyDrag, TranscriptState};
 use crate::wheel_dy;
-use crate::Dashboard;
 
 /// One pane beside the window's own chat: its transcript, its scroll and
 /// everything that belongs to the conversation it draws (#2438).
@@ -115,6 +115,24 @@ impl PaneView {
             width,
         }
     }
+
+    /// Record the box this leaf was drawn in this frame. The walk measures the
+    /// leaf from the tree's shares, so a narrow column wraps its transcript to
+    /// its own width instead of the window's (#2624).
+    pub(crate) fn set_width(&mut self, width: f32) {
+        self.width = width;
+    }
+
+    /// Snap this leaf's transcript to its newest row only while the reader is
+    /// still following: a reader who scrolled up keeps their place while rows
+    /// land under them (#2685, #2698).
+    pub(crate) fn snap_if_following(&mut self) {
+        let offset = scrolled_from_top(f32::from(self.scroll.offset().y));
+        let max = f32::from(self.scroll.max_offset().height);
+        if self.follow.update(offset, max) {
+            self.scroll.scroll_to_bottom();
+        }
+    }
 }
 
 impl Render for PaneView {
@@ -130,7 +148,7 @@ impl Render for PaneView {
                 return;
             }
             let _ = weak.update(cx, |this, cx| {
-                this.release_pane_follow(session);
+                this.release_pane_follow(session, cx);
                 cx.notify();
             });
         };

@@ -711,8 +711,9 @@ struct Dashboard {
     /// so the plain chat is the base case rather than a special one, and a
     /// nested split is just another node. `None` until a conversation opens.
     panes: Option<PaneTree>,
-    /// The state every pane but the chat keeps, keyed by session (#2472).
-    pane_states: HashMap<Uuid, PaneView>,
+    /// The state every pane but the chat keeps, keyed by session (#2472). Each
+    /// leaf is its own entity, so it repaints and is read on its own (#2805).
+    pane_states: HashMap<Uuid, Entity<PaneView>>,
     /// The session holding the caret and answering `ctrl+x`; `None` is the
     /// window's own chat (#2474, #2475).
     pane_focus: Option<Uuid>,
@@ -2152,7 +2153,7 @@ impl Dashboard {
                 // The pane the keyboard is on follows the same rule as the
                 // window: it is the transcript the reader was looking at.
                 if let Some(id) = self.pane_focus {
-                    self.rearm_pane_follow(id);
+                    self.rearm_pane_follow(id, cx);
                 }
                 self.editor
                     .update(cx, |editor, cx| editor.discard_draft(cx));
@@ -2188,35 +2189,27 @@ impl Dashboard {
         cx.notify();
     }
 
-    /// The same pair for one pane's transcript (#2685, #2698).
-    fn release_pane_follow(&mut self, session: Uuid) {
-        if let Some(pane) = self.pane_states.get_mut(&session) {
-            pane.follow.release();
+    /// The same pair for one pane's transcript (#2685, #2698). The pane is its
+    /// own entity, so the follow moves inside it (#2805).
+    fn release_pane_follow(&mut self, session: Uuid, cx: &mut Context<Self>) {
+        if let Some(pane) = self.pane_states.get(&session) {
+            pane.update(cx, |pane, _| pane.follow.release());
         }
     }
 
-    fn rearm_pane_follow(&mut self, session: Uuid) {
-        if let Some(pane) = self.pane_states.get_mut(&session) {
-            pane.follow.rearm();
-            pane.scroll.scroll_to_bottom();
+    fn rearm_pane_follow(&mut self, session: Uuid, cx: &mut Context<Self>) {
+        if let Some(pane) = self.pane_states.get(&session) {
+            pane.update(cx, |pane, _| {
+                pane.follow.rearm();
+                pane.scroll.scroll_to_bottom();
+            });
         }
     }
 
     /// The same for one pane's transcript (#2685).
-    fn follow_pane(&mut self, session: Uuid) {
-        if let Some(pane) = self.pane_states.get_mut(&session) {
-            Self::snap_pane_if_following(pane);
-        }
-    }
-
-    /// Snap one pane's transcript to its newest row only while that pane is
-    /// still following: a reader who scrolled up keeps their place while rows
-    /// land under them (#2685, #2698).
-    fn snap_pane_if_following(pane: &mut PaneView) {
-        let offset = scrolled_from_top(f32::from(pane.scroll.offset().y));
-        let max = f32::from(pane.scroll.max_offset().height);
-        if pane.follow.update(offset, max) {
-            pane.scroll.scroll_to_bottom();
+    fn follow_pane(&mut self, session: Uuid, cx: &mut Context<Self>) {
+        if let Some(pane) = self.pane_states.get(&session) {
+            pane.update(cx, |pane, _| pane.snap_if_following());
         }
     }
 
@@ -2592,7 +2585,7 @@ impl Dashboard {
     /// being built, after that press is done. `refocus_screen` stays the one
     /// decision point, so the two can never disagree about who owns the keys.
     fn request_composer_caret(&mut self, cx: &mut Context<Self>) {
-        let composer = self.composer_entity();
+        let composer = self.composer_entity(cx);
         composer.update(cx, |editor, cx| {
             editor.focus_pending = true;
             cx.notify();
@@ -3369,13 +3362,13 @@ impl Dashboard {
     /// keyboard or hands the composer a file resolves the leaf first. Aiming
     /// at the window's editor while a pane owns the caret puts the text and
     /// the attachment chips into a field the split never draws.
-    fn composer_entity(&self) -> Entity<editor::Editor> {
+    fn composer_entity(&self, cx: &App) -> Entity<editor::Editor> {
         match self.split_focus() {
             Some(id) if Some(id) == self.transcript.session => self.editor.clone(),
             Some(id) => self
                 .pane_states
                 .get(&id)
-                .map(|pane| pane.editor.clone())
+                .map(|pane| pane.read(cx).editor.clone())
                 .unwrap_or_else(|| self.editor.clone()),
             None => self.editor.clone(),
         }
@@ -3389,7 +3382,7 @@ impl Dashboard {
         let Some(handle) = window.focused(cx) else {
             return "none";
         };
-        if handle == self.composer_entity().read(cx).focus_handle {
+        if handle == self.composer_entity(cx).read(cx).focus_handle {
             "composer"
         } else if handle == self.focus {
             "root"
@@ -3424,8 +3417,8 @@ impl Dashboard {
         // the reader believes they are at the bottom (#2685, #2624).
         if Some(session) == self.transcript.session {
             self.transcript_follow.rearm();
-        } else if let Some(pane) = self.pane_states.get_mut(&session) {
-            pane.follow.rearm();
+        } else if let Some(pane) = self.pane_states.get(&session) {
+            pane.update(cx, |pane, _| pane.follow.rearm());
         }
         cx.notify();
     }
@@ -3579,10 +3572,10 @@ impl Dashboard {
             .map(|[x0, _, x1, _]| x1 - x0)
             .unwrap_or(0.0);
         let window = cx.entity().downgrade();
-        self.pane_states.insert(
-            id,
-            PaneView::new(id, title, pane_editor, pane_copy, pane_width, window),
-        );
+        // The leaf is an entity of its own, so it can be drawn, notified and
+        // read without the window holding every field (#2805).
+        let pane = cx.new(|_| PaneView::new(id, title, pane_editor, pane_copy, pane_width, window));
+        self.pane_states.insert(id, pane);
         // Paint the pane now, with its header, rather than waiting for the
         // transcript load to come back: an empty pane that appears at once
         // reads as a split, where a silent wait reads as nothing (#2438).
@@ -3591,18 +3584,27 @@ impl Dashboard {
         cx.spawn(async move |this, cx| {
             let result = transcript::load_recent(db_path, id).await;
             this.update(cx, |this, cx| {
-                if let Some(pane) = this.pane_states.get_mut(&id) {
-                    match result {
-                        Ok(loaded) => {
-                            let (hidden, turns) = transcript::turns_with_origins(
-                                &loaded.rows,
-                                loaded.total,
-                                &this.turn_metrics,
-                                &loaded.origins,
-                            );
+                // The rows are measured against the window's metrics, read
+                // before the leaf is borrowed: a pane's own context cannot
+                // reach the window's map (#2805).
+                let loaded = result.map(|loaded| {
+                    let (hidden, turns) = transcript::turns_with_origins(
+                        &loaded.rows,
+                        loaded.total,
+                        &this.turn_metrics,
+                        &loaded.origins,
+                    );
+                    (hidden, turns, loaded.rows)
+                });
+                let Some(pane) = this.pane_states.get(&id).cloned() else {
+                    return;
+                };
+                pane.update(cx, |pane, cx| {
+                    match loaded {
+                        Ok((hidden, turns, rows)) => {
                             pane.transcript.hidden = hidden;
                             pane.transcript.turns = turns;
-                            pane.transcript.rows = loaded.rows;
+                            pane.transcript.rows = rows;
                         }
                         Err(e) => pane.transcript.error = Some(e.into()),
                     }
@@ -3610,7 +3612,7 @@ impl Dashboard {
                     pane.follow.rearm();
                     pane.scroll.scroll_to_bottom();
                     cx.notify();
-                }
+                });
             })
             .ok();
         })
@@ -3687,7 +3689,7 @@ impl Dashboard {
         let Some(pane) = self.pane_states.get(&session) else {
             return;
         };
-        let editor = pane.editor.clone();
+        let editor = pane.read(cx).editor.clone();
         let draft = editor.update(cx, |ed, cx| ed.take_draft(cx));
         self.drafts.store(session, draft);
     }
@@ -3891,6 +3893,7 @@ impl Dashboard {
                             this.push_session_notice(
                                 session,
                                 text_commands::cd_reply(&applied.display().to_string()),
+                                cx,
                             );
                             cx.notify();
                         });
@@ -3962,20 +3965,29 @@ impl Dashboard {
         let Some(id) = self.pane_focus else {
             return false;
         };
-        let Some(pane) = self.pane_states.get_mut(&id) else {
+        let Some(pane) = self.pane_states.get(&id).cloned() else {
             return false;
         };
-        let Some(cancel) = pane.cancel.take() else {
+        // The stop has to reach the leaf's own card, so the pane is asked to
+        // clear itself rather than the window reaching into it (#2805).
+        let cancelled = pane.update(cx, |pane, cx| {
+            let Some(cancel) = pane.cancel.take() else {
+                return false;
+            };
+            cancel.cancel();
+            pane.busy = false;
+            pane.live.thinking = false;
+            // The card ends here, not when the service's event lands (#2811): the
+            // user asked for the stop and the pane must stop claiming a turn is
+            // running before the cancellation unwinds.
+            pane.live.stopped = true;
+            pane.live.notices.push("Operation cancelled.".to_string());
+            cx.notify();
+            true
+        });
+        if !cancelled {
             return false;
-        };
-        cancel.cancel();
-        pane.busy = false;
-        pane.live.thinking = false;
-        // The card ends here, not when the service's event lands (#2811): the
-        // user asked for the stop and the pane must stop claiming a turn is
-        // running before the cancellation unwinds.
-        pane.live.stopped = true;
-        pane.live.notices.push("Operation cancelled.".to_string());
+        }
         // The stop names its session and what is still waiting, so the flush
         // that lands with the cancellation event can be paired to it (#2695).
         logging::info(&format!(
@@ -4689,11 +4701,14 @@ impl Dashboard {
 
     /// Put a one-line answer in the conversation that owns it, so a pane never
     /// reads a switch receipt meant for the window chat.
-    fn push_session_notice(&mut self, session: Uuid, line: String) {
+    fn push_session_notice(&mut self, session: Uuid, line: String, cx: &mut Context<Self>) {
         if self.transcript.session == Some(session) {
             self.live.notices.push(line);
-        } else if let Some(pane) = self.pane_states.get_mut(&session) {
-            pane.live.notices.push(line);
+        } else if let Some(pane) = self.pane_states.get(&session) {
+            pane.update(cx, |pane, cx| {
+                pane.live.notices.push(line);
+                cx.notify();
+            });
         } else {
             self.live.notices.push(line);
         }
@@ -4726,6 +4741,7 @@ impl Dashboard {
             self.push_session_notice(
                 session,
                 "The agent is still starting. Try again in a moment.".to_string(),
+                cx,
             );
             cx.notify();
             return;
@@ -5759,33 +5775,42 @@ impl Dashboard {
             let before = self.live.notices.len();
             self.run_command(outcome, Some(session), cx);
             if Some(session) != self.transcript.session
-                && let Some(pane) = self.pane_states.get_mut(&session)
+                && let Some(pane) = self.pane_states.get(&session).cloned()
             {
                 let split_at = before.min(self.live.notices.len());
                 let moved: Vec<String> = self.live.notices.split_off(split_at);
-                pane.live.notices.extend(moved);
+                pane.update(cx, |pane, cx| {
+                    pane.live.notices.extend(moved);
+                    cx.notify();
+                });
             }
             cx.notify();
             return;
         }
         if let Some(cmd) = opencrabs::ui_core::bang::bang_command(&text) {
-            if let Some(pane) = self.pane_states.get_mut(&session) {
-                pane.live.notices.push(format!("! {cmd}"));
+            if let Some(pane) = self.pane_states.get(&session) {
+                pane.update(cx, |pane, cx| {
+                    pane.live.notices.push(format!("! {cmd}"));
+                    cx.notify();
+                });
             }
             bang::spawn(cmd.to_string(), self.sink.clone());
             cx.notify();
             return;
         }
         if let Some(err) = self.agent_error.clone() {
-            if let Some(pane) = self.pane_states.get_mut(&session) {
-                pane.live.notices.push(format!("agent offline: {err}"));
+            if let Some(pane) = self.pane_states.get(&session) {
+                pane.update(cx, |pane, cx| {
+                    pane.live.notices.push(format!("agent offline: {err}"));
+                    cx.notify();
+                });
             }
             cx.notify();
             return;
         }
         // One turn per leaf: a second send while this pane is working joins
         // the session's queue, the terminal's own path (#2441).
-        let Some(pane_busy) = self.pane_states.get(&session).map(|p| p.busy) else {
+        let Some(pane_busy) = self.pane_states.get(&session).map(|p| p.read(cx).busy) else {
             return;
         };
         if pane_busy {
@@ -5800,15 +5825,19 @@ impl Dashboard {
         };
         let cancel = tokio_util::sync::CancellationToken::new();
         let shown = display.clone().unwrap_or_else(|| text.clone());
-        if let Some(pane) = self.pane_states.get_mut(&session) {
-            pane.live = transcript::LiveTurn::default();
-            pane.live.begin(shown);
-            pane.transcript.live_expanded = false;
-            pane.busy = true;
-            pane.cancel = Some(cancel.clone());
-            // Sending in a pane puts its reader back on the end of it (#2698).
-            pane.follow.rearm();
-            pane.scroll.scroll_to_bottom();
+        if let Some(pane) = self.pane_states.get(&session) {
+            pane.update(cx, |pane, cx| {
+                pane.live = transcript::LiveTurn::default();
+                pane.live.begin(shown);
+                pane.transcript.live_expanded = false;
+                pane.busy = true;
+                pane.cancel = Some(cancel.clone());
+                // Sending in a pane puts its reader back on the end of it
+                // (#2698).
+                pane.follow.rearm();
+                pane.scroll.scroll_to_bottom();
+                cx.notify();
+            });
         }
         // Attachments are tracked against the pane's session, so the file
         // lands in that conversation's artifacts, exactly as the window's does.
@@ -5836,15 +5865,16 @@ impl Dashboard {
     /// The four sources are checked in that order because a session can only
     /// be in one of them, and the ones that own a card of their own are more
     /// specific than the rail's own map.
-    fn rail_activity_for(&self, id: Uuid) -> Option<SharedString> {
+    fn rail_activity_for(&self, id: Uuid, cx: &App) -> Option<SharedString> {
         let line = |live: &transcript::LiveTurn| {
             let text = rail_activity_line(live);
             (!text.is_empty()).then(|| SharedString::from(text))
         };
-        if let Some(pane) = self.pane_states.get(&id)
-            && pane.busy
-        {
-            return line(&pane.live);
+        if let Some(pane) = self.pane_states.get(&id) {
+            let pane = pane.read(cx);
+            if pane.busy {
+                return line(&pane.live);
+            }
         }
         if let Some(turn) = self.stashed.get(&id) {
             return line(&turn.live);
@@ -5865,12 +5895,14 @@ impl Dashboard {
         at: std::time::Instant,
         cx: &mut Context<Self>,
     ) {
-        if let Some(pane) = self.pane_states.get_mut(&session) {
-            fold_live(&mut pane.live, progress, at);
-            // Rows landing under a reader who scrolled up must not drag them
-            // back to the bottom (#2685, #2698).
-            Self::snap_pane_if_following(pane);
-            cx.notify();
+        if let Some(pane) = self.pane_states.get(&session).cloned() {
+            pane.update(cx, |pane, cx| {
+                fold_live(&mut pane.live, progress, at);
+                // Rows landing under a reader who scrolled up must not drag
+                // them back to the bottom (#2685, #2698).
+                pane.snap_if_following();
+                cx.notify();
+            });
             return;
         }
         // A conversation the user switched away from keeps its turn in the
@@ -5928,18 +5960,19 @@ impl Dashboard {
         tokens_per_second: Option<f64>,
         cx: &mut Context<Self>,
     ) {
-        let calls = {
-            let Some(pane) = self.pane_states.get_mut(&session) else {
-                return;
-            };
+        let Some(pane) = self.pane_states.get(&session).cloned() else {
+            return;
+        };
+        let calls = pane.update(cx, |pane, cx| {
             pane.live.finalize(tokens_per_second);
             pane.live.thinking = false;
             pane.busy = false;
             pane.cancel = None;
             // The turn ends where the reader is, not where it ended (#2698).
-            Self::snap_pane_if_following(pane);
+            pane.snap_if_following();
+            cx.notify();
             pane.live.tools.len()
-        };
+        });
         // The leaf's card keeps the numbers it showed in flight, the same ones
         // the window's card keeps (#2632): the ctx budget every pane shares,
         // and the calls this leaf made.
@@ -5962,14 +5995,16 @@ impl Dashboard {
     /// The pane's turn failed: the reason lands in that leaf's notices instead
     /// of the window's (#2614).
     fn fail_pane(&mut self, session: Uuid, text: String, cx: &mut Context<Self>) {
-        let Some(pane) = self.pane_states.get_mut(&session) else {
+        let Some(pane) = self.pane_states.get(&session).cloned() else {
             return;
         };
-        pane.live.notices.push(text);
-        pane.live.thinking = false;
-        pane.busy = false;
-        pane.cancel = None;
-        cx.notify();
+        pane.update(cx, |pane, cx| {
+            pane.live.notices.push(text);
+            pane.live.thinking = false;
+            pane.busy = false;
+            pane.cancel = None;
+            cx.notify();
+        });
         // A failed turn still hands the queue to the next one: the text the
         // user typed behind it is not part of the failure (#2695).
         self.drain_pane_pending(session, cx);
@@ -5990,7 +6025,7 @@ impl Dashboard {
         let Some(pane) = self.pane_states.get(&session) else {
             return;
         };
-        if pane.busy {
+        if pane.read(cx).busy {
             return;
         }
         let waiting = agent_bridge::queue_snapshot(session);
@@ -6010,16 +6045,19 @@ impl Dashboard {
             msgs.len()
         ));
         let cancel = tokio_util::sync::CancellationToken::new();
-        if let Some(pane) = self.pane_states.get_mut(&session) {
-            pane.live = transcript::LiveTurn::default();
-            pane.live.begin(joined.display_text.clone());
-            pane.transcript.live_expanded = false;
-            pane.busy = true;
-            pane.cancel = Some(cancel.clone());
-            // A flushed queue is a send too, so the pane follows its answer
-            // the way a typed one does (#2698).
-            pane.follow.rearm();
-            pane.scroll.scroll_to_bottom();
+        if let Some(pane) = self.pane_states.get(&session) {
+            pane.update(cx, |pane, cx| {
+                pane.live = transcript::LiveTurn::default();
+                pane.live.begin(joined.display_text.clone());
+                pane.transcript.live_expanded = false;
+                pane.busy = true;
+                pane.cancel = Some(cancel.clone());
+                // A flushed queue is a send too, so the pane follows its answer
+                // the way a typed one does (#2698).
+                pane.follow.rearm();
+                pane.scroll.scroll_to_bottom();
+                cx.notify();
+            });
         }
         let attached = editor::marker_paths(&joined.context_text);
         agent_bridge::spawn_turn(
@@ -6054,27 +6092,34 @@ impl Dashboard {
                     // takes the numbers it showed in flight before the rows are
                     // drawn (#2632).
                     let turns = this.claim_pane_metrics(session, turns);
-                    if let Some(pane) = this.pane_states.get_mut(&session) {
-                        pane.transcript.hidden = hidden;
-                        pane.transcript.turns = turns;
-                        // The persisted row is on screen: the live copy
-                        // retires, exactly as the window's does, unless the
-                        // flush already started the next turn (#2695):
-                        // clearing then would wipe the card of the turn now
-                        // running, the same guard the window's reload keeps.
-                        if !pane.busy {
-                            pane.live.clear();
-                        }
-                        // The persisted rows land where the reader is watching
-                        // (#2698), never under a reader parked in history.
-                        Self::snap_pane_if_following(pane);
+                    if let Some(pane) = this.pane_states.get(&session) {
+                        pane.update(cx, |pane, cx| {
+                            pane.transcript.hidden = hidden;
+                            pane.transcript.turns = turns;
+                            // The persisted row is on screen: the live copy
+                            // retires, exactly as the window's does, unless the
+                            // flush already started the next turn (#2695):
+                            // clearing then would wipe the card of the turn now
+                            // running, the same guard the window's reload keeps.
+                            if !pane.busy {
+                                pane.live.clear();
+                            }
+                            // The persisted rows land where the reader is
+                            // watching (#2698), never under a reader parked in
+                            // history.
+                            pane.snap_if_following();
+                            cx.notify();
+                        });
                     }
                     cx.notify();
                 }
                 Err(e) => {
-                    if let Some(pane) = this.pane_states.get_mut(&session) {
-                        pane.transcript.error = Some(e.into());
-                        pane.scroll.scroll_to_bottom();
+                    if let Some(pane) = this.pane_states.get(&session) {
+                        pane.update(cx, |pane, cx| {
+                            pane.transcript.error = Some(e.into());
+                            pane.scroll.scroll_to_bottom();
+                            cx.notify();
+                        });
                     }
                     cx.notify();
                 }
@@ -6152,7 +6197,7 @@ impl Dashboard {
         // The composer the text came from: when it sends a recalled message,
         // that message leaves the queue with the text while the rest of its
         // walk goes back to wait (#2637).
-        let sent_from = self.composer_entity();
+        let sent_from = self.composer_entity(cx);
         // Commands are read before every other gate, because the two that
         // matter most are needed exactly when the window is busy or broken:
         // `/stop` has nothing to stop on an idle window, and `/help` is what a
@@ -6331,9 +6376,9 @@ impl Dashboard {
             // with work in flight, and a plan waiting for approval keeps
             // pulsing its ring until the owner opens it (#2636).
             if self.busy
-                || self.pane_states.values().any(|pane| pane.busy)
+                || self.pane_states.values().any(|pane| pane.read(cx).busy)
                 || self
-                    .rail_activity_map()
+                    .rail_activity_map(cx)
                     .values()
                     .any(|row| row.badge.is_some() || row.ring)
                 // A rail flash is an animation of its own: the plan bar has to
@@ -6452,7 +6497,7 @@ impl Dashboard {
                 // no session and stays where it has always been (#2672).
                 agent_bridge::TurnEvent::CommandReply { session, text } => {
                     match session {
-                        Some(id) => self.push_session_notice(id, text),
+                        Some(id) => self.push_session_notice(id, text, cx),
                         None => self.live.notices.push(text),
                     }
                     cx.notify();
@@ -6497,11 +6542,15 @@ impl Dashboard {
                     if self.plan_for == Some(session) {
                         self.plan.set_path(path);
                         cx.notify();
-                    } else if let Some(pane) = self.pane_states.get_mut(&session)
-                        && pane.plan_for == Some(session)
-                    {
-                        pane.plan.set_path(path);
-                        cx.notify();
+                    } else if let Some(pane) = self.pane_states.get(&session).cloned() {
+                        // The path belongs to the session the pane was opened
+                        // for, so a leaf for another conversation ignores it.
+                        if pane.read(cx).plan_for == Some(session) {
+                            pane.update(cx, |pane, cx| {
+                                pane.plan.set_path(path);
+                                cx.notify();
+                            });
+                        }
                     }
                 }
                 agent_bridge::TurnEvent::BootstrapFailed(e) => {
@@ -6515,7 +6564,7 @@ impl Dashboard {
                         continue;
                     }
                     logging::info(&format!("model switched: {line}"));
-                    self.push_session_notice(session, line);
+                    self.push_session_notice(session, line, cx);
                     // The rail row carries the pair the service answers with,
                     // so a switch is only real once the row is re-read.
                     self.refresh_rail(cx);
@@ -6557,7 +6606,7 @@ impl Dashboard {
                         continue;
                     }
                     logging::error(&format!("model switch: {error}"));
-                    self.push_session_notice(session, format!("model switch: {error}"));
+                    self.push_session_notice(session, format!("model switch: {error}"), cx);
                     cx.notify();
                 }
                 agent_bridge::TurnEvent::BrainReady(line) => {
@@ -6939,12 +6988,15 @@ impl Dashboard {
                         // A split leaf: same settle inside its own card, and
                         // the parked copy of a switched-away turn retires.
                         self.stashed.remove(&session);
-                        if let Some(pane) = self.pane_states.get_mut(&session) {
-                            pane.live.finalize(None);
-                            pane.live.thinking = false;
-                            pane.live.stopped = true;
-                            pane.busy = false;
-                            pane.cancel = None;
+                        if let Some(pane) = self.pane_states.get(&session) {
+                            pane.update(cx, |pane, cx| {
+                                pane.live.finalize(None);
+                                pane.live.thinking = false;
+                                pane.live.stopped = true;
+                                pane.busy = false;
+                                pane.cancel = None;
+                                cx.notify();
+                            });
                         }
                         // The stop is acknowledged: the leaf's queue becomes
                         // the next turn now, never while the cancel unwinds
@@ -7031,7 +7083,7 @@ impl Dashboard {
                     // does the same (#2704): a session already working takes
                     // the receipt in its queue, and an idle one starts its turn
                     // and parks it in the stash when it is not on screen.
-                    if self.running_here(session_id) {
+                    if self.running_here(session_id, cx) {
                         // Queue it against the session the task belongs to, in
                         // the store the agent drains, so it goes out between
                         // tool calls instead of waiting for the turn to end
@@ -7145,7 +7197,10 @@ impl Dashboard {
     /// pane has its own and only one of them opened the card.
     fn close_composer_menus(&mut self, cx: &mut Context<Self>) {
         let mut editors = vec![self.editor.clone()];
-        editors.extend(self.pane_states.values().map(|pane| pane.editor.clone()));
+        // Every leaf's composer, read through its handle (#2805).
+        for pane in self.pane_states.values() {
+            editors.push(pane.read(cx).editor.clone());
+        }
         for editor in editors {
             editor.update(cx, |editor, cx| editor.close_context_menu(cx));
         }
@@ -7157,7 +7212,7 @@ impl Dashboard {
     /// `&mut self` and the row iterator holds `&self`, so the two cannot
     /// interleave. Evidence is cached by mtime, so this costs one `stat` per
     /// session that has a plan file and nothing for the rest.
-    fn rail_activity_map(&mut self) -> HashMap<Uuid, rail_activity::RowState> {
+    fn rail_activity_map(&mut self, cx: &App) -> HashMap<Uuid, rail_activity::RowState> {
         let rows: Vec<Uuid> = self.sessions.ordered().map(|s| s.id).collect();
         // The sweep throttle reads a moving clock; the animations read the
         // window's fixed origin. Two different questions, two clocks.
@@ -7179,7 +7234,9 @@ impl Dashboard {
                 // spin a row for a turn nobody is running.
                 (self.busy && self.transcript.session == Some(id))
                     || self.stashed.get(&id).is_some_and(|turn| turn.busy),
-                self.pane_states.get(&id).is_some_and(|pane| pane.busy),
+                self.pane_states
+                    .get(&id)
+                    .is_some_and(|pane| pane.read(cx).busy),
                 manager.as_ref().is_some_and(|mgr| mgr.running_for(id) > 0),
             );
             let plan = self.rail_index.evidence(id, live, now);
@@ -7352,11 +7409,15 @@ impl Dashboard {
     /// A completion for one of those joins the session's queue instead of
     /// starting a second turn over it, which is the rule the terminal applies
     /// to its own per-session state.
-    fn running_here(&self, session: Uuid) -> bool {
+    fn running_here(&self, session: Uuid, cx: &App) -> bool {
         if self.transcript.session == Some(session) && self.busy {
             return true;
         }
-        if self.pane_states.get(&session).is_some_and(|p| p.busy) {
+        if self
+            .pane_states
+            .get(&session)
+            .is_some_and(|pane| pane.read(cx).busy)
+        {
             return true;
         }
         // A parked card that has ended is not work in flight (#2811). Its
@@ -7445,7 +7506,7 @@ impl Dashboard {
         let panes: Vec<_> = self
             .pane_states
             .values()
-            .map(|pane| pane.editor.clone())
+            .map(|pane| pane.read(cx).editor.clone())
             .collect();
         for editor in panes {
             editor.update(cx, |ed, cx| ed.set_placeholder(hint.clone(), cx));
@@ -7458,7 +7519,11 @@ impl Dashboard {
     /// (#2637, #2696).
     fn finish_recall(&mut self, sent: &Entity<editor::Editor>, cx: &mut Context<Self>) {
         let mut editors = vec![self.editor.clone()];
-        editors.extend(self.pane_states.values().map(|pane| pane.editor.clone()));
+        editors.extend(
+            self.pane_states
+                .values()
+                .map(|pane| pane.read(cx).editor.clone()),
+        );
         for editor in editors {
             let keep = editor.entity_id() == sent.entity_id();
             let returned = editor.update(cx, |ed, _| ed.release_recall(keep));
@@ -8026,7 +8091,7 @@ impl Dashboard {
             .iter()
             .map(|id| topic_bar::TopicChip {
                 id: *id,
-                activity: self.topic_is_busy(*id),
+                activity: self.topic_is_busy(*id, cx),
             })
             .collect();
         let plan = topic_bar::bar_plan(root, open, &chips, topic_bar::BAR_TOPICS_SHOWN);
@@ -8109,9 +8174,9 @@ impl Dashboard {
     /// for the conversation it has open. For a topic nobody is drawing there is
     /// no signal: the store keeps no per-topic unread count, so the chip stays
     /// quiet rather than inventing one.
-    fn topic_is_busy(&self, id: Uuid) -> bool {
+    fn topic_is_busy(&self, id: Uuid, cx: &App) -> bool {
         match self.pane_states.get(&id) {
-            Some(pane) => pane.busy,
+            Some(pane) => pane.read(cx).busy,
             None => self.busy && self.transcript.session == Some(id),
         }
     }
@@ -9991,7 +10056,7 @@ impl Dashboard {
             // and the nearest thing answers first.
             // The list belongs to whichever field opened it, so Esc closes the
             // focused pane's list rather than the chat's under it (#2614).
-            let owner = self.composer_entity();
+            let owner = self.composer_entity(cx);
             let spelling = owner.read(cx).list_open();
             if spelling {
                 owner.update(cx, |editor, cx| {
@@ -10080,7 +10145,7 @@ impl Dashboard {
                 && self.busy
                 && self.live.untouched()
             {
-                let composer = self.composer_entity();
+                let composer = self.composer_entity(cx);
                 // Only into an empty field: anything typed since the send is
                 // the user's, and taking the question back must never cost it.
                 // One condition, not two nested ones: the take has to run only
@@ -10156,6 +10221,7 @@ impl Dashboard {
                     .filter(|id| self.pane_states.contains_key(id));
                 let (x, y, max) = match target.and_then(|id| self.pane_states.get(&id)) {
                     Some(pane) => {
+                        let pane = pane.read(cx);
                         let offset = pane.scroll.offset();
                         let max = pane.scroll.max_offset().height;
                         (offset.x, (offset.y + dy).min(px(0.0)).max(-max), max)
@@ -10168,8 +10234,11 @@ impl Dashboard {
                 };
                 match target {
                     Some(id) => {
-                        if let Some(pane) = self.pane_states.get_mut(&id) {
-                            pane.scroll.set_offset(gpui::point(x, y));
+                        if let Some(pane) = self.pane_states.get(&id) {
+                            pane.update(cx, |pane, cx| {
+                                pane.scroll.set_offset(gpui::point(x, y));
+                                cx.notify();
+                            });
                         }
                     }
                     None => self.transcript_scroll.set_offset(gpui::point(x, y)),
@@ -10181,8 +10250,8 @@ impl Dashboard {
                 // (#2698).
                 let at_end = y >= -max;
                 match (target, at_end) {
-                    (Some(id), true) => self.rearm_pane_follow(id),
-                    (Some(id), false) => self.release_pane_follow(id),
+                    (Some(id), true) => self.rearm_pane_follow(id, cx),
+                    (Some(id), false) => self.release_pane_follow(id, cx),
                     (None, true) => self.rearm_transcript_follow(),
                     (None, false) => self.release_transcript_follow(),
                 }
@@ -10446,29 +10515,32 @@ impl Dashboard {
     /// mtime, and this pass turns the settled tasks into one chime. The
     /// window strip and every pane strip share one seen set, so a plan drawn
     /// twice rings once, and a reload of an unchanged file rings not at all.
-    fn chime_settled_plan_tasks(&mut self) {
+    fn chime_settled_plan_tasks(&mut self, cx: &mut Context<Self>) {
         let now = std::time::Instant::now();
 
         // A pane strip only re-reads its file when it is drawn, and this pass
         // runs before the split body is built. Refresh here so a background
         // pane that settled rings on this frame instead of the next redraw it
         // happens to get (#2733). Each read is mtime-gated.
-        for pane in self.pane_states.values_mut() {
-            pane.plan.refresh();
+        for pane in self.pane_states.values() {
+            pane.update(cx, |pane, _| pane.plan.refresh());
         }
 
         // Every plan in this frame, each paired with the row that draws it, in
         // one order so a settled task reaches the chime, the banner, and the
         // flash from a single pass. A pre-init plan writes the nil session
         // until the hook stamps it, so the drawing row is the honest fallback.
-        let mut plans: Vec<Option<&opencrabs::tui::plan::PlanDocument>> =
+        // Owned snapshots: a pane is an entity now (#2805), so a borrowed
+        // document would keep its handle borrowed across the announce. One
+        // snapshot per pane per frame, and a plan is a handful of tasks.
+        let mut plans: Vec<Option<opencrabs::tui::plan::PlanDocument>> =
             Vec::with_capacity(1 + self.pane_states.len());
         let mut owners: Vec<Uuid> = Vec::with_capacity(1 + self.pane_states.len());
 
-        plans.push(self.plan.document());
+        plans.push(self.plan.document().cloned());
         owners.push(self.transcript.session.unwrap_or(Uuid::nil()));
         for (pane_id, pane) in &self.pane_states {
-            plans.push(pane.plan.document());
+            plans.push(pane.read(cx).plan.document().cloned());
             owners.push(*pane_id);
         }
 
@@ -10481,7 +10553,7 @@ impl Dashboard {
         // task was fresh.
         let mut settled: Vec<Uuid> = Vec::new();
         for (slot, owner) in plans.iter().zip(owners.iter()) {
-            let Some(doc) = *slot else {
+            let Some(doc) = slot else {
                 continue;
             };
             let fresh = opencrabs::utils::completion_sound::resolved_task_ids(Some(doc))
@@ -10500,7 +10572,9 @@ impl Dashboard {
         // #2729: the same set drives the OS banner, so a task that rings also
         // reaches the Notification Center, and neither can fire twice for one
         // settle.
-        if opencrabs::utils::desktop_notify::announce_settled_tasks(seen, &plans) == 0 {
+        let borrowed: Vec<Option<&opencrabs::tui::plan::PlanDocument>> =
+            plans.iter().map(Option::as_ref).collect();
+        if opencrabs::utils::desktop_notify::announce_settled_tasks(seen, &borrowed) == 0 {
             return;
         }
         // One flash per settled session, on the same instant the chime rings:
@@ -10591,6 +10665,24 @@ impl Dashboard {
         // string per leaf instead of touching the bridge or the plan file.
         let leaves = tree.leaves();
         let count = leaves.len();
+        // Each leaf records the box the walk is about to give it, so its own
+        // transcript wraps to its width instead of the window's (#2624,
+        // #2805). The number comes from the tree's shares, the same one the
+        // plan strip reads for its density below.
+        for session in &leaves {
+            if Some(*session) == self.transcript.session {
+                continue;
+            }
+            let share = tree.leaf_width_share(*session).unwrap_or(1.0);
+            let width = if share < 1.0 {
+                split_pane_width(content, false, share)
+            } else {
+                content
+            };
+            if let Some(pane) = self.pane_states.get(session) {
+                pane.update(cx, |pane, _| pane.set_width(width));
+            }
+        }
         // One owner for the keyboard, resolved the same way the drop handler
         // and the caret resolve it (#2620).
         let focus = self.split_focus();
@@ -10677,19 +10769,21 @@ impl Dashboard {
                         self.editor.clone(),
                     )
                 } else {
-                    match self.pane_states.get_mut(session) {
-                        Some(pane) => {
-                            pane.plan.refresh();
-                            (
-                                pane.plan
-                                    .editing_view(Some(&actions))
-                                    .or_else(|| pane.plan.pane_view(density, expanded)),
-                                agent_bridge::queue_snapshot(*session),
-                                pane.editor.clone(),
-                            )
-                        }
-                        None => continue,
-                    }
+                    let Some(pane) = self.pane_states.get(session).cloned() else {
+                        continue;
+                    };
+                    // The strip is built from the leaf's own state, inside the
+                    // leaf (#2805). A view is owned, so it crosses the handle.
+                    pane.update(cx, |pane, _| {
+                        pane.plan.refresh();
+                        (
+                            pane.plan
+                                .editing_view(Some(&actions))
+                                .or_else(|| pane.plan.pane_view(density, expanded)),
+                            agent_bridge::queue_snapshot(*session),
+                            pane.editor.clone(),
+                        )
+                    })
                 };
                 let mut col = div().flex().flex_col().flex_none().gap_2();
                 if let Some(view) = plan_view {
@@ -10792,7 +10886,6 @@ impl Dashboard {
             // leaf the tree no longer holds, so every leaf read as unfocused,
             // drew dim, and painted no ring (#2620).
             focus,
-            content,
             areas: &self.split_areas,
             entity: cx.entity().downgrade(),
             interactive,
@@ -10803,7 +10896,7 @@ impl Dashboard {
         };
         let mut path = Vec::new();
         let tree = self.panes.as_ref().expect("checked a moment ago");
-        pane_element(tree, &mut ctx, &mut path, 1.0)
+        pane_element(tree, &mut ctx, cx, &mut path)
     }
 }
 
@@ -10839,7 +10932,7 @@ impl Render for Dashboard {
                     // The keyboard follows the pane, not the window (#2610):
                     // a rotated caret that left focus on the chat leaf typed
                     // into a field the split was not drawing.
-                    let composer = self.composer_entity();
+                    let composer = self.composer_entity(cx);
                     let handle = composer.read(cx).focus_handle.clone();
                     // `before` is true when gpui turned the request into a
                     // no-op, because it returns early on the handle that is
@@ -10870,7 +10963,7 @@ impl Render for Dashboard {
         // composer. The transition above cannot see that, so the drift is read
         // off the window instead and repaired before the user types (#2741).
         if owner == KeyboardOwner::Composer {
-            let composer = self.composer_entity();
+            let composer = self.composer_entity(cx);
             let drifted = !composer.read(cx).focus_handle.is_focused(window)
                 && window.focused(cx).is_none_or(|handle| handle == self.focus);
             if drifted {
@@ -10887,7 +10980,7 @@ impl Render for Dashboard {
             // kept the caret, so everything typed into the prompt also landed
             // in the message field and Enter submitted it. A field the overlay
             // owns is not this drift; only the composer is.
-            let composer = self.composer_entity();
+            let composer = self.composer_entity(cx);
             let leaked = composer.read(cx).focus_handle.is_focused(window);
             if leaked {
                 window.focus(&self.focus);
@@ -10911,7 +11004,7 @@ impl Render for Dashboard {
         // never yanked back down.
         self.follow_chat();
         for session in self.panes.as_ref().map(|t| t.leaves()).unwrap_or_default() {
-            self.follow_pane(session);
+            self.follow_pane(session, cx);
         }
         // The rail is an overlay only while it holds the keys. A path that
         // focuses the composer directly (a drop, a pasted image, the
@@ -10921,7 +11014,7 @@ impl Render for Dashboard {
         if self.rail_focused
             && self.rail_open
             && self
-                .composer_entity()
+                .composer_entity(cx)
                 .read(cx)
                 .focus_handle
                 .is_focused(window)
@@ -10951,7 +11044,7 @@ impl Render for Dashboard {
         // tick: the strip was re-read by mtime just above, and the pane
         // strips are re-read again when the split body is built below, so a
         // pane that settles between frames is caught on the next one.
-        self.chime_settled_plan_tasks();
+        self.chime_settled_plan_tasks(cx);
 
         // The rail's rows: each carries its own click listener, built in its
         // own loop turn so the `&mut cx` borrow stays legal.
@@ -10963,7 +11056,7 @@ impl Render for Dashboard {
         // What every row says about work in flight (#2636), resolved once
         // before the loop: the index needs `&mut self` and the row iterator
         // holds `&self`.
-        let activity = self.rail_activity_map();
+        let activity = self.rail_activity_map(cx);
         // The plan bar reads the same cached index the badges just warmed:
         // one stat per row with a plan file, no second loader.
         let plan_progress = self.rail_plan_progress_map();
@@ -11085,7 +11178,7 @@ impl Render for Dashboard {
                 // (#2718). The wording is the pane's own (#2326), so a split
                 // leaf and its rail row never describe the same turn two
                 // different ways.
-                activity: self.rail_activity_for(progress_id),
+                activity: self.rail_activity_for(progress_id, cx),
                 plan: plan_progress.get(&id).copied(),
                 // The bar blinks orange for a few seconds after a task in
                 // this session's plan settles, on the same event that rings
@@ -13639,7 +13732,7 @@ impl Render for Dashboard {
                 this.drag_seen = None;
                 // A dropped file belongs to the composer the keyboard owns,
                 // which in a split is the focused pane's own field (#2610).
-                let composer = this.composer_entity();
+                let composer = this.composer_entity(cx);
                 let added = composer.update(cx, |editor, cx| {
                     let added = editor.attach_paths(paths);
                     if added > 0 {
@@ -16078,9 +16171,9 @@ mod tests {
             .split("\nmod tests {")
             .next()
             .expect("the production half of the file");
-        // The pane's own tick moved to the pane walk with the rest of the
-        // leaf, so the two halves of #2698 are read where each one now lives.
-        let pane = PANE_LAYOUT;
+        // The pane's own tick lives with the leaf's state now (#2805), so the
+        // two halves of #2698 are read where each one lives.
+        let view = PANE_VIEW;
         assert!(
             code.contains("wheel_releases_follow(wheel_dy(&ev.delta))"),
             "the wheel is judged by the shared rule, never a second one"
@@ -16090,11 +16183,11 @@ mod tests {
             "a tick over the conversation releases the window's follow"
         );
         assert!(
-            pane.contains("this.release_pane_follow(wheel_session);"),
+            view.contains("this.release_pane_follow(session, cx);"),
             "a tick over a pane releases that pane's follow, not the window's"
         );
         assert_eq!(
-            pane.matches("wheel: Some(Rc::new(wheel))").count(),
+            view.matches("wheel: Some(Rc::new(wheel))").count(),
             1,
             "every pane boxes the tick it mints"
         );
@@ -16140,7 +16233,7 @@ mod tests {
             "a page down that reaches the end re-arms the conversation"
         );
         assert!(
-            branch.contains("(Some(id), false) => self.release_pane_follow(id)"),
+            branch.contains("(Some(id), false) => self.release_pane_follow(id, cx)"),
             "a page up releases the pane it scrolled"
         );
     }
@@ -16273,7 +16366,7 @@ mod tests {
         );
         let render = dashboard_render(src);
         assert!(
-            render.contains("activity: self.rail_activity_for(id)"),
+            render.contains("activity: self.rail_activity_for(id, cx)"),
             "the render feeds the card from whichever owner holds the turn"
         );
         let lookup = fn_body(src, "rail_activity_for");
@@ -16879,7 +16972,7 @@ mod tests {
             .and_then(|rest| rest.split("    /// Re-read one pane's rows").next())
             .expect("drain_pane_pending");
         assert!(
-            drain.contains("if pane.busy {"),
+            drain.contains("if pane.read(cx).busy {"),
             "never a second spawn into a running or unwinding turn"
         );
         assert!(
@@ -17716,7 +17809,7 @@ mod tests {
             .next()
             .expect("the end of the arm");
         assert!(
-            arm.contains("self.running_here(session_id)"),
+            arm.contains("self.running_here(session_id, cx)"),
             "a session already working takes the receipt in its queue"
         );
         assert!(

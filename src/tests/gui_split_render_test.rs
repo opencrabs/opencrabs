@@ -52,6 +52,8 @@ fn on_key() -> &'static str {
 /// The pane walk, which lives in its own module (#2817 follow-up): the tree
 /// turned into elements, leaf by leaf.
 const PANE_LAYOUT: &str = include_str!("../gui/pane_layout.rs");
+/// The leaf's own state and drawing live in the pane's entity now (#2805).
+const PANE_VIEW: &str = include_str!("../gui/pane_view.rs");
 
 /// The walk that turns the pane tree into elements (#2472).
 fn pane_element() -> &'static str {
@@ -603,7 +605,7 @@ fn cycle_pane_focus() -> &'static str {
 fn a_dropped_file_belongs_to_the_focused_pane() {
     let drop = flat(drop_handler());
     assert!(
-        drop.contains("this.composer_entity()"),
+        drop.contains("this.composer_entity(cx)"),
         "the chip goes to the composer the keyboard owns, not the window's"
     );
     assert!(
@@ -629,7 +631,7 @@ fn the_keyboard_follows_the_caret_between_panes() {
             .expect("the root arm follows the composer arm"),
     );
     assert!(
-        composer_target.contains("self.composer_entity()"),
+        composer_target.contains("self.composer_entity(cx)"),
         "the composer target resolves the focused pane's own field"
     );
 }
@@ -711,7 +713,11 @@ fn a_pane_turn_settles_its_own_leaf() {
     );
     let walk = flat(pane_element());
     assert!(
-        walk.contains("&pane.live,"),
+        walk.contains("pane.clone().into_any_element()"),
+        "the leaf is drawn by the pane's own entity, not by the window's walk"
+    );
+    assert!(
+        flat(PANE_VIEW).contains("&self.live,"),
         "the leaf draws its own live turn instead of an empty one"
     );
 }
