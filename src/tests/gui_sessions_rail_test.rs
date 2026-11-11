@@ -97,8 +97,12 @@ fn rail_card_media_is_large_dual_and_the_title_is_bold() {
 
     let title = block(row, "let title = div()", "let body = div()");
     assert!(
-        title.contains(".gap_4()") && title.contains(".when_some(marks, |d, marks| d.child(marks))"),
-        "the single media slot has 16px separation from the title"
+        media.contains(".mr_2()"),
+        "the media slot carries its own air before the name, so the spacing cannot collapse"
+    );
+    assert!(
+        title.contains(".gap_2()") && title.contains(".when_some(marks, |d, marks| d.child(marks))"),
+        "the name line keeps one tight gap beside the name"
     );
     let title_weight = block(row, "let title_text = if indented", "let title = div()");
     assert!(title_weight.contains("title_text.text_xs()"));

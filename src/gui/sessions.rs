@@ -1603,6 +1603,12 @@ pub fn row(s: &Session, flags: RowFlags, chips: Option<Stateful<Div>>) -> Statef
             .relative()
             .flex_none()
             .size(rems(RAIL_MARK_REMS))
+            // The air between the media and the name rides the media slot
+            // itself (#2800). A container `gap` alone let the spacing
+            // disappear on the widest rail, where the long name and the
+            // trailing stamp over-constrained the row; a margin on a fixed
+            // box cannot collapse.
+            .mr_2()
             .child(icon)
             .when_some(badge, |d, badge| d.child(badge))
             .into_any_element()
@@ -1650,10 +1656,11 @@ pub fn row(s: &Session, flags: RowFlags, chips: Option<Stateful<Div>>) -> Statef
         .flex()
         .flex_row()
         .items_center()
-        // The media needs real air before the name (#2800): at `gap_3` the
-        // picture read as glued to the first letter, worst on the widest
-        // rail where there is no shortage of room.
-        .gap_4()
+        // Two tight gaps, one on each side of the name: the media carries its
+        // own half of the air before the name (`mr_2` on its slot), and this
+        // gap separates the name from the trailing cluster. Between them the
+        // media keeps 16px of air at every rail width (#2800).
+        .gap_2()
         .min_w_0()
         // The name line fills the body so the trailing cluster's `ml_auto`
         // has free space to push against. Without this it shrinks to its text
