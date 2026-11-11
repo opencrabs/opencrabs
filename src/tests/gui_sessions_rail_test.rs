@@ -167,7 +167,7 @@ fn grouped_topics_are_compact_visible_pins_not_a_dropdown() {
 }
 
 #[test]
-fn rail_header_has_no_kebab_and_the_stamp_owns_its_own_line() {
+fn rail_header_has_no_kebab_and_one_right_aligned_metadata_cluster() {
     assert!(
         !SESSIONS.contains("dropbar") && !GUI_MAIN.contains("dropbar"),
         "the empty menu row and its renderer are gone"
@@ -178,16 +178,21 @@ fn rail_header_has_no_kebab_and_the_stamp_owns_its_own_line() {
     );
 
     let row = block(SESSIONS, "pub fn row(", "pub fn on_click(");
-    // The stamp owns a full line above the name (#2802): sharing the title
-    // line is exactly what let the date paint over the title on a wide rail.
+    // The stamp rides the title line one size down from the name (#2802), so
+    // it can never paint over the title: the name truncates in the space the
+    // trailing cluster leaves.
     let stamp = block(row, "let stamp = (!indented)", "let title = div()");
     assert!(
         stamp.contains("rail_stamp(s.updated_at") && stamp.contains("rail_cost(s.total_cost)"),
         "the stamp is the shared day-or-clock plus compact cost"
     );
     assert!(
-        stamp.contains(".w_full()") && stamp.contains(".justify_end()"),
-        "the stamp fills its own line and hugs the card's right edge"
+        stamp.contains(".text_xs()") && stamp.contains(".flex_none()"),
+        "the stamp is quieter than the name and never squeezes the cluster"
+    );
+    assert!(
+        !stamp.contains(".w_full()") && !stamp.contains(".justify_end()"),
+        "the stamp no longer owns a full-width line of its own"
     );
     let title = block(row, "let title = div()", "let body = div()");
     // The cluster opens before `ml_auto` pushes it to the edge, so its shape
@@ -197,20 +202,25 @@ fn rail_header_has_no_kebab_and_the_stamp_owns_its_own_line() {
         .split_once(".ml_auto()")
         .expect("right-aligned mark cluster");
     assert!(
-        trailing.contains(".when_some(pin_toggle,") && trailing.contains(".when_some(badge,"),
-        "the pin and the activity glyph keep the right edge of the name line"
-    );
-    assert!(
-        !trailing.contains("s.total_cost") && !trailing.contains("%m-%d %H:%M"),
-        "the stamp no longer shares a line with the title it used to overlap"
+        trailing.contains(".when_some(stamp,")
+            && trailing.contains(".when_some(pin_toggle,")
+            && trailing.contains(".when_some(badge,"),
+        "the stamp, the pin and the activity glyph share one right-aligned cluster"
     );
     assert!(
         cluster_head.trim_end().ends_with(".flex_none()") && cluster_head.contains(".gap_2()"),
-        "the pin and the unread badge form one horizontal cluster"
+        "the stamp, pin and unread badge form one horizontal cluster"
     );
     assert!(
         !trailing.contains(".flex_col()") && !trailing.contains(".items_end()"),
         "no second stacked metadata line remains"
+    );
+    // The name is the only child that may shrink, so the cluster keeps its
+    // place instead of being overrun on a wide rail (#2802).
+    let name = block(row, "let title_text = div()", "let title_text = if indented");
+    assert!(
+        name.contains(".flex_1()") && name.contains(".min_w_0()"),
+        "the name yields by truncating, never by moving the cluster"
     );
     assert!(
         !row.contains("row.child(action)"),

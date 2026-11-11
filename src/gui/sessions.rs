@@ -1624,6 +1624,13 @@ pub fn row(s: &Session, flags: RowFlags, chips: Option<Stateful<Div>>) -> Statef
             palette::current().text
         }))
         .truncate()
+        // The name gives way, the trailing cluster never moves (#2802). A
+        // text child sized to its own content overflowed the row on a wide
+        // rail instead of shrinking, so the cluster it shared the line with
+        // was painted over the name. `flex_1` plus `min_w_0` lets the name
+        // truncate inside the space the cluster leaves.
+        .flex_1()
+        .min_w_0()
         .child(SharedString::from(fit(&label, 42)));
     let title_text = if indented {
         title_text.text_xs()
@@ -1632,18 +1639,13 @@ pub fn row(s: &Session, flags: RowFlags, chips: Option<Stateful<Div>>) -> Statef
             .text_sm()
             .font_weight(gpui::FontWeight::BOLD)
     };
-    // The stamp sits on a line of its own, right-aligned above the name
-    // (#2802 follow-up). Sharing the title line meant a long name and a long
-    // sum fought for the same pixels, and on a wide rail the date painted
-    // straight over the title. Its own line cannot collide, and its right
-    // edge is the card edge on every row, so the whole rail reads as one
-    // column instead of a ragged one.
+    // The stamp rides the title line, one size down from the name (#2802).
+    // It belongs to the trailing cluster, not to the name's line box: that
+    // way it shares the card's right edge with the pin, and the name yields
+    // by truncating instead of the date painting over it.
     let stamp = (!indented).then(|| {
         div()
-            .flex()
             .flex_none()
-            .w_full()
-            .justify_end()
             .text_xs()
             .text_color(rgb(palette::current().text_muted))
             .child(SharedString::from(format!(
@@ -1668,9 +1670,9 @@ pub fn row(s: &Session, flags: RowFlags, chips: Option<Stateful<Div>>) -> Statef
         .w_full()
         .when_some(marks, |d, marks| d.child(marks))
         .child(title_text)
-        // The pin and the activity glyph keep the right edge of the name
-        // line. `ml_auto` carries them there in one group, and `flex_none`
-        // holds their width while a long title truncates.
+        // The stamp, the pin and the activity glyph keep the right edge of
+        // the name line. `ml_auto` carries them there in one group, and
+        // `flex_none` holds their width while a long title truncates.
         .child(
             div()
                 .flex()
@@ -1679,6 +1681,9 @@ pub fn row(s: &Session, flags: RowFlags, chips: Option<Stateful<Div>>) -> Statef
                 .gap_2()
                 .flex_none()
                 .ml_auto()
+                // The day-or-clock stamp leads the cluster, so it shares the
+                // card's right edge with the pin instead of drifting (#2802).
+                .when_some(stamp, |d, stamp| d.child(stamp))
                 // Full and compact rows share one wired pin control (#2803).
                 .when_some(pin_toggle, |d, pin| d.child(pin))
                 // The activity glyph closes the cluster at the right edge
@@ -1696,9 +1701,6 @@ pub fn row(s: &Session, flags: RowFlags, chips: Option<Stateful<Div>>) -> Statef
         .gap_0p5()
         .flex_1()
         .min_w_0()
-        // The stamp leads the card, above the name, so the date and the sum
-        // never share a line with the title they used to overlap (#2802).
-        .when_some(stamp, |d, stamp| d.child(stamp))
         .child(title)
         // Topic chips ride inline under the title, on the parent card itself
         // (Telegram topic style). They never push a child out to its own row.
@@ -2421,7 +2423,7 @@ mod tests {
             cluster.contains(".when_some(pin_toggle,"),
             "the wired pin rides the one right-aligned cluster"
         );
-        let stamp = cluster.find("%m-%d %H:%M").expect("date/cost stamp");
+        let stamp = cluster.find(".when_some(stamp,").expect("date/cost stamp");
         let pin = cluster
             .find(".when_some(pin_toggle,")
             .expect("pushpin after the stamp");
@@ -2873,14 +2875,13 @@ mod tests {
         );
     }
 
-    /// Card contract: the stamp (clock today, calendar day before) rides its
-    /// own right-aligned line above the title, the name line carries only the
-    /// media, the name and the right-edge marks, and the message context is a
-    /// line below (under the chip strip when topics are attached). Sharing
-    /// the stamp with the title is what painted the date over the name
-    /// (#2802), so the two must never be one row again.
+    /// Card contract: the stamp (clock today, calendar day before) rides the
+    /// title line one size down from the name, inside the same right-aligned
+    /// cluster as the pin, and the name yields by truncating instead of the
+    /// date painting over it (#2802). The message context is a line below,
+    /// under the chip strip when topics are attached.
     #[test]
-    fn card_stamp_is_its_own_line_above_the_title() {
+    fn card_stamp_shares_the_title_line_without_overlapping_the_name() {
         let source = include_str!("sessions.rs");
         let row_source = source
             .split("pub fn row(")
@@ -2902,20 +2903,32 @@ mod tests {
             "the cost reads the shared compact formatter"
         );
         assert!(
-            title_line.contains(".justify_end()"),
-            "the stamp hugs the card's right edge on its own line"
+            title_line.contains(".text_xs()"),
+            "the stamp is one size down from the bold name"
+        );
+        assert!(
+            !title_line.contains(".justify_end()"),
+            "the stamp no longer owns a full-width line of its own"
         );
         assert!(
             !title_line.contains("%m-%d %H:%M"),
-            "the title line never carries the stamp again"
+            "the stamp is formatted once, never re-formatted at paint time"
         );
-        let title_block = title_line
-            .split(".child(title)")
+        let cluster = title_line
+            .split(".ml_auto()")
             .nth(1)
-            .expect("the title row after the stamp line");
+            .expect("the right-aligned cluster");
         assert!(
-            !title_block.contains("s.total_cost"),
-            "the cost does not paint beside the name"
+            cluster.contains(".when_some(stamp,"),
+            "the stamp rides the trailing cluster, so it shares the card's right edge"
+        );
+        let name = title_line
+            .split(".ml_auto()")
+            .next()
+            .expect("the name before the cluster");
+        assert!(
+            name.contains(".flex_1()") && name.contains(".min_w_0()"),
+            "the name truncates, which is what stops the stamp painting over it"
         );
         assert!(
             row_source.contains(".when_some(preview,"),
