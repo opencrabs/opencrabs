@@ -18638,7 +18638,10 @@ mod tests {
         let src = include_str!("main.rs");
         let builder = fn_body(src, "rail_menu_popover_for");
         assert!(
-            builder.contains("self.rail_menu_at"),
+            builder
+                .split_whitespace()
+                .collect::<String>()
+                .contains("self.rail_menu_at"),
             "the press the row recorded is what places the card"
         );
         assert!(
@@ -18694,7 +18697,10 @@ mod tests {
         );
         let builder = fn_body(src, "rail_menu_popover_for");
         assert!(
-            builder.contains("self.rail_menu_at"),
+            builder
+                .split_whitespace()
+                .collect::<String>()
+                .contains("self.rail_menu_at"),
             "the card opens at the point the press recorded"
         );
         assert!(
