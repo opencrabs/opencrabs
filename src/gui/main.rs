@@ -1633,18 +1633,20 @@ mod sidebar_action_tests {
         let (_before, after) = helper
             .split_once("if duplicate {")
             .unwrap_or_else(|| panic!("the duplicate branch"));
+        let branch = after
+            .split_once("let Some(caret) = caret else {")
+            .map(|(branch, _)| branch)
+            .unwrap_or_else(|| panic!("the branch ends where the chat leaf path begins"));
         assert!(
-            after.contains("self.warn_pane_duplicate(id, cx)"),
+            branch.contains("self.warn_pane_duplicate(id, cx)"),
             "a duplicate says so instead of moving anything"
         );
         assert!(
-            after.contains("return;"),
-            "and the pick stops there instead of renaming a leaf"
+            branch.contains("return false;"),
+            "the pick reports that it did not land instead of renaming a leaf"
         );
         assert!(
-            !after.split("return;").next().unwrap_or_default().contains(
-                ["rename_leaf(caret, ", "id)"].concat().as_str()
-            ),
+            !branch.contains(["rename_leaf(caret, ", "id)"].concat().as_str()),
             "no leaf moves on the duplicate path"
         );
         let warn = fn_body(src, "warn_pane_duplicate");
@@ -1670,6 +1672,67 @@ mod sidebar_action_tests {
         assert!(
             render.contains("warning_overlay(&body, dismiss)"),
             "the card is the window's existing warning shape"
+        );
+    }
+
+    #[test]
+    fn a_topic_pick_drafts_in_the_pane_holding_the_caret() {
+        // #2819: both topic-pick arms opened through `open_session`, which
+        // moves the chat leaf, so asking for a new topic on a conversation
+        // picked from the palette changed the wrong pane. The prompt resolves
+        // its parent from the pane holding the caret, so an arm that carried on
+        // after a refused pick would draft under the wrong conversation.
+        let src = include_str!("main.rs");
+        let body = fn_body(src, "run_finder_pick");
+        let draft = body
+            .split_once("TopicPick::Draft => {")
+            .map(|(_, rest)| rest)
+            .unwrap_or_else(|| panic!("the draft arm"))
+            .split_once("TopicPick::EnableThenDraft => {")
+            .map(|(arm, _)| arm)
+            .unwrap_or_else(|| panic!("the draft arm ends at the next arm"));
+        let enable = body
+            .split_once("TopicPick::EnableThenDraft => {")
+            .map(|(_, rest)| rest)
+            .unwrap_or_else(|| panic!("the enable arm"))
+            .split_once("PaletteAction::Favorite =>")
+            .map(|(arm, _)| arm)
+            .unwrap_or_else(|| panic!("the enable arm ends at the next palette row"));
+        for (name, arm) in [("draft", draft), ("enable then draft", enable)] {
+            assert!(
+                arm.contains("if self.open_picked_in_focused_pane(id, true, cx)"),
+                "the {name} arm opens in the pane holding the caret and only carries on when the pick landed"
+            );
+            assert!(
+                !arm.contains("self.open_session(id, cx)"),
+                "the {name} arm never moves the chat leaf"
+            );
+        }
+        assert!(
+            draft.contains("self.start_topic_draft(cx)"),
+            "the draft arm opens the prompt"
+        );
+        assert!(
+            enable.contains("this.start_topic_draft(cx)"),
+            "the enable arm opens the prompt after the flag is written"
+        );
+        // The rail row's own "New topic" item walked the same chat leaf door,
+        // so the prompt landed on the wrong conversation there too.
+        let menu = fn_body(src, "rail_menu_popover_for");
+        let new_topic = menu
+            .split_once("MenuKind::NewTopic => {")
+            .map(|(_, rest)| rest)
+            .unwrap_or_else(|| panic!("the row menu's new topic item"))
+            .split_once("MenuKind::GroupTopics =>")
+            .map(|(item, _)| item)
+            .unwrap_or_else(|| panic!("the new topic item ends at the next entry"));
+        assert!(
+            new_topic.contains("if this.open_picked_in_focused_pane(id, true, cx)"),
+            "the row menu opens the conversation in the pane holding the caret"
+        );
+        assert!(
+            !new_topic.contains("this.open_session(id, cx)"),
+            "the row menu never moves the chat leaf"
         );
     }
 
@@ -2225,7 +2288,17 @@ impl Dashboard {
     /// one: that drags the chat leaf onto a conversation already on screen or
     /// destroys a pane the user built. The window says so and leaves the tree
     /// alone.
-    fn open_picked_in_focused_pane(&mut self, id: Uuid, hand_back: bool, cx: &mut Context<Self>) {
+    ///
+    /// Returns whether the pick landed, meaning the conversation is the one the
+    /// pane holding the caret now shows. The topic prompt resolves its parent
+    /// from that pane, so a caller that opens a conversation and then acts on
+    /// it must not carry on when the window warned instead of moving a leaf.
+    fn open_picked_in_focused_pane(
+        &mut self,
+        id: Uuid,
+        hand_back: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let chat = self.transcript.session;
         // `pane_focus` is a cache, so it only counts while the tree the render
         // draws still holds the leaf it names (#2620).
@@ -2247,7 +2320,7 @@ impl Dashboard {
                 self.refocus_screen();
                 cx.notify();
             }
-            return;
+            return true;
         }
         let duplicate = (Some(id) != chat
             && self.panes.as_ref().is_some_and(|tree| tree.contains(id)))
@@ -2258,20 +2331,20 @@ impl Dashboard {
             if hand_back {
                 self.warn_pane_duplicate(id, cx);
             }
-            return;
+            return false;
         }
         let Some(caret) = caret else {
             // The chat leaf holds the caret, which is the leaf this door has
             // always moved.
             self.open_session_handing_back(id, hand_back, cx);
-            return;
+            return true;
         };
         let renamed = self
             .panes
             .as_mut()
             .is_some_and(|tree| tree.rename_leaf(caret, id));
         if !renamed {
-            return;
+            return false;
         }
         // The leaf's transcript, live turn, plan strip and editor all belong to
         // the conversation that just left it, so its draft is filed first.
@@ -2288,6 +2361,7 @@ impl Dashboard {
             self.refocus_screen();
             cx.notify();
         }
+        true
     }
 
     /// Opening a conversation is reading its plan: the rail's ring stops here,
@@ -2924,13 +2998,19 @@ impl Dashboard {
                     }
                     TopicPick::Draft => {
                         // The exact path the "New topic" menu item walks
-                        // (#2482).
-                        self.open_session(id, cx);
-                        self.start_topic_draft(cx);
+                        // (#2482). The conversation opens in the pane holding
+                        // the caret, and the prompt only opens when the pick
+                        // landed: a duplicate says so instead of drafting
+                        // under a conversation the window refused to move
+                        // (#2819).
+                        if self.open_picked_in_focused_pane(id, true, cx) {
+                            self.start_topic_draft(cx);
+                        }
                     }
                     TopicPick::EnableThenDraft => {
-                        self.open_session(id, cx);
-                        self.enable_topics_then(id, |this, cx| this.start_topic_draft(cx), cx);
+                        if self.open_picked_in_focused_pane(id, true, cx) {
+                            self.enable_topics_then(id, |this, cx| this.start_topic_draft(cx), cx);
+                        }
                     }
                 }
             }
@@ -7051,9 +7131,13 @@ impl Dashboard {
                         sessions::MenuKind::Rename => this.start_rename(id, cx),
                         sessions::MenuKind::EnableTopics => this.enable_topics(id, cx),
                         sessions::MenuKind::NewTopic => {
-                            // The prompt works on the open chat, so open the row first (#2397).
-                            this.open_session(id, cx);
-                            this.start_topic_draft(cx);
+                            // The prompt hangs the topic under the pane
+                            // holding the caret, so the row opens there first
+                            // and the prompt only follows a pick that landed
+                            // (#2397, #2819).
+                            if this.open_picked_in_focused_pane(id, true, cx) {
+                                this.start_topic_draft(cx);
+                            }
                         }
                         sessions::MenuKind::GroupTopics => this.start_group_topics(id, cx),
                         sessions::MenuKind::SplitSide => this.split_row(id, Layout::Side, cx),
