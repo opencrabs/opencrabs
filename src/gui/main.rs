@@ -1270,6 +1270,37 @@ mod sidebar_action_tests {
         );
     }
 
+    /// The rename dialog's icon picks render big enough to recognise
+    /// (#2789): picker cells at 4.0rem, the chosen badge at 3.2rem inside a
+    /// 4.0rem slot. The 512x512 sources stay crisp at 2x.
+    #[test]
+    fn rename_dialog_icons_render_big_and_crisp() {
+        let src = include_str!("main.rs");
+        // Scope to the window render: this test module sits above it in the
+        // file, so a bare split would land in the test's own strings.
+        let render = dashboard_render(src);
+        let picker = render
+            .split("topic-icon-{name}")
+            .nth(1)
+            .expect("picker cell id")
+            .split(".collect()")
+            .next()
+            .expect("picker cell before collect");
+        assert!(
+            picker.contains("topic_icons::picture(bytes, 4.0)"),
+            "a pick renders at 4.0rem, not a speck"
+        );
+        let overlay = fn_body(src, "topic_prompt_overlay");
+        assert!(
+            overlay.contains("topic_icons::picture(bytes, 3.2)"),
+            "the chosen badge picture renders at 3.2rem"
+        );
+        assert!(
+            overlay.contains(".size(rems(4.0))"),
+            "the badge slot grows to 4.0rem around it"
+        );
+    }
+
     #[test]
     fn a_topic_switch_hands_the_caret_back() {
         // #2741: a click on a topic chip took the caret and never asked for it
@@ -13028,13 +13059,15 @@ impl Render for Dashboard {
                         .id(SharedString::from(format!("topic-icon-{name}")))
                         // A pick is a picture, not a bullet (#2768): at the
                         // old 1.5rem the eight badges were specks and picking
-                        // one was guesswork.
+                        // one was guesswork. They render at 4.0rem now
+                        // (#2789): big enough to recognise, and the 512x512
+                        // sources stay crisp at 2x.
                         .p_1()
                         .rounded(px(6.0))
                         .cursor_pointer()
                         .hover(|d| d.bg(rgb(palette::current().panel_hi)))
                         .on_click(pick)
-                        .child(topic_icons::picture(bytes, 2.6))
+                        .child(topic_icons::picture(bytes, 4.0))
                 })
                 .collect();
             root = root.child(topic_prompt_overlay(label, &draft, &icon, picks, cancel));
@@ -16720,12 +16753,12 @@ fn topic_prompt_overlay(
     // stored glyph when the row predates the picture set (#2478).
     let picture = topic_icons::topic_icon(icon)
         .or_else(|| topic_icons::crab_icon(icon))
-        .map(|bytes| topic_icons::picture(bytes, 2.4).into_any_element());
+        .map(|bytes| topic_icons::picture(bytes, 3.2).into_any_element());
     let icon_badge = div()
         .flex_none()
         // The badge carries the same picture the picker showed, so it has to
-        // be big enough to recognise (#2768).
-        .size(rems(3.2))
+        // be big enough to recognise (#2768, #2789).
+        .size(rems(4.0))
         .flex()
         .items_center()
         .justify_center()
