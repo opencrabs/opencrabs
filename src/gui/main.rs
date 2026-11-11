@@ -850,6 +850,11 @@ struct Dashboard {
     /// this carries that row's title for the warning instead of opening a
     /// prompt that would nest one under another.
     topic_warning: Option<String>,
+    /// A pick that named a conversation already open in a pane (#2819). The
+    /// plain open path used to drag it into the chat leaf and close the pane
+    /// it came from, so a pick could destroy a split the user built. This
+    /// carries that row's title for the card that says so instead.
+    pane_warning: Option<String>,
     /// Which side of the chat the topic row sits on (#2402).
     topic_edge: topic_tabs::Edge,
     /// The topic being renamed, while the prompt is open for a rename (#2304).
@@ -1259,11 +1264,12 @@ mod sidebar_action_tests {
     #[test]
     fn the_arrow_walk_previews_without_taking_the_keys() {
         // #2665: the walk opens each row it stands on, so handing the composer
-        // the caret there would eat the next arrow.
+        // the caret there would eat the next arrow. #2819: the row lands in the
+        // pane holding the caret, still without the hand back.
         let src = include_str!("main.rs");
         let keys = fn_body(src, "on_key");
         assert!(
-            keys.contains("open_session_handing_back(id, false, cx)"),
+            keys.contains("open_picked_in_focused_pane(id, false, cx)"),
             "the arrows preview the row and keep the rail armed"
         );
     }
@@ -1560,6 +1566,128 @@ mod sidebar_action_tests {
         assert!(
             caret.contains("self.refocus_screen()"),
             "the derived owner stays the one decision point"
+        );
+    }
+
+    #[test]
+    fn a_pick_lands_in_the_pane_that_holds_the_caret() {
+        // #2819: every commit door went through `open_session`, which is the
+        // window door and only knows the chat leaf. With a second pane holding
+        // the caret the wrong pane changed, and the pane the reader was
+        // looking at never moved.
+        let src = include_str!("main.rs");
+        let helper = fn_body(src, "open_picked_in_focused_pane");
+        assert!(
+            helper.contains("self.pane_focus"),
+            "the door asks which pane holds the caret"
+        );
+        assert!(
+            helper.contains("tree.contains(*focus)"),
+            "a cached caret is only trusted while the tree still holds it"
+        );
+        let rename = ["tree.rename_leaf(caret, ", "id)"].concat();
+        assert!(
+            helper.contains(rename.as_str()),
+            "the leaf holding the caret is the one that moves"
+        );
+        let follows = ["self.pane_focus = Some(", "id);"].concat();
+        assert!(
+            helper.contains(follows.as_str()),
+            "the caret follows the conversation into the renamed leaf"
+        );
+        assert!(
+            helper.contains("self.persist_layout()"),
+            "the tree the user now sees is the one written down"
+        );
+        // The rail's two commits and its arrow preview all take this door.
+        let keys = fn_body(src, "on_key");
+        let commit = ["open_picked_in_focused_pane(id, ", "true, cx)"].concat();
+        assert!(
+            keys.contains(commit.as_str()),
+            "a committed rail row moves the focused pane"
+        );
+        let preview = ["open_picked_in_focused_pane(id, ", "false, cx)"].concat();
+        assert!(
+            keys.contains(preview.as_str()),
+            "the walk previews in the focused pane without the hand back"
+        );
+        let render = dashboard_render(src);
+        assert!(
+            render.contains(commit.as_str()),
+            "the row click moves the focused pane"
+        );
+        let pick = fn_body(src, "pick_or_open");
+        assert!(
+            pick.contains(commit.as_str()),
+            "the palette and the filter land in the focused pane"
+        );
+    }
+
+    #[test]
+    fn a_duplicate_pick_warns_instead_of_swapping() {
+        // #2819: picking a conversation that already sits in a pane used to
+        // drag it into the chat leaf and close the pane it came from, so one
+        // pick could take a split apart for nothing.
+        let src = include_str!("main.rs");
+        let helper = fn_body(src, "open_picked_in_focused_pane");
+        let (_before, after) = helper
+            .split_once("if duplicate {")
+            .unwrap_or_else(|| panic!("the duplicate branch"));
+        assert!(
+            after.contains("self.warn_pane_duplicate(id, cx)"),
+            "a duplicate says so instead of moving anything"
+        );
+        assert!(
+            after.contains("return;"),
+            "and the pick stops there instead of renaming a leaf"
+        );
+        assert!(
+            !after.split("return;").next().unwrap_or_default().contains(
+                ["rename_leaf(caret, ", "id)"].concat().as_str()
+            ),
+            "no leaf moves on the duplicate path"
+        );
+        let warn = fn_body(src, "warn_pane_duplicate");
+        assert!(
+            warn.contains("self.pane_warning = Some(title)"),
+            "the card carries the conversation it named"
+        );
+        let overlays = fn_body(src, "open_overlays");
+        assert!(
+            overlays.contains("self.pane_warning.is_some()"),
+            "the card owns the keyboard while it is up"
+        );
+        assert!(
+            src.contains("is already open in another pane"),
+            "the card says why the pick did nothing"
+        );
+        let keys = fn_body(src, "on_key");
+        assert!(
+            keys.contains("self.pane_warning = None"),
+            "Enter or Esc closes the card"
+        );
+        let render = dashboard_render(src);
+        assert!(
+            render.contains("warning_overlay(&body, dismiss)"),
+            "the card is the window's existing warning shape"
+        );
+    }
+
+    #[test]
+    fn the_chat_leaf_still_takes_the_pick_when_no_pane_has_the_caret() {
+        // #2819 keeps the single pane window exactly as it was: with no other
+        // leaf holding the caret, the chat leaf is the one that moves, and it
+        // keeps whatever hand back the door asked for.
+        let src = include_str!("main.rs");
+        let helper = fn_body(src, "open_picked_in_focused_pane");
+        let fallback = ["open_session_handing_back(id, ", "hand_back, cx)"].concat();
+        assert!(
+            helper.contains(fallback.as_str()),
+            "the chat leaf path keeps the hand back it was given"
+        );
+        assert!(
+            helper.contains("let Some(caret) = caret else {"),
+            "the fallback is the no other pane case, not a guess"
         );
     }
 
@@ -2085,6 +2213,115 @@ impl Dashboard {
         cx.notify();
     }
 
+    /// A pick that lands in the pane holding the caret (#2819).
+    ///
+    /// Every commit door used to call `open_session`, which is the window door
+    /// and knows only the chat leaf. With a second pane holding the caret,
+    /// picking a conversation renamed the chat leaf and left the pane the
+    /// reader was looking at untouched, so the wrong pane changed. This asks
+    /// the caret first, the way `open_topic_in_pane` asks it for a topic chip.
+    ///
+    /// A conversation already open in a leaf is never renamed into another
+    /// one: that drags the chat leaf onto a conversation already on screen or
+    /// destroys a pane the user built. The window says so and leaves the tree
+    /// alone.
+    fn open_picked_in_focused_pane(&mut self, id: Uuid, hand_back: bool, cx: &mut Context<Self>) {
+        let chat = self.transcript.session;
+        // `pane_focus` is a cache, so it only counts while the tree the render
+        // draws still holds the leaf it names (#2620).
+        let caret = self
+            .pane_focus
+            .filter(|focus| Some(*focus) != chat)
+            .filter(|focus| {
+                self.panes
+                    .as_ref()
+                    .is_some_and(|tree| tree.contains(*focus))
+            });
+        if caret == Some(id) {
+            // Already the conversation in the pane holding the caret, so the
+            // pick asks for nothing but the keyboard back.
+            if hand_back {
+                self.rail_focused = false;
+                self.sync_composer_session();
+                self.request_composer_caret(cx);
+                self.refocus_screen();
+                cx.notify();
+            }
+            return;
+        }
+        let duplicate = (Some(id) != chat
+            && self.panes.as_ref().is_some_and(|tree| tree.contains(id)))
+            || (caret.is_some() && Some(id) == chat);
+        if duplicate {
+            // A walk over the list must not stop on a card: the preview just
+            // leaves the pane alone and the next arrow carries on.
+            if hand_back {
+                self.warn_pane_duplicate(id, cx);
+            }
+            return;
+        }
+        let Some(caret) = caret else {
+            // The chat leaf holds the caret, which is the leaf this door has
+            // always moved.
+            self.open_session_handing_back(id, hand_back, cx);
+            return;
+        };
+        let renamed = self
+            .panes
+            .as_mut()
+            .is_some_and(|tree| tree.rename_leaf(caret, id));
+        if !renamed {
+            return;
+        }
+        // The leaf's transcript, live turn, plan strip and editor all belong to
+        // the conversation that just left it, so its draft is filed first.
+        self.stash_pane_draft(caret, cx);
+        self.pane_states.remove(&caret);
+        self.open_pane_state(id, cx);
+        self.mark_rail_seen(id);
+        self.pane_focus = Some(id);
+        self.sync_composer_session();
+        self.persist_layout();
+        if hand_back {
+            self.rail_focused = false;
+            self.request_composer_caret(cx);
+            self.refocus_screen();
+            cx.notify();
+        }
+    }
+
+    /// Opening a conversation is reading its plan: the rail's ring stops here,
+    /// not at paint, so a repaint can never be mistaken for a read and a ring
+    /// never clears itself just because the row scrolled past. The window door
+    /// and a pane pick both land here.
+    fn mark_rail_seen(&mut self, id: Uuid) {
+        if let Some(evidence) = self
+            .rail_index
+            .evidence(id, false, std::time::Instant::now())
+        {
+            self.rail_seen.mark(id, evidence.stamp);
+        }
+    }
+
+    /// Say a picked conversation already sits in a pane (#2819).
+    ///
+    /// The plain open path used to pull it into the chat leaf and close the
+    /// pane it came from, so a pick could take a split apart for nothing. The
+    /// card names the conversation and the tree is left exactly as it was.
+    fn warn_pane_duplicate(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        let title = self
+            .sessions
+            .items
+            .iter()
+            .find(|s| s.id == id)
+            .and_then(|s| s.title.clone())
+            .unwrap_or_else(|| "That session".to_string());
+        self.pane_warning = Some(title);
+        self.rail_focused = false;
+        self.refocus_screen();
+        cx.notify();
+    }
+
     /// Open one conversation: select it in the rail, switch the right pane to
     /// chat, and load its newest window off the UI thread. Every door (rail
     /// click, launch, ctrl+u return, create topic) goes through here, and the
@@ -2104,15 +2341,7 @@ impl Dashboard {
     /// the next arrow from arriving.
     fn open_session_handing_back(&mut self, id: Uuid, hand_back: bool, cx: &mut Context<Self>) {
         self.begin_conversation(id, cx);
-        // Opening a conversation is reading its plan: the rail's ring stops
-        // here, not at paint, so a repaint can never be mistaken for a read and
-        // a ring never clears itself just because the row scrolled past.
-        if let Some(evidence) = self
-            .rail_index
-            .evidence(id, false, std::time::Instant::now())
-        {
-            self.rail_seen.mark(id, evidence.stamp);
-        }
+        self.mark_rail_seen(id);
         self.screen = Screen::Chat;
         let db_path = self.db_path.clone();
         cx.spawn(async move |this, cx| {
@@ -2240,7 +2469,7 @@ impl Dashboard {
         if self.group_target.is_some() {
             open.push(OverlayId::GroupPick);
         }
-        if self.topic_warning.is_some() {
+        if self.topic_warning.is_some() || self.pane_warning.is_some() {
             open.push(OverlayId::Warning);
         }
         if self.sessions.filter_active {
@@ -3337,7 +3566,9 @@ impl Dashboard {
         if self.split_pick.is_some() {
             self.choose_split(id, cx);
         } else {
-            self.open_session(id, cx);
+            // The pane holding the caret takes the pick, not the chat leaf
+            // (#2819).
+            self.open_picked_in_focused_pane(id, true, cx);
         }
     }
 
@@ -9600,9 +9831,10 @@ impl Dashboard {
         // keyboard while it is up (#2605): Enter or Esc closes it, and every
         // other keystroke is swallowed instead of reaching the card behind
         // it.
-        if self.topic_warning.is_some() {
+        if self.topic_warning.is_some() || self.pane_warning.is_some() {
             if matches!(ev.keystroke.key.as_str(), "enter" | "escape") {
                 self.topic_warning = None;
+                self.pane_warning = None;
                 self.refocus_screen();
             }
             cx.notify();
@@ -9964,7 +10196,7 @@ impl Dashboard {
                         }
                         // During a split pick the arrows only walk the list (#2438).
                         if self.split_pick.is_none() {
-                            self.open_session_handing_back(id, false, cx);
+                            self.open_picked_in_focused_pane(id, false, cx);
                         }
                     }
                     cx.notify();
@@ -9977,7 +10209,7 @@ impl Dashboard {
                             cx.notify();
                             return;
                         }
-                        self.open_session(id, cx);
+                        self.open_picked_in_focused_pane(id, true, cx);
                         // Back to the composer, the place a newly opened
                         // conversation is about to be typed into.
                         self.refocus_screen();
@@ -10957,7 +11189,8 @@ impl Render for Dashboard {
                     return;
                 }
                 this.close_rail_filter(cx);
-                this.open_session(id, cx);
+                // The pane holding the caret takes the pick (#2819).
+                this.open_picked_in_focused_pane(id, true, cx);
             });
             let r = r.on_mouse_down(MouseButton::Right, ask_menu);
             let r = r.on_mouse_down(MouseButton::Left, press);
@@ -13596,6 +13829,22 @@ impl Render for Dashboard {
             );
             root = root.child(warning_overlay(&body, dismiss));
         }
+        // A pick that named a conversation already open in a pane says so
+        // instead of moving it (#2819). One card at a time, so the topic
+        // warning keeps the slot when both are somehow armed.
+        if self.topic_warning.is_none()
+            && let Some(title) = self.pane_warning.clone()
+        {
+            let dismiss = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                this.pane_warning = None;
+                this.refocus_screen();
+                cx.notify();
+            });
+            let body = format!(
+                "\"{title}\" is already open in another pane. Close that pane first, or pick a different conversation."
+            );
+            root = root.child(warning_overlay(&body, dismiss));
+        }
         // A preview sits over both panes, and over everything else on the
         // window: it is where the user went to look at something, and the
         // transcript behind it must not take a click meant for it (#2395).
@@ -14297,6 +14546,7 @@ fn main() {
                         topic_menu_at: None,
                         topic_draft: None,
                         topic_warning: None,
+                        pane_warning: None,
                         topic_edge: topic_tabs::Edge::from_config(
                             Config::load()
                                 .ok()
