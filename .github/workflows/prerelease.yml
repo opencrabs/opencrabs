@@ -153,8 +153,10 @@ jobs:
 
       - name: Install dependencies
         # libxcb1-dev: #2765 gave Linux gpui's x11 backend, and x11rb's
-        # xcb_ffi carries `#[link(name = "xcb")]`.
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libxcb1-dev
+        # xcb_ffi carries `#[link(name = "xcb")]`. The same link line also
+        # carries -lxkbcommon and -lxkbcommon-x11, so those dev packages
+        # are needed too; the ubuntu-24.04 image ships none of them.
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev
 
       - name: Build
         shell: bash
