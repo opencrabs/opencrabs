@@ -64,7 +64,14 @@ fn grouped_topics_are_compact_visible_pins_not_a_dropdown() {
     );
 
     let row = block(SESSIONS, "pub fn row(", "pub fn on_click(");
-    assert!(row.contains(".when(indented, |d| d.child(topic_pin_mark()))"));
+    assert!(
+        !row.contains("topic_pin_mark"),
+        "the pre-title branch mark is gone: one pin, in the trailing cluster (#2788)"
+    );
+    assert!(
+        row.contains(".when(indented, |d| d.child(pin_icon(favorited, 0.9)))"),
+        "a grouped topic keeps its single pin in the trailing cluster"
+    );
     assert!(row.contains(".when(indented, |d| d.pl_4().pr_2().py_1())"));
     assert!(row.contains("title_text.text_xs()"));
     assert!(

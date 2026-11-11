@@ -192,7 +192,7 @@ fn rail_card_stacks_the_running_line_under_the_plan_bar() {
     let bar_cell = block(
         GUI_SESSIONS_RS,
         "fn plan_progress_cell(",
-        "fn topic_pin_mark(",
+        "pub fn on_click(",
     );
     assert!(
         bar_cell.contains("if flash {") && bar_cell.contains("palette::current().accent"),

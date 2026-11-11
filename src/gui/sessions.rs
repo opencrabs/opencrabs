@@ -1222,12 +1222,6 @@ pub fn preview_line(role: &str, text: &str) -> SharedString {
     ))
 }
 
-/// One session row: title on the left, timestamp and cost aligned right on
-/// the same line, the caller's action strip on the far right. Pure data plus
-/// one slot for behaviour, so the view owns every listener it puts on
-/// screen. A pinned row carries the star the owner asked
-/// for, in the accent colour, so "why is this one on top" is answered by the
-/// row itself.
 /// The pin mark a row carries (#2788): a quiet Telegram-style pushpin,
 /// filled once pinned, outline before first use. Without the outline a
 /// first-time user saw no mark, no button and no hint, so pinning looked
@@ -1549,7 +1543,6 @@ pub fn row(
         // has free space to push against. Without this it shrinks to its text
         // and the glyph parks right after the name (#2636 follow-up).
         .w_full()
-        .when(indented, |d| d.child(topic_pin_mark()))
         .when_some(mark, |d, mark| d.child(mark))
         .child(title_text)
         // Timestamp, cost, the pin and the activity glyph share ONE
@@ -1748,15 +1741,6 @@ fn plan_progress_cell(done: usize, total: usize, flash: bool) -> Div {
                 .text_color(rgb(palette::current().text_muted))
                 .child(SharedString::from(format!("{done}/{total}"))),
         )
-}
-
-/// The quiet branch mark that makes a grouped topic read as a compact pin.
-fn topic_pin_mark() -> Div {
-    div()
-        .flex_none()
-        .text_xs()
-        .text_color(rgb(palette::current().text_muted))
-        .child("\u{2442}")
 }
 
 /// The click behaviour for a row, typed the way `cx.listener` produces it.
@@ -2390,9 +2374,10 @@ mod tests {
         );
     }
 
-    /// The pin contract (#2788): the pushpin rides the one trailing cluster,
-    /// never the title line, the full row stacks the stamp above it, and the
-    /// star glyphs are gone from the module.
+    /// The pin contract (#2788): one pushpin per row, in the trailing
+    /// cluster and never before the name. A full row stacks the stamp above
+    /// the pin, an indented topic keeps it inline, and the star glyphs are
+    /// gone from the module.
     #[test]
     fn the_pin_rides_the_trailing_cluster_not_the_title() {
         let source = include_str!("sessions.rs");
@@ -2411,6 +2396,14 @@ mod tests {
             !title_line.contains("= pin_mark(favorited)"),
             "the title line never paints the pin before the name"
         );
+        let name_line = title_line
+            .split(".ml_auto()")
+            .next()
+            .expect("name line before the trailing cluster");
+        assert!(
+            !name_line.contains("pin_icon") && !name_line.contains("topic_pin_mark"),
+            "no pin of any kind paints before the name, indented rows included"
+        );
         let cluster = title_line
             .split(".ml_auto()")
             .nth(1)
@@ -2418,6 +2411,14 @@ mod tests {
         assert!(
             cluster.contains("pin_icon(favorited, 0.9)"),
             "the pin rides the one right-aligned cluster"
+        );
+        let stamp = cluster.find("%m-%d %H:%M").expect("date/cost stamp");
+        let pin = cluster
+            .find("pin_icon(favorited, 0.9)")
+            .expect("pushpin under the stamp");
+        assert!(
+            stamp < pin,
+            "the stamp paints above the pin on a full row, Telegram style"
         );
         assert!(
             cluster.contains(".flex_col()") && cluster.contains(".items_end()"),
@@ -2907,9 +2908,9 @@ mod tests {
             .split("fn plan_progress_cell(")
             .nth(1)
             .expect("plan progress cell")
-            .split("fn topic_pin_mark(")
+            .split("pub fn on_click(")
             .next()
-            .expect("cell source before the pin mark");
+            .expect("cell source before the click handler");
         assert!(
             cell_source.contains("crate::plan_strip::progress_bar(done, total)"),
             "the bar reuses the composer strip's math, not a second copy"
