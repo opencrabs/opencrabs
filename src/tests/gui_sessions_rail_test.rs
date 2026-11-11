@@ -347,8 +347,10 @@ fn selected_topic_owns_the_parent_activity_line() {
 }
 
 /// Telegram puts the pin beside the topic cards, not on the name line (#2803).
-/// A card with topics therefore hands the pin to its chip line, and a card
+/// A card with topics therefore hands the pin to its chip block, and a card
 /// without topics keeps it on the name line so no empty row is invented.
+/// The pin caps the block from its own line (#2809): a column beside the strip
+/// took the pin's width out of every wrapped row.
 #[test]
 fn the_pin_rides_the_chip_line_when_a_card_has_topics() {
     let row = block(SESSIONS, "pub fn row(", "pub fn on_click(");
@@ -363,11 +365,23 @@ fn the_pin_rides_the_chip_line_when_a_card_has_topics() {
     let footer = block(row, "let footer = match", "let body = div()");
     assert!(
         footer.contains("(Some(strip), Some(pin))") && footer.contains(".child(pin)"),
-        "the chip line mounts the pin at its right edge"
+        "the chip block mounts the pin at its right edge"
     );
     assert!(
-        footer.contains(".flex_none()"),
-        "the pin keeps its width while a long chip list wraps"
+        footer.contains(".flex_col()"),
+        "the pin takes its own line above the strip instead of a column beside it"
+    );
+    assert!(
+        footer.contains(".justify_end()"),
+        "the pin line holds the card's right edge"
+    );
+    assert!(
+        footer.contains("div().w_full().min_w_0().child(strip)"),
+        "the strip spans the whole card, so no row reserves width for the pin"
+    );
+    assert!(
+        !footer.contains(".flex_1().min_w_0().child(strip)"),
+        "the strip no longer shares its row with the pin, which stole width on every row"
     );
     let title = block(row, "let title = div()", "let footer = match");
     assert!(

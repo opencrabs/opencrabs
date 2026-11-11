@@ -1716,21 +1716,29 @@ pub fn row(s: &Session, flags: RowFlags, chips: Option<Stateful<Div>>) -> Statef
                 // (#2636).
                 .when_some(badge, |d, glyph| d.child(badge_cell(glyph))),
         );
-    // The chip strip carries the pin at its right edge when the card has
-    // topics: Telegram puts the pin on the topic line, not on the name (#2803).
-    // The strip keeps its own wrapping width and the pin holds the card's
-    // right edge, so a long chip list wraps under itself instead of pushing
-    // the pin around.
+    // The pin caps the chip block from its own line at the card's right edge
+    // (#2809). Held beside the strip in a flex row, the pin took its width out
+    // of every wrapped line: a 28-topic card lost about 30px of chip width on
+    // all eleven rows, and the rows below the first one left a dead column
+    // under the glyph. Above the strip the pin keeps the card's right edge and
+    // costs no width, so the chips wrap against the whole card and the rows
+    // under it use the space the pin would have eaten.
     let footer = match (chips, footer_pin) {
         (Some(strip), Some(pin)) => Some(
             div()
                 .flex()
-                .flex_row()
-                .items_start()
-                .gap_2()
+                .flex_col()
                 .w_full()
-                .child(div().flex_1().min_w_0().child(strip))
-                .child(div().flex_none().child(pin)),
+                .min_w_0()
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .justify_end()
+                        .w_full()
+                        .child(pin),
+                )
+                .child(div().w_full().min_w_0().child(strip)),
         ),
         (Some(strip), None) => Some(div().w_full().child(strip)),
         (None, _) => None,
