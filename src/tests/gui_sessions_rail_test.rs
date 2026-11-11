@@ -147,7 +147,7 @@ fn grouped_topics_are_compact_visible_pins_not_a_dropdown() {
         "the pre-title branch mark is gone: one pin, in the trailing cluster (#2788)"
     );
     assert!(
-        row.contains(".when_some(pin_toggle, |d, pin| d.child(pin))"),
+        row.contains(".when_some(title_pin, |d, pin| d.child(pin))"),
         "full and grouped rows share one pin control in the trailing cluster"
     );
     assert!(row.contains(".when(indented, |d| d.pl_4().pr_2().py_1())"));
@@ -203,9 +203,13 @@ fn rail_header_has_no_kebab_and_one_right_aligned_metadata_cluster() {
         .expect("right-aligned mark cluster");
     assert!(
         trailing.contains(".when_some(stamp,")
-            && trailing.contains(".when_some(pin_toggle,")
+            && trailing.contains(".when_some(title_pin,")
             && trailing.contains(".when_some(badge,"),
-        "the stamp, the pin and the activity glyph share one right-aligned cluster"
+        "the stamp, the pin fallback and the activity glyph share one right-aligned cluster"
+    );
+    assert!(
+        !trailing.contains(".when_some(footer_pin,"),
+        "the chip line owns the pin when topics are attached, never both lines"
     );
     assert!(
         cluster_head.trim_end().ends_with(".flex_none()") && cluster_head.contains(".gap_2()"),
@@ -254,7 +258,7 @@ fn rail_pin_toggles_without_opening_the_card() {
 
     let row = block(SESSIONS, "pub fn row(", "pub fn on_click(");
     assert_eq!(
-        row.matches(".when_some(pin_toggle,").count(),
+        row.matches(".when_some(title_pin,").count(),
         1,
         "one wired control serves both full and compact rows"
     );
@@ -324,7 +328,7 @@ fn selected_topic_owns_the_parent_activity_line() {
         "let body = div()",
         ".id(SharedString::from(s.id.to_string()))",
     );
-    let chips = body.find(".when_some(chips,").expect("chip strip");
+    let chips = body.find(".when_some(footer,").expect("chip strip");
     let fallback = body
         .find("let preview = activity.or(preview);")
         .expect("live activity wins over the selected topic's preview");
@@ -339,5 +343,35 @@ fn selected_topic_owns_the_parent_activity_line() {
         body.matches(".when_some(preview,").count(),
         1,
         "one existing renderer serves parents and selected topics"
+    );
+}
+
+/// Telegram puts the pin beside the topic cards, not on the name line (#2803).
+/// A card with topics therefore hands the pin to its chip line, and a card
+/// without topics keeps it on the name line so no empty row is invented.
+#[test]
+fn the_pin_rides_the_chip_line_when_a_card_has_topics() {
+    let row = block(SESSIONS, "pub fn row(", "pub fn on_click(");
+    assert!(
+        row.contains("let (title_pin, footer_pin) = if chips.is_some()"),
+        "one control is routed to exactly one line, decided by whether topics exist"
+    );
+    assert!(
+        row.contains("(None, pin_toggle)") && row.contains("(pin_toggle, None)"),
+        "a card with topics drops the name-line pin and a card without keeps it"
+    );
+    let footer = block(row, "let footer = match", "let body = div()");
+    assert!(
+        footer.contains("(Some(strip), Some(pin))") && footer.contains(".child(pin)"),
+        "the chip line mounts the pin at its right edge"
+    );
+    assert!(
+        footer.contains(".flex_none()"),
+        "the pin keeps its width while a long chip list wraps"
+    );
+    let title = block(row, "let title = div()", "let footer = match");
+    assert!(
+        title.contains(".when_some(title_pin,"),
+        "the name line only carries the pin when the card has no topics"
     );
 }

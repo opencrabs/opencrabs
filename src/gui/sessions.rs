@@ -1654,6 +1654,15 @@ pub fn row(s: &Session, flags: RowFlags, chips: Option<Stateful<Div>>) -> Statef
                 rail_cost(s.total_cost)
             )))
     });
+    // The pin rides the card's last line, the way Telegram puts it beside the
+    // topic cards (#2803). With topics attached that line is the chip strip,
+    // where the pin keeps the card's right edge; a card with no topics keeps
+    // the pin on its name line so it never invents an empty row.
+    let (title_pin, footer_pin) = if chips.is_some() {
+        (None, pin_toggle)
+    } else {
+        (pin_toggle, None)
+    };
     let title = div()
         .flex()
         .flex_row()
@@ -1684,12 +1693,32 @@ pub fn row(s: &Session, flags: RowFlags, chips: Option<Stateful<Div>>) -> Statef
                 // The day-or-clock stamp leads the cluster, so it shares the
                 // card's right edge with the pin instead of drifting (#2802).
                 .when_some(stamp, |d, stamp| d.child(stamp))
-                // Full and compact rows share one wired pin control (#2803).
-                .when_some(pin_toggle, |d, pin| d.child(pin))
+                // Without topics the pin keeps this line; with topics it moves
+                // down beside the chips (#2803).
+                .when_some(title_pin, |d, pin| d.child(pin))
                 // The activity glyph closes the cluster at the right edge
                 // (#2636).
                 .when_some(badge, |d, glyph| d.child(badge_cell(glyph))),
         );
+    // The chip strip carries the pin at its right edge when the card has
+    // topics: Telegram puts the pin on the topic line, not on the name (#2803).
+    // The strip keeps its own wrapping width and the pin holds the card's
+    // right edge, so a long chip list wraps under itself instead of pushing
+    // the pin around.
+    let footer = match (chips, footer_pin) {
+        (Some(strip), Some(pin)) => Some(
+            div()
+                .flex()
+                .flex_row()
+                .items_start()
+                .gap_2()
+                .w_full()
+                .child(div().flex_1().min_w_0().child(strip))
+                .child(div().flex_none().child(pin)),
+        ),
+        (Some(strip), None) => Some(div().w_full().child(strip)),
+        (None, _) => None,
+    };
     // A grouped topic is a compact pin beneath its session. Its title stays
     // visible, while the repeated date and cost metadata belongs to full rows.
     // Fill the remaining row width: `justify_between` alone left this
@@ -1704,7 +1733,7 @@ pub fn row(s: &Session, flags: RowFlags, chips: Option<Stateful<Div>>) -> Statef
         .child(title)
         // Topic chips ride inline under the title, on the parent card itself
         // (Telegram topic style). They never push a child out to its own row.
-        .when_some(chips, |d, c| d.child(c))
+        .when_some(footer, |d, c| d.child(c))
         .when(!indented, |d| {
             // A turn in flight says what it is doing, in the preview's own
             // slot (#2718): the card would otherwise sit on the last
@@ -2383,9 +2412,9 @@ mod tests {
         );
     }
 
-    /// The pin contract (#2788): one pushpin per row, in the trailing
-    /// cluster and never before the name. A full row keeps the stamp and pin
-    /// on one line, an indented topic keeps the pin inline, and the star
+    /// The pin contract (#2788, #2803): one pushpin per row, and never before
+    /// the name. A card with topics carries it on the chip line, the way
+    /// Telegram does; a card with none keeps it on the name line. The star
     /// glyphs are gone from the module.
     #[test]
     fn the_pin_rides_the_trailing_cluster_not_the_title() {
@@ -2398,7 +2427,7 @@ mod tests {
             .next()
             .expect("row source before click handler");
         let title_line = row_source
-            .split(".when_some(chips,")
+            .split(".when_some(footer,")
             .next()
             .expect("title line before the chip strip");
         assert!(
@@ -2420,20 +2449,20 @@ mod tests {
             .nth(1)
             .expect("trailing cluster");
         assert!(
-            cluster.contains(".when_some(pin_toggle,"),
-            "the wired pin rides the one right-aligned cluster"
+            cluster.contains(".when_some(title_pin,"),
+            "a card with no topics keeps the wired pin on its name line"
         );
-        let stamp = cluster.find(".when_some(stamp,").expect("date/cost stamp");
-        let pin = cluster
-            .find(".when_some(pin_toggle,")
-            .expect("pushpin after the stamp");
         assert!(
-            stamp < pin,
-            "the stamp paints before the pin on the same full-row line"
+            !cluster.contains("%m-%d %H:%M"),
+            "the cluster never formats a date: the stamp arrives already formatted"
+        );
+        assert!(
+            !cluster.contains("when_some(footer_pin,"),
+            "the chip line owns the pin whenever topics are attached"
         );
         assert!(
             cluster.contains(".flex_row()") && cluster.contains(".gap_2()"),
-            "the full-row metadata and pin share one horizontal cluster"
+            "the stamp, pin and unread badge share one horizontal cluster"
         );
         assert!(
             !cluster.contains(".flex_col()") && !cluster.contains(".items_end()"),
@@ -2740,7 +2769,7 @@ mod tests {
             .next()
             .expect("row source before click handler");
         assert!(
-            row_source.contains(".when_some(chips,"),
+            row_source.contains(".when_some(footer,"),
             "the parent card mounts the chip strip inline under its title"
         );
 
@@ -2891,7 +2920,7 @@ mod tests {
             .next()
             .expect("row source before click handler");
         let title_line = row_source
-            .split(".when_some(chips,")
+            .split(".when_some(footer,")
             .next()
             .expect("title line before the chip strip");
         assert!(
