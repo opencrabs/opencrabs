@@ -1716,7 +1716,11 @@ fn inline_crabs(
     let Some(pieces) = topic_icons::inline_pieces(&text) else {
         return selectable_styled_text(text, style, highlights, links, selection);
     };
-    let mut row = div().flex().flex_wrap().items_center();
+    // The row takes the width its parent gave it, so the wrap below has a
+    // width to wrap at. Without `w_full` a flex row measures its children
+    // against an indefinite width, and every chunk collapses to one character
+    // wide and stacks the whole line into a vertical column (#2794).
+    let mut row = div().flex().flex_wrap().items_center().w_full().min_w_0();
     let crab_size = inline_crab_size(&style);
     for piece in pieces {
         if let Some(bytes) = piece.crab {
@@ -1741,9 +1745,13 @@ fn inline_crabs(
             let chunk = text[range].to_string();
             let drawn =
                 selectable_text_segment(chunk, length, &style, covered, &chunk_links, selection);
-            // An unbreakable word longer than the pane (a pasted URL) shrinks
-            // and wraps inside its own chunk instead of pushing the row wide.
-            row = row.child(drawn.min_w_0());
+            // A chunk keeps the width its own text needs and the row wraps
+            // between chunks. `min_w_0` here was the bug: it let every chunk
+            // shrink under its content, and a shrinking `StyledText` wraps one
+            // character per line, so a whole message came out as vertical
+            // columns of single letters (#2794). A word wider than the pane
+            // now overflows its row instead of shredding the line.
+            row = row.child(drawn.flex_none());
         }
     }
     row

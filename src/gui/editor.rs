@@ -19,18 +19,20 @@ use opencrabs::ui_core::input_history::{
     input_history_down, input_history_up, record_input_history,
 };
 use opencrabs::ui_core::palette::{next_word_end, previous_word_start};
+use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, App, Bounds, ClickEvent, ClipboardEntry, ClipboardItem, Context, CursorStyle, Div,
-    Element, ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
-    Focusable, Font, GlobalElementId, ImageFormat, KeyBinding, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, PathPromptOptions, Pixels, Point,
-    ScrollHandle, SharedString, Style, TextAlign, TextRun, UTF16Selection, Window, WrappedLine,
-    actions, div, fill, img, point, prelude::*, px, relative, rgb, rgba, size,
+    AnyElement, App, Bounds, ClickEvent, ClipboardEntry, ClipboardItem, Context, Corners,
+    CursorStyle, Div, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler,
+    EventEmitter, FocusHandle, Focusable, Font, GlobalElementId, ImageFormat, KeyBinding, LayoutId,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, PathPromptOptions,
+    Pixels, Point, RenderImage, ScrollHandle, SharedString, Style, TextAlign, TextRun,
+    UTF16Selection, Window, WrappedLine, actions, div, fill, img, point, prelude::*, px, relative,
+    rgb, rgba, size, transparent_black,
 };
 
 use unicode_segmentation::UnicodeSegmentation;
@@ -335,6 +337,10 @@ pub struct Editor {
     notice_generation: u64,
     /// Last shaped draft, reused while its key holds still (#2688).
     shaped_draft: Option<ShapedDraft>,
+    /// The pack pictures the field has already decoded, by shortcode. A crab
+    /// shortcode in the draft is painted as its picture, and decoding a PNG on
+    /// every frame would cost more than the paint it feeds (#2794).
+    crab_images: HashMap<&'static str, Arc<RenderImage>>,
     /// The box's own scroll position, so a draft taller than
     /// `COMPOSER_MAX_ROWS` moves under the field instead of painting over the
     /// pane below it (#2773).
@@ -420,6 +426,7 @@ impl Editor {
             notice: None,
             notice_generation: 0,
             shaped_draft: None,
+            crab_images: HashMap::new(),
             scroll: ScrollHandle::new(),
             reveal: None,
             reveal_key: (0, 0),
@@ -591,6 +598,21 @@ impl Editor {
             self.command_dismissed = true;
             cx.notify();
         }
+    }
+
+    /// The picture for a crab, decoded once and kept (#2794).
+    ///
+    /// The field paints a crab as a picture rather than its `:name:`, so the
+    /// decode has to happen somewhere on the paint path. Caching it here means
+    /// the second frame of the same draft, and every frame after it, only
+    /// clones an `Arc`.
+    fn crab_image(&mut self, name: &'static str) -> Option<Arc<RenderImage>> {
+        if let Some(image) = self.crab_images.get(name) {
+            return Some(Arc::clone(image));
+        }
+        let image = crab_picture(crate::topic_icons::crab_icon(name)?)?;
+        self.crab_images.insert(name, Arc::clone(&image));
+        Some(image)
     }
 
     /// How many rows the `:query` list shows, the terminal's cap (#2413).
@@ -1648,6 +1670,10 @@ struct RowPaint {
     selection: Vec<(Point<Pixels>, Point<Pixels>)>,
     /// Caret origin within the line, when the caret sits on it.
     cursor: Option<Point<Pixels>>,
+    /// The crab shortcodes on this line, as (byte offset in the logical line,
+    /// pack name). The field paints the pack picture at each one, over the
+    /// transparent run the shaper left for it (#2794).
+    crabs: Vec<(usize, &'static str)>,
 }
 
 /// The composer's shaped lines plus the inputs they were shaped from (#2688).
@@ -1831,14 +1857,30 @@ impl Element for EditorElement {
             style.color
         };
         let font = style.font();
-        let run = TextRun {
-            len: display.len(),
-            font: font.clone(),
-            color: run_color,
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        };
+        // One run per stretch of text, with a transparent run over every crab
+        // shortcode: the glyphs still take their width, so the caret, the
+        // selection and the wrap land where they would with the token shown,
+        // and the picture painted on top of that empty box is the emoji the
+        // user picked (#2794).
+        let runs = draft_runs(&display, &font, run_color);
+        // The pack pictures this draft draws, decoded before the frame paints
+        // so the paint pass only reads them (#2794).
+        if !empty {
+            let crabs: Vec<&'static str> = crate::topic_icons::crab_tokens(&display)
+                .into_iter()
+                .filter_map(|(_, bytes)| crate::topic_icons::crab_name(bytes))
+                .collect();
+            if !crabs.is_empty() {
+                self.input.update(cx, |input, _| {
+                    for name in crabs {
+                        // Decoded here so the paint pass only reads: a miss
+                        // still paints nothing rather than a PNG decode
+                        // inside the frame.
+                        let _ = input.crab_image(name);
+                    }
+                });
+            }
+        }
         // Shaping is the expensive half of a composer frame, and the draft,
         // size, width, font and color are the only inputs it depends on. A
         // caret blink, a selection, a notice timer or a streaming answer
@@ -1866,7 +1908,7 @@ impl Element for EditorElement {
                     .shape_text(
                         SharedString::from(display.clone()),
                         font_size,
-                        &[run],
+                        &runs,
                         Some(wrap_width),
                         None,
                     )
@@ -1932,12 +1974,28 @@ impl Element for EditorElement {
                 caret = line.position_for_index(offset, line_height);
             }
 
+            // The pack pictures on this line, at line-local byte offsets. A
+            // crab shortcode is shaped into a transparent run, so the glyphs
+            // still hold their width and the picture lands exactly where the
+            // token sat (#2794).
+            let crabs: Vec<(usize, &'static str)> = if empty {
+                Vec::new()
+            } else {
+                crate::topic_icons::crab_tokens(text)
+                    .into_iter()
+                    .filter_map(|(range, bytes)| {
+                        crate::topic_icons::crab_name(bytes).map(|name| (range.start, name))
+                    })
+                    .collect()
+            };
+
             rows.push(RowPaint {
                 line_ix: index,
                 top,
                 height,
                 selection,
                 cursor: caret,
+                crabs,
             });
             top += height;
             line_start = line_end + 1; // past the '\n'
@@ -2035,6 +2093,38 @@ impl Element for EditorElement {
                 cx,
             )
             .unwrap();
+            // The pack pictures, drawn over the transparent runs the shaper
+            // left where each shortcode sits (#2794). The square is centred in
+            // the box the token still holds, so the text after it never moves
+            // and the picture never spills onto the next word.
+            if !row.crabs.is_empty() {
+                let images = &self.input.read(cx).crab_images;
+                for (offset, name) in row.crabs.iter() {
+                    let Some(image) = images.get(name) else {
+                        continue;
+                    };
+                    let Some(at) = line.position_for_index(*offset, line_height) else {
+                        continue;
+                    };
+                    let token_end = line.position_for_index(*offset + name.len() + 2, line_height);
+                    let width = token_end
+                        .filter(|end| end.y == at.y)
+                        .map(|end| end.x - at.x)
+                        .unwrap_or(line_height)
+                        .max(line_height);
+                    let inset = (width - line_height) * 0.5;
+                    let _ = window.paint_image(
+                        Bounds::new(
+                            point(bounds.left() + at.x + inset, y + at.y),
+                            size(line_height, line_height),
+                        ),
+                        Corners::default(),
+                        Arc::clone(image),
+                        0,
+                        false,
+                    );
+                }
+            }
             if focused && let Some(caret) = row.cursor {
                 window.paint_quad(fill(
                     Bounds::new(
@@ -2452,6 +2542,57 @@ fn wrapped_row_count(content: &str, wrap_width: Pixels, window: &Window) -> usiz
     shaped_rows(shape_draft(content, wrap_width, window).as_ref(), content)
 }
 
+/// Decode a pack PNG into the picture gpui paints (#2794).
+///
+/// gpui takes pictures as BGRA bytes, one `image::Frame` per animation step,
+/// and a crab is one step: the decode is the RGBA read, the red/blue swap and
+/// nothing else. The field decodes each crab once and keeps the result, so a
+/// draft that holds the same picture on several lines pays for it once.
+fn crab_picture(bytes: &[u8]) -> Option<Arc<RenderImage>> {
+    let rgba = image::load_from_memory_with_format(bytes, image::ImageFormat::Png)
+        .ok()?
+        .into_rgba8();
+    let (width, height) = rgba.dimensions();
+    let mut bgra = rgba.into_raw();
+    for pixel in bgra.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+    let buffer = image::RgbaImage::from_raw(width, height, bgra)?;
+    Some(Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])))
+}
+
+/// One run per stretch of `text`, with every crab shortcode drawn in
+/// `transparent_black` (#2794).
+///
+/// The token stays in the string, so the glyphs still hold the width the
+/// shortcode took and every caret, selection and wrap offset after it stays
+/// honest. The run only makes those glyphs invisible: the field paints the
+/// pack picture on top of the empty box the run leaves behind. Cutting the
+/// token out instead would shift every offset past it.
+fn draft_runs(text: &str, font: &Font, color: gpui::Hsla) -> Vec<TextRun> {
+    let run = |len: usize, color| TextRun {
+        len,
+        font: font.clone(),
+        color,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let mut runs = Vec::new();
+    let mut cursor = 0;
+    for (token, _) in crate::topic_icons::crab_tokens(text) {
+        if cursor < token.start {
+            runs.push(run(token.start - cursor, color));
+        }
+        runs.push(run(token.end - token.start, transparent_black()));
+        cursor = token.end;
+    }
+    if cursor < text.len() || runs.is_empty() {
+        runs.push(run(text.len() - cursor, color));
+    }
+    runs
+}
+
 /// Shape the draft with the same inputs the field paints with: the style the
 /// window hands down, the width it was given, no forced line limit. The caller
 /// decides whether the lines are worth keeping. Both the height question and
@@ -2460,20 +2601,13 @@ fn wrapped_row_count(content: &str, wrap_width: Pixels, window: &Window) -> usiz
 fn shape_draft(content: &str, wrap_width: Pixels, window: &Window) -> Option<Vec<WrappedLine>> {
     let style = window.text_style();
     let font_size = style.font_size.to_pixels(window.rem_size());
-    let run = TextRun {
-        len: content.len(),
-        font: style.font(),
-        color: style.color,
-        background_color: None,
-        underline: None,
-        strikethrough: None,
-    };
+    let runs = draft_runs(content, &style.font(), style.color);
     window
         .text_system()
         .shape_text(
             SharedString::from(content.to_string()),
             font_size,
-            &[run],
+            &runs,
             Some(wrap_width),
             None,
         )
@@ -2668,6 +2802,39 @@ mod tests {
         let glyph = super::Editor::emoji_rows("smile")[0];
         assert!(glyph.crab.is_none());
         assert_eq!(super::emoji_insertion(&glyph), glyph.glyph);
+    }
+
+    /// A crab shortcode is shaped into a transparent run that keeps its width
+    /// (#2794).
+    ///
+    /// The field paints the pack picture over the box those glyphs hold, so
+    /// the run has to cover the token exactly and the runs have to cover the
+    /// whole draft. A run of the wrong length moves the caret, the selection
+    /// and every wrap offset after it, which is the class of bug the picture
+    /// itself would hide.
+    #[test]
+    fn a_crab_shortcode_keeps_its_width_in_a_transparent_run() {
+        let text = "hi :cry: there";
+        let runs = super::draft_runs(text, &gpui::font("Helvetica"), gpui::hsla(0., 0., 0., 1.));
+        assert_eq!(
+            runs.iter().map(|run| run.len).sum::<usize>(),
+            text.len(),
+            "the runs cover the whole draft"
+        );
+        assert_eq!(runs.len(), 3, "text, token, text");
+        let crab = runs
+            .iter()
+            .find(|run| run.color == gpui::transparent_black())
+            .expect("the crab token is its own run");
+        assert_eq!(crab.len, ":cry:".len(), "the run covers the token exactly");
+    }
+
+    /// A decoded picture names itself by the bytes it was decoded from
+    /// (#2794): the paint pass looks the picture up by shortcode.
+    #[test]
+    fn a_picture_names_itself_by_address() {
+        let bytes = crate::topic_icons::crab_icon("cry").expect("the pack holds cry");
+        assert_eq!(crate::topic_icons::crab_name(bytes), Some("cry"));
     }
 
     /// The pack leads, but it does not grow the list: the eight-row cap is the

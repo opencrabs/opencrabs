@@ -305,6 +305,19 @@ pub fn crab_icon(name: &str) -> Option<&'static [u8]> {
         .map(|(_, bytes)| *bytes)
 }
 
+/// The pack name of a picture's own bytes (#2794).
+///
+/// The scanner hands back the bytes rather than the name, and a caller that
+/// caches a decoded picture needs the name to key it. The bytes are the same
+/// `&'static` slice the pack holds, so the match is by address: no PNG is
+/// compared byte by byte.
+pub fn crab_name(bytes: &'static [u8]) -> Option<&'static str> {
+    CRAB_ICONS
+        .iter()
+        .find(|(_, candidate)| std::ptr::eq(*candidate, bytes))
+        .map(|(name, _)| *name)
+}
+
 /// The `:name:` tokens in `text` that name a crab, left to right, with the
 /// bytes of the picture each one stands for (#2771).
 ///
