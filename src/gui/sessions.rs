@@ -15,8 +15,8 @@ use crate::{icon, palette, platform_icons};
 use std::collections::{HashMap, HashSet};
 
 use gpui::{
-    AnyElement, AnyView, App, ClickEvent, Context, Div, Image, ImageFormat, InteractiveElement,
-    ObjectFit, Render, ScrollHandle, SharedString, Stateful, Styled, Window, div, img,
+    AnyElement, App, ClickEvent, Div, Image, ImageFormat, InteractiveElement,
+    ObjectFit, ScrollHandle, SharedString, Stateful, Styled, Window, div, img,
     linear_color_stop, linear_gradient, prelude::*, rems, rgb,
 };
 use std::sync::Arc;
@@ -51,7 +51,7 @@ pub struct SessionsState {
     /// The row whose context menu is open. Right-click asked for it; a
     /// left click anywhere, an esc, or a pick closes it. The menu anchors
     /// to the row, not the pointer: the row is the stable thing inside a
-    /// scrolling rail, and the slide strip already behaves this way.
+    /// scrolling rail, and the slide already behaves this way.
     pub rail_menu: Option<uuid::Uuid>,
     /// Set when the fetch failed; the rail says why instead of lying empty.
     pub error: Option<SharedString>,
@@ -1482,7 +1482,7 @@ fn accent_bar_visible(selected: bool, cursored: bool) -> bool {
 pub fn row(
     s: &Session,
     flags: RowFlags,
-    action: Option<Stateful<Div>>,
+    dropbar: Option<Stateful<Div>>,
     chips: Option<Stateful<Div>>,
 ) -> Stateful<Div> {
     let RowFlags {
@@ -1601,6 +1601,9 @@ pub fn row(
         .gap_0p5()
         .flex_1()
         .min_w_0()
+        // The dropbar is the card's first row, above the title (#2797): the
+        // kebab lives on its own line so the title keeps the full card width.
+        .when_some(dropbar, |d, bar| d.child(bar))
         .child(title)
         // Topic chips ride inline under the title, on the parent card itself
         // (Telegram topic style). They never push a child out to its own row.
@@ -1680,9 +1683,6 @@ pub fn row(
         // it would paint over the state and hide which conversation is open.
         .when(!selected, |d| d.hover(|d| d.bg(rgb(palette::current().bg))))
         .child(body);
-    if let Some(action) = action {
-        row = row.child(action);
-    }
     row
 }
 
@@ -1746,86 +1746,23 @@ pub fn on_click(
     row.on_click(handler)
 }
 
-/// One icon in a row's slide-out strip. Icons only, so the strip stays small
-/// next to the title: the title keeps its room, and the glyph carries the
-/// action (#2384).
-/// The hover label of a slide icon: a small card naming the action (#2392).
-struct IconTip(SharedString);
-
-impl Render for IconTip {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .px_2()
-            .py_1()
-            .rounded_sm()
-            .border_1()
-            .border_color(rgb(palette::current().panel_hi))
-            .bg(rgb(palette::current().panel))
-            .text_xs()
-            .text_color(rgb(palette::current().text))
-            .child(self.0.clone())
-    }
-}
-
-fn action_icon(id: &'static str, icon: AnyElement, label: &'static str) -> Stateful<Div> {
+/// The rail card's dropbar (#2797): one quiet kebab on its own line above the
+/// title. It opens the same rail menu the right-click and the swipe open, so
+/// pin, topic and delete live in one popover instead of a strip that eats the
+/// title's width. The card hides it while its topic chips are expanded.
+pub fn dropbar_button(id: uuid::Uuid) -> Stateful<Div> {
     div()
-        .id(id)
-        .tooltip(move |_window, cx| -> AnyView {
-            cx.new(|_| IconTip(SharedString::from(label))).into()
-        })
+        .id(SharedString::from(format!("session-dropbar-{id}")))
         .flex()
         .flex_none()
         .items_center()
         .justify_center()
-        .size(rems(1.6))
+        .size(rems(1.4))
         .rounded_sm()
         .cursor_pointer()
+        .text_color(rgb(palette::current().text_muted))
         .hover(|d| d.bg(rgb(palette::current().panel_hi)))
-        .child(icon)
-}
-
-/// A text glyph shaped for the slide-out strip, so the vector icons and the
-/// glyph icons share one cell style.
-fn glyph_icon(glyph: &'static str, color: u32) -> AnyElement {
-    div()
-        .text_sm()
-        .text_color(rgb(color))
-        .child(SharedString::from(glyph))
-        .into_any_element()
-}
-
-/// The pin icon of a row's slide-out strip (#2788): the same quiet pushpin
-/// the row carries, filled and muted once pinned, outline and faint before.
-/// The tooltip names the action the click performs, matching the rail menu.
-pub fn pin_button(favorited: bool) -> Stateful<Div> {
-    let (id, label) = if favorited {
-        ("session-unpin", "Unpin")
-    } else {
-        ("session-pin", "Pin")
-    };
-    action_icon(id, pin_icon(favorited, 1.0).into_any_element(), label)
-}
-
-/// The topic icon of a row's slide-out strip. With topics off it turns them
-/// on; with topics on it opens a new topic under the session (#2302, #2303).
-pub fn topic_button(topics_on: bool) -> Stateful<Div> {
-    let color = if topics_on {
-        palette::current().accent
-    } else {
-        palette::current().text_muted
-    };
-    action_icon("session-topic", glyph_icon("\u{2442}", color), "Topic")
-}
-
-/// The delete icon of a row's slide-out strip. It never deletes on its own:
-/// the view routes every delete path through one confirmation dialog, so a
-/// mis-swipe cannot cost a conversation.
-pub fn delete_button() -> Stateful<Div> {
-    action_icon(
-        "session-delete",
-        glyph_icon("\u{2715}", palette::current().red),
-        "Delete",
-    )
+        .child(SharedString::from("\u{22EE}"))
 }
 
 const RAIL_FILTER_SVG: &[u8] = include_bytes!(concat!(
@@ -2199,7 +2136,7 @@ mod tests {
     }
 
     /// A slide that comes up short is a click with an unsteady hand: the
-    /// row snaps back and its strip stays shut.
+    /// row snaps back and its menu stays shut.
     #[test]
     fn a_short_slide_snaps_back() {
         assert!(!super::slide_reveals(500.0, 500.0));
@@ -2209,10 +2146,10 @@ mod tests {
         ));
     }
 
-    /// Past the threshold the strip is earned, and the threshold itself
+    /// Past the threshold the menu is earned, and the threshold itself
     /// counts: the rule is "at least this far", not "further than".
     #[test]
-    fn a_slide_past_the_threshold_opens_the_strip() {
+    fn a_slide_past_the_threshold_opens_the_menu() {
         assert!(super::slide_reveals(500.0, 500.0 - super::SLIDE_REVEAL_PX));
         assert!(super::slide_reveals(
             500.0,
@@ -2222,7 +2159,7 @@ mod tests {
 
     /// Rightward travel is not a slide, however far it goes.
     #[test]
-    fn a_rightward_slide_never_opens_the_strip() {
+    fn a_rightward_slide_never_opens_the_menu() {
         assert!(!super::slide_reveals(500.0, 520.0));
         assert!(!super::slide_reveals(500.0, 900.0));
     }
@@ -2423,20 +2360,37 @@ mod tests {
             !source.contains('\u{2605}') && !source.contains('\u{2606}'),
             "the star glyphs are gone: the pushpin replaces them"
         );
-        let button = source
-            .split("pub fn pin_button(")
-            .nth(1)
-            .expect("pin button")
-            .split("pub fn topic_button(")
-            .next()
-            .expect("button before the topic button");
         assert!(
-            button.contains("pin_icon(favorited, 1.0)"),
-            "the strip speaks the same pin language as the row"
+            !source.contains("pub fn pin_button(")
+                && !source.contains("pub fn topic_button(")
+                && !source.contains("pub fn delete_button("),
+            "the slide-out strip is gone: the dropbar kebab opens the rail menu (#2797)"
+        );
+    }
+
+    #[test]
+    fn rail_dropbar_sits_above_the_title() {
+        let source = include_str!("sessions.rs");
+        let row_source = source
+            .split("pub fn row(")
+            .nth(1)
+            .expect("session row renderer")
+            .split("pub fn on_click(")
+            .next()
+            .expect("row source before click handler");
+        assert!(
+            row_source.contains(".when_some(dropbar,"),
+            "the card mounts a dropbar slot"
+        );
+        let bar = row_source.find(".when_some(dropbar,").expect("dropbar mount");
+        let title = row_source.find(".child(title)").expect("title mount");
+        assert!(
+            bar < title,
+            "the dropbar paints above the title, never beside it"
         );
         assert!(
-            button.contains("\"Unpin\"") && button.contains("\"Pin\""),
-            "the tooltip names the action, matching the rail menu"
+            !row_source.contains("row.child(action)"),
+            "the trailing slide-out strip no longer appends to the row"
         );
     }
 
@@ -2813,16 +2767,16 @@ mod tests {
             count_source.contains(".hover(|d| d.bg(rgb(palette::current().panel_hi)))"),
             "the overflow pill hovers at panel_hi too"
         );
-        let action_source = source
-            .split("fn action_icon(")
+        let dropbar_source = source
+            .split("pub fn dropbar_button(")
             .nth(1)
-            .expect("action icon renderer")
-            .split("fn glyph_icon(")
+            .expect("dropbar button renderer")
+            .split("pub fn filter_icon(")
             .next()
-            .expect("action source before the glyph helper");
+            .expect("dropbar source before the funnel icon");
         assert!(
-            action_source.contains(".hover(|d| d.bg(rgb(palette::current().panel_hi)))"),
-            "the slide-out icons hover at panel_hi too"
+            dropbar_source.contains(".hover(|d| d.bg(rgb(palette::current().panel_hi)))"),
+            "the dropbar kebab hovers at panel_hi too"
         );
         let filter_source = source
             .split("fn filter_chip(")

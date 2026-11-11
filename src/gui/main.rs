@@ -761,9 +761,6 @@ struct Dashboard {
     /// counting: the poll tick retires the flag a few frames after the moves
     /// stop, and the drop clears it outright.
     drag_seen: Option<std::time::Instant>,
-    /// The row whose pin/delete strip is showing. One at a time: opening a
-    /// row's actions closes the one before it.
-    rail_actions: Option<Uuid>,
     /// Where the right press that opened the rail's context menu landed, in
     /// window coordinates. The card opens just past the rail at that
     /// height instead of over the row it belongs to (#2742).
@@ -775,9 +772,9 @@ struct Dashboard {
     /// the entry is dropped the moment that turn settles.
     rail_live: HashMap<Uuid, transcript::LiveTurn>,
     /// A leftward slide in flight on a rail row: the session and the pointer
-    /// x where the drag began. Past the threshold the row's strip opens.
+    /// x where the drag began. Past the threshold the row's menu opens.
     rail_swipe: Option<(Uuid, f32)>,
-    /// The row whose strip a slide just opened. gpui fires a click on mouse-up
+    /// The row whose menu a slide just opened. gpui fires a click on mouse-up
     /// whenever the pointer is still over the element, movement or not, so
     /// without this the release that ends a slide also opens the chat the
     /// slide was meant to act on.
@@ -2090,9 +2087,6 @@ impl Dashboard {
         }
         if self.preview.is_some() {
             open.push(OverlayId::Preview);
-        }
-        if self.rail_actions.is_some() {
-            open.push(OverlayId::RowActions);
         }
         if self.sessions.rail_menu.is_some() {
             open.push(OverlayId::RailMenu);
@@ -3591,7 +3585,6 @@ impl Dashboard {
             .iter()
             .find(|row| row.current)
             .map(|row| row.provider.clone());
-        self.rail_actions = None;
         self.sessions.rail_menu = None;
         self.start_models_fetch();
         self.refocus_screen();
@@ -3752,7 +3745,6 @@ impl Dashboard {
         self.refresh_skills();
         self.skills_index = 0;
         self.screen = Screen::Skills;
-        self.rail_actions = None;
         self.sessions.rail_menu = None;
         self.refocus_screen();
         cx.notify();
@@ -3780,7 +3772,6 @@ impl Dashboard {
         let prompt = skills_view::prompt(skill);
         let slash = skill.slash_name.clone();
         self.screen = Screen::Chat;
-        self.rail_actions = None;
         self.sessions.rail_menu = None;
         self.refocus_screen();
         self.live.notices.push(format!("Running {slash}"));
@@ -4229,7 +4220,6 @@ impl Dashboard {
         self.models_query.clear();
         self.screen = Screen::Onboard;
         self.refresh_onboard_models();
-        self.rail_actions = None;
         self.sessions.rail_menu = None;
         self.refocus_screen();
         cx.notify();
@@ -4378,7 +4368,6 @@ impl Dashboard {
     /// screen answers with live data rather than a mock row (#2426).
     fn open_mission_control(&mut self, cx: &mut Context<Self>) {
         self.onboard = None;
-        self.rail_actions = None;
         self.screen = Screen::MissionControl;
         // A detail left open when the screen closed does not re-open: the
         // screen starts on its panels, and the row is clamped to the snapshot
@@ -5012,7 +5001,6 @@ impl Dashboard {
         self.cd_show_hidden = false;
         self.cd_selected = 0;
         self.cd_entries = cd_entries_for(&self.cd_dir, false);
-        self.rail_actions = None;
         self.screen = Screen::DirectoryPicker;
         // The screen takes the keyboard, the same rule as Themes: on this
         // screen the arrows walk the list, so a stale editor focus would
@@ -5081,13 +5069,10 @@ impl Dashboard {
     /// ctrl+h, or Cmd+? on a Mac: the key reference, the window's door to the
     /// rows the terminal prints via `/help` (#2320). It is read-only, so it
     /// can sit above every other affordance: closing it leaves the screen
-    /// exactly as it was, and opening it disarms the rail's row strip so a
-    /// click meant for the panel cannot delete anything behind it.
+    /// exactly as it was.
     fn toggle_help(&mut self, cx: &mut Context<Self>) {
         self.help_open = !self.help_open;
-        if self.help_open {
-            self.rail_actions = None;
-        } else {
+        if !self.help_open {
             // Closing the reference is a return to the conversation, so the
             // caret goes back where typing is expected.
             self.refocus_screen();
@@ -7210,7 +7195,7 @@ impl Dashboard {
         .detach();
     }
 
-    /// Arm the delete dialog. Every delete path (a row's strip, and nothing
+    /// Arm the delete dialog. Every delete path (a row's menu, and nothing
     /// else) lands here instead of erasing, so the erase is always the second,
     /// deliberate click.
     fn request_delete(&mut self, id: Uuid, cx: &mut Context<Self>) {
@@ -7303,9 +7288,6 @@ impl Dashboard {
         self.pane_states.remove(&id);
         // The pin is part of the row: it leaves with the row.
         self.sessions.favorites.retain(|f| *f != id);
-        if self.rail_actions == Some(id) {
-            self.rail_actions = None;
-        }
         cx.notify();
     }
 
@@ -9342,8 +9324,8 @@ impl Dashboard {
         }
         // Deleting a conversation has no chord. ctrl+backspace is the editor's
         // word delete (#2313), so a window binding on it would break typing,
-        // and the command key is macOS-only. The row strip's delete, behind
-        // the confirm dialog, is the one path: the slide reveals it.
+        // and the command key is macOS-only. The row menu's delete, behind
+        // the confirm dialog, is the one path: the dropbar and the slide reveal it.
         // Esc twice stops the running turn, the TUI's own gesture. It sits
         // before the editor gate because the editor owns the keyboard while
         // typing and would swallow it.
@@ -9441,7 +9423,6 @@ impl Dashboard {
             match ev.keystroke.key.as_str() {
                 "enter" => {
                     self.confirm_delete = None;
-                    self.rail_actions = None;
                     self.delete_session(id, cx);
                 }
                 "escape" => {
@@ -9473,14 +9454,9 @@ impl Dashboard {
                 cx.notify();
                 return;
             }
-            // An open row strip closes next: Esc dismisses the nearest
-            // affordance, never the far one.
-            if self.rail_actions.take().is_some() {
-                cx.notify();
-                return;
-            }
-            // The context menu is the strip's neighbour: same nearness
-            // rule, and a dismissal writes nothing (#2354).
+            // The context menu closes next: Esc dismisses the nearest
+            // affordance, never the far one, and a dismissal writes
+            // nothing (#2354).
             if self.sessions.rail_menu.take().is_some() {
                 cx.notify();
                 return;
@@ -10517,58 +10493,13 @@ impl Render for Dashboard {
             let selected = self.sessions.selected == Some(id);
             let cursored = self.sessions.cursor == Some(id);
             let favorite = self.sessions.is_favorite(id);
-            // A row's actions stay out of sight until asked for. There is no
-            // always-visible delete: an ✕ on every row reads as "close" and
-            // costs conversations. Slide the row left, or press the pin key,
-            // and the strip appears on that row alone.
-            let topics_on = self.sessions.is_topic_enabled(id);
-            let action = if self.rail_actions == Some(id) {
-                // Topic icon: turn topics on for this session, or open the new
-                // topic prompt under it if they are already on (#2302, #2303).
-                let topic = cx.listener(move |this, _ev, _window, cx| {
-                    cx.stop_propagation();
-                    if this.sessions.is_topic_enabled(id) {
-                        this.open_session(id, cx);
-                        this.start_topic_draft(cx);
-                    } else {
-                        this.enable_topics(id, cx);
-                    }
-                });
-                let pin = cx.listener(move |this, _ev, _window, cx| {
-                    cx.stop_propagation();
-                    this.toggle_favorite(id, cx);
-                });
-                let del = cx.listener(move |this, _ev, _window, cx| {
-                    cx.stop_propagation();
-                    this.request_delete(id, cx);
-                });
-                Some(
-                    div()
-                        .id(SharedString::from(format!("session-actions-{id}")))
-                        .flex()
-                        .flex_row()
-                        // The body takes the remaining width now that the name
-                        // line fills the row, so the strip has to refuse to
-                        // shrink; otherwise a long title clips its icons.
-                        .flex_none()
-                        .items_center()
-                        .gap_1()
-                        .child(sessions::pin_button(favorite).on_click(pin))
-                        .child(sessions::topic_button(topics_on).on_click(topic))
-                        .child(sessions::delete_button().on_click(del)),
-                )
-            } else {
-                None
-            };
             // Right-click asks for the row's menu: pin and delete without
-            // the slide gesture or a chord (#2354). It closes any open
-            // strip first: one affordance at a time, the rail's own rule.
+            // the slide gesture or a chord (#2354).
             let ask_menu = cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
                 this.sessions.rail_menu = Some(id);
                 // Where the card opens from: the row's own height, so it
                 // lands beside the row instead of over it (#2742).
                 this.rail_menu_at = Some(ev.position);
-                this.rail_actions = None;
                 cx.notify();
             });
             let indented = self.sessions.is_indented(id);
@@ -10659,7 +10590,6 @@ impl Render for Dashboard {
                         // gives the card its height the same way a row's
                         // does (#2742).
                         this.rail_menu_at = Some(ev.position);
-                        this.rail_actions = None;
                         cx.notify();
                     });
                     let chip = sessions::topic_chip(
@@ -10694,17 +10624,41 @@ impl Render for Dashboard {
                 }
                 sessions::topic_chips(id, els)
             });
+            // The dropbar: one quiet kebab above the title, on its own line
+            // so the name keeps the full card width (#2797). It opens the
+            // same rail menu the right-click and the swipe open. A topic row
+            // keeps its parent's affordance, and a card with its chips
+            // expanded hides the bar so the chips own the space.
+            let dropbar = if !indented && !self.rail_chips_expanded.contains(&id) {
+                let kebab = cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
+                    cx.stop_propagation();
+                    this.sessions.rail_menu = Some(id);
+                    this.rail_menu_at = Some(ev.position);
+                    cx.notify();
+                });
+                Some(
+                    div()
+                        .id(SharedString::from(format!("session-dropbar-row-{id}")))
+                        .flex()
+                        .flex_row()
+                        .justify_end()
+                        .w_full()
+                        .child(
+                            sessions::dropbar_button(id)
+                                .on_mouse_down(MouseButton::Left, kebab),
+                        ),
+                )
+            } else {
+                None
+            };
             // No menu is passed in: the card is built once at the window
             // root, because a child of the row would inherit the row's frame
             // and the card is placed in window coordinates (#2742).
-            let r = sessions::row(s, flags, action, chips);
-            // The press starts the slide and closes any other row's strip.
+            let r = sessions::row(s, flags, dropbar, chips);
+            // The press starts the slide that opens the card's menu.
             let press = cx.listener(move |this, _ev: &MouseDownEvent, window, cx| {
                 this.rail_slide_opened = None;
                 this.rail_swipe = Some((id, f32::from(window.mouse_position().x)));
-                if this.rail_actions.is_some_and(|open| open != id) {
-                    this.rail_actions = None;
-                }
                 // A left press on the rail dismisses a context menu: the
                 // press is elsewhere, so the menu goes with it (#2354).
                 this.sessions.close_rail_menu();
@@ -10731,7 +10685,6 @@ impl Render for Dashboard {
                     return;
                 }
                 this.close_rail_filter(cx);
-                this.rail_actions = None;
                 this.open_session(id, cx);
             });
             let r = r.on_mouse_down(MouseButton::Right, ask_menu);
@@ -13085,13 +13038,14 @@ impl Render for Dashboard {
                         }
                     }
                 }
-                // A rail row slid left far enough: open its actions. The
+                // A rail row slid left far enough: open its menu. The
                 // threshold keeps a wobbling click from revealing anything.
                 if let Some((id, from_x)) = this.rail_swipe
                     && sessions::slide_reveals(from_x, f32::from(ev.position.x))
-                    && this.rail_actions != Some(id)
+                    && this.sessions.rail_menu != Some(id)
                 {
-                    this.rail_actions = Some(id);
+                    this.sessions.rail_menu = Some(id);
+                    this.rail_menu_at = Some(ev.position);
                     this.rail_slide_opened = Some(id);
                     cx.notify();
                 }
@@ -13172,7 +13126,6 @@ impl Render for Dashboard {
                 .unwrap_or_else(|| "(untitled)".to_string());
             let confirm = cx.listener(move |this, _ev, _window, cx| {
                 this.confirm_delete = None;
-                this.rail_actions = None;
                 this.refocus_screen();
                 this.delete_session(id, cx);
             });
@@ -14050,7 +14003,6 @@ fn main() {
                         dragging_rail: false,
                         drag_from: None,
                         drag_seen: None,
-                        rail_actions: None,
                         rail_menu_at: None,
                         rail_live: HashMap::new(),
                         rail_swipe: None,
@@ -18114,14 +18066,14 @@ mod tests {
             "the bridge must be reached from delete_session itself, not a neighbour"
         );
 
-        // Two arming paths: the row's slide-out strip, and ctrl+d on the
+        // Two arming paths: the row's menu, and ctrl+d on the
         // cursor row (#2352). Both ask the dialog; arming is not deleting.
         // The needles are split so the scan cannot count its own source text.
         let strip_arm = ["this.request", "_delete(id, cx);"].concat();
         let chord_arm = ["self.request", "_delete(target, cx);"].concat();
         assert!(
             src.contains(&strip_arm),
-            "the row strip must arm the dialog"
+            "the row menu must arm the dialog"
         );
         assert!(
             src.contains(&chord_arm),
@@ -18136,7 +18088,7 @@ mod tests {
             "only the dialog's confirm may call delete_session"
         );
         // Esc is the dialog's cancel, and it must answer the dialog before
-        // the row strip or the turn it would otherwise abort.
+        // the row menu or the turn it would otherwise abort.
         assert!(
             src.contains("if self.confirm_delete.take().is_some()"),
             "Esc must cancel the dialog first"
@@ -18146,7 +18098,7 @@ mod tests {
     use super::*;
 
     /// ctrl+d carries a delete, so the chord must never BE the delete: it
-    /// resolves one row, then asks the same dialog the row's strip asks
+    /// resolves one row, then asks the same dialog the row's menu asks
     /// (#2352). The bridge stays behind the dialog's confirm button.
     #[test]
     fn ctrl_d_arms_the_confirm_dialog_not_the_delete() {
@@ -18875,15 +18827,16 @@ mod tests {
             render.contains("self.rail_menu_popover_for(id, cx)"),
             "the root render is what builds the open row's card"
         );
-        // Both entry points record where the press landed: a row and a chip.
-        // Counted inside the render, because this scan's own string holds the
-        // same text and a whole-file count would read three.
+        // Every entry point records where the press landed: a row, a chip,
+        // the dropbar kebab and the swipe (#2797). Counted inside the render,
+        // because this scan's own string holds the same text and a
+        // whole-file count would read one more.
         let asks = dashboard_render(src)
             .matches("this.rail_menu_at = Some(ev.position);")
             .count();
         assert_eq!(
-            asks, 2,
-            "a rail row and a topic chip each record their press"
+            asks, 4,
+            "a rail row, a topic chip, the dropbar kebab and the swipe each record their press"
         );
         let builder = fn_body(src, "rail_menu_popover_for");
         assert!(
@@ -18896,6 +18849,72 @@ mod tests {
         assert!(
             !builder.contains("rail_width"),
             "and not at the rail's edge, which is not where the click landed"
+        );
+    }
+
+    #[test]
+    fn rail_slide_opens_the_menu_not_a_strip() {
+        // #2797: the slide used to open a flex_none strip beside the body,
+        // which clipped the title instead of shrinking. It now opens the
+        // same rail menu the right-click opens, and the strip's state is
+        // gone for good, not parked behind a flag. The needle is split so
+        // the scan cannot count its own source text.
+        let src = include_str!("main.rs");
+        let dead = ["rail_", "actions"].concat();
+        assert!(
+            !src.contains(&dead),
+            "the strip's state is removed from every site"
+        );
+        let slide = dashboard_render(src)
+            .split("sessions::slide_reveals(from_x")
+            .nth(1)
+            .expect("the slide handler")
+            .split("cx.notify();")
+            .next()
+            .expect("the slide block");
+        assert!(
+            slide.contains("&& this.sessions.rail_menu != Some(id)"),
+            "a slide on the row whose menu is already open changes nothing"
+        );
+        assert!(
+            slide.contains("this.sessions.rail_menu = Some(id);"),
+            "a slide past the threshold opens the row's menu"
+        );
+        assert!(
+            slide.contains("this.rail_menu_at = Some(ev.position);"),
+            "the slide anchors the menu where the pointer landed"
+        );
+        assert!(
+            slide.contains("this.rail_slide_opened = Some(id);"),
+            "the release that ends a slide must not pick the row"
+        );
+    }
+
+    #[test]
+    fn rail_dropbar_hides_when_chips_expanded() {
+        // #2797: the owner's rule, "Chips open hides bar". The bar is built
+        // only for full cards whose chips are folded; it returns when the
+        // chips fold back. The menu being open does not hide it.
+        let src = include_str!("main.rs");
+        let build = dashboard_render(src)
+            .split("let dropbar = if ")
+            .nth(1)
+            .expect("the dropbar build")
+            .split("let r = sessions::row(")
+            .next()
+            .expect("the dropbar block before the row call");
+        assert!(
+            build.starts_with("!indented && !self.rail_chips_expanded.contains(&id)"),
+            "the bar hides while the card's chips are expanded, and a topic row keeps its parent's affordance"
+        );
+        let condition = build.split(" {").next().expect("the visibility condition");
+        assert!(
+            !condition.contains("rail_menu"),
+            "the bar stays visible while its own menu is open"
+        );
+        assert!(
+            build.contains("sessions::dropbar_button(id)"),
+            "the visible bar carries the kebab that opens the rail menu"
         );
     }
 

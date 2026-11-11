@@ -113,8 +113,6 @@ pub enum OverlayId {
     Warning,
     /// A file preview, which covers the window.
     Preview,
-    /// One row's slide out action strip.
-    RowActions,
     /// A row's context menu.
     RailMenu,
     /// Waiting for a second session while a split is set up.

@@ -51,13 +51,14 @@ fn code(src: &'static str) -> &'static str {
 /// and hands that to the card.
 #[test]
 fn every_right_press_records_the_point_it_happened_at() {
-    // Two entry points on the rail: a row and a topic chip.
+    // Four entry points on the rail: a row's right press, a topic chip's
+    // right press, the dropbar kebab and the left swipe (#2797).
     assert_eq!(
         code(GUI_MAIN)
             .matches("this.rail_menu_at = Some(ev.position);")
             .count(),
-        2,
-        "a rail row and a topic chip each record their press"
+        4,
+        "a rail row, a topic chip, the dropbar kebab and the swipe each record their press"
     );
     assert!(
         code(GUI_MAIN).contains("this.topic_menu_at = Some(ev.position);"),
