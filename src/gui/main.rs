@@ -49,6 +49,7 @@ mod overlays;
 mod palette;
 mod pane_chrome;
 mod pane_layout;
+mod pane_view;
 mod plan_strip;
 mod platform_icons;
 mod preview;
@@ -84,6 +85,7 @@ use crate::pane_chrome::{
     split_pane_width, window_footer_yields,
 };
 use crate::pane_layout::{PanesCtx, pane_element};
+use crate::pane_view::PaneView;
 use crate::screen_keys::{
     ChordMods, FocusTarget, KeyboardOwner, OverlayId, ScreenAction, focus_target, keyboard_owner,
     screen_chord,
@@ -103,7 +105,7 @@ use opencrabs::ui_core::rail;
 use opencrabs::ui_core::scroll::{Follow, scrolled_from_top, wheel_releases_follow};
 use opencrabs::ui_core::split::{self, Layout};
 use opencrabs::ui_core::topic_bar;
-use transcript::{CopyDrag, TranscriptState};
+use transcript::CopyDrag;
 // The terminal's own command table, shared rather than copied.
 use opencrabs::ui_core::commands as slash;
 // The Seeker engine: ranking, keywords and state, shared with the terminal
@@ -222,44 +224,6 @@ impl Render for PaneGhost {
     }
 }
 
-/// One pane beside the window's own chat: its transcript and scroll (#2438).
-/// Where it sits, how much space it holds and which session it shows all live
-/// in the pane tree, so a pane carries neither a layout nor a session of its
-/// own (#2472).
-struct SplitPane {
-    /// The session's title as the rail shows it, for the pane header.
-    title: String,
-    transcript: TranscriptState,
-    scroll: ScrollHandle,
-    /// This pane's own bottom-follow state (#2685), per leaf like every other
-    /// piece of pane chrome.
-    follow: Follow,
-    /// The pane's own composer (#2530). What is typed here stays with the pane
-    /// it was typed into, so moving focus never carries a draft across.
-    editor: Entity<editor::Editor>,
-    /// The pane's own plan strip, read from its session's plan file and cached
-    /// by mtime like the window's.
-    plan: plan_strip::PlanStripState,
-    /// Which session the strip's path was resolved for, so the DB lookup runs
-    /// once per pane rather than once per frame.
-    plan_for: Option<Uuid>,
-    /// The turn this pane is running (#2614). A leaf owns its own stream, so
-    /// sending here never repaints the window's conversation.
-    live: transcript::LiveTurn,
-    /// Whether this pane's turn is in flight: its composer takes a queue
-    /// instead of starting a second one, exactly as the window does.
-    busy: bool,
-    /// The token that cancels THIS pane's turn, so `/stop` in one leaf leaves
-    /// the other running.
-    cancel: Option<tokio_util::sync::CancellationToken>,
-    /// This pane's own drag-to-copy state (#2623). A pane transcript is built
-    /// with `ViewHooks::default()`, which leaves `drag: None`, so every pane
-    /// had no anchor, no highlight and no release handler: the gesture was
-    /// dead the moment a second pane existed. It cannot share the window's
-    /// either, because the row text is stored by ordinal and two panes plus
-    /// the window all count rows from zero.
-    copy_drag: Rc<CopyDrag>,
-}
 
 /// The ledger path, unchanged: `config.database.path`, with the same
 /// default (`~/.opencrabs/opencrabs.db`) when config cannot be read at all.
@@ -748,7 +712,7 @@ struct Dashboard {
     /// nested split is just another node. `None` until a conversation opens.
     panes: Option<PaneTree>,
     /// The state every pane but the chat keeps, keyed by session (#2472).
-    pane_states: HashMap<Uuid, SplitPane>,
+    pane_states: HashMap<Uuid, PaneView>,
     /// The session holding the caret and answering `ctrl+x`; `None` is the
     /// window's own chat (#2474, #2475).
     pane_focus: Option<Uuid>,
@@ -2248,7 +2212,7 @@ impl Dashboard {
     /// Snap one pane's transcript to its newest row only while that pane is
     /// still following: a reader who scrolled up keeps their place while rows
     /// land under them (#2685, #2698).
-    fn snap_pane_if_following(pane: &mut SplitPane) {
+    fn snap_pane_if_following(pane: &mut PaneView) {
         let offset = scrolled_from_top(f32::from(pane.scroll.offset().y));
         let max = f32::from(pane.scroll.max_offset().height);
         if pane.follow.update(offset, max) {
@@ -3604,24 +3568,20 @@ impl Dashboard {
         // The pane's plan lives wherever its session is bound, which is a DB
         // read; the same lookup the window's strip uses, resolved once here.
         agent_bridge::spawn_plan_path(self.db_path.clone(), id, self.sink.clone());
+        // The leaf's state is its own type now (#2805). It opens at the
+        // width the window last painted the wall at, and the walk corrects it
+        // the first frame the pane has a box of its own.
+        let pane_width = self
+            .split_areas
+            .borrow()
+            .get(&Vec::new())
+            .copied()
+            .map(|[x0, _, x1, _]| x1 - x0)
+            .unwrap_or(0.0);
+        let window = cx.entity().downgrade();
         self.pane_states.insert(
             id,
-            SplitPane {
-                title,
-                transcript: TranscriptState {
-                    session: Some(id),
-                    ..Default::default()
-                },
-                scroll: ScrollHandle::new(),
-                follow: Follow::new(),
-                editor: pane_editor,
-                plan: plan_strip::PlanStripState::default(),
-                plan_for: Some(id),
-                live: transcript::LiveTurn::default(),
-                busy: false,
-                cancel: None,
-                copy_drag: pane_copy,
-            },
+            PaneView::new(id, title, pane_editor, pane_copy, pane_width, window),
         );
         // Paint the pane now, with its header, rather than waiting for the
         // transcript load to come back: an empty pane that appears at once
@@ -15148,6 +15108,10 @@ mod tests {
     /// of the renderer reads that file instead of the crate root.
     const PANE_LAYOUT: &str = include_str!("pane_layout.rs");
 
+    /// A leaf is its own view now (#2805): its state and the transcript it
+    /// draws are scanned here, not in the crate root.
+    const PANE_VIEW: &str = include_str!("pane_view.rs");
+
     /// A live turn repaints on every fourth poll tick, not on every one. The
     /// spinner and the clock are the only things moving in that branch, and at
     /// 20 Hz each repaint rebuilt every pane's transcript (#2688).
@@ -15873,7 +15837,7 @@ mod tests {
         // Option: the window keeps exactly one and swaps it on a switch
         // (#2616). Both remaining handovers belong to the window chat: the
         // attachment-tile scan and the body that paints it. A split pane
-        // paints from its own `SplitPane::live`, and the third window
+        // paints from its own `PaneView::live`, and the third window
         // handover was the Themes preview leaf the centered modal replaced
         // (#2619).
         assert_eq!(
@@ -16030,15 +15994,17 @@ mod tests {
             !pane.contains("ViewHooks::default()"),
             "a pane must hand its transcript a drag state"
         );
+        // The hooks are the leaf's own now (#2805), built where the leaf
+        // draws rather than where the walk used to.
         assert!(
-            pane.contains("drag: Some(pane.copy_drag.clone())"),
+            PANE_VIEW.contains("drag: Some(self.copy_drag.clone())"),
             "the pane's own drag state is wired to its transcript"
         );
-        let state = src
-            .split("struct SplitPane {")
+        let state = PANE_VIEW
+            .split("pub(crate) struct PaneView {")
             .nth(1)
             .and_then(|rest| rest.split("\n}").next())
-            .expect("split pane");
+            .expect("the pane view");
         assert!(
             state.contains("copy_drag: Rc<CopyDrag>"),
             "each pane carries its own drag state"

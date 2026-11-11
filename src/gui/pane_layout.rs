@@ -29,9 +29,10 @@ use crate::pane_chrome::{
     UNFOCUSED_PANE_OPACITY, drop_indicator, focus_ring_color, pane_footer, pane_header,
     split_divider, split_pane_width,
 };
+use crate::pane_view::PaneView;
 use crate::wheel_dy;
 use crate::transcript;
-use crate::{Dashboard, PaneDrag, SplitPane};
+use crate::{Dashboard, PaneDrag};
 
 /// Everything the pane walk needs to draw one leaf or one split: the chat
 /// element (drawn once, at its own leaf), the state each other pane keeps, the
@@ -41,7 +42,7 @@ pub(crate) struct PanesCtx<'a> {
     pub(crate) chat: Option<AnyElement>,
     pub(crate) chat_session: Option<Uuid>,
     pub(crate) chat_title: SharedString,
-    pub(crate) states: &'a HashMap<Uuid, SplitPane>,
+    pub(crate) states: &'a HashMap<Uuid, PaneView>,
     pub(crate) focus: Option<Uuid>,
     pub(crate) content: f32,
     pub(crate) areas: &'a Rc<std::cell::RefCell<HashMap<Vec<usize>, [f32; 4]>>>,
