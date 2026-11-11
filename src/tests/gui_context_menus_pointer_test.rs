@@ -274,3 +274,29 @@ fn one_left_press_closes_whichever_card_is_open() {
         );
     }
 }
+
+/// The ring is the card's only edge, so it cannot be a shade of the fill it
+/// sits on. `panel_hi` is four RGB steps off `panel`, which is 1.04:1 on both
+/// themes, and two of the four surfaces a menu opens over paint `panel`
+/// themselves (the rail row, and the composer whose field wears `panel_hi` as
+/// its own border). A `panel_hi` ring therefore left the card with no visible
+/// edge exactly where it was needed, and `shadow_md` could not cover for it at
+/// alpha 0.10 over a near-black fill. `text_faint` is the token the split
+/// rules moved to for this same reason (#2473): 2.9:1 on the dark theme,
+/// 3.8:1 on the light one.
+#[test]
+fn the_card_rings_in_a_colour_that_reads_against_its_own_fill() {
+    let card = fn_body(MENU, "menu_card");
+    assert!(
+        card.contains(".border_color(rgb(palette::current().text_faint))"),
+        "the ring is the visible token, not another step off the fill"
+    );
+    assert!(
+        !card.contains("border_color(rgb(palette::current().panel_hi))"),
+        "panel_hi sat within four RGB steps of panel on every theme"
+    );
+    assert!(
+        card.contains(".bg(rgb(palette::current().panel))"),
+        "the card still fills with the panel colour, so the ring is what shows"
+    );
+}

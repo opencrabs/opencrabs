@@ -93,7 +93,17 @@ pub fn menu_card(id: &'static str, items: Vec<Stateful<Div>>) -> Stateful<Div> {
         .p_1()
         .rounded_sm()
         .border_1()
-        .border_color(rgb(palette::current().panel_hi))
+        // The ring is the only thing that separates the card from what it
+        // covers, so it has to read against the card's own fill and against
+        // every surface a menu opens over. `panel_hi` did neither: four RGB
+        // steps off `panel` is 1.04:1 on both themes, and two of the four
+        // surfaces paint `panel` themselves (the rail row, and the composer
+        // whose field even wears `panel_hi` as its own border), so the card
+        // had no visible edge anywhere. `shadow_md` does not cover for it at
+        // alpha 0.10 over a near-black fill. `text_faint` is the token the
+        // split rules moved to for exactly this reason (#2473) and it lands
+        // at 2.9:1 dark and 3.8:1 light.
+        .border_color(rgb(palette::current().text_faint))
         .bg(rgb(palette::current().panel))
         .shadow_md();
     for item in items {
