@@ -367,6 +367,7 @@ pub mod gui_cancel_test;
 pub mod gui_chat_menu_2480_test;
 pub mod gui_clickable_links_test;
 pub mod gui_completion_sound_test;
+pub mod gui_context_menus_pointer_test;
 pub mod gui_debug_config_test;
 pub mod gui_depth_test;
 pub mod gui_esc_screens_test;

@@ -64,20 +64,18 @@ fn the_menu_floats_as_a_card_and_the_strip_nothing_grows_from() {
         "one card builder serves the rail menu and the chat menu"
     );
     assert!(
-        MENU.contains("menu_card(\"rail-context-menu\""),
-        "the rail menu keeps its card"
+        MENU.contains("pub fn menu_popover("),
+        "one popover places that card at the pointer that opened it (#2690)"
     );
     // The move is mechanical: the rail still imports the primitives under the
     // same names, so nothing in that module learned a new address (#2613).
     assert!(
-        SESSIONS.contains(
-            "pub use crate::menu::{MenuEntry, MenuKind, menu_card, menu_item, menu_popover};"
-        ),
-        "the rail re-exports the moved primitives unchanged"
+        SESSIONS.contains("pub use crate::menu::{MenuEntry, MenuKind, menu_item, menu_popover};"),
+        "the rail re-exports the primitives it still draws with"
     );
     assert!(
-        GUI_MAIN.contains("sessions::menu_card(\"chat-menu\""),
-        "the chat menu draws the same card"
+        GUI_MAIN.contains("sessions::menu_popover(\"chat-menu\", items, at)"),
+        "the chat menu draws the same card, at the press that asked for it"
     );
     assert!(
         !GUI_MAIN.contains("fn topic_bar("),
@@ -89,8 +87,8 @@ fn the_menu_floats_as_a_card_and_the_strip_nothing_grows_from() {
         "the strip takes a key, the tabs and the edge button, nothing else"
     );
 
-    // Painted last, so the conversation cannot cover the open card: children
-    // paint in order.
+    // Painted last, so the conversation cannot cover the open card. It is
+    // attached at the window root now, deferred, above everything (#2690).
     let footer_arm = GUI_MAIN
         .find("Screen::MissionControl => right.child(footer),")
         .expect("the chat column ends with its footer");
@@ -99,7 +97,7 @@ fn the_menu_floats_as_a_card_and_the_strip_nothing_grows_from() {
         .expect("the card is attached to the chat column");
     assert!(
         menu > footer_arm,
-        "the card is the column's last child, so it paints over the transcript"
+        "the card is attached after the column, so it paints over the transcript"
     );
 }
 
