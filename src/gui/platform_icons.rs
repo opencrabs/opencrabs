@@ -18,19 +18,30 @@ use std::sync::Arc;
 /// then be drawn in any colour without a second file.
 pub const PLACEHOLDER: &str = "#8a8a8a";
 
-/// Telegram's own blue. The mark is the one piece of this chrome that keeps
-/// its brand colour, the way the topic strip keeps Telegram's selection blue.
+/// Channel marks keep their own brand colours rather than the theme accent.
 pub const TELEGRAM_BLUE: u32 = 0x2aabee;
+pub const SLACK_PURPLE: u32 = 0x4a154b;
+pub const DISCORD_BLURPLE: u32 = 0x5865f2;
 
 const TELEGRAM_SVG: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/src/assets/telegram.svg"
+));
+const SLACK_SVG: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/src/assets/slack.svg"
+));
+const DISCORD_SVG: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/src/assets/discord.svg"
 ));
 
 /// The embedded vector for a platform, when we carry one.
 fn platform_svg(platform: &str) -> Option<&'static [u8]> {
     match platform {
         "Telegram" => Some(TELEGRAM_SVG),
+        "Slack" => Some(SLACK_SVG),
+        "Discord" => Some(DISCORD_SVG),
         _ => None,
     }
 }
@@ -39,6 +50,8 @@ fn platform_svg(platform: &str) -> Option<&'static [u8]> {
 pub fn platform_colour(platform: &str) -> Option<u32> {
     match platform {
         "Telegram" => Some(TELEGRAM_BLUE),
+        "Slack" => Some(SLACK_PURPLE),
+        "Discord" => Some(DISCORD_BLURPLE),
         _ => None,
     }
 }
@@ -67,7 +80,10 @@ pub fn platform_icon(platform: &str, size: f32) -> Option<AnyElement> {
 
 #[cfg(test)]
 mod tests {
-    use super::{PLACEHOLDER, TELEGRAM_BLUE, TELEGRAM_SVG, platform_colour, platform_svg};
+    use super::{
+        DISCORD_BLURPLE, DISCORD_SVG, PLACEHOLDER, SLACK_PURPLE, SLACK_SVG, TELEGRAM_BLUE,
+        TELEGRAM_SVG, platform_colour, platform_svg,
+    };
 
     /// An embedded file that is not a vector would draw a blank box in the
     /// slot the name used to occupy, so the shape is checked here.
@@ -85,11 +101,28 @@ mod tests {
         assert!(platform_svg("Telegram").is_some());
     }
 
+    #[test]
+    fn slack_and_discord_cards_have_embedded_brand_marks() {
+        for (platform, bytes, colour) in [
+            ("Slack", SLACK_SVG, SLACK_PURPLE),
+            ("Discord", DISCORD_SVG, DISCORD_BLURPLE),
+        ] {
+            let svg = std::str::from_utf8(bytes).expect("platform SVG is UTF-8");
+            assert!(svg.starts_with("<svg"));
+            assert!(svg.contains("width=\"96\" height=\"96\""));
+            assert!(svg.contains("viewBox=\"0 0 24 24\""));
+            assert!(svg.contains("<path"));
+            assert!(svg.contains(PLACEHOLDER));
+            assert_eq!(platform_colour(platform), Some(colour));
+            assert!(platform_svg(platform).is_some());
+        }
+    }
+
     /// No mark, no picture: a platform we carry no vector for falls back to its
     /// name instead of borrowing another brand's icon.
     #[test]
     fn a_platform_without_a_mark_gets_none() {
-        assert_eq!(platform_colour("Discord"), None);
-        assert!(platform_svg("Discord").is_none());
+        assert_eq!(platform_colour("Trello"), None);
+        assert!(platform_svg("Trello").is_none());
     }
 }
