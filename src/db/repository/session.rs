@@ -547,7 +547,8 @@ impl SessionRepository {
             .collect()
     }
 
-    /// Set or clear one topic's icon. None clears it back to the default.
+    /// Set or clear one session's icon, root or topic. None clears it back
+    /// to the default.
     pub async fn set_topic_icon(&self, id: Uuid, icon: Option<&str>) -> Result<()> {
         let (id_str, icon) = (id.to_string(), icon.map(str::to_string));
         self.pool
@@ -566,7 +567,9 @@ impl SessionRepository {
         Ok(())
     }
 
-    /// Every topic that has an icon of its own, with the icon.
+    /// Every session that has an icon of its own, root or topic, with the
+    /// icon. The rename dialog sets one on any conversation, so the read
+    /// cannot filter to children: a root card paints its pick too (#2790).
     pub async fn topic_icons(&self) -> Result<Vec<(Uuid, String)>> {
         self.pool
             .get()
@@ -575,7 +578,7 @@ impl SessionRepository {
             .interact(move |conn| {
                 let mut stmt = conn.prepare_cached(
                     "SELECT id, topic_icon FROM sessions
-                     WHERE parent_id IS NOT NULL AND topic_icon IS NOT NULL",
+                     WHERE topic_icon IS NOT NULL",
                 )?;
                 let rows = stmt
                     .query_map([], |row| {

@@ -25,8 +25,9 @@ async fn boot_reads_the_icon_rows_instead_of_starting_with_an_empty_map() {
         "boot loads the icons it paints"
     );
 
-    // The query behind that call: a child session with an icon is returned, a
-    // root session and an icon-less topic are not.
+    // The query behind that call: every session with an icon is returned,
+    // root or topic, because the rename dialog sets one on any conversation
+    // (#2790). An icon-less topic is still left out.
     let db = crate::db::database::Database::connect_in_memory()
         .await
         .unwrap();
@@ -47,11 +48,18 @@ async fn boot_reads_the_icon_rows_instead_of_starting_with_an_empty_map() {
         .unwrap();
 
     let rows = sessions.topic_icons().await.unwrap();
+    let by_id: std::collections::HashMap<_, _> = rows.into_iter().collect();
     assert_eq!(
-        rows,
-        vec![(topic, "\u{1f4a1}".to_string())],
-        "only topics carry a tab icon"
+        by_id.get(&topic).map(String::as_str),
+        Some("\u{1f4a1}"),
+        "a topic keeps its icon"
     );
+    assert_eq!(
+        by_id.get(&root.id).map(String::as_str),
+        Some("\u{1f980}"),
+        "a root conversation carries its icon too, so its card paints the pick (#2790)"
+    );
+    assert_eq!(by_id.len(), 2, "the icon-less topic is still left out");
 }
 
 /// A menu that grows the strip is not a menu. Both menus draw the same card,
