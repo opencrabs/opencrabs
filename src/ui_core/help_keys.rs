@@ -714,9 +714,11 @@ mod tests {
         let tui = seeker_items(HelpClient::Tui);
         let gui = seeker_items(HelpClient::Gui);
 
-        // The window answers `r` since #2670, so both surfaces list it now.
+        // `r` answers in the terminal only since #2812: the window spends its
+        // bare letters on the rail's find field, and Rename stays on the row
+        // menu there, so the seeker must not offer a chord it cannot take.
         assert!(tui.iter().any(|item| item.title.contains("Rename")));
-        assert!(gui.iter().any(|item| item.title.contains("Rename")));
+        assert!(!gui.iter().any(|item| item.title.contains("Rename")));
         // The window scales its own rem (#2425) and the terminal has no say.
         assert!(gui.iter().any(|item| item.title.contains("Zoom")));
         assert!(!tui.iter().any(|item| item.title.contains("Zoom")));
