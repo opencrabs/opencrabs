@@ -55,6 +55,7 @@ mod telegram_topics;
 mod text_commands;
 mod theme;
 mod themes_view;
+mod thumbs;
 mod topic_icons;
 mod topic_tabs;
 mod transcript;

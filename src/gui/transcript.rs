@@ -31,9 +31,9 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use gpui::{
-    AbsoluteLength, AnyElement, App, ClickEvent, Div, HighlightStyle, MouseButton, ObjectFit,
-    Pixels, Point, ScrollHandle, SharedString, Stateful, Styled, StyledText, TextLayout, TextStyle,
-    Window, div, img, prelude::*, px, rems, rgb, rgba,
+    AbsoluteLength, AnyElement, App, ClickEvent, Div, HighlightStyle, MouseButton, ScrollHandle,
+    SharedString, Stateful, Styled, StyledText, TextLayout, TextStyle, Window, div, prelude::*, px,
+    rems, rgb, rgba,
 };
 
 use opencrabs::db::Database;
@@ -2035,14 +2035,11 @@ fn attachment_cell(path: &std::path::Path, side: f32) -> Div {
             .rounded(px(CARD_RADIUS))
             .border_1()
             .border_color(rgb(palette::current().track))
-            .child(
-                img(path.to_path_buf())
-                    .size_full()
-                    // Clip the pixels as well as the box. GPUI's image paint
-                    // can otherwise cover the outer card's rounded top edge.
-                    .rounded(px(concentric_radius(1.0)))
-                    .object_fit(ObjectFit::Cover),
-            )
+            // A square crop painted with `Fill`, so the painted quad is the
+            // box and the radius lands inside the tile's own arc. `Cover` on
+            // the original painted a larger quad and its arc sat outside the
+            // tile's, which is what let pixels past the corner (#2796).
+            .child(crate::thumbs::picture(path, px(concentric_radius(1.0))))
             .into_any_element()
     } else {
         // A document and a clip have nothing to draw, so the box states what a
@@ -4100,8 +4097,11 @@ mod tests {
         );
     }
 
-    /// #2536: the image needs its own concentric clip. Clipping only the
-    /// outer box still lets the image paint over the card's top corners.
+    /// #2796: the picture is painted from the square cache, so the radius it is
+    /// given lands on a quad that is exactly the tile's box. #2536 gave the
+    /// picture the concentric radius but left `Cover` painting a larger quad,
+    /// so the arc sat outside the tile's and its test, which only looked for
+    /// the string, stayed green over a tile that still bled.
     #[test]
     fn attachment_media_clips_inside_the_card_radius() {
         let src = include_str!("transcript.rs");
@@ -4111,8 +4111,15 @@ mod tests {
             .and_then(|rest| rest.split("/// The last cell").next())
             .expect("attachment cell");
         assert!(cell.contains(".rounded(px(CARD_RADIUS))"));
-        assert!(cell.contains(".rounded(px(concentric_radius(1.0)))"));
         assert!(cell.contains(".overflow_hidden()"));
+        assert!(
+            cell.contains("crate::thumbs::picture(") && cell.contains("px(concentric_radius(1.0))"),
+            "the tile paints the square crop at the concentric radius"
+        );
+        assert!(
+            !cell.contains("Cover"),
+            "a cover fit paints outside the tile, whatever radius it is given"
+        );
         assert_eq!(concentric_radius(1.0), CARD_RADIUS - 1.0);
     }
 

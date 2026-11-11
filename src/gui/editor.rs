@@ -29,10 +29,10 @@ use gpui::{
     AnyElement, App, Bounds, ClickEvent, ClipboardEntry, ClipboardItem, Context, Corners,
     CursorStyle, Div, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler,
     EventEmitter, FocusHandle, Focusable, Font, GlobalElementId, ImageFormat, KeyBinding, LayoutId,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, PathPromptOptions,
-    Pixels, Point, RenderImage, ScrollHandle, SharedString, Style, TextAlign, TextRun,
-    UTF16Selection, Window, WrappedLine, actions, div, fill, img, point, prelude::*, px, relative,
-    rgb, rgba, size, transparent_black,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Point,
+    RenderImage, ScrollHandle, SharedString, Style, TextAlign, TextRun, UTF16Selection, Window,
+    WrappedLine, actions, div, fill, point, prelude::*, px, relative, rgb, rgba, size,
+    transparent_black,
 };
 
 use unicode_segmentation::UnicodeSegmentation;
@@ -2322,11 +2322,10 @@ fn attachment_strip(attachments: &[Attachment], cx: &mut Context<Editor>) -> Div
                 .flex_shrink_0()
                 .overflow_hidden()
                 .rounded(px(4.0))
-                .child(
-                    img(attachment.path.clone())
-                        .size_full()
-                        .object_fit(ObjectFit::Cover),
-                )
+                // A square crop painted with `Fill`: the painted quad is the
+                // box, so the chip's radius lands on the picture instead of
+                // leaving square pixels under the arc (#2796).
+                .child(crate::thumbs::picture(&attachment.path, px(4.0)))
                 .into_any_element()
         } else {
             div()
@@ -3160,10 +3159,12 @@ mod tests {
             .and_then(|rest| rest.split("} else {").next())
             .expect("the image branch is identifiable");
         assert!(
-            image_branch.contains("img(attachment.path.clone())")
-                && image_branch.contains(".size_full()")
-                && image_branch.contains("ObjectFit::Cover"),
-            "the picture fills a box instead of deciding its own size"
+            image_branch.contains("crate::thumbs::picture(&attachment.path"),
+            "the picture comes from the square cache, not a cover fit"
+        );
+        assert!(
+            !image_branch.contains("Cover"),
+            "a cover fit paints a larger quad than the chip and bleeds (#2796)"
         );
         assert!(
             image_branch.contains(".flex_shrink_0()"),

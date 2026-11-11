@@ -588,6 +588,11 @@ fn image_body(
                 // own aspect ratio when height is Auto, the bug behind #2395.
                 .w(px(w))
                 .h(px(h))
+                // The same radius as the box. `Contain` paints inside the box
+                // already, so this only matters for the one picture that fills
+                // it exactly, where the arc is the only thing that can round
+                // the corners (#2796).
+                .rounded(px(6.0))
                 .object_fit(ObjectFit::Contain),
         )
         .into_any_element()
@@ -633,6 +638,7 @@ fn video_body(preview: &Preview, poster: Option<&Path>) -> AnyElement {
                 img(frame.to_path_buf())
                     .w(px(IMAGE_BOX.0))
                     .h(px(IMAGE_BOX.1))
+                    .rounded(px(6.0))
                     .object_fit(ObjectFit::Contain),
             )
             .into_any_element(),
