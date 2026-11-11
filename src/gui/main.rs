@@ -16754,8 +16754,8 @@ mod tests {
         // text never moved the caret and ctrl+| split whatever leaf the
         // window still called focused instead of the pane just clicked.
         let body = PANE_VIEW
-            .split("let mut node = div()")
-            .nth(1)
+            .split_once("let mut node = div()")
+            .map(|(_, leaf)| leaf)
             .expect("the leaf builds its own box");
         assert!(
             body.contains(".capture_any_mouse_down(take_keyboard)"),
@@ -16806,8 +16806,8 @@ mod tests {
         // height. Without this the plan card was squeezed to zero in a short
         // pane, which is why it only ever vanished in a split.
         let body = PANE_VIEW
-            .split("let mut node = div()")
-            .nth(1)
+            .split_once("let mut node = div()")
+            .map(|(_, leaf)| leaf)
             .expect("the leaf builds its own box");
         assert!(
             body.contains(".flex_none().min_w_0().child(chrome)"),

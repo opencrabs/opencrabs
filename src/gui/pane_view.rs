@@ -1,10 +1,10 @@
 //! One split pane as an entity of its own (#2805).
 //!
-//! Every pane's state used to sit in a `HashMap<Uuid, SplitPane>` on the
-//! window, so the window was the only thing that could repaint: a row landing
-//! in one leaf, a plan task settling in another, or a scroll tick in a third
-//! all went through `Dashboard::notify` and redrew the whole wall. Lifting the
-//! state into a `PaneView` entity gives each leaf a repaint of its own.
+//! Every pane's state used to sit in a map on the window, so the window was
+//! the only thing that could repaint: a row landing in one leaf, a plan task
+//! settling in another, or a scroll tick in a third all went through
+//! `Dashboard::notify` and redrew the whole wall. Lifting the state into a
+//! `PaneView` entity gives each leaf a repaint of its own.
 //!
 //! The state itself does not change. `title`, `transcript`, `scroll`, `follow`,
 //! `editor`, `plan`, `plan_for`, `live`, `busy`, `cancel` and `copy_drag` were
@@ -82,8 +82,8 @@ pub(crate) struct PaneView {
     /// The token that cancels THIS pane's turn, so `/stop` in one leaf leaves
     /// the other running.
     pub(crate) cancel: Option<tokio_util::sync::CancellationToken>,
-    /// This pane's own drag-to-copy state (#2623). A pane transcript is built
-    /// with `ViewHooks::default()`, which leaves `drag: None`, so every pane
+    /// This pane's own drag-to-copy state (#2623). A pane transcript used to
+    /// be built with default hooks, which leave `drag: None`, so every pane
     /// had no anchor, no highlight and no release handler: the gesture was
     /// dead the moment a second pane existed. It cannot share the window's
     /// either, because the row text is stored by ordinal and two panes plus

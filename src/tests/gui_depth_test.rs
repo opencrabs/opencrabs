@@ -44,8 +44,8 @@ fn the_input_has_a_panel_background_and_a_shadow() {
 /// the same function.
 fn leaf_arm() -> &'static str {
     PANE_VIEW
-        .split("let mut node = div()")
-        .nth(1)
+        .split_once("let mut node = div()")
+        .map(|(_, leaf)| leaf)
         .expect("a leaf is built in leaf_box")
 }
 
