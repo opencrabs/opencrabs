@@ -225,7 +225,8 @@ async fn tui_completed_plan_history_reloads_pages_and_renders() {
 
     app.load_session(session.id).await.unwrap();
     assert!(app.hidden_older_messages > 0);
-    assert_eq!(app.messages.len(), App::DISPLAY_MESSAGE_WINDOW);
+    // The window, plus the dim marker row it puts on top (#2818).
+    assert_eq!(app.messages.len(), App::DISPLAY_MESSAGE_WINDOW + 1);
     assert!(
         !app.messages
             .iter()
