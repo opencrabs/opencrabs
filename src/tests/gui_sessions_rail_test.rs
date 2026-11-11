@@ -58,26 +58,47 @@ fn rail_card_media_is_large_dual_and_the_title_is_bold() {
     }
 
     let row = block(SESSIONS, "pub fn row(", "pub fn on_click(");
-    assert!(
-        !row.contains("icon.or_else"),
-        "a stored picture never suppresses the channel mark"
+    let media = block(row, "let platform = rail::platform_of", "let title_text =");
+    assert_eq!(
+        media.matches(".child(icon)").count(),
+        1,
+        "the stored picture has one mount, not a second icon beside it"
     );
     assert!(
-        row.contains("platform_icons::platform_icon(platform, RAIL_MARK_REMS)"),
-        "the channel mark uses the same 28px size"
+        media.contains(".relative()") && media.contains(".size(rems(RAIL_MARK_REMS))"),
+        "the picture owns one 28px positioning box"
     );
-    let media = block(row, "let marks =", "let title_text =");
-    assert!(media.contains(".gap_2()"), "the two marks have 8px separation");
-    let picture = media.find(".when_some(icon,").expect("stored picture first");
-    let platform = media
-        .find(".when_some(platform_mark,")
-        .expect("platform mark second");
-    assert!(picture < platform, "the stored picture leads the channel mark");
+    let badge = block(media, "let badge =", "            .relative()");
+    for needle in [
+        "platform_icons::platform_icon_with_colour(",
+        "RAIL_CHANNEL_GLYPH_REMS",
+        "palette::current().accent",
+        ".absolute()",
+        ".top_0()",
+        ".right_0()",
+        ".rounded_full()",
+        ".size(rems(RAIL_CHANNEL_BADGE_REMS))",
+        ".border_color(rgb(palette::current().accent))",
+    ] {
+        assert!(
+            badge.contains(needle),
+            "the rounded top-right channel badge uses the theme accent: {needle}"
+        );
+    }
+    assert!(
+        media.contains("let marks = picture.or_else")
+            && media.contains("platform_icons::platform_icon(platform, RAIL_MARK_REMS)"),
+        "only a missing picture falls back to the standalone 28px channel mark"
+    );
+    assert!(
+        !media.contains(".when_some(platform_mark,") && !media.contains(".gap_2()"),
+        "the side-by-side double-icon group is gone"
+    );
 
     let title = block(row, "let title = div()", "// Timestamp, cost");
     assert!(
-        title.contains(".gap_3()") && title.contains(".when(has_mark, |d| d.child(marks))"),
-        "the media group has 12px separation from the title"
+        title.contains(".gap_3()") && title.contains(".when_some(marks, |d, marks| d.child(marks))"),
+        "the single media slot has 12px separation from the title"
     );
     let title_weight = block(row, "let title_text = if indented", "let title = div()");
     assert!(title_weight.contains("title_text.text_xs()"));

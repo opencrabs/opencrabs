@@ -1238,6 +1238,8 @@ pub fn pin_mark(favorited: bool) -> (bool, u32) {
 
 /// Full rail cards use one media size for stored pictures and platform marks.
 pub const RAIL_MARK_REMS: f32 = 1.75;
+const RAIL_CHANNEL_BADGE_REMS: f32 = 0.75;
+const RAIL_CHANNEL_GLYPH_REMS: f32 = 0.45;
 
 const PIN_SVG: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/assets/pin.svg"));
 const PIN_OUTLINE_SVG: &[u8] = include_bytes!(concat!(
@@ -1524,20 +1526,46 @@ pub fn row(s: &Session, flags: RowFlags, chips: Option<Stateful<Div>>) -> Statef
         Some(title) => rail::chat_name(Some(title)),
         None => "(untitled)".to_string(),
     };
-    // A stored picture and a channel mark coexist (#2800): the owner's pick
-    // leads, then the platform mark identifies the channel. Without a pick,
-    // a supported channel keeps its mark and other sessions get no avatar.
-    let platform_mark = rail::platform_of(stored.filter(|_| !indented))
-        .and_then(|platform| platform_icons::platform_icon(platform, RAIL_MARK_REMS));
-    let has_mark = icon.is_some() || platform_mark.is_some();
-    let marks = div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap_2()
-        .flex_none()
-        .when_some(icon, |d, icon| d.child(icon))
-        .when_some(platform_mark, |d, mark| d.child(mark));
+    // One media slot, never two side-by-side icons (#2800). A stored picture
+    // carries a small accent channel badge at its top right. Without a picture,
+    // a supported channel keeps only its standalone mark; GUI-only sessions
+    // get no invented avatar.
+    let platform = rail::platform_of(stored.filter(|_| !indented));
+    let picture = icon.map(|icon| {
+        let badge = platform
+            .and_then(|platform| {
+                platform_icons::platform_icon_with_colour(
+                    platform,
+                    RAIL_CHANNEL_GLYPH_REMS,
+                    palette::current().accent,
+                )
+            })
+            .map(|mark| {
+                div()
+                    .absolute()
+                    .top_0()
+                    .right_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(rems(RAIL_CHANNEL_BADGE_REMS))
+                    .rounded_full()
+                    .border_1()
+                    .border_color(rgb(palette::current().accent))
+                    .bg(rgb(palette::current().panel))
+                    .child(mark)
+            });
+        div()
+            .relative()
+            .flex_none()
+            .size(rems(RAIL_MARK_REMS))
+            .child(icon)
+            .when_some(badge, |d, badge| d.child(badge))
+            .into_any_element()
+    });
+    let marks = picture.or_else(|| {
+        platform.and_then(|platform| platform_icons::platform_icon(platform, RAIL_MARK_REMS))
+    });
     let title_text = div()
         // A closed topic reads dimmed: still there, no longer taking work.
         .text_color(rgb(if closed {
@@ -1564,7 +1592,7 @@ pub fn row(s: &Session, flags: RowFlags, chips: Option<Stateful<Div>>) -> Statef
         // has free space to push against. Without this it shrinks to its text
         // and the glyph parks right after the name (#2636 follow-up).
         .w_full()
-        .when(has_mark, |d| d.child(marks))
+        .when_some(marks, |d, marks| d.child(marks))
         .child(title_text)
         // Timestamp, cost, the pin and the activity glyph share ONE
         // right-aligned cluster: a single auto margin carries the whole

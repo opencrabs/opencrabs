@@ -18,7 +18,8 @@ use std::sync::Arc;
 /// then be drawn in any colour without a second file.
 pub const PLACEHOLDER: &str = "#8a8a8a";
 
-/// Channel marks keep their own brand colours rather than the theme accent.
+/// Standalone channel marks keep their brand colours. A badge overlaid on a
+/// stored picture may use the theme accent so the two images read as one.
 pub const TELEGRAM_BLUE: u32 = 0x2aabee;
 pub const SLACK_PURPLE: u32 = 0x4a154b;
 pub const DISCORD_BLURPLE: u32 = 0x5865f2;
@@ -56,13 +57,22 @@ pub fn platform_colour(platform: &str) -> Option<u32> {
     }
 }
 
-/// A platform's mark, recoloured to its brand colour, drawn at `size` rems.
+/// A platform's standalone mark, recoloured to its brand colour.
+pub fn platform_icon(platform: &str, size: f32) -> Option<AnyElement> {
+    platform_icon_with_colour(platform, size, platform_colour(platform)?)
+}
+
+/// A platform mark in an explicit colour, drawn at `size` rems. The rail uses
+/// this for the small accent badge over a stored session picture (#2800).
 ///
 /// `None` when no mark is embedded for that platform: the caller then paints
 /// the name alone rather than inventing a picture for it.
-pub fn platform_icon(platform: &str, size: f32) -> Option<AnyElement> {
+pub fn platform_icon_with_colour(
+    platform: &str,
+    size: f32,
+    colour: u32,
+) -> Option<AnyElement> {
     let svg = platform_svg(platform)?;
-    let colour = platform_colour(platform)?;
     // GPUI rasterizes a vector from its intrinsic size, so the source carries
     // 96px the way `topic-orientation.svg` does and stays crisp at 16px.
     let recoloured = String::from_utf8_lossy(svg)
