@@ -9976,6 +9976,11 @@ impl Dashboard {
                         return;
                     }
                 }
+                // Every other key falls through to the handlers below. The
+                // arms above are guarded, so the match still needs a wildcard
+                // to be exhaustive: a keystroke the rail does not claim is not
+                // an error, it is simply somebody else's.
+                _ => {}
             }
         }
         // Chat owns no usage keys. Esc included: backing out of the
