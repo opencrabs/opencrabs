@@ -2555,6 +2555,17 @@ fn live_card(
         }
     };
     let (lead, _) = live_status_line(live);
+    // The paragraph the turn last spoke leads the card (#2816). The prose is
+    // what the turn concluded and the calls are only what it ran, so a card
+    // that put the tool block on top read bottom up: the row a reader sees
+    // first named the command and the sentence explaining it sat underneath.
+    // Narration is occasional, so most turns have no paragraph and the head
+    // keeps the top of the card exactly as it was.
+    let prose = if expanded {
+        None
+    } else {
+        collapsed_narration(live)
+    };
     // #2468: the head row owns the card's width and the lead takes the slack
     // as a single line. Without a width of its own the row sized to its
     // content, the content was the lead, and the lead was measured against the
@@ -2569,7 +2580,9 @@ fn live_card(
         .w_full()
         .min_w_0()
         .px_2()
-        .pt_1()
+        // The prose block above the head carries the card's top padding, so
+        // the head must not add it twice (#2816).
+        .when(prose.is_none(), |d| d.pt_1())
         .pb_1()
         .child(
             div()
@@ -2606,17 +2619,15 @@ fn live_card(
         .border_color(rgb(palette::current().panel_hi))
         .bg(glass_fill(palette::current().panel))
         .cursor_pointer()
-        .hover(|d| d.bg(rgb(palette::current().panel_hi)))
-        .child(head);
-    if expanded {
-        card = card.child(live_card_body(live, drag));
-    } else if let Some(paragraph) = collapsed_narration(live) {
-        // Narration stays in the card, never in the chat history. The collapsed
-        // card previews what the turn just said under its header, the way a
-        // summary rides beneath its title; opening the card prints every
-        // paragraph in order.
+        .hover(|d| d.bg(rgb(palette::current().panel_hi)));
+    // The prose leads (#2816): the paragraph sits above the head row, so the
+    // card reads prose first and the tool block under it, never the reverse.
+    // Narration stays out of the chat history: the collapsed card previews
+    // what the turn just said, and opening the card prints every paragraph in
+    // order.
+    if let Some(paragraph) = prose {
         card = card.child(
-            div().px_2().pb_1().w_full().min_w_0().child(
+            div().px_2().pt_1().pb_1().w_full().min_w_0().child(
                 selectable_styled_text(
                     paragraph,
                     small_style(SMALL_TEXT_SIZE, palette::current().text_muted),
@@ -2627,6 +2638,10 @@ fn live_card(
                 .line_clamp(3),
             ),
         );
+    }
+    card = card.child(head);
+    if expanded {
+        card = card.child(live_card_body(live, drag));
     }
     if let Some(footer) = live_card_footer(live, ctx) {
         card = card.child(
@@ -5471,6 +5486,33 @@ mod tests {
         assert!(
             src_at(SRC, &body) < src_at(SRC, &foot),
             "the footer is drawn after the body"
+        );
+    }
+
+    /// #2816: the paragraph the turn spoke leads the card. The head row names
+    /// the call, so a card that drew it first read bottom up: the command on
+    /// top and the sentence explaining it underneath.
+    #[test]
+    fn the_collapsed_card_leads_with_the_turns_paragraph() {
+        const SRC: &str = include_str!("transcript.rs");
+        let card = SRC
+            .split_once("fn live_card(")
+            .expect("the live card")
+            .1
+            .split_once("fn live_card_footer(")
+            .expect("the card footer")
+            .0;
+        let prose = card
+            .find("if let Some(paragraph) = prose")
+            .expect("the prose block");
+        let head = card.find("card = card.child(head)").expect("the head row");
+        assert!(
+            prose < head,
+            "the paragraph is painted above the tool head, never under it"
+        );
+        assert!(
+            card.contains("collapsed_narration(live)"),
+            "the card previews the pane's own paragraph, not a second rule"
         );
     }
 
