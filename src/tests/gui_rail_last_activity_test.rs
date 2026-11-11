@@ -53,9 +53,18 @@ fn a_failed_turn_refreshes_the_rail_too() {
 fn the_rail_still_paints_the_field_it_is_sorted_by() {
     let sessions = include_str!("../gui/sessions.rs");
     let row = block(sessions, "pub fn row(", "pub fn on_click(");
+    // #2815 rolled a card's stamp up over the topics it hides as chips, so the
+    // row prints `stamp_at` instead of the parent's own `updated_at`. It is
+    // still the field the order is keyed on: printing `created_at`, or the
+    // parent row's untouched `updated_at`, would leave a correctly sorted rail
+    // looking scrambled.
     assert!(
-        row.contains("s.updated_at"),
-        "the row prints updated_at, the field the refetch sorts by; printing \
-         created_at would leave a correctly sorted rail looking scrambled"
+        row.contains("rail_stamp(stamp_at"),
+        "the row prints the stamp the order is keyed on"
+    );
+    let ordered = block(sessions, "pub fn ordered(", "pub fn is_closed(");
+    assert!(
+        ordered.contains("std::cmp::Reverse(activity.get(&s.id)"),
+        "the order is keyed on the same rolled-up activity the card prints"
     );
 }

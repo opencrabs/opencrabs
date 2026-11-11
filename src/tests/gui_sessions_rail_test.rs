@@ -127,13 +127,18 @@ fn the_rail_header_is_compact_opencrabs_branding() {
 
 #[test]
 fn grouped_topics_are_compact_visible_pins_not_a_dropdown() {
-    let ordered = block(SESSIONS, "pub fn ordered(", "/// Whether a row is a topic");
+    let ordered = block(SESSIONS, "pub fn ordered(", "pub fn is_closed(");
     // #2701 replaced the fold tree with chips that always paint, so the order
     // keeps every topic directly beneath its parent and hides none of them.
     // The toggle is a key, not rail chrome: the row still paints no fold
-    // button or dropdown.
+    // button or dropdown. #2817 builds the child lists once and appends them
+    // under each parent in one pass instead of rescanning the visible set.
     assert!(
-        ordered.contains("self.parents.get(&s.id) == Some(&top.id) && grouped(s)"),
+        ordered.contains("children.entry(*parent).or_default().push(*s)"),
+        "every topic is collected under its parent"
+    );
+    assert!(
+        ordered.contains("out.extend(kids.iter().copied())"),
         "a topic always follows its parent in the order"
     );
     assert!(
@@ -182,8 +187,10 @@ fn rail_header_has_no_kebab_and_one_right_aligned_metadata_cluster() {
     // it can never paint over the title: the name truncates in the space the
     // trailing cluster leaves.
     let stamp = block(row, "let stamp = (!indented)", "let title = div()");
+    // #2815 rolled the stamp up over the topics a card hides as chips, so the
+    // row prints `stamp_at` instead of the parent's own `updated_at`.
     assert!(
-        stamp.contains("rail_stamp(s.updated_at") && stamp.contains("rail_cost(cost)"),
+        stamp.contains("rail_stamp(stamp_at") && stamp.contains("rail_cost(cost)"),
         "the stamp is the shared day-or-clock plus the rolled-up compact cost"
     );
     assert!(
