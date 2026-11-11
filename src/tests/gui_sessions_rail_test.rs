@@ -36,6 +36,59 @@ fn session_rows_paint_edge_to_edge_without_card_chrome() {
 }
 
 #[test]
+fn rail_card_media_is_large_dual_and_the_title_is_bold() {
+    assert!(
+        SESSIONS.contains("pub const RAIL_MARK_REMS: f32 = 1.75;"),
+        "full-card media is 28px at the default 16px root"
+    );
+    let wiring = block(
+        GUI_MAIN,
+        "icon: self.sessions.topic_icons.get(&id)",
+        "};",
+    );
+    for resolver in [
+        "topic_icons::tab_icon(stored, sessions::RAIL_MARK_REMS)",
+        "self.custom_icon_picture(stored, sessions::RAIL_MARK_REMS)",
+        "topic_icons::tab_glyph(stored, sessions::RAIL_MARK_REMS)",
+    ] {
+        assert!(
+            wiring.contains(resolver),
+            "stored media resolver uses the shared full-card size: {resolver}"
+        );
+    }
+
+    let row = block(SESSIONS, "pub fn row(", "pub fn on_click(");
+    assert!(
+        !row.contains("icon.or_else"),
+        "a stored picture never suppresses the channel mark"
+    );
+    assert!(
+        row.contains("platform_icons::platform_icon(platform, RAIL_MARK_REMS)"),
+        "the channel mark uses the same 28px size"
+    );
+    let media = block(row, "let marks =", "let title_text =");
+    assert!(media.contains(".gap_2()"), "the two marks have 8px separation");
+    let picture = media.find(".when_some(icon,").expect("stored picture first");
+    let platform = media
+        .find(".when_some(platform_mark,")
+        .expect("platform mark second");
+    assert!(picture < platform, "the stored picture leads the channel mark");
+
+    let title = block(row, "let title = div()", "// Timestamp, cost");
+    assert!(
+        title.contains(".gap_3()") && title.contains(".when(has_mark, |d| d.child(marks))"),
+        "the media group has 12px separation from the title"
+    );
+    let title_weight = block(row, "let title_text = if indented", "let title = div()");
+    assert!(title_weight.contains("title_text.text_xs()"));
+    assert!(title_weight.contains(".text_sm()"));
+    assert!(
+        title_weight.contains(".font_weight(gpui::FontWeight::BOLD)"),
+        "only the full session title gains bold weight"
+    );
+}
+
+#[test]
 fn the_rail_header_is_compact_opencrabs_branding() {
     let header = block(SESSIONS, "fn brand_header()", "#[cfg(test)]");
     assert!(header.contains("icon::banner_logo()"));

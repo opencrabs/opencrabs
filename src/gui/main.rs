@@ -1495,16 +1495,16 @@ mod sidebar_action_tests {
             .next()
             .expect("wiring before the flags close");
         assert!(
-            wiring.contains("topic_icons::tab_icon(stored, 1.0)"),
-            "an embedded mark renders on the card, same as on the tab"
+            wiring.contains("topic_icons::tab_icon(stored, sessions::RAIL_MARK_REMS)"),
+            "an embedded mark renders at the full rail-card media size"
         );
         assert!(
-            wiring.contains("self.custom_icon_picture(stored, 1.0)"),
-            "a custom image renders from the view's cache"
+            wiring.contains("self.custom_icon_picture(stored, sessions::RAIL_MARK_REMS)"),
+            "a custom image renders from the view's cache at the same size"
         );
         assert!(
-            wiring.contains("topic_icons::tab_glyph(stored, 1.0)"),
-            "a legacy glyph keeps its text slot"
+            wiring.contains("topic_icons::tab_glyph(stored, sessions::RAIL_MARK_REMS)"),
+            "a legacy glyph keeps its text slot at the same size"
         );
     }
 
@@ -10666,14 +10666,18 @@ impl Render for Dashboard {
                 // The stored icon leads the row (#2790), resolved exactly
                 // like the topic tab resolves it: an embedded mark, a
                 // custom image from the view's cache, or a legacy glyph.
-                // A pick in the rename dialog reaches the card without a
-                // restart, and the paint never reads a file.
+                // The row adds the channel mark beside it (#2800). A pick in
+                // the rename dialog reaches the card without a restart, and
+                // the paint never reads a file.
                 icon: self.sessions.topic_icons.get(&id).and_then(|stored| {
-                    topic_icons::tab_icon(stored, 1.0)
-                        .or_else(|| self.custom_icon_picture(stored, 1.0))
+                    topic_icons::tab_icon(stored, sessions::RAIL_MARK_REMS)
                         .or_else(|| {
-                            (!stored.starts_with(topic_icons::IMG_PREFIX))
-                                .then(|| topic_icons::tab_glyph(stored, 1.0))
+                            self.custom_icon_picture(stored, sessions::RAIL_MARK_REMS)
+                        })
+                        .or_else(|| {
+                            (!stored.starts_with(topic_icons::IMG_PREFIX)).then(|| {
+                                topic_icons::tab_glyph(stored, sessions::RAIL_MARK_REMS)
+                            })
                         })
                 }),
             };

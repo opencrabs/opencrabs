@@ -1236,6 +1236,9 @@ pub fn pin_mark(favorited: bool) -> (bool, u32) {
     }
 }
 
+/// Full rail cards use one media size for stored pictures and platform marks.
+pub const RAIL_MARK_REMS: f32 = 1.75;
+
 const PIN_SVG: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/assets/pin.svg"));
 const PIN_OUTLINE_SVG: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -1352,8 +1355,8 @@ pub struct RowFlags {
     /// row says "work is still going here" without being opened.
     pub running: Option<SharedString>,
     /// The session's stored icon, already built by the view (#2790): an
-    /// embedded mark, a custom image or a legacy glyph. When set it wins
-    /// over the platform mark in the leading slot. The module never reads
+    /// embedded mark, a custom image or a legacy glyph. It leads the optional
+    /// channel mark rather than replacing it (#2800). The module never reads
     /// files: the view owns the image cache and hands over the finished
     /// element.
     pub icon: Option<AnyElement>,
@@ -1509,13 +1512,20 @@ pub fn row(
         Some(title) => rail::chat_name(Some(title)),
         None => "(untitled)".to_string(),
     };
-    // The stored icon wins over the platform mark (#2790): the owner picked
-    // it for this session, so it leads the row. Without one, a channel card
-    // still prints its platform; a row without a pick has no mark.
-    let mark = icon.or_else(|| {
-        rail::platform_of(stored.filter(|_| !indented))
-            .and_then(|platform| platform_icons::platform_icon(platform, 1.0))
-    });
+    // A stored picture and a channel mark coexist (#2800): the owner's pick
+    // leads, then the platform mark identifies the channel. Without a pick,
+    // a supported channel keeps its mark and other sessions get no avatar.
+    let platform_mark = rail::platform_of(stored.filter(|_| !indented))
+        .and_then(|platform| platform_icons::platform_icon(platform, RAIL_MARK_REMS));
+    let has_mark = icon.is_some() || platform_mark.is_some();
+    let marks = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .flex_none()
+        .when_some(icon, |d, icon| d.child(icon))
+        .when_some(platform_mark, |d, mark| d.child(mark));
     let title_text = div()
         // A closed topic reads dimmed: still there, no longer taking work.
         .text_color(rgb(if closed {
@@ -1528,19 +1538,21 @@ pub fn row(
     let title_text = if indented {
         title_text.text_xs()
     } else {
-        title_text.text_sm()
+        title_text
+            .text_sm()
+            .font_weight(gpui::FontWeight::BOLD)
     };
     let title = div()
         .flex()
         .flex_row()
         .items_center()
-        .gap_2()
+        .gap_3()
         .min_w_0()
         // The name line fills the body so the trailing cluster's `ml_auto`
         // has free space to push against. Without this it shrinks to its text
         // and the glyph parks right after the name (#2636 follow-up).
         .w_full()
-        .when_some(mark, |d, mark| d.child(mark))
+        .when(has_mark, |d| d.child(marks))
         .child(title_text)
         // Timestamp, cost, the pin and the activity glyph share ONE
         // right-aligned cluster: a single auto margin carries the whole
