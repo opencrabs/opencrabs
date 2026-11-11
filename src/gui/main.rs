@@ -1324,14 +1324,15 @@ mod sidebar_action_tests {
 
     #[test]
     fn a_rail_affordance_that_stops_the_press_hands_the_keys_back() {
-        // #2798: these two stop the press before it reaches the window
+        // #2798: these three stop the press before it reaches the window
         // root, so the root cannot hand the caret back for them. Each one
-        // does it itself, or a press that only opens a card or a menu leaves
-        // the composer waiting for an Esc.
+        // does it itself, or a press on a rail affordance leaves the composer
+        // waiting for an Esc.
         let src = include_str!("main.rs");
         let render = dashboard_render(src);
         for (anchor, why) in [
             ("let ask_menu = cx.listener", "a row's right press"),
+            ("let toggle_pin = cx.listener", "a row's pin"),
             ("let ask = cx.listener", "a topic chip's right press"),
         ] {
             let (_head, tail) = render
@@ -10627,10 +10628,19 @@ impl Render for Dashboard {
             let badge = state
                 .badge
                 .map(|_| rail_activity::frame(self.rail_clock.elapsed()));
+            // The visible pin and the context menu share one favorite writer
+            // (#2803). Stopping the press keeps the row closed and prevents a slide.
+            let toggle_pin = cx.listener(move |this, _ev: &MouseDownEvent, _window, cx| {
+                cx.stop_propagation();
+                this.rail_hands_back();
+                this.toggle_favorite(id, cx);
+            });
+            let pin_toggle = sessions::pin_toggle(id, favorite)
+                .on_mouse_down(MouseButton::Left, toggle_pin);
             let flags = sessions::RowFlags {
                 selected,
                 cursored,
-                favorited: favorite,
+                pin_toggle: Some(pin_toggle),
                 indented,
                 closed,
                 badge,

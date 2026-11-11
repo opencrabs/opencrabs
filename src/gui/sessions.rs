@@ -1260,6 +1260,22 @@ pub fn pin_icon(favorited: bool, size: f32) -> impl IntoElement {
         .object_fit(ObjectFit::Contain)
 }
 
+/// The visible pin is the pin/unpin control (#2803). The view attaches the
+/// existing favorite action; this renderer owns only the hit target and hover.
+pub fn pin_toggle(id: uuid::Uuid, favorited: bool) -> Stateful<Div> {
+    div()
+        .id(SharedString::from(format!("session-pin-toggle-{id}")))
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .size(rems(1.4))
+        .rounded_sm()
+        .cursor_pointer()
+        .hover(|d| d.bg(rgb(palette::current().panel_hi)))
+        .child(pin_icon(favorited, 0.9))
+}
+
 /// The menu's contents, resolved from the row's pin state. Pure, so the
 /// labels are pinned by test and the render only draws what this returns
 /// (#2354).
@@ -1316,13 +1332,14 @@ pub fn rail_menu_entries(favorited: bool, topics_enabled: bool) -> Vec<MenuEntry
 /// What a rail row shows about its session right now. Grouped so the row
 /// keeps a short argument list as the rail gains states.
 ///
-/// Not Clone: the custom icon is a built element, and elements are moved,
-/// not copied. The row takes the flags by value, so nothing needs a clone.
+/// Not Clone: built elements are moved, not copied. The row takes the flags by
+/// value, so nothing needs a clone.
 #[derive(Default)]
 pub struct RowFlags {
     pub selected: bool,
     pub cursored: bool,
-    pub favorited: bool,
+    /// The view-wired pin/unpin control (#2803), shared by full and compact rows.
+    pub pin_toggle: Option<Stateful<Div>>,
     pub indented: bool,
     pub closed: bool,
     /// The spinner glyph for a row that has work in flight (#2636), or `None`.
@@ -1486,7 +1503,7 @@ pub fn row(s: &Session, flags: RowFlags, chips: Option<Stateful<Div>>) -> Statef
     let RowFlags {
         selected,
         cursored,
-        favorited,
+        pin_toggle,
         indented,
         closed,
         badge,
@@ -1579,11 +1596,9 @@ pub fn row(s: &Session, flags: RowFlags, chips: Option<Stateful<Div>>) -> Statef
                                 s.total_cost
                             ))),
                     )
-                    .child(pin_icon(favorited, 0.9))
                 })
-                // A grouped topic row keeps its compact pin inline, without
-                // the ledger metadata repeated on every child (#2788).
-                .when(indented, |d| d.child(pin_icon(favorited, 0.9)))
+                // Full and compact rows share one wired pin control (#2803).
+                .when_some(pin_toggle, |d, pin| d.child(pin))
                 // The activity glyph closes the cluster at the right edge
                 // (#2636). `flex_none` keeps it its width when a long title
                 // truncates.
@@ -2302,7 +2317,7 @@ mod tests {
             .next()
             .expect("title line before the chip strip");
         assert!(
-            !title_line.contains("= pin_mark(favorited)"),
+            !title_line.contains("= pin_mark("),
             "the title line never paints the pin before the name"
         );
         let name_line = title_line
@@ -2310,7 +2325,9 @@ mod tests {
             .next()
             .expect("name line before the trailing cluster");
         assert!(
-            !name_line.contains("pin_icon") && !name_line.contains("topic_pin_mark"),
+            !name_line.contains("pin_toggle")
+                && !name_line.contains("pin_icon")
+                && !name_line.contains("topic_pin_mark"),
             "no pin of any kind paints before the name, indented rows included"
         );
         let cluster = title_line
@@ -2318,12 +2335,12 @@ mod tests {
             .nth(1)
             .expect("trailing cluster");
         assert!(
-            cluster.contains("pin_icon(favorited, 0.9)"),
-            "the pin rides the one right-aligned cluster"
+            cluster.contains(".when_some(pin_toggle,"),
+            "the wired pin rides the one right-aligned cluster"
         );
         let stamp = cluster.find("%m-%d %H:%M").expect("date/cost stamp");
         let pin = cluster
-            .find("pin_icon(favorited, 0.9)")
+            .find(".when_some(pin_toggle,")
             .expect("pushpin after the stamp");
         assert!(
             stamp < pin,

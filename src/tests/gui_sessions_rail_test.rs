@@ -122,8 +122,8 @@ fn grouped_topics_are_compact_visible_pins_not_a_dropdown() {
         "the pre-title branch mark is gone: one pin, in the trailing cluster (#2788)"
     );
     assert!(
-        row.contains(".when(indented, |d| d.child(pin_icon(favorited, 0.9)))"),
-        "a grouped topic keeps its single pin in the trailing cluster"
+        row.contains(".when_some(pin_toggle, |d, pin| d.child(pin))"),
+        "full and grouped rows share one pin control in the trailing cluster"
     );
     assert!(row.contains(".when(indented, |d| d.pl_4().pr_2().py_1())"));
     assert!(row.contains("title_text.text_xs()"));
@@ -160,7 +160,7 @@ fn rail_header_has_no_kebab_and_shares_one_line() {
         .expect("right-aligned metadata cluster");
     let stamp = trailing.find("%m-%d %H:%M").expect("timestamp");
     let pin = trailing
-        .find("pin_icon(favorited, 0.9)")
+        .find(".when_some(pin_toggle,")
         .expect("pin after timestamp");
     assert!(stamp < pin, "timestamp and pin share the title line");
     assert!(
@@ -175,4 +175,57 @@ fn rail_header_has_no_kebab_and_shares_one_line() {
         !row.contains("row.child(action)"),
         "the removed slide-out strip does not return"
     );
+}
+
+#[test]
+fn rail_pin_toggles_without_opening_the_card() {
+    let control = block(
+        SESSIONS,
+        "pub fn pin_toggle(",
+        "/// The menu's contents",
+    );
+    for affordance in [
+        "session-pin-toggle-{id}",
+        ".size(rems(1.4))",
+        ".rounded_sm()",
+        ".cursor_pointer()",
+        ".child(pin_icon(favorited, 0.9))",
+    ] {
+        assert!(
+            control.contains(affordance),
+            "the pin control keeps its target and artwork: {affordance}"
+        );
+    }
+    assert!(
+        control.contains(".hover(|d| d.bg(rgb(palette::current().panel_hi)))"),
+        "the pin hover uses the rail's panel_hi"
+    );
+
+    let row = block(SESSIONS, "pub fn row(", "pub fn on_click(");
+    assert_eq!(
+        row.matches(".when_some(pin_toggle,").count(),
+        1,
+        "one wired control serves both full and compact rows"
+    );
+
+    let handler = block(
+        GUI_MAIN,
+        "let toggle_pin = cx.listener",
+        "let flags = sessions::RowFlags",
+    );
+    assert!(handler.contains("cx.stop_propagation();"));
+    assert!(handler.contains("this.toggle_favorite(id, cx);"));
+    assert!(handler.contains("sessions::pin_toggle(id, favorite)"));
+    assert!(handler.contains(".on_mouse_down(MouseButton::Left, toggle_pin)"));
+    assert!(
+        !handler.contains("pick_or_open") && !handler.contains("rail_swipe"),
+        "the pin never opens the row or starts a slide"
+    );
+
+    let flags = block(
+        GUI_MAIN,
+        "let flags = sessions::RowFlags",
+        "// A parent card carries",
+    );
+    assert!(flags.contains("pin_toggle: Some(pin_toggle)"));
 }
