@@ -6,6 +6,12 @@
 
 const GUI_MAIN: &str = include_str!("../gui/main.rs");
 
+/// The pane chrome and the split's geometry, which live in their own module
+/// (#2817 follow-up). The rules below still read source, because the window has
+/// no headless harness: a constant's width and a helper's shape are checked
+/// where they are written, whichever file that is.
+const PANE_CHROME: &str = include_str!("../gui/pane_chrome.rs");
+
 /// The chat's width planning and its screen arm, from where the pane width is
 /// read to the next screen. The share and the measure are planned above the
 /// match so the chrome under the conversation aligns to one width (#2588), so
@@ -68,7 +74,7 @@ fn panes_body() -> &'static str {
 
 /// The dimmed composer an unfocused pane shows (#2530).
 fn pane_composer_dim() -> &'static str {
-    GUI_MAIN
+    PANE_CHROME
         .split("fn pane_composer_dim(")
         .nth(1)
         .expect("pane_composer_dim is defined")
@@ -153,7 +159,7 @@ fn both_panes_carry_a_header_and_a_close_button() {
         "every leaf builds its own header and its own close button"
     );
     assert!(
-        GUI_MAIN.contains("fn pane_header(") && GUI_MAIN.contains("focused: bool,"),
+        PANE_CHROME.contains("fn pane_header(") && PANE_CHROME.contains("focused: bool,"),
         "one helper draws every header, so they cannot drift"
     );
     assert!(
@@ -164,7 +170,7 @@ fn both_panes_carry_a_header_and_a_close_button() {
 
 #[test]
 fn the_focused_pane_wears_a_band_under_its_header() {
-    let header = GUI_MAIN
+    let header = PANE_CHROME
         .split("fn pane_header(")
         .nth(1)
         .expect("pane_header is defined")
@@ -245,15 +251,15 @@ fn both_halves_take_their_share_of_the_width() {
         "a visible rule sits between each pair, and the strip around it takes the drag"
     );
     assert!(
-        GUI_MAIN.contains("const SPLIT_DIVIDER_PX: f32 = 2.0;"),
+        PANE_CHROME.contains("const SPLIT_DIVIDER_PX: f32 = 2.0;"),
         "the rule has a named width, and one pixel of a panel tone was invisible"
     );
     assert!(
-        GUI_MAIN.contains("fn split_rule_color() -> u32 {"),
+        PANE_CHROME.contains("fn split_rule_color() -> u32 {"),
         "the rule reads a colour that contrasts with the background"
     );
     assert!(
-        !GUI_MAIN
+        !PANE_CHROME
             .split("fn split_divider(")
             .nth(1)
             .expect("split_divider is defined")
@@ -267,7 +273,7 @@ fn both_halves_take_their_share_of_the_width() {
 
 #[test]
 fn a_stacked_pane_plans_against_the_whole_width() {
-    let helper = GUI_MAIN
+    let helper = PANE_CHROME
         .split("fn split_pane_width(")
         .nth(1)
         .expect("split_pane_width is defined")
@@ -312,7 +318,7 @@ fn the_divider_resizes_both_panes() {
         "a double click puts the pair back to even"
     );
     assert!(
-        GUI_MAIN.contains("const SPLIT_HANDLE_PX: f32 = 12.0;"),
+        PANE_CHROME.contains("const SPLIT_HANDLE_PX: f32 = 12.0;"),
         "the rule has a grabbable strip, since a 2px target cannot be hit reliably"
     );
 }
@@ -349,7 +355,7 @@ fn alt_tab_rotates_the_panes_and_bare_tab_does_not() {
             .contains("self.cycle_pane_focus(rotation == split::PaneRotation::Clockwise, cx);"),
         "the arm hands the direction to the caret instead of always going forward"
     );
-    let helper = GUI_MAIN
+    let helper = PANE_CHROME
         .split("fn rotation_chord(")
         .nth(1)
         .expect("the chord is read in one place")
@@ -449,7 +455,7 @@ fn ctrl_x_closes_the_pane_holding_the_caret() {
 #[test]
 fn the_chord_is_read_through_one_place() {
     assert!(
-        GUI_MAIN.contains("fn split_chord(ks: &gpui::Keystroke)"),
+        PANE_CHROME.contains("fn split_chord(ks: &gpui::Keystroke)"),
         "the window reads the chord in one place, not inline at the call site"
     );
     assert!(
