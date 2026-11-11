@@ -15853,25 +15853,50 @@ fn command_popup_view(names: &[&'static str], selected: usize) -> Div {
 /// card line has one colour to spend, so the halves are joined with the same
 /// separator the terminal uses. Empty means the turn has said nothing yet: the
 /// card then keeps its preview instead of blanking a line to show a blank.
+///
+/// The prose leads and the call follows (#2816). Narration is occasional, not
+/// constant: most turns run from call to call and never speak, and on those
+/// the call is still the whole line. When a turn does speak, the paragraph is
+/// what it concluded and the call is only what it ran, so a card that printed
+/// the call alone hid the sentence the chat above it was showing.
 fn rail_activity_line(live: &transcript::LiveTurn) -> String {
+    // The paragraph the turn last spoke, clipped by the pane's own rule so the
+    // two surfaces never show a different slice of the same sentence.
+    let narration = live
+        .narration()
+        .last()
+        .map(transcript::collapsed_paragraph)
+        .filter(|text| !text.is_empty());
     // `live_status_line` invents "OpenCrabs is thinking..." for a turn that has
     // produced nothing at all, which on a card would out-shout the preview it
-    // is replacing. The rail waits for the first real event (#2718).
+    // is replacing. The rail waits for the first real event (#2718), and a
+    // paragraph counts as one: a turn whose only output so far is prose still
+    // has something to say.
     let idle = !live.thinking
         && live.tools.is_empty()
         && live.chunks == 0
         && live.stream.is_empty()
-        && live.reasoning.is_empty();
+        && live.reasoning.is_empty()
+        && narration.is_none();
     if idle {
         return String::new();
     }
     let (lead, tail) = transcript::live_status_line(live);
-    match (lead.is_empty(), tail.is_empty()) {
-        (true, true) => String::new(),
-        (true, false) => tail,
-        (false, true) => lead,
-        (false, false) => format!("{lead} \u{b7} {tail}"),
+    let mut parts: Vec<String> = Vec::new();
+    parts.extend(narration);
+    // Then what it ran. The call-count and clock tail is appended after both,
+    // so the line reads the way the chat does: prose, the call, then the tally.
+    match transcript::live_activity(live) {
+        Some(call) => parts.push(call),
+        // A turn that spoke but has not called anything yet gets no second
+        // "thinking" label: the prose is the line.
+        None if parts.is_empty() && !lead.is_empty() => parts.push(lead),
+        None => {}
     }
+    if !tail.is_empty() {
+        parts.push(tail);
+    }
+    parts.join(" \u{b7} ")
 }
 
 /// Fold one progress event into a live card.
@@ -19105,6 +19130,48 @@ mod tests {
         let poll = fn_body(src, "poll");
         let retires = poll.matches("self.rail_live.remove(&session);").count();
         assert_eq!(retires, 3, "Done, Failed and Cancelled each clear it");
+    }
+
+    /// #2816: the card's live line leads with the paragraph the turn spoke and
+    /// names the call after it. Narration is occasional, so the call still owns
+    /// the line on the turns that never speak.
+    #[test]
+    fn a_speaking_turn_puts_its_paragraph_before_the_call() {
+        let mut live = transcript::LiveTurn::default();
+        live.push_narration("The stamp reads the parent row, not the topics.");
+        live.tools.push(transcript::ToolCall::running(
+            "bash".to_string(),
+            "sed -n 1791p sessions.rs".to_string(),
+        ));
+        let line = rail_activity_line(&live);
+        let prose = line
+            .find("The stamp reads the parent row")
+            .expect("the paragraph is on the line");
+        let call = line
+            .find("sed -n 1791p")
+            .expect("the call is on the line too");
+        assert!(prose < call, "the paragraph leads the call: {line}");
+    }
+
+    /// Prose with no call yet is the whole line: a second "thinking" label
+    /// beside the sentence the turn just said tells the reader nothing.
+    #[test]
+    fn a_speaking_turn_with_no_call_yet_drops_the_thinking_placeholder() {
+        let mut live = transcript::LiveTurn::default();
+        live.push_narration("Reading the rail row now.");
+        let line = rail_activity_line(&live);
+        assert!(line.contains("Reading the rail row now."), "{line}");
+        assert!(!line.contains("thinking"), "no second label: {line}");
+    }
+
+    /// Narration alone is enough to put a line on the card, and a turn that has
+    /// said nothing at all still leaves the preview in its slot.
+    #[test]
+    fn narration_alone_is_enough_to_show_a_card_line() {
+        let mut live = transcript::LiveTurn::default();
+        assert_eq!(rail_activity_line(&live), "");
+        live.push_narration("Found the column.");
+        assert_eq!(rail_activity_line(&live), "Found the column.");
     }
 
     #[test]

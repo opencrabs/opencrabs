@@ -2840,20 +2840,27 @@ const COLLAPSED_NARRATION_CHARS: usize = 280;
 /// dozens of calls, and printing those paragraphs into the history turns one
 /// card into a wall. The body still prints every paragraph in order when the
 /// card is expanded.
-fn collapsed_narration(live: &LiveTurn) -> Option<String> {
+///
+/// The session rail reads it too (#2816): a card's live line leads with the
+/// paragraph the turn last spoke, so both surfaces clip the prose the same way.
+pub(crate) fn collapsed_narration(live: &LiveTurn) -> Option<String> {
     live.narration()
         .last()
-        .map(|text| {
-            // One source line only (#2731). gpui's line_clamp shapes each
-            // newline-separated line against the budget left over from the
-            // lines before it, and subtracts with overflow when an earlier
-            // line already wrapped past the clamp, aborting the window. A
-            // single source line is shaped once against the full budget, so
-            // collapsing every whitespace run to one space removes the trigger.
-            let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
-            fit(&flat, COLLAPSED_NARRATION_CHARS)
-        })
+        .map(collapsed_paragraph)
         .filter(|text| !text.is_empty())
+}
+
+/// One paragraph flattened to a single line and clipped (#2731).
+///
+/// gpui's line_clamp shapes each newline-separated line against the budget left
+/// over from the lines before it, and subtracts with overflow when an earlier
+/// line already wrapped past the clamp, aborting the window. A single source
+/// line is shaped once against the full budget, so collapsing every whitespace
+/// run to one space removes the trigger. The rail shares the rule (#2816) so a
+/// card and the pane never clip the same sentence differently.
+pub(crate) fn collapsed_paragraph(text: &str) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    fit(&flat, COLLAPSED_NARRATION_CHARS)
 }
 
 /// The running turn, drawn with the transcript's own block grammar: the
