@@ -10,6 +10,9 @@ const SESSIONS: &str = include_str!("../gui/sessions.rs");
 // transcript can draw its own message menu without depending on it (#2613).
 // One builder still serves every menu; only its address changed.
 const MENU: &str = include_str!("../gui/menu.rs");
+// The topic row is its own module since #2817 follow-up, so the right press on
+// a tab is checked where the tab is built.
+const TOPIC_BAR: &str = include_str!("../gui/topic_bar_view.rs");
 
 /// The icons vanished because the map started empty and only filled after a
 /// close or a create. The rows were in the database the whole time; nothing
@@ -114,7 +117,7 @@ fn the_menu_floats_as_a_card_and_the_strip_nothing_grows_from() {
 #[test]
 fn a_right_press_on_a_tab_and_on_the_chat_opens_the_same_card() {
     assert!(
-        GUI_MAIN.contains(".on_mouse_down(MouseButton::Right, on_right)"),
+        TOPIC_BAR.contains(".on_mouse_down(MouseButton::Right, on_right)"),
         "a topic tab answers a right press"
     );
     assert!(

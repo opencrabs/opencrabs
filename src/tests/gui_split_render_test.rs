@@ -49,15 +49,19 @@ fn on_key() -> &'static str {
         .expect("the handler has a body")
 }
 
+/// The pane walk, which lives in its own module (#2817 follow-up): the tree
+/// turned into elements, leaf by leaf.
+const PANE_LAYOUT: &str = include_str!("../gui/pane_layout.rs");
+
 /// The walk that turns the pane tree into elements (#2472).
 fn pane_element() -> &'static str {
-    GUI_MAIN
+    PANE_LAYOUT
         .split("fn pane_element(")
         .nth(1)
         .expect("pane_element is defined")
         .split("\n#[cfg(test)]\nmod tests {")
         .next()
-        .expect("the walk comes before the test module")
+        .expect("the walk is the last thing in its module")
 }
 
 /// The body that draws the chat screen's pane tree (#2530): where each pane's
@@ -127,9 +131,9 @@ fn the_second_pane_is_composed_in_one_place() {
     // Count definitions, not mentions: two other tests in this file quote the
     // signature as a literal, so a raw `matches` counted those too (#2646).
     assert_eq!(
-        GUI_MAIN
+        PANE_LAYOUT
             .lines()
-            .filter(|line| line.starts_with("fn pane_element("))
+            .filter(|line| line.contains("fn pane_element("))
             .count(),
         1,
         "one walk draws every pane, so a flat split and a nested one cannot drift"

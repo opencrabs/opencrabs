@@ -6,6 +6,9 @@
 const GUI_MAIN: &str = include_str!("../gui/main.rs");
 const EDITOR: &str = include_str!("../gui/editor.rs");
 
+/// The pane walk, which lives in its own module since #2817 follow-up.
+const PANE_LAYOUT: &str = include_str!("../gui/pane_layout.rs");
+
 #[test]
 fn the_header_has_a_panel_background_and_a_divider() {
     let start = GUI_MAIN
@@ -39,7 +42,7 @@ fn the_input_has_a_panel_background_and_a_shadow() {
 /// The leaf arm of the pane walk, from its panel down to the split arm
 /// (#2472, #2581).
 fn leaf_arm() -> &'static str {
-    GUI_MAIN
+    PANE_LAYOUT
         .split("let mut node = div()")
         .nth(1)
         .expect("a leaf is built in pane_element")
