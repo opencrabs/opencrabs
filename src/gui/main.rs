@@ -5274,6 +5274,22 @@ impl Dashboard {
         .detach();
     }
 
+    /// Put the rail's find field in front of the keyboard (#2812).
+    ///
+    /// The row the keyboard stands on is armed, so Enter has a target, and the
+    /// overlay takes the keys so the composer's Enter and arrows stop answering
+    /// while the field says it is listening (#2454). `ctrl+f` and the first
+    /// typed character both come through here, so the two ways into the field
+    /// cannot drift apart.
+    fn arm_rail_filter(&mut self, cx: &mut Context<Self>) {
+        self.sessions.filter_active = true;
+        if self.sessions.cursor.is_none() || !self.sessions.cursor_visible() {
+            self.sessions.cursor = self.sessions.cursor_step(None, 1);
+        }
+        self.refocus_overlay();
+        cx.notify();
+    }
+
     /// Leave the rail filter. The query is a transient find aid, so every
     /// exit clears it: the rail returns to the full list and never hides a
     /// filter behind a closed field.
@@ -9378,14 +9394,7 @@ impl Dashboard {
             if self.sessions.filter_active {
                 self.close_rail_filter(cx);
             } else {
-                self.sessions.filter_active = true;
-                // The field takes the keyboard, so the composer's Enter and
-                // arrows stop answering while it says it is listening (#2454).
-                if self.sessions.cursor.is_none() || !self.sessions.cursor_visible() {
-                    self.sessions.cursor = self.sessions.cursor_step(None, 1);
-                }
-                self.refocus_overlay();
-                cx.notify();
+                self.arm_rail_filter(cx);
             }
             return;
         }
