@@ -497,9 +497,159 @@ pub fn picture(bytes: &'static [u8], size: f32) -> impl IntoElement {
     .rounded(gpui::px(size * 2.0))
     .object_fit(ObjectFit::Contain)
 }
+
+/// The prefix a custom image icon writes in front of its stored filename
+/// (#2790). The file itself lives under `gui-icons/` in the OpenCrabs home;
+/// only a bare filename is ever stored, so a value can never name a path
+/// outside the store.
+pub const IMG_PREFIX: &str = "img:";
+
+/// The stored value for a custom image filename, e.g. `img:<uuid>.png`.
+pub fn img_store_name(filename: &str) -> String {
+    format!("{IMG_PREFIX}{filename}")
+}
+
+/// The directory custom icon images live in: `gui-icons/` under the
+/// OpenCrabs home.
+pub fn image_store_dir() -> std::path::PathBuf {
+    opencrabs::config::opencrabs_home().join("gui-icons")
+}
+
+/// Resolve a stored `img:` value to its file path, or `None` when the value
+/// is not an image reference or names anything but a bare filename. Path
+/// separators and `..` are refused, so a stored value can never escape the
+/// store (#2790).
+pub fn stored_image_path(stored: &str) -> Option<std::path::PathBuf> {
+    let name = stored.strip_prefix(IMG_PREFIX)?;
+    if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
+        return None;
+    }
+    Some(image_store_dir().join(name))
+}
+
+/// The extensions GPUI can decode for a custom icon (#2790).
+pub const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "gif", "bmp", "tiff", "svg"];
+
+/// The largest file the icon picker accepts: 5MB (#2790).
+pub const MAX_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
+
+/// Whether a picked file can become an icon: a decodable extension and a
+/// size under the cap. Pure, so the picker's refusal rules are testable
+/// without a window.
+pub fn image_pick_allowed(path: &std::path::Path, bytes: u64) -> bool {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase());
+    let known = ext.is_some_and(|e| IMAGE_EXTENSIONS.contains(&e));
+    known && bytes <= MAX_IMAGE_BYTES
+}
+
+/// The GPUI format a stored image filename decodes as, from its extension.
+pub fn image_format(filename: &str) -> Option<ImageFormat> {
+    let ext = std::path::Path::new(filename)
+        .extension()
+        .and_then(|e| e.to_str())?
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => Some(ImageFormat::Png),
+        "jpg" | "jpeg" => Some(ImageFormat::Jpeg),
+        "webp" => Some(ImageFormat::Webp),
+        "gif" => Some(ImageFormat::Gif),
+        "bmp" => Some(ImageFormat::Bmp),
+        "tiff" => Some(ImageFormat::Tiff),
+        "svg" => Some(ImageFormat::Svg),
+        _ => None,
+    }
+}
+
+/// A custom icon image drawn in the same contained slot as the embedded
+/// pictures (#2790). The image is shared: the view reads each file once and
+/// the paint only clones the handle, never the bytes.
+pub fn cached_picture(image: Arc<Image>, size: f32) -> AnyElement {
+    img(image)
+        .w(rems(size))
+        .h(rems(size))
+        .flex_none()
+        .rounded(gpui::px(size * 2.0))
+        .object_fit(ObjectFit::Contain)
+        .into_any_element()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The img scheme round-trips: a stored filename resolves back to the
+    /// same bare name under the store, and nothing else does (#2790).
+    #[test]
+    fn img_scheme_round_trips() {
+        let stored = img_store_name("crab.png");
+        assert_eq!(stored, "img:crab.png");
+        let path = stored_image_path(&stored).expect("bare filename resolves");
+        assert_eq!(path.file_name().and_then(|n| n.to_str()), Some("crab.png"));
+        assert!(path.starts_with(image_store_dir()));
+        // The embedded scheme and a bare name are not image references.
+        assert!(stored_image_path("topic:development").is_none());
+        assert!(stored_image_path("crab.png").is_none());
+    }
+
+    /// A stored value can never name a path outside the store (#2790).
+    #[test]
+    fn img_scheme_refuses_traversal() {
+        for bad in [
+            "img:",
+            "img:../evil.png",
+            "img:a/../../evil.png",
+            "img:sub/dir.png",
+            "img:back\\slash.png",
+            "img:..",
+        ] {
+            assert!(stored_image_path(bad).is_none(), "{bad} must not resolve");
+        }
+    }
+
+    /// The picker accepts decodable extensions under the cap and refuses
+    /// everything else (#2790). Temp files only, never the live home.
+    #[test]
+    fn image_pick_validates_extension_and_size() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let png = dir.path().join("icon.png");
+        std::fs::write(&png, b"not really a png").expect("write");
+        assert!(image_pick_allowed(&png, 1024));
+        assert!(image_pick_allowed(&png, MAX_IMAGE_BYTES));
+        assert!(!image_pick_allowed(&png, MAX_IMAGE_BYTES + 1));
+        let exe = dir.path().join("icon.exe");
+        std::fs::write(&exe, b"nope").expect("write");
+        assert!(!image_pick_allowed(&exe, 16));
+        let upper = dir.path().join("ICON.PNG");
+        std::fs::write(&upper, b"case").expect("write");
+        assert!(image_pick_allowed(&upper, 16));
+        let noext = dir.path().join("icon");
+        std::fs::write(&noext, b"none").expect("write");
+        assert!(!image_pick_allowed(&noext, 16));
+    }
+
+    /// Every accepted extension maps to the format GPUI decodes it as
+    /// (#2790).
+    #[test]
+    fn image_format_maps_extensions() {
+        assert!(matches!(image_format("img:a.png"), Some(ImageFormat::Png)));
+        assert!(matches!(image_format("img:a.JPG"), Some(ImageFormat::Jpeg)));
+        assert!(matches!(image_format("img:a.jpeg"), Some(ImageFormat::Jpeg)));
+        assert!(matches!(image_format("img:a.webp"), Some(ImageFormat::Webp)));
+        assert!(matches!(image_format("img:a.svg"), Some(ImageFormat::Svg)));
+        assert!(image_format("img:a.exe").is_none());
+        assert!(image_format("img:noext").is_none());
+    }
+
+    /// A custom reference is not an embedded picture, so the tab resolver
+    /// has to try the image store before falling back to text (#2790).
+    #[test]
+    fn img_reference_is_not_an_embedded_icon() {
+        assert!(tab_icon("img:crab.png", 1.0).is_none());
+        assert!(topic_icon("img:crab.png").is_none());
+    }
 
     /// A PNG always starts with these four bytes, so an embedded file that is
     /// not one (a stray `.DS_Store`, a renamed JPG) fails here instead of

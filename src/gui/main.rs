@@ -94,10 +94,10 @@ use futures::channel::oneshot;
 
 use gpui::{
     AnyElement, App, Application, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, Div,
-    DragMoveEvent, Entity, ExternalPaths, FocusHandle, KeyDownEvent, KeystrokeEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta, ScrollHandle,
-    ScrollWheelEvent, SharedString, Stateful, TitlebarOptions, Window, WindowBounds, WindowOptions,
-    div, point, prelude::*, px, relative, rems, rgb, rgba, size,
+    DragMoveEvent, Entity, ExternalPaths, FocusHandle, Image, KeyDownEvent, KeystrokeEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Point,
+    ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString, Stateful, TitlebarOptions, Window,
+    WindowBounds, WindowOptions, div, point, prelude::*, px, relative, rems, rgb, rgba, size,
 };
 use opencrabs::brain::agent::ProgressEvent;
 use opencrabs::brain::tools::suggest_options::{SuggestionItem, SuggestionStyle};
@@ -105,6 +105,7 @@ use opencrabs::utils::drop_landing::human_size;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
+use std::sync::Arc;
 use uuid::Uuid;
 
 use opencrabs::brain::mission_control::{McActivity, McAnalytics, McInboxItem, McScheduleItem};
@@ -735,6 +736,10 @@ struct Dashboard {
     forward_cursor: Option<Uuid>,
     /// The icon picked for the topic being named; None means the default (#2414).
     topic_draft_icon: Option<String>,
+    /// Custom icon images read once from the store, keyed by stored value
+    /// (#2790). The paint clones an Arc, never reads a file; the map
+    /// rebuilds when the topic icons load and after an image is picked.
+    icon_images: HashMap<String, Arc<Image>>,
     /// The Help Center body's scroll position, so the arrows can move it (#2407).
     help_scroll: ScrollHandle,
     /// A splitter drag is in flight. The move events land on the window root,
@@ -7363,12 +7368,18 @@ impl Dashboard {
                     // The icon sits before the name and is not a word, so the
                     // two-word shortening (#2477) is applied to the name alone.
                     // A stored picture is drawn; a stored emoji stays text (#2478).
+                    // A custom image resolves from the view's cache before the
+                    // text fallback, so an img: reference never prints as a
+                    // label (#2790).
                     let stored = self.sessions.topic_icons.get(&id).cloned();
-                    let picture = stored
-                        .as_deref()
-                        .and_then(|stored| topic_icons::tab_icon(stored, icon_rems));
+                    let picture = stored.as_deref().and_then(|stored| {
+                        topic_icons::tab_icon(stored, icon_rems)
+                            .or_else(|| self.custom_icon_picture(stored, icon_rems))
+                    });
                     let glyph = match (&picture, stored.as_deref()) {
-                        (None, Some(icon)) => Some(topic_icons::tab_glyph(icon, icon_rems)),
+                        (None, Some(icon)) if !icon.starts_with(topic_icons::IMG_PREFIX) => {
+                            Some(topic_icons::tab_glyph(icon, icon_rems))
+                        }
                         _ => None,
                     };
                     (topic_label(&name(id)), picture.or(glyph))
@@ -7673,11 +7684,121 @@ impl Dashboard {
                     Ok(pairs) => this.sessions.topic_icons = pairs.into_iter().collect(),
                     Err(e) => logging::error(&format!("topic icons refresh: {e}")),
                 }
+                // The custom images follow the stored values, so a rename
+                // that writes one reaches the rail without a restart (#2790).
+                this.refresh_icon_images();
                 cx.notify();
             })
             .ok();
         })
         .detach();
+    }
+
+    /// Re-read the custom icon images the rail and tabs draw (#2790). One
+    /// file read per icon, at refresh time; the paint only clones an Arc.
+    /// A missing or undecodable file logs and drops out, so the row falls
+    /// back to its platform mark instead of drawing a blank box.
+    fn refresh_icon_images(&mut self) {
+        let mut images = HashMap::new();
+        for stored in self.sessions.topic_icons.values() {
+            let Some(path) = topic_icons::stored_image_path(stored) else {
+                continue;
+            };
+            let Some(format) = topic_icons::image_format(stored) else {
+                continue;
+            };
+            match std::fs::read(&path) {
+                Ok(bytes) => {
+                    images.insert(stored.clone(), Arc::new(Image::from_bytes(format, bytes)));
+                }
+                Err(e) => logging::error(&format!("icon image {stored}: {e}")),
+            }
+        }
+        self.icon_images = images;
+    }
+
+    /// The cached picture for a stored `img:` value, or None for anything
+    /// else (#2790). Never reads a file: the cache is filled at refresh
+    /// time and when an image is picked.
+    fn custom_icon_picture(&self, stored: &str, size: f32) -> Option<AnyElement> {
+        let image = self.icon_images.get(stored)?;
+        Some(topic_icons::cached_picture(image.clone(), size))
+    }
+
+    /// The icon picker's "add image" cell: the platform's own file picker,
+    /// then a validated copy into the icon store (#2790). A cancelled
+    /// prompt changes nothing.
+    fn pick_icon_image(&mut self, cx: &mut Context<Self>) {
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Choose an icon image".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = receiver.await else {
+                return;
+            };
+            let Some(path) = paths.first().cloned() else {
+                return;
+            };
+            this.update(cx, |this, cx| {
+                this.attach_icon_image(path, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Validate one picked file and store it as the draft's icon (#2790).
+    /// The copy gets a fresh uuid name, so two picks of the same file never
+    /// fight over one slot and an old icon stays untouched until the rename
+    /// is submitted. Failures land in the notices, never silent.
+    fn attach_icon_image(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
+        let meta = match std::fs::metadata(&path) {
+            Ok(meta) => meta,
+            Err(e) => {
+                self.live.notices.push(format!("icon image: {e}"));
+                cx.notify();
+                return;
+            }
+        };
+        if !topic_icons::image_pick_allowed(&path, meta.len()) {
+            self.live.notices.push(
+                "icon image: pick a png, jpg, webp, gif, bmp, tiff or svg under 5MB".to_string(),
+            );
+            cx.notify();
+            return;
+        }
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                self.live.notices.push(format!("icon image: {e}"));
+                cx.notify();
+                return;
+            }
+        };
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("png")
+            .to_ascii_lowercase();
+        let filename = format!("{}.{ext}", uuid::Uuid::new_v4());
+        let dir = topic_icons::image_store_dir();
+        if let Err(e) =
+            std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(dir.join(&filename), &bytes))
+        {
+            self.live.notices.push(format!("icon image: {e}"));
+            cx.notify();
+            return;
+        }
+        let stored = topic_icons::img_store_name(&filename);
+        if let Some(format) = topic_icons::image_format(&filename) {
+            self.icon_images
+                .insert(stored.clone(), Arc::new(Image::from_bytes(format, bytes)));
+        }
+        self.topic_draft_icon = Some(stored);
+        cx.notify();
     }
 
     /// Refetch the rail from the ledger. The pinned set rides along: pins come
@@ -10259,6 +10380,14 @@ impl Render for Dashboard {
                 // The card's last line: whatever detached command is still
                 // running here, formatted exactly as the composer strip does.
                 running: running_tasks.get(&id).cloned(),
+                // A custom image icon leads the row when the session has one
+                // (#2790). Built from the view's cache, so the paint never
+                // reads a file.
+                icon: self
+                    .sessions
+                    .topic_icons
+                    .get(&id)
+                    .and_then(|stored| self.custom_icon_picture(stored, 1.0)),
             };
             // A parent card carries its topics as inline chips: three by
             // default, a "+N" pill expands the rest, a collapse pill folds
@@ -13048,7 +13177,7 @@ impl Render for Dashboard {
                 .topic_draft_icon
                 .clone()
                 .unwrap_or_else(|| DEFAULT_TOPIC_ICON.to_string());
-            let picks: Vec<Stateful<Div>> = topic_icons::TOPIC_ICONS
+            let mut picks: Vec<Stateful<Div>> = topic_icons::TOPIC_ICONS
                 .iter()
                 .map(|&(name, bytes)| {
                     let pick = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
@@ -13070,7 +13199,45 @@ impl Render for Dashboard {
                         .child(topic_icons::picture(bytes, 4.0))
                 })
                 .collect();
-            root = root.child(topic_prompt_overlay(label, &draft, &icon, picks, cancel));
+            // One extra cell opens the platform file picker for a custom
+            // image, Telegram style (#2790). The tile matches the embedded
+            // picks' geometry so the grid keeps its rhythm.
+            let add_image = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                this.pick_icon_image(cx);
+            });
+            picks.push(
+                div()
+                    .id("topic-icon-add-image")
+                    .p_1()
+                    .rounded(px(6.0))
+                    .cursor_pointer()
+                    .hover(|d| d.bg(rgb(palette::current().panel_hi)))
+                    .on_click(add_image)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size(rems(4.0))
+                            .rounded(px(8.0))
+                            .border_1()
+                            .border_color(rgb(palette::current().panel_hi))
+                            .text_color(rgb(palette::current().text_muted))
+                            .text_size(rems(1.6))
+                            .child("+"),
+                    ),
+            );
+            // The badge previews a custom pick from the same cache the rail
+            // and tabs draw from (#2790).
+            let custom_picture = self.custom_icon_picture(&icon, 3.2);
+            root = root.child(topic_prompt_overlay(
+                label,
+                &draft,
+                &icon,
+                picks,
+                custom_picture,
+                cancel,
+            ));
         }
         // The update dialog (#2406): two stages, and /evolve runs only after the second yes.
         if let Some(second) = self.update_prompt {
@@ -13600,6 +13767,7 @@ fn main() {
                         forward_query: String::new(),
                         forward_cursor: None,
                         topic_draft_icon: None,
+                        icon_images: HashMap::new(),
                         help_scroll: ScrollHandle::new(),
                         dragging_rail: false,
                         drag_from: None,
@@ -13703,6 +13871,10 @@ fn main() {
                         branch: git_branch(&opencrabs::utils::cwd::launch_cwd()),
                     }
                 });
+                // Custom icon images are read once at startup, not per paint
+                // (#2790): the stored values were loaded with the rest of the
+                // topic state above.
+                view.update(cx, |this, _| this.refresh_icon_images());
                 // Ctrl+C has to reach the window even while the composer holds
                 // the keyboard, and the editor binds the key to its own copy
                 // action (#2587): a keymap match stops every listener behind
@@ -16736,6 +16908,7 @@ fn topic_prompt_overlay(
     draft: &str,
     icon: &str,
     picks: Vec<Stateful<Div>>,
+    custom_picture: Option<AnyElement>,
     cancel: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     let field = div()
@@ -16750,10 +16923,14 @@ fn topic_prompt_overlay(
         .text_color(rgb(palette::current().text))
         .child(SharedString::from(format!("{draft}|")));
     // The chosen icon, as a picture when it names an embedded one and as the
-    // stored glyph when the row predates the picture set (#2478).
-    let picture = topic_icons::topic_icon(icon)
-        .or_else(|| topic_icons::crab_icon(icon))
-        .map(|bytes| topic_icons::picture(bytes, 3.2).into_any_element());
+    // stored glyph when the row predates the picture set (#2478). A custom
+    // image arrives already built from the view's cache (#2790); an img:
+    // reference never prints as a label, even when its file is missing.
+    let picture = custom_picture.or_else(|| {
+        topic_icons::topic_icon(icon)
+            .or_else(|| topic_icons::crab_icon(icon))
+            .map(|bytes| topic_icons::picture(bytes, 3.2).into_any_element())
+    });
     let icon_badge = div()
         .flex_none()
         // The badge carries the same picture the picker showed, so it has to
@@ -16765,9 +16942,10 @@ fn topic_prompt_overlay(
         .rounded(px(CARD_RADIUS))
         .bg(glass_fill(palette::current().bg))
         .text_size(rems(1.4))
-        .when(picture.is_none(), |d| {
-            d.child(SharedString::from(icon.to_string()))
-        })
+        .when(
+            picture.is_none() && !icon.starts_with(topic_icons::IMG_PREFIX),
+            |d| d.child(SharedString::from(icon.to_string())),
+        )
         .children(picture);
     let picker = div().flex().flex_row().flex_wrap().gap_1().children(picks);
     let panel = div()

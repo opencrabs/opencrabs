@@ -1311,9 +1311,9 @@ pub fn rail_menu_entries(favorited: bool, topics_enabled: bool) -> Vec<MenuEntry
 /// What a rail row shows about its session right now. Grouped so the row
 /// keeps a short argument list as the rail gains states.
 ///
-/// Clone, not Copy: the preview is a shared string, so the struct owns a
-/// refcount rather than a bag of bits.
-#[derive(Clone, Default)]
+/// Not Clone: the custom icon is a built element, and elements are moved,
+/// not copied. The row takes the flags by value, so nothing needs a clone.
+#[derive(Default)]
 pub struct RowFlags {
     pub selected: bool,
     pub cursored: bool,
@@ -1353,6 +1353,11 @@ pub struct RowFlags {
     /// nothing runs. Paints as the card's last line, under the plan bar, so a
     /// row says "work is still going here" without being opened.
     pub running: Option<SharedString>,
+    /// The session's custom image icon, already built by the view (#2790).
+    /// When set it wins over the platform mark in the leading slot. The
+    /// module never reads files: the view owns the image cache and hands
+    /// over the finished element.
+    pub icon: Option<AnyElement>,
 }
 
 /// One topic chip: a child conversation painted as a compact pill on its
@@ -1486,6 +1491,7 @@ pub fn row(
         plan,
         flash,
         running,
+        icon,
     } = flags;
     // A channel card says the chat once: the platform prints as its mark, not
     // as a word, and the topic segment belongs to the chip under the card, not
@@ -1497,8 +1503,13 @@ pub fn row(
         Some(title) => rail::chat_name(Some(title)),
         None => "(untitled)".to_string(),
     };
-    let mark = rail::platform_of(stored.filter(|_| !indented))
-        .and_then(|platform| platform_icons::platform_icon(platform, 1.0));
+    // A custom image icon wins over the platform mark (#2790): the owner
+    // picked it for this session, so it leads the row. Without one, a
+    // channel card still prints its platform; a topic row has no mark.
+    let mark = icon.or_else(|| {
+        rail::platform_of(stored.filter(|_| !indented))
+            .and_then(|platform| platform_icons::platform_icon(platform, 1.0))
+    });
     let title_text = div()
         // A closed topic reads dimmed: still there, no longer taking work.
         .text_color(rgb(if closed {
