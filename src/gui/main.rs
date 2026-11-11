@@ -134,7 +134,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use opencrabs::brain::mission_control::{McActivity, McAnalytics, McInboxItem, McScheduleItem};
+use opencrabs::brain::mission_control::McAnalytics;
 use opencrabs::config::Config;
 use opencrabs::config::GuiTheme;
 use opencrabs::config::gui_font;
