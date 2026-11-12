@@ -62,12 +62,12 @@ fn gui_cancel_esc_reaches_the_pane_before_the_window_gate() {
         .find("cancel_focused_pane_turn(\"Esc\"")
         .expect("Esc stops the focused pane's turn");
     let gate = branch
-        .find("if !self.busy {")
+        .find("if !self.turn.busy {")
         .expect("the window still gates its own turn");
     assert!(
         pane_stop < gate,
         "the pane stop sits before the gate: a split leaf sets pane.busy with \
-         self.busy clear, so a gate-first order hands the keyboard back and \
+         self.turn.busy clear, so a gate-first order hands the keyboard back and \
          leaves that turn streaming"
     );
 }
@@ -80,7 +80,7 @@ fn gui_cancel_esc_still_releases_the_window_turn() {
         "the window's own turn still drops its future"
     );
     assert!(
-        branch.contains("self.busy = false"),
+        branch.contains("self.turn.busy = false"),
         "and the window still reports itself idle"
     );
 }
@@ -122,7 +122,7 @@ fn gui_cancel_the_settle_keeps_the_card_on_screen() {
         "a dropped turn stops the rail's spinner"
     );
     assert!(
-        arm.contains("self.cancel = None"),
+        arm.contains("self.turn.cancel = None"),
         "and the window lets go of the token"
     );
     assert!(

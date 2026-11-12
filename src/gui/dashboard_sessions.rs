@@ -14,7 +14,7 @@ impl Dashboard {
         success: bool,
         elapsed_secs: f32,
     ) -> bool {
-        transcript::settle_detached(&mut self.live.tools, task_id, success, elapsed_secs)
+        transcript::settle_detached(&mut self.turn.live.tools, task_id, success, elapsed_secs)
     }
 
     /// Run a turn on the open conversation for a finished background task.
@@ -39,15 +39,15 @@ impl Dashboard {
             );
             return;
         };
-        self.live.begin(display_text.clone());
+        self.turn.live.begin(display_text.clone());
         // A new turn re-arms the follow, the terminal's own rule (#2698).
         self.rearm_transcript_follow();
         self.transcript.live_expanded = false;
-        self.settle.begin(self.transcript.row_total());
-        self.busy = true;
+        self.turn.settle.begin(self.transcript.row_total());
+        self.turn.busy = true;
         self.sync_composer_hint(cx);
         let cancel = tokio_util::sync::CancellationToken::new();
-        self.cancel = Some(cancel.clone());
+        self.turn.cancel = Some(cancel.clone());
         let attached = editor::marker_paths(&context_text);
         agent_bridge::spawn_turn(
             bridge.service.clone(),
@@ -71,7 +71,7 @@ impl Dashboard {
     /// starting a second turn over it, which is the rule the terminal applies
     /// to its own per-session state.
     pub(crate) fn running_here(&self, session: Uuid, cx: &App) -> bool {
-        if self.transcript.session == Some(session) && self.busy {
+        if self.transcript.session == Some(session) && self.turn.busy {
             return true;
         }
         if self
@@ -84,7 +84,7 @@ impl Dashboard {
         // A parked card that has ended is not work in flight (#2811). Its
         // entry outlives the turn so the stop survives a switch, and reading
         // presence as work would queue the completion instead of resuming it.
-        self.stashed.get(&session).is_some_and(|turn| turn.busy)
+        self.stashed.get(&session).is_some_and(|parked| parked.busy)
     }
 
     /// Start the turn a completion asks for on a conversation nobody is
@@ -115,17 +115,9 @@ impl Dashboard {
         let cancel = tokio_util::sync::CancellationToken::new();
         self.stashed.insert(
             session_id,
-            StashedTurn {
-                live,
-                cancel: Some(cancel.clone()),
-                // The rows land under a conversation that is not on screen, so
-                // no reload has to be proven here; opening it reads them.
-                settle_expect: None,
-                settle_retries: 0,
-                ctx_tokens: None,
-                // A task completion just started this turn.
-                busy: true,
-            },
+            // The rows land under a conversation that is not on screen, so no
+            // reload has to be proven here; opening it reads them.
+            chat_leaf::Turn::running(live, cancel.clone()),
         );
         let attached = editor::marker_paths(&context_text);
         agent_bridge::spawn_turn(
@@ -150,7 +142,7 @@ impl Dashboard {
     /// live under the caret because that is where the user is typing, and the
     /// queue card is a list, not an instruction manual (#2630).
     pub(crate) fn composer_hint(&self) -> SharedString {
-        composer_hint_for(self.busy, self.queued_for_strip().len())
+        composer_hint_for(self.turn.busy, self.queued_for_strip().len())
     }
 
     /// Paint the hint on every composer: the focused field and each split
@@ -234,7 +226,7 @@ impl Dashboard {
     }
 
     pub(crate) fn drain_pending(&mut self, cx: &mut Context<Self>) {
-        if self.busy {
+        if self.turn.busy {
             return;
         }
         // Boot text has no session to live in yet. It joins the open one here,
@@ -274,15 +266,15 @@ impl Dashboard {
                 "queue flush: session {sid}, sending {} queued as one turn",
                 msgs.len()
             ));
-            self.live.begin(joined.display_text.clone());
+            self.turn.live.begin(joined.display_text.clone());
             // A flushed queue is a send, so it follows its own answer (#2698).
             self.rearm_transcript_follow();
             self.transcript.live_expanded = false;
-            self.settle.begin(self.transcript.row_total());
-            self.busy = true;
+            self.turn.settle.begin(self.transcript.row_total());
+            self.turn.busy = true;
             self.sync_composer_hint(cx);
             let cancel = tokio_util::sync::CancellationToken::new();
-            self.cancel = Some(cancel.clone());
+            self.turn.cancel = Some(cancel.clone());
             let attached = editor::marker_paths(&joined.context_text);
             agent_bridge::spawn_turn(
                 bridge.service.clone(),
@@ -349,7 +341,7 @@ impl Dashboard {
             if let Err(e) = sessions::set_favorite(db_path, id, !pinned).await {
                 logging::error(&format!("favorite {id}: {e}"));
                 this.update(cx, |this, cx| {
-                    this.live.notices.push(format!("favorite: {e}"));
+                    this.turn.live.notices.push(format!("favorite: {e}"));
                     cx.notify();
                 })
                 .ok();
@@ -384,7 +376,7 @@ impl Dashboard {
             if let Err(e) = sessions::set_topics(db_path.clone(), id, true).await {
                 logging::error(&format!("enable topics {id}: {e}"));
                 this.update(cx, |this, cx| {
-                    this.live.notices.push(format!("enable topics: {e}"));
+                    this.turn.live.notices.push(format!("enable topics: {e}"));
                     cx.notify();
                 })
                 .ok();
@@ -565,7 +557,7 @@ impl Dashboard {
                 Err(e) => {
                     logging::error(&format!("topic info {id}: {e}"));
                     this.update(cx, |this, cx| {
-                        this.live.notices.push(format!("topic info: {e}"));
+                        this.turn.live.notices.push(format!("topic info: {e}"));
                         cx.notify();
                     })
                     .ok();
@@ -586,7 +578,7 @@ impl Dashboard {
             if let Err(e) = sessions::set_closed(db_path, id, !closed).await {
                 logging::error(&format!("close topic {id}: {e}"));
                 this.update(cx, |this, cx| {
-                    this.live.notices.push(format!("close topic: {e}"));
+                    this.turn.live.notices.push(format!("close topic: {e}"));
                     cx.notify();
                 })
                 .ok();

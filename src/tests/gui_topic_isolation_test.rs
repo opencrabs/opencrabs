@@ -173,7 +173,7 @@ fn create_topic_walks_the_begin_conversation_door() {
         .next()
         .expect("begin_conversation body");
     for reset in [
-        "&mut self.ctx_tokens,",
+        "&mut self.turn,",
         "self.metrics.pending.clear();",
         "ed.release_recall(false)",
         "ed.begin_conversation(cx)",

@@ -29,7 +29,7 @@ impl Dashboard {
             commands::Outcome::RunWith(action, arg) => (action, Some(arg)),
             other => {
                 if let Some(line) = commands::message(&other) {
-                    self.live.notices.push(line);
+                    self.turn.live.notices.push(line);
                     cx.notify();
                 }
                 return;
@@ -64,7 +64,7 @@ impl Dashboard {
             commands::GuiAction::Quit => cx.quit(),
             commands::GuiAction::Evolve => {
                 let session = self.transcript.session.unwrap_or_else(Uuid::nil);
-                self.live
+                self.turn.live
                     .notices
                     .push("Checking for a new release...".to_string());
                 agent_bridge::spawn_evolve(self.sink.clone(), session);
@@ -90,7 +90,7 @@ impl Dashboard {
         let arg = arg.unwrap_or_default();
         match command {
             C::Compact => {
-                let pct = match (self.ctx_tokens, self.ctx_max) {
+                let pct = match (self.turn.ctx_tokens, self.ctx_max) {
                     (Some(used), max) if max > 0 => f64::from(used) / f64::from(max) * 100.0,
                     _ => 0.0,
                 };
@@ -103,7 +103,7 @@ impl Dashboard {
                     Some("/compact".to_string()),
                     cx,
                 );
-                self.live
+                self.turn.live
                     .notices
                     .push(opencrabs::tui::compact_notice::requested(pct));
                 cx.notify();
@@ -123,7 +123,7 @@ impl Dashboard {
                 if opencrabs::brain::goal::is_bare(&arg) {
                     // Bare `/goal` is denied with the usage line and never
                     // reaches the model, exactly as the terminal does.
-                    self.live
+                    self.turn.live
                         .notices
                         .push(opencrabs::brain::goal::goal_usage_warning());
                     cx.notify();
@@ -146,7 +146,7 @@ impl Dashboard {
                     self.open_cd_picker(cx);
                 } else {
                     let Some(session) = session else {
-                        self.live
+                        self.turn.live
                             .notices
                             .push("No conversation is open. Type /new first.".to_string());
                         cx.notify();
@@ -154,7 +154,7 @@ impl Dashboard {
                     };
                     let expanded = opencrabs::brain::tools::error::expand_tilde(&arg);
                     if !expanded.is_dir() {
-                        self.live
+                        self.turn.live
                             .notices
                             .push(text_commands::cd_not_a_directory(&arg));
                         cx.notify();
@@ -179,7 +179,7 @@ impl Dashboard {
             }
             other => {
                 let Some(session) = session else {
-                    self.live
+                    self.turn.live
                         .notices
                         .push("No conversation is open. Type /new first.".to_string());
                     cx.notify();
@@ -201,8 +201,8 @@ impl Dashboard {
     ///
     /// `/stop` and Esc share this so the two cannot drift about which turn
     /// they stop or what they leave behind (#2614, #2657). The window's turn
-    /// is a separate question: a leaf runs with `pane.busy` set while
-    /// `self.busy` stays clear, so a stop that looked only at `self.busy`
+    /// is a separate question: a leaf runs with `pane.busy` set while the
+    /// window's own flag stays clear, so a stop that looked only at that flag
     /// walked straight past a running pane and reported nothing to do.
     ///
     /// Returns true when a pane turn was actually cancelled. `why` is the name
@@ -261,16 +261,16 @@ impl Dashboard {
         if self.cancel_focused_pane_turn("/stop", cx) {
             return;
         }
-        let Some(cancel) = self.cancel.take() else {
-            self.live.notices.push("Nothing is running.".to_string());
+        let Some(cancel) = self.turn.cancel.take() else {
+            self.turn.live.notices.push("Nothing is running.".to_string());
             cx.notify();
             return;
         };
         cancel.cancel();
-        self.busy = false;
-        self.live.thinking = false;
-        self.live.stopped = true;
-        self.live.notices.push("Operation cancelled.".to_string());
+        self.turn.busy = false;
+        self.turn.live.thinking = false;
+        self.turn.live.stopped = true;
+        self.turn.live.notices.push("Operation cancelled.".to_string());
         logging::info("turn cancelled by /stop");
         cx.notify();
     }

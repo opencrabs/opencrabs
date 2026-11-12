@@ -232,7 +232,7 @@ impl Dashboard {
         self.screen = Screen::Chat;
         self.sessions.rail_menu = None;
         self.refocus_screen();
-        self.live.notices.push(format!("Running {slash}"));
+        self.turn.live.notices.push(format!("Running {slash}"));
         self.send_message(prompt, cx);
     }
 
@@ -526,7 +526,7 @@ impl Dashboard {
         if let Some(ob) = self.onboard.as_mut() {
             ob.mark_brain_generating();
         }
-        self.live
+        self.turn.live
             .notices
             .push("writing your brain files".to_string());
         agent_bridge::spawn_brain_generation(
@@ -549,7 +549,7 @@ impl Dashboard {
         match finished {
             Some((onboard::Finish::Failed(e), _)) => {
                 logging::error(&format!("onboarding save: {e}"));
-                self.live.notices.push(format!("setup did not save: {e}"));
+                self.turn.live.notices.push(format!("setup did not save: {e}"));
             }
             Some((onboard::Finish::Saved { brain_prompt }, workspace)) => {
                 self.onboard = None;
@@ -557,7 +557,7 @@ impl Dashboard {
                 self.refocus_screen();
                 self.reload_agent(cx, Some("setup saved"));
                 if let Some(prompt) = brain_prompt {
-                    self.live
+                    self.turn.live
                         .notices
                         .push("generating personalized brain files".to_string());
                     if let Some(bridge) = agent_bridge::bridge() {
@@ -618,7 +618,7 @@ impl Dashboard {
         let config = match Config::load() {
             Ok(config) => config,
             Err(e) => {
-                self.live
+                self.turn.live
                     .notices
                     .push(format!("saved, but the settings would not load: {e}"));
                 cx.notify();
@@ -627,7 +627,7 @@ impl Dashboard {
         };
         self.agent_ready = false;
         if let Some(line) = saved {
-            self.live.notices.push(line.to_string());
+            self.turn.live.notices.push(line.to_string());
         }
         agent_bridge::spawn_bootstrap(config, self.sink.clone());
         cx.notify();
@@ -645,7 +645,7 @@ impl Dashboard {
         let Some(step) = onboard::step_for_command(command) else {
             // Every door in `GUI_SUPPORTED` names a step; if a future edit
             // adds one without a step, say so instead of opening at random.
-            self.live
+            self.turn.live
                 .notices
                 .push(format!("{command} has no onboarding step wired yet."));
             cx.notify();
@@ -702,14 +702,14 @@ impl Dashboard {
         cx: &mut Context<Self>,
     ) {
         if self.transcript.session == Some(session) {
-            self.live.notices.push(line);
+            self.turn.live.notices.push(line);
         } else if let Some(pane) = self.pane_states.get(&session) {
             pane.update(cx, |pane, cx| {
                 pane.live.notices.push(line);
                 cx.notify();
             });
         } else {
-            self.live.notices.push(line);
+            self.turn.live.notices.push(line);
         }
     }
 
@@ -723,7 +723,7 @@ impl Dashboard {
             None => arg,
         };
         let Some(session) = self.models_session.or_else(|| self.focused_pane()) else {
-            self.live.notices.push(
+            self.turn.live.notices.push(
                 "No conversation is open, so there is nothing to switch. Type /new first."
                     .to_string(),
             );

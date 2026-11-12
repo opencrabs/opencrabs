@@ -20,7 +20,7 @@ fn escape_branch() -> &'static str {
     DASHBOARD_KEYS
         .get(start..)
         .expect("the escape branch starts on a char boundary")
-        .split("if !self.busy {")
+        .split("if !self.turn.busy {")
         .next()
         .expect("the escape branch ends at the turn gate")
 }

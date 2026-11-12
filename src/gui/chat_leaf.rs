@@ -9,11 +9,11 @@
 //!
 //! The groups, in the order they move:
 //!
-//! 1. [`Settle`] and [`Metrics`] here: the reload handshake and the per-turn
-//!    numbers waiting on it. Pure data, no window, no context.
-//! 2. The turn itself: the live card, its cancel handle, `busy`, the prompt
-//!    size, and the stash that parks one conversation's turn under it while
-//!    another is on screen (#2616).
+//! 1. [`Settle`] and [`Metrics`]: the reload handshake and the per-turn
+//!    numbers waiting on it. Pure data, no window, no context. Moved.
+//! 2. [`Turn`]: the live card, `busy`, the cancel handle, the prompt size and
+//!    the handshake above, so the turn on screen and the ones parked under
+//!    their own conversations (#2616) are one shape instead of two. Moved.
 //! 3. The transcript: the rows, their scroll handle and the follow flag.
 //! 4. The composer handles and the queue, and then the entity that draws all
 //!    of it, which is the step that stops a window repaint from re-walking
@@ -22,9 +22,10 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use super::transcript::TurnMetrics;
+use super::transcript::{LiveTurn, TurnMetrics};
 
 /// The reload handshake that keeps a finished turn's card on screen until the
 /// ledger holds its rows.
@@ -80,4 +81,52 @@ pub(crate) struct Metrics {
     /// and a split can settle two panes before either reload comes back
     /// (#2632).
     pub(crate) pending: HashMap<Uuid, TurnMetrics>,
+}
+
+/// The turn a conversation is running, and the same turn parked under a
+/// conversation the window is not painting (#2616).
+///
+/// One struct for both, because both hold exactly the same facts: the card,
+/// whether anything is still moving, the handle that stops it, the prompt size
+/// the provider last reported, and the reload handshake waiting for its rows.
+/// The window used to keep the visible half in five loose fields and the
+/// parked half in a near-identical `StashedTurn`, with `swap_visible_turn`
+/// copying field by field between them through nine parameters. Moving the
+/// whole value is the same swap with none of the copying, and it is the state
+/// the chat leaf owns from here on (#2805).
+#[derive(Default)]
+pub(crate) struct Turn {
+    /// The turn in flight: question, stream, tool rows, notices. It renders
+    /// as the transcript's last entry and clears once the DB holds the rows,
+    /// so a slow or silent turn never looks like an empty conversation.
+    pub(crate) live: LiveTurn,
+    /// A turn is running: sends queue instead of starting a second one.
+    pub(crate) busy: bool,
+    /// The running turn's cancellation token, so Esc twice stops it the way
+    /// the TUI's second Esc does. `None` when no turn is in flight.
+    pub(crate) cancel: Option<CancellationToken>,
+    /// Prompt tokens the provider last reported (`ProgressEvent::TokenCount`
+    /// and the finished turn's own `context_tokens`). `None` until the first
+    /// answer, which is why the TUI shows a dash there too.
+    pub(crate) ctx_tokens: Option<u32>,
+    /// The reload handshake that keeps a finished turn's card up until the
+    /// ledger holds its rows (#2705).
+    pub(crate) settle: Settle,
+}
+
+impl Turn {
+    /// A turn already running in a conversation the window is not painting:
+    /// a recovered turn at boot (#2627) and a completion that resumed a
+    /// session nobody is looking at (#2704).
+    ///
+    /// Both park the same shape, so both build it here instead of spelling out
+    /// five fields and hoping the next one added to `Turn` is remembered.
+    pub(crate) fn running(live: LiveTurn, cancel: CancellationToken) -> Self {
+        Self {
+            live,
+            busy: true,
+            cancel: Some(cancel),
+            ..Self::default()
+        }
+    }
 }

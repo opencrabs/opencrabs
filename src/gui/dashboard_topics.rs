@@ -247,7 +247,7 @@ impl Dashboard {
     pub(crate) fn topic_is_busy(&self, id: Uuid, cx: &App) -> bool {
         match self.pane_states.get(&id) {
             Some(pane) => pane.read(cx).busy,
-            None => self.busy && self.transcript.session == Some(id),
+            None => self.turn.busy && self.transcript.session == Some(id),
         }
     }
 
@@ -270,7 +270,7 @@ impl Dashboard {
             // (#2605). A prompt that cannot create anything never opens.
             logging::debug("topic draft: no conversation here can hold topics");
             self.topic_menu = None;
-            self.live
+            self.turn.live
                 .notices
                 .push("topics are off for this conversation".to_string());
             self.refocus_screen();
@@ -294,7 +294,7 @@ impl Dashboard {
             return;
         };
         if name.is_empty() {
-            self.live.notices.push("a topic needs a name".to_string());
+            self.turn.live.notices.push("a topic needs a name".to_string());
             cx.notify();
             return;
         }
@@ -321,7 +321,7 @@ impl Dashboard {
                         this.update(cx, |this, cx| {
                             if let Some(e) = icon_err {
                                 logging::error(&format!("rename icon {target}: {e}"));
-                                this.live.notices.push(format!("rename icon: {e}"));
+                                this.turn.live.notices.push(format!("rename icon: {e}"));
                             }
                             this.topic_draft = None;
                             this.topic_rename = None;
@@ -342,7 +342,7 @@ impl Dashboard {
                     Err(e) => {
                         logging::error(&format!("rename topic {target}: {e}"));
                         this.update(cx, |this, cx| {
-                            this.live.notices.push(format!("rename: {e}"));
+                            this.turn.live.notices.push(format!("rename: {e}"));
                             cx.notify();
                         })
                         .ok();
@@ -396,7 +396,7 @@ impl Dashboard {
                 Err(e) => {
                     logging::error(&format!("create topic under {parent}: {e}"));
                     this.update(cx, |this, cx| {
-                        this.live.notices.push(format!("topic: {e}"));
+                        this.turn.live.notices.push(format!("topic: {e}"));
                         cx.notify();
                     })
                     .ok();
@@ -617,13 +617,13 @@ impl Dashboard {
         let meta = match std::fs::metadata(&path) {
             Ok(meta) => meta,
             Err(e) => {
-                self.live.notices.push(format!("icon image: {e}"));
+                self.turn.live.notices.push(format!("icon image: {e}"));
                 cx.notify();
                 return;
             }
         };
         if !topic_icons::image_pick_allowed(&path, meta.len()) {
-            self.live.notices.push(
+            self.turn.live.notices.push(
                 "icon image: pick a png, jpg, webp, gif, bmp, tiff or svg under 5MB".to_string(),
             );
             cx.notify();
@@ -632,7 +632,7 @@ impl Dashboard {
         let bytes = match std::fs::read(&path) {
             Ok(bytes) => bytes,
             Err(e) => {
-                self.live.notices.push(format!("icon image: {e}"));
+                self.turn.live.notices.push(format!("icon image: {e}"));
                 cx.notify();
                 return;
             }
@@ -647,7 +647,7 @@ impl Dashboard {
         if let Err(e) =
             std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(dir.join(&filename), &bytes))
         {
-            self.live.notices.push(format!("icon image: {e}"));
+            self.turn.live.notices.push(format!("icon image: {e}"));
             cx.notify();
             return;
         }

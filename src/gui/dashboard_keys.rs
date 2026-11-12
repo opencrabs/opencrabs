@@ -533,14 +533,14 @@ impl Dashboard {
                 return;
             }
             // A split leaf runs its own turn with `pane.busy` set while
-            // `self.busy` stays clear, so the idle path below would hand the
+            // `self.turn.busy` stays clear, so the idle path below would hand the
             // keyboard back and leave that turn streaming (#2657). The stop
             // reaches the pane the keyboard is on first, the same order
             // `/stop` uses (#2614).
             if self.cancel_focused_pane_turn("Esc", cx) {
                 return;
             }
-            if !self.busy {
+            if !self.turn.busy {
                 // Idle Esc hands the keyboard back. The rail's mode is the
                 // only thing Esc owns here, and Tab is what arms it. The old
                 // blur bridge existed only because focus never moved off the
@@ -567,8 +567,8 @@ impl Dashboard {
             // turn opened are deleted rather than redrawn.
             let mut returned = false;
             if let Some(sid) = self.transcript.session
-                && self.busy
-                && self.live.untouched()
+                && self.turn.busy
+                && self.turn.live.untouched()
             {
                 let composer = self.composer_entity(cx);
                 // Only into an empty field: anything typed since the send is
@@ -577,7 +577,7 @@ impl Dashboard {
                 // on an empty field, and clippy reads the nesting as a mistake
                 // rather than the guard it is (#2641).
                 if composer.read(cx).content.trim().is_empty()
-                    && let Some(text) = self.live.user.take()
+                    && let Some(text) = self.turn.live.user.take()
                 {
                     composer.update(cx, |editor, cx| {
                         editor.restore_draft(text, cx);
@@ -590,25 +590,25 @@ impl Dashboard {
                             self.sink.clone(),
                         );
                     }
-                    self.live.clear();
+                    self.turn.live.clear();
                     returned = true;
                 }
             }
-            if let Some(cancel) = self.cancel.take() {
+            if let Some(cancel) = self.turn.cancel.take() {
                 cancel.cancel();
             }
             // Same wording and immediate release as `abort_active_turn`: the
             // pane stops claiming a turn is running the moment the user asked
             // it to stop, and the service's own Failed event lands afterwards.
-            self.busy = false;
-            self.live.thinking = false;
+            self.turn.busy = false;
+            self.turn.live.thinking = false;
             // Only a turn that still has something to show keeps the stop
             // (#2811): a handed-back question already cleared the card, and
             // marking that one stopped would draw an empty card with no text.
             if !returned {
-                self.live.stopped = true;
+                self.turn.live.stopped = true;
             }
-            self.cancel = None;
+            self.turn.cancel = None;
             let waiting = self.queued_for_strip().len();
             if waiting > 0 {
                 // The send itself waits for the cancellation to be
@@ -617,13 +617,13 @@ impl Dashboard {
                 // conversation. The turn's own event drains the queue (see the
                 // post-batch `drain_pending`), which is milliseconds after the
                 // stop (#2631).
-                self.live.notices.push(format!(
+                self.turn.live.notices.push(format!(
                     "Operation cancelled. Sending the {waiting} queued."
                 ));
             } else if !returned {
                 // A handed-back message already says so in the composer, so
                 // the notice would be the second time the user is told.
-                self.live.notices.push("Operation cancelled.".to_string());
+                self.turn.live.notices.push("Operation cancelled.".to_string());
             }
             logging::info("turn cancelled by Esc");
             self.sync_composer_hint(cx);

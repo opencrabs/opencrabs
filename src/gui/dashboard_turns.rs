@@ -53,13 +53,13 @@ impl Dashboard {
             // the field it was typed in: after the command runs, the notices
             // it wrote move to that pane, so a split never answers in the
             // wrong leaf (#2614).
-            let before = self.live.notices.len();
+            let before = self.turn.live.notices.len();
             self.run_command(outcome, Some(session), cx);
             if Some(session) != self.transcript.session
                 && let Some(pane) = self.pane_states.get(&session).cloned()
             {
-                let split_at = before.min(self.live.notices.len());
-                let moved: Vec<String> = self.live.notices.split_off(split_at);
+                let split_at = before.min(self.turn.live.notices.len());
+                let moved: Vec<String> = self.turn.live.notices.split_off(split_at);
                 pane.update(cx, |pane, cx| {
                     pane.live.notices.extend(moved);
                     cx.notify();
@@ -160,8 +160,8 @@ impl Dashboard {
         if let Some(turn) = self.stashed.get(&id) {
             return line(&turn.live);
         }
-        if self.busy && self.transcript.session == Some(id) {
-            return line(&self.live);
+        if self.turn.busy && self.transcript.session == Some(id) {
+            return line(&self.turn.live);
         }
         self.rail_live.get(&id).and_then(line)
     }
@@ -260,7 +260,7 @@ impl Dashboard {
         self.metrics.pending.insert(
             session,
             transcript::TurnMetrics {
-                ctx_used: self.ctx_tokens.unwrap_or(0),
+                ctx_used: self.turn.ctx_tokens.unwrap_or(0),
                 ctx_max: self.ctx_max,
                 tps: tokens_per_second,
                 tool_calls: calls,
@@ -491,7 +491,7 @@ impl Dashboard {
         // `!cmd` runs a shell command here, not a turn, as the terminal does (#2437).
         if let Some(cmd) = opencrabs::ui_core::bang::bang_command(&text) {
             bang::spawn(cmd.to_string(), self.sink.clone());
-            self.live.notices.push(format!("! {cmd}"));
+            self.turn.live.notices.push(format!("! {cmd}"));
             cx.notify();
             return;
         }
@@ -504,21 +504,21 @@ impl Dashboard {
             .session
             .is_some_and(|id| self.sessions.is_closed(id))
         {
-            self.live
+            self.turn.live
                 .notices
                 .push("This topic is closed. Reopen it to continue.".to_string());
             cx.notify();
             return;
         }
         if self.agent_error.is_some() {
-            self.live.notices.push(format!(
+            self.turn.live.notices.push(format!(
                 "agent offline: {}",
                 self.agent_error.as_deref().unwrap_or("bootstrap failed")
             ));
             cx.notify();
             return;
         }
-        if self.busy {
+        if self.turn.busy {
             // The message joins the session's queue, which the agent drains
             // between tool calls, the terminal's own path (#2441). With no
             // session open it waits in the window's own list. Busy is read
@@ -561,7 +561,7 @@ impl Dashboard {
             self.new_session(cx);
             return;
         };
-        self.live
+        self.turn.live
             .begin(display.clone().unwrap_or_else(|| text.clone()));
         // A send is the reader asking for the end of the conversation (#2698).
         self.rearm_transcript_follow();
@@ -570,15 +570,15 @@ impl Dashboard {
         // copy may be dropped (see `reload_transcript`). Measured on the
         // session's own row total, which never saturates the way the windowed
         // turn count does (#2705).
-        self.settle.begin(self.transcript.row_total());
+        self.turn.settle.begin(self.transcript.row_total());
         // A recalled message is the turn's own text now, so it leaves the
         // queue with it; the messages the walk took before it go back to wait
         // (#2637).
         self.finish_recall(&sent_from, cx);
-        self.busy = true;
+        self.turn.busy = true;
         self.sync_composer_hint(cx);
         let cancel = tokio_util::sync::CancellationToken::new();
-        self.cancel = Some(cancel.clone());
+        self.turn.cancel = Some(cancel.clone());
         // Attachments are tracked against the session the same way the TUI
         // does it (`FileService::get_or_create_file`), so the file lands in
         // the session's artifacts, not just in the message text.
@@ -660,7 +660,7 @@ impl Dashboard {
             // and token counter advance on the same repaint. So does a rail row
             // with work in flight, and a plan waiting for approval keeps
             // pulsing its ring until the owner opens it (#2636).
-            if self.busy
+            if self.turn.busy
                 || self.pane_states.values().any(|pane| pane.read(cx).busy)
                 || self
                     .rail_activity_map(cx)
@@ -744,7 +744,7 @@ impl Dashboard {
                     }
                 }
                 agent_bridge::TurnEvent::SessionCreateFailed(e) => {
-                    self.live.notices.push(format!("new session: {e}"));
+                    self.turn.live.notices.push(format!("new session: {e}"));
                 }
                 agent_bridge::TurnEvent::UpdateAvailable(version) => {
                     self.update_available = Some(version);
@@ -756,7 +756,7 @@ impl Dashboard {
                         self.transcript.hidden = 0;
                         self.transcript.error = None;
                     }
-                    self.live.notices.push("Session cleared.".to_string());
+                    self.turn.live.notices.push("Session cleared.".to_string());
                     // The card must drop the line of a chat that no longer has
                     // messages. Only the previews are re-read: a rail refresh
                     // here would reorder rows under the cursor.
@@ -764,15 +764,15 @@ impl Dashboard {
                     cx.notify();
                 }
                 agent_bridge::TurnEvent::ClearFailed(text) => {
-                    self.live.notices.push(text);
+                    self.turn.live.notices.push(text);
                     cx.notify();
                 }
                 agent_bridge::TurnEvent::BangOutput(text) => {
-                    self.live.notices.push(text);
+                    self.turn.live.notices.push(text);
                     cx.notify();
                 }
                 agent_bridge::TurnEvent::EvolveDone(text) => {
-                    self.live.notices.push(text);
+                    self.turn.live.notices.push(text);
                     cx.notify();
                 }
                 // A text command answered on the bridge: one line, the same
@@ -783,7 +783,7 @@ impl Dashboard {
                 agent_bridge::TurnEvent::CommandReply { session, text } => {
                     match session {
                         Some(id) => self.push_session_notice(id, text, cx),
-                        None => self.live.notices.push(text),
+                        None => self.turn.live.notices.push(text),
                     }
                     cx.notify();
                 }
@@ -804,11 +804,11 @@ impl Dashboard {
                         // deleted conversation on screen.
                         self.transcript.session = None;
                         self.transcript.turns.clear();
-                        self.live.clear();
+                        self.turn.live.clear();
                         // The deleted conversation's turn, if one ran there,
                         // goes with it: the row it belonged to is gone.
                         self.stashed.remove(&id);
-                        self.busy = false;
+                        self.turn.busy = false;
                         // The files screen of a deleted session has nothing
                         // left to list: back to the chat, never a ghost list.
                         if self.screen == Screen::Files {
@@ -818,7 +818,7 @@ impl Dashboard {
                     self.refresh_rail(cx);
                 }
                 agent_bridge::TurnEvent::SessionDeleteFailed(e) => {
-                    self.live.notices.push(format!("delete session: {e}"));
+                    self.turn.live.notices.push(format!("delete session: {e}"));
                 }
                 agent_bridge::TurnEvent::PlanPath { session, path } => {
                     // Stale lookups (user switched conversations while the
@@ -841,7 +841,7 @@ impl Dashboard {
                 agent_bridge::TurnEvent::BootstrapFailed(e) => {
                     logging::error(&format!("agent offline: {e}"));
                     self.agent_error = Some(e.clone());
-                    self.live.notices.push(format!("agent offline: {e}"));
+                    self.turn.live.notices.push(format!("agent offline: {e}"));
                 }
                 agent_bridge::TurnEvent::ModelSwitched { session, line } => {
                     if self.models_switching.take() != Some(session) {
@@ -864,7 +864,7 @@ impl Dashboard {
                         && let Some(b) = agent_bridge::bridge()
                     {
                         self.ctx_max = b.service.context_limit_for_session(session);
-                        self.ctx_tokens = None;
+                        self.turn.ctx_tokens = None;
                     }
                     // A pick is a commitment: apply it, say so once, and put
                     // the user back in the conversation that asked. A stale
@@ -896,7 +896,7 @@ impl Dashboard {
                 }
                 agent_bridge::TurnEvent::BrainReady(line) => {
                     logging::info(&format!("brain: {line}"));
-                    self.live.notices.push(format!("brain: {line}"));
+                    self.turn.live.notices.push(format!("brain: {line}"));
                     // A brain written from the wizard's own step ends that
                     // step; the setup itself is saved by the same finish path
                     // the Enter key uses, so the two routes cannot diverge.
@@ -919,7 +919,7 @@ impl Dashboard {
                 }
                 agent_bridge::TurnEvent::BrainFailed(e) => {
                     logging::error(&format!("brain: {e}"));
-                    self.live
+                    self.turn.live
                         .notices
                         .push(format!("brain generation failed: {e}"));
                     // The step keeps the reason and stays up: Enter still
@@ -933,7 +933,7 @@ impl Dashboard {
                     cx.notify();
                 }
                 agent_bridge::TurnEvent::ProgressFor(_, ProgressEvent::Thinking, _) => {
-                    self.live.thinking = true;
+                    self.turn.live.thinking = true;
                 }
                 agent_bridge::TurnEvent::ProgressFor(
                     _,
@@ -948,8 +948,8 @@ impl Dashboard {
                     // a whole batch, so reading the clock here would stamp every
                     // chunk in the batch with one instant and collapse the
                     // window the rate is measured over.
-                    self.live.thinking = false;
-                    self.live.note_chunk_at(&text, at);
+                    self.turn.live.thinking = false;
+                    self.turn.live.note_chunk_at(&text, at);
                     // The rail's preview follows the answer as it streams, at
                     // most one batched read a second.
                     self.refresh_previews_if_live(cx);
@@ -968,11 +968,11 @@ impl Dashboard {
                     // streamed chunks and again as intermediate text. Appending
                     // both is what drew the paragraph twice, so both paths
                     // dedupe against what is already on screen.
-                    self.live.thinking = false;
+                    self.turn.live.thinking = false;
                     if let Some(reasoning) = reasoning {
-                        self.live.push_reasoning_at(&reasoning, at);
+                        self.turn.live.push_reasoning_at(&reasoning, at);
                     }
-                    self.live.push_narration(&text);
+                    self.turn.live.push_narration(&text);
                 }
                 agent_bridge::TurnEvent::ProgressFor(
                     _,
@@ -983,12 +983,12 @@ impl Dashboard {
                     },
                     _,
                 ) => {
-                    self.live.thinking = false;
+                    self.turn.live.thinking = false;
                     // The ledger's own wording (`tui::app::messaging`), so a
                     // live row reads exactly like the row that persists.
                     let description =
                         opencrabs::tui::app::App::format_tool_description(&tool_name, &tool_input);
-                    self.live
+                    self.turn.live
                         .push_tool(transcript::ToolCall::running(tool_name, description));
                     // A silent tool run still moves the preview's tool line, so
                     // the same throttled read the chunk path uses is asked for
@@ -1012,6 +1012,7 @@ impl Dashboard {
                     // finish settles them, so a synchronous call must never close
                     // one that happens to share its tool name.
                     let open = self
+                        .turn
                         .live
                         .tools
                         .iter_mut()
@@ -1022,7 +1023,7 @@ impl Dashboard {
                             call.done = true;
                             call.success = success;
                         }
-                        None => self.live.push_tool(transcript::ToolCall {
+                        None => self.turn.live.push_tool(transcript::ToolCall {
                             name: tool_name.clone(),
                             description: tool_name,
                             success,
@@ -1041,11 +1042,11 @@ impl Dashboard {
                     ProgressEvent::QueuedUserMessage { text },
                     _,
                 ) if self.transcript.session == Some(sid) => {
-                    self.live.injected.push(text);
+                    self.turn.live.injected.push(text);
                     cx.notify();
                 }
                 agent_bridge::TurnEvent::ProgressFor(_, ProgressEvent::TokenCount(count), _) => {
-                    self.ctx_tokens = Some(count.min(u32::MAX as usize) as u32);
+                    self.turn.ctx_tokens = Some(count.min(u32::MAX as usize) as u32);
                 }
                 // A detached command's row lands synchronously, while the
                 // turn that spawned it is still live, and its finish finds it
@@ -1057,8 +1058,8 @@ impl Dashboard {
                     _,
                 ) => {
                     if Some(sid) == self.transcript.session {
-                        self.live.thinking = false;
-                        self.live
+                        self.turn.live.thinking = false;
+                        self.turn.live
                             .push_tool(transcript::ToolCall::detached(task_id, label));
                     }
                 }
@@ -1133,7 +1134,7 @@ impl Dashboard {
                     // The provider's own prompt size for the call that just
                     // answered: the honest number for the ctx footer, not an
                     // estimate of what we think we sent.
-                    self.ctx_tokens = Some(context_tokens);
+                    self.turn.ctx_tokens = Some(context_tokens);
                     // The same numbers, frozen for THIS turn, so the settled
                     // card can print what the turn cost instead of whatever
                     // the session's budget reads later (#2324).
@@ -1144,7 +1145,7 @@ impl Dashboard {
                                 ctx_used: context_tokens,
                                 ctx_max: self.ctx_max,
                                 tps: tokens_per_second,
-                                tool_calls: self.live.tools.len(),
+                                tool_calls: self.turn.live.tools.len(),
                             },
                         );
                     }
@@ -1156,16 +1157,16 @@ impl Dashboard {
                     // the window is what turns a token count into a rate, and
                     // a log that prints the count alone cannot tell a short
                     // window from an inflated numerator (#2703).
-                    let active_secs = self.live.streaming_active_secs();
-                    self.live.finalize(tokens_per_second);
+                    let active_secs = self.turn.live.streaming_active_secs();
+                    self.turn.live.finalize(tokens_per_second);
                     // The answer stays on screen: the stream when chunks
                     // arrived, otherwise the response the turn returned. Live
                     // state clears only once the reload proves the DB has it.
-                    if self.live.stream.trim().is_empty() && !content.trim().is_empty() {
-                        self.live.settled = Some(content.clone());
+                    if self.turn.live.stream.trim().is_empty() && !content.trim().is_empty() {
+                        self.turn.live.settled = Some(content.clone());
                     }
-                    self.busy = false;
-                    self.live.thinking = false;
+                    self.turn.busy = false;
+                    self.turn.live.thinking = false;
                     // One line per turn, with the stream's own numbers: a
                     // turn that rendered as one silent dump is diagnosable
                     // from the log (chunks=0 means the provider never
@@ -1173,13 +1174,13 @@ impl Dashboard {
                     logging::info(&format!(
                         "turn done ({} chars, {} chunks, {} bytes, first {:?}, {}s elapsed, {:.2}s active, {} tok, rate {:.1} tok/s, service {:?}), reloading transcript",
                         content.len(),
-                        self.live.chunks,
-                        self.live.chunk_bytes,
-                        self.live.first_chunk,
-                        self.live.elapsed_secs(),
+                        self.turn.live.chunks,
+                        self.turn.live.chunk_bytes,
+                        self.turn.live.first_chunk,
+                        self.turn.live.elapsed_secs(),
                         active_secs,
-                        self.live.tokens,
-                        self.live.tokens_per_sec(),
+                        self.turn.live.tokens,
+                        self.turn.live.tokens_per_sec(),
                         tokens_per_second
                     ));
                     reload = self.transcript.session;
@@ -1207,8 +1208,8 @@ impl Dashboard {
                     // A card a stop already took back has no line to write on:
                     // the cancellation landing afterwards is the echo of the
                     // stop, not news (#2635).
-                    if !self.live.is_empty() {
-                        self.live.notices.push(text);
+                    if !self.turn.live.is_empty() {
+                        self.turn.live.notices.push(text);
                     }
                     // A failed turn still ran, so it keeps the numbers it
                     // actually measured instead of showing a bare clock while
@@ -1217,23 +1218,23 @@ impl Dashboard {
                     // failure before the first call has no reading of its own,
                     // and borrowing the previous turn's budget would be a lie.
                     self.metrics.pending.remove(&session);
-                    self.live.finalize(None);
-                    if self.live.tokens > 0
-                        && let Some(used) = self.ctx_tokens
+                    self.turn.live.finalize(None);
+                    if self.turn.live.tokens > 0
+                        && let Some(used) = self.turn.ctx_tokens
                     {
                         self.metrics.pending.insert(
                             session,
                             transcript::TurnMetrics {
                                 ctx_used: used,
                                 ctx_max: self.ctx_max,
-                                tps: Some(f64::from(self.live.tokens_per_sec()))
+                                tps: Some(f64::from(self.turn.live.tokens_per_sec()))
                                     .filter(|t| *t > 0.0),
-                                tool_calls: self.live.tools.len(),
+                                tool_calls: self.turn.live.tools.len(),
                             },
                         );
                     }
-                    self.busy = false;
-                    self.live.thinking = false;
+                    self.turn.busy = false;
+                    self.turn.live.thinking = false;
                     reload = self.transcript.session;
                 }
                 agent_bridge::TurnEvent::Cancelled { session } => {
@@ -1260,14 +1261,14 @@ impl Dashboard {
                         // re-read now would wipe what the user can still see.
                         // The card keeps its stream, with the clock and rate
                         // frozen where the stop landed.
-                        self.live.finalize(None);
-                        self.busy = false;
-                        self.live.thinking = false;
+                        self.turn.live.finalize(None);
+                        self.turn.busy = false;
+                        self.turn.live.thinking = false;
                         // The stop is the settle (#2811): the card keeps its
                         // stream and now says it was stopped, instead of
                         // waiting on a spinner that will never turn again.
-                        self.live.stopped = true;
-                        self.cancel = None;
+                        self.turn.live.stopped = true;
+                        self.turn.cancel = None;
                         logging::info("turn settled after the stop dropped it");
                     } else {
                         // A split leaf: same settle inside its own card, and
@@ -1315,15 +1316,15 @@ impl Dashboard {
                     // a recovered turn that painted into a window believing it
                     // was idle would look exactly like the work being lost.
                     if self.transcript.session == Some(session) {
-                        self.live = transcript::LiveTurn::default();
+                        self.turn.live = transcript::LiveTurn::default();
                         // The ledger already holds this question: the process
                         // that asked it died after writing the row. Resuming is
                         // not a fresh send, and starting it as one stamped the
                         // resume time, missed the row in the identity window,
                         // and painted the question twice (#2740).
-                        self.live.resume(user_message);
-                        self.busy = true;
-                        self.cancel = Some(cancel);
+                        self.turn.live.resume(user_message);
+                        self.turn.busy = true;
+                        self.turn.cancel = Some(cancel);
                         // No reload here on purpose: the turn's rows are
                         // already in the ledger and a reload landing now would
                         // fight the card it is about to fill.
@@ -1338,15 +1339,8 @@ impl Dashboard {
                         live.resume(user_message);
                         self.stashed.insert(
                             session,
-                            StashedTurn {
-                                live,
-                                cancel: Some(cancel),
-                                settle_expect: None,
-                                settle_retries: 0,
-                                ctx_tokens: None,
-                                // Recovered mid-flight, so the turn is running.
-                                busy: true,
-                            },
+                            // Recovered mid-flight, so the turn is running.
+                            chat_leaf::Turn::running(live, cancel),
                         );
                     }
                     self.refresh_rail(cx);
@@ -1394,8 +1388,8 @@ impl Dashboard {
         // The hint follows the turn and the queue, including a report that
         // landed mid-turn, so it is repainted on every event batch (#2630).
         self.sync_composer_hint(cx);
-        if !self.busy {
-            self.cancel = None;
+        if !self.turn.busy {
+            self.turn.cancel = None;
             self.drain_pending(cx);
         }
         self.follow_chat();

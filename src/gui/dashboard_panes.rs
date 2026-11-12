@@ -23,7 +23,7 @@ impl Dashboard {
         // splitting it." while the window was plainly drawing a live focused
         // pane (#2757).
         let Some(target) = self.split_origin() else {
-            self.live
+            self.turn.live
                 .notices
                 .push("Open a session before splitting it.".to_string());
             cx.notify();
@@ -68,14 +68,14 @@ impl Dashboard {
         // the window holds no tree yet: the same rule the chord door walks, so
         // the two doors cannot disagree about the originating pane (#2757).
         let Some(target) = self.split_origin() else {
-            self.live
+            self.turn.live
                 .notices
                 .push("Open a session before splitting it.".to_string());
             cx.notify();
             return;
         };
         if Some(id) == chat || self.panes.as_ref().is_some_and(|tree| tree.contains(id)) {
-            self.live
+            self.turn.live
                 .notices
                 .push("That session is already open in a pane.".to_string());
             cx.notify();
@@ -560,7 +560,7 @@ impl Dashboard {
         if self.transcript.session == Some(id)
             || self.panes.as_ref().is_some_and(|tree| tree.contains(id))
         {
-            self.live
+            self.turn.live
                 .notices
                 .push("That session is already open in a pane. Pick another.".to_string());
             cx.notify();
@@ -580,7 +580,7 @@ impl Dashboard {
             .is_some_and(|tree| tree.split(target, layout, id));
         if !split {
             self.pane_focus = None;
-            self.live
+            self.turn.live
                 .notices
                 .push("That pane is no longer open.".to_string());
             cx.notify();
@@ -732,7 +732,7 @@ impl Dashboard {
         if count > 1 {
             parts.push(format!("[{index}/{count}]"));
         }
-        if self.busy && self.transcript.session == Some(session) {
+        if self.turn.busy && self.transcript.session == Some(session) {
             // The GUI runs one conversation at a time, so the only pane that
             // can be mid-turn is the open one.
             parts.push("⠙ working".to_string());

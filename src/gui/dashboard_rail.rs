@@ -127,8 +127,8 @@ impl Dashboard {
                 // ended is NOT live (#2811): the entry outlives the turn so the
                 // stop survives the switch, and reading presence as work would
                 // spin a row for a turn nobody is running.
-                (self.busy && self.transcript.session == Some(id))
-                    || self.stashed.get(&id).is_some_and(|turn| turn.busy),
+                (self.turn.busy && self.transcript.session == Some(id))
+                    || self.stashed.get(&id).is_some_and(|parked| parked.busy),
                 self.pane_states
                     .get(&id)
                     .is_some_and(|pane| pane.read(cx).busy),
@@ -315,7 +315,7 @@ impl Dashboard {
             .stashed
             .values()
             .any(|t| t.live.user.is_some() || !t.live.tools.is_empty());
-        if !previews_can_move(self.busy, stashed_live, self.rail.streaming_count()) {
+        if !previews_can_move(self.turn.busy, stashed_live, self.rail.streaming_count()) {
             return;
         }
         if self

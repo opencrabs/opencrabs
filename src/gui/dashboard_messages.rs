@@ -579,12 +579,13 @@ impl Dashboard {
         // session. A reload that comes back short is a write that has not
         // landed yet. The count is the session's own row total, so a
         // conversation past the display window settles like any other (#2705).
-        let expect = self.settle.expect;
-        let attempt = self.settle.retries;
+        let expect = self.turn.settle.expect;
+        let attempt = self.turn.settle.retries;
         // The budget starts at the first read that found the rows short, not
         // when the question was sent: it measures the write, which only exists
         // once the turn has ended.
         let deadline = *self
+            .turn
             .settle
             .deadline
             .get_or_insert_with(|| std::time::Instant::now() + SETTLE_BUDGET);
@@ -618,15 +619,15 @@ impl Dashboard {
                             .transcript
                             .turns
                             .last()
-                            .is_some_and(|turn| transcript::newest_live_turn_matches(turn, &this.live));
+                            .is_some_and(|turn| transcript::newest_live_turn_matches(turn, &this.turn.live));
                         if question_landed {
-                            this.live.landed = true;
+                            this.turn.live.landed = true;
                         }
                         // A turn that is still running owns the live card.
                         // Reading the conversation under it (a boot resume, or
                         // opening a session mid-turn) must not wipe the card
                         // the work is painting into (#2627).
-                        let in_flight = this.busy;
+                        let in_flight = this.turn.busy;
                         // The ordered ids the selection resolves its ranges and
                         // its copy order against, which the visible turns alone
                         // cannot answer once they are folded (#2613).
@@ -637,44 +638,44 @@ impl Dashboard {
                             // recorded at `Done` (#2324).
                             if !in_flight {
                                 this.attach_pending_metrics(sid);
-                                this.live.clear();
+                                this.turn.live.clear();
                             }
-                            this.settle.expect = None;
-                            this.settle.retries = 0;
-                            this.settle.deadline = None;
-                            this.settle.rechecks = 0;
+                            this.turn.settle.expect = None;
+                            this.turn.settle.retries = 0;
+                            this.turn.settle.deadline = None;
+                            this.turn.settle.rechecks = 0;
                         } else if in_flight {
                             // Short of the count while a turn is running is not
                             // a missed write, it is a turn still writing.
-                            this.settle.expect = None;
-                            this.settle.retries = 0;
-                            this.settle.deadline = None;
+                            this.turn.settle.expect = None;
+                            this.turn.settle.retries = 0;
+                            this.turn.settle.deadline = None;
                         } else if std::time::Instant::now() < deadline {
                             // The row is still in flight: retry shortly, the
                             // live turn keeps the answer on screen meanwhile.
                             // The row total travels with the attempt so the
                             // next incident is diagnosable from the log alone.
-                            this.settle.retries = attempt + 1;
+                            this.turn.settle.retries = attempt + 1;
                             logging::info(&format!(
                                 "transcript short of the finished turn, retry {} (rows {total}, want {})",
                                 attempt + 1,
                                 expect.map_or("?".to_string(), |n| n.to_string()),
                             ));
                             this.reload_transcript(sid, cx);
-                        } else if this.settle.rechecks < SETTLE_RECHECKS {
+                        } else if this.turn.settle.rechecks < SETTLE_RECHECKS {
                             // The budget ran out, but the payload is usually
                             // written by now and only this read missed it. One
                             // more look after a pause turns a permanently
                             // pinned live card into a bounded delay (the
                             // 2026-11-08 incident sat there until the session
                             // was reopened).
-                            this.settle.rechecks += 1;
-                            this.settle.expect = expect;
-                            this.settle.retries = 0;
-                            this.settle.deadline = None;
+                            this.turn.settle.rechecks += 1;
+                            this.turn.settle.expect = expect;
+                            this.turn.settle.retries = 0;
+                            this.turn.settle.deadline = None;
                             logging::info(&format!(
                                 "transcript short after {SETTLE_BUDGET:?}; recheck {} (rows {total}, want {})",
-                                this.settle.rechecks,
+                                this.turn.settle.rechecks,
                                 expect.map_or("?".to_string(), |n| n.to_string()),
                             ));
                             let view = cx.entity().downgrade();
@@ -695,9 +696,9 @@ impl Dashboard {
                                 "transcript never caught up; keeping the live turn (rows {total}, want {})",
                                 expect.map_or("?".to_string(), |n| n.to_string()),
                             ));
-                            this.settle.expect = None;
-                            this.settle.retries = 0;
-                            this.settle.deadline = None;
+                            this.turn.settle.expect = None;
+                            this.turn.settle.retries = 0;
+                            this.turn.settle.deadline = None;
                         }
                     }
                     Err(e) => this.transcript.error = Some(e.into()),

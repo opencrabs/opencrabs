@@ -164,7 +164,7 @@ fn the_reply_lands_on_the_strip_of_the_session_that_asked() {
         "an answered command belongs in the strip of the session that asked (#2672)"
     );
     assert!(
-        body.contains("self.live.notices.push(text)"),
+        body.contains("self.turn.live.notices.push(text)"),
         "a reply with no session keeps answering on the window strip (#2672)"
     );
 }

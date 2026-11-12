@@ -105,12 +105,7 @@ impl Dashboard {
                 &mut self.stashed,
                 self.transcript.session,
                 id,
-                &mut self.live,
-                &mut self.busy,
-                &mut self.cancel,
-                &mut self.settle.expect,
-                &mut self.settle.retries,
-                &mut self.ctx_tokens,
+                &mut self.turn,
             );
             // Every switch says who it left, who it arrived on and whether a
             // card was parked (#2811). The report that started this had only
@@ -249,7 +244,7 @@ impl Dashboard {
                 self.ctrl_c_pending = Some(now);
                 self.editor
                     .update(cx, |editor, cx| editor.discard_draft(cx));
-                self.live
+                self.turn.live
                     .notices
                     .push("Press Ctrl+C again to quit".to_string());
             }
@@ -258,12 +253,12 @@ impl Dashboard {
                 // The stop reaches the pane the keyboard is on first, then the
                 // window's own turn, the same order Esc uses.
                 self.cancel_focused_pane_turn("Ctrl+C", cx);
-                if let Some(cancel) = self.cancel.take() {
+                if let Some(cancel) = self.turn.cancel.take() {
                     cancel.cancel();
                 }
-                self.busy = false;
-                self.live.thinking = false;
-                self.cancel = None;
+                self.turn.busy = false;
+                self.turn.live.thinking = false;
+                self.turn.cancel = None;
                 logging::info("ctrl+c quit the window");
                 cx.quit();
                 return;
@@ -554,7 +549,7 @@ impl Dashboard {
     pub(crate) fn toggle_newest_turn(&mut self, cx: &mut Context<Self>) {
         // A turn in flight owns the chord: the card on screen is the live one,
         // so ctrl+o opens or folds IT, the way it opens a settled turn (#2442).
-        if !self.live.is_empty() {
+        if !self.turn.live.is_empty() {
             self.transcript.live_expanded = !self.transcript.live_expanded;
             cx.notify();
             return;

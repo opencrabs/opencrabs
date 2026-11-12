@@ -512,31 +512,6 @@ fn channel_chip_line_from(names: &[String]) -> Option<SharedString> {
     channel_status::status_line(&borrowed, &channel_ownership()).map(SharedString::from)
 }
 
-/// A running turn parked under the conversation that owns it (#2616).
-///
-/// The window paints one conversation at a time, and every session may be
-/// mid-turn on its own. Turn state therefore travels with the session:
-/// switching conversations parks the card, its cancel handle, the reload
-/// handshake and the last prompt size here, and coming back puts them on
-/// screen again. An entry exists while a turn is in flight, and also while a
-/// card has ended but the reload has not replaced it yet, so a profile with
-/// thousands of conversations still costs nothing.
-struct StashedTurn {
-    live: transcript::LiveTurn,
-    cancel: Option<tokio_util::sync::CancellationToken>,
-    settle_expect: Option<usize>,
-    settle_retries: u8,
-    ctx_tokens: Option<u32>,
-    /// Whether the turn was still running when the window parked it (#2811).
-    ///
-    /// Restored verbatim instead of assumed. A card the user stopped has
-    /// nothing left to animate, so forcing `busy` back on would put a spinner
-    /// over a turn nobody is running, which is the frozen look the report
-    /// described. The rail and the queue ask this flag rather than the entry's
-    /// presence, so a parked stop reads as idle in both.
-    busy: bool,
-}
-
 /// Whether a rail preview refresh can actually change a line.
 ///
 /// The first version asked `rail.streaming_count()`, which counts only
@@ -998,24 +973,16 @@ struct Dashboard {
     /// open conversation (`transcript.session`), never on a session of the
     /// bridge's own, so the answer always lands where the question was typed.
     agent_ready: bool,
-    /// The turn in flight: question, stream, tool rows, notices. It renders
-    /// as the transcript's last entry and clears once the DB holds the rows,
-    /// so a slow or silent turn never looks like an empty conversation.
-    live: transcript::LiveTurn,
+    /// The turn in flight: the card, whether it is still running, the handle
+    /// that stops it, the prompt size the provider reported and the reload
+    /// handshake waiting for its rows. One value, so a switch moves the turn
+    /// whole and the chat leaf inherits one field instead of five (#2805).
+    turn: chat_leaf::Turn,
     /// Turns running in conversations the window is not painting (#2616).
     /// Keyed by the session that owns each one, so a switch parks the turn on
     /// screen and restores the destination's, and the window never has to
     /// guess which conversation a card belongs to.
-    stashed: std::collections::HashMap<Uuid, StashedTurn>,
-    /// The reload handshake that keeps a finished turn's card up until the
-    /// ledger holds its rows (#2705). Its own type, because the wait is one
-    /// fact with four parts and the chat leaf will own it whole.
-    settle: chat_leaf::Settle,
-    /// A turn is running: sends queue instead of starting a second one.
-    busy: bool,
-    /// The running turn's cancellation token, so Esc twice stops it the way
-    /// the TUI's second Esc does. `None` when no turn is in flight.
-    cancel: Option<tokio_util::sync::CancellationToken>,
+    stashed: std::collections::HashMap<Uuid, chat_leaf::Turn>,
     /// The hint last painted on the composers, so a tick only touches them when
     /// the state actually changed (#2630).
     hint_painted: Option<SharedString>,
@@ -1032,10 +999,6 @@ struct Dashboard {
     unsent: Vec<agent_bridge::PendingMessage>,
     /// Set when the agent stack failed to come up; sends are refused.
     agent_error: Option<String>,
-    /// Prompt tokens the provider last reported (`ProgressEvent::TokenCount`
-    /// and the finished turn's own `context_tokens`). `None` until the first
-    /// answer, which is why the TUI shows a dash there too.
-    ctx_tokens: Option<u32>,
     /// The open conversation's context window: the compaction budget the
     /// service actually enforces for it, not a hardcoded 200K.
     ctx_max: u32,
@@ -2588,7 +2551,7 @@ impl Render for Dashboard {
             // The window holds exactly the visible conversation's turn: it was
             // parked and handed back by `swap_visible_turn`, so a live card
             // here always belongs to the session on screen (#2616).
-            &self.live,
+            &self.turn.live,
         ) {
             let path = std::path::PathBuf::from(key.clone());
             let handler = cx.listener(move |this, _ev, _window, cx| {
@@ -2718,15 +2681,15 @@ impl Render for Dashboard {
                     // The visible conversation's turn, never another's: the
                     // window keeps exactly one and swaps them on a switch
                     // (#2616).
-                    &self.live,
-                    self.busy,
+                    &self.turn.live,
+                    self.turn.busy,
                     measure,
                     fold_handlers,
                     transcript::ViewHooks {
                         attachments: attachment_handlers,
                         drag: Some(self.copy_drag.clone()),
                         wheel: Some(wheel),
-                        ctx_used: self.ctx_tokens,
+                        ctx_used: self.turn.ctx_tokens,
                         ctx_max: self.ctx_max,
                         live_click: Some(live_click.clone()),
                         message_click: message_click.clone(),
@@ -2799,7 +2762,7 @@ impl Render for Dashboard {
                                 &model,
                                 &tilde_path(&opencrabs::utils::cwd::launch_cwd()),
                                 self.branch.as_deref().unwrap_or("-"),
-                                self.live.tokens_per_sec(),
+                                self.turn.live.tokens_per_sec(),
                             )
                         );
                         div()
@@ -5786,16 +5749,12 @@ fn main() {
                         agent_rx,
                         sink: agent_sink,
                         agent_ready: false,
-                        live: transcript::LiveTurn::default(),
+                        turn: chat_leaf::Turn::default(),
                         stashed: HashMap::new(),
-                        settle: chat_leaf::Settle::default(),
-                        busy: false,
-                        cancel: None,
                         hint_painted: None,
                         queue_expanded: false,
                         unsent: Vec::new(),
                         agent_error: None,
-                        ctx_tokens: None,
                         ctx_max: 0,
                         metrics: chat_leaf::Metrics::default(),
                         branch: git_branch(&opencrabs::utils::cwd::launch_cwd()),
@@ -6019,11 +5978,10 @@ fn fold_live(
 ///
 /// The window paints one conversation at a time, but every session may be
 /// running a turn of its own. State moves with the session instead of the
-/// window: the outgoing turn is stored whole (card, cancel handle, reload
-/// handshake, prompt size) and the incoming one restored, so neither the
-/// spinner nor the counters jump to a conversation that never sent anything
-/// (#2616). A session with nothing in flight gets an empty slot, which is
-/// what makes a switch to an idle conversation paint as idle.
+/// window: the outgoing turn is stored whole and the incoming one restored, so
+/// neither the spinner nor the counters jump to a conversation that never sent
+/// anything (#2616). A session with nothing in flight gets an empty slot,
+/// which is what makes a switch to an idle conversation paint as idle.
 ///
 /// A card that has ended is parked too (#2811). Gating the park on `busy` alone
 /// dropped every turn the moment it stopped running, so a turn the user had
@@ -6031,55 +5989,29 @@ fn fold_live(
 /// verdict went with it. What decides the park is whether the card holds
 /// anything the ledger cannot draw yet, which is `!live.is_empty()`; `busy`
 /// rides along so the restored card knows whether anything is still moving.
-#[allow(clippy::too_many_arguments)]
+///
+/// The whole [`chat_leaf::Turn`] moves now, not six fields of it, so the
+/// reload handshake's deadline and late re-checks travel with the turn they
+/// belong to instead of waiting on screen for the next conversation (#2805).
 fn swap_visible_turn(
-    stashed: &mut std::collections::HashMap<Uuid, StashedTurn>,
+    stashed: &mut std::collections::HashMap<Uuid, chat_leaf::Turn>,
     from: Option<Uuid>,
     to: Uuid,
-    live: &mut transcript::LiveTurn,
-    busy: &mut bool,
-    cancel: &mut Option<tokio_util::sync::CancellationToken>,
-    settle_expect: &mut Option<usize>,
-    settle_retries: &mut u8,
-    ctx_tokens: &mut Option<u32>,
+    turn: &mut chat_leaf::Turn,
 ) {
     if from == Some(to) {
         return;
     }
     if let Some(from) = from
-        && (*busy || !live.is_empty())
+        && (turn.busy || !turn.live.is_empty())
     {
-        stashed.insert(
-            from,
-            StashedTurn {
-                live: std::mem::take(live),
-                cancel: cancel.take(),
-                settle_expect: settle_expect.take(),
-                settle_retries: std::mem::take(settle_retries),
-                ctx_tokens: ctx_tokens.take(),
-                busy: *busy,
-            },
-        );
+        stashed.insert(from, std::mem::take(turn));
     }
     match stashed.remove(&to) {
-        Some(turn) => {
-            *live = turn.live;
-            *cancel = turn.cancel;
-            *settle_expect = turn.settle_expect;
-            *settle_retries = turn.settle_retries;
-            *ctx_tokens = turn.ctx_tokens;
-            // The flag travels with the card (#2811): a stopped turn comes
-            // back stopped, not "running again".
-            *busy = turn.busy;
-        }
-        None => {
-            *live = transcript::LiveTurn::default();
-            *cancel = None;
-            *settle_expect = None;
-            *settle_retries = 0;
-            *ctx_tokens = None;
-            *busy = false;
-        }
+        // The flag travels with the card (#2811): a stopped turn comes back
+        // stopped, not "running again".
+        Some(restored) => *turn = restored,
+        None => *turn = chat_leaf::Turn::default(),
     }
 }
 
@@ -6725,34 +6657,29 @@ mod tests {
         let a = uuid::Uuid::new_v4();
         let b = uuid::Uuid::new_v4();
 
-        let mut stashed: std::collections::HashMap<uuid::Uuid, super::StashedTurn> =
+        let mut stashed: std::collections::HashMap<uuid::Uuid, super::chat_leaf::Turn> =
             std::collections::HashMap::new();
-        let mut live = super::transcript::LiveTurn::default();
 
         // A turn running in conversation A, with every piece of state the
         // card needs to look alive. Declared already carrying it, so the test
         // reads as the turn it describes and never as a blank that is filled
         // in later.
-        live.begin("ask A".to_string());
-        live.thinking = true;
-        live.tokens = 42;
-        let mut busy = true;
-        let mut cancel = Some(tokio_util::sync::CancellationToken::new());
-        let mut settle_expect: Option<usize> = Some(7);
-        let mut settle_retries: u8 = 2;
-        let mut ctx_tokens: Option<u32> = Some(1_234);
+        let mut turn = super::chat_leaf::Turn {
+            live: super::transcript::LiveTurn::default(),
+            busy: true,
+            cancel: Some(tokio_util::sync::CancellationToken::new()),
+            ctx_tokens: Some(1_234),
+            settle: super::chat_leaf::Settle::default(),
+        };
+        turn.live.begin("ask A".to_string());
+        turn.live.thinking = true;
+        turn.live.tokens = 42;
+        turn.settle.expect = Some(7);
+        turn.settle.retries = 2;
+        turn.settle.rechecks = 1;
+        turn.settle.deadline = Some(std::time::Instant::now());
 
-        super::swap_visible_turn(
-            &mut stashed,
-            Some(a),
-            b,
-            &mut live,
-            &mut busy,
-            &mut cancel,
-            &mut settle_expect,
-            &mut settle_retries,
-            &mut ctx_tokens,
-        );
+        super::swap_visible_turn(&mut stashed, Some(a), b, &mut turn);
 
         assert_eq!(
             stashed.len(),
@@ -6769,38 +6696,37 @@ mod tests {
             stashed[&a].cancel.is_some(),
             "the parked turn keeps its cancel token"
         );
-        assert_eq!(stashed[&a].settle_expect, Some(7));
-        assert!(!busy, "the conversation now on screen is idle");
-        assert!(live.user.is_none(), "B never inherits A's card");
-        assert_eq!(ctx_tokens, None, "nor A's context counter");
+        assert_eq!(stashed[&a].settle.expect, Some(7));
+        // The whole handshake travels now, not just the two fields the old
+        // parameter list happened to name: the deadline and the late
+        // re-checks belong to the turn that armed them (#2805).
+        assert_eq!(stashed[&a].settle.retries, 2);
+        assert_eq!(stashed[&a].settle.rechecks, 1);
+        assert!(
+            stashed[&a].settle.deadline.is_some(),
+            "the wait's own budget parked with the turn it was measuring"
+        );
+        assert!(!turn.busy, "the conversation now on screen is idle");
+        assert!(turn.live.user.is_none(), "B never inherits A's card");
+        assert_eq!(turn.ctx_tokens, None, "nor A's context counter");
 
         // B runs its own turn, then the user goes back to A.
-        live.begin("ask B".to_string());
-        busy = true;
-        super::swap_visible_turn(
-            &mut stashed,
-            Some(b),
-            a,
-            &mut live,
-            &mut busy,
-            &mut cancel,
-            &mut settle_expect,
-            &mut settle_retries,
-            &mut ctx_tokens,
-        );
+        turn.live.begin("ask B".to_string());
+        turn.busy = true;
+        super::swap_visible_turn(&mut stashed, Some(b), a, &mut turn);
 
         assert_eq!(
-            live.user.as_deref(),
+            turn.live.user.as_deref(),
             Some("ask A"),
             "A's card comes back, so its tool block and counters keep ticking"
         );
-        assert!(live.thinking);
-        assert_eq!(live.tokens, 42);
-        assert!(busy, "A is still running");
-        assert!(cancel.is_some(), "A's cancel token came back with it");
-        assert_eq!(settle_expect, Some(7));
-        assert_eq!(settle_retries, 2);
-        assert_eq!(ctx_tokens, Some(1_234));
+        assert!(turn.live.thinking);
+        assert_eq!(turn.live.tokens, 42);
+        assert!(turn.busy, "A is still running");
+        assert!(turn.cancel.is_some(), "A's cancel token came back with it");
+        assert_eq!(turn.settle.expect, Some(7));
+        assert_eq!(turn.settle.retries, 2);
+        assert_eq!(turn.ctx_tokens, Some(1_234));
         assert_eq!(stashed.len(), 1);
         assert_eq!(
             stashed[&b].live.user.as_deref(),
@@ -6810,20 +6736,10 @@ mod tests {
 
         // Opening the conversation already on screen is not a switch: nothing
         // is parked and the running turn is left alone.
-        super::swap_visible_turn(
-            &mut stashed,
-            Some(a),
-            a,
-            &mut live,
-            &mut busy,
-            &mut cancel,
-            &mut settle_expect,
-            &mut settle_retries,
-            &mut ctx_tokens,
-        );
+        super::swap_visible_turn(&mut stashed, Some(a), a, &mut turn);
         assert_eq!(stashed.len(), 1, "a no-op switch parks nothing");
-        assert_eq!(live.user.as_deref(), Some("ask A"));
-        assert!(busy);
+        assert_eq!(turn.live.user.as_deref(), Some("ask A"));
+        assert!(turn.busy);
     }
 
     /// #2811: stopping a turn clears `busy` immediately, and the park used to
@@ -6834,30 +6750,16 @@ mod tests {
     fn a_stopped_card_survives_a_switch_without_claiming_it_is_running() {
         let a = uuid::Uuid::new_v4();
         let b = uuid::Uuid::new_v4();
-        let mut stashed: std::collections::HashMap<uuid::Uuid, super::StashedTurn> =
+        let mut stashed: std::collections::HashMap<uuid::Uuid, super::chat_leaf::Turn> =
             std::collections::HashMap::new();
-        let mut live = super::transcript::LiveTurn::default();
-        live.begin("ask A".to_string());
-        live.stream = "half an answer".to_string();
-        live.stopped = true;
+        let mut turn = super::chat_leaf::Turn::default();
+        turn.live.begin("ask A".to_string());
+        turn.live.stream = "half an answer".to_string();
+        turn.live.stopped = true;
         // What the stop already did: nothing is running any more.
-        let mut busy = false;
-        let mut cancel: Option<tokio_util::sync::CancellationToken> = None;
-        let mut settle_expect: Option<usize> = None;
-        let mut settle_retries: u8 = 0;
-        let mut ctx_tokens: Option<u32> = None;
+        turn.busy = false;
 
-        super::swap_visible_turn(
-            &mut stashed,
-            Some(a),
-            b,
-            &mut live,
-            &mut busy,
-            &mut cancel,
-            &mut settle_expect,
-            &mut settle_retries,
-            &mut ctx_tokens,
-        );
+        super::swap_visible_turn(&mut stashed, Some(a), b, &mut turn);
 
         assert_eq!(
             stashed.len(),
@@ -6870,25 +6772,15 @@ mod tests {
         );
         assert!(stashed[&a].live.stopped, "and knowing it was stopped");
 
-        super::swap_visible_turn(
-            &mut stashed,
-            Some(b),
-            a,
-            &mut live,
-            &mut busy,
-            &mut cancel,
-            &mut settle_expect,
-            &mut settle_retries,
-            &mut ctx_tokens,
-        );
+        super::swap_visible_turn(&mut stashed, Some(b), a, &mut turn);
 
         assert_eq!(
-            live.stream, "half an answer",
+            turn.live.stream, "half an answer",
             "the stream the user saw came back with the card"
         );
-        assert!(live.stopped, "and so did the fact it was stopped");
+        assert!(turn.live.stopped, "and so did the fact it was stopped");
         assert!(
-            !busy,
+            !turn.busy,
             "a restored stop must not claim the turn is running: that is the frozen spinner"
         );
         assert!(stashed.is_empty(), "the card moved back onto the screen");
@@ -6901,26 +6793,11 @@ mod tests {
     fn an_idle_conversation_parks_nothing() {
         let a = uuid::Uuid::new_v4();
         let b = uuid::Uuid::new_v4();
-        let mut stashed: std::collections::HashMap<uuid::Uuid, super::StashedTurn> =
+        let mut stashed: std::collections::HashMap<uuid::Uuid, super::chat_leaf::Turn> =
             std::collections::HashMap::new();
-        let mut live = super::transcript::LiveTurn::default();
-        let mut busy = false;
-        let mut cancel: Option<tokio_util::sync::CancellationToken> = None;
-        let mut settle_expect: Option<usize> = None;
-        let mut settle_retries: u8 = 0;
-        let mut ctx_tokens: Option<u32> = None;
+        let mut turn = super::chat_leaf::Turn::default();
 
-        super::swap_visible_turn(
-            &mut stashed,
-            Some(a),
-            b,
-            &mut live,
-            &mut busy,
-            &mut cancel,
-            &mut settle_expect,
-            &mut settle_retries,
-            &mut ctx_tokens,
-        );
+        super::swap_visible_turn(&mut stashed, Some(a), b, &mut turn);
 
         assert!(
             stashed.is_empty(),
@@ -6954,7 +6831,7 @@ mod tests {
         // handover was the Themes preview leaf the centered modal replaced
         // (#2619).
         assert_eq!(
-            production.matches("&self.live,").count(),
+            production.matches("&self.turn.live,").count(),
             2,
             "the attachment scan and the chat body both paint the window's turn"
         );
@@ -6989,7 +6866,7 @@ mod tests {
             .next()
             .expect("the end of the arm");
         assert!(
-            arm.contains("self.live.resume(user_message)"),
+            arm.contains("self.turn.live.resume(user_message)"),
             "the card names the message the killed process was answering, and says its row is already written"
         );
         assert_eq!(
@@ -7001,9 +6878,9 @@ mod tests {
             !arm.contains("begin(user_message)"),
             "a resumed turn that starts as a fresh one stamps the resume time and paints the question twice (#2740)"
         );
-        assert!(arm.contains("self.busy = true"), "a recovered turn is busy");
+        assert!(arm.contains("self.turn.busy = true"), "a recovered turn is busy");
         assert!(
-            arm.contains("self.cancel = Some(cancel)"),
+            arm.contains("self.turn.cancel = Some(cancel)"),
             "stop has to end a recovered turn too"
         );
         assert!(
@@ -7388,7 +7265,7 @@ mod tests {
         for source in [
             "self.pane_states.get(&id)",
             "self.stashed.get(&id)",
-            "self.busy && self.transcript.session == Some(id)",
+            "self.turn.busy && self.transcript.session == Some(id)",
             "self.rail_live.get(&id)",
         ] {
             assert!(
@@ -7903,7 +7780,7 @@ mod tests {
             .expect("the Esc branch for a running turn");
         assert!(branch.contains("cancel.cancel()"), "Esc cancels the turn");
         assert!(
-            branch.contains("self.busy = false;"),
+            branch.contains("self.turn.busy = false;"),
             "the pane stops claiming a turn is running the moment Esc lands"
         );
         assert!(
@@ -7915,7 +7792,7 @@ mod tests {
             "no second turn starts while the cancel is still unwinding"
         );
         assert!(
-            production.contains("if !self.busy {\n            self.cancel = None;\n            self.drain_pending(cx);"),
+            production.contains("if !self.turn.busy {\n            self.turn.cancel = None;\n            self.drain_pending(cx);"),
             "the turn's own event drains the queue once the cancel is acknowledged"
         );
     }
@@ -7930,7 +7807,7 @@ mod tests {
             .next()
             .expect("production source before the test module");
         assert!(
-            production.contains("self.live.notices.push(\"Operation cancelled.\".to_string());"),
+            production.contains("self.turn.live.notices.push(\"Operation cancelled.\".to_string());"),
             "an empty queue keeps the plain wording"
         );
         let drain = production
@@ -8025,7 +7902,7 @@ mod tests {
             .and_then(|rest| rest.split("agent_bridge::TurnEvent::TurnReverted").next())
             .expect("the Cancelled branch");
         assert!(
-            cancelled.contains("self.live.stopped = true;"),
+            cancelled.contains("self.turn.live.stopped = true;"),
             "the card must say the turn was stopped instead of spinning"
         );
         assert!(
