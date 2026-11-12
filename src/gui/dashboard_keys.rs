@@ -566,7 +566,7 @@ impl Dashboard {
             // sitting in a chat that will never answer it, and the rows the
             // turn opened are deleted rather than redrawn.
             let mut returned = false;
-            if let Some(sid) = self.transcript.session
+            if let Some(sid) = self.chat_session
                 && self.turn.busy
                 && self.turn.live.untouched()
             {
@@ -652,8 +652,8 @@ impl Dashboard {
                         (offset.x, (offset.y + dy).min(px(0.0)).max(-max), max)
                     }
                     None => {
-                        let offset = self.transcript_scroll.offset();
-                        let max = self.transcript_scroll.max_offset().height;
+                        let offset = self.chat_state.scroll.offset();
+                        let max = self.chat_state.scroll.max_offset().height;
                         (offset.x, (offset.y + dy).min(px(0.0)).max(-max), max)
                     }
                 };
@@ -666,7 +666,7 @@ impl Dashboard {
                             });
                         }
                     }
-                    None => self.transcript_scroll.set_offset(gpui::point(x, y)),
+                    None => self.chat_state.scroll.set_offset(gpui::point(x, y)),
                 }
                 // A page key is the reader moving by hand, the same gesture
                 // the terminal binds to its own scroll: up releases the follow
@@ -684,7 +684,7 @@ impl Dashboard {
                 return;
             }
             if key == "k" && ev.keystroke.modifiers.control {
-                if let Some(id) = self.transcript.session {
+                if let Some(id) = self.chat_session {
                     agent_bridge::spawn_clear_messages(self.db_path.clone(), id, self.sink.clone());
                 }
                 return;
@@ -921,7 +921,7 @@ impl Dashboard {
                 // Esc on the usage screen means "back to the conversation".
                 // With nothing to return to it is a no-op, never a window
                 // close (phase-0 lesson).
-                if self.transcript.session.is_some() {
+                if self.chat_session.is_some() {
                     self.screen = Screen::Chat;
                     cx.notify();
                 } else {
@@ -963,7 +963,7 @@ impl Dashboard {
         let mut owners: Vec<Uuid> = Vec::with_capacity(1 + self.pane_states.len());
 
         plans.push(self.plan.document().cloned());
-        owners.push(self.transcript.session.unwrap_or(Uuid::nil()));
+        owners.push(self.chat_session.unwrap_or(Uuid::nil()));
         for (pane_id, pane) in &self.pane_states {
             plans.push(pane.read(cx).plan.document().cloned());
             owners.push(*pane_id);

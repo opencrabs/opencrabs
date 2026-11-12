@@ -42,8 +42,8 @@ impl Dashboard {
         self.turn.live.begin(display_text.clone());
         // A new turn re-arms the follow, the terminal's own rule (#2698).
         self.rearm_transcript_follow();
-        self.transcript.live_expanded = false;
-        self.turn.settle.begin(self.transcript.row_total());
+        self.chat_state.transcript.live_expanded = false;
+        self.turn.settle.begin(self.chat_state.row_total());
         self.turn.busy = true;
         self.sync_composer_hint(cx);
         let cancel = tokio_util::sync::CancellationToken::new();
@@ -71,7 +71,7 @@ impl Dashboard {
     /// starting a second turn over it, which is the rule the terminal applies
     /// to its own per-session state.
     pub(crate) fn running_here(&self, session: Uuid, cx: &App) -> bool {
-        if self.transcript.session == Some(session) && self.turn.busy {
+        if self.chat_session == Some(session) && self.turn.busy {
             return true;
         }
         if self
@@ -193,7 +193,7 @@ impl Dashboard {
     /// both, so what the user reads is exactly what will send (#2629).
     pub(crate) fn queued_for_strip(&self) -> Vec<agent_bridge::PendingMessage> {
         let mut out = self.unsent.clone();
-        if let Some(sid) = self.transcript.session {
+        if let Some(sid) = self.chat_session {
             out.extend(agent_bridge::queue_snapshot(sid));
         }
         out
@@ -231,14 +231,14 @@ impl Dashboard {
         }
         // Boot text has no session to live in yet. It joins the open one here,
         // so there is never a second list the agent cannot see (#2629).
-        if let Some(sid) = self.transcript.session
+        if let Some(sid) = self.chat_session
             && !self.unsent.is_empty()
         {
             for msg in std::mem::take(&mut self.unsent) {
                 agent_bridge::queue_push(sid, msg);
             }
         }
-        let waiting = match self.transcript.session {
+        let waiting = match self.chat_session {
             Some(sid) => agent_bridge::queue_snapshot(sid),
             None => self.unsent.clone(),
         };
@@ -253,7 +253,7 @@ impl Dashboard {
         };
         // No open conversation: keep the queue and open one. The queue drains
         // again when that session lands (`SessionCreated`).
-        let Some(sid) = self.transcript.session else {
+        let Some(sid) = self.chat_session else {
             self.new_session(cx);
             return;
         };
@@ -269,8 +269,8 @@ impl Dashboard {
             self.turn.live.begin(joined.display_text.clone());
             // A flushed queue is a send, so it follows its own answer (#2698).
             self.rearm_transcript_follow();
-            self.transcript.live_expanded = false;
-            self.turn.settle.begin(self.transcript.row_total());
+            self.chat_state.transcript.live_expanded = false;
+            self.turn.settle.begin(self.chat_state.row_total());
             self.turn.busy = true;
             self.sync_composer_hint(cx);
             let cancel = tokio_util::sync::CancellationToken::new();
@@ -593,17 +593,16 @@ impl Dashboard {
 
     /// Whether the open chat is a session with topics turned on.
     pub(crate) fn open_chat_topics_on(&self) -> bool {
-        self.transcript
-            .session
+        self.chat_session
             .is_some_and(|id| self.sessions.is_topic_enabled(id))
     }
 
     /// The session a new topic hangs under (#2686): the leaf that owns the
     /// keyboard, or the chat leaf when the window is unsplit. A split used to
-    /// create the topic under `transcript.session` whatever pane was focused,
+    /// create the topic under the chat's own session whatever pane was focused,
     /// and refused outright when that leaf had topics off.
     pub(crate) fn topic_parent(&self) -> Option<Uuid> {
-        self.split_focus().or(self.transcript.session)
+        self.split_focus().or(self.chat_session)
     }
 
     /// The conversation a new topic would hang under, or `None` when nothing
@@ -622,8 +621,7 @@ impl Dashboard {
         {
             return Some(id);
         }
-        self.transcript
-            .session
+        self.chat_session
             .filter(|id| self.sessions.is_topic_enabled(*id))
     }
 }

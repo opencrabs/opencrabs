@@ -127,7 +127,7 @@ impl Dashboard {
                 // ended is NOT live (#2811): the entry outlives the turn so the
                 // stop survives the switch, and reading presence as work would
                 // spin a row for a turn nobody is running.
-                (self.turn.busy && self.transcript.session == Some(id))
+                (self.turn.busy && self.chat_session == Some(id))
                     || self.stashed.get(&id).is_some_and(|parked| parked.busy),
                 self.pane_states
                     .get(&id)

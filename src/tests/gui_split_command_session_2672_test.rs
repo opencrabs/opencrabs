@@ -109,7 +109,7 @@ fn the_text_runner_takes_the_session_it_was_handed() {
     );
     let body = function_body(src, "fn run_text_command(").expect("its body is closed");
     assert!(
-        !body.contains("self.transcript.session"),
+        !body.contains("self.chat_session"),
         "run_text_command must act on the session it was handed, not re-derive the \
          window's chat (#2672)"
     );

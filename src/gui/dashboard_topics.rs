@@ -120,7 +120,7 @@ impl Dashboard {
     /// window (#2686). Every read and every click resolves against it, so a
     /// pane's strip shows that pane's family and a click moves that pane.
     pub(crate) fn topic_tabs(&self, pane: Option<Uuid>, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let Some(open) = pane.or(self.transcript.session) else {
+        let Some(open) = pane.or(self.chat_session) else {
             return Vec::new();
         };
         let root = self.sessions.parents.get(&open).copied().unwrap_or(open);
@@ -247,7 +247,7 @@ impl Dashboard {
     pub(crate) fn topic_is_busy(&self, id: Uuid, cx: &App) -> bool {
         match self.pane_states.get(&id) {
             Some(pane) => pane.read(cx).busy,
-            None => self.turn.busy && self.transcript.session == Some(id),
+            None => self.turn.busy && self.chat_session == Some(id),
         }
     }
 

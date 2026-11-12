@@ -55,7 +55,7 @@ impl Dashboard {
             // wrong leaf (#2614).
             let before = self.turn.live.notices.len();
             self.run_command(outcome, Some(session), cx);
-            if Some(session) != self.transcript.session
+            if Some(session) != self.chat_state.session()
                 && let Some(pane) = self.pane_states.get(&session).cloned()
             {
                 let split_at = before.min(self.turn.live.notices.len());
@@ -160,7 +160,7 @@ impl Dashboard {
         if let Some(turn) = self.stashed.get(&id) {
             return line(&turn.live);
         }
-        if self.turn.busy && self.transcript.session == Some(id) {
+        if self.turn.busy && self.chat_state.session() == Some(id) {
             return line(&self.turn.live);
         }
         self.rail_live.get(&id).and_then(line)
@@ -425,7 +425,7 @@ impl Dashboard {
         display: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        if Some(session) == self.transcript.session {
+        if Some(session) == self.chat_state.session() {
             self.send_message_showing(text, display, cx);
         } else {
             // The window asked for this turn, not a field: the overlay gate
@@ -472,7 +472,7 @@ impl Dashboard {
         // A send ends the offer (#2708): the buttons belonged to the turn that
         // made them, and leaving them up over a new question would send a
         // stale follow-up into it.
-        if let Some(sid) = self.transcript.session {
+        if let Some(sid) = self.chat_state.session() {
             agent_bridge::options_take(sid);
         }
         // The composer the text came from: when it sends a recalled message,
@@ -485,7 +485,7 @@ impl Dashboard {
         // user reaches for when the agent is offline. A line that starts with
         // a slash never becomes a turn (#2374).
         if let Some(outcome) = commands::parse_command(&text) {
-            self.run_command(outcome, self.transcript.session, cx);
+            self.run_command(outcome, self.chat_state.session(), cx);
             return;
         }
         // `!cmd` runs a shell command here, not a turn, as the terminal does (#2437).
@@ -500,8 +500,8 @@ impl Dashboard {
         // because a command is not a turn: `/new` and `/sessions` still work
         // from a closed topic.
         if self
-            .transcript
-            .session
+            .chat_state
+            .session()
             .is_some_and(|id| self.sessions.is_closed(id))
         {
             self.turn.live
@@ -528,7 +528,7 @@ impl Dashboard {
             // so this text is simply queued behind the turn. The messages the
             // walk took before it go back to wait when the recall is released
             // below, after this one, which is the order they were queued in.
-            match self.transcript.session {
+            match self.chat_state.session() {
                 Some(sid) => {
                     agent_bridge::queue_push(sid, Self::pending_message(text, display.clone()))
                 }
@@ -555,7 +555,7 @@ impl Dashboard {
         // The turn goes to the conversation on screen. With none open there
         // is nothing to write into, so one is created and the text waits in
         // the queue rather than vanishing into a session nobody is looking at.
-        let Some(sid) = self.transcript.session else {
+        let Some(sid) = self.chat_state.session() else {
             self.unsent
                 .push(Self::pending_message(text, display.clone()));
             self.new_session(cx);
@@ -565,12 +565,12 @@ impl Dashboard {
             .begin(display.clone().unwrap_or_else(|| text.clone()));
         // A send is the reader asking for the end of the conversation (#2698).
         self.rearm_transcript_follow();
-        self.transcript.live_expanded = false;
+        self.chat_state.transcript.live_expanded = false;
         // The finished turn must add one row to the session before the live
         // copy may be dropped (see `reload_transcript`). Measured on the
         // session's own row total, which never saturates the way the windowed
         // turn count does (#2705).
-        self.turn.settle.begin(self.transcript.row_total());
+        self.turn.settle.begin(self.chat_state.row_total());
         // A recalled message is the turn's own text now, so it leaves the
         // queue with it; the messages the walk took before it go back to wait
         // (#2637).
@@ -705,7 +705,7 @@ impl Dashboard {
             // another's card (#2616): only the session on screen reaches the
             // window's live turn below.
             if let agent_bridge::TurnEvent::ProgressFor(sid, progress, at) = &ev
-                && self.transcript.session != Some(*sid)
+                && self.chat_state.session() != Some(*sid)
             {
                 self.fold_pane_progress(*sid, progress.clone(), *at, cx);
                 continue;
@@ -717,7 +717,7 @@ impl Dashboard {
                     // The footer's denominator comes from the service, the
                     // same number compaction enforces for this session.
                     if let Some(b) = agent_bridge::bridge() {
-                        self.ctx_max = match self.transcript.session {
+                        self.ctx_max = match self.chat_state.session() {
                             Some(sid) => b.service.context_limit_for_session(sid),
                             None => b
                                 .service
@@ -727,7 +727,7 @@ impl Dashboard {
                     // A window opened on an empty ledger has no conversation
                     // to send into: make one before the first message can be
                     // typed into nothing.
-                    if self.transcript.session.is_none() {
+                    if self.chat_state.session().is_none() {
                         self.new_session(cx);
                     }
                     self.sync_composer_hint(cx);
@@ -751,10 +751,10 @@ impl Dashboard {
                     cx.notify();
                 }
                 agent_bridge::TurnEvent::MessagesCleared(id) => {
-                    if self.transcript.session == Some(id) {
-                        self.transcript.turns = Vec::new();
-                        self.transcript.hidden = 0;
-                        self.transcript.error = None;
+                    if self.chat_state.session() == Some(id) {
+                        self.chat_state.transcript.turns = Vec::new();
+                        self.chat_state.transcript.hidden = 0;
+                        self.chat_state.transcript.error = None;
                     }
                     self.turn.live.notices.push("Session cleared.".to_string());
                     // The card must drop the line of a chat that no longer has
@@ -798,12 +798,12 @@ impl Dashboard {
                 }
                 agent_bridge::TurnEvent::SessionDeleted(id) => {
                     logging::info(&format!("session deleted {id}"));
-                    if self.transcript.session == Some(id) {
+                    if self.chat_session == Some(id) {
                         // The open pane pointed at a row that no longer is:
                         // clear it rather than leave a transcript of a
                         // deleted conversation on screen.
-                        self.transcript.session = None;
-                        self.transcript.turns.clear();
+                        self.set_chat_session(None);
+                        self.chat_state.transcript.turns.clear();
                         self.turn.live.clear();
                         // The deleted conversation's turn, if one ran there,
                         // goes with it: the row it belonged to is gone.
@@ -860,7 +860,7 @@ impl Dashboard {
                     // would have proved the pick landed, and it never moved.
                     // The last prompt size came from the old provider's
                     // tokenizer, so it goes with it (#2644).
-                    if self.transcript.session == Some(session)
+                    if self.chat_state.session() == Some(session)
                         && let Some(b) = agent_bridge::bridge()
                     {
                         self.ctx_max = b.service.context_limit_for_session(session);
@@ -871,7 +871,7 @@ impl Dashboard {
                     // completion never closes a different screen.
                     if self.screen == Screen::Models && self.models_session == Some(session) {
                         self.screen = Screen::Chat;
-                        if self.transcript.session == Some(session) {
+                        if self.chat_state.session() == Some(session) {
                             self.pane_focus = None;
                         } else if self
                             .panes
@@ -1041,7 +1041,7 @@ impl Dashboard {
                     sid,
                     ProgressEvent::QueuedUserMessage { text },
                     _,
-                ) if self.transcript.session == Some(sid) => {
+                ) if self.chat_state.session() == Some(sid) => {
                     self.turn.live.injected.push(text);
                     cx.notify();
                 }
@@ -1057,7 +1057,7 @@ impl Dashboard {
                     ProgressEvent::DetachedTaskStarted { task_id, label },
                     _,
                 ) => {
-                    if Some(sid) == self.transcript.session {
+                    if Some(sid) == self.chat_state.session() {
                         self.turn.live.thinking = false;
                         self.turn.live
                             .push_tool(transcript::ToolCall::detached(task_id, label));
@@ -1115,7 +1115,7 @@ impl Dashboard {
                     // A split pane runs its own turn (#2614): the answer
                     // belongs to that leaf, so the window's footer and its
                     // conversation are left exactly where the user put them.
-                    if self.transcript.session != Some(session) {
+                    if self.chat_state.session() != Some(session) {
                         // The turn finished in a conversation that is not on
                         // screen: its parked card retires here, and the rows
                         // in the ledger are what drawing that session reads
@@ -1138,7 +1138,7 @@ impl Dashboard {
                     // The same numbers, frozen for THIS turn, so the settled
                     // card can print what the turn cost instead of whatever
                     // the session's budget reads later (#2324).
-                    if let Some(sid) = self.transcript.session {
+                    if let Some(sid) = self.chat_state.session() {
                         self.metrics.pending.insert(
                             sid,
                             transcript::TurnMetrics {
@@ -1183,7 +1183,7 @@ impl Dashboard {
                         self.turn.live.tokens_per_sec(),
                         tokens_per_second
                     ));
-                    reload = self.transcript.session;
+                    reload = self.chat_state.session();
                 }
                 agent_bridge::TurnEvent::Failed { session, text } => {
                     // Same as Done: the live line was this turn's, so it goes
@@ -1192,7 +1192,7 @@ impl Dashboard {
                     // A failure is still activity, so the row moves like a
                     // settled turn does (#2666).
                     self.refresh_rail(cx);
-                    if self.transcript.session != Some(session) {
+                    if self.chat_state.session() != Some(session) {
                         // Same as Done: a failure for a conversation that is
                         // not on screen retires its parked card and leaves the
                         // visible turn untouched (#2616).
@@ -1235,7 +1235,7 @@ impl Dashboard {
                     }
                     self.turn.busy = false;
                     self.turn.live.thinking = false;
-                    reload = self.transcript.session;
+                    reload = self.chat_state.session();
                 }
                 agent_bridge::TurnEvent::Cancelled { session } => {
                     // A stop ends the turn, so the card's live line does too
@@ -1255,7 +1255,7 @@ impl Dashboard {
                     if let Some(bridge) = agent_bridge::bridge() {
                         agent_bridge::spawn_record_turn_stopped(bridge.service.clone(), session);
                     }
-                    if self.transcript.session == Some(session) {
+                    if self.chat_state.session() == Some(session) {
                         // No reload on purpose. The dropped future cannot
                         // promise the ledger has the text it streamed, and a
                         // re-read now would wipe what the user can still see.
@@ -1302,7 +1302,7 @@ impl Dashboard {
                     // The stopped turn's rows are deleted and its question is
                     // back in the composer, so the transcript must stop drawing
                     // the bubble the user just took back (#2635).
-                    if self.transcript.session == Some(session) {
+                    if self.chat_state.session() == Some(session) {
                         reload = Some(session);
                     }
                 }
@@ -1315,7 +1315,7 @@ impl Dashboard {
                     // now (#2627). The card has to say so from the first frame:
                     // a recovered turn that painted into a window believing it
                     // was idle would look exactly like the work being lost.
-                    if self.transcript.session == Some(session) {
+                    if self.chat_state.session() == Some(session) {
                         self.turn.live = transcript::LiveTurn::default();
                         // The ledger already holds this question: the process
                         // that asked it died after writing the row. Resuming is
@@ -1372,7 +1372,7 @@ impl Dashboard {
                             session_id,
                             agent_bridge::PendingMessage::system(context_text, display_text),
                         );
-                    } else if self.transcript.session == Some(session_id) {
+                    } else if self.chat_state.session() == Some(session_id) {
                         self.resume_finished_task(session_id, context_text, display_text, cx);
                     } else {
                         self.resume_off_screen_task(session_id, context_text, display_text, cx);
@@ -1403,7 +1403,7 @@ impl Dashboard {
     /// time, which is why the label ticks off the existing 50 ms poll with no
     /// extra timer.
     pub(crate) fn running_tasks_label(&self) -> Option<String> {
-        let session = self.transcript.session?;
+        let session = self.chat_state.session()?;
         self.running_tasks_label_for(session)
     }
 

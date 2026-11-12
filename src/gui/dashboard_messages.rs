@@ -304,7 +304,7 @@ impl Dashboard {
     /// and with nothing picked it copies the row the menu was opened on.
     pub(crate) fn msg_copy(&mut self, id: Uuid, cx: &mut Context<Self>) {
         let texts: Vec<String> = if self.msg_select.is_empty() {
-            self.transcript
+            self.chat_state.transcript
                 .rows
                 .iter()
                 .filter(|m| m.id == id)
@@ -379,7 +379,7 @@ impl Dashboard {
     /// not about whatever pick happens to be open.
     pub(crate) fn forward_destinations_for(&self, id: Uuid) -> Vec<(Uuid, String)> {
         let Some(source) = self
-            .transcript
+            .chat_state.transcript
             .rows
             .iter()
             .find(|m| m.id == id)
@@ -401,7 +401,7 @@ impl Dashboard {
         if !self.msg_select.is_active() {
             self.msg_select.begin();
         }
-        let order: Vec<Uuid> = self.transcript.message_ids();
+        let order: Vec<Uuid> = self.chat_state.transcript.message_ids();
         if shift {
             self.msg_select.extend(&order, &id);
         } else {
@@ -431,11 +431,11 @@ impl Dashboard {
     /// Order matters: the destination reads them the way the source showed
     /// them, not the order they happened to be clicked.
     pub(crate) fn msg_picked_rows(&self) -> Vec<Message> {
-        let order: Vec<Uuid> = self.transcript.message_ids();
+        let order: Vec<Uuid> = self.chat_state.transcript.message_ids();
         self.msg_select
             .picked_in_order(&order)
             .into_iter()
-            .filter_map(|id| self.transcript.rows.iter().find(|m| m.id == id).cloned())
+            .filter_map(|id| self.chat_state.transcript.rows.iter().find(|m| m.id == id).cloned())
             .collect()
     }
 
@@ -445,7 +445,7 @@ impl Dashboard {
         // A single-row forward never enters select mode: there is nothing to
         // count, so the bar would be a step with one option.
         let rows: Vec<Message> = self
-            .transcript
+            .chat_state.transcript
             .rows
             .iter()
             .filter(|m| m.id == id)
@@ -551,7 +551,7 @@ impl Dashboard {
                         // the rows are written, so a reload finds them. Any
                         // other destination is announced only, because the
                         // window runs one conversation at a time.
-                        if this.transcript.session == Some(target) {
+                        if this.chat_state.session() == Some(target) {
                             this.reload_transcript(target, cx);
                         }
                         logging::info(&format!("forward: {landed} row(s) into {target}"));
@@ -592,7 +592,7 @@ impl Dashboard {
         cx.spawn(async move |this, cx| {
             let result = transcript::load_recent(db_path, sid).await;
             this.update(cx, |this, cx| {
-                if this.transcript.session != Some(sid) {
+                if this.chat_state.session() != Some(sid) {
                     return;
                 }
                 match result {
@@ -607,8 +607,8 @@ impl Dashboard {
                         // Taken before `rows` is moved out below: every retry
                         // log names the row total it was comparing against.
                         let total = loaded.total;
-                        this.transcript.hidden = hidden;
-                        this.transcript.turns = turns;
+                        this.chat_state.transcript.hidden = hidden;
+                        this.chat_state.transcript.turns = turns;
                         // The rows now carry the question the card opened the
                         // turn with, so this exchange has been identified
                         // against the DB once. Record it, because the
@@ -616,7 +616,7 @@ impl Dashboard {
                         // dropping the card's own question here would leave
                         // the prompt on neither side of the seam (#2705).
                         let question_landed = this
-                            .transcript
+                            .chat_state.transcript
                             .turns
                             .last()
                             .is_some_and(|turn| transcript::newest_live_turn_matches(turn, &this.turn.live));
@@ -631,7 +631,7 @@ impl Dashboard {
                         // The ordered ids the selection resolves its ranges and
                         // its copy order against, which the visible turns alone
                         // cannot answer once they are folded (#2613).
-                        this.transcript.rows = loaded.rows;
+                        this.chat_state.transcript.rows = loaded.rows;
                         if landed {
                             // The rows are in: the newest turn is the one
                             // that just answered, so it can claim the metrics
@@ -682,7 +682,7 @@ impl Dashboard {
                             cx.spawn(async move |_, cx| {
                                 cx.background_executor().timer(SETTLE_RECHECK).await;
                                 view.update(cx, |this, cx| {
-                                    if this.transcript.session == Some(sid) {
+                                    if this.chat_state.session() == Some(sid) {
                                         this.reload_transcript(sid, cx);
                                     }
                                 })
@@ -701,7 +701,7 @@ impl Dashboard {
                             this.turn.settle.deadline = None;
                         }
                     }
-                    Err(e) => this.transcript.error = Some(e.into()),
+                    Err(e) => this.chat_state.transcript.error = Some(e.into()),
                 }
                 // The turn has landed: follow it only if the reader is still
                 // at the bottom, the terminal's own rule (#2685, #2698).
@@ -722,7 +722,7 @@ impl Dashboard {
         let Some(metrics) = self.metrics.pending.remove(&sid) else {
             return;
         };
-        let Some(turn) = self.transcript.turns.last_mut() else {
+        let Some(turn) = self.chat_state.transcript.turns.last_mut() else {
             return;
         };
         turn.metrics = Some(metrics);
@@ -735,7 +735,7 @@ impl Dashboard {
         // (#2632): a turn that folds its ledger away the moment it finishes
         // reads as if the work never happened. The chevron still folds it, and
         // older turns keep the terminal's folded default.
-        self.transcript.expanded.insert(anchor);
+        self.chat_state.transcript.expanded.insert(anchor);
     }
 
     /// Give a freshly loaded pane the numbers its turn recorded at settle: the

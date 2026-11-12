@@ -398,7 +398,7 @@ fn alt_tab_rotates_the_panes_and_bare_tab_does_not() {
         "the wraparound lives in the core, where it is tested without a window"
     );
     assert!(
-        cycle_fn.contains("self.pane_focus = if Some(next) == self.transcript.session {"),
+        cycle_fn.contains("self.pane_focus = if Some(next) == self.chat_session {"),
         "the chat's own leaf is the pane the caret reaches as None"
     );
 }
@@ -417,7 +417,7 @@ fn the_page_keys_scroll_the_pane_holding_the_caret() {
         "the caret's pane is the one the page keys move"
     );
     assert!(
-        keys.contains("let offset = self.transcript_scroll.offset();"),
+        keys.contains("let offset = self.chat_state.scroll.offset();"),
         "with no pane focused the page keys scroll the chat"
     );
 }

@@ -72,7 +72,7 @@ impl Dashboard {
     /// and the channel key is bookkeeping, so neither belongs in a header, a
     /// pane border or the footer identity.
     pub(crate) fn session_title(&self) -> Option<String> {
-        self.transcript.session.and_then(|id| {
+        self.chat_session.and_then(|id| {
             self.sessions
                 .items
                 .iter()
@@ -80,6 +80,20 @@ impl Dashboard {
                 .and_then(|s| s.title.as_deref())
                 .map(|stored| rail::chip_name(Some(stored), None))
         })
+    }
+
+    /// The one place the open conversation is written.
+    ///
+    /// `chat_state` owns the conversation on screen and `chat_session` mirrors
+    /// it for the window, which decides the rail's mark, the split fill, the
+    /// plan strip and the model picker with it on every frame. A second write
+    /// site would let the mirror drift from its owner, and a stale mirror
+    /// points every one of those surfaces at the wrong conversation, so both
+    /// halves move here and nowhere else: a switch, a new topic and a session
+    /// being deleted all arrive through this door.
+    pub(crate) fn set_chat_session(&mut self, session: Option<Uuid>) {
+        self.chat_state.transcript.session = session;
+        self.chat_session = session;
     }
 
     /// One door for arriving on a conversation (#2481): every surface that
@@ -92,18 +106,18 @@ impl Dashboard {
     /// switch, so its queue and draft survive. The create-topic path always
     /// passes a brand-new id, so the full reset fires there every time.
     pub(crate) fn begin_conversation(&mut self, id: Uuid, cx: &mut Context<Self>) {
-        let switched = self.transcript.session != Some(id);
+        let switched = self.chat_state.session() != Some(id);
         self.sessions.selected = Some(id);
         if switched {
             // The turn on screen belongs to the conversation being left. A
             // turn still running there is parked under it, and the
             // destination's own turn (or an empty slot) comes on screen, so
             // neither the spinner nor the ctx counter follows the switch
-            // (#2616). Runs before `transcript.session` moves: the previous
+            // (#2616). Runs before `set_chat_session` moves it: the previous
             // id is the key the parked turn is stored under.
             swap_visible_turn(
                 &mut self.stashed,
-                self.transcript.session,
+                self.chat_state.session(),
                 id,
                 &mut self.turn,
             );
@@ -114,10 +128,10 @@ impl Dashboard {
             // parked". One line makes the next repro greppable.
             logging::info(&format!(
                 "session switch {:?} -> {id}: {}",
-                self.transcript.session,
+                self.chat_state.session(),
                 if self
-                    .transcript
-                    .session
+                    .chat_state
+                    .session()
                     .is_some_and(|from| self.stashed.contains_key(&from))
                 {
                     "card parked"
@@ -144,7 +158,7 @@ impl Dashboard {
             // were typed in (#2481). The text is filed under the conversation
             // being left and the destination's own draft comes back, so a
             // switch and a switch back return the same half-typed message.
-            let previous = self.transcript.session;
+            let previous = self.chat_state.session();
             let draft = self.editor.update(cx, |ed, cx| ed.take_draft(cx));
             if let Some(previous) = previous {
                 self.drafts.store(previous, draft);
@@ -157,8 +171,8 @@ impl Dashboard {
                 }
             });
         }
-        let previous = self.transcript.session;
-        self.transcript.session = Some(id);
+        let previous = self.chat_state.session();
+        self.set_chat_session(Some(id));
         // The chat is a leaf of the pane tree, so switching conversations
         // moves that leaf instead of leaving a stale pane behind (#2472).
         self.adopt_chat_leaf(previous, id, cx);
@@ -167,10 +181,10 @@ impl Dashboard {
         // a restart no longer lands on whatever the rail listed first (#2444).
         remember_open_session(id);
         agent_bridge::set_composer_session(Some(id));
-        self.transcript.error = None;
-        self.transcript.turns = Vec::new();
-        self.transcript.rows = Vec::new();
-        self.transcript.hidden = 0;
+        self.chat_state.transcript.error = None;
+        self.chat_state.transcript.turns = Vec::new();
+        self.chat_state.transcript.rows = Vec::new();
+        self.chat_state.transcript.hidden = 0;
         // A menu or a pick belongs to the rows that were on screen: keeping
         // either across a conversation switch would act on another chat's
         // messages, so both are dropped here with the rows (#2613, #2608).
@@ -189,10 +203,10 @@ impl Dashboard {
     /// offset and leaves the offset alone, so growth can never be mistaken for
     /// the reader leaving.
     pub(crate) fn follow_chat(&mut self) {
-        let offset = scrolled_from_top(f32::from(self.transcript_scroll.offset().y));
-        let max = f32::from(self.transcript_scroll.max_offset().height);
-        if self.transcript_follow.update(offset, max) {
-            self.transcript_scroll.scroll_to_bottom();
+        let offset = scrolled_from_top(f32::from(self.chat_state.scroll.offset().y));
+        let max = f32::from(self.chat_state.scroll.max_offset().height);
+        if self.chat_state.follow.update(offset, max) {
+            self.chat_state.scroll.scroll_to_bottom();
         }
     }
 
@@ -201,14 +215,14 @@ impl Dashboard {
     /// Sending, opening a conversation and coming back from a panel all say
     /// the same thing: the reader wants the end of it (#2698).
     pub(crate) fn rearm_transcript_follow(&mut self) {
-        self.transcript_follow.rearm();
-        self.transcript_scroll.scroll_to_bottom();
+        self.chat_state.follow.rearm();
+        self.chat_state.scroll.scroll_to_bottom();
     }
 
     /// Stop following because the reader moved by hand: a wheel tick up or a
     /// PageUp (#2698). The TUI drops `auto_scroll` on the same two gestures.
     pub(crate) fn release_transcript_follow(&mut self) {
-        self.transcript_follow.release();
+        self.chat_state.follow.release();
     }
 
     /// One Ctrl+C press (#2308), the terminal's three steps ported whole.
@@ -222,7 +236,7 @@ impl Dashboard {
         let now = std::time::Instant::now();
         let input_empty = self.editor.read(cx).is_empty();
         let action = ctrl_c_action(
-            self.transcript_follow.is_following(),
+            self.chat_state.follow.is_following(),
             input_empty,
             self.ctrl_c_pending,
             now,
@@ -303,7 +317,7 @@ impl Dashboard {
     /// already sits on screen keep going through the window door, because that
     /// path already closes a duplicate pane and moves the chat's own leaf.
     pub(crate) fn open_topic_in_pane(&mut self, pane: Uuid, id: Uuid, cx: &mut Context<Self>) {
-        if Some(pane) == self.transcript.session || Some(id) == self.transcript.session {
+        if Some(pane) == self.chat_session || Some(id) == self.chat_session {
             self.open_session(id, cx);
             return;
         }
@@ -361,7 +375,7 @@ impl Dashboard {
         hand_back: bool,
         cx: &mut Context<Self>,
     ) -> bool {
-        let chat = self.transcript.session;
+        let chat = self.chat_session;
         // `pane_focus` is a cache, so it only counts while the tree the render
         // draws still holds the leaf it names (#2620).
         let caret = self
@@ -490,7 +504,7 @@ impl Dashboard {
             this.update(cx, |this, cx| {
                 // Apply only if the user still sits on this session; a slow
                 // fetch for an abandoned click paints nothing.
-                if this.transcript.session == Some(id) {
+                if this.chat_session == Some(id) {
                     match result {
                         Ok(loaded) => {
                             let (hidden, turns) = transcript::turns_with_origins(
@@ -499,11 +513,11 @@ impl Dashboard {
                                 &this.metrics.by_anchor,
                                 &loaded.origins,
                             );
-                            this.transcript.hidden = hidden;
-                            this.transcript.turns = turns;
-                            this.transcript.rows = loaded.rows;
+                            this.chat_state.transcript.hidden = hidden;
+                            this.chat_state.transcript.turns = turns;
+                            this.chat_state.transcript.rows = loaded.rows;
                         }
-                        Err(e) => this.transcript.error = Some(e.into()),
+                        Err(e) => this.chat_state.transcript.error = Some(e.into()),
                     }
                     // Opening a conversation is a fresh start: follow its end
                     // even if the reader was parked in the last one's history
@@ -533,11 +547,11 @@ impl Dashboard {
     /// anchors the user OPENED, keyed exactly as the TUI keys its override
     /// map (#2155), which is what lets an opened turn survive a reload.
     pub(crate) fn toggle_turn(&mut self, anchor: &str, cx: &mut Context<Self>) {
-        if !self.transcript.expanded.remove(anchor) {
-            self.transcript.expanded.insert(anchor.to_string());
+        if !self.chat_state.transcript.expanded.remove(anchor) {
+            self.chat_state.transcript.expanded.insert(anchor.to_string());
         } else {
             // A folded turn forgets its full details, so reopening starts at the top (#2440).
-            self.transcript.details.remove(anchor);
+            self.chat_state.transcript.details.remove(anchor);
         }
         cx.notify();
     }
@@ -550,19 +564,19 @@ impl Dashboard {
         // A turn in flight owns the chord: the card on screen is the live one,
         // so ctrl+o opens or folds IT, the way it opens a settled turn (#2442).
         if !self.turn.live.is_empty() {
-            self.transcript.live_expanded = !self.transcript.live_expanded;
+            self.chat_state.transcript.live_expanded = !self.chat_state.transcript.live_expanded;
             cx.notify();
             return;
         }
-        let Some(anchor) = self.transcript.newest_anchor().map(str::to_string) else {
+        let Some(anchor) = self.chat_state.transcript.newest_anchor().map(str::to_string) else {
             return;
         };
-        if !self.transcript.expanded.contains(&anchor) {
-            self.transcript.expanded.insert(anchor);
-        } else if self.transcript.details.remove(&anchor) {
-            self.transcript.expanded.remove(&anchor);
+        if !self.chat_state.transcript.expanded.contains(&anchor) {
+            self.chat_state.transcript.expanded.insert(anchor);
+        } else if self.chat_state.transcript.details.remove(&anchor) {
+            self.chat_state.transcript.expanded.remove(&anchor);
         } else {
-            self.transcript.details.insert(anchor);
+            self.chat_state.transcript.details.insert(anchor);
         }
         cx.notify();
     }

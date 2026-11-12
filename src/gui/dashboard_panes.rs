@@ -36,7 +36,7 @@ impl Dashboard {
         self.split_target = Some(target);
         // A fresh split starts with the pane it grows from in front, whatever
         // the last one left behind (#2474).
-        self.pane_focus = if Some(target) == self.transcript.session {
+        self.pane_focus = if Some(target) == self.chat_session {
             None
         } else {
             Some(target)
@@ -63,7 +63,7 @@ impl Dashboard {
     /// entry already named the session, so the pick is answered here and the
     /// second step is skipped.
     pub(crate) fn split_row(&mut self, id: Uuid, layout: Layout, cx: &mut Context<Self>) {
-        let chat = self.transcript.session;
+        let chat = self.chat_session;
         // The pane the split grows from, seeded from the chat's own leaf when
         // the window holds no tree yet: the same rule the chord door walks, so
         // the two doors cannot disagree about the originating pane (#2757).
@@ -98,7 +98,7 @@ impl Dashboard {
     /// The session holding the caret: the chat's own session when no pane
     /// took it (#2474).
     pub(crate) fn focused_pane(&self) -> Option<Uuid> {
-        self.pane_focus.or(self.transcript.session)
+        self.pane_focus.or(self.chat_session)
     }
 
     /// The leaf a split door grows from (#2757).
@@ -114,7 +114,7 @@ impl Dashboard {
     /// chat's own leaf, then the first surviving one. A window with no tree
     /// starts from the chat's leaf, the way the row menu always has.
     pub(crate) fn split_origin(&mut self) -> Option<Uuid> {
-        let chat = self.transcript.session;
+        let chat = self.chat_session;
         if self.panes.is_none()
             && let Some(chat) = chat
         {
@@ -147,7 +147,7 @@ impl Dashboard {
             &layout_store::path(),
             self.panes.as_ref(),
             self.pane_focus,
-            self.transcript.session,
+            self.chat_session,
         );
     }
 
@@ -165,7 +165,7 @@ impl Dashboard {
         let Some(saved) = saved else {
             return;
         };
-        let Some(chat) = self.transcript.session else {
+        let Some(chat) = self.chat_session else {
             return;
         };
         let Some(tree) = saved.panes else {
@@ -211,7 +211,7 @@ impl Dashboard {
     /// the attachment chips into a field the split never draws.
     pub(crate) fn composer_entity(&self, cx: &App) -> Entity<editor::Editor> {
         match self.split_focus() {
-            Some(id) if Some(id) == self.transcript.session => self.editor.clone(),
+            Some(id) if Some(id) == self.chat_session => self.editor.clone(),
             Some(id) => self
                 .pane_states
                 .get(&id)
@@ -247,7 +247,7 @@ impl Dashboard {
             .as_ref()
             .map(|tree| tree.leaves())
             .unwrap_or_default();
-        resolve_split_focus(&leaves, self.pane_focus, self.transcript.session)
+        resolve_split_focus(&leaves, self.pane_focus, self.chat_session)
     }
 
     /// Everything one split pane's draw reads from the window, folded into one
@@ -324,8 +324,8 @@ impl Dashboard {
         // An expanded strip takes room from the transcript under it, and a
         // viewport that shrinks must not leave the newest row clipped while
         // the reader believes they are at the bottom (#2685, #2624).
-        if Some(session) == self.transcript.session {
-            self.transcript_follow.rearm();
+        if Some(session) == self.chat_session {
+            self.chat_state.follow.rearm();
         } else if let Some(pane) = self.pane_states.get(&session) {
             pane.update(cx, |pane, _| pane.follow.rearm());
         }
@@ -354,7 +354,7 @@ impl Dashboard {
         self.split_drag = None;
         self.pane_focus = None;
         self.sync_composer_session();
-        if self.transcript.session == Some(session) {
+        if self.chat_session == Some(session) {
             self.open_session(absorbed, cx);
         } else {
             self.refocus_screen();
@@ -406,7 +406,7 @@ impl Dashboard {
         let next = leaves[index];
         // The chat's own leaf is the pane the caret reaches as `None`, which
         // is how every other surface already names it.
-        self.pane_focus = if Some(next) == self.transcript.session {
+        self.pane_focus = if Some(next) == self.chat_session {
             None
         } else {
             Some(next)
@@ -557,7 +557,7 @@ impl Dashboard {
             self.split_pick = None;
             return;
         };
-        if self.transcript.session == Some(id)
+        if self.chat_session == Some(id)
             || self.panes.as_ref().is_some_and(|tree| tree.contains(id))
         {
             self.turn.live
@@ -732,7 +732,7 @@ impl Dashboard {
         if count > 1 {
             parts.push(format!("[{index}/{count}]"));
         }
-        if self.turn.busy && self.transcript.session == Some(session) {
+        if self.turn.busy && self.chat_session == Some(session) {
             // The GUI runs one conversation at a time, so the only pane that
             // can be mid-turn is the open one.
             parts.push("⠙ working".to_string());
@@ -809,7 +809,7 @@ impl Dashboard {
         // the same text in its own render (#2805), so only this leaf's is
         // built here.
         let mut footers: HashMap<Uuid, SharedString> = HashMap::new();
-        if let Some(chat) = self.transcript.session
+        if let Some(chat) = self.chat_session
             && let Some(i) = leaves.iter().position(|session| *session == chat)
         {
             footers.insert(
@@ -827,7 +827,7 @@ impl Dashboard {
         // its draw reads from the window: a different one redraws the pane,
         // and a pane nobody touched costs one hash.
         for (ix, session) in leaves.iter().enumerate() {
-            if Some(*session) == self.transcript.session {
+            if Some(*session) == self.chat_session {
                 continue;
             }
             let share = tree.leaf_width_share(*session).unwrap_or(1.0);
@@ -847,13 +847,13 @@ impl Dashboard {
         // the chat leaf's, because its state is the window's own.
         let mut chrome: HashMap<Uuid, AnyElement> = HashMap::new();
         // One topic strip per pane, in that pane's own chrome (#2686): the
-        // strip used to resolve `self.transcript.session`, so every pane in a
+        // strip used to resolve `self.chat_session`, so every pane in a
         // wall showed the chat leaf's topics and clicking one moved a
         // conversation the user was not reading.
         let mut tops: HashMap<Uuid, AnyElement> = HashMap::new();
         if interactive {
             for session in &leaves {
-                let is_chat = Some(*session) == self.transcript.session;
+                let is_chat = Some(*session) == self.chat_session;
                 // The pane builds its own topics, plan strip, queue, offers,
                 // running task line and composer (#2805). The window's chrome
                 // below is for the chat leaf alone, whose state is the
@@ -996,7 +996,7 @@ impl Dashboard {
         }
         let mut ctx = PanesCtx {
             chat: Some(chat),
-            chat_session: self.transcript.session,
+            chat_session: self.chat_session,
             chat_title: title,
             states: &self.pane_states,
             // The resolved owner, not the raw id: a stale `pane_focus` named a

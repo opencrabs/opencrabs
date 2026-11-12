@@ -63,7 +63,7 @@ impl Dashboard {
             commands::GuiAction::Text(command) => self.run_text_command(command, arg, session, cx),
             commands::GuiAction::Quit => cx.quit(),
             commands::GuiAction::Evolve => {
-                let session = self.transcript.session.unwrap_or_else(Uuid::nil);
+                let session = self.chat_session.unwrap_or_else(Uuid::nil);
                 self.turn.live
                     .notices
                     .push("Checking for a new release...".to_string());
@@ -250,7 +250,7 @@ impl Dashboard {
     pub(crate) fn stop_turn(&mut self, cx: &mut Context<Self>) {
         // A stop ends the offer too (#2708): the turn that made the buttons is
         // gone, so they can only send a follow-up nobody asked for.
-        for sid in [self.focused_pane(), self.transcript.session]
+        for sid in [self.focused_pane(), self.chat_session]
             .into_iter()
             .flatten()
         {

@@ -14,7 +14,8 @@
 //! 2. [`Turn`]: the live card, `busy`, the cancel handle, the prompt size and
 //!    the handshake above, so the turn on screen and the ones parked under
 //!    their own conversations (#2616) are one shape instead of two. Moved.
-//! 3. The transcript: the rows, their scroll handle and the follow flag.
+//! 3. [`ChatState`]: the transcript, its scroll handle and the follow flag.
+//!    Moved.
 //! 4. The composer handles and the queue, and then the entity that draws all
 //!    of it, which is the step that stops a window repaint from re-walking
 //!    the conversation.
@@ -22,10 +23,12 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
+use gpui::ScrollHandle;
+use opencrabs::ui_core::scroll::Follow;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use super::transcript::{LiveTurn, TurnMetrics};
+use super::transcript::{LiveTurn, TranscriptState, TurnMetrics};
 
 /// The reload handshake that keeps a finished turn's card on screen until the
 /// ledger holds its rows.
@@ -128,5 +131,41 @@ impl Turn {
             cancel: Some(cancel),
             ..Self::default()
         }
+    }
+}
+
+/// The conversation on screen: its rows, the viewport they scroll in, and
+/// whether that viewport keeps following their bottom (#2805).
+///
+/// These three move together because every reader that touches one of them is
+/// asking about the conversation itself: a reload lands rows, a send measures
+/// the row total, a wheel releases the follow. None of them decides which
+/// conversation the window is on, which is why the session id the rail, the
+/// split fill and the plan strip read lives on `Dashboard::chat_session` as a
+/// mirror instead of behind this value.
+#[derive(Default)]
+pub(crate) struct ChatState {
+    /// The turns on screen and the stored rows they were built from.
+    pub(crate) transcript: TranscriptState,
+    /// The viewport the transcript scrolls in.
+    pub(crate) scroll: ScrollHandle,
+    /// Whether the transcript keeps following its newest row (#2685). A one
+    /// shot snap could not: it is consumed by the next layout, and every row
+    /// that lands afterwards is out of view. It is released when the reader
+    /// scrolls up and re-armed when they send, open or come back (#2698).
+    pub(crate) follow: Follow,
+}
+
+impl ChatState {
+    /// The conversation these rows belong to, or `None` before any selection.
+    pub(crate) fn session(&self) -> Option<Uuid> {
+        self.transcript.session
+    }
+
+    /// The session's true row total, measured on the ledger and not on the
+    /// display window, so a conversation longer than `WINDOW` still settles
+    /// (#2705).
+    pub(crate) fn row_total(&self) -> usize {
+        self.transcript.row_total()
     }
 }

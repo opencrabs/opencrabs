@@ -14,10 +14,10 @@ impl Dashboard {
             Screen::Chat => self.screen = Screen::Usage,
             Screen::Usage => {
                 self.screen = Screen::Chat;
-                if let Some(id) = self.transcript.session
-                    && self.transcript.turns.is_empty()
-                    && self.transcript.hidden == 0
-                    && self.transcript.error.is_none()
+                if let Some(id) = self.chat_session
+                    && self.chat_state.transcript.turns.is_empty()
+                    && self.chat_state.transcript.hidden == 0
+                    && self.chat_state.transcript.error.is_none()
                 {
                     self.open_session(id, cx);
                     return;
@@ -725,7 +725,7 @@ impl Dashboard {
     /// answer the same key with the same screen. Needs an open conversation
     /// like every other session-bound command here.
     pub(crate) fn open_cd_picker(&mut self, cx: &mut Context<Self>) {
-        let Some(session) = self.transcript.session else {
+        let Some(session) = self.chat_session else {
             self.turn.live
                 .notices
                 .push("No conversation is open. Type /new first.".to_string());
@@ -759,7 +759,7 @@ impl Dashboard {
     /// task, the ordering the terminal's picker was just fixed to use
     /// (#2526): a slow persistence write must never hold the screen open.
     pub(crate) fn cd_select_here(&mut self, cx: &mut Context<Self>) {
-        let Some(session) = self.transcript.session else {
+        let Some(session) = self.chat_session else {
             self.close_cd_picker(cx);
             return;
         };
@@ -829,7 +829,7 @@ impl Dashboard {
             cx.notify();
             return;
         }
-        let Some(sid) = self.transcript.session else {
+        let Some(sid) = self.chat_session else {
             logging::info("ctrl-g ignored: no open conversation");
             return;
         };

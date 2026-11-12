@@ -930,15 +930,15 @@ struct Dashboard {
     /// It is memory only, like the rail's streaming set: a window restart has
     /// nothing to flash about.
     plan_flash_until: HashMap<Uuid, std::time::Instant>,
-    /// The selected session's transcript and its scroll handle, so a fresh
-    /// load can open at the bottom where the conversation ends.
-    transcript: transcript::TranscriptState,
-    transcript_scroll: ScrollHandle,
-    /// Whether the chat transcript keeps following its bottom (#2685). A one
-    /// shot snap could not: it is consumed by the next layout, and every row
-    /// that lands afterwards is out of view. It is released when the reader
-    /// scrolls up and re-armed when they send, open or come back (#2698).
-    transcript_follow: Follow,
+    /// The conversation on screen: its transcript, its viewport and whether
+    /// that viewport follows the newest row (#2805). One value, so a frame
+    /// that touches the chat stops being a frame that rebuilds the window.
+    chat_state: chat_leaf::ChatState,
+    /// The session `chat_state` holds, mirrored on the window because the
+    /// rail, the split fill, the plan strip and the model picker decide with
+    /// it on every frame. Written in exactly one place, `set_chat_session`, so
+    /// it cannot drift from the owner it mirrors.
+    chat_session: Option<Uuid>,
     /// When the first Ctrl+C armed the quit window (#2308). `None` means no
     /// press is waiting, and the next one only clears and arms again.
     ctrl_c_pending: Option<std::time::Instant>,
@@ -970,8 +970,9 @@ struct Dashboard {
     agent_rx: std::sync::mpsc::Receiver<agent_bridge::TurnEvent>,
     sink: agent_bridge::EventSink,
     /// Set once bootstrap reports the service live. Turns run on the pane's
-    /// open conversation (`transcript.session`), never on a session of the
-    /// bridge's own, so the answer always lands where the question was typed.
+    /// open conversation (`chat_state.transcript.session`), never on a session
+    /// of the bridge's own, so the answer always lands where the question was
+    /// typed.
     agent_ready: bool,
     /// The turn in flight: the card, whether it is still running, the handle
     /// that stops it, the prompt size the provider reported and the reload
@@ -2010,9 +2011,9 @@ impl Render for Dashboard {
         // depends on what the session is bound to, so the lookup is a DB read
         // and runs once per selection, off the paint path; the strip itself
         // then only stats the file.
-        if self.plan_for != self.transcript.session {
-            self.plan_for = self.transcript.session;
-            match self.transcript.session {
+        if self.plan_for != self.chat_session {
+            self.plan_for = self.chat_session;
+            match self.chat_session {
                 Some(sid) => {
                     self.plan.set_path(None);
                     // The lookup reads the DB through the pool, and deadpool
@@ -2515,7 +2516,7 @@ impl Render for Dashboard {
         // view's own `cx` can build them; the transcript takes them by value.
         let mut fold_handlers: std::collections::HashMap<String, transcript::ClickHandler> =
             std::collections::HashMap::new();
-        for anchor in self.transcript.anchors() {
+        for anchor in self.chat_state.transcript.anchors() {
             let key = anchor.clone();
             let handler = cx.listener(move |this, _ev, _window, cx| {
                 this.toggle_turn(&key, cx);
@@ -2538,7 +2539,8 @@ impl Render for Dashboard {
                 {
                     return;
                 }
-                this.transcript.live_expanded = !this.transcript.live_expanded;
+                this.chat_state.transcript.live_expanded =
+                    !this.chat_state.transcript.live_expanded;
                 cx.notify();
             }));
         // One click listener per attachment tile, minted here for the same
@@ -2547,7 +2549,7 @@ impl Render for Dashboard {
         let mut attachment_handlers: std::collections::HashMap<String, transcript::ClickHandler> =
             std::collections::HashMap::new();
         for key in transcript::attachment_paths_with_live(
-            &self.transcript,
+            &self.chat_state.transcript,
             // The window holds exactly the visible conversation's turn: it was
             // parked and handed back by `swap_visible_turn`, so a live card
             // here always belongs to the session on screen (#2616).
@@ -2564,7 +2566,7 @@ impl Render for Dashboard {
         // menu, and while select mode is on a left click toggles it. Minted
         // per frame like the tiles above, because only this `cx` can build a
         // listener and each row has to answer for itself.
-        let msg_order: Vec<Uuid> = self.transcript.message_ids();
+        let msg_order: Vec<Uuid> = self.chat_state.transcript.message_ids();
         let select_on = self.msg_select.is_active();
         let msg_picked: std::collections::HashSet<Uuid> = msg_order
             .iter()
@@ -2642,7 +2644,7 @@ impl Render for Dashboard {
         let chat_share = self
             .panes
             .as_ref()
-            .zip(self.transcript.session)
+            .zip(self.chat_session)
             .and_then(|(tree, id)| tree.leaf_width_share(id))
             .unwrap_or(1.0);
         let primary_width = if chat_share < 1.0 {
@@ -2676,8 +2678,8 @@ impl Render for Dashboard {
                 // row is still never planned wider than its box.
                 let measure = chat_measure_px;
                 let primary = transcript::view(
-                    &self.transcript,
-                    &self.transcript_scroll,
+                    &self.chat_state.transcript,
+                    &self.chat_state.scroll,
                     // The visible conversation's turn, never another's: the
                     // window keeps exactly one and swaps them on a switch
                     // (#2616).
@@ -2737,7 +2739,7 @@ impl Render for Dashboard {
                         // session, so the global slot never moves and this row
                         // kept naming the pair it started with (#2634).
                         let (provider, model) = match agent_bridge::bridge() {
-                            Some(b) => match self.transcript.session {
+                            Some(b) => match self.chat_session {
                                 Some(sid) => {
                                     let (provider, model) =
                                         b.service.provider_pair_for_session(sid);
@@ -4257,7 +4259,7 @@ impl Render for Dashboard {
                 // step prints under its title. Read once: the picker needs the
                 // provider for an unknown id, and the header needs both.
                 let live = agent_bridge::bridge().map(|bridge| {
-                    match self.models_session.or(self.transcript.session) {
+                    match self.models_session.or(self.chat_session) {
                         Some(sid) => (
                             bridge.service.provider_name_for_session(sid),
                             bridge.service.provider_model_for_session(sid),
@@ -4419,8 +4421,7 @@ impl Render for Dashboard {
         // Topics live in the chat: the `...` button sits above the
         // conversation for a session that has them on (#2303).
         let is_topic = self
-            .transcript
-            .session
+            .chat_session
             .is_some_and(|id| self.sessions.parents.contains_key(&id));
         // A split draws the strip inside each pane (#2687): one window row
         // above a wall of panes named the chat's topics over conversations
@@ -4500,7 +4501,7 @@ impl Render for Dashboard {
                 // window keeps exactly the layout it has always had, measure
                 // wrapper included (#2594).
                 if !self.window_is_split() {
-                    let open = self.transcript.session;
+                    let open = self.chat_session;
                     let actions = open.map(|session| self.plan_actions(session, cx));
                     self.plan.refresh();
                     let card = self
@@ -4535,7 +4536,7 @@ impl Render for Dashboard {
                     }
                     // The follow-up offer sits where the queue does, directly
                     // above the composer it sends into (#2708).
-                    if let Some(sid) = self.transcript.session {
+                    if let Some(sid) = self.chat_session {
                         let offers = agent_bridge::options_snapshot(sid);
                         if !offers.is_empty() {
                             let rows = self.option_rows(sid, offers, cx);
@@ -5124,7 +5125,7 @@ impl Render for Dashboard {
                     this.update_prompt = None;
                     this.run_command(
                         commands::Outcome::Run(commands::GuiAction::Evolve),
-                        this.transcript.session,
+                        this.chat_session,
                         cx,
                     );
                 } else {
@@ -5731,12 +5732,15 @@ fn main() {
                         plan_expanded: std::collections::HashSet::new(),
                         announced_task_completions: std::collections::HashSet::new(),
                         plan_flash_until: HashMap::new(),
-                        transcript: transcript::TranscriptState {
-                            session: initial_session,
-                            ..Default::default()
+                        chat_state: chat_leaf::ChatState {
+                            transcript: transcript::TranscriptState {
+                                session: initial_session,
+                                ..Default::default()
+                            },
+                            scroll: ScrollHandle::new(),
+                            follow: Follow::new(),
                         },
-                        transcript_scroll: ScrollHandle::new(),
-                        transcript_follow: Follow::new(),
+                        chat_session: initial_session,
                         ctrl_c_pending: None,
                         // Registered by `main` once the window exists: it needs
                         // a handle on this view to judge the press (#2308).
@@ -7265,7 +7269,7 @@ mod tests {
         for source in [
             "self.pane_states.get(&id)",
             "self.stashed.get(&id)",
-            "self.turn.busy && self.transcript.session == Some(id)",
+            "self.turn.busy && self.chat_session == Some(id)",
             "self.rail_live.get(&id)",
         ] {
             assert!(
@@ -7551,7 +7555,7 @@ mod tests {
             "the cursor starts on the pane being split"
         );
         assert!(
-            !body.contains("self.sessions.cursor = self.transcript.session;"),
+            !body.contains("self.sessions.cursor = self.chat_session;"),
             "the chat's row is not the pane being split"
         );
     }
@@ -7570,7 +7574,7 @@ mod tests {
             "the chord door splits the pane that holds the caret"
         );
         assert!(
-            !body.contains("self.pane_focus.or(self.transcript.session)"),
+            !body.contains("self.pane_focus.or(self.chat_session)"),
             "the resolution stays in `split_origin`, not a second copy here"
         );
         let origin = fn_body(src, "split_origin");
