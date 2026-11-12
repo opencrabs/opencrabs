@@ -29,6 +29,7 @@ mod session_files;
 mod sessions;
 pub(crate) mod skills_dialog;
 pub(crate) mod theme;
+mod theme_lookup;
 pub(crate) mod theme_picker;
 // Boot-apply in tui::runner references presets::by_name at startup.
 pub(crate) mod presets;
@@ -79,20 +80,4 @@ pub use background::{LABEL_CHARS, format_background_tasks};
 pub(crate) use input::queue_line_parts;
 
 pub use theme::Theme;
-
-/// Look up a theme by name for the desktop window: built-in presets first,
-/// then user themes in `~/.opencrabs/themes`. Case-insensitive, like `/theme`.
-pub fn find_theme(name: &str) -> Option<&'static Theme> {
-    presets::by_name(name).or_else(|| user_themes::find(name))
-}
-
-/// Every theme name the desktop window can pick: the built-in presets, then
-/// the user presets. Read on each open of the themes screen, so a new file in
-/// `~/.opencrabs/themes` shows up without a restart.
-pub fn theme_names() -> Vec<&'static str> {
-    presets::built_ins()
-        .iter()
-        .map(|t| t.name)
-        .chain(user_themes::all().into_iter().map(|t| t.name))
-        .collect()
-}
+pub use theme_lookup::{find_theme, theme_names};
