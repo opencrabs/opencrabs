@@ -36,3 +36,9 @@ pub mod session_preview;
 pub mod split;
 pub mod topic_bar;
 pub mod usage;
+// Which window controls a window draws itself, and what each maps to
+// (#2813). The drawing needs a window and lives in the GUI binary; the
+// decision reads only `gpui` types, so it is gated on the same feature as
+// `card`.
+#[cfg(feature = "gui")]
+pub mod window_controls;
