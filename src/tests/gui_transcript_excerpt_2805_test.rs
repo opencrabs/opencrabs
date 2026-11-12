@@ -145,6 +145,10 @@ fn a_stored_rows_copy_text_is_built_once() {
         text.contains("stored_copy_text(*id, role, content)"),
         "the stored row's text comes from the memo"
     );
+    assert!(
+        !memo.contains("hit.to_string()"),
+        "a cache hit hands back the shared text, not a copy of the body"
+    );
 }
 
 /// The source this file pins must still be the file the window builds, so a
@@ -158,5 +162,109 @@ fn the_renderer_under_test_is_the_one_the_window_builds() {
     assert!(
         MESSAGE_REPO.contains("fn find_recent_by_sessions("),
         "the family read is on the message repository"
+    );
+}
+
+/// The transcript draws a window of turns, not every row it loaded. A
+/// keystroke re-renders the view, so the drawn window is the per-character
+/// cost: the terminal draws what its viewport holds and leaves the rest behind
+/// a history marker, and the window does the same (#2805).
+#[test]
+fn the_transcript_draws_a_window_of_turns() {
+    assert!(
+        TRANSCRIPT.contains("const TURN_WINDOW: usize = 24;"),
+        "the drawn window is a named constant, not a literal in the loop"
+    );
+    let body = region_in(TRANSCRIPT, "pub fn view(", "\n#[cfg(test)]\n");
+    assert!(
+        body.contains("if ti < first {"),
+        "the loop skips the turns older than the drawn window"
+    );
+    assert!(
+        body.contains("older_turns_marker(first)"),
+        "the skipped turns are announced, never dropped in silence"
+    );
+    let window = region("pub fn hidden_turns(", "pub fn newest_anchor(");
+    let drawn = region("pub fn drawn_turns(", "pub fn message_ids(");
+    assert!(
+        drawn.contains("&self.turns[self.turns.len() - drawn..]"),
+        "the drawn window is one slice the frame walks"
+    );
+    for (start, end) in [
+        ("pub fn anchors(", "pub fn attachment_paths("),
+        (
+            "pub fn attachment_paths(",
+            "/// Every path whose tile must carry",
+        ),
+    ] {
+        assert!(
+            region(start, end).contains("self.drawn_turns()"),
+            "{start} walks the drawn window, not every loaded turn"
+        );
+    }
+    assert!(
+        window.contains("TURN_WINDOW.saturating_add(self.older_loaded)"),
+        "ctrl+o widens the window instead of replacing it"
+    );
+}
+
+/// A closed rail builds no rows: it is an overlay, and every row carries its
+/// own listeners plus four maps under it, all of it thrown away at the layout
+/// pass when the rail is not drawn (#2805).
+#[test]
+fn a_closed_rail_builds_no_rows() {
+    let window = include_str!("../gui/main.rs");
+    let (_, rail) = window
+        .split_once("let rail_drawn = self.rail_open")
+        .expect("the rail decides whether it is drawn before it is built");
+    for gated in [
+        "let activity = if rail_drawn {",
+        "let plan_progress = if rail_drawn {",
+        "let running_tasks = if rail_drawn {",
+        "let rail_order: Vec<&opencrabs::db::models::Session> = if rail_drawn {",
+    ] {
+        assert!(
+            rail.contains(gated),
+            "{gated} is gated on the rail being drawn"
+        );
+    }
+    assert!(
+        rail.contains("if rail_drawn {\n            self.snapshot_rail_plan_progress();"),
+        "the plan index is only warmed for a rail that draws"
+    );
+}
+
+/// ctrl+o is what the marker tells the user to press, so the chord's first job
+/// is the history the window is not drawing (#2805). Before it, the chord only
+/// knew how to open or fold the newest turn.
+#[test]
+fn the_chord_loads_the_next_window_before_anything_else() {
+    let nav = include_str!("../gui/dashboard_nav.rs");
+    let chord = region_in(
+        nav,
+        "pub(crate) fn toggle_newest_turn(",
+        "if !self.turn.live.is_empty()",
+    );
+    assert!(
+        chord.contains("if self.chat_state.transcript.load_older() {"),
+        "the chord loads older turns first"
+    );
+    assert!(
+        chord.contains("return;"),
+        "loading a window ends the chord instead of folding the card too"
+    );
+    let door = region_in(
+        nav,
+        "pub(crate) fn set_chat_session(",
+        "pub(crate) fn begin_conversation(",
+    );
+    assert!(
+        door.contains("self.chat_state.transcript.older_loaded = 0;"),
+        "another conversation opens at its newest window"
+    );
+    let marker = region("fn older_turns_marker(", "/// The TUI's spinner frames");
+    assert!(
+        marker.contains("older turns hidden (ctrl+o to load)"),
+        "the marker names the chord that reveals it"
     );
 }

@@ -92,6 +92,11 @@ impl Dashboard {
     /// halves move here and nowhere else: a switch, a new topic and a session
     /// being deleted all arrive through this door.
     pub(crate) fn set_chat_session(&mut self, session: Option<Uuid>) {
+        // A conversation opens at its newest window: the history another one
+        // loaded with ctrl+o does not follow it here (#2805).
+        if self.chat_state.transcript.session != session {
+            self.chat_state.transcript.older_loaded = 0;
+        }
         self.chat_state.transcript.session = session;
         self.chat_session = session;
     }
@@ -571,6 +576,15 @@ impl Dashboard {
     /// then folded again (#2440). The first press opens the turn; the second
     /// shows its reasoning whole.
     pub(crate) fn toggle_newest_turn(&mut self, cx: &mut Context<Self>) {
+        // The chord's first job is the history the window is not drawing
+        // (#2805): the transcript draws a screen of turns and leaves the rest
+        // behind a marker, and ctrl+o is what brings the next window back, the
+        // same way the terminal's history marker does. Once nothing is left,
+        // the chord keeps its old meaning.
+        if self.chat_state.transcript.load_older() {
+            cx.notify();
+            return;
+        }
         // A turn in flight owns the chord: the card on screen is the live one,
         // so ctrl+o opens or folds IT, the way it opens a settled turn (#2442).
         if !self.turn.live.is_empty() {

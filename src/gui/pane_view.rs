@@ -376,6 +376,14 @@ impl Render for PaneView {
                     .map(|(_, half)| half),
             )
         };
+        // The pane owns its transcript state, so the click that loads the next
+        // window of turns is minted here (#2805).
+        let older_click: transcript::ClickHandler =
+            std::rc::Rc::new(cx.listener(|this, _ev: &gpui::ClickEvent, _window, cx| {
+                if this.transcript.load_older() {
+                    cx.notify();
+                }
+            }));
         let body = transcript::view(
             &self.transcript,
             &self.scroll,
@@ -389,6 +397,7 @@ impl Render for PaneView {
                 // `drag: None`.
                 drag: Some(self.copy_drag.clone()),
                 wheel: Some(Rc::new(wheel)),
+                older: Some(older_click),
                 ..Default::default()
             },
         )

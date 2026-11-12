@@ -2010,23 +2010,43 @@ impl Render for Dashboard {
         // pane that settles between frames is caught on the next one.
         self.chime_settled_plan_tasks(cx);
 
+        // Rows are built only when the rail is on screen (#2805). It is an
+        // overlay: with it closed the frame still built every row, each with
+        // its own listeners, and every map under it, then threw all of it away
+        // at the layout pass. A keystroke re-renders this view, so that work
+        // was paid per character typed.
+        let rail_drawn = self.rail_open || self.screen == Screen::Onboard;
         // The rail's rows: each carries its own click listener, built in its
         // own loop turn so the `&mut cx` borrow stays legal.
         let mut rail_rows: Vec<AnyElement> = Vec::with_capacity(self.sessions.items.len());
         // The plan chip filters rows by progress, so resolve every session's
         // counts before any pass calls `visible()` (#2719). This also warms
         // the index the badge and bar passes read below.
-        self.snapshot_rail_plan_progress();
+        if rail_drawn {
+            self.snapshot_rail_plan_progress();
+        }
         // What every row says about work in flight (#2636), resolved once
         // before the loop: the index needs `&mut self` and the row iterator
         // holds `&self`.
-        let activity = self.rail_activity_map(cx);
+        let activity = if rail_drawn {
+            self.rail_activity_map(cx)
+        } else {
+            HashMap::new()
+        };
         // The plan bar reads the same cached index the badges just warmed:
         // one stat per row with a plan file, no second loader.
-        let plan_progress = self.rail_plan_progress_map();
+        let plan_progress = if rail_drawn {
+            self.rail_plan_progress_map()
+        } else {
+            HashMap::new()
+        };
         // Detached commands say "work is still running here" even when the
         // turn is idle, so every card answers it without being opened.
-        let running_tasks = self.rail_running_map();
+        let running_tasks = if rail_drawn {
+            self.rail_running_map()
+        } else {
+            HashMap::new()
+        };
         // One clock for the whole pass, so every flashing card blinks on the
         // same frame instead of one behind its neighbour.
         let flash_now = std::time::Instant::now();
@@ -2038,16 +2058,29 @@ impl Render for Dashboard {
         // a row. Chips always paint: a terminal-written `topics_collapsed`
         // flag never blanks the strip, the GUI has no row-era fold (#2701).
         let searching = !self.sessions.filter.trim().is_empty();
-        let visible_ids: std::collections::HashSet<Uuid> =
-            self.sessions.visible().map(|s| s.id).collect();
+        let visible_ids: std::collections::HashSet<Uuid> = if rail_drawn {
+            self.sessions.visible().map(|s| s.id).collect()
+        } else {
+            std::collections::HashSet::new()
+        };
         // The grouped stamp, spend and indent of every card, one pass each.
         // The row loop asked per row and every ask scanned the whole rail, so
         // a 200-row rail paid ~80k item visits a frame for numbers that only
         // change when a message lands (#2817).
-        let grouped_stamps = self.sessions.grouped_activities();
-        let grouped_costs = self.sessions.grouped_costs();
-        let indented_ids = self.sessions.indented_ids();
-        let chip_children: std::collections::HashSet<Uuid> = if searching {
+        let (grouped_stamps, grouped_costs, indented_ids) = if rail_drawn {
+            (
+                self.sessions.grouped_activities(),
+                self.sessions.grouped_costs(),
+                self.sessions.indented_ids(),
+            )
+        } else {
+            (
+                HashMap::new(),
+                HashMap::new(),
+                std::collections::HashSet::new(),
+            )
+        };
+        let chip_children: std::collections::HashSet<Uuid> = if searching || !rail_drawn {
             std::collections::HashSet::new()
         } else {
             self.sessions
@@ -2058,7 +2091,12 @@ impl Render for Dashboard {
                 .collect()
         };
         let mut children_by_parent: HashMap<Uuid, Vec<(Uuid, String)>> = HashMap::new();
-        for s in self.sessions.visible() {
+        let chip_rows: Vec<&opencrabs::db::models::Session> = if rail_drawn {
+            self.sessions.visible().collect()
+        } else {
+            Vec::new()
+        };
+        for s in chip_rows {
             if chip_children.contains(&s.id)
                 && let Some(p) = self.sessions.parents.get(&s.id)
             {
@@ -2075,7 +2113,12 @@ impl Render for Dashboard {
             }
         }
         // Pinned rows first, the rest untouched: the TUI's own order.
-        for s in self.sessions.ordered() {
+        let rail_order: Vec<&opencrabs::db::models::Session> = if rail_drawn {
+            self.sessions.ordered().collect()
+        } else {
+            Vec::new()
+        };
+        for s in rail_order {
             let id = s.id;
             // This child paints as a chip on its parent's card, not a row.
             if chip_children.contains(&id) {
@@ -2521,6 +2564,14 @@ impl Render for Dashboard {
                     !this.chat_state.transcript.live_expanded;
                 cx.notify();
             }));
+        // The marker above the transcript's drawn window loads the next one
+        // (#2805). Minted here because the transcript state lives on this view.
+        let older_click: transcript::ClickHandler =
+            std::rc::Rc::new(cx.listener(|this, _ev: &gpui::ClickEvent, _window, cx| {
+                if this.chat_state.transcript.load_older() {
+                    cx.notify();
+                }
+            }));
         // One click listener per attachment tile, minted here for the same
         // reason as the folds: only this `cx` can build one, and each tile has
         // to open its own file (#2395).
@@ -2676,6 +2727,7 @@ impl Render for Dashboard {
                         message_press: message_press.clone(),
                         selection: select_on.then(|| msg_picked.clone()),
                         menu_dismiss: Some(msg_dismiss.clone()),
+                        older: Some(older_click.clone()),
                     },
                 )
                 .into_any_element();

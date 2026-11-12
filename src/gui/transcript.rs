@@ -662,6 +662,17 @@ impl LiveTurn {
     }
 }
 
+/// Turns the transcript draws before it leaves the rest behind a marker
+/// (#2805).
+///
+/// Every drawn block is an element the layout pass has to measure and shape,
+/// and a keystroke in the composer re-renders this view, so the window that
+/// was loaded (200 rows, ~100 turns) was also the window that was built on
+/// every character typed. The terminal draws only what its viewport holds; the
+/// GUI draws this many turns and loads the next window on ctrl+o, which is the
+/// same shape as `load_more_history` in `tui/app/messaging.rs`.
+const TURN_WINDOW: usize = 24;
+
 /// The transcript's live state, owned by the window's view.
 #[derive(Default)]
 pub struct TranscriptState {
@@ -669,6 +680,9 @@ pub struct TranscriptState {
     pub session: Option<uuid::Uuid>,
     /// Rows the window hid, announced above the transcript.
     pub hidden: usize,
+    /// Extra turn windows the reader asked for with ctrl+o (#2805). The drawn
+    /// window is `TURN_WINDOW + older_loaded`, clamped to what was loaded.
+    pub older_loaded: usize,
     pub turns: Vec<Turn>,
     /// Anchors the user has opened. Folding is the default, so absence means
     /// folded, exactly like `turn_is_folded` in the TUI.
@@ -701,10 +715,37 @@ impl TranscriptState {
         self.hidden + self.rows.len()
     }
 
+    /// How many loaded turns the drawn window leaves behind (#2805).
+    pub fn hidden_turns(&self) -> usize {
+        self.turns
+            .len()
+            .saturating_sub(TURN_WINDOW.saturating_add(self.older_loaded))
+    }
+
+    /// Load the next window of turns. Returns false when nothing is left, so
+    /// the caller can fall through to its own meaning for the chord.
+    pub fn load_older(&mut self) -> bool {
+        if self.hidden_turns() == 0 {
+            return false;
+        }
+        self.older_loaded = self.older_loaded.saturating_add(TURN_WINDOW);
+        true
+    }
+
     /// Newest turn's anchor: the one ctrl-o acts on, as in the TUI where
     /// ctrl+o toggles the newest turn only.
     pub fn newest_anchor(&self) -> Option<&str> {
         self.turns.last().map(|t| t.anchor.as_str())
+    }
+
+    /// The turns the drawn window holds (#2805): what a frame builds and what
+    /// a listener can reach. The older turns wait behind the marker, so minting
+    /// a click for one would be work thrown away at the layout pass.
+    pub fn drawn_turns(&self) -> &[Turn] {
+        let drawn = TURN_WINDOW
+            .saturating_add(self.older_loaded)
+            .min(self.turns.len());
+        &self.turns[self.turns.len() - drawn..]
     }
 
     /// The ids of every stored row on screen, so the window can mint a click
@@ -716,7 +757,10 @@ impl TranscriptState {
 
     /// Every anchor on screen, so the caller can mint one click listener each.
     pub fn anchors(&self) -> Vec<String> {
-        self.turns.iter().map(|t| t.anchor.clone()).collect()
+        self.drawn_turns()
+            .iter()
+            .map(|t| t.anchor.clone())
+            .collect()
     }
 
     /// Every attachment the tiles can open, in the marker's own path form and
@@ -725,7 +769,7 @@ impl TranscriptState {
     /// tile must open its own file, not whichever was planned last.
     pub fn attachment_paths(&self) -> Vec<String> {
         let mut seen: Vec<String> = Vec::new();
-        for turn in &self.turns {
+        for turn in self.drawn_turns() {
             for block in &turn.blocks {
                 if let Block::Msg { content, .. } = block {
                     for path in marker_paths(content) {
@@ -2554,7 +2598,7 @@ fn live_card_body(live: &LiveTurn, drag: Option<&Rc<CopyDrag>>) -> Div {
     };
     let ordinal = {
         let mut texts = d.texts.borrow_mut();
-        texts.push(row_text);
+        texts.push(Rc::from(row_text));
         texts.len() - 1
     };
     let selection = SelectionContext::new(d, ordinal);
@@ -2807,6 +2851,17 @@ fn block_view(
                 "\u{2191} {hidden} older messages hidden",
             ))),
     }
+}
+
+/// The row above the drawn window: how many turns wait, and the chord that
+/// brings them back (#2805).
+fn older_turns_marker(hidden: usize) -> Div {
+    div()
+        .text_xs()
+        .text_color(rgb(palette::current().text_muted))
+        .child(SharedString::from(format!(
+            "\u{2191} {hidden} older turns hidden (ctrl+o to load)",
+        )))
 }
 
 /// The TUI's spinner frames, in its own order
@@ -3113,7 +3168,7 @@ impl PendingClick {
 /// endpoints and produces one clipboard payload for mouse release and keys.
 #[derive(Default)]
 pub struct CopyDrag {
-    texts: RefCell<Vec<String>>,
+    texts: RefCell<Vec<Rc<str>>>,
     /// The press under the pointer, cleared by every release (#2317).
     pending_click: RefCell<Option<PendingClick>>,
     anchor: Cell<Option<TextPoint>>,
@@ -3535,7 +3590,7 @@ fn selectable_row<E: gpui::IntoElement>(
     let selected = drag
         .range()
         .is_some_and(|(lo, hi)| (lo..=hi).contains(&ordinal));
-    let text_len = drag.texts.borrow().get(ordinal).map_or(0, String::len);
+    let text_len = drag.texts.borrow().get(ordinal).map_or(0, |t| t.len());
     let start = drag.clone();
     let extend = drag.clone();
     let release = drag.clone();
@@ -3612,7 +3667,7 @@ fn markdown_copy_text(src: &str) -> String {
 /// cached markdown and joining one `String` per line: 65,000 allocations for
 /// the window the largest local session draws, paid again on every keystroke.
 /// A stored row's text never changes, so one build per row is enough.
-fn stored_copy_text(id: uuid::Uuid, role: &str, content: &str) -> String {
+fn stored_copy_text(id: uuid::Uuid, role: &str, content: &str) -> Rc<str> {
     thread_local! {
         static CACHE: RefCell<HashMap<uuid::Uuid, Rc<str>>> = RefCell::new(HashMap::new());
     }
@@ -3620,8 +3675,12 @@ fn stored_copy_text(id: uuid::Uuid, role: &str, content: &str) -> String {
     /// drawing side by side. Past it the map is dropped whole rather than
     /// growing without a bound.
     const CACHE_ENTRIES: usize = 1024;
+    // The cached `Rc` goes out as itself, never a copy of the body: handing
+    // back a fresh `String` per call re-allocated the whole window (9.8 MB for
+    // the largest local session) on every keystroke, which is the cost this
+    // cache exists to remove (#2805).
     if let Some(hit) = CACHE.with(|c| c.borrow().get(&id).cloned()) {
-        return hit.to_string();
+        return hit;
     }
     let text = strip_markers(content);
     let built: Rc<str> = if role == "assistant" {
@@ -3636,13 +3695,13 @@ fn stored_copy_text(id: uuid::Uuid, role: &str, content: &str) -> String {
         }
         cache.insert(id, built.clone());
     });
-    built.to_string()
+    built
 }
 
 /// The plain text a row copies: what the row shows, without markers or folds.
 /// Assistant rows use the same visible markdown segments as the renderer so a
 /// character offset never points at stripped `##` or backtick source bytes.
-fn block_text(block: &Block) -> String {
+fn block_text(block: &Block) -> Rc<str> {
     match block {
         // A stored row never changes once written, so its copy text is built
         // once and reused (#2805). Rebuilding it per paint meant flattening the
@@ -3658,15 +3717,17 @@ fn block_text(block: &Block) -> String {
         Block::Msg { role, content, .. } => {
             let text = strip_markers(content);
             if role == "assistant" {
-                markdown_copy_text(&text)
+                Rc::from(markdown_copy_text(&text).as_str())
             } else {
-                text.into_owned()
+                Rc::from(&*text)
             }
         }
-        Block::Thinking { content } => content.trim().to_string(),
-        Block::Tools { calls } => calls.iter().map(tool_line).collect::<Vec<_>>().join("\n"),
-        Block::CompletedPlan { plan, .. } => plan.copy_text(),
-        Block::Marker { .. } => String::new(),
+        Block::Thinking { content } => Rc::from(content.trim()),
+        Block::Tools { calls } => {
+            Rc::from(calls.iter().map(tool_line).collect::<Vec<_>>().join("\n"))
+        }
+        Block::CompletedPlan { plan, .. } => Rc::from(plan.copy_text().as_str()),
+        Block::Marker { .. } => Rc::from(""),
     }
 }
 
@@ -3697,6 +3758,10 @@ pub struct ViewHooks {
     /// The live card's own click, minted by the caller for the same reason the
     /// folds are: only the owning view can build one.
     pub live_click: Option<ClickHandler>,
+    /// The marker above the drawn window (#2805). A pane owns its own
+    /// transcript state, so the click that loads the next window has to be
+    /// minted by whichever view holds that state.
+    pub older: Option<ClickHandler>,
 }
 
 pub fn view(
@@ -3719,6 +3784,7 @@ pub fn view(
         message_press,
         selection: selected,
         menu_dismiss,
+        older: older_click,
     } = hooks;
     if let Some(d) = &drag {
         d.texts.borrow_mut().clear();
@@ -3787,6 +3853,20 @@ pub fn view(
             true,
         ));
     }
+    // The turns past the drawn window wait behind their own marker (#2805),
+    // the same bargain the terminal's history marker makes: the window is
+    // what a screen can hold, not everything that was loaded.
+    let drawn = TURN_WINDOW
+        .saturating_add(state.older_loaded)
+        .min(state.turns.len());
+    let first = state.turns.len() - drawn;
+    if first > 0 {
+        let marker = older_turns_marker(first);
+        col = col.child(match older_click {
+            Some(handler) => marker.cursor_pointer().on_click(handler),
+            None => marker,
+        });
+    }
     let last = state.turns.len().saturating_sub(1);
     // A turn still being drawn by the live card is not drawn again from the
     // rows a reload just installed: the persisted copy has the same question,
@@ -3803,6 +3883,9 @@ pub fn view(
     // single session carries no label, so nothing is drawn there.
     let mut shown_origin: Option<&str> = None;
     for (ti, turn) in state.turns.iter().enumerate() {
+        if ti < first {
+            continue;
+        }
         if persisted_turn_is_hidden(ti, last, newest_is_live) {
             continue;
         }
@@ -4032,11 +4115,9 @@ mod tests {
     #[test]
     fn drag_copy_across_blocks_preserves_partial_rows_and_blank_lines() {
         let drag = CopyDrag::default();
-        drag.texts.borrow_mut().extend([
-            "first".to_string(),
-            "second".to_string(),
-            "third".to_string(),
-        ]);
+        drag.texts
+            .borrow_mut()
+            .extend([Rc::from("first"), Rc::from("second"), Rc::from("third")]);
         drag.anchor.set(Some(TextPoint::new(2, 4)));
         drag.end.set(Some(TextPoint::new(0, 2)));
         assert_eq!(drag.copied_text().as_deref(), Some("rst\n\nsecond\n\nthir"));
@@ -4487,7 +4568,7 @@ mod tests {
             drag.clipboard_item()
                 .and_then(|item| item.text())
                 .as_deref(),
-            Some(copied.as_str()),
+            Some(&*copied),
             "drag copy returns the visible checklist, never stored JSON"
         );
     }
@@ -6077,7 +6158,7 @@ mod tests {
             .expect("live_card_body exists");
         let (card_src, _) = card.split_once("\n}\n").expect("live_card_body ends");
         assert!(
-            card_src.contains(["texts.push(row_", "text)"].concat().as_str()),
+            card_src.contains(["texts.push(Rc::from(row_", "text))"].concat().as_str()),
             "the live card's ledger registers its own copy row"
         );
         assert!(

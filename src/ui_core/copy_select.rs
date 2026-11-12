@@ -61,14 +61,18 @@ fn boundary(text: &str, offset: usize) -> usize {
 /// The exact dragged text. Within one row this is only the selected range.
 /// Across rows it keeps #2383's blank-line join and takes the partial first
 /// and last rows rather than snapping the whole gesture to block boundaries.
-pub fn copied_range(texts: &[String], anchor: TextPoint, end: TextPoint) -> Option<String> {
+pub fn copied_range<S: AsRef<str>>(
+    texts: &[S],
+    anchor: TextPoint,
+    end: TextPoint,
+) -> Option<String> {
     let (start, end) = ordered_points(anchor, end)?;
     if start.row >= texts.len() || end.row >= texts.len() {
         return None;
     }
 
     if start.row == end.row {
-        let text = &texts[start.row];
+        let text = texts[start.row].as_ref();
         let lo = boundary(text, start.offset);
         let hi = boundary(text, end.offset);
         return text
@@ -79,6 +83,7 @@ pub fn copied_range(texts: &[String], anchor: TextPoint, end: TextPoint) -> Opti
 
     let mut picked = Vec::with_capacity(end.row - start.row + 1);
     for (row, text) in texts.iter().enumerate().take(end.row + 1).skip(start.row) {
+        let text = text.as_ref();
         let lo = if row == start.row {
             boundary(text, start.offset)
         } else {
@@ -96,12 +101,12 @@ pub fn copied_range(texts: &[String], anchor: TextPoint, end: TextPoint) -> Opti
 
 /// The text of rows `lo..=hi`, joined by blank lines. None when the range is
 /// empty or outside the rows.
-pub fn copied_text(texts: &[String], lo: usize, hi: usize) -> Option<String> {
+pub fn copied_text<S: AsRef<str>>(texts: &[S], lo: usize, hi: usize) -> Option<String> {
     let picked: Vec<&str> = texts
         .iter()
         .skip(lo)
         .take(hi.checked_sub(lo)? + 1)
-        .map(String::as_str)
+        .map(AsRef::as_ref)
         .collect();
     (!picked.is_empty()).then(|| picked.join("\n\n"))
 }
