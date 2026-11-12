@@ -1741,7 +1741,19 @@ pub fn spawn_undo_last_turn(service: Arc<AgentService>, session_id: Uuid, sink: 
 /// the next boot resumed a turn the user had abandoned, painting their last
 /// message again as if it had just been sent. A stop is not a crash: only a
 /// process dying under a running turn keeps its row (#1462).
-pub fn spawn_record_turn_stopped(service: Arc<AgentService>, session_id: Uuid) {
+///
+/// `answer` is what the card had streamed when the stop landed (#2851). The
+/// turn's own writer is gone with its future, so without it the session keeps
+/// the question and the verdict and loses the answer between them: the window
+/// draws the card from memory, and the first read of the session (a switch, a
+/// reload, a restart) can only draw what the rows hold. Writing it before the
+/// marker keeps the exchange in the order it happened, so the reloaded turn
+/// carries the answer the user was reading.
+pub fn spawn_record_turn_stopped(
+    service: Arc<AgentService>,
+    session_id: Uuid,
+    answer: Option<String>,
+) {
     let spawned = std::thread::Builder::new()
         .stack_size(1024 * 1024)
         .name("gui-turn-stopped".into())
@@ -1758,12 +1770,15 @@ pub fn spawn_record_turn_stopped(service: Arc<AgentService>, session_id: Uuid) {
             };
             runtime.block_on(async move {
                 let messages = opencrabs::services::MessageService::new(service.context().clone());
-                if let Err(e) = messages.record_turn_stopped(session_id).await {
+                // What the card streamed goes in first (#2851), so the turn
+                // reads question, answer, verdict, the order the user saw.
+                if let Err(e) = messages.record_stopped_turn(session_id, answer).await {
                     crate::logging::error(&format!("turn stopped row: {e}"));
                 }
                 // The recovery ticket goes with it (#2850): the turn is over
                 // because the user ended it, so no later boot may replay it.
-                let pending = opencrabs::db::PendingRequestRepository::new(service.context().pool());
+                let pending =
+                    opencrabs::db::PendingRequestRepository::new(service.context().pool());
                 if let Err(e) = pending.delete_session(session_id).await {
                     crate::logging::error(&format!("turn stopped recovery row: {e}"));
                 }

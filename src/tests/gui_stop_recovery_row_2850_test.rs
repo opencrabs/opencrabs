@@ -35,8 +35,9 @@ fn the_stop_drops_its_recovery_ticket() {
         "a stopped turn must delete the row that would resume it"
     );
     assert!(
-        body.contains("record_turn_stopped(session_id)"),
-        "and it must still write the verdict row (#2811)"
+        body.contains("record_stopped_turn(session_id, answer)"),
+        "and it must still write the verdict row (#2811), now beside the \
+         answer the card had streamed (#2851)"
     );
 }
 

@@ -706,6 +706,40 @@ impl MessageRepository {
             .context("Failed to get last message")
     }
 
+    /// The newest row of a session that belongs to its current turn (#2851).
+    ///
+    /// A stop writes the answer and then the marker that closes it, so the
+    /// plain last row is that marker and using it would open a second answer
+    /// row for a turn that already has one. `marker_role` is skipped for that
+    /// reason. Rows older than the session's last user question belong to
+    /// earlier turns and are never returned: appending this turn's text to a
+    /// previous answer would draw one reply as two.
+    pub async fn get_last_row_of_current_turn(
+        &self,
+        session_id: Uuid,
+        marker_role: &str,
+    ) -> Result<Option<Message>> {
+        let sid = session_id.to_string();
+        let marker = marker_role.to_string();
+        self.pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                conn.prepare_cached(
+                    "SELECT * FROM messages WHERE session_id = ?1 AND role != ?2 \
+                     AND sequence > (SELECT COALESCE(MAX(sequence), 0) FROM messages \
+                                     WHERE session_id = ?1 AND role = 'user') \
+                     ORDER BY sequence DESC LIMIT 1",
+                )?
+                .query_row(params![sid, marker], Message::from_row)
+                .optional()
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to read the current turn's last row")
+    }
+
     /// The latest message of every session in `ids`, in one round trip.
     ///
     /// The rail paints a preview on every card and repaints on a shared clock,

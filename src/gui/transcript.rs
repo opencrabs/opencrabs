@@ -6088,6 +6088,16 @@ mod tests {
         );
         assert!(!turn.summary.has_error, "a stop is not an error");
         assert_eq!(settled_verdict(turn), ("\u{23f9}", "Stopped"));
+        // The answer the turn had streamed is still the turn's answer, so the
+        // reloaded card shows the text the user was reading when they stopped
+        // it, not a question and a verdict with a hole between them (#2851).
+        let final_idx = turn
+            .final_idx
+            .expect("the streamed answer is the turn's final block");
+        match &turn.blocks[final_idx] {
+            Block::Msg { content, .. } => assert_eq!(content, "partway through"),
+            _ => panic!("the final answer is a message block"),
+        }
     }
 
     /// The stop is asked first (#2811): a turn the user stopped after an error

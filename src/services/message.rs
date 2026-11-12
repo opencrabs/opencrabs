@@ -234,6 +234,84 @@ impl MessageService {
         .await
     }
 
+    /// Record a stopped turn along with the answer it had streamed (#2851).
+    ///
+    /// The answer goes in first, as the turn's assistant row, and the stop
+    /// marker follows it. That order is the whole point: the transcript is
+    /// rebuilt from rows, so a session reloaded after the stop (a switch, a
+    /// restart) could only ever show the question and the verdict while the
+    /// text the user was reading was gone. An empty or blank answer writes
+    /// nothing, because a stop before the first token has nothing to keep.
+    pub async fn record_stopped_turn(
+        &self,
+        session_id: Uuid,
+        answer: Option<String>,
+    ) -> Result<Message> {
+        if let Some(answer) = answer.filter(|text| !text.trim().is_empty()) {
+            self.keep_stopped_answer(session_id, answer).await?;
+        }
+        self.record_turn_stopped(session_id).await
+    }
+
+    /// Put the text a stopped turn had streamed into its assistant row.
+    ///
+    /// A turn opens that row at its start and appends to it as it goes (#964),
+    /// so a stop usually finds one already waiting, empty or part-written.
+    /// Filling it is what keeps the turn one answer: a second row would draw
+    /// the same reply twice. The row is looked up within the current turn only,
+    /// and the stop marker an earlier stop wrote is skipped, so a repeated stop
+    /// cannot open a second answer row for the same turn.
+    ///
+    /// A row that already holds text is never rewritten, only extended. When
+    /// the row already carries the card's text, whether the text ends there or
+    /// the row ran past it, there is nothing to keep. When the card had
+    /// streamed further, the row is a prefix and only the missing tail goes in.
+    /// Anything else means the ledger does not hold this text at all, and
+    /// dropping it there is the loss this closes (#2851), so it goes in as the
+    /// answer's next paragraph.
+    async fn keep_stopped_answer(&self, session_id: Uuid, answer: String) -> Result<()> {
+        let repo = MessageRepository::new(self.context.pool());
+        let last = repo
+            .get_last_row_of_current_turn(session_id, TURN_STOPPED_ROLE)
+            .await
+            .context("Failed to read the stopped turn's last row")?;
+
+        if let Some(row) = last.filter(|row| row.role == "assistant") {
+            if row.content.trim().is_empty() {
+                repo.append_content(row.id, answer.as_str())
+                    .await
+                    .context("Failed to keep the stopped turn's answer")?;
+                return Ok(());
+            }
+            // The row already carries this text. Appends land at iteration
+            // boundaries, so the row can run ahead of the card and hold the
+            // text somewhere before its end: writing it again would draw the
+            // same reply twice.
+            if row.content.contains(answer.as_str()) {
+                return Ok(());
+            }
+            // The card had streamed further than the row: finish it.
+            if let Some(tail) = answer.strip_prefix(row.content.as_str()) {
+                repo.append_content(row.id, tail)
+                    .await
+                    .context("Failed to keep the stopped turn's answer")?;
+                return Ok(());
+            }
+            let joined = format!("\n\n{answer}");
+            repo.append_content(row.id, joined.as_str())
+                .await
+                .context("Failed to keep the stopped turn's answer")?;
+            return Ok(());
+        }
+
+        // No row to fill: the turn stopped before it opened one, which is the
+        // shape that lost the answer outright (#2851). The text the user read
+        // becomes its own row.
+        self.create_message(session_id, "assistant".to_string(), answer)
+            .await?;
+        Ok(())
+    }
+
     /// The newest `limit` messages of a session, oldest-first. Reads only the
     /// tail, so a session switch costs `limit` rows whatever the history size.
     pub async fn list_recent_messages_for_session(

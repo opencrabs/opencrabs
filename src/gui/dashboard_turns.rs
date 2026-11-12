@@ -1253,6 +1253,30 @@ impl Dashboard {
                     reload = self.chat_state.session();
                 }
                 agent_bridge::TurnEvent::Cancelled { session } => {
+                    // What the card had streamed when the stop landed (#2851).
+                    // The cancel drops the turn's future, so nothing else will
+                    // ever write this text, and every read of the session after
+                    // the stop (a switch, a reload, a restart) can only draw
+                    // what the rows hold. Capture it before the branches below
+                    // settle the card, in the order the rail resolves which
+                    // card owns the turn: a split leaf first, then the parked
+                    // copy of a switched-away turn, then the window's own.
+                    let stopped_answer = {
+                        let pane_answer = self
+                            .pane_states
+                            .get(&session)
+                            .and_then(|pane| pane.read(cx).live.answer().map(str::to_string));
+                        let parked_answer = self
+                            .stashed
+                            .get(&session)
+                            .and_then(|parked| parked.live.answer().map(str::to_string));
+                        let live_answer = if self.chat_state.session() == Some(session) {
+                            self.turn.live.answer().map(str::to_string)
+                        } else {
+                            None
+                        };
+                        pane_answer.or(parked_answer).or(live_answer)
+                    };
                     // A stop ends the turn, so the card's live line does too
                     // (#2718).
                     self.rail_live.remove(&session);
@@ -1263,19 +1287,28 @@ impl Dashboard {
                     self.refresh_rail(cx);
                     self.metrics.pending.remove(&session);
                     // The verdict needs a row (#2811). A cancelled turn writes
-                    // no error and no answer, so without this the turn settles
-                    // as Finished and the stop vanishes on the next reload.
-                    // Written for the cancelled session, whichever one is on
-                    // screen, because the turn was real where it ran.
+                    // no error and no answer of its own, so without this the
+                    // turn settles as Finished and the stop vanishes on the
+                    // next reload. Written for the cancelled session, whichever
+                    // one is on screen, because the turn was real where it ran.
+                    // The text the card had streamed goes with it (#2851): the
+                    // future that would have written it is gone, so this call is
+                    // the only thing that can put it in the ledger, and the
+                    // reload after the stop reads nothing else.
                     if let Some(bridge) = agent_bridge::bridge() {
-                        agent_bridge::spawn_record_turn_stopped(bridge.service.clone(), session);
+                        agent_bridge::spawn_record_turn_stopped(
+                            bridge.service.clone(),
+                            session,
+                            stopped_answer,
+                        );
                     }
                     if self.chat_state.session() == Some(session) {
-                        // No reload on purpose. The dropped future cannot
-                        // promise the ledger has the text it streamed, and a
-                        // re-read now would wipe what the user can still see.
-                        // The card keeps its stream, with the clock and rate
-                        // frozen where the stop landed.
+                        // No reload on purpose. The write above runs on its own
+                        // thread, so a read taken from this frame can land
+                        // before the answer row exists and draw the turn
+                        // without it. The card keeps its stream, with the clock
+                        // and rate frozen where the stop landed, and the next
+                        // read of this session finds the answer in the ledger.
                         self.turn.live.finalize(None);
                         self.turn.busy = false;
                         self.turn.live.thinking = false;
