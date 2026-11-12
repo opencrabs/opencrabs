@@ -142,9 +142,12 @@ use gpui::{
     Entity, ExternalPaths, FocusHandle, Image, KeyDownEvent, KeystrokeEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Point, ScrollDelta,
     ScrollHandle, ScrollWheelEvent, SharedString, Stateful, TitlebarOptions, Window, WindowBounds,
-    WindowControlArea, WindowDecorations, WindowOptions, div, point, prelude::*, px, relative,
-    rems, rgb, rgba, size,
+    WindowControlArea, WindowOptions, div, point, prelude::*, px, rems, rgb, rgba, size,
 };
+// The decoration request is Linux-only (#2813): every other platform keeps the
+// server-side decorations its window manager already draws.
+#[cfg(target_os = "linux")]
+use gpui::WindowDecorations;
 use opencrabs::brain::agent::ProgressEvent;
 use opencrabs::brain::tools::suggest_options::SuggestionItem;
 use opencrabs::utils::drop_landing::human_size;
