@@ -83,6 +83,7 @@ mod topic_icons;
 mod topic_tabs;
 mod transcript;
 mod usage_view;
+mod window_controls;
 
 use crate::composer_view::{
     command_popup_view, composer_hint_for, emoji_popup_view, options_strip, queue_strip,
@@ -141,7 +142,8 @@ use gpui::{
     Entity, ExternalPaths, FocusHandle, Image, KeyDownEvent, KeystrokeEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Point, ScrollDelta,
     ScrollHandle, ScrollWheelEvent, SharedString, Stateful, TitlebarOptions, Window, WindowBounds,
-    WindowOptions, div, point, prelude::*, px, rems, rgb, rgba, size,
+    WindowControlArea, WindowDecorations, WindowOptions, div, point, prelude::*, px, relative,
+    rems, rgb, rgba, size,
 };
 use opencrabs::brain::agent::ProgressEvent;
 use opencrabs::brain::tools::suggest_options::SuggestionItem;
@@ -2530,6 +2532,14 @@ impl Render for Dashboard {
             .bg(rgb(palette::current().panel))
             .border_b_1()
             .border_color(rgb(palette::current().panel_hi))
+            // The header is the window's own bar on Linux, where the
+            // compositor draws none (#2813), so a press on it moves the
+            // window instead of selecting text. On the chat screen there is no
+            // header (#2596), and the compositor's own gesture moves it there.
+            .window_control_area(WindowControlArea::Drag)
+            .on_mouse_down(MouseButton::Left, |_ev, window, _cx| {
+                window.start_window_move()
+            })
             .child(icon::banner_logo())
             .child(div().text_lg().child(SharedString::from(label)));
 
@@ -5275,6 +5285,21 @@ impl Render for Dashboard {
                 find::channel_hint(state.query(), &self.finder_channels),
             ));
         }
+        // The window controls are the frame's, not a screen's (#2813): drawn
+        // over the top-right corner so no screen's layout owns them, and before
+        // the menus and modals below so a scrim that owns the pointer also owns
+        // the buttons.
+        if let Some(cluster) =
+            window_controls::cluster(window.window_decorations(), |control, _ev, window, cx| {
+                match control {
+                    window_controls::Control::Minimize => window.minimize_window(),
+                    window_controls::Control::Maximize => window.zoom_window(),
+                    window_controls::Control::Close => cx.quit(),
+                }
+            })
+        {
+            root = root.child(cluster);
+        }
         // Both context menus live here, at the window root, never inside the
         // row or column that asked for them (#2690). Their cards are placed at
         // the press point in window coordinates, and a parent's own frame would
@@ -5524,6 +5549,17 @@ fn main() {
                     appears_transparent: false,
                     traffic_light_position: None,
                 }),
+                // A Wayland compositor that does not implement
+                // `zxdg_decoration_manager_v1` (mutter is one) never answers a
+                // decoration request, so asking for server-side decorations
+                // yields a window with no chrome at all: no title bar and no
+                // minimise, maximise or close button (#2813). Client-side is
+                // the only request that guarantees the controls exist, and the
+                // window draws them itself in `window_controls`.
+                #[cfg(target_os = "linux")]
+                window_decorations: Some(WindowDecorations::Client),
+                #[cfg(not(target_os = "linux"))]
+                window_decorations: None,
                 ..Default::default()
             },
             |window, cx| {
