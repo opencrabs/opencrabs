@@ -10,10 +10,10 @@
 //! removed the chat screen's title row in #2596 and does not want it back.
 
 use gpui::{App, ClickEvent, Decorations, Div, Stateful, Window, div, prelude::*, rgb};
-use opencrabs::ui_core::window_controls::{controls, glyph};
 /// The window's own `match` names the controls, so the type is re-exported
 /// rather than reached through the library path at every use.
 pub use opencrabs::ui_core::window_controls::Control;
+use opencrabs::ui_core::window_controls::{controls, glyph};
 
 use crate::palette;
 
