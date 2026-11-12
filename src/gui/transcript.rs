@@ -57,6 +57,36 @@ use crate::markdown;
 /// history stays behind the `Marker` block.
 const WINDOW: usize = 200;
 
+/// Lines of one message body a folded turn draws before it hands the rest to
+/// the reader (#2805). The pane builds one element per line, so a window that
+/// holds a 1.6 MB row built tens of thousands of them on every keystroke: the
+/// newest 200 rows of the largest local session measure 64,827 lines, and the
+/// composer paid that on every character typed. The TUI never shows more than
+/// an excerpt of its working-out for the same reason; expanding the turn is
+/// what asks for the whole thing.
+const MSG_EXCERPT_LINES: usize = 20;
+
+/// Cut a body at `max` lines and report how many lines were left out. The cut
+/// is always announced with its own count: a silent one reads as eaten content
+/// (the #904 trap).
+fn excerpt_lines(content: &str, max: usize) -> (std::borrow::Cow<'_, str>, usize) {
+    let mut seen = 0usize;
+    for (i, ch) in content.char_indices() {
+        if ch != '\n' {
+            continue;
+        }
+        seen += 1;
+        if seen == max {
+            let hidden = content[i + 1..].lines().count();
+            if hidden == 0 {
+                return (std::borrow::Cow::Borrowed(content), 0);
+            }
+            return (std::borrow::Cow::Borrowed(&content[..i]), hidden);
+        }
+    }
+    (std::borrow::Cow::Borrowed(content), 0)
+}
+
 /// Char-safe truncation for collapsed content (#2271: never slice bytes).
 fn fit(s: &str, max_chars: usize) -> String {
     let mut out = String::new();
@@ -776,22 +806,27 @@ pub async fn load_recent(
                                 origins: HashMap::new(),
                             });
                         }
-                        let mut rows: Vec<Message> = Vec::new();
-                        let mut origins: HashMap<uuid::Uuid, String> = HashMap::new();
+                        let ids: Vec<uuid::Uuid> = family.iter().map(|(id, _)| *id).collect();
                         let mut total: i64 = 0;
-                        for (id, title) in family {
-                            let label = topic_family_label(&title);
-                            let window = repo.find_recent_by_session(id, WINDOW).await?;
-                            total += repo.count_by_session(id).await?;
-                            for row in &window {
-                                // A label is only worth carrying when the
-                                // family has more than one name to tell apart,
-                                // which is exactly this branch.
-                                if let Some(label) = &label {
-                                    origins.insert(row.id, label.clone());
-                                }
+                        for id in &ids {
+                            total += repo.count_by_session(*id).await?;
+                        }
+                        // One conversation, one window (#2805). A window per
+                        // member drew 3,627 rows for a 44-member family into a
+                        // pane built to show 200, and every one of them was
+                        // rebuilt on every keystroke.
+                        let mut rows = repo.find_recent_by_sessions(&ids, WINDOW).await?;
+                        let labels: HashMap<uuid::Uuid, String> = family
+                            .iter()
+                            .filter_map(|(id, title)| {
+                                topic_family_label(title).map(|label| (*id, label))
+                            })
+                            .collect();
+                        let mut origins: HashMap<uuid::Uuid, String> = HashMap::new();
+                        for row in &rows {
+                            if let Some(label) = labels.get(&row.session_id) {
+                                origins.insert(row.id, label.clone());
                             }
-                            rows.extend(window);
                         }
                         // Same order the TUI's reader gets from SQL. The id
                         // breaks a tie between two rows stamped the same
@@ -1866,9 +1901,20 @@ fn bubble(
     content_width: f32,
     handlers: &HashMap<String, ClickHandler>,
     selection: Option<&SelectionContext>,
+    full: bool,
 ) -> Div {
-    let paths = marker_paths(content);
-    let text = strip_markers(content);
+    // The cut happens on the raw source, before anything walks it (#2805): a
+    // folded turn reads its first rows and the rest is one click away, so
+    // `strip_markers` and the markdown parse only ever see the excerpt instead
+    // of the tens of kilobytes a single stored answer can carry. The copy path
+    // still reads the whole block, so a drag is never handed the cut text.
+    let (content, hidden) = if full {
+        (std::borrow::Cow::Borrowed(content), 0)
+    } else {
+        excerpt_lines(content, MSG_EXCERPT_LINES)
+    };
+    let paths = marker_paths(&content);
+    let text = strip_markers(&content);
     // `min_w_0` lets a wide row shrink to the pane instead of pushing it wide,
     // and `flex_shrink_0` stops the column squeezing a row below the height its
     // tiles reserved. Before #2395 the row had neither, so a tile laid out
@@ -1913,6 +1959,17 @@ fn bubble(
     if !paths.is_empty() {
         col = col.child(history_attachments(&paths, attachment_width, handlers));
     }
+    if hidden > 0 {
+        col = col.child(
+            div()
+                .text_xs()
+                .italic()
+                .text_color(rgb(palette::current().text_muted))
+                .child(SharedString::from(format!(
+                    "\u{2026} +{hidden} more lines hidden (click the turn header to read them)",
+                ))),
+        );
+    }
     col
 }
 
@@ -1928,9 +1985,18 @@ fn forward_block(
     content_width: f32,
     handlers: &HashMap<String, ClickHandler>,
     selection: Option<&SelectionContext>,
+    full: bool,
 ) -> Div {
-    let paths = marker_paths(content);
-    let text = strip_markers(content);
+    // A forward carries the same excerpt rule as any other body (#2805): a
+    // pasted report is exactly the shape that made a frame expensive, so the
+    // cut lands on the source before anything walks it.
+    let (content, hidden) = if full {
+        (std::borrow::Cow::Borrowed(content), 0)
+    } else {
+        excerpt_lines(content, MSG_EXCERPT_LINES)
+    };
+    let paths = marker_paths(&content);
+    let text = strip_markers(&content);
     let attachment_width = (content_width - 2.0 * MESSAGE_PAD_X).max(0.0);
     let mut col = div()
         .flex()
@@ -1959,6 +2025,17 @@ fn forward_block(
     }
     if !paths.is_empty() {
         col = col.child(history_attachments(&paths, attachment_width, handlers));
+    }
+    if hidden > 0 {
+        col = col.child(
+            div()
+                .text_xs()
+                .italic()
+                .text_color(rgb(palette::current().text_muted))
+                .child(SharedString::from(format!(
+                    "\u{2026} +{hidden} more lines hidden (click the turn header to read them)",
+                ))),
+        );
     }
     col
 }
@@ -2687,6 +2764,7 @@ fn block_view(
     content_width: f32,
     handlers: &HashMap<String, ClickHandler>,
     selection: Option<&SelectionContext>,
+    full: bool,
 ) -> Div {
     match block {
         Block::Msg {
@@ -2694,13 +2772,21 @@ fn block_view(
             time,
             forward: Some(mark),
             ..
-        } => forward_block(mark, content, time, content_width, handlers, selection),
+        } => forward_block(mark, content, time, content_width, handlers, selection, full),
         Block::Msg {
             role,
             content,
             time,
             ..
-        } => bubble(role, content, time, content_width, handlers, selection),
+        } => bubble(
+            role,
+            content,
+            time,
+            content_width,
+            handlers,
+            selection,
+            full,
+        ),
         Block::Thinking { content } => thinking_block(content, false),
         Block::Tools { calls } => tools_block(calls, selection),
         Block::CompletedPlan { message_id, plan } => div().child(
@@ -2837,7 +2923,7 @@ fn live_block(
         selectable_row(
             d,
             ordinal,
-            block_view(block, content_width, handlers, Some(&selection)),
+            block_view(block, content_width, handlers, Some(&selection), true),
         )
         .into_any_element(),
     )
@@ -2906,7 +2992,7 @@ fn live_view(
         // can see, so it is the only copy there is to drag.
         col = col.child(match live_block(drag, &block, content_width, handlers) {
             Some(row) => row,
-            None => block_view(&block, content_width, handlers, None).into_any_element(),
+            None => block_view(&block, content_width, handlers, None, true).into_any_element(),
         });
     }
     for notice in &live.notices {
@@ -2931,7 +3017,7 @@ fn live_view(
         };
         col = col.child(match live_block(drag, &block, content_width, handlers) {
             Some(row) => row,
-            None => block_view(&block, content_width, handlers, None).into_any_element(),
+            None => block_view(&block, content_width, handlers, None, true).into_any_element(),
         });
     }
     // ONE card for the whole turn: header, body when open, footer. The three
@@ -2956,7 +3042,7 @@ fn live_view(
         };
         col = col.child(match live_block(drag, &block, content_width, handlers) {
             Some(row) => row,
-            None => block_view(&block, content_width, handlers, None).into_any_element(),
+            None => block_view(&block, content_width, handlers, None, true).into_any_element(),
         });
     }
     col
@@ -3511,11 +3597,56 @@ fn markdown_copy_text(src: &str) -> String {
     segments.join("\n")
 }
 
+/// Copy text for a stored row, kept by message id (#2805).
+///
+/// The pane asks for every row's copy text on every paint while drag-to-copy is
+/// armed, which is always. Building it means stripping markers, walking the
+/// cached markdown and joining one `String` per line: 65,000 allocations for
+/// the window the largest local session draws, paid again on every keystroke.
+/// A stored row's text never changes, so one build per row is enough.
+fn stored_copy_text(id: uuid::Uuid, role: &str, content: &str) -> String {
+    thread_local! {
+        static CACHE: RefCell<HashMap<uuid::Uuid, Rc<str>>> = RefCell::new(HashMap::new());
+    }
+    /// Rows a window can show at once is 200; the headroom covers panes
+    /// drawing side by side. Past it the map is dropped whole rather than
+    /// growing without a bound.
+    const CACHE_ENTRIES: usize = 1024;
+    if let Some(hit) = CACHE.with(|c| c.borrow().get(&id).cloned()) {
+        return hit.to_string();
+    }
+    let text = strip_markers(content);
+    let built: Rc<str> = if role == "assistant" {
+        Rc::from(markdown_copy_text(&text).as_str())
+    } else {
+        Rc::from(&*text)
+    };
+    CACHE.with(|c| {
+        let mut cache = c.borrow_mut();
+        if cache.len() >= CACHE_ENTRIES {
+            cache.clear();
+        }
+        cache.insert(id, built.clone());
+    });
+    built.to_string()
+}
+
 /// The plain text a row copies: what the row shows, without markers or folds.
 /// Assistant rows use the same visible markdown segments as the renderer so a
 /// character offset never points at stripped `##` or backtick source bytes.
 fn block_text(block: &Block) -> String {
     match block {
+        // A stored row never changes once written, so its copy text is built
+        // once and reused (#2805). Rebuilding it per paint meant flattening the
+        // whole window again on every keystroke: the markdown cache saves the
+        // parse, not the per-line `String`s and the join, and the largest local
+        // session has 65,000 of those lines on screen.
+        Block::Msg {
+            role,
+            content,
+            message_id: Some(id),
+            ..
+        } => stored_copy_text(*id, role, content),
         Block::Msg { role, content, .. } => {
             let text = strip_markers(content);
             if role == "assistant" {
@@ -3645,6 +3776,7 @@ pub fn view(
             content_width,
             &attachment_handlers,
             None,
+            true,
         ));
     }
     let last = state.turns.len().saturating_sub(1);
@@ -3715,14 +3847,18 @@ pub fn view(
                     let selection = SelectionContext::new(d, ordinal);
                     match block {
                         Block::Thinking { content } => thinking_block(content, full),
-                        _ => {
-                            block_view(block, content_width, &attachment_handlers, Some(&selection))
-                        }
+                        _ => block_view(
+                            block,
+                            content_width,
+                            &attachment_handlers,
+                            Some(&selection),
+                            !folded,
+                        ),
                     }
                 }
                 _ => match block {
                     Block::Thinking { content } => thinking_block(content, full),
-                    _ => block_view(block, content_width, &attachment_handlers, None),
+                    _ => block_view(block, content_width, &attachment_handlers, None, !folded),
                 },
             };
             // A stored row carries its own menu anchor and pick box (#2613).

@@ -109,6 +109,47 @@ impl MessageRepository {
         Ok(messages)
     }
 
+    /// The newest rows across a set of sessions, newest first, capped at
+    /// `limit`. A session that has topics reads as one conversation, and
+    /// reading each member's own window put 3,627 rows into a pane that shows
+    /// 200 of them (#2805).
+    pub async fn find_recent_by_sessions(
+        &self,
+        session_ids: &[Uuid],
+        limit: usize,
+    ) -> Result<Vec<Message>> {
+        if session_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ids: Vec<String> = session_ids.iter().map(|id| id.to_string()).collect();
+        let placeholders = vec!["?"; ids.len()].join(",");
+        let sql = format!(
+            "SELECT * FROM messages WHERE session_id IN ({placeholders}) \
+             ORDER BY created_at DESC, id DESC LIMIT ?"
+        );
+        let limit = limit as i64;
+        let mut messages = self
+            .pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                let mut values: Vec<rusqlite::types::Value> = ids
+                    .into_iter()
+                    .map(rusqlite::types::Value::Text)
+                    .collect();
+                values.push(rusqlite::types::Value::Integer(limit));
+                let mut stmt = conn.prepare_cached(&sql)?;
+                let rows = stmt.query_map(params_from_iter(values.iter()), Message::from_row)?;
+                rows.collect::<std::result::Result<Vec<_>, _>>()
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to find recent messages by sessions")?;
+        messages.reverse();
+        Ok(messages)
+    }
+
     /// Recent conversation rows for tools that must not expose plan history.
     /// Filtering in SQL preserves the requested tail size.
     pub async fn find_recent_without_completed_plans(

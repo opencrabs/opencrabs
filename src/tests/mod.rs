@@ -387,6 +387,7 @@ pub mod gui_theme_config_test;
 pub mod gui_themes_screen_test;
 pub mod gui_tls_provider_2452_test;
 pub mod gui_topic_isolation_test;
+pub mod gui_transcript_excerpt_2805_test;
 pub mod gui_two_agents_migrations_2297_test;
 pub mod headless_tool_surface_test;
 pub mod help_catalog_test;
