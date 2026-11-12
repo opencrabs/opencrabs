@@ -217,6 +217,30 @@ impl PendingRequestRepository {
         Ok(())
     }
 
+    /// Delete every row of one session (#2850).
+    ///
+    /// A turn the user stopped by hand is not a crash: they abandoned the work,
+    /// so the next boot must not resume it. The stop drops the turn's future,
+    /// which is why the turn's own cleanup never runs, so the row is deleted
+    /// from the stop site instead.
+    pub async fn delete_session(&self, session_id: Uuid) -> Result<()> {
+        let sid = session_id.to_string();
+        self.pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                conn.execute(
+                    "DELETE FROM pending_requests WHERE session_id = ?1",
+                    params![sid],
+                )
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to delete pending requests for session")?;
+        Ok(())
+    }
+
     /// Get ALL surviving rows (process died while these were in-flight).
     ///
     /// A row only exists while a request is PROCESSING — completion deletes it

@@ -1727,12 +1727,20 @@ pub fn spawn_undo_last_turn(service: Arc<AgentService>, session_id: Uuid, sink: 
     }
 }
 
-/// Record a stopped turn in the session's history (#2811).
+/// Record a stopped turn in the session's history, and drop its recovery row.
 ///
 /// A cancel drops the turn's future, so nothing inside the turn writes the row
 /// that says it was stopped. The verdict needs that row: with no error and no
 /// answer, every surface that derives a turn's outcome from its rows answered
-/// "Finished", and the stop disappeared the moment the transcript reloaded.
+/// "Finished", and the stop disappeared the moment the transcript reloaded
+/// (#2811).
+///
+/// The same dropped future is why the recovery ticket has to be deleted here
+/// (#2850). The turn deletes its own `pending_requests` row when it finishes,
+/// and that code never runs after a stop, so the row outlived every stop and
+/// the next boot resumed a turn the user had abandoned, painting their last
+/// message again as if it had just been sent. A stop is not a crash: only a
+/// process dying under a running turn keeps its row (#1462).
 pub fn spawn_record_turn_stopped(service: Arc<AgentService>, session_id: Uuid) {
     let spawned = std::thread::Builder::new()
         .stack_size(1024 * 1024)
@@ -1752,6 +1760,12 @@ pub fn spawn_record_turn_stopped(service: Arc<AgentService>, session_id: Uuid) {
                 let messages = opencrabs::services::MessageService::new(service.context().clone());
                 if let Err(e) = messages.record_turn_stopped(session_id).await {
                     crate::logging::error(&format!("turn stopped row: {e}"));
+                }
+                // The recovery ticket goes with it (#2850): the turn is over
+                // because the user ended it, so no later boot may replay it.
+                let pending = opencrabs::db::PendingRequestRepository::new(service.context().pool());
+                if let Err(e) = pending.delete_session(session_id).await {
+                    crate::logging::error(&format!("turn stopped recovery row: {e}"));
                 }
             });
         });
