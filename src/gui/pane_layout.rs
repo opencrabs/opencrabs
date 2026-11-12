@@ -17,7 +17,8 @@
 //! `panes_body` and draws.
 
 use gpui::{
-    AnyElement, App, Entity, IntoElement, MouseDownEvent, SharedString, Window, div, prelude::*,
+    AnyElement, AnyView, App, Entity, IntoElement, MouseDownEvent, SharedString, Window, div,
+    prelude::*,
 };
 use opencrabs::ui_core::pane_tree::{DropHalf, PaneTree};
 use std::collections::HashMap;
@@ -26,7 +27,7 @@ use uuid::Uuid;
 
 use crate::Dashboard;
 use crate::pane_chrome::split_divider;
-use crate::pane_view::{LeafBox, PaneView, leaf_box};
+use crate::pane_view::{LeafBox, PaneView, leaf_box, pane_root_style};
 
 /// Everything the pane walk needs to draw one leaf or one split: the chat
 /// element (drawn once, at its own leaf), the state each other pane keeps, the
@@ -89,7 +90,17 @@ pub(crate) fn pane_element(
             // pane entity (#2805). The walk only says where it sits.
             if !is_chat {
                 return match ctx.states.get(session) {
-                    Some(pane) => pane.clone().into_any_element(),
+                    // A pane is inserted through gpui's cached view path
+                    // (#2805). A plain entity element renders its whole
+                    // subtree in `request_layout` on every frame the window
+                    // draws, so one row landing in one leaf re-walked every
+                    // other leaf's transcript. Cached, the pane is laid out
+                    // from the style it draws with and its last prepaint is
+                    // replayed, and only a pane the window notified draws
+                    // again. `pane_root_style` is that same root box.
+                    Some(pane) => AnyView::from(pane.clone())
+                        .cached(pane_root_style())
+                        .into_any_element(),
                     None => div().into_any_element(),
                 };
             }

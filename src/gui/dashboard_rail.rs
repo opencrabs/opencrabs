@@ -243,6 +243,9 @@ impl Dashboard {
                 // Previews follow the rows, so a new or renamed session gets
                 // its line without a second trigger.
                 this.refresh_previews(cx);
+                // The refetched rows carry the names a pane's topic strip
+                // draws, so the panes are told alongside the rail (#2805).
+                this.notify_panes(cx);
                 cx.notify();
             })
             .ok();

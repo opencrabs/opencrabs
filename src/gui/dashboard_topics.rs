@@ -543,6 +543,9 @@ impl Dashboard {
                 // The custom images follow the stored values, so a rename
                 // that writes one reaches the rail without a restart (#2790).
                 this.refresh_icon_images();
+                // Every split pane draws the same store, so the refresh that
+                // just landed is theirs too (#2805).
+                this.notify_panes(cx);
                 cx.notify();
             })
             .ok();

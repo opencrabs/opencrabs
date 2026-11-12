@@ -250,6 +250,68 @@ impl Dashboard {
         resolve_split_focus(&leaves, self.pane_focus, self.transcript.session)
     }
 
+    /// Everything one split pane's draw reads from the window, folded into one
+    /// number (#2805).
+    ///
+    /// A pane is cached, so a pane the window did not notify replays its last
+    /// frame instead of drawing again. Any value its draw takes from outside
+    /// itself has to be in here, or a change it cannot see would sit on screen
+    /// until something else moved it: the keyboard owner, the status row, the
+    /// drop band, the plan and queue toggles, the queue and the offers waiting
+    /// for it, the running task line, and the session and topic data the strip
+    /// is built from. The plan file is not here; the pane re-reads it on its
+    /// mtime in `sync_frame`, which is the same pass that settles this.
+    fn pane_stamp(&self, session: Uuid, width: f32, index: usize, count: usize) -> u64 {
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        width.to_bits().hash(&mut hasher);
+        count.hash(&mut hasher);
+        (self.split_focus() == Some(session)).hash(&mut hasher);
+        self.pane_footer_text(session, index, count)
+            .hash(&mut hasher);
+        self.pane_drop
+            .filter(|(target, _)| *target == session)
+            .map(|(_, half)| (half.layout.is_stacked(), half.after))
+            .hash(&mut hasher);
+        self.plan_expanded.contains(&session).hash(&mut hasher);
+        self.queue_expanded.hash(&mut hasher);
+        self.topic_draft.is_none().hash(&mut hasher);
+        self.running_tasks_label_for(session).hash(&mut hasher);
+        // A queued message and an offer both draw in the pane's column, and
+        // both arrive from the bridge rather than through the window's own
+        // state, so the text is what the pane can be told apart by.
+        for queued in agent_bridge::queue_snapshot(session) {
+            queued.display_text.hash(&mut hasher);
+        }
+        for offer in agent_bridge::options_snapshot(session) {
+            offer.label.hash(&mut hasher);
+        }
+        // The topic strip is built from the session store, so a topic opening,
+        // closing, being renamed or picking up an icon has to reach the pane
+        // that draws the family. The counts catch the structural changes; the
+        // two reload passes also notify every pane directly.
+        self.sessions.items.len().hash(&mut hasher);
+        self.sessions.topics.len().hash(&mut hasher);
+        self.sessions.parents.len().hash(&mut hasher);
+        self.sessions.topic_icons.len().hash(&mut hasher);
+        self.sessions.topic_titles.len().hash(&mut hasher);
+        self.topic_edge.as_str().hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// Redraw every split pane (#2805).
+    ///
+    /// A pane is cached, so the two passes that reload the session store, the
+    /// rail's refetch and the topic refresh, have to tell the panes that draw
+    /// from it. A rename or an icon change that leaves every count the same
+    /// would otherwise sit behind a stale strip until something else moved it.
+    pub(crate) fn notify_panes(&mut self, cx: &mut Context<Self>) {
+        for pane in self.pane_states.values() {
+            pane.update(cx, |_, cx| cx.notify());
+        }
+    }
+
     /// Expand or collapse one pane's plan strip (#2624). The choice is per
     /// leaf: a pane in a wall of eight opens on its bar, and the one the user
     /// is reading trades room for the whole checklist without touching the
@@ -740,24 +802,6 @@ impl Dashboard {
         // string per leaf instead of touching the bridge or the plan file.
         let leaves = tree.leaves();
         let count = leaves.len();
-        // Each leaf records the box the walk is about to give it, so its own
-        // transcript wraps to its width instead of the window's (#2624,
-        // #2805). The number comes from the tree's shares, the same one the
-        // plan strip reads for its density below.
-        for session in &leaves {
-            if Some(*session) == self.transcript.session {
-                continue;
-            }
-            let share = tree.leaf_width_share(*session).unwrap_or(1.0);
-            let width = if share < 1.0 {
-                split_pane_width(content, false, share)
-            } else {
-                content
-            };
-            if let Some(pane) = self.pane_states.get(session) {
-                pane.update(cx, |pane, _| pane.set_width(width));
-            }
-        }
         // One owner for the keyboard, resolved the same way the drop handler
         // and the caret resolve it (#2620).
         let focus = self.split_focus();
@@ -772,6 +816,30 @@ impl Dashboard {
                 chat,
                 SharedString::from(self.pane_footer_text(chat, i + 1, count)),
             );
+        }
+        // Each leaf records the frame the walk is about to give it, so its own
+        // transcript wraps to its width instead of the window's (#2624,
+        // #2805). The width comes from the tree's shares, the same one the
+        // plan strip reads for its density below.
+        //
+        // A pane is inserted through gpui's cached view path (#2805), so it
+        // replays its last frame until it is notified. The stamp is everything
+        // its draw reads from the window: a different one redraws the pane,
+        // and a pane nobody touched costs one hash.
+        for (ix, session) in leaves.iter().enumerate() {
+            if Some(*session) == self.transcript.session {
+                continue;
+            }
+            let share = tree.leaf_width_share(*session).unwrap_or(1.0);
+            let width = if share < 1.0 {
+                split_pane_width(content, false, share)
+            } else {
+                content
+            };
+            let stamp = self.pane_stamp(*session, width, ix + 1, count);
+            if let Some(pane) = self.pane_states.get(session) {
+                pane.update(cx, |pane, cx| pane.sync_frame(width, stamp, cx));
+            }
         }
         // Per-pane chrome (#2530): every pane carries its own plan strip,
         // queue and composer, exactly as the terminal's panes do. A pane

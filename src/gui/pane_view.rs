@@ -97,6 +97,16 @@ pub(crate) struct PaneView {
     /// changes. `Render` takes no arguments beyond the window and the leaf's
     /// own context, so the number has to arrive as state.
     width: f32,
+    /// The window-owned half of this leaf's frame, folded into one number
+    /// (#2805).
+    ///
+    /// A pane is inserted through gpui's cached view path, so a pane that was
+    /// not notified replays its last prepaint instead of drawing again. Every
+    /// value its draw reads from outside itself, the keyboard owner, the
+    /// status row, the drop band, the topic strip, the queue, the offers, the
+    /// plan file and its own width, is what the walk hashes here. A difference
+    /// is the only thing that redraws a pane the user did not touch.
+    stamp: u64,
 }
 
 impl PaneView {
@@ -128,14 +138,27 @@ impl PaneView {
             copy_drag,
             window,
             width,
+            stamp: 0,
         }
     }
 
-    /// Record the box this leaf was drawn in this frame. The walk measures the
-    /// leaf from the tree's shares, so a narrow column wraps its transcript to
-    /// its own width instead of the window's (#2624).
-    pub(crate) fn set_width(&mut self, width: f32) {
+    /// Hand this leaf the frame the walk resolved for it (#2624, #2805).
+    ///
+    /// The width comes from the tree's shares, so a narrow column wraps its
+    /// transcript to its own width instead of the window's. The stamp covers
+    /// everything else the draw reads from the window, and a different stamp
+    /// is what redraws a pane that was cached. The plan file is re-read here on
+    /// its mtime, because a cached pane never reaches the refresh in its own
+    /// draw (#2691).
+    pub(crate) fn sync_frame(&mut self, width: f32, stamp: u64, cx: &mut Context<Self>) {
         self.width = width;
+        let before = self.plan.mtime();
+        self.plan.refresh();
+        if self.stamp == stamp && self.plan.mtime() == before {
+            return;
+        }
+        self.stamp = stamp;
+        cx.notify();
     }
 
     /// Snap this leaf's transcript to its newest row only while the reader is
@@ -420,6 +443,22 @@ pub(crate) struct LeafBox {
     /// is already borrowed.
     pub(crate) landing: Option<DropHalf>,
     pub(crate) window: WeakEntity<Dashboard>,
+}
+
+/// The layout every pane frame starts from (#2805).
+///
+/// `leaf_box` builds this box in the pane's own draw, and the cached view path
+/// lays the pane out from this instead of drawing it, so the two have to
+/// agree: the pane fills the slot the walk gives it and may shrink to it. A
+/// split child is sized by its slot's `flex_basis`, so the pane's own basis is
+/// zero and it takes whatever the slot measured.
+pub(crate) fn pane_root_style() -> gpui::StyleRefinement {
+    gpui::StyleRefinement::default()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_w_0()
+        .min_h_0()
 }
 
 /// Draw one leaf's frame (#2612, #2624, #2683, #2687).

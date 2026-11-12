@@ -80,6 +80,16 @@ impl PlanStripState {
             .and_then(opencrabs::utils::plan_files::load_plan_from_path);
     }
 
+    /// The file's last write, the key this strip caches on (#2805).
+    ///
+    /// A split pane is inserted through gpui's cached view path, so a pane that
+    /// was not notified replays its last frame and never reaches `refresh` on
+    /// its own. The walk refreshes the strip for it and compares this around
+    /// the call, which is how a rewritten plan still redraws the pane.
+    pub fn mtime(&self) -> Option<SystemTime> {
+        self.mtime
+    }
+
     /// The plan this strip last read (#2691). The window's chime pass walks
     /// every strip through here and hands the documents to
     /// `completion_sound::newly_resolved`, which dedupes by task id, so the
