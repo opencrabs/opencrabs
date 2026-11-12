@@ -75,7 +75,11 @@ impl Dashboard {
     /// carry the family. A pane builds this in its own render through the
     /// window handle, and `panes_body` builds the chat leaf's through the same
     /// function, so both wear one strip.
-    pub(crate) fn pane_topics(&mut self, session: Uuid, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(crate) fn pane_topics(
+        &mut self,
+        session: Uuid,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let leaves = self
             .panes
             .as_ref()

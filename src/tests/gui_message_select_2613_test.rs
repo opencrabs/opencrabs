@@ -5,9 +5,9 @@
 //! parts that are pure (the action list) are called for real: the type makes a
 //! dead entry unreachable, and this test pins the labels it paints.
 
+use crate::tests::gui_dashboard_source::DASHBOARD;
 use crate::ui_core::message_select::MessageAction;
 
-const GUI_MAIN: &str = include_str!("../gui/main.rs");
 const TRANSCRIPT: &str = include_str!("../gui/transcript.rs");
 
 /// The menu is the set of actions that can actually be carried out, in the
@@ -32,7 +32,7 @@ fn the_menu_offers_only_the_actions_this_version_wires() {
         "Report",
     ] {
         assert!(
-            !GUI_MAIN.contains(&format!("\"{absent}\".to_string()")),
+            !DASHBOARD.contains(&format!("\"{absent}\".to_string()")),
             "{absent} has no path yet, so it is not offered as a dead entry"
         );
     }

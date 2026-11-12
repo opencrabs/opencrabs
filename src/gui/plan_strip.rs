@@ -827,7 +827,14 @@ mod tests {
             "the card renders both taps it is handed"
         );
 
-        let main = include_str!("main.rs");
+        // The strip is called from three places after the split (#2822): the
+        // split pane's body, the tap builder, and the window's own render for
+        // the unsplit case. The order below is the order the one file had.
+        let main = concat!(
+            include_str!("dashboard_panes.rs"),
+            include_str!("dashboard_turns.rs"),
+            include_str!("main.rs"),
+        );
         let panes = main
             .split("fn panes_body(")
             .nth(1)

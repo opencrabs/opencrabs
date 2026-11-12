@@ -40,7 +40,11 @@ impl Dashboard {
     /// both record their press point, so the card lands under the pointer
     /// rather than beside the rail: a chip sits mid-row, and the row's right
     /// edge is not where the click happened.
-    pub(crate) fn rail_menu_popover_for(&self, id: Uuid, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(crate) fn rail_menu_popover_for(
+        &self,
+        id: Uuid,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         if self.sessions.rail_menu != Some(id) {
             return None;
         }
@@ -371,7 +375,10 @@ impl Dashboard {
     /// snippet-bearing rows are kept here; `visible()` already holds the title
     /// matches on screen through `matches`, so this map is purely the deep
     /// hits and the snippets that stand in for their previews.
-    pub(crate) fn apply_rail_find(&mut self, content: Vec<opencrabs::db::repository::ContentSearchRow>) {
+    pub(crate) fn apply_rail_find(
+        &mut self,
+        content: Vec<opencrabs::db::repository::ContentSearchRow>,
+    ) {
         let title_ids: Vec<Uuid> = self
             .sessions
             .items

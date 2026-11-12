@@ -478,7 +478,11 @@ impl Dashboard {
     /// takes, so a click and a key press can never act on different rows.
     /// A kind chip pressed on the Seeker card: the list reshapes through the
     /// engine's own filter, so both frontends filter identically (#2491).
-    pub(crate) fn set_finder_kind_filter(&mut self, want: Option<PaletteKind>, cx: &mut Context<Self>) {
+    pub(crate) fn set_finder_kind_filter(
+        &mut self,
+        want: Option<PaletteKind>,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(state) = self.finder.as_mut() {
             state.set_kind_filter(want);
             cx.notify();

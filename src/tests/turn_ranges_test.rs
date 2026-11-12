@@ -717,7 +717,10 @@ fn a_stopped_turn_with_no_work_still_earns_a_header() {
     let s = turn_summary(&msgs, turn_ranges(&msgs)[0]);
     assert!(s.stopped);
     assert_eq!(s.tool_calls, 0);
-    assert_eq!(format_turn_header(s, 0).as_deref(), Some("\u{23f9} Stopped"));
+    assert_eq!(
+        format_turn_header(s, 0).as_deref(),
+        Some("\u{23f9} Stopped")
+    );
 }
 
 #[test]

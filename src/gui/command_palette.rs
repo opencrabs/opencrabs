@@ -892,7 +892,11 @@ mod tests {
     /// stuck cell, not a field (#2531).
     #[test]
     fn seeker_caret_stops_blinking_once_typing_stops() {
-        let src = include_str!("main.rs");
+        // Two of the three pins moved to the finder in the split (#2822): the
+        // blink check and the reset that restarts it. The idle constant stayed
+        // in the window. Read the whole dashboard so a pin cannot pass while
+        // the code it names lives one module over.
+        let src = crate::dashboard_source::DASHBOARD;
         assert!(
             src.contains("const CARET_IDLE_AFTER"),
             "the idle window is a named constant"

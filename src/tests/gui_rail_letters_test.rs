@@ -129,10 +129,7 @@ fn the_window_help_marks_the_session_letters_terminal_only() {
         ("t", "Topics on, then a new topic"),
         ("c", "Close or reopen the selected topic"),
     ] {
-        let hits: Vec<_> = sessions
-            .iter()
-            .filter(|row| row.neutral == chord)
-            .collect();
+        let hits: Vec<_> = sessions.iter().filter(|row| row.neutral == chord).collect();
         assert_eq!(hits.len(), 1, "{chord} is still documented once");
         assert_eq!(
             hits[0].description, description,

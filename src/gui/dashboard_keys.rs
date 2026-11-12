@@ -6,7 +6,12 @@
 use super::*;
 
 impl Dashboard {
-    pub(crate) fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_key(
+        &mut self,
+        ev: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // The theme modal owns every key while it is open, on every screen: it
         // is the topmost surface, so nothing under it may answer a keystroke,
         // the composer's arrows and Enter included (#2619).

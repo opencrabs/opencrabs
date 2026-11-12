@@ -224,8 +224,11 @@ mod tests {
 
     #[test]
     fn sidebar_actions_frontends_consume_the_same_catalog() {
+        // The window's catalog reads all twelve dashboard modules since the
+        // split (#2822): a scan of `main.rs` alone would pass while a forbidden
+        // `new_topic_item()` sat one module over. The terminal is still one file.
         for source in [
-            include_str!("../gui/main.rs"),
+            crate::tests::gui_dashboard_source::DASHBOARD,
             include_str!("../tui/app/state.rs"),
         ] {
             assert!(source.contains("actions::items()"));

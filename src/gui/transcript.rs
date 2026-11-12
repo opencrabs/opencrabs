@@ -18,9 +18,7 @@
 
 use crate::palette;
 use crate::topic_icons;
-use opencrabs::services::message::{
-    CompletedPlanPayload, PLAN_COMPLETED_ROLE, TURN_STOPPED_ROLE,
-};
+use opencrabs::services::message::{CompletedPlanPayload, PLAN_COMPLETED_ROLE, TURN_STOPPED_ROLE};
 use opencrabs::ui_core::card::{CARD_RADIUS, concentric_radius, glass_fill};
 use opencrabs::ui_core::copy_select::{self, TextPoint};
 use opencrabs::ui_core::links::{self, ClickTarget};

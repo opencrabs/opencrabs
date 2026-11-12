@@ -1523,14 +1523,8 @@ impl App {
         // had never been stopped after a session switch. The row is written
         // even when nothing was said, because the stop itself is the news; the
         // context builder skips this role, so the model never sees it.
-        if !handed_back
-            && let Some(session_id) = self.current_session.as_ref().map(|s| s.id)
-        {
-            if let Err(e) = self
-                .message_service
-                .record_turn_stopped(session_id)
-                .await
-            {
+        if !handed_back && let Some(session_id) = self.current_session.as_ref().map(|s| s.id) {
+            if let Err(e) = self.message_service.record_turn_stopped(session_id).await {
                 tracing::error!("Failed to record the stopped turn: {e}");
             }
             // The same row in memory, so the header reads `Stopped` before any

@@ -741,7 +741,9 @@ mod tests {
 
     #[test]
     fn seeker_frontends_select_their_own_help_rows() {
-        let gui = include_str!("../gui/main.rs");
+        // The seeker rows are built in the finder module since the split
+        // (#2822), so the window's side reads every dashboard module.
+        let gui = crate::tests::gui_dashboard_source::DASHBOARD;
         let tui = include_str!("../tui/app/state.rs");
         assert!(gui.contains("help_keys::seeker_items(help_keys::HelpClient::Gui)"));
         assert!(tui.contains("help_keys::seeker_items(HelpClient::Tui)"));

@@ -605,7 +605,11 @@ impl Dashboard {
     /// They send the literal commands the terminal and Telegram send, through
     /// the composer path that parses them, so a tap and a typed `/execute` are
     /// one code path and never two implementations of an approval.
-    pub(crate) fn plan_actions(&mut self, session: Uuid, cx: &mut Context<Self>) -> plan_strip::PlanActions {
+    pub(crate) fn plan_actions(
+        &mut self,
+        session: Uuid,
+        cx: &mut Context<Self>,
+    ) -> plan_strip::PlanActions {
         let approve = cx.listener(move |this, _ev: &gpui::ClickEvent, _window, cx| {
             cx.stop_propagation();
             this.send_turn_to(session, "/execute".to_string(), None, cx);
@@ -622,7 +626,10 @@ impl Dashboard {
 
     /// The queue entry for a send: a hidden prompt keeps its display line, so
     /// the queue strip never reads `[SYSTEM: ...]` (#2756).
-    pub(crate) fn pending_message(text: String, display: Option<String>) -> agent_bridge::PendingMessage {
+    pub(crate) fn pending_message(
+        text: String,
+        display: Option<String>,
+    ) -> agent_bridge::PendingMessage {
         match display {
             Some(shown) => agent_bridge::PendingMessage::system(text, shown),
             None => agent_bridge::PendingMessage::plain(text),

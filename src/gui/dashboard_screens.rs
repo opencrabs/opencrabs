@@ -263,7 +263,11 @@ impl Dashboard {
     ///
     /// Both keys are the inbox's, as in the terminal: the other panels hold
     /// no proposal to decide.
-    pub(crate) fn decide_selected(&mut self, decision: mission_control::Decision, cx: &mut Context<Self>) {
+    pub(crate) fn decide_selected(
+        &mut self,
+        decision: mission_control::Decision,
+        cx: &mut Context<Self>,
+    ) {
         if self.mc_nav.panel != mission_control::Panel::Inbox {
             return;
         }

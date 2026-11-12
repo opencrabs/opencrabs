@@ -188,8 +188,15 @@ async fn a_short_session_opens_whole_with_no_history_marker() {
     }
 
     app.load_session(session.id).await.unwrap();
-    assert_eq!(app.hidden_older_messages, 0, "nothing sits behind the window");
-    assert_eq!(app.messages.len(), 50, "every row the session holds is here");
+    assert_eq!(
+        app.hidden_older_messages, 0,
+        "nothing sits behind the window"
+    );
+    assert_eq!(
+        app.messages.len(),
+        50,
+        "every row the session holds is here"
+    );
     assert!(
         !app.messages
             .iter()
@@ -240,7 +247,10 @@ async fn tui_completed_plan_history_reloads_pages_and_renders() {
     while app.hidden_older_messages > 0 {
         app.load_more_history().await.unwrap();
         presses += 1;
-        assert!(presses < 16, "paging never reached the start of the session");
+        assert!(
+            presses < 16,
+            "paging never reached the start of the session"
+        );
     }
     assert!(presses > 1, "a windowed session takes more than one press");
     assert_eq!(app.messages.first().unwrap().id, completed.id);

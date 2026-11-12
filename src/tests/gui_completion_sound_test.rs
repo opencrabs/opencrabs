@@ -133,8 +133,9 @@ fn the_player_stays_behind_the_opt_in_and_the_feature() {
         "the enabled path reaches the embedded WAV: {body}"
     );
     assert!(
-        DASHBOARD_KEYS
-            .contains("#[cfg(not(feature = \"notification-sound\"))]\n    pub(crate) fn play_task_chime() {}"),
+        DASHBOARD_KEYS.contains(
+            "#[cfg(not(feature = \"notification-sound\"))]\n    pub(crate) fn play_task_chime() {}"
+        ),
         "a build without the feature still compiles, with a silent no-op"
     );
 }

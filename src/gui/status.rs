@@ -84,4 +84,3 @@ pub(crate) fn help_rows() -> Vec<(
     }
     out
 }
-

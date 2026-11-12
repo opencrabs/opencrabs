@@ -28,10 +28,8 @@ const TELEGRAM_SVG: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/src/assets/telegram.svg"
 ));
-const SLACK_SVG: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/src/assets/slack.svg"
-));
+const SLACK_SVG: &[u8] =
+    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/assets/slack.svg"));
 const DISCORD_SVG: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/src/assets/discord.svg"
@@ -67,11 +65,7 @@ pub fn platform_icon(platform: &str, size: f32) -> Option<AnyElement> {
 ///
 /// `None` when no mark is embedded for that platform: the caller then paints
 /// the name alone rather than inventing a picture for it.
-pub fn platform_icon_with_colour(
-    platform: &str,
-    size: f32,
-    colour: u32,
-) -> Option<AnyElement> {
+pub fn platform_icon_with_colour(platform: &str, size: f32, colour: u32) -> Option<AnyElement> {
     let svg = platform_svg(platform)?;
     // GPUI rasterizes a vector from its intrinsic size, so the source carries
     // 96px the way `topic-orientation.svg` does and stays crisp at 16px.

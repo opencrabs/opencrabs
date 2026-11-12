@@ -43,11 +43,7 @@ fn rail_card_media_is_large_dual_and_the_title_is_bold() {
         SESSIONS.contains("pub const RAIL_MARK_REMS: f32 = 1.75;"),
         "full-card media is 28px at the default 16px root"
     );
-    let wiring = block(
-        GUI_MAIN,
-        "icon: self.sessions.topic_icons.get(&id)",
-        "};",
-    );
+    let wiring = block(GUI_MAIN, "icon: self.sessions.topic_icons.get(&id)", "};");
     for resolver in [
         "topic_icons::tab_icon(stored, sessions::RAIL_MARK_REMS)",
         "self.custom_icon_picture(stored, sessions::RAIL_MARK_REMS)",
@@ -103,7 +99,8 @@ fn rail_card_media_is_large_dual_and_the_title_is_bold() {
         "the media slot adds no margin of its own: one 8px gap carries the air"
     );
     assert!(
-        title.contains(".gap_2()") && title.contains(".when_some(marks, |d, marks| d.child(marks))"),
+        title.contains(".gap_2()")
+            && title.contains(".when_some(marks, |d, marks| d.child(marks))"),
         "the name line keeps one tight gap beside the name"
     );
     let title_weight = block(row, "let title_text = if indented", "let title = div()");
@@ -230,7 +227,11 @@ fn rail_header_has_no_kebab_and_one_right_aligned_metadata_cluster() {
     );
     // The name is the only child that may shrink, so the cluster keeps its
     // place instead of being overrun on a wide rail (#2802).
-    let name = block(row, "let title_text = div()", "let title_text = if indented");
+    let name = block(
+        row,
+        "let title_text = div()",
+        "let title_text = if indented",
+    );
     assert!(
         name.contains(".flex_1()") && name.contains(".min_w_0()"),
         "the name yields by truncating, never by moving the cluster"
@@ -243,11 +244,7 @@ fn rail_header_has_no_kebab_and_one_right_aligned_metadata_cluster() {
 
 #[test]
 fn rail_pin_toggles_without_opening_the_card() {
-    let control = block(
-        SESSIONS,
-        "pub fn pin_toggle(",
-        "/// The menu's contents",
-    );
+    let control = block(SESSIONS, "pub fn pin_toggle(", "/// The menu's contents");
     for affordance in [
         "session-pin-toggle-{id}",
         ".size(rems(PIN_REMS))",
@@ -312,8 +309,7 @@ fn selected_topic_owns_the_parent_activity_line() {
     );
     assert!(resolution.contains(".get(&id).map_or(id,"));
     assert!(resolution.contains("self.sessions"));
-    assert!(resolution
-        .contains("progress_id(id, kids.iter().map(|(kid_id, _)| *kid_id))"));
+    assert!(resolution.contains("progress_id(id, kids.iter().map(|(kid_id, _)| *kid_id))"));
     assert!(
         !resolution.contains(".cursor"),
         "keyboard cursor is not an input to the progress owner"

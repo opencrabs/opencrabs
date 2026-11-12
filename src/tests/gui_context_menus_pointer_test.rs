@@ -137,7 +137,7 @@ fn every_menu_goes_through_the_one_pointer_popover() {
     // Nothing is placed from the geometry of the surface that owns it any
     // more: no card built straight from a row, and no absolute corner.
     assert!(
-        !GUI_MAIN.contains("sessions::menu_card("),
+        !DASHBOARD.contains("sessions::menu_card("),
         "the window never builds a card it has not anchored at a press"
     );
     assert!(

@@ -24,9 +24,9 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use uuid::Uuid;
 
+use crate::Dashboard;
 use crate::pane_chrome::split_divider;
 use crate::pane_view::{LeafBox, PaneView, leaf_box};
-use crate::Dashboard;
 
 /// Everything the pane walk needs to draw one leaf or one split: the chat
 /// element (drawn once, at its own leaf), the state each other pane keeps, the
@@ -96,24 +96,22 @@ pub(crate) fn pane_element(
             // The window's own conversation is the leaf whose state the window
             // still holds, so the window hands it the same frame a pane builds
             // for itself (#2612, #2687).
-            leaf_box(
-                LeafBox {
-                    session: *session,
-                    title: ctx.chat_title.clone(),
-                    is_chat: true,
-                    focused: ctx.focus.is_none(),
-                    interactive: ctx.interactive,
-                    topics: ctx.tops.remove(session),
-                    chrome: ctx.chrome.remove(session),
-                    footer: ctx.footers.get(session).cloned(),
-                    body: ctx.chat.take().unwrap_or_else(|| div().into_any_element()),
-                    landing: ctx
-                        .drop
-                        .filter(|(target, _)| target == session)
-                        .map(|(_, half)| half),
-                    window: ctx.entity.clone(),
-                },
-            )
+            leaf_box(LeafBox {
+                session: *session,
+                title: ctx.chat_title.clone(),
+                is_chat: true,
+                focused: ctx.focus.is_none(),
+                interactive: ctx.interactive,
+                topics: ctx.tops.remove(session),
+                chrome: ctx.chrome.remove(session),
+                footer: ctx.footers.get(session).cloned(),
+                body: ctx.chat.take().unwrap_or_else(|| div().into_any_element()),
+                landing: ctx
+                    .drop
+                    .filter(|(target, _)| target == session)
+                    .map(|(_, half)| half),
+                window: ctx.entity.clone(),
+            })
         }
         PaneTree::Split {
             layout, children, ..

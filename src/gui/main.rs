@@ -42,6 +42,8 @@ mod dashboard_panes;
 mod dashboard_rail;
 mod dashboard_screens;
 mod dashboard_sessions;
+#[cfg(test)]
+mod dashboard_source;
 mod dashboard_topics;
 mod dashboard_turns;
 mod editor;
@@ -234,7 +236,6 @@ impl Render for PaneGhost {
             .child(self.title.clone())
     }
 }
-
 
 /// The ledger path, unchanged: `config.database.path`, with the same
 /// default (`~/.opencrabs/opencrabs.db`) when config cannot be read at all.
@@ -1099,7 +1100,7 @@ fn set_rail_open_state(
 #[cfg(test)]
 mod sidebar_action_tests {
     use super::*;
-    use crate::tests::gui_dashboard_source::DASHBOARD;
+    use crate::dashboard_source::DASHBOARD;
 
     /// The body of one function in one of the GUI files, up to the next method.
     /// The source scans below pin decisions a unit test cannot reach without a
@@ -1442,7 +1443,7 @@ mod sidebar_action_tests {
             picker.contains("topic_icons::picture(bytes, 4.0)"),
             "a pick renders at 4.0rem, not a speck"
         );
-        let overlay = fn_body(src, "topic_prompt_overlay");
+        let overlay = fn_body(include_str!("overlays.rs"), "topic_prompt_overlay");
         assert!(
             overlay.contains("topic_icons::picture(bytes, 3.2)"),
             "the chosen badge picture renders at 3.2rem"
@@ -1482,7 +1483,7 @@ mod sidebar_action_tests {
     #[test]
     fn the_session_image_opens_the_picker() {
         let src = DASHBOARD;
-        let overlay = fn_body(src, "topic_prompt_overlay");
+        let overlay = fn_body(include_str!("overlays.rs"), "topic_prompt_overlay");
         assert!(
             overlay.contains(".id(\"topic-prompt-image\")"),
             "the badge is a click target, not a static picture"
@@ -1841,11 +1842,15 @@ mod sidebar_action_tests {
 
     #[test]
     fn sidebar_actions_existing_toggle_uses_the_same_transition() {
-        let source = DASHBOARD;
+        // The toggle moved to the rail module in the split (#2822). Read that
+        // file alone: the whole dashboard also contains this test's own needle,
+        // and `rsplit` picks the last occurrence, which would be the string
+        // rather than the function.
+        let source = include_str!("dashboard_rail.rs");
         let body = source
-            .rsplit("fn toggle_rail")
-            .next()
-            .and_then(|tail| tail.split("fn stop_turn").next())
+            .split("fn toggle_rail")
+            .nth(1)
+            .and_then(|tail| tail.split("fn set_rail_open").next())
             .expect("toggle body");
         assert!(body.contains("self.set_rail_open(open, cx)"));
         assert!(!body.contains("self.rail_open = !self.rail_open"));
@@ -2186,8 +2191,8 @@ impl Render for Dashboard {
                 this.rail_hands_back();
                 this.toggle_favorite(id, cx);
             });
-            let pin_toggle = sessions::pin_toggle(id, favorite)
-                .on_mouse_down(MouseButton::Left, toggle_pin);
+            let pin_toggle =
+                sessions::pin_toggle(id, favorite).on_mouse_down(MouseButton::Left, toggle_pin);
             let flags = sessions::RowFlags {
                 selected,
                 cursored,
@@ -2242,13 +2247,10 @@ impl Render for Dashboard {
                 // the paint never reads a file.
                 icon: self.sessions.topic_icons.get(&id).and_then(|stored| {
                     topic_icons::tab_icon(stored, sessions::RAIL_MARK_REMS)
+                        .or_else(|| self.custom_icon_picture(stored, sessions::RAIL_MARK_REMS))
                         .or_else(|| {
-                            self.custom_icon_picture(stored, sessions::RAIL_MARK_REMS)
-                        })
-                        .or_else(|| {
-                            (!stored.starts_with(topic_icons::IMG_PREFIX)).then(|| {
-                                topic_icons::tab_glyph(stored, sessions::RAIL_MARK_REMS)
-                            })
+                            (!stored.starts_with(topic_icons::IMG_PREFIX))
+                                .then(|| topic_icons::tab_glyph(stored, sessions::RAIL_MARK_REMS))
                         })
                 }),
             };
@@ -2302,12 +2304,8 @@ impl Render for Dashboard {
                     )
                     .on_click(open)
                     .on_mouse_down(MouseButton::Right, ask);
-                    let width = sessions::chip_width(
-                        &*window,
-                        title,
-                        live.is_some() || st.ring,
-                        sel,
-                    );
+                    let width =
+                        sessions::chip_width(&*window, title, live.is_some() || st.ring, sel);
                     els.push((chip, width));
                 }
                 let hidden = kids.len().saturating_sub(limit);
@@ -5904,7 +5902,6 @@ fn main() {
     });
 }
 
-
 /// The card's single line for a turn running with no pane of its own (#2718).
 ///
 /// The pane paints the lead in the accent colour and the tail muted, and a
@@ -6224,13 +6221,13 @@ enum SendOrigin {
 #[cfg(test)]
 mod tests {
     use super::{pick_initial_session, remember_open_session};
+    use crate::composer_view::{composer_hint_for, queue_rows};
+    use crate::dashboard_source::DASHBOARD;
     use crate::overlays::cd_entries_for;
     use crate::pane_chrome::CHAT_MEASURE_PX;
-    use crate::composer_view::{composer_hint_for, queue_rows};
     use crate::status::help_rows;
     use crate::topic_bar_view::topic_label;
     use opencrabs::brain::mission_control::McAnalytics;
-    use crate::tests::gui_dashboard_source::DASHBOARD;
 
     /// A leaf is its own view now (#2805): its state and the transcript it
     /// draws are scanned here, not in the crate root.
@@ -6372,19 +6369,34 @@ mod tests {
     fn mission_schedule_duration_matches_the_terminal_format() {
         assert_eq!(crate::mission_control_view::mc_schedule_duration(0), "0s");
         assert_eq!(crate::mission_control_view::mc_schedule_duration(42), "42s");
-        assert_eq!(crate::mission_control_view::mc_schedule_duration(61), "1m 1s");
-        assert_eq!(crate::mission_control_view::mc_schedule_duration(3661), "61m 1s");
+        assert_eq!(
+            crate::mission_control_view::mc_schedule_duration(61),
+            "1m 1s"
+        );
+        assert_eq!(
+            crate::mission_control_view::mc_schedule_duration(3661),
+            "61m 1s"
+        );
     }
 
     #[test]
     fn mission_top_tool_bar_tracks_relative_usage() {
-        assert_eq!(crate::mission_control_view::mc_tool_bar(0, 100), "░".repeat(12));
+        assert_eq!(
+            crate::mission_control_view::mc_tool_bar(0, 100),
+            "░".repeat(12)
+        );
         assert_eq!(
             crate::mission_control_view::mc_tool_bar(50, 100),
             format!("{}{}", "█".repeat(6), "░".repeat(6))
         );
-        assert_eq!(crate::mission_control_view::mc_tool_bar(100, 100), "█".repeat(12));
-        assert_eq!(crate::mission_control_view::mc_tool_bar(200, 100), "█".repeat(12));
+        assert_eq!(
+            crate::mission_control_view::mc_tool_bar(100, 100),
+            "█".repeat(12)
+        );
+        assert_eq!(
+            crate::mission_control_view::mc_tool_bar(200, 100),
+            "█".repeat(12)
+        );
     }
 
     #[test]
@@ -6392,7 +6404,8 @@ mod tests {
         let mut analytics = McAnalytics::default();
         analytics.phantom.total = 1;
         assert!(
-            crate::mission_control_view::mc_phantoms_rows(&analytics, palette::current()).is_empty(),
+            crate::mission_control_view::mc_phantoms_rows(&analytics, palette::current())
+                .is_empty(),
             "an empty model breakdown must reach the panel's empty state"
         );
 
@@ -6609,12 +6622,9 @@ mod tests {
         // Two arming paths: the row's menu, and ctrl+d on the
         // cursor row (#2352). Both ask the dialog; arming is not deleting.
         // The needles are split so the scan cannot count its own source text.
-        let strip_arm = ["this.request", "_delete(id, cx);"].concat();
+        let strip_arm = ["this.request", "_delete(id, cx)"].concat();
         let chord_arm = ["self.request", "_delete(target, cx);"].concat();
-        assert!(
-            src.contains(&strip_arm),
-            "the row menu must arm the dialog"
-        );
+        assert!(src.contains(&strip_arm), "the row menu must arm the dialog");
         assert!(
             src.contains(&chord_arm),
             "ctrl+d must arm the dialog through the resolved target"
@@ -7391,7 +7401,7 @@ mod tests {
         );
         let render = dashboard_render(src);
         assert!(
-            render.contains("activity: self.rail_activity_for(id, cx)"),
+            render.contains("activity: self.rail_activity_for(progress_id, cx)"),
             "the render feeds the card from whichever owner holds the turn"
         );
         let lookup = fn_body(src, "rail_activity_for");
@@ -7944,7 +7954,7 @@ mod tests {
             "an empty queue keeps the plain wording"
         );
         let drain = production
-            .split("    fn drain_pending(")
+            .split("    pub(crate) fn drain_pending(")
             .nth(1)
             .and_then(|rest| rest.split("    /// Create a conversation").next())
             .expect("drain_pending");
@@ -7967,7 +7977,7 @@ mod tests {
             .next()
             .expect("production source before the test module");
         let settle = production
-            .split("    fn settle_pane(")
+            .split("    pub(crate) fn settle_pane(")
             .nth(1)
             .and_then(|rest| rest.split("    /// The pane's turn failed").next())
             .expect("settle_pane");
@@ -7976,7 +7986,7 @@ mod tests {
             "a settled pane flushes its queue"
         );
         let fail = production
-            .split("    fn fail_pane(")
+            .split("    pub(crate) fn fail_pane(")
             .nth(1)
             .and_then(|rest| rest.split("    /// A pane's turn ended").next())
             .expect("fail_pane");
@@ -7994,7 +8004,7 @@ mod tests {
             "a stopped pane flushes when the cancellation lands, the #2631 ordering"
         );
         let drain = production
-            .split("    fn drain_pane_pending(")
+            .split("    pub(crate) fn drain_pane_pending(")
             .nth(1)
             .and_then(|rest| rest.split("    /// Re-read one pane's rows").next())
             .expect("drain_pane_pending");
@@ -8068,7 +8078,7 @@ mod tests {
             .next()
             .expect("production source before the test module");
         let send = production
-            .split("    fn send_from_pane(")
+            .split("    pub(crate) fn send_from_pane(")
             .nth(1)
             .and_then(|rest| {
                 rest.split("        // A send ends that pane's offer")
@@ -8084,7 +8094,7 @@ mod tests {
             "the overlay gate is keyed on the composer, not on the window"
         );
         let turn = production
-            .split("    fn send_turn_to(")
+            .split("    pub(crate) fn send_turn_to(")
             .nth(1)
             .and_then(|rest| rest.split("    /// Dispatch the one turn").next())
             .expect("send_turn_to");
@@ -8109,7 +8119,7 @@ mod tests {
             .next()
             .expect("production source before the test module");
         let reload = production
-            .split("    fn reload_pane(")
+            .split("    pub(crate) fn reload_pane(")
             .nth(1)
             .and_then(|rest| rest.split("    /// Send one turn to the session").next())
             .expect("reload_pane");
@@ -8154,7 +8164,7 @@ mod tests {
             .next()
             .expect("production source before the test module");
         let window_drain = production
-            .split("    fn drain_pending(")
+            .split("    pub(crate) fn drain_pending(")
             .nth(1)
             .and_then(|rest| rest.split("    /// Create a conversation").next())
             .expect("drain_pending");
@@ -8163,7 +8173,7 @@ mod tests {
             "the window's flush logs its joined send"
         );
         let pane_drain = production
-            .split("    fn drain_pane_pending(")
+            .split("    pub(crate) fn drain_pane_pending(")
             .nth(1)
             .and_then(|rest| rest.split("    /// Re-read one pane's rows").next())
             .expect("drain_pane_pending");
@@ -8172,7 +8182,7 @@ mod tests {
             "the pane's flush logs its joined send"
         );
         let stop = production
-            .split("    fn cancel_focused_pane_turn(")
+            .split("    pub(crate) fn cancel_focused_pane_turn(")
             .nth(1)
             .and_then(|rest| rest.split("    /// `/stop`").next())
             .expect("cancel_focused_pane_turn");
@@ -8259,7 +8269,7 @@ mod tests {
         // follows it there.
         let src = include_str!("pane_chrome.rs");
         let footer = src
-            .split("fn pane_footer(id: SharedString")
+            .split("fn pane_footer(")
             .nth(1)
             .and_then(|rest| rest.split("\n/// ").next())
             .expect("pane footer");
@@ -8752,11 +8762,7 @@ mod tests {
             "open_session commits through open_session_handing_back"
         );
         let (_, back) = src
-            .split_once(
-                ["fn open_session_", "handing_back(&mut self, id: Uuid"]
-                    .concat()
-                    .as_str(),
-            )
+            .split_once(["fn open_session_", "handing_back("].concat().as_str())
             .expect("open_session_handing_back exists");
         let (back_body, _) = back
             .split_once("\n    pub(crate) fn ")
@@ -8986,7 +8992,9 @@ mod tests {
         let (_, after) = src
             .split_once("fn cd_select_here")
             .expect("cd_select_here exists");
-        let (body, _) = after.split_once("\n    pub(crate) fn ").unwrap_or((after, ""));
+        let (body, _) = after
+            .split_once("\n    pub(crate) fn ")
+            .unwrap_or((after, ""));
         let switch = body
             .find("self.screen = Screen::Chat;")
             .expect("select switches to chat");
@@ -9123,7 +9131,7 @@ mod gui {
     mod tests {
         use super::super::Config;
         use crate::composer_view::popup_window;
-        use crate::tests::gui_dashboard_source::DASHBOARD;
+        use crate::dashboard_source::DASHBOARD;
 
         /// Eight names is the most a popup may cover: beyond that it would
         /// hide the conversation it belongs to.

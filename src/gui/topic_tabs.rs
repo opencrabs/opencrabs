@@ -121,6 +121,23 @@ pub fn separator_color() -> Hsla {
 mod tests {
     use super::*;
 
+    /// The topic row is drawn across three files: the `All` cell and its glyph
+    /// stayed with the dashboard's own render, the cell itself moved to
+    /// `topic_bar_view`, and the overlay the old single file cut it off at is
+    /// `overlays`. The concatenation keeps the order the one file had, so a
+    /// split between two of them still means what it meant (#2817, #2822).
+    const TOPIC_ROW: &str = concat!(
+        include_str!("dashboard_topics.rs"),
+        include_str!("topic_bar_view.rs"),
+        include_str!("overlays.rs"),
+    );
+
+    /// The separator and its one negative gutter, plus the window's own copy of
+    /// the accent: the strip moved to `topic_bar_view`, the window kept the
+    /// other call (#2817).
+    const TOPIC_SEPARATORS: &str =
+        concat!(include_str!("topic_bar_view.rs"), include_str!("main.rs"),);
+
     #[test]
     fn topic_style_vertical_all_and_topics_share_square_transparent_cells() {
         let all = style(true);
@@ -161,7 +178,7 @@ mod tests {
     fn topic_style_separators_read_the_live_theme() {
         let expected: Hsla = rgb(crate::palette::current().track).into();
         assert_eq!(separator_color(), expected);
-        let src = include_str!("main.rs");
+        let src = TOPIC_SEPARATORS;
         assert!(src.matches("topic_tabs::separator_color()").count() >= 2);
         // One negative gutter is left: the topic strip. The chat title row
         // carried the other until it was removed (#2596).
@@ -174,7 +191,7 @@ mod tests {
 
     #[test]
     fn topic_style_renderer_gives_all_an_icon_and_never_fills_a_selected_cell() {
-        let src = include_str!("main.rs");
+        let src = TOPIC_ROW;
         let all = src
             .split("topic_bar::BarEntry::All =>")
             .nth(1)

@@ -285,7 +285,12 @@ impl Dashboard {
 
     /// Open the message menu on a stored row (#2613), at the press that
     /// asked for it (#2690).
-    pub(crate) fn msg_menu_open(&mut self, id: Uuid, at: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
+    pub(crate) fn msg_menu_open(
+        &mut self,
+        id: Uuid,
+        at: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
         // One menu at a time: the rail's open menu closes, and so does any
         // other row's.
         self.sessions.close_rail_menu();

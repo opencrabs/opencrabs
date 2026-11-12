@@ -210,8 +210,7 @@ impl PaneView {
                         MouseButton::Left,
                         move |_ev: &MouseDownEvent, _window: &mut Window, cx: &mut App| {
                             cx.stop_propagation();
-                            let _ =
-                                weak.update(cx, |this, cx| this.toggle_pane_plan(session, cx));
+                            let _ = weak.update(cx, |this, cx| this.toggle_pane_plan(session, cx));
                         },
                     ),
             );
@@ -248,14 +247,15 @@ impl PaneView {
                 .map(|item| {
                     let label = item.label.clone();
                     let weak = self.window.clone();
-                    let pick: ClickHandler =
-                        Rc::new(move |_ev: &ClickEvent, _window: &mut Window, cx: &mut App| {
+                    let pick: ClickHandler = Rc::new(
+                        move |_ev: &ClickEvent, _window: &mut Window, cx: &mut App| {
                             cx.stop_propagation();
                             agent_bridge::options_take(session);
                             let _ = weak.update(cx, |this, cx| {
                                 this.send_turn_to(session, label.clone(), None, cx);
                             });
-                        });
+                        },
+                    );
                     (item, pick)
                 })
                 .collect();
@@ -292,12 +292,14 @@ impl PaneView {
     fn plan_tap(&self, command: &'static str) -> ClickHandler {
         let weak = self.window.clone();
         let session = self.session;
-        Rc::new(move |_ev: &ClickEvent, _window: &mut Window, cx: &mut App| {
-            cx.stop_propagation();
-            let _ = weak.update(cx, |this, cx| {
-                this.send_turn_to(session, command.to_string(), None, cx);
-            });
-        })
+        Rc::new(
+            move |_ev: &ClickEvent, _window: &mut Window, cx: &mut App| {
+                cx.stop_propagation();
+                let _ = weak.update(cx, |this, cx| {
+                    this.send_turn_to(session, command.to_string(), None, cx);
+                });
+            },
+        )
     }
 }
 
@@ -374,23 +376,21 @@ impl Render for PaneView {
         // (#2686, #2687).
         let topics = window.update(cx, |win, cx| win.pane_topics(session, cx));
         let chrome = self.chrome(cx).into_any_element();
-        leaf_box(
-            LeafBox {
-                session,
-                title: SharedString::from(self.title.clone()),
-                is_chat: false,
-                focused,
-                // A pane exists only on the live screen, so its frame is
-                // always the interactive one.
-                interactive: true,
-                topics,
-                chrome: Some(chrome),
-                footer: Some(footer),
-                body,
-                landing,
-                window: self.window.clone(),
-            },
-        )
+        leaf_box(LeafBox {
+            session,
+            title: SharedString::from(self.title.clone()),
+            is_chat: false,
+            focused,
+            // A pane exists only on the live screen, so its frame is
+            // always the interactive one.
+            interactive: true,
+            topics,
+            chrome: Some(chrome),
+            footer: Some(footer),
+            body,
+            landing,
+            window: self.window.clone(),
+        })
     }
 }
 
@@ -519,10 +519,7 @@ pub(crate) fn leaf_box(leaf: LeafBox) -> AnyElement {
                                 this.pane_drop = next;
                                 cx.notify();
                             }
-                        } else if this
-                            .pane_drop
-                            .is_some_and(|(target, _)| target == session)
-                        {
+                        } else if this.pane_drop.is_some_and(|(target, _)| target == session) {
                             // Clear only a band this pane owns, so a pane
                             // hearing the move does not wipe the band the pane
                             // under the pointer set.

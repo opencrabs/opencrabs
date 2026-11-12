@@ -8,7 +8,12 @@ use super::*;
 
 impl Dashboard {
     /// Settle one detached row in the live turn, if it still holds it.
-    pub(crate) fn settle_detached_row(&mut self, task_id: &str, success: bool, elapsed_secs: f32) -> bool {
+    pub(crate) fn settle_detached_row(
+        &mut self,
+        task_id: &str,
+        success: bool,
+        elapsed_secs: f32,
+    ) -> bool {
         transcript::settle_detached(&mut self.live.tools, task_id, success, elapsed_secs)
     }
 
@@ -467,7 +472,11 @@ impl Dashboard {
     /// The inside of the preview: the part that differs per kind. The shell
     /// (title, kind, esc) is the same for all three, so a picture, a clip and
     /// a document cannot drift apart in how they open or close.
-    pub(crate) fn preview_body(&self, open: &preview::Preview, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(crate) fn preview_body(
+        &self,
+        open: &preview::Preview,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let path = open.path.clone();
         let open_file = {
             let path = path.clone();

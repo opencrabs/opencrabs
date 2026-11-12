@@ -157,7 +157,11 @@ impl Dashboard {
     /// screen, a pane whose session the ledger no longer has, and a file that
     /// cannot be read all fall back to the plain chat: a wrong window is worse
     /// than a plain one.
-    pub(crate) fn restore_layout(&mut self, saved: Option<layout_store::SavedLayout>, cx: &mut Context<Self>) {
+    pub(crate) fn restore_layout(
+        &mut self,
+        saved: Option<layout_store::SavedLayout>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(saved) = saved else {
             return;
         };
@@ -549,7 +553,12 @@ impl Dashboard {
     /// tree; a plain switch moves the chat's own leaf to the new session;
     /// opening a session another pane already shows moves it into the chat and
     /// closes that pane, so one session never sits in two leaves.
-    pub(crate) fn adopt_chat_leaf(&mut self, previous: Option<Uuid>, id: Uuid, cx: &mut Context<Self>) {
+    pub(crate) fn adopt_chat_leaf(
+        &mut self,
+        previous: Option<Uuid>,
+        id: Uuid,
+        cx: &mut Context<Self>,
+    ) {
         self.place_chat_leaf(previous, id, cx);
         // The chat's leaf is part of the saved layout, so every path that
         // moves it writes the tree, the one-pane case included (#2675).
@@ -558,7 +567,12 @@ impl Dashboard {
 
     /// The body of `adopt_chat_leaf`. It writes nothing, so the caller can
     /// save once, whichever path the switch took.
-    pub(crate) fn place_chat_leaf(&mut self, previous: Option<Uuid>, id: Uuid, cx: &mut Context<Self>) {
+    pub(crate) fn place_chat_leaf(
+        &mut self,
+        previous: Option<Uuid>,
+        id: Uuid,
+        cx: &mut Context<Self>,
+    ) {
         let Some(tree) = self.panes.as_mut() else {
             self.panes = Some(PaneTree::leaf(id));
             return;

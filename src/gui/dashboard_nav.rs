@@ -480,7 +480,12 @@ impl Dashboard {
     /// false while the arrows walk the rail, because that walk opens the row
     /// it stands on as a preview, and moving focus to the composer would stop
     /// the next arrow from arriving.
-    pub(crate) fn open_session_handing_back(&mut self, id: Uuid, hand_back: bool, cx: &mut Context<Self>) {
+    pub(crate) fn open_session_handing_back(
+        &mut self,
+        id: Uuid,
+        hand_back: bool,
+        cx: &mut Context<Self>,
+    ) {
         self.begin_conversation(id, cx);
         self.mark_rail_seen(id);
         self.screen = Screen::Chat;

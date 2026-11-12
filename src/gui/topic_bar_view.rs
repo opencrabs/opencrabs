@@ -230,4 +230,3 @@ pub(crate) fn overflow_chip(label: String, shape: topic_bar::ChipShape) -> AnyEl
         .child(SharedString::from(label))
         .into_any_element()
 }
-

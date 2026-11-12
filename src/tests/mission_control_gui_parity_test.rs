@@ -43,7 +43,11 @@ fn mission_control_gui_rows_carry_terminal_metadata() {
     );
     assert!(schedule.contains("job.kind.label()"));
 
-    let top_tools = between(GUI_MISSION_VIEW, "fn mc_top_tools_panel", "fn mc_activity_panel");
+    let top_tools = between(
+        GUI_MISSION_VIEW,
+        "fn mc_top_tools_panel",
+        "fn mc_activity_panel",
+    );
     assert!(top_tools.contains("t.fail_rate"));
     assert!(top_tools.contains("mc_tool_bar"));
     assert!(top_tools.contains("let max ="));
@@ -58,7 +62,11 @@ fn mission_control_gui_rows_carry_terminal_metadata() {
 
 #[test]
 fn mission_control_gui_detail_dispatch_covers_every_panel() {
-    let dispatch = between(GUI_MISSION_VIEW, "fn mission_control_detail", "fn mc_detail_body");
+    let dispatch = between(
+        GUI_MISSION_VIEW,
+        "fn mission_control_detail",
+        "fn mc_detail_body",
+    );
     for panel in [
         "mission_control::Panel::Inbox => mc_inbox_detail",
         "mission_control::Panel::Activity => mc_activity_detail",
@@ -68,13 +76,21 @@ fn mission_control_gui_detail_dispatch_covers_every_panel() {
         assert!(dispatch.contains(panel), "missing detail dispatch: {panel}");
     }
 
-    let activity = between(GUI_MISSION_VIEW, "fn mc_activity_detail", "fn mc_schedule_duration");
+    let activity = between(
+        GUI_MISSION_VIEW,
+        "fn mc_activity_detail",
+        "fn mc_schedule_duration",
+    );
     for field in ["\"When\"", "\"Source\"", "\"Level\"", "\"Detail\""] {
         assert!(activity.contains(field), "activity detail lost {field}");
     }
     assert!(activity.contains("\"undated\""));
 
-    let schedule = between(GUI_MISSION_VIEW, "fn mc_schedule_detail", "fn mc_analytics_detail");
+    let schedule = between(
+        GUI_MISSION_VIEW,
+        "fn mc_schedule_detail",
+        "fn mc_analytics_detail",
+    );
     for field in [
         "\"Kind\"",
         "\"Label\"",
@@ -115,14 +131,22 @@ fn mission_control_gui_detail_dispatch_covers_every_panel() {
         );
     }
 
-    let analytics = between(GUI_MISSION_VIEW, "fn mc_analytics_detail", "const MC_LOG_ROWS");
+    let analytics = between(
+        GUI_MISSION_VIEW,
+        "fn mc_analytics_detail",
+        "const MC_LOG_ROWS",
+    );
     assert!(analytics.contains("mc_analytics_cards(snapshot, true, shown)"));
     assert!(analytics.contains("mission_control::grid_rows(count, 2)"));
 }
 
 #[test]
 fn mc_phantoms_empty_breakdown_uses_the_panel_empty_state() {
-    let rows = between(GUI_MISSION_VIEW, "fn mc_phantoms_rows", "fn mc_phantoms_panel");
+    let rows = between(
+        GUI_MISSION_VIEW,
+        "fn mc_phantoms_rows",
+        "fn mc_phantoms_panel",
+    );
     assert!(rows.contains("if a.phantom.by_model.is_empty()"));
     assert!(rows.contains("return Vec::new()"));
 
@@ -139,7 +163,11 @@ fn mc_line_rows_render_through_the_flex_row_truncate_shape() {
     // the one the label/value arm already used: flex row, then a growing,
     // shrinkable text child. Pin both halves so neither can regress.
     let flat = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
-    let panel = flat(between(GUI_MISSION_VIEW, "fn mc_panel(", "fn mc_inbox_panel"));
+    let panel = flat(between(
+        GUI_MISSION_VIEW,
+        "fn mc_panel(",
+        "fn mc_inbox_panel",
+    ));
     assert!(
         panel.contains("McRow::Line(line, _) => {"),
         "the line arm must exist in the panel row builder"

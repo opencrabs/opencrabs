@@ -32,26 +32,6 @@ pub(crate) fn window_footer_yields(pane_count: usize) -> bool {
     pane_count > 1
 }
 
-#[cfg(test)]
-mod window_footer_tests {
-    use super::window_footer_yields;
-
-    /// The window keeps its footer while it is one pane: the row is the only
-    /// place the pair, the path and the branch are named.
-    #[test]
-    fn one_pane_keeps_the_window_footer() {
-        assert!(!window_footer_yields(1));
-    }
-
-    /// Two panes or more hand the row to the panes: each one already names its
-    /// own pair, so the window row would only print a second, staler model.
-    #[test]
-    fn a_split_yields_the_window_footer() {
-        assert!(window_footer_yields(2));
-        assert!(window_footer_yields(4));
-    }
-}
-
 /// A pane's status row at its bottom edge (#2593): the fields the window
 /// footer carries window-wide, scoped to the pane's own session. Unfocused
 /// panes draw it muted and the focused one in the accent, so feedback stays
@@ -462,4 +442,24 @@ pub(crate) fn split_divider(
                 .when(!stacked, |d| d.w(px(SPLIT_DIVIDER_PX)).h_full())
                 .bg(rgb(split_rule_color())),
         )
+}
+
+#[cfg(test)]
+mod window_footer_tests {
+    use super::window_footer_yields;
+
+    /// The window keeps its footer while it is one pane: the row is the only
+    /// place the pair, the path and the branch are named.
+    #[test]
+    fn one_pane_keeps_the_window_footer() {
+        assert!(!window_footer_yields(1));
+    }
+
+    /// Two panes or more hand the row to the panes: each one already names its
+    /// own pair, so the window row would only print a second, staler model.
+    #[test]
+    fn a_split_yields_the_window_footer() {
+        assert!(window_footer_yields(2));
+        assert!(window_footer_yields(4));
+    }
 }

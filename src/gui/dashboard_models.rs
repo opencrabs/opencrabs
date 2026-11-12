@@ -11,7 +11,12 @@ impl Dashboard {
     /// `/models` with no argument opens the picker. With an argument it is the
     /// switch the terminal performs, and no screen opens: the reply is the
     /// answer, exactly like the terminal's.
-    pub(crate) fn open_models(&mut self, arg: Option<String>, session: Option<Uuid>, cx: &mut Context<Self>) {
+    pub(crate) fn open_models(
+        &mut self,
+        arg: Option<String>,
+        session: Option<Uuid>,
+        cx: &mut Context<Self>,
+    ) {
         let target = session.or_else(|| self.focused_pane());
         self.models_session = target;
         // The catalogue is read once, here, so a frame never walks it. A pane
@@ -342,7 +347,12 @@ impl Dashboard {
         false
     }
 
-    pub(crate) fn activate_model_pair(&mut self, pair: String, onboarding: bool, cx: &mut Context<Self>) {
+    pub(crate) fn activate_model_pair(
+        &mut self,
+        pair: String,
+        onboarding: bool,
+        cx: &mut Context<Self>,
+    ) {
         if !onboarding {
             self.switch_model(pair, cx);
             return;
@@ -626,7 +636,12 @@ impl Dashboard {
     /// `/onboard` and the step commands. The wizard opens on the step the
     /// command named, carrying the live config, so the screen shows what is
     /// configured today rather than a blank form.
-    pub(crate) fn open_onboard(&mut self, command: &'static str, arg: Option<String>, cx: &mut Context<Self>) {
+    pub(crate) fn open_onboard(
+        &mut self,
+        command: &'static str,
+        arg: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(step) = onboard::step_for_command(command) else {
             // Every door in `GUI_SUPPORTED` names a step; if a future edit
             // adds one without a step, say so instead of opening at random.
@@ -680,7 +695,12 @@ impl Dashboard {
 
     /// Put a one-line answer in the conversation that owns it, so a pane never
     /// reads a switch receipt meant for the window chat.
-    pub(crate) fn push_session_notice(&mut self, session: Uuid, line: String, cx: &mut Context<Self>) {
+    pub(crate) fn push_session_notice(
+        &mut self,
+        session: Uuid,
+        line: String,
+        cx: &mut Context<Self>,
+    ) {
         if self.transcript.session == Some(session) {
             self.live.notices.push(line);
         } else if let Some(pane) = self.pane_states.get(&session) {
