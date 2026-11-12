@@ -7247,7 +7247,9 @@ mod tests {
         for source in [
             "self.pane_states.get(&id)",
             "self.stashed.get(&id)",
-            "self.turn.busy && self.chat_session == Some(id)",
+            // The open session's turn reads through the hoisted state since
+            // the chat leaf moved its session out of the window (#2805).
+            "self.turn.busy && self.chat_state.session() == Some(id)",
             "self.rail_live.get(&id)",
         ] {
             assert!(
@@ -7788,9 +7790,16 @@ mod tests {
             .split("\n#[cfg(test)]\nmod tests")
             .next()
             .expect("production source before the test module");
+        // rustfmt wraps a long call chain across lines, so compare the code
+        // with its whitespace removed: the same call, however it is laid out.
+        // Both sides are flattened, because the message itself holds a space.
+        let flat: String = production.chars().filter(|c| !c.is_whitespace()).collect();
+        let plain = "self.turn.live.notices.push(\"Operation cancelled.\".to_string());"
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>();
         assert!(
-            production
-                .contains("self.turn.live.notices.push(\"Operation cancelled.\".to_string());"),
+            flat.contains(&plain),
             "an empty queue keeps the plain wording"
         );
         let drain = production
