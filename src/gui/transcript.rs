@@ -3862,9 +3862,17 @@ pub fn view(
     let first = state.turns.len() - drawn;
     if first > 0 {
         let marker = older_turns_marker(first);
+        // The click hangs off a stateful element: gpui's `on_click` lives on
+        // `StatefulInteractiveElement`, not on a bare `Div`, and a
+        // `ClickHandler` is an `Rc<dyn Fn>`, which is not an `Fn`, so it
+        // forwards through a closure of its own.
         col = col.child(match older_click {
-            Some(handler) => marker.cursor_pointer().on_click(handler),
-            None => marker,
+            Some(handler) => marker
+                .id("older-turns-marker")
+                .cursor_pointer()
+                .on_click(move |event, window, cx| handler(event, window, cx))
+                .into_any_element(),
+            None => marker.into_any_element(),
         });
     }
     let last = state.turns.len().saturating_sub(1);
