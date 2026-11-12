@@ -475,6 +475,11 @@ mod tests {
     #[test]
     fn rail_plan_progress_reports_done_over_total_for_an_active_plan() {
         use opencrabs::tui::plan::{PlanTask, TaskType};
+        // Every ask steps past `STAT_TTL` (200 ms), so the index re-stats the
+        // file it was asked about. A clock that stood still would hand back
+        // the cached stamp and keep painting the doc from before the rewrite.
+        let mut now = Instant::now();
+        let step = Duration::from_millis(500);
         let tmp = tempfile::tempdir().expect("tempdir");
         let session = sid(40);
         // Two done (one completed, one skipped), one in flight, one pending:
@@ -504,13 +509,15 @@ mod tests {
             .join(format!("{PLAN_PREFIX}{session}{PLAN_SUFFIX}"));
         std::fs::write(&path, serde_json::to_string(&doc).expect("json")).expect("write");
         let mut index = PlanIndex::with_roots(vec![tmp.path().to_path_buf()]);
+        now += step;
         assert_eq!(
-            index.progress(session, Instant::now()),
+            index.progress(session, now),
             Some((2, 4)),
             "completed and skipped both count as done"
         );
         // A session with no plan file has no bar.
-        assert_eq!(index.progress(sid(41), Instant::now()), None);
+        now += step;
+        assert_eq!(index.progress(sid(41), now), None);
 
         // A design draft has no checklist to draw, even with tasks seeded.
         doc.status = PlanStatus::Editing;
@@ -523,8 +530,9 @@ mod tests {
             .expect("open plan")
             .set_modified(stamp)
             .expect("stamp plan");
+        now += step;
         assert_eq!(
-            index.progress(session, Instant::now()),
+            index.progress(session, now),
             None,
             "a draft awaiting approval has no progress bar"
         );
@@ -541,8 +549,9 @@ mod tests {
             .expect("open plan")
             .set_modified(stamp)
             .expect("stamp plan");
+        now += step;
         assert_eq!(
-            index.progress(session, Instant::now()),
+            index.progress(session, now),
             None,
             "an empty checklist has no bar to draw"
         );
@@ -697,6 +706,11 @@ mod tests {
 
     #[test]
     fn rail_plan_the_document_cache_follows_the_mtime() {
+        // Each ask steps past `STAT_TTL` (200 ms) so the index stats the file
+        // again: the cache is keyed by the stamp, and a frozen clock would keep
+        // the pre-rewrite doc ringing an approved plan.
+        let mut now = Instant::now();
+        let step = Duration::from_millis(500);
         let tmp = tempfile::tempdir().expect("tempdir");
         let session = sid(32);
         let path = seed_plan(
@@ -707,9 +721,10 @@ mod tests {
             true,
         );
         let mut index = PlanIndex::with_roots(vec![tmp.path().to_path_buf()]);
+        now += step;
         assert!(
             index
-                .evidence(session, false, Instant::now())
+                .evidence(session, false, now)
                 .expect("waiting plan")
                 .ready,
             "the draft rings first"
@@ -733,9 +748,8 @@ mod tests {
             .set_modified(stamp)
             .expect("stamp plan");
 
-        let evidence = index
-            .evidence(session, false, Instant::now())
-            .expect("running plan");
+        now += step;
+        let evidence = index.evidence(session, false, now).expect("running plan");
         assert!(evidence.running);
         assert!(!evidence.ready);
     }

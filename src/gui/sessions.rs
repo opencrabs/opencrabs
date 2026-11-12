@@ -15,9 +15,9 @@ use crate::{icon, palette, platform_icons};
 use std::collections::{HashMap, HashSet};
 
 use gpui::{
-    AnyElement, App, ClickEvent, Div, Image, ImageFormat, InteractiveElement,
-    ObjectFit, ScrollHandle, SharedString, Stateful, Styled, TextRun, Window, div, img,
-    linear_color_stop, linear_gradient, prelude::*, rems, rgb,
+    AnyElement, App, ClickEvent, Div, Image, ImageFormat, InteractiveElement, ObjectFit,
+    ScrollHandle, SharedString, Stateful, Styled, TextRun, Window, div, img, linear_color_stop,
+    linear_gradient, prelude::*, rems, rgb,
 };
 use std::sync::Arc;
 
@@ -210,9 +210,8 @@ impl SessionsState {
             .copied()
             .filter(|s| !grouped(s))
             .partition(|s| self.is_favorite(s.id));
-        let key = |s: &&Session| {
-            std::cmp::Reverse(activity.get(&s.id).copied().unwrap_or(s.updated_at))
-        };
+        let key =
+            |s: &&Session| std::cmp::Reverse(activity.get(&s.id).copied().unwrap_or(s.updated_at));
         pinned.sort_by_cached_key(key);
         rest.sort_by_cached_key(key);
         pinned.extend(rest);
@@ -1833,9 +1832,7 @@ pub fn row(s: &Session, flags: RowFlags, chips: Option<Stateful<Div>>) -> Statef
     let title_text = if indented {
         title_text.text_xs()
     } else {
-        title_text
-            .text_sm()
-            .font_weight(gpui::FontWeight::BOLD)
+        title_text.text_sm().font_weight(gpui::FontWeight::BOLD)
     };
     // The stamp rides the title line, one size down from the name (#2802).
     // It belongs to the trailing cluster, not to the name's line box: that
@@ -2211,8 +2208,9 @@ fn brand_header() -> Div {
 mod tests {
     use super::{
         Database, FindMatch, MenuKind, PlanFilter, RailFilter, SessionsState, accent_bar_visible,
-        filter_is_active, fit, icon_write_needed, load_sessions, merge_find_results, palette,
-        pin_mark, preview_line, rail_cost, rail_filter_allows, rail_menu_entries, rail_stamp,
+        chip_width_at, filter_is_active, fit, icon_write_needed, load_sessions, merge_find_results,
+        pack_rows, palette, pin_mark, preview_line, rail_cost, rail_filter_allows,
+        rail_menu_entries, rail_stamp, strip_budgets,
     };
     use opencrabs::db::models::Session;
     use opencrabs::db::repository::ContentSearchRow;
@@ -2563,10 +2561,14 @@ mod tests {
         );
 
         let second = state.cursor_step(Some(first), 1).expect("rows exist");
-        assert_eq!(second, uuid::Uuid::from_u128(1));
+        assert_eq!(
+            second,
+            uuid::Uuid::from_u128(2),
+            "the rail paints newest activity first, so 2 follows the pinned 3"
+        );
 
         let third = state.cursor_step(Some(second), 1).expect("rows exist");
-        assert_eq!(third, uuid::Uuid::from_u128(2));
+        assert_eq!(third, uuid::Uuid::from_u128(1));
 
         // Up walks the same order backwards from an unarmed start.
         let up_first = state.cursor_step(None, -1).expect("rows exist");
@@ -2586,8 +2588,11 @@ mod tests {
             items: vec![session(1, "a"), session(2, "b")],
             ..Default::default()
         };
-        let first = uuid::Uuid::from_u128(1);
-        let last = uuid::Uuid::from_u128(2);
+        // The ends of the painted order, not of the ledger: the rail sorts
+        // newest activity first, so the last row inserted is the first painted.
+        let ids: Vec<uuid::Uuid> = state.ordered().map(|s| s.id).collect();
+        let (first, last) = (ids[0], ids[ids.len() - 1]);
+        assert_ne!(first, last, "the fixture paints two distinct rows");
 
         assert_eq!(state.cursor_step(Some(first), -1), Some(first));
         assert_eq!(state.cursor_step(Some(last), 1), Some(last));
@@ -2636,8 +2641,7 @@ mod tests {
         let parent_row = session(1, "OCDevCore");
         let busy = session(5, "busy topic");
         let quiet = session(2, "quiet topic");
-        let (parent_id, parent_stamp, busy_stamp) =
-            (parent_row.id, parent_row.updated_at, busy.updated_at);
+        let (parent_id, busy_stamp) = (parent_row.id, busy.updated_at);
         let mut state = SessionsState {
             items: vec![parent_row, busy, quiet],
             ..Default::default()
@@ -2652,9 +2656,16 @@ mod tests {
         );
 
         // A card whose topics are all older than its own last message keeps its
-        // own stamp: grouping can only ever move a card forward in time.
+        // own stamp: grouping can only ever move a card forward in time. The
+        // parent therefore has to be the newer row here: `session(2)` outranks
+        // `session(1)` on the fixture's stamp, so the topic below is genuinely
+        // quieter only once the card itself spoke last.
+        let mut spoke_last = session(1, "OCDevCore");
+        spoke_last.updated_at =
+            chrono::DateTime::from_timestamp(1_700_000_010, 0).expect("a fixed stamp is valid");
+        let parent_stamp = spoke_last.updated_at;
         let mut quiet_only = SessionsState {
-            items: vec![session(1, "OCDevCore"), session(2, "quiet topic")],
+            items: vec![spoke_last, session(2, "quiet topic")],
             ..Default::default()
         };
         quiet_only
@@ -2665,7 +2676,7 @@ mod tests {
                 .grouped_activities()
                 .get(&uuid::Uuid::from_u128(1))
                 .copied(),
-            Some(session(1, "x").updated_at),
+            Some(parent_stamp),
             "a quieter topic never pulls the card back in time"
         );
     }
@@ -2829,7 +2840,22 @@ mod tests {
             !title_line.contains("= pin_mark("),
             "the title line never paints the pin before the name"
         );
+        // Ahead of the name the row only opens its container. The pin is bound
+        // above as `title_pin`/`footer_pin`, so what this checks is the paint
+        // call, never the binding that decides which line carries it.
+        let before_name = title_line
+            .split(".child(title_text)")
+            .next()
+            .expect("row source before the name");
+        assert!(
+            !before_name.contains(".child(pin_toggle)")
+                && !before_name.contains(".child(topic_pin_mark)"),
+            "the row paints nothing before the name, pin included"
+        );
         let name_line = title_line
+            .split(".child(title_text)")
+            .nth(1)
+            .expect("name line after the title text")
             .split(".ml_auto()")
             .next()
             .expect("name line before the trailing cluster");
@@ -2839,10 +2865,20 @@ mod tests {
                 && !name_line.contains("topic_pin_mark"),
             "no pin of any kind paints before the name, indented rows included"
         );
-        let cluster = title_line
-            .split(".ml_auto()")
-            .nth(1)
-            .expect("trailing cluster");
+        // The cluster is one div: it opens its own `.child(` with the layout
+        // it shares, and `ml_auto` is the last modifier that carries it to the
+        // right edge. Slice from that opening, not from the push, or the
+        // layout above `ml_auto` is outside the text this reads.
+        let cluster_at = title_line
+            .find(".ml_auto()")
+            .expect("the cluster is pushed right");
+        let cluster_open = title_line[..cluster_at]
+            .rfind(".child(")
+            .expect("the cluster opens on its own child");
+        let cluster_end = title_line
+            .find("let footer")
+            .expect("the title expression ends before the chip strip");
+        let cluster = &title_line[cluster_open..cluster_end];
         assert!(
             cluster.contains(".when_some(title_pin,"),
             "a card with no topics keeps the wired pin on its name line"
@@ -2867,10 +2903,17 @@ mod tests {
             !source.contains('\u{2605}') && !source.contains('\u{2606}'),
             "the star glyphs are gone: the pushpin replaces them"
         );
+        // Read the module before its own tests: this assertion names the three
+        // functions it forbids, so scanning the whole file finds those names in
+        // this very string and fails on itself.
+        let production = source
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .expect("the module before its tests");
         assert!(
-            !source.contains("pub fn pin_button(")
-                && !source.contains("pub fn topic_button(")
-                && !source.contains("pub fn delete_button("),
+            !production.contains("pub fn pin_button(")
+                && !production.contains("pub fn topic_button(")
+                && !production.contains("pub fn delete_button("),
             "the slide-out strip stays removed; right-click and slide open the menu"
         );
     }
@@ -2902,9 +2945,10 @@ mod tests {
         let child = uuid::Uuid::from_u128(12);
         let sibling = uuid::Uuid::from_u128(13);
         let another_parent = uuid::Uuid::from_u128(14);
-        let mut state = SessionsState::default();
-
-        state.selected = Some(child);
+        let mut state = SessionsState {
+            selected: Some(child),
+            ..Default::default()
+        };
         assert_eq!(
             state.progress_id(parent, [child, sibling]),
             child,
@@ -3229,7 +3273,7 @@ mod tests {
             "the chip set never hides a folded parent's topics: chips always paint"
         );
         assert!(
-            !main_source.contains("let holds_focus"),
+            !crate::dashboard_source::DASHBOARD.contains("let holds_focus"),
             "the parent focus computation is removed, not masked (#2792)"
         );
     }
@@ -3385,9 +3429,7 @@ mod tests {
             rail_stamp(yesterday.with_timezone(&chrono::Utc), now),
             "11-10"
         );
-        let older = chrono::Local
-            .with_ymd_and_hms(2026, 9, 1, 1, 0, 0)
-            .unwrap();
+        let older = chrono::Local.with_ymd_and_hms(2026, 9, 1, 1, 0, 0).unwrap();
         assert_eq!(rail_stamp(older.with_timezone(&chrono::Utc), now), "09-01");
     }
 
@@ -3609,8 +3651,11 @@ mod tests {
             reset.contains("sessions.rail_filter_open = false;"),
             "closing the rail shuts the panel"
         );
+        // Escape is decided in the dashboard's key handler, which the split
+        // gave its own module (#2822).
+        let keys_source = include_str!("dashboard_keys.rs");
         assert!(
-            main_source.contains(
+            keys_source.contains(
                 "if self.sessions.rail_filter_open && ev.keystroke.key.as_str() == \"escape\""
             ),
             "Escape closes the open panel before the find field sees it"
