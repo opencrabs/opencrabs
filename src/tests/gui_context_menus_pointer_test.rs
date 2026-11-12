@@ -244,7 +244,7 @@ fn the_composer_menu_closes_on_escape_and_on_a_press_outside_it() {
         "the window closes the composer's card through its own door"
     );
     assert!(
-        close.contains("self.pane_states.values()"),
+        close.contains("self.pane_editors(cx)"),
         "a split pane has its own composer, and only one of them opened the card"
     );
     assert!(

@@ -94,7 +94,8 @@ fn custom_provider_blank_base_url_does_not_support_fetch() {
 const DIALOGS_SRC: &str = include_str!("../tui/app/dialogs.rs");
 const INPUT_SRC: &str = include_str!("../tui/onboarding/input.rs");
 const REQUEST_SRC: &str = include_str!("../ui_core/model_selector/state.rs");
-const FETCH_SRC: &str = include_str!("../ui_core/model_selector/mod.rs");
+/// The fetcher lives in its own module now; `mod.rs` only re-exports it.
+const FETCH_SRC: &str = include_str!("../ui_core/model_selector/fetch.rs");
 
 #[test]
 fn fetch_models_handler_forwards_base_url_not_none() {
