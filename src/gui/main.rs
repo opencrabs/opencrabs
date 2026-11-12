@@ -949,22 +949,16 @@ struct Dashboard {
     /// The rail's own scroll handle, so a cursor moved by the arrows can
     /// ask the next frame to bring its row into view (#2351).
     rail_scroll: ScrollHandle,
-    /// The message editor (task 4). Typing goes to it while it holds focus;
-    /// its Sent events arrive through the subscription made in `main`.
-    editor: Entity<editor::Editor>,
+    /// The composer and the queue: the field the user types in, the drafts kept
+    /// per conversation, the messages waiting behind the turn, and the flags
+    /// the hint and the spinner read. One value, so the chat leaf inherits one
+    /// field instead of seven (#2805).
+    composer: chat_leaf::Composer,
     /// The submitted history every composer in this window walks. One handle
     /// cloned into the window's field and every split pane, so a message sent
     /// in one is recalled in all of them, in real time, and the terminal reads
     /// the same list off the same file.
     history: composer::SharedHistory,
-    /// Half-typed text keyed by the conversation it was typed in. Switching
-    /// away and back returns the same draft instead of throwing it away.
-    drafts: composer::DraftStore,
-    /// Poll ticks counted since the last repaint that a live turn asked for.
-    /// The spinner and the clock are the only things moving in that branch, and
-    /// rebuilding every pane's transcript 20 times a second to advance them is
-    /// what made a split screen crawl (#2688).
-    anim_tick: u64,
     /// Agent-side state (task 5). Events from the bridge's bootstrap and
     /// turn threads land in the receiver; the poll tick drains it.
     agent_rx: std::sync::mpsc::Receiver<agent_bridge::TurnEvent>,
@@ -984,22 +978,6 @@ struct Dashboard {
     /// screen and restores the destination's, and the window never has to
     /// guess which conversation a card belongs to.
     stashed: std::collections::HashMap<Uuid, chat_leaf::Turn>,
-    /// The hint last painted on the composers, so a tick only touches them when
-    /// the state actually changed (#2630).
-    hint_painted: Option<SharedString>,
-    /// Whether the queue strip is showing every message or only its head.
-    /// A queue of five rows pushes the conversation off the screen, so past
-    /// two messages the strip folds and a click opens it (#2629).
-    queue_expanded: bool,
-    /// Text typed before there is a conversation to key it to: while the agent
-    /// stack is still booting, or before the first session exists. Everything
-    /// else waits in `agent_bridge`'s per-session queue, the one the agent
-    /// itself drains between tool calls. Keeping a second list here meant the
-    /// strip could show five messages the agent could not see, so they never
-    /// went out (#2629).
-    unsent: Vec<agent_bridge::PendingMessage>,
-    /// Set when the agent stack failed to come up; sends are refused.
-    agent_error: Option<String>,
     /// The open conversation's context window: the compaction budget the
     /// service actually enforces for it, not a hardcoded 200K.
     ctx_max: u32,
@@ -4518,13 +4496,14 @@ impl Render for Dashboard {
                     let waiting = self.queued_for_strip();
                     if !waiting.is_empty() {
                         col = col.child(central(
-                            queue_strip(&waiting, self.queue_expanded)
+                            queue_strip(&waiting, self.composer.queue_expanded)
                                 .id("queue-strip-chat")
                                 .on_mouse_down(
                                     MouseButton::Left,
                                     cx.listener(|this: &mut Self, _, _, cx| {
                                         if this.queued_for_strip().len() > 2 {
-                                            this.queue_expanded = !this.queue_expanded;
+                                            this.composer.queue_expanded =
+                                                !this.composer.queue_expanded;
                                             cx.notify();
                                         }
                                     }),
@@ -4564,14 +4543,16 @@ impl Render for Dashboard {
                     // still the child directly above the editor, so the order it
                     // paints in does not change (#2590).
                     if self.topic_draft.is_none() {
-                        let popup = self.editor.read(cx).command_popup();
+                        let popup = self.composer.editor.read(cx).command_popup();
                         if let Some((names, selected)) = popup {
                             col = col.child(central(
                                 command_popup_view(&names, selected).into_any_element(),
                                 centred_chat,
                                 chat_measure_px,
                             ));
-                        } else if let Some((items, selected)) = self.editor.read(cx).emoji_popup() {
+                        } else if let Some((items, selected)) =
+                            self.composer.editor.read(cx).emoji_popup()
+                        {
                             col = col.child(central(
                                 emoji_popup_view(&items, selected).into_any_element(),
                                 centred_chat,
@@ -4580,7 +4561,7 @@ impl Render for Dashboard {
                         }
                     }
                     col = col.child(central(
-                        self.editor.clone().into_any_element(),
+                        self.composer.editor.clone().into_any_element(),
                         centred_chat,
                         chat_measure_px,
                     ));
@@ -5746,19 +5727,13 @@ fn main() {
                         // a handle on this view to judge the press (#2308).
                         ctrl_c_interceptor: None,
                         rail_scroll: ScrollHandle::new(),
-                        editor,
+                        composer: chat_leaf::Composer::new(editor),
                         history: dashboard_history,
-                        drafts: composer::DraftStore::new(),
-                        anim_tick: 0,
                         agent_rx,
                         sink: agent_sink,
                         agent_ready: false,
                         turn: chat_leaf::Turn::default(),
                         stashed: HashMap::new(),
-                        hint_painted: None,
-                        queue_expanded: false,
-                        unsent: Vec::new(),
-                        agent_error: None,
                         ctx_max: 0,
                         metrics: chat_leaf::Metrics::default(),
                         branch: git_branch(&opencrabs::utils::cwd::launch_cwd()),
@@ -5788,7 +5763,7 @@ fn main() {
                             }
                             let falls_to_copy = weak
                                 .read_with(cx, |this, cx| {
-                                    let editor = this.editor.read(cx);
+                                    let editor = this.composer.editor.read(cx);
                                     this.screen == Screen::Chat
                                         && editor.focus_handle.is_focused(window)
                                         && editor.has_selection()
@@ -5819,7 +5794,7 @@ fn main() {
                 });
                 // The editor starts focused, like the TUI's input box: the
                 // user opens the window and types straight into it.
-                window.focus(&view.read(cx).editor.read(cx).focus_handle);
+                window.focus(&view.read(cx).composer.editor.read(cx).focus_handle);
                 // Open the newest conversation before the first paint (chat
                 // is the default). The fetch runs off the UI thread, like
                 // every other DB read in this window.
@@ -8404,7 +8379,7 @@ mod tests {
             .find("self.finder_key(ks, cx)")
             .expect("the card must answer keys in on_key");
         let gate = src
-            .find("if self.editor.read(cx).focus_handle.is_focused(window)")
+            .find("if self.composer.editor.read(cx).focus_handle.is_focused(window)")
             .expect("the composer gate is in the handler");
         assert!(
             hook < gate,
@@ -8673,9 +8648,9 @@ mod tests {
         let (body, _) = helper
             .split_once("\n    pub(crate) fn ")
             .expect("the next method ends it");
-        let filed = ["self.drafts.", "store(previous, draft)"].concat();
+        let filed = ["self.composer.drafts.", "store(previous, draft)"].concat();
         assert!(body.contains(&filed), "leaving files the draft");
-        let back = ["self.drafts.", "take(id)"].concat();
+        let back = ["self.composer.drafts.", "take(id)"].concat();
         assert!(body.contains(&back), "arriving takes the stored draft");
         let restore = ["ed.restore_", "state(draft, cx)"].concat();
         assert!(body.contains(&restore), "the returned draft is put back");
@@ -8949,7 +8924,7 @@ mod tests {
             .find("self.ctrl_c_press(cx);")
             .expect("the Ctrl+C branch is in on_key");
         let gate = src
-            .find("if self.editor.read(cx).focus_handle.is_focused(window)")
+            .find("if self.composer.editor.read(cx).focus_handle.is_focused(window)")
             .expect("the composer gate is in on_key");
         assert!(
             branch < gate,

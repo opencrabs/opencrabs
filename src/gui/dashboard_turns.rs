@@ -79,7 +79,7 @@ impl Dashboard {
             cx.notify();
             return;
         }
-        if let Some(err) = self.agent_error.clone() {
+        if let Some(err) = self.composer.agent_error.clone() {
             if let Some(pane) = self.pane_states.get(&session) {
                 pane.update(cx, |pane, cx| {
                     pane.live.notices.push(format!("agent offline: {err}"));
@@ -510,10 +510,10 @@ impl Dashboard {
             cx.notify();
             return;
         }
-        if self.agent_error.is_some() {
+        if self.composer.agent_error.is_some() {
             self.turn.live.notices.push(format!(
                 "agent offline: {}",
-                self.agent_error.as_deref().unwrap_or("bootstrap failed")
+                self.composer.agent_error.as_deref().unwrap_or("bootstrap failed")
             ));
             cx.notify();
             return;
@@ -533,22 +533,24 @@ impl Dashboard {
                     agent_bridge::queue_push(sid, Self::pending_message(text, display.clone()))
                 }
                 None => self
-                    .unsent
+                    .composer.unsent
                     .push(Self::pending_message(text, display.clone())),
             }
             self.finish_recall(&sent_from, cx);
             // The composer now says a message is waiting on the turn, the
             // moment it is queued rather than on the next turn event (#2630).
-            self.sync_composer_hint(cx);
+            let (hint, panes) = (self.composer_hint(), self.pane_editors(cx));
+            self.composer.sync_composer_hint(hint, &panes, cx);
             cx.notify();
             return;
         }
         let Some(bridge) = agent_bridge::bridge() else {
             // Still booting: keep the message, it fires on Ready. The queue
             // strip is where the user sees it.
-            self.unsent
+            self.composer.unsent
                 .push(Self::pending_message(text, display.clone()));
-            self.sync_composer_hint(cx);
+            let (hint, panes) = (self.composer_hint(), self.pane_editors(cx));
+            self.composer.sync_composer_hint(hint, &panes, cx);
             cx.notify();
             return;
         };
@@ -556,7 +558,7 @@ impl Dashboard {
         // is nothing to write into, so one is created and the text waits in
         // the queue rather than vanishing into a session nobody is looking at.
         let Some(sid) = self.chat_state.session() else {
-            self.unsent
+            self.composer.unsent
                 .push(Self::pending_message(text, display.clone()));
             self.new_session(cx);
             return;
@@ -576,7 +578,8 @@ impl Dashboard {
         // (#2637).
         self.finish_recall(&sent_from, cx);
         self.turn.busy = true;
-        self.sync_composer_hint(cx);
+        let (hint, panes) = (self.composer_hint(), self.pane_editors(cx));
+        self.composer.sync_composer_hint(hint, &panes, cx);
         let cancel = tokio_util::sync::CancellationToken::new();
         self.turn.cancel = Some(cancel.clone());
         // Attachments are tracked against the session the same way the TUI
@@ -675,8 +678,8 @@ impl Dashboard {
                 // branch, so they repaint on a slower cadence than the poll
                 // itself. At 20 Hz this walked every pane's transcript five
                 // times as often as the animation needed (#2688).
-                self.anim_tick = self.anim_tick.wrapping_add(1);
-                if busy_repaint_due(self.anim_tick) {
+                self.composer.anim_tick = self.composer.anim_tick.wrapping_add(1);
+                if busy_repaint_due(self.composer.anim_tick) {
                     cx.notify();
                 }
             }
@@ -730,7 +733,8 @@ impl Dashboard {
                     if self.chat_state.session().is_none() {
                         self.new_session(cx);
                     }
-                    self.sync_composer_hint(cx);
+                    let (hint, panes) = (self.composer_hint(), self.pane_editors(cx));
+                    self.composer.sync_composer_hint(hint, &panes, cx);
                     self.drain_pending(cx);
                 }
                 agent_bridge::TurnEvent::SessionCreated(id) => {
@@ -840,7 +844,7 @@ impl Dashboard {
                 }
                 agent_bridge::TurnEvent::BootstrapFailed(e) => {
                     logging::error(&format!("agent offline: {e}"));
-                    self.agent_error = Some(e.clone());
+                    self.composer.agent_error = Some(e.clone());
                     self.turn.live.notices.push(format!("agent offline: {e}"));
                 }
                 agent_bridge::TurnEvent::ModelSwitched { session, line } => {
@@ -1387,7 +1391,8 @@ impl Dashboard {
         // drained on `Ready`, so a message typed while busy never went out.
         // The hint follows the turn and the queue, including a report that
         // landed mid-turn, so it is repainted on every event batch (#2630).
-        self.sync_composer_hint(cx);
+        let (hint, panes) = (self.composer_hint(), self.pane_editors(cx));
+        self.composer.sync_composer_hint(hint, &panes, cx);
         if !self.turn.busy {
             self.turn.cancel = None;
             self.drain_pending(cx);

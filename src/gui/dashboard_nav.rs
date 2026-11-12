@@ -148,7 +148,7 @@ impl Dashboard {
             // A recall belongs to the conversation it started in too, so its
             // messages go back to wait instead of vanishing with the old draft
             // (#2637, #2696).
-            let returned = self.editor.update(cx, |ed, _| ed.release_recall(false));
+            let returned = self.composer.editor.update(cx, |ed, _| ed.release_recall(false));
             if let Some((session, msgs)) = returned {
                 for msg in msgs {
                     agent_bridge::queue_recall_return(session, msg);
@@ -159,12 +159,12 @@ impl Dashboard {
             // being left and the destination's own draft comes back, so a
             // switch and a switch back return the same half-typed message.
             let previous = self.chat_state.session();
-            let draft = self.editor.update(cx, |ed, cx| ed.take_draft(cx));
+            let draft = self.composer.editor.update(cx, |ed, cx| ed.take_draft(cx));
             if let Some(previous) = previous {
-                self.drafts.store(previous, draft);
+                self.composer.drafts.store(previous, draft);
             }
-            let returning = self.drafts.take(id);
-            self.editor.update(cx, move |ed, cx| {
+            let returning = self.composer.drafts.take(id);
+            self.composer.editor.update(cx, move |ed, cx| {
                 ed.begin_conversation(cx);
                 if let Some(draft) = returning {
                     ed.restore_state(draft, cx);
@@ -234,7 +234,7 @@ impl Dashboard {
     /// thing wherever it is caught.
     pub(crate) fn ctrl_c_press(&mut self, cx: &mut Context<Self>) {
         let now = std::time::Instant::now();
-        let input_empty = self.editor.read(cx).is_empty();
+        let input_empty = self.composer.editor.read(cx).is_empty();
         let action = ctrl_c_action(
             self.chat_state.follow.is_following(),
             input_empty,
@@ -250,13 +250,13 @@ impl Dashboard {
                 if let Some(id) = self.pane_focus {
                     self.rearm_pane_follow(id, cx);
                 }
-                self.editor
+                self.composer.editor
                     .update(cx, |editor, cx| editor.discard_draft(cx));
                 logging::info("ctrl+c snapped the transcript to the bottom");
             }
             CtrlCAction::ClearAndArm => {
                 self.ctrl_c_pending = Some(now);
-                self.editor
+                self.composer.editor
                     .update(cx, |editor, cx| editor.discard_draft(cx));
                 self.turn.live
                     .notices
@@ -280,7 +280,8 @@ impl Dashboard {
         }
         // The draft is gone, so the hint that describes an empty field is the
         // one that belongs under it now (#2308).
-        self.sync_composer_hint(cx);
+        let (hint, panes) = (self.composer_hint(), self.pane_editors(cx));
+        self.composer.sync_composer_hint(hint, &panes, cx);
         cx.notify();
     }
 

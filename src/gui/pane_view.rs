@@ -199,7 +199,7 @@ impl PaneView {
                     .map(|tree| tree.leaves().len())
                     .unwrap_or(1),
                 win.plan_expanded.contains(&session),
-                win.queue_expanded,
+                win.composer.queue_expanded,
                 win.topic_draft.is_none(),
                 win.split_focus() == Some(session),
                 win.running_tasks_label_for(session),
@@ -253,7 +253,8 @@ impl PaneView {
                             cx.stop_propagation();
                             if folds {
                                 let _ = weak.update(cx, |this, cx| {
-                                    this.queue_expanded = !this.queue_expanded;
+                                    this.composer.queue_expanded =
+                                        !this.composer.queue_expanded;
                                     cx.notify();
                                 });
                             }

@@ -544,7 +544,7 @@ fn the_window_composer_stands_down_once_the_window_is_split() {
     // stand down. `flat` folds the reflow, so this pins the wrapper itself
     // rather than the column the editor landed on.
     assert!(
-        gated.contains("central( self.editor.clone()"),
+        gated.contains("central( self.composer.editor.clone()"),
         "the window's composer sits inside the gate, still on the chat measure"
     );
     assert!(
@@ -617,7 +617,7 @@ fn a_dropped_file_belongs_to_the_focused_pane() {
         "the chip goes to the composer the keyboard owns, not the window's"
     );
     assert!(
-        !drop.contains("this.editor.update"),
+        !drop.contains("this.composer.editor.update"),
         "the window's editor is the chat leaf's field, which a split may not draw"
     );
 }

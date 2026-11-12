@@ -91,11 +91,9 @@ impl Dashboard {
     /// press that closes it (#2749). Every field is checked, because a split
     /// pane has its own and only one of them opened the card.
     pub(crate) fn close_composer_menus(&mut self, cx: &mut Context<Self>) {
-        let mut editors = vec![self.editor.clone()];
+        let mut editors = vec![self.composer.editor.clone()];
         // Every leaf's composer, read through its handle (#2805).
-        for pane in self.pane_states.values() {
-            editors.push(pane.read(cx).editor.clone());
-        }
+        editors.extend(self.pane_editors(cx));
         for editor in editors {
             editor.update(cx, |editor, cx| editor.close_context_menu(cx));
         }

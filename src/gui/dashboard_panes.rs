@@ -211,13 +211,13 @@ impl Dashboard {
     /// the attachment chips into a field the split never draws.
     pub(crate) fn composer_entity(&self, cx: &App) -> Entity<editor::Editor> {
         match self.split_focus() {
-            Some(id) if Some(id) == self.chat_session => self.editor.clone(),
+            Some(id) if Some(id) == self.chat_session => self.composer.editor.clone(),
             Some(id) => self
                 .pane_states
                 .get(&id)
                 .map(|pane| pane.read(cx).editor.clone())
-                .unwrap_or_else(|| self.editor.clone()),
-            None => self.editor.clone(),
+                .unwrap_or_else(|| self.composer.editor.clone()),
+            None => self.composer.editor.clone(),
         }
     }
 
@@ -275,7 +275,7 @@ impl Dashboard {
             .map(|(_, half)| (half.layout.is_stacked(), half.after))
             .hash(&mut hasher);
         self.plan_expanded.contains(&session).hash(&mut hasher);
-        self.queue_expanded.hash(&mut hasher);
+        self.composer.queue_expanded.hash(&mut hasher);
         self.topic_draft.is_none().hash(&mut hasher);
         self.running_tasks_label_for(session).hash(&mut hasher);
         // A queued message and an offer both draw in the pane's column, and
@@ -447,7 +447,7 @@ impl Dashboard {
         });
         // A draft filed before this pane was closed, moved, or switched comes
         // back with it.
-        if let Some(draft) = self.drafts.take(id) {
+        if let Some(draft) = self.composer.drafts.take(id) {
             pane_editor.update(cx, |ed, cx| ed.restore_state(draft, cx));
         }
         cx.subscribe(&pane_editor, move |this, _editor, event, cx| match event {
@@ -600,7 +600,7 @@ impl Dashboard {
         };
         let editor = pane.read(cx).editor.clone();
         let draft = editor.update(cx, |ed, cx| ed.take_draft(cx));
-        self.drafts.store(session, draft);
+        self.composer.drafts.store(session, draft);
     }
 
     /// The same for every pane, for a tree replaced wholesale.
@@ -899,7 +899,7 @@ impl Dashboard {
                             .editing_view(Some(&actions))
                             .or_else(|| self.plan.pane_view(density, expanded)),
                         self.queued_for_strip(),
-                        self.editor.clone(),
+                        self.composer.editor.clone(),
                     )
                 };
                 let mut col = div().flex().flex_col().flex_none().gap_2();
@@ -925,14 +925,15 @@ impl Dashboard {
                     // list does not react to a stray tap (#2629).
                     let folds = queued.len() > 2;
                     col = col.child(
-                        queue_strip(&queued, self.queue_expanded)
+                        queue_strip(&queued, self.composer.queue_expanded)
                             .id(SharedString::from(format!("queue-strip-{strip_session}")))
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this: &mut Self, _, _, cx| {
                                     cx.stop_propagation();
                                     if folds {
-                                        this.queue_expanded = !this.queue_expanded;
+                                        this.composer.queue_expanded =
+                                            !this.composer.queue_expanded;
                                         cx.notify();
                                     }
                                 }),

@@ -16,18 +16,22 @@
 //!    their own conversations (#2616) are one shape instead of two. Moved.
 //! 3. [`ChatState`]: the transcript, its scroll handle and the follow flag.
 //!    Moved.
-//! 4. The composer handles and the queue, and then the entity that draws all
-//!    of it, which is the step that stops a window repaint from re-walking
-//!    the conversation.
+//! 4. [`Composer`]: the field the user types in, the drafts, the queue and the
+//!    flags the hint and the spinner read. Moved.
+//! 5. The entity that draws all of it, which is the step that stops a window
+//!    repaint from re-walking the conversation.
 
 use std::collections::HashMap;
 use std::time::Instant;
 
-use gpui::ScrollHandle;
+use gpui::{App, Entity, ScrollHandle, SharedString};
+use opencrabs::ui_core::composer::DraftStore;
 use opencrabs::ui_core::scroll::Follow;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use super::agent_bridge::PendingMessage;
+use super::editor::Editor;
 use super::transcript::{LiveTurn, TranscriptState, TurnMetrics};
 
 /// The reload handshake that keeps a finished turn's card on screen until the
@@ -167,5 +171,86 @@ impl ChatState {
     /// (#2705).
     pub(crate) fn row_total(&self) -> usize {
         self.transcript.row_total()
+    }
+}
+
+/// The composer on screen and the messages waiting behind it (#2805).
+///
+/// The field the user types in, the drafts kept per conversation, the queue the
+/// strip shows and the handful of flags the hint and the spinner read. They
+/// belong together because every one of them answers the same question: what
+/// does the next send do.
+///
+/// `history` is deliberately not here. It is one handle cloned into the window
+/// and every split pane, so a message sent in one is recalled in all of them in
+/// real time; moving it into this leaf would make every other leaf reach
+/// through this one to get it.
+pub(crate) struct Composer {
+    /// The window's own message field. Typing goes to it while it holds focus,
+    /// and its `Sent` events arrive through the subscription `main` makes.
+    pub(crate) editor: Entity<Editor>,
+    /// Half-typed text keyed by the conversation it was typed in, so switching
+    /// away and back returns the same draft instead of throwing it away.
+    pub(crate) drafts: DraftStore,
+    /// Text typed before there is a conversation to key it to: while the agent
+    /// stack is still booting, or before the first session exists. Everything
+    /// else waits in `agent_bridge`'s per-session queue, the one the agent
+    /// drains between tool calls; a second list here let the strip show
+    /// messages the agent could not see, so they never went out (#2629).
+    pub(crate) unsent: Vec<PendingMessage>,
+    /// Whether the queue strip is showing every message or only its head. Five
+    /// rows push the conversation off the screen, so past two the strip folds
+    /// and a click opens it (#2629).
+    pub(crate) queue_expanded: bool,
+    /// Set when the agent stack failed to come up; sends are refused.
+    pub(crate) agent_error: Option<String>,
+    /// The hint last painted on the composers, so a tick only touches them when
+    /// the state actually changed (#2630).
+    pub(crate) hint_painted: Option<SharedString>,
+    /// Poll ticks counted since the last repaint a live turn asked for. The
+    /// spinner and the clock are the only things moving in that branch, and
+    /// rebuilding every pane's transcript twenty times a second to advance them
+    /// is what made a split screen crawl (#2688).
+    pub(crate) anim_tick: u64,
+}
+
+impl Composer {
+    /// Built around the field `main` creates. An entity has no default, so this
+    /// value cannot either; everything else starts empty.
+    pub(crate) fn new(editor: Entity<Editor>) -> Self {
+        Self {
+            editor,
+            drafts: DraftStore::new(),
+            unsent: Vec::new(),
+            queue_expanded: false,
+            agent_error: None,
+            hint_painted: None,
+            anim_tick: 0,
+        }
+    }
+
+    /// Paint the hint under the caret: the window's own field and each split
+    /// pane's, so a pane that takes the keyboard already says the right thing.
+    /// Only a real state change touches them, because the placeholder is an
+    /// edit on every composer and a tick that repaints them all is a tick that
+    /// steals the frame (#2630).
+    ///
+    /// The panes come in as an argument: this leaf owns the window's field, not
+    /// the split tree, so the window hands it the fields it cannot reach.
+    pub(crate) fn sync_composer_hint(
+        &mut self,
+        hint: SharedString,
+        panes: &[Entity<Editor>],
+        cx: &mut App,
+    ) {
+        if self.hint_painted.as_ref() == Some(&hint) {
+            return;
+        }
+        self.hint_painted = Some(hint.clone());
+        self.editor
+            .update(cx, |ed, cx| ed.set_placeholder(hint.clone(), cx));
+        for editor in panes {
+            editor.update(cx, |ed, cx| ed.set_placeholder(hint.clone(), cx));
+        }
     }
 }

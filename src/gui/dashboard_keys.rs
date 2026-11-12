@@ -155,8 +155,13 @@ impl Dashboard {
         // A transcript selection survives mouse release so the keyboard can
         // copy it too (#2529). A composer selection keeps its own GPUI copy
         // action; otherwise this is the transcript's shared cmd/ctrl-C path.
-        let composer_has_copy_selection = self.editor.read(cx).focus_handle.is_focused(window)
-            && self.editor.read(cx).has_selection();
+        let composer_has_copy_selection = self
+            .composer
+            .editor
+            .read(cx)
+            .focus_handle
+            .is_focused(window)
+            && self.composer.editor.read(cx).has_selection();
         if self.screen == Screen::Chat
             && !composer_has_copy_selection
             && opencrabs::ui_core::copy_select::is_copy_chord(
@@ -626,7 +631,8 @@ impl Dashboard {
                 self.turn.live.notices.push("Operation cancelled.".to_string());
             }
             logging::info("turn cancelled by Esc");
-            self.sync_composer_hint(cx);
+            let (hint, panes) = (self.composer_hint(), self.pane_editors(cx));
+            self.composer.sync_composer_hint(hint, &panes, cx);
             cx.notify();
             return;
         }
@@ -707,7 +713,7 @@ impl Dashboard {
         if ev.keystroke.key == "tab"
             && self.screen == Screen::Chat
             && self.rail_open
-            && (self.rail_focused || !self.editor.read(cx).list_open())
+            && (self.rail_focused || !self.composer.editor.read(cx).list_open())
         {
             self.rail_focused = !self.rail_focused;
             if self.rail_focused {
@@ -737,7 +743,7 @@ impl Dashboard {
         // While the editor holds focus it owns the keyboard: its actions
         // (send, newline, movement) run through the keymap, and raw keys
         // reaching this handler would double-handle Enter and friends.
-        if self.editor.read(cx).focus_handle.is_focused(window) {
+        if self.composer.editor.read(cx).focus_handle.is_focused(window) {
             return;
         }
         // Rail arrows and enter. This sits after the editor gate, so the

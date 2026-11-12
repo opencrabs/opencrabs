@@ -45,7 +45,8 @@ impl Dashboard {
         self.chat_state.transcript.live_expanded = false;
         self.turn.settle.begin(self.chat_state.row_total());
         self.turn.busy = true;
-        self.sync_composer_hint(cx);
+        let (hint, panes) = (self.composer_hint(), self.pane_editors(cx));
+        self.composer.sync_composer_hint(hint, &panes, cx);
         let cancel = tokio_util::sync::CancellationToken::new();
         self.turn.cancel = Some(cancel.clone());
         let attached = editor::marker_paths(&context_text);
@@ -145,25 +146,14 @@ impl Dashboard {
         composer_hint_for(self.turn.busy, self.queued_for_strip().len())
     }
 
-    /// Paint the hint on every composer: the focused field and each split
-    /// pane's own, so a pane that takes the keyboard already says the right
-    /// thing. Only a real state change touches them (#2630).
-    pub(crate) fn sync_composer_hint(&mut self, cx: &mut Context<Self>) {
-        let hint = self.composer_hint();
-        if self.hint_painted.as_ref() == Some(&hint) {
-            return;
-        }
-        self.hint_painted = Some(hint.clone());
-        self.editor
-            .update(cx, |ed, cx| ed.set_placeholder(hint.clone(), cx));
-        let panes: Vec<_> = self
-            .pane_states
+    /// Every split pane's own composer. The window's field lives on the chat
+    /// leaf, so a hint that has to reach the panes is handed this list rather
+    /// than reaching into the split tree itself (#2805).
+    pub(crate) fn pane_editors(&self, cx: &App) -> Vec<Entity<editor::Editor>> {
+        self.pane_states
             .values()
             .map(|pane| pane.read(cx).editor.clone())
-            .collect();
-        for editor in panes {
-            editor.update(cx, |ed, cx| ed.set_placeholder(hint.clone(), cx));
-        }
+            .collect()
     }
 
     /// A composer just sent its field. The field holds every message its recall
@@ -171,12 +161,8 @@ impl Dashboard {
     /// nothing goes back to wait. Other composers release their whole recall
     /// (#2637, #2696).
     pub(crate) fn finish_recall(&mut self, sent: &Entity<editor::Editor>, cx: &mut Context<Self>) {
-        let mut editors = vec![self.editor.clone()];
-        editors.extend(
-            self.pane_states
-                .values()
-                .map(|pane| pane.read(cx).editor.clone()),
-        );
+        let mut editors = vec![self.composer.editor.clone()];
+        editors.extend(self.pane_editors(cx));
         for editor in editors {
             let keep = editor.entity_id() == sent.entity_id();
             let returned = editor.update(cx, |ed, _| ed.release_recall(keep));
@@ -192,7 +178,7 @@ impl Dashboard {
     /// session, then anything typed before a session existed. One store backs
     /// both, so what the user reads is exactly what will send (#2629).
     pub(crate) fn queued_for_strip(&self) -> Vec<agent_bridge::PendingMessage> {
-        let mut out = self.unsent.clone();
+        let mut out = self.composer.unsent.clone();
         if let Some(sid) = self.chat_session {
             out.extend(agent_bridge::queue_snapshot(sid));
         }
@@ -232,15 +218,15 @@ impl Dashboard {
         // Boot text has no session to live in yet. It joins the open one here,
         // so there is never a second list the agent cannot see (#2629).
         if let Some(sid) = self.chat_session
-            && !self.unsent.is_empty()
+            && !self.composer.unsent.is_empty()
         {
-            for msg in std::mem::take(&mut self.unsent) {
+            for msg in std::mem::take(&mut self.composer.unsent) {
                 agent_bridge::queue_push(sid, msg);
             }
         }
         let waiting = match self.chat_session {
             Some(sid) => agent_bridge::queue_snapshot(sid),
-            None => self.unsent.clone(),
+            None => self.composer.unsent.clone(),
         };
         if waiting.is_empty() {
             return;
@@ -272,7 +258,8 @@ impl Dashboard {
             self.chat_state.transcript.live_expanded = false;
             self.turn.settle.begin(self.chat_state.row_total());
             self.turn.busy = true;
-            self.sync_composer_hint(cx);
+            let (hint, panes) = (self.composer_hint(), self.pane_editors(cx));
+            self.composer.sync_composer_hint(hint, &panes, cx);
             let cancel = tokio_util::sync::CancellationToken::new();
             self.turn.cancel = Some(cancel.clone());
             let attached = editor::marker_paths(&joined.context_text);
@@ -510,7 +497,7 @@ impl Dashboard {
         agent_bridge::spawn_delete_session(self.db_path.clone(), id, self.sink.clone());
         // A deleted conversation must not keep a draft waiting for a composer
         // it can never reach. Its pane's editor leaves with the conversation.
-        self.drafts.remove(id);
+        self.composer.drafts.remove(id);
         self.pane_states.remove(&id);
         // The pin is part of the row: it leaves with the row.
         self.sessions.favorites.retain(|f| *f != id);
