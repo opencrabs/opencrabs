@@ -148,7 +148,10 @@ impl Dashboard {
             // A recall belongs to the conversation it started in too, so its
             // messages go back to wait instead of vanishing with the old draft
             // (#2637, #2696).
-            let returned = self.composer.editor.update(cx, |ed, _| ed.release_recall(false));
+            let returned = self
+                .composer
+                .editor
+                .update(cx, |ed, _| ed.release_recall(false));
             if let Some((session, msgs)) = returned {
                 for msg in msgs {
                     agent_bridge::queue_recall_return(session, msg);
@@ -250,15 +253,18 @@ impl Dashboard {
                 if let Some(id) = self.pane_focus {
                     self.rearm_pane_follow(id, cx);
                 }
-                self.composer.editor
+                self.composer
+                    .editor
                     .update(cx, |editor, cx| editor.discard_draft(cx));
                 logging::info("ctrl+c snapped the transcript to the bottom");
             }
             CtrlCAction::ClearAndArm => {
                 self.ctrl_c_pending = Some(now);
-                self.composer.editor
+                self.composer
+                    .editor
                     .update(cx, |editor, cx| editor.discard_draft(cx));
-                self.turn.live
+                self.turn
+                    .live
                     .notices
                     .push("Press Ctrl+C again to quit".to_string());
             }
@@ -549,7 +555,10 @@ impl Dashboard {
     /// map (#2155), which is what lets an opened turn survive a reload.
     pub(crate) fn toggle_turn(&mut self, anchor: &str, cx: &mut Context<Self>) {
         if !self.chat_state.transcript.expanded.remove(anchor) {
-            self.chat_state.transcript.expanded.insert(anchor.to_string());
+            self.chat_state
+                .transcript
+                .expanded
+                .insert(anchor.to_string());
         } else {
             // A folded turn forgets its full details, so reopening starts at the top (#2440).
             self.chat_state.transcript.details.remove(anchor);
@@ -569,7 +578,12 @@ impl Dashboard {
             cx.notify();
             return;
         }
-        let Some(anchor) = self.chat_state.transcript.newest_anchor().map(str::to_string) else {
+        let Some(anchor) = self
+            .chat_state
+            .transcript
+            .newest_anchor()
+            .map(str::to_string)
+        else {
             return;
         };
         if !self.chat_state.transcript.expanded.contains(&anchor) {

@@ -628,7 +628,10 @@ impl Dashboard {
             } else if !returned {
                 // A handed-back message already says so in the composer, so
                 // the notice would be the second time the user is told.
-                self.turn.live.notices.push("Operation cancelled.".to_string());
+                self.turn
+                    .live
+                    .notices
+                    .push("Operation cancelled.".to_string());
             }
             logging::info("turn cancelled by Esc");
             let (hint, panes) = (self.composer_hint(), self.pane_editors(cx));
@@ -743,7 +746,13 @@ impl Dashboard {
         // While the editor holds focus it owns the keyboard: its actions
         // (send, newline, movement) run through the keymap, and raw keys
         // reaching this handler would double-handle Enter and friends.
-        if self.composer.editor.read(cx).focus_handle.is_focused(window) {
+        if self
+            .composer
+            .editor
+            .read(cx)
+            .focus_handle
+            .is_focused(window)
+        {
             return;
         }
         // Rail arrows and enter. This sits after the editor gate, so the

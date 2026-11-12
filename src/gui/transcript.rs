@@ -2772,7 +2772,15 @@ fn block_view(
             time,
             forward: Some(mark),
             ..
-        } => forward_block(mark, content, time, content_width, handlers, selection, full),
+        } => forward_block(
+            mark,
+            content,
+            time,
+            content_width,
+            handlers,
+            selection,
+            full,
+        ),
         Block::Msg {
             role,
             content,

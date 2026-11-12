@@ -134,10 +134,8 @@ impl MessageRepository {
             .await
             .context("Failed to get connection")?
             .interact(move |conn| {
-                let mut values: Vec<rusqlite::types::Value> = ids
-                    .into_iter()
-                    .map(rusqlite::types::Value::Text)
-                    .collect();
+                let mut values: Vec<rusqlite::types::Value> =
+                    ids.into_iter().map(rusqlite::types::Value::Text).collect();
                 values.push(rusqlite::types::Value::Integer(limit));
                 let mut stmt = conn.prepare_cached(&sql)?;
                 let rows = stmt.query_map(params_from_iter(values.iter()), Message::from_row)?;

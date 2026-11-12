@@ -39,7 +39,10 @@ fn a_folded_turn_draws_an_excerpt_and_announces_what_it_hid() {
 
     for (start, end) in [
         ("fn bubble(", "/// A forwarded copy"),
-        ("fn forward_block(", "/// The files a stored message carries"),
+        (
+            "fn forward_block(",
+            "/// The files a stored message carries",
+        ),
     ] {
         let body = region(start, end);
         assert!(
@@ -84,7 +87,10 @@ fn a_folded_turn_does_not_draw_its_whole_body() {
 /// family, and reading each member's own window put 3,627 rows on screen.
 #[test]
 fn the_merged_family_reads_one_window_not_one_per_member() {
-    let loader = region("pub async fn load_recent(", "/// What a stored session title");
+    let loader = region(
+        "pub async fn load_recent(",
+        "/// What a stored session title",
+    );
     assert!(
         loader.contains("repo.find_recent_by_sessions(&ids, WINDOW)"),
         "the family is read as one window"
@@ -122,10 +128,7 @@ fn a_stored_rows_copy_text_is_built_once() {
         memo.contains("static CACHE: RefCell<HashMap<uuid::Uuid, Rc<str>>>"),
         "the cache is keyed by the row, which never changes once written"
     );
-    assert!(
-        memo.contains("CACHE_ENTRIES"),
-        "the cache has a ceiling"
-    );
+    assert!(memo.contains("CACHE_ENTRIES"), "the cache has a ceiling");
 
     let text = region("fn block_text(", "/// What the transcript view listens to");
     assert!(

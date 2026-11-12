@@ -504,7 +504,8 @@ impl Dashboard {
             .session()
             .is_some_and(|id| self.sessions.is_closed(id))
         {
-            self.turn.live
+            self.turn
+                .live
                 .notices
                 .push("This topic is closed. Reopen it to continue.".to_string());
             cx.notify();
@@ -513,7 +514,10 @@ impl Dashboard {
         if self.composer.agent_error.is_some() {
             self.turn.live.notices.push(format!(
                 "agent offline: {}",
-                self.composer.agent_error.as_deref().unwrap_or("bootstrap failed")
+                self.composer
+                    .agent_error
+                    .as_deref()
+                    .unwrap_or("bootstrap failed")
             ));
             cx.notify();
             return;
@@ -533,7 +537,8 @@ impl Dashboard {
                     agent_bridge::queue_push(sid, Self::pending_message(text, display.clone()))
                 }
                 None => self
-                    .composer.unsent
+                    .composer
+                    .unsent
                     .push(Self::pending_message(text, display.clone())),
             }
             self.finish_recall(&sent_from, cx);
@@ -547,7 +552,8 @@ impl Dashboard {
         let Some(bridge) = agent_bridge::bridge() else {
             // Still booting: keep the message, it fires on Ready. The queue
             // strip is where the user sees it.
-            self.composer.unsent
+            self.composer
+                .unsent
                 .push(Self::pending_message(text, display.clone()));
             let (hint, panes) = (self.composer_hint(), self.pane_editors(cx));
             self.composer.sync_composer_hint(hint, &panes, cx);
@@ -558,12 +564,14 @@ impl Dashboard {
         // is nothing to write into, so one is created and the text waits in
         // the queue rather than vanishing into a session nobody is looking at.
         let Some(sid) = self.chat_state.session() else {
-            self.composer.unsent
+            self.composer
+                .unsent
                 .push(Self::pending_message(text, display.clone()));
             self.new_session(cx);
             return;
         };
-        self.turn.live
+        self.turn
+            .live
             .begin(display.clone().unwrap_or_else(|| text.clone()));
         // A send is the reader asking for the end of the conversation (#2698).
         self.rearm_transcript_follow();
@@ -923,7 +931,8 @@ impl Dashboard {
                 }
                 agent_bridge::TurnEvent::BrainFailed(e) => {
                     logging::error(&format!("brain: {e}"));
-                    self.turn.live
+                    self.turn
+                        .live
                         .notices
                         .push(format!("brain generation failed: {e}"));
                     // The step keeps the reason and stays up: Enter still
@@ -992,7 +1001,8 @@ impl Dashboard {
                     // live row reads exactly like the row that persists.
                     let description =
                         opencrabs::tui::app::App::format_tool_description(&tool_name, &tool_input);
-                    self.turn.live
+                    self.turn
+                        .live
                         .push_tool(transcript::ToolCall::running(tool_name, description));
                     // A silent tool run still moves the preview's tool line, so
                     // the same throttled read the chunk path uses is asked for
@@ -1063,7 +1073,8 @@ impl Dashboard {
                 ) => {
                     if Some(sid) == self.chat_state.session() {
                         self.turn.live.thinking = false;
-                        self.turn.live
+                        self.turn
+                            .live
                             .push_tool(transcript::ToolCall::detached(task_id, label));
                     }
                 }

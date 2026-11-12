@@ -64,7 +64,8 @@ impl Dashboard {
             commands::GuiAction::Quit => cx.quit(),
             commands::GuiAction::Evolve => {
                 let session = self.chat_session.unwrap_or_else(Uuid::nil);
-                self.turn.live
+                self.turn
+                    .live
                     .notices
                     .push("Checking for a new release...".to_string());
                 agent_bridge::spawn_evolve(self.sink.clone(), session);
@@ -103,7 +104,8 @@ impl Dashboard {
                     Some("/compact".to_string()),
                     cx,
                 );
-                self.turn.live
+                self.turn
+                    .live
                     .notices
                     .push(opencrabs::tui::compact_notice::requested(pct));
                 cx.notify();
@@ -123,7 +125,8 @@ impl Dashboard {
                 if opencrabs::brain::goal::is_bare(&arg) {
                     // Bare `/goal` is denied with the usage line and never
                     // reaches the model, exactly as the terminal does.
-                    self.turn.live
+                    self.turn
+                        .live
                         .notices
                         .push(opencrabs::brain::goal::goal_usage_warning());
                     cx.notify();
@@ -146,7 +149,8 @@ impl Dashboard {
                     self.open_cd_picker(cx);
                 } else {
                     let Some(session) = session else {
-                        self.turn.live
+                        self.turn
+                            .live
                             .notices
                             .push("No conversation is open. Type /new first.".to_string());
                         cx.notify();
@@ -154,7 +158,8 @@ impl Dashboard {
                     };
                     let expanded = opencrabs::brain::tools::error::expand_tilde(&arg);
                     if !expanded.is_dir() {
-                        self.turn.live
+                        self.turn
+                            .live
                             .notices
                             .push(text_commands::cd_not_a_directory(&arg));
                         cx.notify();
@@ -179,7 +184,8 @@ impl Dashboard {
             }
             other => {
                 let Some(session) = session else {
-                    self.turn.live
+                    self.turn
+                        .live
                         .notices
                         .push("No conversation is open. Type /new first.".to_string());
                     cx.notify();
@@ -262,7 +268,10 @@ impl Dashboard {
             return;
         }
         let Some(cancel) = self.turn.cancel.take() else {
-            self.turn.live.notices.push("Nothing is running.".to_string());
+            self.turn
+                .live
+                .notices
+                .push("Nothing is running.".to_string());
             cx.notify();
             return;
         };
@@ -270,7 +279,10 @@ impl Dashboard {
         self.turn.busy = false;
         self.turn.live.thinking = false;
         self.turn.live.stopped = true;
-        self.turn.live.notices.push("Operation cancelled.".to_string());
+        self.turn
+            .live
+            .notices
+            .push("Operation cancelled.".to_string());
         logging::info("turn cancelled by /stop");
         cx.notify();
     }

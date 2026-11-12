@@ -270,7 +270,8 @@ impl Dashboard {
             // (#2605). A prompt that cannot create anything never opens.
             logging::debug("topic draft: no conversation here can hold topics");
             self.topic_menu = None;
-            self.turn.live
+            self.turn
+                .live
                 .notices
                 .push("topics are off for this conversation".to_string());
             self.refocus_screen();
@@ -294,7 +295,10 @@ impl Dashboard {
             return;
         };
         if name.is_empty() {
-            self.turn.live.notices.push("a topic needs a name".to_string());
+            self.turn
+                .live
+                .notices
+                .push("a topic needs a name".to_string());
             cx.notify();
             return;
         }

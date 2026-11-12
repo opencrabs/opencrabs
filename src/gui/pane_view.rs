@@ -253,8 +253,7 @@ impl PaneView {
                             cx.stop_propagation();
                             if folds {
                                 let _ = weak.update(cx, |this, cx| {
-                                    this.composer.queue_expanded =
-                                        !this.composer.queue_expanded;
+                                    this.composer.queue_expanded = !this.composer.queue_expanded;
                                     cx.notify();
                                 });
                             }

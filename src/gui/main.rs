@@ -6857,7 +6857,10 @@ mod tests {
             !arm.contains("begin(user_message)"),
             "a resumed turn that starts as a fresh one stamps the resume time and paints the question twice (#2740)"
         );
-        assert!(arm.contains("self.turn.busy = true"), "a recovered turn is busy");
+        assert!(
+            arm.contains("self.turn.busy = true"),
+            "a recovered turn is busy"
+        );
         assert!(
             arm.contains("self.turn.cancel = Some(cancel)"),
             "stop has to end a recovered turn too"
@@ -7786,7 +7789,8 @@ mod tests {
             .next()
             .expect("production source before the test module");
         assert!(
-            production.contains("self.turn.live.notices.push(\"Operation cancelled.\".to_string());"),
+            production
+                .contains("self.turn.live.notices.push(\"Operation cancelled.\".to_string());"),
             "an empty queue keeps the plain wording"
         );
         let drain = production

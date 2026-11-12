@@ -31,5 +31,5 @@ pub mod palette;
 pub mod theme_pack;
 
 pub use converter::{convert_alacritty_toml, convert_opencode_json};
-pub use palette::{SourcePalette, Variant, mix};
 pub(crate) use palette::XTERM16;
+pub use palette::{SourcePalette, Variant, mix};

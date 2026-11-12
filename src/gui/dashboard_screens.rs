@@ -726,7 +726,8 @@ impl Dashboard {
     /// like every other session-bound command here.
     pub(crate) fn open_cd_picker(&mut self, cx: &mut Context<Self>) {
         let Some(session) = self.chat_session else {
-            self.turn.live
+            self.turn
+                .live
                 .notices
                 .push("No conversation is open. Type /new first.".to_string());
             cx.notify();
@@ -773,7 +774,8 @@ impl Dashboard {
                 None => dir.clone(),
             };
             let _ = this.update(cx, |this, cx| {
-                this.turn.live
+                this.turn
+                    .live
                     .notices
                     .push(text_commands::cd_reply(&applied.display().to_string()));
                 cx.notify();

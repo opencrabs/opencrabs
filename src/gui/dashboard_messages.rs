@@ -304,7 +304,8 @@ impl Dashboard {
     /// and with nothing picked it copies the row the menu was opened on.
     pub(crate) fn msg_copy(&mut self, id: Uuid, cx: &mut Context<Self>) {
         let texts: Vec<String> = if self.msg_select.is_empty() {
-            self.chat_state.transcript
+            self.chat_state
+                .transcript
                 .rows
                 .iter()
                 .filter(|m| m.id == id)
@@ -379,7 +380,8 @@ impl Dashboard {
     /// not about whatever pick happens to be open.
     pub(crate) fn forward_destinations_for(&self, id: Uuid) -> Vec<(Uuid, String)> {
         let Some(source) = self
-            .chat_state.transcript
+            .chat_state
+            .transcript
             .rows
             .iter()
             .find(|m| m.id == id)
@@ -435,7 +437,14 @@ impl Dashboard {
         self.msg_select
             .picked_in_order(&order)
             .into_iter()
-            .filter_map(|id| self.chat_state.transcript.rows.iter().find(|m| m.id == id).cloned())
+            .filter_map(|id| {
+                self.chat_state
+                    .transcript
+                    .rows
+                    .iter()
+                    .find(|m| m.id == id)
+                    .cloned()
+            })
             .collect()
     }
 
@@ -445,7 +454,8 @@ impl Dashboard {
         // A single-row forward never enters select mode: there is nothing to
         // count, so the bar would be a step with one option.
         let rows: Vec<Message> = self
-            .chat_state.transcript
+            .chat_state
+            .transcript
             .rows
             .iter()
             .filter(|m| m.id == id)

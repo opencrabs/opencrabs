@@ -526,7 +526,8 @@ impl Dashboard {
         if let Some(ob) = self.onboard.as_mut() {
             ob.mark_brain_generating();
         }
-        self.turn.live
+        self.turn
+            .live
             .notices
             .push("writing your brain files".to_string());
         agent_bridge::spawn_brain_generation(
@@ -549,7 +550,10 @@ impl Dashboard {
         match finished {
             Some((onboard::Finish::Failed(e), _)) => {
                 logging::error(&format!("onboarding save: {e}"));
-                self.turn.live.notices.push(format!("setup did not save: {e}"));
+                self.turn
+                    .live
+                    .notices
+                    .push(format!("setup did not save: {e}"));
             }
             Some((onboard::Finish::Saved { brain_prompt }, workspace)) => {
                 self.onboard = None;
@@ -557,7 +561,8 @@ impl Dashboard {
                 self.refocus_screen();
                 self.reload_agent(cx, Some("setup saved"));
                 if let Some(prompt) = brain_prompt {
-                    self.turn.live
+                    self.turn
+                        .live
                         .notices
                         .push("generating personalized brain files".to_string());
                     if let Some(bridge) = agent_bridge::bridge() {
@@ -618,7 +623,8 @@ impl Dashboard {
         let config = match Config::load() {
             Ok(config) => config,
             Err(e) => {
-                self.turn.live
+                self.turn
+                    .live
                     .notices
                     .push(format!("saved, but the settings would not load: {e}"));
                 cx.notify();
@@ -645,7 +651,8 @@ impl Dashboard {
         let Some(step) = onboard::step_for_command(command) else {
             // Every door in `GUI_SUPPORTED` names a step; if a future edit
             // adds one without a step, say so instead of opening at random.
-            self.turn.live
+            self.turn
+                .live
                 .notices
                 .push(format!("{command} has no onboarding step wired yet."));
             cx.notify();
