@@ -611,7 +611,7 @@ impl Dashboard {
             // (#2811): a handed-back question already cleared the card, and
             // marking that one stopped would draw an empty card with no text.
             if !returned {
-                self.turn.live.stopped = true;
+                self.turn.live.stop();
             }
             self.turn.cancel = None;
             let waiting = self.queued_for_strip().len();

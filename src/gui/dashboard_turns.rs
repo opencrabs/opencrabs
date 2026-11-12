@@ -1282,7 +1282,7 @@ impl Dashboard {
                         // The stop is the settle (#2811): the card keeps its
                         // stream and now says it was stopped, instead of
                         // waiting on a spinner that will never turn again.
-                        self.turn.live.stopped = true;
+                        self.turn.live.stop();
                         self.turn.cancel = None;
                         logging::info("turn settled after the stop dropped it");
                     } else {
@@ -1293,7 +1293,7 @@ impl Dashboard {
                             pane.update(cx, |pane, cx| {
                                 pane.live.finalize(None);
                                 pane.live.thinking = false;
-                                pane.live.stopped = true;
+                                pane.live.stop();
                                 pane.busy = false;
                                 pane.cancel = None;
                                 cx.notify();

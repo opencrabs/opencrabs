@@ -371,6 +371,10 @@ pub struct LiveTurn {
     /// the head on a stop glyph instead of a spinner for a turn nobody is
     /// running, and the reload reads the same fact back from its own row.
     pub stopped: bool,
+    /// When the stop landed, on the same `Instant` base as `started`. Set once
+    /// by [`LiveTurn::stop`], and the clock reads to here instead of to now, so
+    /// a stopped card holds its second instead of counting on (#2849).
+    pub stopped_at: Option<std::time::Instant>,
     /// Output tokens produced this turn, counted with the same tokenizer the
     /// TUI runs over every chunk (`brain::tokenizer`), so the live counter and
     /// the TUI's agree instead of being two estimates.
@@ -454,6 +458,18 @@ impl LiveTurn {
         self.landed = true;
     }
 
+    /// The user stopped this turn: the card says so, and its clock stops here.
+    ///
+    /// The stop instant is taken once. Every repaint after it reads the same
+    /// second, which is what a stopped card is worth: a number that keeps
+    /// climbing claims a turn that is still running (#2849).
+    pub fn stop(&mut self) {
+        self.stopped = true;
+        if self.stopped_at.is_none() {
+            self.stopped_at = Some(std::time::Instant::now());
+        }
+    }
+
     /// The DB has the turn: drop the live copy.
     pub fn clear(&mut self) {
         self.user = None;
@@ -466,6 +482,7 @@ impl LiveTurn {
         self.notices.clear();
         self.settled = None;
         self.stopped = false;
+        self.stopped_at = None;
         self.tokens = 0;
         self.started = None;
         self.chunks = 0;
@@ -495,9 +512,17 @@ impl LiveTurn {
         self.tps.finalize(self.tokens, authoritative);
     }
 
-    /// Seconds since the turn opened; zero before one has.
+    /// Seconds the turn ran; zero before one has.
+    ///
+    /// Measured to the stop when there is one, never to now, so the clock
+    /// freezes with the rate and the card cannot count for a turn nobody is
+    /// running (#2849).
     pub fn elapsed_secs(&self) -> u64 {
-        self.started.map(|t| t.elapsed().as_secs()).unwrap_or(0)
+        let Some(start) = self.started else {
+            return 0;
+        };
+        let until = self.stopped_at.unwrap_or_else(std::time::Instant::now);
+        until.saturating_duration_since(start).as_secs()
     }
 
     /// Output tokens per second, measured the way every other surface measures

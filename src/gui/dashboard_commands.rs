@@ -232,7 +232,7 @@ impl Dashboard {
             // The card ends here, not when the service's event lands (#2811): the
             // user asked for the stop and the pane must stop claiming a turn is
             // running before the cancellation unwinds.
-            pane.live.stopped = true;
+            pane.live.stop();
             pane.live.notices.push("Operation cancelled.".to_string());
             cx.notify();
             true
@@ -278,7 +278,7 @@ impl Dashboard {
         cancel.cancel();
         self.turn.busy = false;
         self.turn.live.thinking = false;
-        self.turn.live.stopped = true;
+        self.turn.live.stop();
         self.turn
             .live
             .notices

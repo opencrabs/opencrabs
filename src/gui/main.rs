@@ -7985,8 +7985,9 @@ mod tests {
             .and_then(|rest| rest.split("agent_bridge::TurnEvent::TurnReverted").next())
             .expect("the Cancelled branch");
         assert!(
-            cancelled.contains("self.turn.live.stopped = true;"),
-            "the card must say the turn was stopped instead of spinning"
+            cancelled.contains("self.turn.live.stop();"),
+            "the card must say the turn was stopped instead of spinning, \
+             through the one call that also freezes its clock (#2849)"
         );
         assert!(
             cancelled.contains("agent_bridge::spawn_record_turn_stopped("),
