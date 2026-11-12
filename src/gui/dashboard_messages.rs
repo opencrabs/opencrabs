@@ -579,13 +579,14 @@ impl Dashboard {
         // session. A reload that comes back short is a write that has not
         // landed yet. The count is the session's own row total, so a
         // conversation past the display window settles like any other (#2705).
-        let expect = self.settle_expect;
-        let attempt = self.settle_retries;
+        let expect = self.settle.expect;
+        let attempt = self.settle.retries;
         // The budget starts at the first read that found the rows short, not
         // when the question was sent: it measures the write, which only exists
         // once the turn has ended.
         let deadline = *self
-            .settle_deadline
+            .settle
+            .deadline
             .get_or_insert_with(|| std::time::Instant::now() + SETTLE_BUDGET);
         cx.spawn(async move |this, cx| {
             let result = transcript::load_recent(db_path, sid).await;
@@ -598,7 +599,7 @@ impl Dashboard {
                         let (hidden, turns) = transcript::turns_with_origins(
                             &loaded.rows,
                             loaded.total,
-                            &this.turn_metrics,
+                            &this.metrics.by_anchor,
                             &loaded.origins,
                         );
                         let landed = settle_landed(expect, loaded.total);
@@ -638,42 +639,42 @@ impl Dashboard {
                                 this.attach_pending_metrics(sid);
                                 this.live.clear();
                             }
-                            this.settle_expect = None;
-                            this.settle_retries = 0;
-                            this.settle_deadline = None;
-                            this.settle_rechecks = 0;
+                            this.settle.expect = None;
+                            this.settle.retries = 0;
+                            this.settle.deadline = None;
+                            this.settle.rechecks = 0;
                         } else if in_flight {
                             // Short of the count while a turn is running is not
                             // a missed write, it is a turn still writing.
-                            this.settle_expect = None;
-                            this.settle_retries = 0;
-                            this.settle_deadline = None;
+                            this.settle.expect = None;
+                            this.settle.retries = 0;
+                            this.settle.deadline = None;
                         } else if std::time::Instant::now() < deadline {
                             // The row is still in flight: retry shortly, the
                             // live turn keeps the answer on screen meanwhile.
                             // The row total travels with the attempt so the
                             // next incident is diagnosable from the log alone.
-                            this.settle_retries = attempt + 1;
+                            this.settle.retries = attempt + 1;
                             logging::info(&format!(
                                 "transcript short of the finished turn, retry {} (rows {total}, want {})",
                                 attempt + 1,
                                 expect.map_or("?".to_string(), |n| n.to_string()),
                             ));
                             this.reload_transcript(sid, cx);
-                        } else if this.settle_rechecks < SETTLE_RECHECKS {
+                        } else if this.settle.rechecks < SETTLE_RECHECKS {
                             // The budget ran out, but the payload is usually
                             // written by now and only this read missed it. One
                             // more look after a pause turns a permanently
                             // pinned live card into a bounded delay (the
                             // 2026-11-08 incident sat there until the session
                             // was reopened).
-                            this.settle_rechecks += 1;
-                            this.settle_expect = expect;
-                            this.settle_retries = 0;
-                            this.settle_deadline = None;
+                            this.settle.rechecks += 1;
+                            this.settle.expect = expect;
+                            this.settle.retries = 0;
+                            this.settle.deadline = None;
                             logging::info(&format!(
                                 "transcript short after {SETTLE_BUDGET:?}; recheck {} (rows {total}, want {})",
-                                this.settle_rechecks,
+                                this.settle.rechecks,
                                 expect.map_or("?".to_string(), |n| n.to_string()),
                             ));
                             let view = cx.entity().downgrade();
@@ -694,9 +695,9 @@ impl Dashboard {
                                 "transcript never caught up; keeping the live turn (rows {total}, want {})",
                                 expect.map_or("?".to_string(), |n| n.to_string()),
                             ));
-                            this.settle_expect = None;
-                            this.settle_retries = 0;
-                            this.settle_deadline = None;
+                            this.settle.expect = None;
+                            this.settle.retries = 0;
+                            this.settle.deadline = None;
                         }
                     }
                     Err(e) => this.transcript.error = Some(e.into()),
@@ -717,7 +718,7 @@ impl Dashboard {
     /// the map is what carries the numbers onto a later reload of the same
     /// conversation.
     pub(crate) fn attach_pending_metrics(&mut self, sid: Uuid) {
-        let Some(metrics) = self.pending_metrics.remove(&sid) else {
+        let Some(metrics) = self.metrics.pending.remove(&sid) else {
             return;
         };
         let Some(turn) = self.transcript.turns.last_mut() else {
@@ -728,7 +729,7 @@ impl Dashboard {
         // claim the turn did nothing (#2632).
         turn.summary.tool_calls = turn.summary.tool_calls.max(metrics.tool_calls);
         let anchor = turn.anchor.clone();
-        self.turn_metrics.insert(anchor.clone(), metrics);
+        self.metrics.by_anchor.insert(anchor.clone(), metrics);
         // The card the user was watching keeps its rows once it settles
         // (#2632): a turn that folds its ledger away the moment it finishes
         // reads as if the work never happened. The chevron still folds it, and
@@ -744,13 +745,13 @@ impl Dashboard {
         session: Uuid,
         mut turns: Vec<transcript::Turn>,
     ) -> Vec<transcript::Turn> {
-        let Some(metrics) = self.pending_metrics.remove(&session) else {
+        let Some(metrics) = self.metrics.pending.remove(&session) else {
             return turns;
         };
         if let Some(turn) = turns.last_mut() {
             turn.metrics = Some(metrics);
             turn.summary.tool_calls = turn.summary.tool_calls.max(metrics.tool_calls);
-            self.turn_metrics.insert(turn.anchor.clone(), metrics);
+            self.metrics.by_anchor.insert(turn.anchor.clone(), metrics);
         }
         turns
     }

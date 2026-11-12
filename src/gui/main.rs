@@ -29,6 +29,7 @@ mod agent_bridge;
 mod attachment_view;
 mod bang;
 mod breakdown;
+mod chat_leaf;
 mod command_palette;
 mod commands;
 mod composer_view;
@@ -1006,21 +1007,10 @@ struct Dashboard {
     /// screen and restores the destination's, and the window never has to
     /// guess which conversation a card belongs to.
     stashed: std::collections::HashMap<Uuid, StashedTurn>,
-    /// Reload attempts made while waiting for the turn's rows to persist.
-    /// Bounded, so a write that never lands cannot spin the fetch loop.
-    settle_retries: u8,
-    /// When the current settle wait started. `None` between turns: the budget
-    /// is measured from the first reload that found the rows short, not from
-    /// the send, because the write only exists once the turn has ended.
-    settle_deadline: Option<std::time::Instant>,
-    /// Late re-reads already spent on this turn. Two is the whole allowance,
-    /// so a write that truly never lands leaves a log line instead of a loop.
-    settle_rechecks: u8,
-    /// Rows the session must hold before the live turn is dropped: the
-    /// session's row total when the send happened, plus the one the new turn
-    /// appends. Measured on the ledger, not on the windowed transcript, so a
-    /// conversation longer than `transcript::WINDOW` still settles (#2705).
-    settle_expect: Option<usize>,
+    /// The reload handshake that keeps a finished turn's card up until the
+    /// ledger holds its rows (#2705). Its own type, because the wait is one
+    /// fact with four parts and the chat leaf will own it whole.
+    settle: chat_leaf::Settle,
     /// A turn is running: sends queue instead of starting a second one.
     busy: bool,
     /// The running turn's cancellation token, so Esc twice stops it the way
@@ -1049,16 +1039,10 @@ struct Dashboard {
     /// The open conversation's context window: the compaction budget the
     /// service actually enforces for it, not a hardcoded 200K.
     ctx_max: u32,
-    /// Per-turn card metrics keyed by turn anchor (#2324): what a settled
-    /// turn cost and how fast it answered. In memory only, so a restarted
-    /// window forgets instead of showing the session's current number as if
-    /// it belonged to an old turn.
-    turn_metrics: HashMap<String, transcript::TurnMetrics>,
-    /// Metrics for the turns that just settled, waiting for their rows to land
-    /// so the anchor they get keyed by exists. Keyed by session, one slot each:
-    /// a reload for another conversation must not claim them, and a split can
-    /// settle two panes before either reload comes back (#2632).
-    pending_metrics: HashMap<Uuid, transcript::TurnMetrics>,
+    /// What each settled turn cost and how fast it answered (#2324), plus the
+    /// numbers waiting for their rows to land. One owner, like the handshake
+    /// above: both are read from the same reload.
+    metrics: chat_leaf::Metrics,
     /// The checkout's branch, read once at startup: the footer's own field in
     /// the TUI. `None` outside a git tree, which the footer shows as a dash
     /// rather than a made-up name.
@@ -5804,10 +5788,7 @@ fn main() {
                         agent_ready: false,
                         live: transcript::LiveTurn::default(),
                         stashed: HashMap::new(),
-                        settle_expect: None,
-                        settle_retries: 0,
-                        settle_deadline: None,
-                        settle_rechecks: 0,
+                        settle: chat_leaf::Settle::default(),
                         busy: false,
                         cancel: None,
                         hint_painted: None,
@@ -5816,8 +5797,7 @@ fn main() {
                         agent_error: None,
                         ctx_tokens: None,
                         ctx_max: 0,
-                        turn_metrics: HashMap::new(),
-                        pending_metrics: HashMap::new(),
+                        metrics: chat_leaf::Metrics::default(),
                         branch: git_branch(&opencrabs::utils::cwd::launch_cwd()),
                     }
                 });

@@ -20,7 +20,7 @@ impl Dashboard {
     /// Run a turn on the open conversation for a finished background task.
     ///
     /// Same bookkeeping as `drain_pending`: the resumed turn must look like any
-    /// other turn, so `live.begin` seeds the panel and `settle_expect` counts the
+    /// other turn, so `live.begin` seeds the panel and `settle.begin` counts the
     /// row the answer will land in. Without a service there is nowhere to send
     /// it, so it queues and drains on `Ready` instead of vanishing.
     pub(crate) fn resume_finished_task(
@@ -43,10 +43,7 @@ impl Dashboard {
         // A new turn re-arms the follow, the terminal's own rule (#2698).
         self.rearm_transcript_follow();
         self.transcript.live_expanded = false;
-        self.settle_retries = 0;
-        self.settle_deadline = None;
-        self.settle_rechecks = 0;
-        self.settle_expect = Some(self.transcript.row_total() + 1);
+        self.settle.begin(self.transcript.row_total());
         self.busy = true;
         self.sync_composer_hint(cx);
         let cancel = tokio_util::sync::CancellationToken::new();
@@ -281,10 +278,7 @@ impl Dashboard {
             // A flushed queue is a send, so it follows its own answer (#2698).
             self.rearm_transcript_follow();
             self.transcript.live_expanded = false;
-            self.settle_retries = 0;
-            self.settle_deadline = None;
-            self.settle_rechecks = 0;
-            self.settle_expect = Some(self.transcript.row_total() + 1);
+            self.settle.begin(self.transcript.row_total());
             self.busy = true;
             self.sync_composer_hint(cx);
             let cancel = tokio_util::sync::CancellationToken::new();

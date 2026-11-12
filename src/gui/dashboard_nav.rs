@@ -108,8 +108,8 @@ impl Dashboard {
                 &mut self.live,
                 &mut self.busy,
                 &mut self.cancel,
-                &mut self.settle_expect,
-                &mut self.settle_retries,
+                &mut self.settle.expect,
+                &mut self.settle.retries,
                 &mut self.ctx_tokens,
             );
             // Every switch says who it left, who it arrived on and whether a
@@ -132,7 +132,7 @@ impl Dashboard {
             ));
             // Metrics belong to the turn they settled, never to the session
             // the user just switched to.
-            self.pending_metrics.clear();
+            self.metrics.pending.clear();
             if let Some(b) = agent_bridge::bridge() {
                 self.ctx_max = b.service.context_limit_for_session(id);
             }
@@ -501,7 +501,7 @@ impl Dashboard {
                             let (hidden, turns) = transcript::turns_with_origins(
                                 &loaded.rows,
                                 loaded.total,
-                                &this.turn_metrics,
+                                &this.metrics.by_anchor,
                                 &loaded.origins,
                             );
                             this.transcript.hidden = hidden;

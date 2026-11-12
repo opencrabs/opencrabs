@@ -500,7 +500,7 @@ impl Dashboard {
                     let (hidden, turns) = transcript::turns_with_origins(
                         &loaded.rows,
                         loaded.total,
-                        &this.turn_metrics,
+                        &this.metrics.by_anchor,
                         &loaded.origins,
                     );
                     (hidden, turns, loaded.rows)

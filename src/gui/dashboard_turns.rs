@@ -257,7 +257,7 @@ impl Dashboard {
         // The leaf's card keeps the numbers it showed in flight, the same ones
         // the window's card keeps (#2632): the ctx budget every pane shares,
         // and the calls this leaf made.
-        self.pending_metrics.insert(
+        self.metrics.pending.insert(
             session,
             transcript::TurnMetrics {
                 ctx_used: self.ctx_tokens.unwrap_or(0),
@@ -366,7 +366,7 @@ impl Dashboard {
                     let (hidden, turns) = transcript::turns_with_origins(
                         &loaded.rows,
                         loaded.total,
-                        &this.turn_metrics,
+                        &this.metrics.by_anchor,
                         &loaded.origins,
                     );
                     // The turn this leaf's card was watching has landed, so it
@@ -566,14 +566,11 @@ impl Dashboard {
         // A send is the reader asking for the end of the conversation (#2698).
         self.rearm_transcript_follow();
         self.transcript.live_expanded = false;
-        self.settle_retries = 0;
-        self.settle_deadline = None;
-        self.settle_rechecks = 0;
         // The finished turn must add one row to the session before the live
         // copy may be dropped (see `reload_transcript`). Measured on the
         // session's own row total, which never saturates the way the windowed
         // turn count does (#2705).
-        self.settle_expect = Some(self.transcript.row_total() + 1);
+        self.settle.begin(self.transcript.row_total());
         // A recalled message is the turn's own text now, so it leaves the
         // queue with it; the messages the walk took before it go back to wait
         // (#2637).
@@ -1141,7 +1138,7 @@ impl Dashboard {
                     // card can print what the turn cost instead of whatever
                     // the session's budget reads later (#2324).
                     if let Some(sid) = self.transcript.session {
-                        self.pending_metrics.insert(
+                        self.metrics.pending.insert(
                             sid,
                             transcript::TurnMetrics {
                                 ctx_used: context_tokens,
@@ -1219,12 +1216,12 @@ impl Dashboard {
                     // only written when the provider streamed something: a
                     // failure before the first call has no reading of its own,
                     // and borrowing the previous turn's budget would be a lie.
-                    self.pending_metrics.remove(&session);
+                    self.metrics.pending.remove(&session);
                     self.live.finalize(None);
                     if self.live.tokens > 0
                         && let Some(used) = self.ctx_tokens
                     {
-                        self.pending_metrics.insert(
+                        self.metrics.pending.insert(
                             session,
                             transcript::TurnMetrics {
                                 ctx_used: used,
@@ -1248,7 +1245,7 @@ impl Dashboard {
                     // carries no text: whoever asked for the stop already said
                     // "Operation cancelled", so a second line would be noise.
                     self.refresh_rail(cx);
-                    self.pending_metrics.remove(&session);
+                    self.metrics.pending.remove(&session);
                     // The verdict needs a row (#2811). A cancelled turn writes
                     // no error and no answer, so without this the turn settles
                     // as Finished and the stop vanishes on the next reload.
