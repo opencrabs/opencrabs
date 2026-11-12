@@ -27,7 +27,7 @@ use uuid::Uuid;
 
 use crate::Dashboard;
 use crate::pane_chrome::split_divider;
-use crate::pane_view::{LeafBox, PaneView, leaf_box, pane_root_style};
+use crate::pane_view::{LeafBox, PaneView, leaf_box};
 
 /// Everything the pane walk needs to draw one leaf or one split: the chat
 /// element (drawn once, at its own leaf), the state each other pane keeps, the
@@ -90,17 +90,20 @@ pub(crate) fn pane_element(
             // pane entity (#2805). The walk only says where it sits.
             if !is_chat {
                 return match ctx.states.get(session) {
-                    // A pane is inserted through gpui's cached view path
-                    // (#2805). A plain entity element renders its whole
-                    // subtree in `request_layout` on every frame the window
-                    // draws, so one row landing in one leaf re-walked every
-                    // other leaf's transcript. Cached, the pane is laid out
-                    // from the style it draws with and its last prepaint is
-                    // replayed, and only a pane the window notified draws
-                    // again. `pane_root_style` is that same root box.
-                    Some(pane) => AnyView::from(pane.clone())
-                        .cached(pane_root_style())
-                        .into_any_element(),
+                    // A pane draws itself, plainly (#2805). This used to go
+                    // through `AnyView::cached`, and that is what broke the
+                    // window. The cached path lays a view out with no
+                    // children at all (`gpui-0.2.2/src/view.rs`,
+                    // `request_layout` passes `None`), so a pane's box was
+                    // sized from a bare style, and `prepaint` replayed the
+                    // last frame's paint and hitboxes whenever the bounds
+                    // happened to match. A pane that scrolled without its
+                    // outer box moving kept painting the old offset, and a box
+                    // that no longer matched its content painted over the leaf
+                    // beside it. Correctness first: the entity still keeps
+                    // pane state out of the window, and a pane that was not
+                    // notified simply draws the same thing again.
+                    Some(pane) => AnyView::from(pane.clone()).into_any_element(),
                     None => div().into_any_element(),
                 };
             }

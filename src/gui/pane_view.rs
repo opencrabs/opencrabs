@@ -446,22 +446,6 @@ pub(crate) struct LeafBox {
     pub(crate) window: WeakEntity<Dashboard>,
 }
 
-/// The layout every pane frame starts from (#2805).
-///
-/// `leaf_box` builds this box in the pane's own draw, and the cached view path
-/// lays the pane out from this instead of drawing it, so the two have to
-/// agree: the pane fills the slot the walk gives it and may shrink to it. A
-/// split child is sized by its slot's `flex_basis`, so the pane's own basis is
-/// zero and it takes whatever the slot measured.
-pub(crate) fn pane_root_style() -> gpui::StyleRefinement {
-    gpui::StyleRefinement::default()
-        .flex()
-        .flex_col()
-        .flex_1()
-        .min_w_0()
-        .min_h_0()
-}
-
 /// Draw one leaf's frame (#2612, #2624, #2683, #2687).
 pub(crate) fn leaf_box(leaf: LeafBox) -> AnyElement {
     let LeafBox {

@@ -721,8 +721,12 @@ fn a_pane_turn_settles_its_own_leaf() {
     );
     let walk = flat(pane_element());
     assert!(
-        walk.contains("AnyView::from(pane.clone())") && walk.contains(".cached(pane_root_style())"),
-        "the leaf is drawn by the pane's own entity through gpui's cached view path, so a window repaint lays it out again instead of re-walking its transcript (#2805)"
+        walk.contains("AnyView::from(pane.clone()).into_any_element()"),
+        "the leaf is drawn by the pane's own entity, so the window never holds a pane's state (#2805)"
+    );
+    assert!(
+        !walk.contains(".cached("),
+        "the pane is not inserted through gpui's cached view path: that path lays a view out with no children and replays its last prepaint, so a scroll inside a pane never reached the screen and a resized box painted over its neighbour (#2805)"
     );
     assert!(
         flat(PANE_VIEW).contains("&self.live,"),
@@ -731,17 +735,11 @@ fn a_pane_turn_settles_its_own_leaf() {
 }
 
 #[test]
-fn a_cached_pane_is_redrawn_only_when_its_frame_changes() {
-    // The pane is inserted through `AnyView::cached`, so the walk's style is
-    // what lays it out on a frame it does not draw (#2805). It has to be the
-    // same root box `leaf_box` builds, or a cached frame lays out differently
-    // from a drawn one.
-    assert!(
-        flat(PANE_VIEW).contains(".flex() .flex_col() .flex_1() .min_w_0() .min_h_0();"),
-        "the cached view path lays the pane out from the box leaf_box builds"
-    );
-    // A pane that is never notified replays its last frame, so the walk hands
-    // it the frame it resolved and the pane notifies itself only on a change.
+fn a_pane_is_handed_its_frame_and_draws_when_it_changes() {
+    // The walk resolves each pane's frame and hands it over, so a pane knows
+    // when its own box moved (#2805). This is bookkeeping, not a paint cache:
+    // the pane is inserted as a plain entity element, so it draws on every
+    // frame the window draws and its scroll and its layout stay live.
     let body = flat(panes_body());
     assert!(
         body.contains("pane.sync_frame(width, stamp, cx)"),
@@ -753,6 +751,6 @@ fn a_cached_pane_is_redrawn_only_when_its_frame_changes() {
     );
     assert!(
         flat(PANE_VIEW).contains("if self.stamp == stamp && self.plan.mtime() == before {"),
-        "an unchanged stamp leaves the pane cached instead of notifying it every frame"
+        "an unchanged stamp leaves the pane alone instead of notifying it every frame"
     );
 }
