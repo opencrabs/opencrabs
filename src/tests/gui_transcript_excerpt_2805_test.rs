@@ -12,14 +12,18 @@ const MESSAGE_REPO: &str = include_str!("../db/repository/message.rs");
 
 /// The renderer between two of its neighbours, so an assertion cannot be
 /// satisfied by an unrelated function elsewhere in the file.
-fn region(start: &str, end: &str) -> &'static str {
-    TRANSCRIPT
+fn region_in(source: &'static str, start: &str, end: &str) -> &'static str {
+    source
         .split(start)
         .nth(1)
         .unwrap_or_else(|| panic!("{start} is defined"))
         .split(end)
         .next()
         .unwrap_or_else(|| panic!("{end} follows {start}"))
+}
+
+fn region(start: &str, end: &str) -> &'static str {
+    region_in(TRANSCRIPT, start, end)
 }
 
 /// A folded turn draws an excerpt of its body and says how much it hid. The cut
@@ -61,9 +65,10 @@ fn a_folded_turn_draws_an_excerpt_and_announces_what_it_hid() {
 
     // The rule is bounded on both ends: a ceiling worth reading, and a marker
     // that always names the count.
+    // The region starts after the name, so the bound is read from its tail.
     let cap = region("const MSG_EXCERPT_LINES", "/// Cut a body at");
     assert!(
-        cap.contains("MSG_EXCERPT_LINES: usize = 20"),
+        cap.starts_with(": usize = 20"),
         "the folded body is bounded to one screenful"
     );
 }
@@ -104,8 +109,9 @@ fn the_merged_family_reads_one_window_not_one_per_member() {
         "the hidden count still comes from the whole family"
     );
 
-    let repo = region(
-        "pub async fn find_recent_by_sessions(",
+    let repo = region_in(
+        MESSAGE_REPO,
+        "fn find_recent_by_sessions(",
         "/// Recent conversation rows for tools",
     );
     assert!(
@@ -150,7 +156,7 @@ fn the_renderer_under_test_is_the_one_the_window_builds() {
         "the transcript renderer is present"
     );
     assert!(
-        MESSAGE_REPO.contains("pub async fn find_recent_by_sessions("),
+        MESSAGE_REPO.contains("fn find_recent_by_sessions("),
         "the family read is on the message repository"
     );
 }
