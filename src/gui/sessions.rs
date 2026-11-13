@@ -113,6 +113,29 @@ pub struct SessionsState {
     pub content_matches: HashMap<uuid::Uuid, String>,
 }
 
+/// One topic chip waiting for its card (#2853): the id the click opens, the
+/// label it prints, the ledger stamp it sorts by, and whether work is running
+/// in it right now. Built where the chips are built so the strip can be
+/// ordered by the same facts the chip itself paints.
+pub struct RailChip {
+    pub id: uuid::Uuid,
+    pub title: String,
+    pub at: chrono::DateTime<chrono::Utc>,
+    pub busy: bool,
+}
+
+/// The instant one chip sorts by (#2853). A topic with work in flight is
+/// pinned to `now`, the paint's one clock, so the chips the reader can see
+/// working lead the strip and two of them tie instead of reshuffling on every
+/// frame. Everything else sorts by its own stamp, the clock the card's title
+/// folds over (#2815), so the strip and the stamp can never disagree.
+pub fn chip_order_key(
+    chip: &RailChip,
+    now: chrono::DateTime<chrono::Utc>,
+) -> std::cmp::Reverse<chrono::DateTime<chrono::Utc>> {
+    std::cmp::Reverse(if chip.busy { now } else { chip.at })
+}
+
 impl SessionsState {
     /// The rows the rail shows right now, in ledger order. Three gates: the
     /// ctrl+f query (`matches` on the title, or a deep content hit), and the
@@ -2704,6 +2727,130 @@ mod tests {
             order,
             vec![card_id, topic_id, chat_id],
             "the card leads on its topic's stamp, and the topic stays under it"
+        );
+    }
+
+    /// A card's chips follow the same clock as its title (#2853): the topics
+    /// with work in flight lead, then the rest by their own stamp. Before this
+    /// the strip rode whatever order the last ledger load returned, and that
+    /// load only runs at turn boundaries, so a topic that had just started
+    /// working kept the slot it held minutes earlier while its chip already
+    /// showed the spinner.
+    #[test]
+    fn chips_with_work_in_flight_lead_the_strip() {
+        let stamp = |secs: i64| {
+            chrono::DateTime::from_timestamp(1_700_000_000 + secs, 0).expect("a fixed stamp")
+        };
+        let now = stamp(100);
+        // The ledger load order at the moment the owner looked: UX had spoken
+        // last, two idle topics sat above the topic that had just started.
+        let mut chips = vec![
+            RailChip {
+                id: uuid::Uuid::from_u128(1),
+                title: "UX".to_string(),
+                at: stamp(90),
+                busy: true,
+            },
+            RailChip {
+                id: uuid::Uuid::from_u128(2),
+                title: "Themes".to_string(),
+                at: stamp(80),
+                busy: false,
+            },
+            RailChip {
+                id: uuid::Uuid::from_u128(3),
+                title: "Meme".to_string(),
+                at: stamp(70),
+                busy: false,
+            },
+            RailChip {
+                id: uuid::Uuid::from_u128(4),
+                title: "MultiPane".to_string(),
+                at: stamp(60),
+                busy: true,
+            },
+        ];
+
+        chips.sort_by_key(|c| chip_order_key(c, now));
+
+        let order: Vec<&str> = chips.iter().map(|c| c.title.as_str()).collect();
+        assert_eq!(
+            order,
+            vec!["UX", "MultiPane", "Themes", "Meme"],
+            "the two working topics lead, and the idle ones keep their stamp order"
+        );
+    }
+
+    /// Two topics working at once tie on the paint's one clock, so the strip
+    /// keeps their existing order instead of reshuffling them every frame, and
+    /// idle chips still sort newest first (#2853).
+    #[test]
+    fn chips_that_tie_keep_their_place() {
+        let stamp = |secs: i64| {
+            chrono::DateTime::from_timestamp(1_700_000_000 + secs, 0).expect("a fixed stamp")
+        };
+        let now = stamp(100);
+        let mut chips = vec![
+            RailChip {
+                id: uuid::Uuid::from_u128(1),
+                title: "older idle".to_string(),
+                at: stamp(10),
+                busy: false,
+            },
+            RailChip {
+                id: uuid::Uuid::from_u128(2),
+                title: "newer idle".to_string(),
+                at: stamp(50),
+                busy: false,
+            },
+            RailChip {
+                id: uuid::Uuid::from_u128(3),
+                title: "first busy".to_string(),
+                at: stamp(1),
+                busy: true,
+            },
+            RailChip {
+                id: uuid::Uuid::from_u128(4),
+                title: "second busy".to_string(),
+                at: stamp(2),
+                busy: true,
+            },
+        ];
+
+        chips.sort_by_key(|c| chip_order_key(c, now));
+
+        let order: Vec<&str> = chips.iter().map(|c| c.title.as_str()).collect();
+        assert_eq!(
+            order,
+            vec!["first busy", "second busy", "newer idle", "older idle"],
+            "busy chips tie on now, the rest sort by stamp"
+        );
+    }
+
+    /// The strip really orders what it builds (#2853). Structural because the
+    /// ordering is one call in the window's paint loop: deleting it compiles,
+    /// reads fine, and quietly puts the chips back on the ledger load order.
+    /// The busy flag must come from the same badge that paints the spinner, or
+    /// the sort and the marker would disagree about which topics are working.
+    #[test]
+    fn the_strip_orders_the_chips_it_builds() {
+        let source = include_str!("main.rs");
+        let block = source
+            .split("let mut children_by_parent")
+            .nth(1)
+            .and_then(|rest| rest.split("// Pinned rows first").next())
+            .expect("the chip set build");
+        assert!(
+            block.contains("kids.sort_by_key(|chip| sessions::chip_order_key(chip, chips_now))"),
+            "the chips must be ordered by the activity key, not left on the load order"
+        );
+        assert!(
+            block.contains("busy: activity.get(&s.id).is_some_and(|st| st.badge.is_some())"),
+            "the busy flag is the badge the chip paints, so the order matches the marker"
+        );
+        assert!(
+            block.contains("at: s.updated_at"),
+            "an idle chip sorts by the same stamp the card's title folds over"
         );
     }
 

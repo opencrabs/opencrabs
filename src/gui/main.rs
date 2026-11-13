@@ -2095,7 +2095,13 @@ impl Render for Dashboard {
                 .map(|(cid, _)| cid)
                 .collect()
         };
-        let mut children_by_parent: HashMap<Uuid, Vec<(Uuid, String)>> = HashMap::new();
+        let mut children_by_parent: HashMap<Uuid, Vec<sessions::RailChip>> = HashMap::new();
+        // One clock for the chip order (#2853): a topic with work in flight
+        // sorts as if it just spoke, so the chips the reader can see working
+        // lead the strip instead of holding the slot the last ledger load gave
+        // them. Every busy chip ties on this one instant, which keeps their
+        // existing order stable rather than reshuffling each frame.
+        let chips_now = chrono::Utc::now();
         let chip_rows: Vec<&opencrabs::db::models::Session> = if rail_drawn {
             self.sessions.visible().collect()
         } else {
@@ -2105,17 +2111,35 @@ impl Render for Dashboard {
             if chip_children.contains(&s.id)
                 && let Some(p) = self.sessions.parents.get(&s.id)
             {
-                children_by_parent.entry(*p).or_default().push((
-                    s.id,
-                    // A chip names its own topic, never the chat plus the
-                    // topic plus the channel key (#2766): the card above it
-                    // already says the chat.
-                    rail::chip_name(
-                        s.title.as_deref(),
-                        self.sessions.topic_titles.get(&s.id).map(String::as_str),
-                    ),
-                ));
+                children_by_parent
+                    .entry(*p)
+                    .or_default()
+                    .push(sessions::RailChip {
+                        id: s.id,
+                        // A chip names its own topic, never the chat plus the
+                        // topic plus the channel key (#2766): the card above it
+                        // already says the chat.
+                        title: rail::chip_name(
+                            s.title.as_deref(),
+                            self.sessions.topic_titles.get(&s.id).map(String::as_str),
+                        ),
+                        // The clock the card's own stamp folds over (#2815), so
+                        // the strip and the title can never disagree.
+                        at: s.updated_at,
+                        // The marker the chip paints: a live turn or a running
+                        // plan task (rail_activity::row_state).
+                        busy: activity.get(&s.id).is_some_and(|st| st.badge.is_some()),
+                    });
             }
+        }
+        for kids in children_by_parent.values_mut() {
+            // The strip's order (#2853): the topics with work in flight lead,
+            // then the rest by the stamp the card prints. Without this the
+            // chips rode whatever order the last ledger load returned, and that
+            // load only runs at turn boundaries, so a topic that had just
+            // started working kept the slot it held minutes earlier while its
+            // chip already showed the spinner.
+            kids.sort_by_key(|chip| sessions::chip_order_key(chip, chips_now));
         }
         // Pinned rows first, the rest untouched: the TUI's own order.
         let rail_order: Vec<&opencrabs::db::models::Session> = if rail_drawn {
@@ -2156,7 +2180,7 @@ impl Render for Dashboard {
             // (#2804). Cursor, plan progress and running tasks stay with the parent.
             let progress_id = children_by_parent.get(&id).map_or(id, |kids| {
                 self.sessions
-                    .progress_id(id, kids.iter().map(|(kid_id, _)| *kid_id))
+                    .progress_id(id, kids.iter().map(|kid| kid.id))
             });
             // The visible pin and the context menu share one favorite writer
             // (#2803). Stopping the press keeps the row closed and prevents a slide.
@@ -2239,8 +2263,9 @@ impl Render for Dashboard {
                 // chips itself so the first row can stop short of the pin while
                 // the rows below keep the full card width (#2809).
                 let mut els: Vec<(Stateful<Div>, f32)> = Vec::new();
-                for (kid_id, title) in kids.iter().take(limit) {
-                    let kid_id = *kid_id;
+                for kid in kids.iter().take(limit) {
+                    let kid_id = kid.id;
+                    let title = &kid.title;
                     let st = activity.get(&kid_id).copied().unwrap_or_default();
                     let live = st
                         .badge
