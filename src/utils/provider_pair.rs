@@ -53,9 +53,12 @@ pub fn display_model(provider: &str, model: &str) -> String {
 
 /// Resolve `model` to the spelling the catalogue itself uses.
 ///
-/// Tried in order: the exact spelling, then the provider-prefixed one, then one
-/// peeled prefix. `None` means the catalogue holds no entry for this model, so
-/// the caller decides what to do instead of this function guessing.
+/// Tried in order: the exact spelling, then the provider-prefixed one, then the
+/// bare name, then the provider prefix re-applied to that bare name (which is
+/// what resolves a doubled `provider/provider/model` pin against a catalogue
+/// that stores `provider/model`). `None` means the catalogue holds no entry for
+/// this model, so the caller decides what to do instead of this function
+/// guessing.
 pub fn canonical_model(provider: &str, model: &str, supported: &[String]) -> Option<String> {
     let provider = provider.trim();
     let model = model.trim();
@@ -71,8 +74,14 @@ pub fn canonical_model(provider: &str, model: &str, supported: &[String]) -> Opt
             return Some(prefixed);
         }
         let bare = bare_model(provider, model);
-        if bare != model && supported.iter().any(|candidate| candidate == bare) {
-            return Some(bare.to_string());
+        if bare != model {
+            if supported.iter().any(|candidate| candidate == bare) {
+                return Some(bare.to_string());
+            }
+            let recombined = format!("{provider}/{bare}");
+            if supported.iter().any(|candidate| candidate == &recombined) {
+                return Some(recombined);
+            }
         }
     }
     None
