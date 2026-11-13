@@ -266,11 +266,10 @@ impl Dashboard {
     /// user asks, and the service's own failure event lands afterwards.
     pub(crate) fn stop_turn(&mut self, cx: &mut Context<Self>) {
         // A stop ends the offer too (#2708): the turn that made the buttons is
-        // gone, so they can only send a follow-up nobody asked for.
-        for sid in [self.focused_pane(), self.chat_session]
-            .into_iter()
-            .flatten()
-        {
+        // gone, so they can only send a follow-up nobody asked for. That offer
+        // belongs to the session the stop can reach, and only that one: a caret
+        // on a pane leaves the chat leaf's offer alone (#2885).
+        if let Some(sid) = self.split_focus().or(self.chat_session) {
             agent_bridge::options_take(sid);
         }
         // A split leaf runs its own turn, so `/stop` reaches the pane the
@@ -278,7 +277,15 @@ impl Dashboard {
         if self.cancel_focused_pane_turn("/stop", cx) {
             return;
         }
-        let Some(cancel) = self.turn.cancel.take() else {
+        // The window's turn is the chat leaf's, so a caret on a pane leaves it
+        // running: the pane stop above was the only turn this command could
+        // reach (#2885).
+        let cancel = if self.split_focus().is_some() {
+            None
+        } else {
+            self.turn.cancel.take()
+        };
+        let Some(cancel) = cancel else {
             self.turn
                 .live
                 .notices
