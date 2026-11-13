@@ -81,10 +81,6 @@ pub fn filtered_rows(rows: &[Row], query: &str) -> Vec<Row> {
         .collect()
 }
 
-/// Provider rows the models screen keeps in view. The picker is the screen's
-/// main content, so this stays shorter than the wizard's 14-row window.
-pub const PROVIDERS_VISIBLE: usize = 8;
-
 /// One row of the models screen's provider list.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ProviderRow {
