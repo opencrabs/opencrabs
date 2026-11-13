@@ -55,17 +55,24 @@ fn rail_card_media_is_large_dual_and_the_title_is_bold() {
     for resolver in [
         "topic_icons::tab_icon(stored, sessions::RAIL_MARK_REMS)",
         "self.icon_images.get(stored)",
-        "topic_icons::tab_glyph(stored, sessions::RAIL_MARK_REMS)",
     ] {
         assert!(
             wiring.contains(resolver),
             "stored media resolver uses the shared full-card size: {resolver}"
         );
     }
+    // #2933 moved the glyph draw out of the resolver and into the rail: the
+    // resolver now answers `RailIcon::Glyph(stored)` and the rail paints it,
+    // so the full-card size is pinned where the paint happens.
+    assert!(
+        wiring.contains("rail_view::RailIcon::Glyph(stored.to_string())"),
+        "the stored mark resolver answers data for the rail to size"
+    );
     assert!(
         RAIL_VIEW.contains("topic_icons::cached_picture(")
+            && RAIL_VIEW.contains("topic_icons::tab_glyph(stored, sessions::RAIL_MARK_REMS)")
             && RAIL_VIEW.contains("sessions::RAIL_MARK_REMS"),
-        "a custom picture is drawn at the same full-card size the marks are"
+        "a custom picture and a stored mark are drawn at the same full-card size"
     );
 
     let row = block(SESSIONS, "pub fn row(", "pub fn on_click(");
