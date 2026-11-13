@@ -860,7 +860,7 @@ impl PaletteState {
     }
 
     pub fn query(&self) -> &str {
-        &self.field.text()
+        self.field.text()
     }
 
     /// The insertion point as a character offset into [`PaletteState::query`].
