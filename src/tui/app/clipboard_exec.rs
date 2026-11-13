@@ -185,7 +185,7 @@ pub(crate) fn text_from_clipboard_bytes(bytes: &[u8]) -> Option<String> {
     (!text.trim().is_empty()).then_some(text)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
