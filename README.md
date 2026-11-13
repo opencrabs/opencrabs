@@ -752,6 +752,18 @@ The same card carries a **Font** row under the four previews. It lists the famil
 
 Code blocks are the exception that needs its own key. They draw in a monospaced family, and a proportional fallback would lose the column alignment, so `[gui] mono_font` walks a candidate list and keeps the first one installed: JetBrains Mono, SF Mono, Menlo, Consolas, Cascadia Code, DejaVu Sans Mono, Noto Sans Mono, Liberation Mono, Courier New, then the generic `monospace`. A saved family that is not installed falls back to that walk instead of silently rendering in a proportional face, which is what used to happen on Windows where the old hard-coded `Menlo` pin fell through to Segoe UI.
 
+#### Settings modal
+
+`ctrl+,` opens the settings card over the conversation, in the same centred shape as the theme picker. It writes each change at once through the config file's own locked, revalidating path, so the modal and a hand edit never disagree: values are re-read from `config.toml` every time the card opens.
+
+| Section | What you can change |
+|---------|---------------------|
+| **Agent** | approval policy (`ask`, `auto-session`, `auto-always`), the completion-sound master switch and the four OS-notification switches, redaction (global plus the group/DM overrides, where `default` means the key stays absent), lazy tool schemas, thinking-loop guard, time-marker interval, debug file logging |
+| **Memory** | vector embeddings, the external sweep and embedding backfill intervals, and the two shared-session gates |
+| **Credentials** | every keyed provider, custom providers included, with the current state shown as `••••••••` or `not set`; enter arms a masked edit (one bullet per typed character), enter saves to `keys.toml`, esc cancels. The key's value is never displayed |
+
+`↑`/`↓` walk the rows, `enter` flips or cycles a value, `←`/`→` step the numeric rows, and the `-`/`+` controls do the same with the mouse. Settings that only take effect at startup (lazy tools, vector embeddings) carry an amber `restart` tag, and the status line says so again after the save. `esc` or a click outside the card closes it.
+
 #### Every command answers on the window
 
 The window runs the terminal's whole slash-command surface, not a subset. All 34 commands in the [Chat Mode](#chat-mode) table answer here, and two tests hold the line: `no_command_is_left_without_a_screen` walks every name the terminal offers and fails the build if one lands on "no screen for it", and `support_separates_missing_from_unknown` fails if a name is neither answered nor recognised. A command that owns a screen opens it full width, `esc` goes back to the chat. The rest answer in the transcript through the engine's own entry point, so a plan approved on the window is the same plan object the terminal approves, and `/cd` moves this session's directory through the same shared applier the terminal calls, never another session's.

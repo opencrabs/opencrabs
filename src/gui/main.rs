@@ -44,6 +44,7 @@ mod dashboard_projects;
 mod dashboard_rail;
 mod dashboard_screens;
 mod dashboard_sessions;
+mod dashboard_settings;
 #[cfg(test)]
 mod dashboard_source;
 mod dashboard_topics;
@@ -75,6 +76,10 @@ mod projects_view;
 mod rail_activity;
 mod screen_keys;
 mod sessions;
+mod settings_modal;
+mod settings_view;
+#[cfg(test)]
+mod settings_view_test;
 mod skills_view;
 mod status;
 mod telegram_topics;
@@ -940,6 +945,18 @@ struct Dashboard {
     /// Whether the installed families have been read. The enumeration walks
     /// CoreText on macOS and keeps no cache, so it runs once per process.
     fonts_loaded: bool,
+    /// The settings modal (#2878): the values are read fresh from the loaded
+    /// config on open, one row per `settings_view::SPECS` entry, followed by
+    /// the credential rows. `settings_secret` is the one armed credential
+    /// edit: its row index and the typed buffer, which is only ever painted
+    /// as bullets.
+    settings_open: bool,
+    settings_values: Vec<settings_view::RowValue>,
+    settings_creds: Vec<settings_view::CredSpec>,
+    settings_cursor: usize,
+    settings_scroll: ScrollHandle,
+    settings_status: Option<String>,
+    settings_secret: Option<(usize, String)>,
     /// The /cd picker's browse state (#2527): the directory on screen, its
     /// subdirectories read at open and on every descend, the row the
     /// keyboard stands on, and whether dotfile directories are listed.
@@ -5719,6 +5736,10 @@ impl Render for Dashboard {
         if self.themes_open {
             root = root.child(self.themes_modal(cx));
         }
+        // The settings modal follows the same rule (#2878).
+        if self.settings_open {
+            root = root.child(self.settings_modal(cx));
+        }
         root
     }
 }
@@ -6186,6 +6207,13 @@ fn main() {
                         themes_val_track: std::rc::Rc::new(std::cell::RefCell::new(None)),
                         fonts_open: false,
                         fonts_loaded: false,
+                        settings_open: false,
+                        settings_values: Vec::new(),
+                        settings_creds: Vec::new(),
+                        settings_cursor: 0,
+                        settings_scroll: ScrollHandle::new(),
+                        settings_status: None,
+                        settings_secret: None,
                         cd_dir: std::env::current_dir().unwrap_or_default(),
                         cd_entries: Vec::new(),
                         cd_selected: 0,

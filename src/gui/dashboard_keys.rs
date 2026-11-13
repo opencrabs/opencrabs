@@ -12,6 +12,18 @@ impl Dashboard {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The settings modal owns every key while it is open, on every screen
+        // (#2878): an armed credential edit must not leak a typed character
+        // into the composer, and the rows' arrows belong to the modal alone.
+        if self.settings_open {
+            let ks = &ev.keystroke;
+            if ks.modifiers.control && ks.key == "," {
+                self.close_settings(cx);
+                return;
+            }
+            self.settings_modal_key(ks, cx);
+            return;
+        }
         // The theme modal owns every key while it is open, on every screen: it
         // is the topmost surface, so nothing under it may answer a keystroke,
         // the composer's arrows and Enter included (#2619).
@@ -248,6 +260,13 @@ impl Dashboard {
         if ev.keystroke.modifiers.control && ev.keystroke.modifiers.shift && ev.keystroke.key == "t"
         {
             self.toggle_themes(cx);
+            return;
+        }
+        // ctrl+comma opens the settings modal (#2878), the chord every editor
+        // user already reaches for. It sits with the screen keys for the same
+        // reason as the theme chord: it works while typing.
+        if ev.keystroke.modifiers.control && ev.keystroke.key == "," {
+            self.toggle_settings(cx);
             return;
         }
         // While the rail filter is open it owns the keyboard, editor focus

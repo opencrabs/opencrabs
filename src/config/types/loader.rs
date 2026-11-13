@@ -1212,6 +1212,68 @@ impl Config {
         Ok(())
     }
 
+    /// Remove one key from a section, leaving every other line untouched.
+    ///
+    /// The counterpart of [`Self::write_key`] for `Option` fields whose
+    /// `None` is a real third state: `agent.redact_group` / `agent.redact_dm`
+    /// follow the global default only while the key is ABSENT, so a settings
+    /// surface that offers "default" beside on/off needs a removal, not a
+    /// write (#2878). A missing section or key is a no-op, because the state
+    /// the caller asked for already holds.
+    pub fn remove_key(section: &str, key: &str) -> Result<()> {
+        use toml_edit::DocumentMut;
+
+        let _guard = CONFIG_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let path =
+            Self::system_config_path().unwrap_or_else(|| opencrabs_home().join("config.toml"));
+        if !path.exists() {
+            return Ok(());
+        }
+        if let Err(e) = crate::config::alias_merge::migrate_file(&path) {
+            tracing::warn!(
+                "alias_merge: pre-write migration failed for {}: {e}",
+                path.display()
+            );
+        }
+        let mut doc: DocumentMut = fs::read_to_string(&path)?.parse()?;
+
+        let parts: Vec<String> = section.split('.').map(|p| p.to_string()).collect();
+        let mut current = doc.as_table_mut();
+        for part in &parts {
+            let Some(next) = current.get_mut(part.as_str()) else {
+                return Ok(());
+            };
+            current = next
+                .as_table_mut()
+                .with_context(|| format!("'{}' is not a table", part))?;
+        }
+        if current.remove(key).is_none() {
+            return Ok(());
+        }
+
+        // Same never-write-a-broken-file gate as write_item (#714): removing
+        // an optional key cannot invent an orphan, so the parse guard is the
+        // whole check here.
+        let serialized = doc.to_string();
+        if let Err(e) =
+            crate::config::guard::parses(crate::config::guard::ProtectedFile::Config, &serialized)
+        {
+            tracing::error!(
+                target: "config_guard",
+                "Denied config.toml key removal [{section}].{key}: would break parsing: {e}"
+            );
+            anyhow::bail!(
+                "config key removal denied: removing [{section}].{key} would make config.toml \
+                 invalid ({e}). The file was NOT changed."
+            );
+        }
+        Self::backup_config(&path, 7);
+        crate::config::types::io::atomic_write(&path, &serialized)?;
+        tracing::info!("Removed config key [{section}].{key}");
+        Ok(())
+    }
+
     /// Write a key-value pair into the system keys.toml using TOML merge.
     /// Same as write_key but targets keys.toml instead of config.toml.
     pub fn write_keys_key(section: &str, key: &str, value: &str) -> Result<()> {

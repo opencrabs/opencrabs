@@ -169,6 +169,15 @@ pub const ROWS: &[HelpRow] = &[
         Some("ctrl-shift-t"),
         "Themes: choose the palette",
     ),
+    // The settings modal is a window-only surface (#2878): the terminal edits
+    // config.toml/keys.toml through its own slash commands, so the row never
+    // prints there.
+    window_row(
+        HelpSection::Global,
+        "ctrl+,",
+        "ctrl-comma",
+        "Settings: agent, memory, keys",
+    ),
     row(
         HelpSection::Global,
         "ctrl+s",

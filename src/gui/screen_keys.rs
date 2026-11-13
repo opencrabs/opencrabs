@@ -133,6 +133,8 @@ pub enum OverlayId {
     CommandPalette,
     /// The theme modal, which owns the window while it is open (#2619).
     Themes,
+    /// The settings modal, which owns the window while it is open (#2878).
+    Settings,
 }
 
 /// Who answers a keystroke. Exactly one of these is true at a time, which is
@@ -341,6 +343,11 @@ mod tests {
         assert_eq!(
             keyboard_owner(&[OverlayId::Themes], Screen::MissionControl),
             KeyboardOwner::Overlay(OverlayId::Themes)
+        );
+        // The settings modal obeys the same law (#2878).
+        assert_eq!(
+            keyboard_owner(&[OverlayId::Settings], Screen::Models),
+            KeyboardOwner::Overlay(OverlayId::Settings)
         );
     }
 

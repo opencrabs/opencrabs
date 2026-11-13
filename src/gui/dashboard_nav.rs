@@ -620,6 +620,12 @@ impl Dashboard {
     /// derived from this one list, so an opener cannot forget to move focus
     /// and a closer cannot forget to hand it back (#2454, #2455).
     pub(crate) fn open_overlays(&self) -> Vec<OverlayId> {
+        // The settings modal owns the keyboard on every screen, the same law
+        // as the theme modal: it is the topmost surface while it is open, so
+        // nothing behind it may answer a key (#2878).
+        if self.settings_open {
+            return vec![OverlayId::Settings];
+        }
         // The theme modal owns the keyboard on every screen, including the
         // non-chat ones: it is the topmost surface while it is open, so
         // nothing behind it may answer a key (#2619).
