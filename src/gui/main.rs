@@ -4277,35 +4277,51 @@ impl Render for Dashboard {
                             chat_measure_px,
                         ));
                     }
-                    // The slash-command list sits over the input while a name is
-                    // not being spelled, the terminal's own placement. The name
-                    // prompt itself is the overlay below (#2398). The list floats
-                    // over the composer, so it lines up with it: same measure,
-                    // still the child directly above the editor, so the order it
-                    // paints in does not change (#2590).
-                    if self.topic_draft.is_none() {
-                        let popup = self.composer.editor.read(cx).command_popup();
-                        if let Some((names, selected)) = popup {
-                            col = col.child(central(
-                                command_popup_view(&names, selected).into_any_element(),
-                                centred_chat,
-                                chat_measure_px,
-                            ));
-                        } else if let Some((items, selected)) =
-                            self.composer.editor.read(cx).emoji_popup()
-                        {
-                            col = col.child(central(
-                                emoji_popup_view(&items, selected).into_any_element(),
-                                centred_chat,
-                                chat_measure_px,
-                            ));
+                    // The unsplit chat uses the same composer swap as a split
+                    // leaf (#2924). Without this arm the forward state changed
+                    // but its destination picker was never rendered here.
+                    let composer_replacement = if self.forward_pick.is_some()
+                        && self.forward_leaf.is_none()
+                    {
+                        Some(self.forward_picker(cx))
+                    } else if self.msg_select.is_active() {
+                        Some(self.select_bar(cx))
+                    } else {
+                        None
+                    };
+                    if let Some(view) = composer_replacement {
+                        col = col.child(central(view, centred_chat, chat_measure_px));
+                    } else {
+                        // The slash-command list sits over the input while a name is
+                        // not being spelled, the terminal's own placement. The name
+                        // prompt itself is the overlay below (#2398). The list floats
+                        // over the composer, so it lines up with it: same measure,
+                        // still the child directly above the editor, so the order it
+                        // paints in does not change (#2590).
+                        if self.topic_draft.is_none() {
+                            let popup = self.composer.editor.read(cx).command_popup();
+                            if let Some((names, selected)) = popup {
+                                col = col.child(central(
+                                    command_popup_view(&names, selected).into_any_element(),
+                                    centred_chat,
+                                    chat_measure_px,
+                                ));
+                            } else if let Some((items, selected)) =
+                                self.composer.editor.read(cx).emoji_popup()
+                            {
+                                col = col.child(central(
+                                    emoji_popup_view(&items, selected).into_any_element(),
+                                    centred_chat,
+                                    chat_measure_px,
+                                ));
+                            }
                         }
+                        col = col.child(central(
+                            self.composer.editor.clone().into_any_element(),
+                            centred_chat,
+                            chat_measure_px,
+                        ));
                     }
-                    col = col.child(central(
-                        self.composer.editor.clone().into_any_element(),
-                        centred_chat,
-                        chat_measure_px,
-                    ));
                 }
                 if let Some(strip) = topic_bottom {
                     col = col.child(central(strip, centred_chat, chat_measure_px));

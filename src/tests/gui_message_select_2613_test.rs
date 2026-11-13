@@ -9,6 +9,7 @@ use crate::tests::gui_dashboard_source::DASHBOARD;
 use crate::ui_core::message_select::MessageAction;
 
 const TRANSCRIPT: &str = include_str!("../gui/transcript.rs");
+const MAIN: &str = include_str!("../gui/main.rs");
 
 /// The menu is the set of actions that can actually be carried out, in the
 /// order Telegram shows them. A label with no path behind it never ships.
@@ -96,6 +97,54 @@ fn right_press_is_on_the_outer_message_row() {
             < row.find("row = row.on_mouse_down(MouseButton::Right").unwrap(),
         "the outer row owns the press after its body and controls are attached"
     );
+}
+
+/// The main chat, not only a split leaf, swaps its composer for the forward
+/// destination picker (#2924).
+#[test]
+fn the_unsplit_chat_renders_the_forward_picker() {
+    let chat = MAIN
+        .split("if !self.window_is_split() {\n                    let open = self.chat_session;")
+        .nth(1)
+        .and_then(|rest| rest.split("if let Some(strip) = topic_bottom").next())
+        .expect("the unsplit chat composer region");
+    assert!(chat.contains("self.forward_pick.is_some()"));
+    assert!(chat.contains("self.forward_leaf.is_none()"));
+    assert!(chat.contains("Some(self.forward_picker(cx))"));
+    assert!(chat.contains("Some(self.select_bar(cx))"));
+}
+
+/// Choosing a destination opens it and stages a reply for review. It must not
+/// resurrect the old direct history write or send anything behind the user's
+/// back (#2924).
+#[test]
+fn forward_opens_the_destination_and_stages_a_composer_reply() {
+    let forward = DASHBOARD
+        .split("pub(crate) fn forward_into(")
+        .nth(1)
+        .and_then(|rest| rest.split("/// Refetch the turn's session transcript").next())
+        .expect("forward destination commit");
+    assert!(forward.contains("open_picked_in_focused_pane(target, true, cx)"));
+    assert!(forward.contains("self.reply_rows(rows, leaf, cx)"));
+    assert!(forward.contains("self.pane_focus = Some(target)"));
+    assert!(forward.contains("self.pane_focus = None"));
+    assert!(forward.contains("!self.pane_states.contains_key(&target)"));
+    assert!(
+        forward.find("open_picked_in_focused_pane(target, true, cx)").unwrap()
+            < forward.find("self.reply_rows(rows, leaf, cx)").unwrap(),
+        "the destination is open before its composer receives the quote"
+    );
+    for forbidden in [
+        "transcript::forward_rows",
+        "cx.spawn",
+        "reload_transcript",
+        "install_loaded_in_pane",
+    ] {
+        assert!(
+            !forward.contains(forbidden),
+            "forward must stage a draft, not run `{forbidden}`"
+        );
+    }
 }
 
 /// Only a stored `Message` row can be picked. Tool output, system notices,

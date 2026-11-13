@@ -1033,9 +1033,9 @@ impl Dashboard {
         self.forward_into(target, cx);
     }
 
-    /// Copy the picked rows into `target`. The write runs off the UI thread;
-    /// the destination is only written to, never prompted, so a forward can
-    /// never start a turn the user did not ask for.
+    /// Open `target` and quote the picked rows in its composer (#2924).
+    /// Forwarding is a draft, not a database write: the user reviews the quote,
+    /// adds any message they want, and explicitly sends it from that session.
     pub(crate) fn forward_into(&mut self, target: Uuid, cx: &mut Context<Self>) {
         let Some(rows) = self.forward_pick.clone() else {
             return;
@@ -1046,45 +1046,44 @@ impl Dashboard {
         if target == source {
             return;
         }
-        let label = self.session_label(source);
-        let db_path = self.db_path.clone();
+
+        let in_chat = self.chat_session == Some(target);
+        let already_open = in_chat
+            || self
+                .panes
+                .as_ref()
+                .is_some_and(|tree| tree.contains(target));
+        if already_open {
+            if in_chat {
+                self.pane_focus = None;
+            } else {
+                // Focusing an existing destination must not rebuild its view or
+                // discard its composer. Only a parked leaf needs restoring.
+                if !self.pane_states.contains_key(&target) {
+                    self.open_pane_state(target, cx);
+                }
+                self.pane_focus = Some(target);
+            }
+            self.screen = Screen::Chat;
+            self.rail_focused = false;
+            self.mark_rail_seen(target);
+            self.sync_composer_session(cx);
+            self.request_composer_caret(cx);
+            self.refocus_screen();
+            self.persist_layout();
+        } else if !self.open_picked_in_focused_pane(target, true, cx) {
+            return;
+        }
+
+        let leaf = (self.chat_session != Some(target)).then_some(target);
         self.forward_pick = None;
         self.forward_leaf = None;
         self.forward_query.clear();
         self.forward_cursor = None;
         self.msg_select.cancel();
         self.msg_menu = None;
-        cx.spawn(async move |this, cx| {
-            let result = transcript::forward_rows(db_path.clone(), rows, target, label).await;
-            // A destination already on screen shows the forwarded rows now,
-            // whether it is the window's chat or another split leaf (#2827).
-            let loaded = match &result {
-                Ok(_) => Some(transcript::load_recent(db_path, target).await),
-                Err(_) => None,
-            };
-            this.update(cx, |this, cx| {
-                match result {
-                    Ok(landed) => {
-                        if this.chat_state.session() == Some(target) {
-                            if let Some(Ok(loaded)) = loaded {
-                                this.install_loaded(loaded, cx);
-                            } else {
-                                this.reload_transcript(target, cx);
-                            }
-                        } else if this.pane_states.contains_key(&target)
-                            && let Some(Ok(loaded)) = loaded
-                        {
-                            this.install_loaded_in_pane(target, loaded, cx);
-                        }
-                        logging::info(&format!("forward: {landed} row(s) into {target}"));
-                    }
-                    Err(e) => logging::error(&format!("forward into {target}: {e}")),
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+        self.reply_rows(rows, leaf, cx);
+        logging::info(&format!("forward staged for review in {target}"));
     }
 
     /// Refetch the turn's session transcript from the DB, and drop the live
