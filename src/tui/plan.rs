@@ -481,34 +481,55 @@ impl PlanDocument {
     /// a criteria contract is a genuine gap and is left untouched. Returns
     /// whether a task was completed.
     pub fn complete_trailing_delivery_task(&mut self) -> bool {
+        if !self.trailing_delivery_pending() {
+            return false;
+        }
+        let last = self.tasks.len() - 1;
+        self.tasks[last].complete(Some(
+            "Auto-completed at turn settle: the turn delivered its final response (#737)."
+                .to_string(),
+        ));
+        true
+    }
+
+    /// Whether this plan is done, or is done apart from the trailing delivery
+    /// step the turn settle completes (#737).
+    ///
+    /// The settled-task banner reads this to recognise the moment a plan
+    /// finishes. Its last real task settles in the same pass that the plan
+    /// banner goes out for the same finish, so a task banner for that pass is
+    /// a second card for one piece of news (#2752).
+    pub fn finishes_on_this_settle(&self) -> bool {
+        self.is_complete() || self.trailing_delivery_pending()
+    }
+
+    /// Every task before the last is resolved, the last is `Pending`, and it
+    /// declares no criteria contract (#1932).
+    ///
+    /// A `Pending` task anywhere but the end, a `Failed`/`Blocked` last task,
+    /// or a last task carrying a criteria contract is a genuine gap, not a
+    /// delivery step, so it does not count as finished.
+    fn trailing_delivery_pending(&self) -> bool {
         let Some(last) = self.tasks.len().checked_sub(1) else {
             return false;
         };
         let head_resolved = self.tasks[..last]
             .iter()
             .all(|t| matches!(t.status, TaskStatus::Completed | TaskStatus::Skipped));
-        if head_resolved && matches!(self.tasks[last].status, TaskStatus::Pending) {
-            // #1932: the auto-complete is for the DELIVERY shape only, and
-            // delivery-shaped means the task declared no verifiable
-            // contract. A trailing task with acceptance criteria says "this
-            // box means the listed commands ran and their outcomes were
-            // seen"; a turn that merely settled proves none of that. Before
-            // this gate, a trailing "verify the publisher end to end" task
-            // whose criterion awaited an external deploy was completed and
-            // ARCHIVED as done on any turn's final text, fabricating the
-            // record and making multi-turn plans structurally impossible.
-            // Such tasks now stay Pending until their criteria are met by
-            // an actual `complete`.
-            if !self.tasks[last].acceptance_criteria.is_empty() {
-                return false;
-            }
-            self.tasks[last].complete(Some(
-                "Auto-completed at turn settle: the turn delivered its final response (#737)."
-                    .to_string(),
-            ));
-            return true;
-        }
-        false
+        // #1932: the auto-complete is for the DELIVERY shape only, and
+        // delivery-shaped means the task declared no verifiable
+        // contract. A trailing task with acceptance criteria says "this
+        // box means the listed commands ran and their outcomes were
+        // seen"; a turn that merely settled proves none of that. Before
+        // this gate, a trailing "verify the publisher end to end" task
+        // whose criterion awaited an external deploy was completed and
+        // ARCHIVED as done on any turn's final text, fabricating the
+        // record and making multi-turn plans structurally impossible.
+        // Such tasks now stay Pending until their criteria are met by
+        // an actual `complete`.
+        head_resolved
+            && matches!(self.tasks[last].status, TaskStatus::Pending)
+            && self.tasks[last].acceptance_criteria.is_empty()
     }
 
     /// Approve the plan: Editing → Active, stamping `approved_at` and the

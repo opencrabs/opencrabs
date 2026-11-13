@@ -248,6 +248,20 @@ fn config_allows(event: &NotificationEvent) -> bool {
     }
 }
 
+/// Whether a banner will be raised when a whole plan finishes.
+///
+/// Read on its own because the settled-task path needs the answer for an event
+/// it is not raising: when the plan banner covers the finish, the task banner
+/// for that same finish stands down (#2752). Mirrors the `PlanCompleted` arm of
+/// [`config_allows`], including the master switch.
+fn plan_completed_allowed() -> bool {
+    let Ok(config) = crate::config::Config::load() else {
+        return false;
+    };
+    let agent = &config.agent;
+    agent.completion_notification_enabled && agent.notify_on_plan_completed
+}
+
 /// Settled tasks in `plans` that `seen` had not recorded yet, adding them as
 /// it goes.
 ///
@@ -276,6 +290,26 @@ pub(crate) fn fresh_settled_tasks<'a>(
     fresh
 }
 
+/// The settled tasks from `fresh` that deserve a banner of their own.
+///
+/// A plan that has nothing left to run settles its final task in the same pass
+/// that the plan itself finishes, and the plan banner carries that news from
+/// the turn-settle seam. Raising the task banner for that pass put two cards on
+/// screen for one finish (#2752), so it stands down. A task that settles while
+/// the plan is still running keeps its banner: that is the case the task
+/// switch exists for. With plan banners turned off the task banner is the only
+/// one left, so it still fires.
+pub(crate) fn bannerable_settles<'a>(
+    plan: &PlanDocument,
+    fresh: &'a [(Uuid, &'a str, bool)],
+    plan_banners_enabled: bool,
+) -> &'a [(Uuid, &'a str, bool)] {
+    if plan_banners_enabled && plan.finishes_on_this_settle() {
+        return &[];
+    }
+    fresh
+}
+
 /// Record settled plan tasks in `seen` and announce each new one.
 ///
 /// Returns the number of tasks this call recorded, which is exactly the count
@@ -285,16 +319,25 @@ pub(crate) fn fresh_settled_tasks<'a>(
 ///
 /// A skipped task counts as settled for the chime but is announced as a stop,
 /// never a success: the banner must not claim work that was abandoned.
+///
+/// The count is the raw settle count even when a banner stands down, because
+/// the chime and the rail flash still mark the moment.
 pub fn announce_settled_tasks(seen: &mut HashSet<Uuid>, plans: &[Option<&PlanDocument>]) -> usize {
-    let fresh = fresh_settled_tasks(seen, plans);
-    for (_, label, success) in &fresh {
-        let _ = raise(NotificationEvent::TaskCompleted {
-            label: (*label).to_string(),
-            success: *success,
-            elapsed_secs: 0,
-        });
+    let plan_banners = plan_completed_allowed();
+    let mut recorded = 0;
+    for entry in plans {
+        let Some(plan) = *entry else { continue };
+        let fresh = fresh_settled_tasks(seen, &[Some(plan)]);
+        recorded += fresh.len();
+        for (_, label, success) in bannerable_settles(plan, &fresh, plan_banners) {
+            let _ = raise(NotificationEvent::TaskCompleted {
+                label: (*label).to_string(),
+                success: *success,
+                elapsed_secs: 0,
+            });
+        }
     }
-    fresh.len()
+    recorded
 }
 
 /// Raise one desktop notification. Returns `true` when a transport was

@@ -18,8 +18,8 @@ use uuid::Uuid;
 use crate::config::AgentConfig;
 use crate::tui::plan::{PlanDocument, PlanStatus, PlanTask, TaskStatus, TaskType};
 use crate::utils::desktop_notify::{
-    NotificationEvent, enabled, first_time, fresh_settled_tasks, should_raise, summary_line,
-    truncate, xml_escape,
+    NotificationEvent, bannerable_settles, enabled, first_time, fresh_settled_tasks, should_raise,
+    summary_line, truncate, xml_escape,
 };
 
 const SOURCE: &str = include_str!("../utils/desktop_notify.rs");
@@ -81,21 +81,22 @@ fn xml_escape_covers_the_five_metacharacters() {
 }
 
 #[test]
-fn plan_and_task_events_dedupe_but_turns_do_not() {
+fn one_finish_keeps_one_key_and_turns_carry_none() {
+    // #2752: a plan finishing and its last task settling are ONE piece of
+    // news. The plan event owns the key, so the second sighting of that
+    // finish is suppressed instead of becoming a second card.
     let plan = NotificationEvent::PlanCompleted {
         title: "Ship it".to_string(),
         tasks: 3,
     };
-    assert_eq!(plan.dedupe_key().as_deref(), Some("plan:Ship it"));
-
-    let task = NotificationEvent::TaskCompleted {
-        label: "Write the transport".to_string(),
-        success: true,
-        elapsed_secs: 4,
-    };
+    let key = format!("plan:Ship it {}", Uuid::new_v4());
+    assert!(key.starts_with("plan:"), "the plan event owns the finish key");
+    assert!(first_time(&key), "the first sighting announces the finish");
+    assert!(!first_time(&key), "a re-render must not announce it again");
     assert_eq!(
-        task.dedupe_key().as_deref(),
-        Some("task:Write the transport")
+        plan.dedupe_key().as_deref(),
+        Some("plan:Ship it"),
+        "the plan event's key is the one the finish is remembered by"
     );
 
     // Asking the same thing twice deserves two banners, so turns carry no key.
@@ -112,6 +113,91 @@ fn plan_and_task_events_dedupe_but_turns_do_not() {
         }
         .dedupe_key(),
         None
+    );
+}
+
+#[test]
+fn a_finished_plan_raises_one_banner_not_two() {
+    // The plan's last task settles in the same pass the plan finishes. The
+    // plan banner carries that news, so the task banner for that pass stands
+    // down (#2752).
+    let plan = plan_with("Ship it", &[TaskStatus::Completed, TaskStatus::Completed]);
+    let mut seen: HashSet<Uuid> = HashSet::new();
+    seen.insert(plan.tasks[0].id);
+    let fresh = fresh_settled_tasks(&mut seen, &[Some(&plan)]);
+    assert_eq!(fresh.len(), 1, "only the last task is fresh");
+
+    assert!(
+        bannerable_settles(&plan, &fresh, true).is_empty(),
+        "one banner per finished plan: the plan banner already says it"
+    );
+
+    // With plan banners off, the task banner is the only one left.
+    assert_eq!(
+        bannerable_settles(&plan, &fresh, false).len(),
+        1,
+        "the task switch still speaks when the plan switch is off"
+    );
+}
+
+#[test]
+fn a_plan_owing_only_its_delivery_step_counts_as_finished() {
+    // The trailing delivery step is not real work (#737), so the pass that
+    // settles everything before it is the pass the plan finishes.
+    let plan = plan_with("Ship it", &[TaskStatus::Completed, TaskStatus::Pending]);
+    assert!(plan.finishes_on_this_settle());
+
+    let mut seen: HashSet<Uuid> = HashSet::new();
+    seen.insert(plan.tasks[0].id);
+    let fresh = fresh_settled_tasks(&mut seen, &[Some(&plan)]);
+    assert!(
+        bannerable_settles(&plan, &fresh, true).is_empty(),
+        "the delivery step does not earn the finish a second banner"
+    );
+}
+
+#[test]
+fn a_task_settling_mid_plan_keeps_its_own_banner() {
+    // Two tasks still owe work, so this settle is not a finish and the task
+    // switch is exactly what should speak.
+    let plan = plan_with(
+        "Ship it",
+        &[
+            TaskStatus::Completed,
+            TaskStatus::Pending,
+            TaskStatus::Pending,
+        ],
+    );
+    assert!(!plan.finishes_on_this_settle());
+
+    let mut seen: HashSet<Uuid> = HashSet::new();
+    seen.insert(plan.tasks[0].id);
+    let fresh = fresh_settled_tasks(&mut seen, &[Some(&plan)]);
+    assert_eq!(fresh.len(), 1);
+    assert_eq!(
+        bannerable_settles(&plan, &fresh, true).len(),
+        1,
+        "a task that settles on its own still announces itself"
+    );
+}
+
+#[test]
+fn a_trailing_task_with_criteria_is_real_work_not_a_finish() {
+    // #1932: a criteria contract on the last task means the plan is not done
+    // when the task before it settles.
+    let mut plan = plan_with("Ship it", &[TaskStatus::Completed, TaskStatus::Pending]);
+    plan.tasks[1]
+        .acceptance_criteria
+        .push("cargo test reports 0 failed".to_string());
+    assert!(!plan.finishes_on_this_settle());
+
+    let mut seen: HashSet<Uuid> = HashSet::new();
+    seen.insert(plan.tasks[0].id);
+    let fresh = fresh_settled_tasks(&mut seen, &[Some(&plan)]);
+    assert_eq!(
+        bannerable_settles(&plan, &fresh, true).len(),
+        1,
+        "the settled task is not the finish, so it keeps its banner"
     );
 }
 
