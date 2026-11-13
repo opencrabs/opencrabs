@@ -5,8 +5,9 @@
 //! picks, whether it follows the system, and how a custom accent lands.
 
 use crate::config::gui_theme::{
-    LIGHT, ORGN, base_for, contrast_ratio, derive, follows_system, format_accent, parse_accent,
-    resolve,
+    LIGHT, MAX_WINDOW_TRANSPARENCY, ORGN, base_for, clamp_window_transparency, contrast_ratio,
+    derive, follows_system, format_accent, parse_accent, resolve, transparency_from_slider,
+    window_opacity,
 };
 use crate::config::types::{GuiConfig, GuiTheme};
 
@@ -16,7 +17,36 @@ fn the_theme_defaults_to_auto_so_a_first_install_follows_the_system() {
     assert_eq!(config.theme, GuiTheme::Auto);
     assert!(config.custom_accent.is_none());
     assert!(config.topic_tabs.is_none());
+    assert_eq!(config.transparency, 0);
     assert!(follows_system(config.theme));
+}
+
+#[test]
+fn window_transparency_is_bounded_and_convertible() {
+    assert_eq!(MAX_WINDOW_TRANSPARENCY, 40);
+    assert_eq!(clamp_window_transparency(0), 0);
+    assert_eq!(clamp_window_transparency(25), 25);
+    assert_eq!(clamp_window_transparency(u8::MAX), 40);
+    assert_eq!(window_opacity(0), 1.0);
+    assert_eq!(window_opacity(25), 0.75);
+    assert_eq!(window_opacity(40), 0.6);
+    assert_eq!(window_opacity(u8::MAX), 0.6);
+}
+
+#[test]
+fn transparency_sliders_and_toml_keep_the_percentage() {
+    assert_eq!(transparency_from_slider(0.0), 0);
+    assert_eq!(transparency_from_slider(0.5), 20);
+    assert_eq!(transparency_from_slider(1.0), 40);
+    assert_eq!(transparency_from_slider(-1.0), 0);
+    assert_eq!(transparency_from_slider(2.0), 40);
+    assert_eq!(transparency_from_slider(f32::NAN), 0);
+
+    let config: GuiConfig = toml::from_str("transparency = 25").unwrap();
+    assert_eq!(config.transparency, 25);
+    let text = toml::to_string(&config).unwrap();
+    let back: GuiConfig = toml::from_str(&text).unwrap();
+    assert_eq!(back.transparency, 25);
 }
 
 #[test]

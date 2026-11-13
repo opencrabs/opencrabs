@@ -2608,6 +2608,11 @@ pub struct GuiConfig {
     #[serde(default)]
     pub base: Option<String>,
 
+    /// Whole-window transparency as a percentage (#2922). Zero is opaque.
+    /// The desktop clamps this to its legibility ceiling before painting.
+    #[serde(default)]
+    pub transparency: u8,
+
     /// Where the topic tab row sits: `top`, `left`, `bottom` or `right`.
     /// Unset or unknown means top.
     #[serde(default)]

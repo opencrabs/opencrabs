@@ -344,7 +344,12 @@ impl Dashboard {
             GuiTheme::Custom => 2,
             GuiTheme::Auto => 3,
         };
+        if let Ok(config) = Config::load() {
+            self.window_transparency =
+                gui_theme::clamp_window_transparency(config.gui.transparency);
+        }
         self.themes_drag = None;
+        self.themes_transparency_drag = false;
         self.themes_open = true;
         // The window's root takes the keyboard, not the composer: the modal
         // owns the arrows and Enter, so a stale editor focus would send a
@@ -358,6 +363,13 @@ impl Dashboard {
     /// the window never keeps a theme the config does not hold.
     pub(crate) fn close_themes(&mut self, cx: &mut Context<Self>) {
         self.themes_drag = None;
+        self.themes_transparency_drag = false;
+        // A release has already persisted the value. A close during a drag
+        // has not, so the saved config is the correct preview rollback (#2922).
+        if let Ok(config) = Config::load() {
+            self.window_transparency =
+                gui_theme::clamp_window_transparency(config.gui.transparency);
+        }
         self.themes_open = false;
         self.fonts_open = false;
         palette::adopt(palette::saved());
@@ -368,6 +380,53 @@ impl Dashboard {
     /// The accent the wheel is painting right now.
     pub(crate) fn themes_accent(&self) -> u32 {
         gui_theme::hsv_to_rgb(self.themes_hue, self.themes_sat, self.themes_val)
+    }
+
+    /// Start a whole-window transparency drag (#2922). The value paints live,
+    /// but the config is untouched until release.
+    pub(crate) fn transparency_press_at(&mut self, x: f32, y: f32) -> bool {
+        self.themes_transparency_drag = false;
+        let Some(bounds) = *self.themes_transparency_track.borrow() else {
+            return false;
+        };
+        if !accent::inside(bounds, x, y, accent::SLACK) {
+            return false;
+        }
+        let position = accent::slider_value(bounds, x);
+        self.window_transparency = gui_theme::transparency_from_slider(position);
+        self.themes_transparency_drag = true;
+        self.themes_drag = None;
+        true
+    }
+
+    /// Follow a transparency drag even after the pointer leaves the track.
+    pub(crate) fn transparency_drag_to(&mut self, x: f32) -> bool {
+        if !self.themes_transparency_drag {
+            return false;
+        }
+        if let Some(bounds) = *self.themes_transparency_track.borrow() {
+            let position = accent::slider_value(bounds, x);
+            self.window_transparency = gui_theme::transparency_from_slider(position);
+        }
+        true
+    }
+
+    /// Persist the transparency a drag settled on (#2922).
+    pub(crate) fn keep_transparency(&mut self, cx: &mut Context<Self>) {
+        if !self.themes_transparency_drag {
+            return;
+        }
+        self.themes_transparency_drag = false;
+        let value = self.window_transparency;
+        match Config::write_key("gui", "transparency", &value.to_string()) {
+            Ok(_) => logging::info(&format!(
+                "themes: kept whole-window transparency at {value}%"
+            )),
+            Err(e) => logging::error(&format!(
+                "themes: could not save whole-window transparency {value}%: {e}"
+            )),
+        }
+        cx.notify();
     }
 
     /// The modal's own keys. The arrows walk the four cards without writing
@@ -648,9 +707,39 @@ impl Dashboard {
             })
             .collect();
         let base_row = themes_view::base_row(base, base_picks, shown);
-        // The wheel is the only draggable thing in the window: a press seeds
-        // the hue and the drag repaints live, with the save landing on release,
-        // so a drag never writes the config once per frame.
+        // Whole-window transparency has its own track and save lifecycle, so
+        // it never pretends to be part of the custom accent (#2922).
+        let transparency_press = cx.listener(|this, ev: &MouseDownEvent, _window, cx| {
+            let x = f32::from(ev.position.x);
+            let y = f32::from(ev.position.y);
+            if this.transparency_press_at(x, y) {
+                cx.notify();
+            }
+        });
+        let transparency_slide = cx.listener(|this, ev: &MouseMoveEvent, _window, cx| {
+            if this.transparency_drag_to(f32::from(ev.position.x)) {
+                cx.notify();
+            }
+        });
+        let transparency_release = cx.listener(|this, _ev: &MouseUpEvent, _window, cx| {
+            this.keep_transparency(cx);
+        });
+        let transparency_release_out = cx.listener(|this, _ev: &MouseUpEvent, _window, cx| {
+            this.keep_transparency(cx);
+        });
+        let transparency_row = div()
+            .id("theme-transparency-row")
+            .on_mouse_down(MouseButton::Left, transparency_press)
+            .on_mouse_move(transparency_slide)
+            .on_mouse_up(MouseButton::Left, transparency_release)
+            .on_mouse_up_out(MouseButton::Left, transparency_release_out)
+            .child(themes_view::transparency_row(
+                self.window_transparency,
+                shown,
+                self.themes_transparency_track.clone(),
+            ));
+        // The accent wheel follows the same live-preview and release-to-save
+        // lifecycle as transparency, so a drag never writes once per frame.
         let press = cx.listener(|this, ev: &MouseDownEvent, _window, cx| {
             let x = f32::from(ev.position.x);
             let y = f32::from(ev.position.y);
@@ -751,6 +840,7 @@ impl Dashboard {
         themes_view::modal(
             cards,
             base_row,
+            transparency_row,
             accent_row,
             font_row,
             "A click saves the card at once; the arrows walk them and Enter picks.",

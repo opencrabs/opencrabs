@@ -161,8 +161,8 @@ use gpui::{
     DragMoveEvent, Entity, ExternalPaths, FocusHandle, Image, KeyDownEvent, KeystrokeEvent,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Point,
     ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString, Stateful, TitlebarOptions, Window,
-    WindowBounds, WindowControlArea, WindowOptions, div, point, prelude::*, px, rems, rgb, rgba,
-    size,
+    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowOptions, div, point,
+    prelude::*, px, rems, rgb, rgba, size,
 };
 // The decoration request is Linux-only (#2813): every other platform keeps the
 // server-side decorations its window manager already draws.
@@ -972,14 +972,24 @@ struct Dashboard {
     themes_open: bool,
     /// The card the keyboard is standing on: 0 orgn, 1 light, 2 custom, 3 auto.
     themes_card: usize,
+    /// The whole-window transparency in force (#2922). Zero keeps the native
+    /// window opaque; a positive value composites the root with the desktop.
+    window_transparency: u8,
+    /// The native compositing mode last applied by the renderer. Tracking it
+    /// avoids sending the same platform mutation on every frame.
+    window_background_transparent: bool,
     /// Which accent control the pointer is dragging, if any.
     themes_drag: Option<accent::Drag>,
+    /// Whether the pointer is dragging the whole-window transparency track.
+    themes_transparency_drag: bool,
     /// The wheel's box in window coordinates, recorded at paint time so a
     /// press can be turned into a hue (#2619).
     themes_wheel: std::rc::Rc<std::cell::RefCell<Option<[f32; 4]>>>,
     /// The saturation and brightness tracks' boxes, recorded the same way.
     themes_sat_track: std::rc::Rc<std::cell::RefCell<Option<[f32; 4]>>>,
     themes_val_track: std::rc::Rc<std::cell::RefCell<Option<[f32; 4]>>>,
+    /// The whole-window transparency track, recorded the same way (#2922).
+    themes_transparency_track: std::rc::Rc<std::cell::RefCell<Option<[f32; 4]>>>,
     /// Whether the font list under the cards is open (#2786). Closed by
     /// default, because the list is the machine's whole family catalog and the
     /// modal is small.
@@ -2030,6 +2040,18 @@ pub(crate) fn busy_repaint_due(tick: u64) -> bool {
 
 impl Render for Dashboard {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Native alpha and the root's opacity are two halves of the same
+        // setting (#2922). Change the platform mode only when it flips; the
+        // opacity itself is cheap to paint on every frame.
+        let transparent = self.window_transparency > 0;
+        if transparent != self.window_background_transparent {
+            window.set_background_appearance(if transparent {
+                WindowBackgroundAppearance::Transparent
+            } else {
+                WindowBackgroundAppearance::Opaque
+            });
+            self.window_background_transparent = transparent;
+        }
         // The machine's font catalog is read once, on the first paint (#2786):
         // `all_font_names` walks CoreText on macOS and keeps no cache of its
         // own, so asking it per frame would re-enumerate every installed
@@ -4304,6 +4326,9 @@ impl Render for Dashboard {
             .flex()
             .flex_row()
             .size_full()
+            // Every child, including the transcript and every overlay, gets
+            // the same opacity. The native window accepts alpha above (#2922).
+            .opacity(gui_theme::window_opacity(self.window_transparency))
             .bg(rgb(palette::current().bg))
             .text_color(rgb(palette::current().text))
             // One family for the window (#2786): `font_family` sets the family
@@ -5379,6 +5404,8 @@ fn main() {
                 opencrabs::utils::last_session::read(),
             )
         });
+    let initial_transparency =
+        gui_theme::clamp_window_transparency(Config::current().gui.transparency);
     Application::new().run(move |cx: &mut App| {
         // Dock icon first: a bare binary has no bundle, so macOS would show
         // its generic "exec" icon for the whole session otherwise.
@@ -5396,6 +5423,14 @@ fn main() {
                     appears_transparent: false,
                     traffic_light_position: None,
                 }),
+                // The root paints every surface at the matching opacity. The
+                // native window must accept alpha too, or the opaque backing
+                // would hide the desktop behind it (#2922).
+                window_background: if initial_transparency > 0 {
+                    WindowBackgroundAppearance::Transparent
+                } else {
+                    WindowBackgroundAppearance::Opaque
+                },
                 // A Wayland compositor that does not implement
                 // `zxdg_decoration_manager_v1` (mutter is one) never answers a
                 // decoration request, so asking for server-side decorations
@@ -5676,10 +5711,14 @@ fn main() {
                         themes_val: 0.84,
                         themes_open: false,
                         themes_card: 3,
+                        window_transparency: initial_transparency,
+                        window_background_transparent: initial_transparency > 0,
                         themes_drag: None,
+                        themes_transparency_drag: false,
                         themes_wheel: std::rc::Rc::new(std::cell::RefCell::new(None)),
                         themes_sat_track: std::rc::Rc::new(std::cell::RefCell::new(None)),
                         themes_val_track: std::rc::Rc::new(std::cell::RefCell::new(None)),
+                        themes_transparency_track: std::rc::Rc::new(std::cell::RefCell::new(None)),
                         fonts_open: false,
                         fonts_loaded: false,
                         settings_open: false,

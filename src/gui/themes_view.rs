@@ -229,6 +229,54 @@ pub fn swatch(bg: u32, name: &str, selected: bool, shown: Palette) -> Stateful<D
         .hover(|d| d.border_color(rgb(shown.text_muted)))
 }
 
+/// Whole-window transparency (#2922). This is independent of the palette, so
+/// the control stays available for every theme card.
+pub fn transparency_row(
+    value: u8,
+    shown: Palette,
+    track: Rc<RefCell<Option<[f32; 4]>>>,
+) -> Div {
+    let value = gui_theme::clamp_window_transparency(value);
+    let position = f32::from(value) / f32::from(gui_theme::MAX_WINDOW_TRANSPARENCY);
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .w_full()
+        .p_3()
+        .rounded(px(concentric_radius(6.0)))
+        .border_1()
+        .border_color(rgb(shown.track))
+        .bg(rgb(shown.bg))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .w_full()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(shown.text_muted))
+                        .child("Window transparency"),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(shown.accent))
+                        .child(SharedString::from(format!("{value}%"))),
+                ),
+        )
+        .child(slider(position, shown.accent, track))
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(shown.text_faint))
+                .child("Entire window, text and dialogs included. 0% is opaque; maximum 40%."),
+        )
+}
+
 /// The base picker (#2746): the canvases the window can sit on, under the
 /// cards. A pick saves the base and switches the window to `custom`, so the
 /// whole interface follows the one colour that was chosen.
@@ -644,11 +692,12 @@ pub fn font_row(
 }
 
 /// The modal itself: a scrim that dismisses, and a centred card that does
-/// not. `base` is the background picker, `accent` the custom row, which is
-/// present only while Custom is in force.
+/// not. The body scrolls inside the shell, so every control stays reachable
+/// on a short window. `accent` is present only while Custom is in force.
 pub fn modal(
     cards: Vec<Stateful<Div>>,
     base: Div,
+    transparency: Div,
     accent: Option<AnyElement>,
     fonts: Div,
     footer: &str,
@@ -659,7 +708,17 @@ pub fn modal(
     for card in cards {
         rows = rows.child(card);
     }
-    let mut body = div().flex().flex_col().gap_3().child(rows).child(base);
+    let mut body = div()
+        .id("theme-modal-body")
+        .flex()
+        .flex_col()
+        .gap_3()
+        .flex_1()
+        .min_h_0()
+        .overflow_y_scroll()
+        .child(rows)
+        .child(base)
+        .child(transparency);
     if let Some(accent) = accent {
         body = body.child(accent);
     }

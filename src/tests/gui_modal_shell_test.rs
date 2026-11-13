@@ -21,6 +21,23 @@ fn theme_consumes_the_shared_modal_shell() {
 }
 
 #[test]
+fn theme_transparency_reaches_config_native_alpha_and_the_whole_root() {
+    let types = include_str!("../config/types.rs");
+    let main = include_str!("../gui/main.rs");
+    let dashboard = include_str!("../gui/dashboard_screens.rs");
+    let theme = include_str!("../gui/themes_view.rs");
+    assert!(types.contains("pub transparency: u8"));
+    assert!(main.contains("window_background: if initial_transparency > 0"));
+    assert!(main.contains("window.set_background_appearance(if transparent"));
+    assert!(main.contains(".opacity(gui_theme::window_opacity(self.window_transparency))"));
+    assert!(dashboard.contains("Config::write_key(\"gui\", \"transparency\""));
+    assert!(dashboard.contains("themes_view::transparency_row("));
+    assert!(theme.contains("pub fn transparency_row("));
+    assert!(theme.contains(".id(\"theme-modal-body\")"));
+    assert!(theme.contains(".overflow_y_scroll()"));
+}
+
+#[test]
 fn theme_previews_do_not_recolor_their_cards() {
     let theme = include_str!("../gui/themes_view.rs");
     let card = theme

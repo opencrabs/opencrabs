@@ -86,6 +86,32 @@ pub const LIGHT: Palette = Palette {
     selection: 0xf3e3d3,
 };
 
+/// The most transparency the desktop window allows (#2922). Past this the
+/// text would fade far enough to make the interface hard to use.
+pub const MAX_WINDOW_TRANSPARENCY: u8 = 40;
+
+/// Keep a hand-edited config value inside the window's legibility ceiling.
+pub const fn clamp_window_transparency(value: u8) -> u8 {
+    if value > MAX_WINDOW_TRANSPARENCY {
+        MAX_WINDOW_TRANSPARENCY
+    } else {
+        value
+    }
+}
+
+/// Convert saved transparency to the root element's opacity.
+pub fn window_opacity(transparency: u8) -> f32 {
+    f32::from(100 - clamp_window_transparency(transparency)) / 100.0
+}
+
+/// Convert a slider position to the bounded percentage saved in the config.
+pub fn transparency_from_slider(position: f32) -> u8 {
+    if !position.is_finite() {
+        return 0;
+    }
+    (position.clamp(0.0, 1.0) * f32::from(MAX_WINDOW_TRANSPARENCY)).round() as u8
+}
+
 /// The base a mode draws, before any accent is painted.
 ///
 /// `orgn` and `light` are the two palettes the window ships. `auto` follows
