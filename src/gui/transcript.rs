@@ -860,14 +860,31 @@ pub struct Loaded {
 ///
 /// A transcript read is the only place the map is built: a toggle edits the
 /// entry it touched, so drawing a chip never goes back to the ledger.
+///
+/// A failure here never fails the read. `spawn_bootstrap` runs the migrations
+/// on its own thread while the window is already loading its first transcript
+/// (`main.rs`), so the sidecar table can be one migration behind the window:
+/// "no such table: message_reactions" arrived on the first paint of a build
+/// that added the table and blanked the pane with an error line instead of the
+/// conversation. Reactions are a decoration on the row, so a read that cannot
+/// answer is an empty map and the next load draws the chips. The neighboring
+/// sidecar reads in `main.rs` (`favorites`, `topics`, `closed`, `parents`,
+/// `topic_icons`) take the same posture for the same reason.
 async fn reactions_for(
     db: &Database,
     rows: &[Message],
-) -> anyhow::Result<HashMap<uuid::Uuid, Vec<(String, usize)>>> {
+) -> HashMap<uuid::Uuid, Vec<(String, usize)>> {
     let ids: Vec<uuid::Uuid> = rows.iter().map(|m| m.id).collect();
-    MessageReactionRepository::new(db.pool().clone())
+    match MessageReactionRepository::new(db.pool().clone())
         .for_messages(&ids)
         .await
+    {
+        Ok(reactions) => reactions,
+        Err(e) => {
+            crate::logging::error(&format!("reactions load: {e:#}"));
+            HashMap::new()
+        }
+    }
 }
 
 /// Toggle one reaction on one stored row (#2825).
@@ -983,7 +1000,7 @@ pub async fn load_recent(
                         if family.len() <= 1 {
                             let rows = repo.find_recent_by_session(session_id, WINDOW).await?;
                             let total = repo.count_by_session(session_id).await?;
-                            let reactions = reactions_for(&db, &rows).await?;
+                            let reactions = reactions_for(&db, &rows).await;
                             return Ok::<_, anyhow::Error>(Loaded {
                                 rows,
                                 total,
@@ -1017,7 +1034,7 @@ pub async fn load_recent(
                         // breaks a tie between two rows stamped the same
                         // second, so the union is stable across reloads.
                         rows.sort_by_key(|m| (m.created_at, m.id));
-                        let reactions = reactions_for(&db, &rows).await?;
+                        let reactions = reactions_for(&db, &rows).await;
                         Ok::<_, anyhow::Error>(Loaded {
                             rows,
                             total,

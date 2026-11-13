@@ -376,6 +376,7 @@ pub mod gui_font_test;
 pub mod gui_footer_title_test;
 pub mod gui_layout_test;
 pub mod gui_message_edit_2826_test;
+pub mod gui_message_reaction_2825_test;
 pub mod gui_message_select_2613_test;
 pub mod gui_overlay_layer_test;
 pub mod gui_panes_follow_test;
