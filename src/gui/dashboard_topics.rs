@@ -430,12 +430,17 @@ impl Dashboard {
         self.group_cursor = 0;
         self.group_error = None;
         self.group_busy = false;
+        self.group_filter.clear();
         self.refocus_screen();
         let db_path = self.db_path.clone();
         // Taken rows: topics themselves, every child (a key) and every parent
-        // (a value) already in the rail's tree.
-        let mut taken: std::collections::HashSet<Uuid> = self.sessions.topics.clone();
-        taken.extend(self.sessions.parents.keys().copied());
+        // (a value) already in the rail's tree. A session that carries the
+        // topics flag is NOT taken: grouping it folds its topics into it
+        // first, which is the only way a family becomes a topic at depth one
+        // (#2864). It used to be seeded from `sessions.topics`, which is why
+        // those rows were missing from the list with no reason given.
+        let mut taken: std::collections::HashSet<Uuid> =
+            self.sessions.parents.keys().copied().collect();
         taken.extend(self.sessions.parents.values().copied());
         cx.spawn(async move |this, cx| {
             match sessions::load_group_candidates(db_path, id).await {
@@ -468,6 +473,15 @@ impl Dashboard {
         cx.notify();
     }
 
+    /// The candidate rows the field lets through (#2864), in list order.
+    ///
+    /// Narrowing happens on the way out rather than by editing
+    /// `group_candidates`, so the selection survives a filter change: a row
+    /// checked under one search is still checked when the search is cleared.
+    pub(crate) fn group_visible(&self) -> Vec<(Uuid, String, String)> {
+        filter_group_candidates(&self.group_candidates, &self.group_filter)
+    }
+
     /// Attach every checked candidate under the target, then close the picker
     /// and refresh the rail. A guard refusal stops the batch and shows its
     /// sentence instead of a raw constraint error.
@@ -493,6 +507,20 @@ impl Dashboard {
         let db_path = self.db_path.clone();
         cx.spawn(async move |this, cx| {
             for child in children {
+                // Fold first when the candidate carries topics of its own:
+                // the attach guard refuses a session that still has live
+                // children, and after the fold it has none (#2864). The fold
+                // is its own transaction, so a refusal below leaves a
+                // session with no topics rather than half a family.
+                if let Err(e) = sessions::merge_topics(db_path.clone(), child).await {
+                    this.update(cx, |this, cx| {
+                        this.group_busy = false;
+                        this.group_error = Some(e);
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
                 if let Err(e) = sessions::attach_topic(db_path.clone(), child, parent).await {
                     this.update(cx, |this, cx| {
                         this.group_busy = false;
@@ -522,6 +550,7 @@ impl Dashboard {
         self.group_cursor = 0;
         self.group_error = None;
         self.group_busy = false;
+        self.group_filter.clear();
         self.refocus_screen();
     }
 
@@ -668,5 +697,65 @@ impl Dashboard {
         }
         self.topic_draft_icon = Some(stored);
         cx.notify();
+    }
+}
+
+/// The group picker's rows after the field is applied (#2864).
+///
+/// Case-insensitive, title only: the date is not something anyone types to
+/// find a conversation. A blank field returns the list unchanged, so clearing
+/// the field brings every candidate back rather than rebuilding it.
+pub(crate) fn filter_group_candidates(
+    candidates: &[(Uuid, String, String)],
+    needle: &str,
+) -> Vec<(Uuid, String, String)> {
+    let needle = needle.trim().to_lowercase();
+    if needle.is_empty() {
+        return candidates.to_vec();
+    }
+    candidates
+        .iter()
+        .filter(|(_, title, _)| title.to_lowercase().contains(&needle))
+        .cloned()
+        .collect()
+}
+
+#[cfg(test)]
+mod group_filter_tests {
+    use super::filter_group_candidates;
+    use uuid::Uuid;
+
+    fn rows() -> Vec<(Uuid, String, String)> {
+        vec![
+            (Uuid::from_u128(1), "Rust rewrite".into(), "11-01 10:00".into()),
+            (Uuid::from_u128(2), "Telegram topics".into(), "11-02 11:00".into()),
+            (Uuid::from_u128(3), "rustfmt sweep".into(), "11-03 12:00".into()),
+        ]
+    }
+
+    /// The field narrows the list and clearing it brings everything back
+    /// (#2864). It used to swallow every keystroke, so typing did nothing.
+    #[test]
+    fn the_field_narrows_the_candidates() {
+        let narrowed = filter_group_candidates(&rows(), "rust");
+        let titles: Vec<&str> = narrowed.iter().map(|(_, t, _)| t.as_str()).collect();
+        assert_eq!(
+            titles,
+            vec!["Rust rewrite", "rustfmt sweep"],
+            "matching is case-insensitive and keeps list order"
+        );
+
+        let all = filter_group_candidates(&rows(), "");
+        assert_eq!(all.len(), 3, "a blank field shows every candidate");
+
+        let spaced = filter_group_candidates(&rows(), "  rust  ");
+        assert_eq!(spaced.len(), 2, "surrounding space is not part of the name");
+    }
+
+    /// A search that matches nothing yields nothing, and the picker says so
+    /// with its own empty state instead of listing rows that do not match.
+    #[test]
+    fn a_search_that_matches_nothing_returns_no_rows() {
+        assert!(filter_group_candidates(&rows(), "zzz").is_empty());
     }
 }

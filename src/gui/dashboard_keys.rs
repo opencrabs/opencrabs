@@ -412,20 +412,26 @@ impl Dashboard {
         // the card answers while it is up.
         if self.group_target.is_some() {
             match ev.keystroke.key.as_str() {
-                "up" | "k" if !self.group_candidates.is_empty() => {
+                "up" => {
                     self.group_cursor = self.group_cursor.saturating_sub(1);
                 }
-                "down" | "j" if !self.group_candidates.is_empty() => {
-                    self.group_cursor =
-                        (self.group_cursor + 1).min(self.group_candidates.len() - 1);
+                "down" => {
+                    let shown = self.group_visible().len();
+                    if shown > 0 {
+                        self.group_cursor = (self.group_cursor + 1).min(shown - 1);
+                    }
                 }
                 "space" => {
-                    if let Some((id, _, _)) = self.group_candidates.get(self.group_cursor) {
+                    if let Some((id, _, _)) = self.group_visible().get(self.group_cursor) {
                         let id = *id;
                         if !self.group_selected.insert(id) {
                             self.group_selected.remove(&id);
                         }
                     }
+                }
+                "backspace" => {
+                    self.group_filter.pop();
+                    self.group_cursor = 0;
                 }
                 "enter" => {
                     self.submit_group_topics(cx);
@@ -433,7 +439,24 @@ impl Dashboard {
                 "escape" => {
                     self.close_group_topics();
                 }
-                _ => {}
+                _ => {
+                    // A printable character narrows the list (#2864). The
+                    // dialog used to swallow these, so typing in the field
+                    // did nothing at all.
+                    if let Some(ch) = ev
+                        .keystroke
+                        .key_char
+                        .as_deref()
+                        .and_then(|s| s.chars().next())
+                        && !ch.is_control()
+                        && !ev.keystroke.modifiers.control
+                        && !ev.keystroke.modifiers.platform
+                        && !ev.keystroke.modifiers.alt
+                    {
+                        self.group_filter.push(ch);
+                        self.group_cursor = 0;
+                    }
+                }
             }
             cx.notify();
             return;

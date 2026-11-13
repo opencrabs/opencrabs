@@ -354,3 +354,29 @@ async fn deleting_the_last_live_topic_switches_topics_off() {
         "a family with no live topic is not a family (#2863)"
     );
 }
+
+#[tokio::test]
+async fn a_session_whose_topics_are_all_archived_can_be_grouped() {
+    let (_db, sessions, _messages, parent, topics) = seeded_family().await;
+    let target = Session::new(Some("target".to_string()), None, None);
+    sessions.create(&target).await.expect("create target");
+
+    // Archive both topics without folding, so the parent keeps archived
+    // children. That is the row shape that used to refuse forever.
+    for topic in &topics {
+        sessions.delete(*topic).await.expect("archive topic");
+    }
+
+    sessions
+        .attach_topic(parent, target.id)
+        .await
+        .expect("a session with only archived topics is not a parent any more");
+
+    assert!(
+        sessions
+            .topic_parents()
+            .await
+            .expect("list parents")
+            .contains(&(parent, target.id))
+    );
+}

@@ -853,6 +853,10 @@ struct Dashboard {
     group_cursor: usize,
     group_error: Option<String>,
     group_busy: bool,
+    /// What has been typed into the picker's field (#2864). Narrowing happens
+    /// against this, never against the list in place, so clearing the field
+    /// brings every candidate back.
+    group_filter: String,
     /// Whether the key reference is open (#2320). The overlay reads the same
     /// table the terminal's `/help` prints, so the two cannot disagree.
     help_open: bool,
@@ -5039,11 +5043,28 @@ impl Render for Dashboard {
                 .and_then(|id| self.sessions.items.iter().find(|s| s.id == id))
                 .and_then(|s| s.title.clone())
                 .unwrap_or_else(|| "(untitled)".to_string());
+            // The rows the field lets through (#2864). Built fresh each
+            // render so a keystroke narrows the list without touching the
+            // selection underneath it.
+            let visible = self.group_visible();
             let mut list = div().id("group-pick-list").flex().flex_col().gap_0p5();
-            for (idx, (sid, title, date)) in self.group_candidates.iter().enumerate() {
+            for (idx, (sid, title, date)) in visible.iter().enumerate() {
                 let sid = *sid;
                 let checked = self.group_selected.contains(&sid);
                 let cursored = idx == self.group_cursor;
+                // A row that still carries topics is offered, and says how
+                // many: grouping it folds them into it first, which is the
+                // only way a family becomes a topic at depth one (#2864).
+                let topic_count = match self
+                    .sessions
+                    .parents
+                    .values()
+                    .filter(|parent| **parent == sid)
+                    .count()
+                {
+                    0 => None,
+                    n => Some(n),
+                };
                 let toggle = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
                     this.group_cursor = idx;
                     if !this.group_selected.insert(sid) {
@@ -5092,6 +5113,18 @@ impl Render for Dashboard {
                             .truncate()
                             .child(SharedString::from(title.clone())),
                     )
+                    .when_some(topic_count, |d, count| {
+                        d.child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(palette::current().text_muted))
+                                .child(SharedString::from(if count == 1 {
+                                    "1 topic".to_string()
+                                } else {
+                                    format!("{count} topics")
+                                })),
+                        )
+                    })
                     .child(
                         div()
                             .text_xs()
@@ -5099,6 +5132,22 @@ impl Render for Dashboard {
                             .child(SharedString::from(date.clone())),
                     );
                 list = list.child(row);
+            }
+            // A blank list is never left unexplained (#2864): an empty field
+            // with nothing to offer and a search that matched nothing read
+            // the same before, and neither said which one it was.
+            if visible.is_empty() {
+                list = list.child(
+                    div()
+                        .id("group-pick-empty")
+                        .text_xs()
+                        .text_color(rgb(palette::current().text_muted))
+                        .child(SharedString::from(if self.group_filter.is_empty() {
+                            "no session is available to group".to_string()
+                        } else {
+                            "no session matches that".to_string()
+                        })),
+                );
             }
             let scroller = div()
                 .id("group-pick-body")
@@ -5137,8 +5186,34 @@ impl Render for Dashboard {
                         .text_xs()
                         .text_color(rgb(palette::current().text_muted))
                         .child(SharedString::from(
-                            "Pick sessions to attach as topics. Space toggles, Enter groups.",
+                            "Pick sessions to attach as topics. Type to filter, Space \
+                             toggles, Enter groups.",
                         )),
+                )
+                // The field (#2864). It shows what was typed instead of
+                // holding a caret: the dialog owns the keyboard, so the
+                // characters land here from the key handler, not from a
+                // focusable text input.
+                .child(
+                    div()
+                        .id("group-pick-filter")
+                        .px_2()
+                        .py_1()
+                        .rounded(px(4.0))
+                        .border_1()
+                        .border_color(rgb(palette::current().panel_hi))
+                        .bg(rgb(palette::current().panel_hi))
+                        .text_sm()
+                        .text_color(if self.group_filter.is_empty() {
+                            rgb(palette::current().text_faint)
+                        } else {
+                            rgb(palette::current().text)
+                        })
+                        .child(SharedString::from(if self.group_filter.is_empty() {
+                            "type to filter...".to_string()
+                        } else {
+                            self.group_filter.clone()
+                        })),
                 )
                 .when_some(self.group_error.clone(), |d, e| {
                     d.child(
@@ -5990,6 +6065,7 @@ fn main() {
                         group_cursor: 0,
                         group_error: None,
                         group_busy: false,
+                        group_filter: String::new(),
                         preview: None,
                         preview_zoom: 1.0,
                         preview_video: None,

@@ -198,9 +198,14 @@ impl SessionRepository {
                 {
                     return Err(AttachTopicError::AlreadyAttached);
                 }
+                // Live children only: a session whose topics were all
+                // archived is not a parent any more, and counting the
+                // archived rows refused it forever with no way to see why
+                // (#2864).
                 let child_kids: i64 = tx
                     .query_row(
-                        "SELECT COUNT(*) FROM sessions WHERE parent_id = ?1",
+                        "SELECT COUNT(*) FROM sessions \
+                         WHERE parent_id = ?1 AND archived_at IS NULL",
                         params![child_str],
                         |r| r.get(0),
                     )
@@ -462,7 +467,8 @@ impl SessionRepository {
             .context("Failed to get connection")?
             .interact(move |conn| {
                 let mut stmt = conn.prepare_cached(
-                    "SELECT id, parent_id FROM sessions WHERE parent_id IS NOT NULL",
+                    "SELECT id, parent_id FROM sessions \
+                     WHERE parent_id IS NOT NULL AND archived_at IS NULL",
                 )?;
                 let rows = stmt
                     .query_map([], |row| {
