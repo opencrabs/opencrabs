@@ -75,11 +75,10 @@ impl Dashboard {
     }
 
     /// The rows the card can find, built from what this window already holds:
-    /// the shared command table, the destinations both clients can open, and
-    /// the conversation rail.
+    /// the shared and window-only commands, the destinations both clients can
+    /// open, and the conversation rail.
     pub(crate) fn finder_items(&self) -> Vec<PaletteItem> {
-        let mut items: Vec<PaletteItem> = slash::SLASH_COMMANDS
-            .iter()
+        let mut items: Vec<PaletteItem> = slash::gui_commands()
             // A destination prints its own command row: listing both would
             // show `/usage` twice (#2491).
             .filter(|cmd| !find::is_surface_command(cmd.name))

@@ -176,7 +176,7 @@ pub const ROWS: &[HelpRow] = &[
         HelpSection::Global,
         "ctrl+,",
         "ctrl-comma",
-        "Settings: agent, memory, keys",
+        "Settings: agent, memory, keys (/settings)",
     ),
     row(
         HelpSection::Global,
@@ -515,6 +515,9 @@ pub fn seeker_items(client: HelpClient) -> Vec<PaletteItem> {
                 "ctrl+s" => keywords.push_str(
                     " sidebar side bar open show reveal close hide collapse sessions session list rail drawer",
                 ),
+                "ctrl+," => keywords.push_str(
+                    " settings preferences config configuration agent memory keys credentials /settings",
+                ),
                 _ => {}
             }
             Some(
@@ -617,7 +620,7 @@ mod tests {
                     || c.is_ascii_digit()
                     // `|` and `_` are the split chords' key glyphs: shift
                     // and the glyph is the whole chord (#2438).
-                    || matches!(c, '+' | '/' | '@' | '|' | '_')),
+                    || matches!(c, '+' | '/' | '@' | '|' | '_' | ',')),
                 "{} is not a machine spelling",
                 r.neutral
             );

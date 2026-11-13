@@ -614,6 +614,10 @@ const KEYWORDS: &[(&str, &str)] = &[
         "theme themes colour color dark light palette appearance change switch",
         "/theme",
     ),
+    (
+        "settings preferences config configuration agent memory keys credentials approval redaction notifications",
+        "/settings",
+    ),
     ("chat conversation history resume reopen", "/sessions"),
     ("skill workflow recipe", "/skills"),
     ("profile account workspace switch", "/profiles"),

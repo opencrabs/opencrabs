@@ -163,6 +163,14 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
     },
 ];
 
+/// Commands the window answers without pretending the terminal has the same
+/// screen. Keeping these out of `SLASH_COMMANDS` stops the terminal's help and
+/// autocomplete advertising a modal it cannot open (#2878).
+pub const GUI_ONLY_COMMANDS: &[SlashCommand] = &[SlashCommand {
+    name: "/settings",
+    description: "Open agent, memory and credential settings",
+}];
+
 /// Names a user may type for a command that is spelled differently in the
 /// table. `/themes` is what a window user reaches for, because the screen is
 /// called themes and the key chord is "themes"; the terminal has always spelled
@@ -184,6 +192,7 @@ pub const ALIASES: &[(&str, &str)] = &[
 /// mission control).
 pub const GUI_SUPPORTED: &[&str] = &[
     "/theme",
+    "/settings",
     "/usage",
     "/help",
     "/new",
@@ -270,6 +279,11 @@ pub fn parse(input: &str) -> Option<Invocation> {
     })
 }
 
+/// Every command the window can offer: the shared set plus its own screens.
+pub fn gui_commands() -> impl Iterator<Item = &'static SlashCommand> {
+    SLASH_COMMANDS.iter().chain(GUI_ONLY_COMMANDS)
+}
+
 /// The table entry a typed name refers to, following [`ALIASES`].
 ///
 /// Matching is exact, the same as the terminal's dispatcher: `/Models` is not
@@ -285,11 +299,29 @@ pub fn lookup(name: &str) -> Option<&'static SlashCommand> {
     })
 }
 
+/// The window's command lookup, including screens the terminal does not own.
+pub fn lookup_gui(name: &str) -> Option<&'static SlashCommand> {
+    GUI_ONLY_COMMANDS
+        .iter()
+        .find(|command| command.name == name)
+        .or_else(|| lookup(name))
+}
+
 /// Whether this frontend runs the command, knows it and cannot run it, or has
 /// never heard of it. The three answers are drawn differently: one acts, one
 /// names the frontend gap, one suggests a spelling.
 pub fn support(name: &str) -> Support {
     match lookup(name) {
+        None => Support::Unknown,
+        Some(cmd) if GUI_SUPPORTED.contains(&cmd.name) => Support::Runs,
+        Some(_) => Support::Missing,
+    }
+}
+
+/// The window's support answer, using its own command table as well as the
+/// shared one. `/settings` runs here without becoming a terminal command.
+pub fn support_gui(name: &str) -> Support {
+    match lookup_gui(name) {
         None => Support::Unknown,
         Some(cmd) if GUI_SUPPORTED.contains(&cmd.name) => Support::Runs,
         Some(_) => Support::Missing,
@@ -329,6 +361,18 @@ fn shared_prefix_len(a: &str, b: &str) -> usize {
 /// list the user is reading is a second name for one thing, which is how a
 /// short list starts to feel long.
 pub fn completions(draft: &str) -> Vec<&'static str> {
+    completions_from(draft, SLASH_COMMANDS.iter())
+}
+
+/// Command completion for the window, including its own settings screen.
+pub fn gui_completions(draft: &str) -> Vec<&'static str> {
+    completions_from(draft, gui_commands())
+}
+
+fn completions_from(
+    draft: &str,
+    commands: impl Iterator<Item = &'static SlashCommand>,
+) -> Vec<&'static str> {
     // Leading space is indentation the user cannot see, so it is trimmed. A
     // space anywhere after the slash is the argument boundary, and a name list
     // there is noise: `/usage ` is finished, `/us` is not.
@@ -336,8 +380,7 @@ pub fn completions(draft: &str) -> Vec<&'static str> {
     if !word.starts_with('/') || word.chars().any(char::is_whitespace) {
         return Vec::new();
     }
-    SLASH_COMMANDS
-        .iter()
+    commands
         .map(|cmd| cmd.name)
         .filter(|name| name.starts_with(word))
         .collect()
@@ -427,11 +470,25 @@ mod tests {
     fn every_supported_name_is_a_real_command() {
         for name in GUI_SUPPORTED {
             assert!(
-                SLASH_COMMANDS.iter().any(|c| c.name == *name),
-                "{name} is listed as supported but is not in the table"
+                lookup_gui(name).is_some(),
+                "{name} is listed as supported but is not in the window's table"
             );
-            assert_eq!(support(name), Support::Runs, "{name} does not run");
+            assert_eq!(support_gui(name), Support::Runs, "{name} does not run");
         }
+    }
+
+    #[test]
+    fn settings_is_a_window_command_without_a_dead_terminal_entry() {
+        assert!(lookup("/settings").is_none());
+        assert_eq!(support("/settings"), Support::Unknown);
+        assert_eq!(
+            lookup_gui("/settings").map(|command| command.description),
+            Some("Open agent, memory and credential settings")
+        );
+        assert_eq!(support_gui("/settings"), Support::Runs);
+        assert!(gui_commands().any(|command| command.name == "/settings"));
+        assert_eq!(gui_completions("/set"), vec!["/settings"]);
+        assert!(completions("/set").is_empty());
     }
 
     #[test]
@@ -471,7 +528,7 @@ mod tests {
 
     #[test]
     fn every_description_is_present() {
-        for cmd in SLASH_COMMANDS {
+        for cmd in gui_commands() {
             assert!(!cmd.name.is_empty());
             assert!(cmd.name.starts_with('/'), "{} has no slash", cmd.name);
             assert!(

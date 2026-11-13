@@ -43,6 +43,11 @@ impl Dashboard {
                     self.toggle_themes(cx);
                 }
             }
+            commands::GuiAction::OpenSettings => {
+                if !self.settings_open {
+                    self.toggle_settings(cx);
+                }
+            }
             commands::GuiAction::OpenUsage => {
                 if self.screen != Screen::Usage {
                     self.toggle_usage(cx);

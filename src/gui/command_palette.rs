@@ -20,7 +20,7 @@ use std::rc::Rc;
 
 use crate::{Dashboard, palette};
 use opencrabs::ui_core::card::{SEEKER_RADIUS, seeker_concentric_radius};
-use opencrabs::ui_core::commands::{Support, support};
+use opencrabs::ui_core::commands::{Support, support_gui};
 use opencrabs::ui_core::palette::{PaletteKind, PaletteState, SEEKER_PAGE, roast};
 
 /// One printed row, decided without gpui. The renderer paints what this says.
@@ -68,7 +68,7 @@ pub fn rows(state: &PaletteState) -> Vec<RowView> {
             // Read before the title is moved into the row: same value, and the
             // borrow checker has one order that works.
             missing: row.item.kind == PaletteKind::Command
-                && support(&row.item.title) == Support::Missing,
+                && support_gui(&row.item.title) == Support::Missing,
             title: row.item.title,
             subtitle: row.item.subtitle,
             kind: kind_label(row.item.kind),
@@ -1028,10 +1028,9 @@ mod tests {
     /// it rather than the row vanishing.
     #[test]
     fn every_command_row_is_runnable_on_the_window() {
-        use opencrabs::ui_core::commands::{SLASH_COMMANDS, Support, support};
+        use opencrabs::ui_core::commands::{Support, gui_commands, support_gui};
 
-        let items: Vec<PaletteItem> = SLASH_COMMANDS
-            .iter()
+        let items: Vec<PaletteItem> = gui_commands()
             .map(|cmd| item(cmd.name, PaletteKind::Command))
             .collect();
 
@@ -1039,7 +1038,7 @@ mod tests {
         // drops /brain and /compact, whose screens already carry them. The
         // contract is reachability, not the dump: typing a command's own
         // name finds its row, and no found command is terminal only.
-        for cmd in SLASH_COMMANDS {
+        for cmd in gui_commands() {
             let mut probe = state_with(items.clone());
             for ch in cmd.name.chars() {
                 probe.type_char(ch);
@@ -1059,9 +1058,8 @@ mod tests {
         // The gap that would mark a row is gone, so the badge's own trigger is
         // asserted directly: a name the shared table does not know is not a
         // gap, it is a typo.
-        let gap = SLASH_COMMANDS
-            .iter()
-            .filter(|cmd| support(cmd.name) == Support::Missing)
+        let gap = gui_commands()
+            .filter(|cmd| support_gui(cmd.name) == Support::Missing)
             .count();
         assert_eq!(gap, 0, "the window answers every command in the table");
 

@@ -13,7 +13,7 @@
 use crate::palette;
 use crate::topic_icons::CRAB_ICONS;
 use opencrabs::ui_core::card::{CARD_RADIUS, glass_fill};
-use opencrabs::ui_core::commands::completions;
+use opencrabs::ui_core::commands::gui_completions;
 use opencrabs::ui_core::composer::{self, ComposerDraft, SharedHistory, lock_history};
 use opencrabs::ui_core::input_history::{
     input_history_down, input_history_up, record_input_history,
@@ -703,7 +703,7 @@ impl Editor {
         if self.command_dismissed {
             return None;
         }
-        let names = completions(&self.content);
+        let names = gui_completions(&self.content);
         if names.is_empty() {
             return None;
         }

@@ -216,7 +216,7 @@ pub(crate) fn command_popup_view(names: &[&'static str], selected: usize) -> Div
         .bg(rgb(palette::current().panel));
     for (offset, name) in names[window.clone()].iter().enumerate() {
         let picked = window.start + offset == selected;
-        let description = match slash::lookup(name) {
+        let description = match slash::lookup_gui(name) {
             Some(cmd) => slash::clipped(cmd.description, 52).to_string(),
             None => String::new(),
         };

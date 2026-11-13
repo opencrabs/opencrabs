@@ -5,7 +5,13 @@
 //! `config_remove_key_test.rs` exercises the real file mutation.
 
 use crate::ui_core::help_keys;
+use crate::ui_core::palette::{PaletteAction, PaletteItem, PaletteKind, PaletteState};
 
+const GUI_COMMANDS: &str = include_str!("../gui/commands.rs");
+const GUI_COMMAND_DISPATCH: &str = include_str!("../gui/dashboard_commands.rs");
+const GUI_COMPOSER_VIEW: &str = include_str!("../gui/composer_view.rs");
+const GUI_EDITOR: &str = include_str!("../gui/editor.rs");
+const GUI_FINDER: &str = include_str!("../gui/dashboard_finder.rs");
 const GUI_MAIN: &str = include_str!("../gui/main.rs");
 const GUI_SETTINGS: &str = include_str!("../gui/dashboard_settings.rs");
 const GUI_KEYS: &str = include_str!("../gui/dashboard_keys.rs");
@@ -19,6 +25,69 @@ fn ctrl_comma_is_listed_as_the_window_settings_chord() {
         .find(|row| row.gui == Some("ctrl-comma"))
         .expect("the help screen lists ctrl+, for settings");
     assert!(row.description.to_lowercase().contains("settings"));
+    assert!(
+        row.description.contains("/settings"),
+        "the GUI /help screen must name the slash command as well as ctrl+,"
+    );
+}
+
+#[test]
+fn settings_slash_command_opens_the_existing_modal() {
+    for needle in [
+        "\"/settings\" => GuiAction::OpenSettings",
+        "commands::support_gui(&invocation.name)",
+        "commands::lookup_gui(&invocation.name)",
+    ] {
+        assert!(GUI_COMMANDS.contains(needle), "missing command wiring: {needle}");
+    }
+    for (source, needle) in [
+        (
+            GUI_COMMAND_DISPATCH,
+            "commands::GuiAction::OpenSettings => {",
+        ),
+        (GUI_COMMAND_DISPATCH, "self.toggle_settings(cx);"),
+        (GUI_FINDER, "slash::gui_commands()"),
+        (GUI_COMPOSER_VIEW, "slash::lookup_gui(name)"),
+    ] {
+        assert!(source.contains(needle), "missing window wiring: {needle}");
+    }
+    assert!(
+        GUI_EDITOR.contains("gui_completions(&self.content)"),
+        "the composer must autocomplete /settings"
+    );
+}
+
+#[test]
+fn seeker_offers_an_executable_settings_command_before_the_help_row() {
+    for query in ["settings", "/settings", "preferences"] {
+        let mut items: Vec<PaletteItem> = crate::ui_core::commands::gui_commands()
+            .filter(|command| !crate::ui_core::palette::is_surface_command(command.name))
+            .map(|command| {
+                PaletteItem::new(
+                    command.name,
+                    command.description,
+                    PaletteKind::Command,
+                    PaletteAction::RunSlash(command.name),
+                )
+                .with_keywords(crate::ui_core::palette::keywords_for(command.name))
+            })
+            .collect();
+        items.extend(crate::ui_core::palette::surface_items());
+        items.extend(help_keys::seeker_items(help_keys::HelpClient::Gui));
+
+        let mut state = PaletteState::new(items);
+        state.insert_text(query);
+        let first = state
+            .visible()
+            .first()
+            .unwrap_or_else(|| panic!("{query} has no settings result"));
+        assert_eq!(first.item.title, "/settings", "{query} ranked help first");
+        assert_eq!(
+            first.item.action,
+            PaletteAction::RunSlash("/settings"),
+            "{query} must open settings, not the help overlay"
+        );
+    }
 }
 
 #[test]

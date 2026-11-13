@@ -28,6 +28,8 @@ pub enum GuiAction {
     Evolve,
     /// The theme modal: four cards over the conversation, a pick saves at once.
     OpenThemes,
+    /// Agent, memory and credential settings, in the window's own modal.
+    OpenSettings,
     /// The usage ledger.
     OpenUsage,
     /// Mission Control: the inbox, analytics, activity and schedule panels.
@@ -88,8 +90,8 @@ pub enum Outcome {
 /// plain text always produces `None`, so it is unchanged.
 pub fn parse_command(input: &str) -> Option<Outcome> {
     let invocation = commands::parse(input)?;
-    Some(match commands::support(&invocation.name) {
-        Support::Runs => match commands::lookup(&invocation.name) {
+    Some(match commands::support_gui(&invocation.name) {
+        Support::Runs => match commands::lookup_gui(&invocation.name) {
             Some(cmd) => match action_for(cmd.name) {
                 Some(action) => {
                     let arg = invocation.arg.trim();
@@ -117,7 +119,7 @@ pub fn parse_command(input: &str) -> Option<Outcome> {
             },
         },
         Support::Missing => Outcome::Missing(
-            commands::lookup(&invocation.name)
+            commands::lookup_gui(&invocation.name)
                 .map(|cmd| cmd.name)
                 .unwrap_or("/"),
         ),
@@ -135,6 +137,7 @@ pub fn parse_command(input: &str) -> Option<Outcome> {
 fn action_for(name: &str) -> Option<GuiAction> {
     Some(match name {
         "/theme" => GuiAction::OpenThemes,
+        "/settings" => GuiAction::OpenSettings,
         "/evolve" => GuiAction::Evolve,
         "/usage" => GuiAction::OpenUsage,
         "/help" => GuiAction::ToggleHelp,
@@ -218,6 +221,10 @@ mod tests {
         assert_eq!(
             parse_command("/themes"),
             Some(Outcome::Run(GuiAction::OpenThemes))
+        );
+        assert_eq!(
+            parse_command("/settings"),
+            Some(Outcome::Run(GuiAction::OpenSettings))
         );
         assert_eq!(
             parse_command("/help"),
@@ -307,7 +314,7 @@ mod tests {
         // #2470). The `Missing` arm stays for the day a new command lands in
         // SLASH_COMMANDS before its window wiring does, so its line is still
         // checked here: a real command must never be handed to the model.
-        for command in opencrabs::ui_core::commands::SLASH_COMMANDS {
+        for command in opencrabs::ui_core::commands::gui_commands() {
             let name = command.name;
             let outcome = parse_command(name).expect("a real command");
             assert!(
@@ -386,6 +393,7 @@ mod tests {
         match action {
             GuiAction::Evolve => "Evolve",
             GuiAction::OpenThemes => "OpenThemes",
+            GuiAction::OpenSettings => "OpenSettings",
             GuiAction::OpenUsage => "OpenUsage",
             GuiAction::OpenMissionControl => "OpenMissionControl",
             GuiAction::ToggleHelp => "ToggleHelp",
@@ -410,6 +418,7 @@ mod tests {
     const IMPLEMENTED: &[&str] = &[
         "Evolve",
         "OpenThemes",
+        "OpenSettings",
         "OpenUsage",
         "OpenMissionControl",
         "ToggleHelp",

@@ -754,7 +754,7 @@ Code blocks are the exception that needs its own key. They draw in a monospaced 
 
 #### Settings modal
 
-`ctrl+,` opens the settings card over the conversation, in the same centred shape as the theme picker. It writes each change at once through the config file's own locked, revalidating path and re-reads `config.toml` every time the card opens, so a hand edit between visits is picked up.
+Open the settings card with `/settings`, `ctrl+,`, or the `/settings` row in Seeker. The GUI `/help` card lists both the command and the chord. The card floats over the conversation in the same centred shape as the theme picker. It writes each change at once through the config file's own locked, revalidating path and re-reads `config.toml` every time the card opens, so a hand edit between visits is picked up.
 
 | Section | What you can change |
 |---------|---------------------|
@@ -766,11 +766,11 @@ Code blocks are the exception that needs its own key. They draw in a monospaced 
 
 #### Every command answers on the window
 
-The window runs the terminal's whole slash-command surface, not a subset. All 34 commands in the [Chat Mode](#chat-mode) table answer here, and two tests hold the line: `no_command_is_left_without_a_screen` walks every name the terminal offers and fails the build if one lands on "no screen for it", and `support_separates_missing_from_unknown` fails if a name is neither answered nor recognised. A command that owns a screen opens it full width, `esc` goes back to the chat. The rest answer in the transcript through the engine's own entry point, so a plan approved on the window is the same plan object the terminal approves, and `/cd` moves this session's directory through the same shared applier the terminal calls, never another session's.
+The window runs the terminal's whole slash-command surface, not a subset, and adds its own `/settings` command. All 34 commands in the [Chat Mode](#chat-mode) table answer here, and two tests hold the line: `no_command_is_left_without_a_screen` walks every name the window offers and fails the build if one lands on "no screen for it", and `support_separates_missing_from_unknown` fails if a name is neither answered nor recognised. A command that owns a screen opens it full width, `esc` goes back to the chat. The rest answer in the transcript through the engine's own entry point, so a plan approved on the window is the same plan object the terminal approves, and `/cd` moves this session's directory through the same shared applier the terminal calls, never another session's.
 
 | Where it answers | Commands | What you get |
 |------------------|----------|--------------|
-| Centered modal | `/theme` | four preview cards over the conversation; a pick saves at once |
+| Centered modal | `/theme` `/settings` | four theme previews, or the agent, memory and credential settings card |
 | Full-window screen | `/usage` `/models` `/sessions` `/projects` `/skills` `/mission-control` `/onboard` | the screen itself |
 | Setup wizard, opened at its step | `/workspace` `/channels` `/voice` `/image` `/daemon` `/brain` `/doctor` | the same steps and the same writes as the terminal |
 | One line in the transcript | `/compact` `/clear` `/rtk` `/plan` `/show-plan` `/execute` `/discard` `/approve` `/cd` `/goal` `/profiles` `/restart` `/whisper` `/cowork` | what happened, in words; no model turn is spent |
