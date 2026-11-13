@@ -174,7 +174,7 @@ fn create_topic_walks_the_begin_conversation_door() {
         .expect("begin_conversation body");
     for reset in [
         "&mut self.turn,",
-        "self.metrics.pending.clear();",
+        "self.metrics.pending.remove(&from);",
         "ed.release_recall(false)",
         "ed.begin_conversation(cx)",
     ] {

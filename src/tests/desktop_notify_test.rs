@@ -181,8 +181,9 @@ fn a_task_settling_mid_plan_keeps_its_own_banner() {
     );
     assert!(!plan.finishes_on_this_settle());
 
+    // Nothing was announced before this pass, so the task that just settled
+    // is the one the banner is for.
     let mut seen: HashSet<Uuid> = HashSet::new();
-    seen.insert(plan.tasks[0].id);
     let fresh = fresh_settled_tasks(&mut seen, &[Some(&plan)]);
     assert_eq!(fresh.len(), 1);
     assert_eq!(
@@ -202,8 +203,9 @@ fn a_trailing_task_with_criteria_is_real_work_not_a_finish() {
         .push("cargo test reports 0 failed".to_string());
     assert!(!plan.finishes_on_this_settle());
 
+    // The criteria contract on the trailing task keeps this pass from being a
+    // finish, so the task that just settled keeps its own banner.
     let mut seen: HashSet<Uuid> = HashSet::new();
-    seen.insert(plan.tasks[0].id);
     let fresh = fresh_settled_tasks(&mut seen, &[Some(&plan)]);
     assert_eq!(
         bannerable_settles(&plan, &fresh, true).len(),

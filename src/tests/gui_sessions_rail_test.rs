@@ -309,7 +309,7 @@ fn selected_topic_owns_the_parent_activity_line() {
     );
     assert!(resolution.contains(".get(&id).map_or(id,"));
     assert!(resolution.contains("self.sessions"));
-    assert!(resolution.contains("progress_id(id, kids.iter().map(|(kid_id, _)| *kid_id))"));
+    assert!(resolution.contains("progress_id(id, kids.iter().map(|kid| kid.id))"));
     assert!(
         !resolution.contains(".cursor"),
         "keyboard cursor is not an input to the progress owner"

@@ -105,7 +105,8 @@ fn every_stop_path_takes_the_freeze() {
         + DASHBOARD_KEYS.matches("live.stop();").count()
         + DASHBOARD_TURNS.matches("live.stop();").count();
     assert_eq!(
-        stops, 5,
-        "five stop sites: Esc, `/stop`, the pane's own stop, and the two settle arms"
+        stops, 7,
+        "seven stop sites: `/stop` for the window and for a pane, Esc, the two \
+         edit stops, and the two settle arms"
     );
 }

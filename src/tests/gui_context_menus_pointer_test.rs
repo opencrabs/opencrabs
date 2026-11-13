@@ -69,7 +69,7 @@ fn every_right_press_records_the_point_it_happened_at() {
         "a topic tab records its press too"
     );
     assert!(
-        code(DASHBOARD).contains("this.msg_menu_open(id, ev.position, cx);"),
+        code(DASHBOARD).contains("this.msg_menu_open(row.clone(), None, ev.position, cx);"),
         "a stored message row opens its menu at the press"
     );
     assert!(
@@ -127,9 +127,25 @@ fn every_menu_goes_through_the_one_pointer_popover() {
         assert!(DASHBOARD.contains(call), "the window draws {call}");
     }
     assert!(
-        TRANSCRIPT.contains("crate::menu::menu_popover(\"message-context-menu\", rows, at)"),
-        "the message menu is a window-level card, not a child of its row"
+        TRANSCRIPT.contains(
+            "crate::menu::dismissible_menu_popover(\"message-context-menu\", rows, at, dismiss)"
+        ),
+        "the message menu is a window-level card, not a child of its row, and a \
+         press outside it takes it down (#2862)"
     );
+    // The dismissible door is the same placement rule with one handler added:
+    // a card that escaped it would drift back to the row's own geometry.
+    let dismissible = fn_body(MENU, "dismissible_menu_popover");
+    for rule in [
+        "anchored()",
+        ".position(at)",
+        ".snap_to_window_with_margin(",
+    ] {
+        assert!(
+            dismissible.contains(rule),
+            "the dismissible card is placed by the same rule: {rule}"
+        );
+    }
     assert!(
         EDITOR.contains("crate::menu::menu_popover(\"composer-context-menu\", rows, at)"),
         "the composer menu is drawn by the same popover (#2749)"

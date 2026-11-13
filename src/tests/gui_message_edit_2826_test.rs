@@ -11,7 +11,6 @@ use crate::tests::gui_dashboard_source::DASHBOARD;
 
 const TRANSCRIPT: &str = include_str!("../gui/transcript.rs");
 const MESSAGE_REPO: &str = include_str!("../db/repository/message.rs");
-const EDITOR: &str = include_str!("../gui/editor.rs");
 const PANE_VIEW: &str = include_str!("../gui/pane_view.rs");
 const ICON: &str = include_str!("../gui/icon.rs");
 
@@ -81,7 +80,7 @@ fn the_send_stops_the_turn_before_it_truncates() {
         .next()
         .unwrap_or_default();
     let stop = send
-        .find("cancel.cancel()")
+        .find("self.stop_turn_for_edit(target.session, cx);")
         .expect("the edit send stops the turn it interrupts");
     let truncate = send
         .find("truncate_after(")
@@ -97,9 +96,23 @@ fn the_send_stops_the_turn_before_it_truncates() {
         send_at > truncate,
         "and the new text is sent only once the rows are gone"
     );
+    // The door the send takes is the one that cancels: the window's turn when
+    // it shows that conversation, and a split leaf running it either way.
+    let door = DASHBOARD
+        .split("fn stop_turn_for_edit(")
+        .nth(1)
+        .expect("the stop is one function")
+        .split("fn install_loaded(")
+        .next()
+        .unwrap_or_default();
     assert!(
-        send.contains("if self.turn.busy") && send.contains("pane_states.get(&target.session)"),
+        door.contains("self.chat_state.session() == Some(session) && self.turn.busy")
+            && door.contains("pane_states.get(&session)"),
         "both the window's turn and a split leaf running the same session stop"
+    );
+    assert!(
+        door.matches("cancel.cancel();").count() == 2,
+        "each of them cancels the turn it was running"
     );
 }
 
@@ -108,12 +121,14 @@ fn the_send_stops_the_turn_before_it_truncates() {
 #[test]
 fn the_edit_names_its_row_and_ends_with_its_conversation() {
     assert!(
-        DASHBOARD.contains("self.composer.edit = Some(chat_leaf::EditTarget {"),
-        "the button arms the composer with the row it came from"
+        DASHBOARD.contains("self.edit_row = Some(chat_leaf::InlineEdit {"),
+        "the pencil arms the row it came from, with that row's own field"
     );
+    // The target carries its conversation, so the send can only ever cut the
+    // history it named, whichever session is on screen by the time it runs.
     assert!(
-        DASHBOARD.contains("if self.chat_state.session() == Some(target.session)"),
-        "a send only truncates when it is still in the edited row's conversation"
+        DASHBOARD.contains("let session = target.session;"),
+        "a send truncates the conversation the row belongs to, not the one on screen"
     );
     let nav = DASHBOARD
         .split("pub(crate) fn begin_conversation(")
@@ -123,12 +138,12 @@ fn the_edit_names_its_row_and_ends_with_its_conversation() {
         .next()
         .unwrap_or_default();
     assert!(
-        nav.contains("self.composer.edit = None;"),
+        nav.contains("self.edit_row = None;"),
         "leaving the conversation ends the edit"
     );
     assert!(
-        EDITOR.contains("pub fn show_editing("),
-        "the field says it is rewriting history rather than appending to it"
+        DASHBOARD.contains("if let editor::EditorEvent::Sent(text) = event"),
+        "the row's field confirms on Enter, the same as the check under it"
     );
 }
 
@@ -164,37 +179,33 @@ fn a_pane_draws_and_sends_its_own_edit() {
         .next()
         .unwrap_or_default();
     assert!(
-        pane_edit.contains("pane.edit = Some(chat_leaf::EditTarget {"),
+        pane_edit.contains("pane.edit = Some(chat_leaf::InlineEdit {"),
         "the target belongs to the leaf, not to the window"
     );
     assert!(
-        pane_edit.contains("editor.restore_draft(text, cx)"),
-        "and the text lands in the leaf's own field"
+        pane_edit.contains("self.new_inline_editor(text, cx)"),
+        "and the field opens with the text under the pencil, inside the leaf"
     );
 
-    // The send path takes the target before it queues or parses anything: the
-    // row it replaces is about to be deleted, so it must not wait behind a
-    // running turn.
-    let send = DASHBOARD
-        .split("pub(crate) fn send_from_pane(")
+    // The confirm takes the armed target before it hands the text to the send:
+    // the row it replaces is about to be deleted, so a second Enter cannot
+    // spend it twice and it never waits behind a running turn.
+    let confirm = DASHBOARD
+        .split("pub(crate) fn pane_edit_confirm(")
         .nth(1)
-        .expect("a pane sends through one function")
-        .split("if let Some(outcome) = commands::parse_command(&text)")
+        .expect("the leaf's confirm is its own door")
+        .split("pub(crate) fn pane_edit_cancel(")
         .next()
         .unwrap_or_default();
-    let armed = send
+    let armed = confirm
         .find("pane.edit.take()")
-        .expect("the leaf's armed edit is consumed by its own send");
+        .expect("the leaf's armed edit is consumed by its own confirm");
+    let handoff = confirm
+        .find("self.send_edited_in_pane(session, target, text, cx)")
+        .expect("and it goes out through the leaf's edit path");
     assert!(
-        armed
-            < send
-                .find("agent_bridge::options_take(session)")
-                .unwrap_or(usize::MAX),
+        armed < handoff,
         "the edit is taken before the send touches anything else"
-    );
-    assert!(
-        send.contains("self.send_edited_in_pane(session, target, text, cx)"),
-        "and it goes out through the leaf's edit path"
     );
     let edited = DASHBOARD
         .split("fn send_edited_in_pane(")

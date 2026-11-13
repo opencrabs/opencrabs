@@ -27,8 +27,8 @@ fn the_quote_goes_into_the_composer_as_text() {
         "the picks are turned into a quote"
     );
     assert!(
-        reply.contains("editor.restore_draft(text, cx)"),
-        "and the quote lands in the composer as its text"
+        reply.contains("editor.attach_reply(author, preview, quote, cx)"),
+        "and the quote lands on the composer as a reply chip above the field"
     );
     assert!(
         reply.contains("self.msg_select.cancel()"),

@@ -102,13 +102,18 @@ fn project_rows_keep_service_order_and_escape_unwinds_the_nearest_surface() {
     let deleting = DASHBOARD
         .find("if self.projects.delete_confirm {")
         .expect("Escape closes delete confirmation next");
+    let assign = DASHBOARD
+        .find("if matches!(self.projects.mode, ProjectsMode::AssignSession(_)) {")
+        .expect("Escape leaves assignment back to the list");
     let detail = DASHBOARD
         .find("if self.projects.mode != ProjectsMode::List {")
-        .expect("Escape returns from detail or assignment next");
+        .expect("Escape returns from detail next");
+    // The last call is the one that leaves the list: the assignment arm above
+    // closes the screen too, so a plain find would land on that one instead.
     let close = DASHBOARD
-        .find("self.close_projects(cx);")
+        .rfind("self.close_projects(cx);")
         .expect("Escape leaves the list last");
-    assert!(creating < deleting && deleting < detail && detail < close);
+    assert!(creating < deleting && deleting < assign && assign < detail && detail < close);
 }
 
 #[test]
