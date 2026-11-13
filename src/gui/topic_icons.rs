@@ -5,7 +5,9 @@
 //!
 //! - [`TOPIC_ICONS`] are the illustrated crab badges under
 //!   `src/assets/icon-packs/topics/`. They belong to topic creation: a topic
-//!   tab draws one before its name, the way Telegram's topic bar does.
+//!   tab draws one before its name, the way Telegram's topic bar does. The
+//!   whole pack ships, 110 pictures in four families, downscaled to 256x256
+//!   so the binary carries every badge without carrying the originals (#2824).
 //! - [`CRAB_ICONS`] are the reaction-style crabs under
 //!   `src/assets/icon-packs/emojis/`. They are the input's emoji set, and they
 //!   are embedded here so nothing has to load a file at run time.
@@ -21,68 +23,183 @@ use gpui::{
 use std::ops::Range;
 use std::sync::Arc;
 
-/// The icon a topic tab shows, as the picker offers it (#2414, #2478).
+/// One PNG from the topic pack, named by its file stem.
+///
+/// `include_bytes!` needs a literal path, so the stem is spliced into the
+/// pack path once here instead of being written out on all 110 rows below.
+macro_rules! topic_png {
+    ($name:literal) => {
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/assets/icon-packs/topics/",
+            $name,
+            ".png"
+        ))
+    };
+}
+
+/// The icon a topic tab shows, as the picker offers it (#2414, #2478, #2824).
 ///
 /// The stored value is [`TOPIC_PREFIX`] plus the name here, so a row that
 /// already holds a plain emoji still reads as text and nothing in an existing
-/// database has to be rewritten.
+/// database has to be rewritten. A name is the pack's own file stem, so the
+/// value a row holds names the picture it draws.
+///
+/// The whole pack ships. Each picture is downscaled to 256x256 (#2824): the
+/// tab draws one at about 26px and the picker at 64px, so 256 covers a 2x
+/// screen, and embedding the 30.8 MB of 1024x1024 originals would have cost
+/// 4 MB of RGBA per icon decoded.
 pub const TOPIC_ICONS: &[(&str, &[u8])] = &[
-    (
-        "general",
-        include_bytes!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/assets/icon-packs/topics/opencrabs-topic-general.png"
-        )),
-    ),
-    (
-        "development",
-        include_bytes!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/assets/icon-packs/topics/opencrabs-topic-development.png"
-        )),
-    ),
-    (
-        "ideas",
-        include_bytes!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/assets/icon-packs/topics/opencrabs-topic-ideas.png"
-        )),
-    ),
-    (
-        "bug-reports",
-        include_bytes!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/assets/icon-packs/topics/opencrabs-topic-bug-reports.png"
-        )),
-    ),
-    (
-        "releases",
-        include_bytes!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/assets/icon-packs/topics/opencrabs-topic-releases.png"
-        )),
-    ),
-    (
-        "showcase",
-        include_bytes!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/assets/icon-packs/topics/opencrabs-topic-showcase.png"
-        )),
-    ),
-    (
-        "ops",
-        include_bytes!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/assets/icon-packs/topics/opencrabs-topic-ops.png"
-        )),
-    ),
-    (
-        "off-topic",
-        include_bytes!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/assets/icon-packs/topics/opencrabs-topic-off-topic.png"
-        )),
-    ),
+    // The eight OpenCrabs badges, first because they are the default set.
+    ("opencrabs-topic-bug-reports", topic_png!("opencrabs-topic-bug-reports")),
+    ("opencrabs-topic-development", topic_png!("opencrabs-topic-development")),
+    ("opencrabs-topic-general", topic_png!("opencrabs-topic-general")),
+    ("opencrabs-topic-ideas", topic_png!("opencrabs-topic-ideas")),
+    ("opencrabs-topic-off-topic", topic_png!("opencrabs-topic-off-topic")),
+    ("opencrabs-topic-ops", topic_png!("opencrabs-topic-ops")),
+    ("opencrabs-topic-releases", topic_png!("opencrabs-topic-releases")),
+    ("opencrabs-topic-showcase", topic_png!("opencrabs-topic-showcase")),
+
+    // The crab renders, one per piece of work.
+    ("crab_agents", topic_png!("crab_agents")),
+    ("crab_ai-models", topic_png!("crab_ai-models")),
+    ("crab_announcements", topic_png!("crab_announcements")),
+    ("crab_api", topic_png!("crab_api")),
+    ("crab_archive", topic_png!("crab_archive")),
+    ("crab_backend", topic_png!("crab_backend")),
+    ("crab_bug-reports", topic_png!("crab_bug-reports")),
+    ("crab_ci-builds", topic_png!("crab_ci-builds")),
+    ("crab_cli", topic_png!("crab_cli")),
+    ("crab_code-review", topic_png!("crab_code-review")),
+    ("crab_community", topic_png!("crab_community")),
+    ("crab_database", topic_png!("crab_database")),
+    ("crab_deploy", topic_png!("crab_deploy")),
+    ("crab_design", topic_png!("crab_design")),
+    ("crab_development", topic_png!("crab_development")),
+    ("crab_documentation", topic_png!("crab_documentation")),
+    ("crab_events", topic_png!("crab_events")),
+    ("crab_feedback", topic_png!("crab_feedback")),
+    ("crab_finance", topic_png!("crab_finance")),
+    ("crab_food", topic_png!("crab_food")),
+    ("crab_frontend", topic_png!("crab_frontend")),
+    ("crab_gaming", topic_png!("crab_gaming")),
+    ("crab_general", topic_png!("crab_general")),
+    ("crab_gui", topic_png!("crab_gui")),
+    ("crab_help", topic_png!("crab_help")),
+    ("crab_hiring", topic_png!("crab_hiring")),
+    ("crab_ideas", topic_png!("crab_ideas")),
+    ("crab_incidents", topic_png!("crab_incidents")),
+    ("crab_integrations", topic_png!("crab_integrations")),
+    ("crab_introductions", topic_png!("crab_introductions")),
+    ("crab_memes", topic_png!("crab_memes")),
+    ("crab_mobile", topic_png!("crab_mobile")),
+    ("crab_monitoring", topic_png!("crab_monitoring")),
+    ("crab_music", topic_png!("crab_music")),
+    ("crab_off-topic", topic_png!("crab_off-topic")),
+    ("crab_ops", topic_png!("crab_ops")),
+    ("crab_performance", topic_png!("crab_performance")),
+    ("crab_pets", topic_png!("crab_pets")),
+    ("crab_photography", topic_png!("crab_photography")),
+    ("crab_planning", topic_png!("crab_planning")),
+    ("crab_prompts", topic_png!("crab_prompts")),
+    ("crab_questions", topic_png!("crab_questions")),
+    ("crab_releases", topic_png!("crab_releases")),
+    ("crab_roadmap", topic_png!("crab_roadmap")),
+    ("crab_rules", topic_png!("crab_rules")),
+    ("crab_security", topic_png!("crab_security")),
+    ("crab_showcase", topic_png!("crab_showcase")),
+    ("crab_status", topic_png!("crab_status")),
+    ("crab_testing", topic_png!("crab_testing")),
+    ("crab_travel", topic_png!("crab_travel")),
+
+    // The generic badges, for topics that are not about the crabs.
+    ("generic_agents", topic_png!("generic_agents")),
+    ("generic_ai-models", topic_png!("generic_ai-models")),
+    ("generic_announcements", topic_png!("generic_announcements")),
+    ("generic_api", topic_png!("generic_api")),
+    ("generic_archive", topic_png!("generic_archive")),
+    ("generic_backend", topic_png!("generic_backend")),
+    ("generic_bug-reports", topic_png!("generic_bug-reports")),
+    ("generic_ci-builds", topic_png!("generic_ci-builds")),
+    ("generic_cli", topic_png!("generic_cli")),
+    ("generic_code-review", topic_png!("generic_code-review")),
+    ("generic_community", topic_png!("generic_community")),
+    ("generic_database", topic_png!("generic_database")),
+    ("generic_deploy", topic_png!("generic_deploy")),
+    ("generic_design", topic_png!("generic_design")),
+    ("generic_development", topic_png!("generic_development")),
+    ("generic_documentation", topic_png!("generic_documentation")),
+    ("generic_events", topic_png!("generic_events")),
+    ("generic_feedback", topic_png!("generic_feedback")),
+    ("generic_finance", topic_png!("generic_finance")),
+    ("generic_food", topic_png!("generic_food")),
+    ("generic_frontend", topic_png!("generic_frontend")),
+    ("generic_gaming", topic_png!("generic_gaming")),
+    ("generic_general", topic_png!("generic_general")),
+    ("generic_gui", topic_png!("generic_gui")),
+    ("generic_help", topic_png!("generic_help")),
+    ("generic_hiring", topic_png!("generic_hiring")),
+    ("generic_ideas", topic_png!("generic_ideas")),
+    ("generic_incidents", topic_png!("generic_incidents")),
+    ("generic_integrations", topic_png!("generic_integrations")),
+    ("generic_introductions", topic_png!("generic_introductions")),
+    ("generic_memes", topic_png!("generic_memes")),
+    ("generic_mobile", topic_png!("generic_mobile")),
+    ("generic_monitoring", topic_png!("generic_monitoring")),
+    ("generic_music", topic_png!("generic_music")),
+    ("generic_off-topic", topic_png!("generic_off-topic")),
+    ("generic_ops", topic_png!("generic_ops")),
+    ("generic_pets", topic_png!("generic_pets")),
+    ("generic_photography", topic_png!("generic_photography")),
+    ("generic_planning", topic_png!("generic_planning")),
+    ("generic_prompts", topic_png!("generic_prompts")),
+    ("generic_questions", topic_png!("generic_questions")),
+    ("generic_releases", topic_png!("generic_releases")),
+    ("generic_roadmap", topic_png!("generic_roadmap")),
+    ("generic_rules", topic_png!("generic_rules")),
+    ("generic_security", topic_png!("generic_security")),
+    ("generic_showcase", topic_png!("generic_showcase")),
+    ("generic_testing", topic_png!("generic_testing")),
+    ("generic_travel", topic_png!("generic_travel")),
+
+    // The pilot badges, the first set the picker shipped.
+    ("pilot_crab_bugs", topic_png!("pilot_crab_bugs")),
+    ("pilot_crab_development", topic_png!("pilot_crab_development")),
+    ("pilot_crab_general", topic_png!("pilot_crab_general")),
+    ("pilot_generic_chat", topic_png!("pilot_generic_chat")),
+];
+
+/// The families the pack is grouped in, in the order the prompt lists them
+/// (#2824): the caption first, then the prefix every name in it carries.
+pub const TOPIC_FAMILIES: &[(&str, &str)] = &[
+    ("OpenCrabs", "opencrabs-topic-"),
+    ("Crabs", "crab_"),
+    ("Generic", "generic_"),
+    ("Pilot", "pilot_"),
+];
+
+/// The icons of one family, in table order (#2824).
+pub fn family_icons(prefix: &'static str) -> impl Iterator<Item = (&'static str, &'static [u8])> {
+    TOPIC_ICONS
+        .iter()
+        .filter(move |(name, _)| name.starts_with(prefix))
+        .copied()
+}
+
+/// The eight names the picker stored before the full pack arrived (#2824).
+///
+/// A topic created then holds `topic:general` rather than
+/// `topic:opencrabs-topic-general`, and its row still has to draw, so these
+/// names keep resolving to the badge family.
+pub const LEGACY_TOPIC_NAMES: &[&str] = &[
+    "general",
+    "development",
+    "ideas",
+    "bug-reports",
+    "releases",
+    "showcase",
+    "ops",
+    "off-topic",
 ];
 
 /// The composer's crab set: one picture per shortcode, the way the terminal
@@ -291,10 +408,26 @@ pub fn store_name(name: &str) -> String {
 /// The bytes for a topic icon, by name, with or without [`TOPIC_PREFIX`].
 pub fn topic_icon(name: &str) -> Option<&'static [u8]> {
     let name = name.strip_prefix(TOPIC_PREFIX).unwrap_or(name);
-    TOPIC_ICONS
+    if let Some(bytes) = TOPIC_ICONS
         .iter()
         .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
         .map(|(_, bytes)| *bytes)
+    {
+        return Some(bytes);
+    }
+    // A row written before the pack grew holds a bare family name, and the
+    // badge it always drew is still the one it should draw (#2824).
+    if LEGACY_TOPIC_NAMES
+        .iter()
+        .any(|legacy| legacy.eq_ignore_ascii_case(name))
+    {
+        let stem = format!("opencrabs-topic-{name}");
+        return TOPIC_ICONS
+            .iter()
+            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(&stem))
+            .map(|(_, bytes)| *bytes);
+    }
+    None
 }
 
 /// The bytes for a crab, by shortcode.
@@ -685,25 +818,38 @@ mod tests {
             let stored = store_name(name);
             assert_eq!(topic_icon(&stored), Some(*bytes), "{stored} as stored");
         }
+        // A topic created before the pack grew holds `topic:general`, and the
+        // badge it always drew is the one it still draws (#2824).
+        for legacy in LEGACY_TOPIC_NAMES {
+            let bytes = topic_icon(legacy).unwrap_or_else(|| panic!("{legacy} resolves"));
+            let stem = format!("opencrabs-topic-{legacy}");
+            assert_eq!(topic_icon(&stem), Some(bytes), "{stem} is the same picture");
+            assert_eq!(topic_icon(&store_name(legacy)), Some(bytes));
+        }
     }
 
+    /// The picker offers the whole pack, split into the four families it
+    /// ships, and no two names collide (#2824).
     #[test]
-    fn the_picker_offers_the_eight_topic_badges() {
+    fn the_picker_offers_the_whole_pack_in_four_families() {
+        assert_eq!(TOPIC_ICONS.len(), 110);
         let mut names: Vec<&str> = TOPIC_ICONS.iter().map(|(name, _)| *name).collect();
+        let total = names.len();
         names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), total, "a name appears twice");
+        let counts: Vec<(&str, usize)> = TOPIC_FAMILIES
+            .iter()
+            .map(|&(caption, prefix)| (caption, family_icons(prefix).count()))
+            .collect();
         assert_eq!(
-            names,
-            [
-                "bug-reports",
-                "development",
-                "general",
-                "ideas",
-                "off-topic",
-                "ops",
-                "releases",
-                "showcase"
-            ]
+            counts,
+            [("OpenCrabs", 8), ("Crabs", 50), ("Generic", 48), ("Pilot", 4)]
         );
+        // Every icon belongs to exactly one family, so the picker cannot drop
+        // one on the floor between captions.
+        let grouped: usize = counts.iter().map(|(_, count)| count).sum();
+        assert_eq!(grouped, TOPIC_ICONS.len());
     }
 
     #[test]

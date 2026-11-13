@@ -163,17 +163,22 @@ pub(crate) fn split_pick_overlay(layout: Layout, rail_px: gpui::Pixels) -> impl 
         .child(card)
 }
 
-/// The icon a topic gets when none is picked (#2414).
-pub(crate) const DEFAULT_TOPIC_ICON: &str = "💬";
+/// The icon a topic gets when none is picked (#2414, #2824).
+///
+/// A real badge from the pack rather than the bare speech-balloon glyph it
+/// used to be: the picker offers the whole set now, so a topic created
+/// without a pick still looks like one of them.
+pub(crate) const DEFAULT_TOPIC_ICON: &str = "topic:opencrabs-topic-general";
 
 /// The name prompt for a topic (#2398, #2414): a centred card over a dark scrim.
-/// The card holds the name field with the chosen icon before it, and a row of
-/// icons to pick from. Enter creates, Esc or a click outside cancels.
+/// The card holds the name field with the chosen icon before it, and the whole
+/// icon pack to pick from, one captioned family after another (#2824). Enter
+/// creates, Esc or a click outside cancels.
 pub(crate) fn topic_prompt_overlay(
     label: &str,
     draft: &str,
     icon: &str,
-    picks: Vec<Stateful<Div>>,
+    families: Vec<(&'static str, Vec<Stateful<Div>>)>,
     custom_picture: Option<AnyElement>,
     pick_image: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     cancel: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -221,7 +226,30 @@ pub(crate) fn topic_prompt_overlay(
             |d| d.child(SharedString::from(icon.to_string())),
         )
         .children(picture);
-    let picker = div().flex().flex_row().flex_wrap().gap_1().children(picks);
+    // The pack is 110 pictures, so the grid scrolls inside a fixed height
+    // instead of growing the card past the window (#2824). Each family keeps
+    // its caption: that is what makes the pack readable rather than one long
+    // wall of crabs.
+    let picker = div()
+        .id("topic-prompt-picker")
+        .flex()
+        .flex_col()
+        .gap_2()
+        .max_h(rems(18.0))
+        .overflow_y_scroll()
+        .children(families.into_iter().map(|(caption, cells)| {
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(palette::current().text_faint))
+                        .child(SharedString::from(caption)),
+                )
+                .child(div().flex().flex_row().flex_wrap().gap_1().children(cells))
+        }));
     let panel = div()
         .id("topic-prompt-panel")
         .occlude()

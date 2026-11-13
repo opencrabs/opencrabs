@@ -5128,36 +5128,46 @@ impl Render for Dashboard {
                 .topic_draft_icon
                 .clone()
                 .unwrap_or_else(|| DEFAULT_TOPIC_ICON.to_string());
-            let mut picks: Vec<Stateful<Div>> = topic_icons::TOPIC_ICONS
-                .iter()
-                .map(|&(name, bytes)| {
-                    let pick = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
-                        this.topic_draft_icon = Some(topic_icons::store_name(name));
-                        cx.notify();
-                    });
-                    div()
-                        .id(SharedString::from(format!("topic-icon-{name}")))
-                        // A pick is a picture, not a bullet (#2768): at the
-                        // old 1.5rem the eight badges were specks and picking
-                        // one was guesswork. They render at 4.0rem now
-                        // (#2789): big enough to recognise, and the 512x512
-                        // sources stay crisp at 2x.
-                        .p_1()
-                        .rounded(px(6.0))
-                        .cursor_pointer()
-                        .hover(|d| d.bg(rgb(palette::current().panel_hi)))
-                        .on_click(pick)
-                        .child(topic_icons::picture(bytes, 4.0))
-                })
-                .collect();
+            // The pack ships in four families, so the prompt lists them one
+            // after another instead of one 110-cell wall (#2824). A pick is a
+            // picture, not a bullet (#2768): at the old 1.5rem the badges were
+            // specks and picking one was guesswork. They render at 4.0rem
+            // (#2789), and the 256x256 sources stay crisp at 2x.
+            let mut families: Vec<(&'static str, Vec<Stateful<Div>>)> =
+                topic_icons::TOPIC_FAMILIES
+                    .iter()
+                    .map(|&(caption, prefix)| {
+                        let cells: Vec<Stateful<Div>> = topic_icons::family_icons(prefix)
+                            .map(|(name, bytes)| {
+                                let pick =
+                                    cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
+                                        this.topic_draft_icon = Some(topic_icons::store_name(name));
+                                        cx.notify();
+                                    });
+                                div()
+                                    .id(SharedString::from(format!("topic-icon-{name}")))
+                                    .p_1()
+                                    .rounded(px(6.0))
+                                    .cursor_pointer()
+                                    .hover(|d| d.bg(rgb(palette::current().panel_hi)))
+                                    .on_click(pick)
+                                    .child(topic_icons::picture(bytes, 4.0))
+                            })
+                            .collect();
+                        (caption, cells)
+                    })
+                    .collect();
             // One extra cell opens the platform file picker for a custom
             // image, Telegram style (#2790). The tile matches the embedded
-            // picks' geometry so the grid keeps its rhythm.
+            // picks' geometry so the grid keeps its rhythm, and it keeps its
+            // own caption so the + never trails a 50-icon family unseen
+            // (#2824).
             let add_image = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
                 this.pick_icon_image(cx);
             });
-            picks.push(
-                div()
+            families.push((
+                "Your image",
+                vec![div()
                     .id("topic-icon-add-image")
                     .p_1()
                     .rounded(px(6.0))
@@ -5176,8 +5186,8 @@ impl Render for Dashboard {
                             .text_color(rgb(palette::current().text_muted))
                             .text_size(rems(1.6))
                             .child("+"),
-                    ),
-            );
+                    )],
+            ));
             // The badge previews a custom pick from the same cache the rail
             // and tabs draw from (#2790).
             let custom_picture = self.custom_icon_picture(&icon, 3.2);
@@ -5190,7 +5200,7 @@ impl Render for Dashboard {
                 label,
                 &draft,
                 &icon,
-                picks,
+                families,
                 custom_picture,
                 pick_image,
                 cancel,
