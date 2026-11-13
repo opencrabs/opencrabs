@@ -93,3 +93,50 @@ async fn test_session_archive() {
         .unwrap();
     assert!(!found.is_archived());
 }
+
+/// #2881: the rail's staleness signal. One aggregate, and it has to move when a
+/// turn lands on any channel, because the rail cannot see those events.
+#[tokio::test]
+async fn ledger_signature_counts_rows_and_follows_the_newest_update() {
+    let db = Database::connect_in_memory()
+        .await
+        .expect("Failed to create database");
+    db.run_migrations().await.expect("Failed to run migrations");
+    let repo = SessionRepository::new(db.pool().clone());
+
+    assert_eq!(
+        repo.ledger_signature().await.expect("empty signature"),
+        (0, 0),
+        "an empty ledger reads as no updates and no rows"
+    );
+
+    let first = Session::new(
+        Some("First".to_string()),
+        Some(String::new()),
+        Some("anthropic".to_string()),
+    );
+    repo.create(&first).await.expect("Failed to create first");
+    assert_eq!(
+        repo.ledger_signature().await.expect("signature").1,
+        1,
+        "the row count follows creation"
+    );
+
+    let second = Session::new(
+        Some("Second".to_string()),
+        Some(String::new()),
+        Some("anthropic".to_string()),
+    );
+    repo.create(&second).await.expect("Failed to create second");
+
+    let (newest, count) = repo.ledger_signature().await.expect("signature");
+    assert_eq!(count, 2);
+    assert_eq!(
+        newest,
+        first
+            .updated_at
+            .timestamp()
+            .max(second.updated_at.timestamp()),
+        "the newest update is the signal the probe compares"
+    );
+}

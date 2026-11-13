@@ -699,6 +699,12 @@ struct Dashboard {
     /// a result only lands when its generation still matches, so a slow query
     /// for "nee" can never paint over the hits for "needle".
     rail_find_gen: u64,
+    /// The last ledger signature the rail was refetched from (#2881). A turn
+    /// that arrives on a messaging channel produces no window event, so nothing
+    /// on the UI side asks the rail to reload and it kept drawing the list it
+    /// loaded at startup. The probe compares this pair and pays for a reload
+    /// only when the ledger actually moved.
+    rail_ledger_sig: Option<(i64, i64)>,
     /// Seeker deep search (#2721): content hits per trimmed query, cached so
     /// re-opening the same query costs no second read. The card's rows are
     /// rebuilt from this map when a debounced result lands.
@@ -5503,6 +5509,37 @@ fn main() {
                         }
                     })
                     .detach();
+                    // The rail's ledger probe (#2881). A turn that arrives on a
+                    // messaging channel writes to the ledger without producing
+                    // any window event, and every existing `refresh_rail`
+                    // caller was something only this window could cause. One
+                    // aggregate per tick, with the full refetch paid only when
+                    // that aggregate moved, keeps this clear of the per-frame
+                    // ledger reads #2817 removed.
+                    let rail_db = db_path.clone();
+                    cx.spawn(async move |this, cx| {
+                        loop {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_secs(3))
+                                .await;
+                            let sig = sessions::rail_ledger_signature(rail_db.clone()).await;
+                            if this
+                                .update(cx, |this, cx| {
+                                    // `None` means the read failed, not that the
+                                    // ledger is empty: keep the last signature
+                                    // and try again on the next tick.
+                                    if sig.is_some() && sig != this.rail_ledger_sig {
+                                        this.rail_ledger_sig = sig;
+                                        this.refresh_rail(cx);
+                                    }
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    })
+                    .detach();
                     // The rail is an entity of its own (#2933). Its scroll
                     // handle is shared with the window, which still owns the
                     // keyboard walk, and it holds a weak handle back so a rail
@@ -5556,6 +5593,7 @@ fn main() {
                         previews_in_flight: std::rc::Rc::new(std::cell::Cell::new(0)),
                         previews_dirty: std::rc::Rc::new(std::cell::Cell::new(false)),
                         rail_find_gen: 0,
+                        rail_ledger_sig: None,
                         seeker_find: HashMap::new(),
                         seeker_find_gen: 0,
                         seeker_scheduled_query: String::new(),

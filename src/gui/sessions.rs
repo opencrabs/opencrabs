@@ -598,6 +598,34 @@ pub async fn load_sessions(db_path: std::path::PathBuf) -> Result<Vec<Session>, 
     }
 }
 
+/// The rail's ledger signature, read through the same no-migration door as
+/// [`load_sessions`] (#2881). `None` when the read failed, which the caller
+/// must treat as "no news" rather than "the ledger is empty".
+pub async fn rail_ledger_signature(db_path: std::path::PathBuf) -> Option<(i64, i64)> {
+    let (tx, rx) = futures::channel::oneshot::channel::<Option<(i64, i64)>>();
+    let spawned = std::thread::Builder::new()
+        .name("rail-ledger-sig".into())
+        .stack_size(2 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let result = match runtime {
+                Ok(rt) => rt.block_on(async {
+                    let db = Database::connect(&db_path).await.ok()?;
+                    let repo = SessionRepository::new(db.pool().clone());
+                    repo.ledger_signature().await.ok()
+                }),
+                Err(_) => None,
+            };
+            let _ = tx.send(result);
+        });
+    if spawned.is_err() {
+        return None;
+    }
+    rx.await.ok().flatten()
+}
+
 /// The pinned set, read through the same 4 MB no-migration door as
 /// [`load_sessions`]. Returns ids: the rail already holds the rows, this only
 /// says which of them go on top.

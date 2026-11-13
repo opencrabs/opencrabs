@@ -120,6 +120,33 @@ impl SessionRepository {
         Ok(())
     }
 
+    /// One cheap staleness signal for the rail (#2881): the newest
+    /// `updated_at` and the row count, from a single aggregate over the
+    /// sessions table.
+    ///
+    /// A turn that arrives on a messaging channel writes to the ledger without
+    /// producing any window event, so the rail's cached list goes stale with
+    /// nothing to notice. Any turn nudges `updated_at`, so a change in this
+    /// pair means the rail is out of date. The GUI asks for this on a timer
+    /// rather than reloading the list on a timer: one indexed aggregate per
+    /// tick stays clear of the per-frame ledger reads #2817 removed.
+    pub async fn ledger_signature(&self) -> Result<(i64, i64)> {
+        self.pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(|conn| {
+                conn.query_row(
+                    "SELECT COALESCE(MAX(updated_at), 0), COUNT(*) FROM sessions",
+                    [],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                )
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to read the rail ledger signature")
+    }
+
     /// Create a topic under a session: a new session row with `parent_id` set,
     /// and topics switched on for the parent.
     ///
