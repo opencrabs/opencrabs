@@ -42,6 +42,33 @@ impl Dashboard {
             ));
             return;
         }
+        // An edit armed in this leaf rewrites a stored row instead of
+        // appending a new one (#2826). It is taken before anything is queued:
+        // the row it replaces is about to be deleted, so letting it wait
+        // behind a running turn would send it against history that moved.
+        let armed = self
+            .pane_states
+            .get(&session)
+            .cloned()
+            .and_then(|pane| {
+                // An `Entity`'s update hands the closure's own value back, so
+                // a pane that is already gone has no edit to hand back.
+                pane.update(cx, |pane, _| pane.edit.take())
+            });
+        if let Some(target) = armed {
+            if target.session == session {
+                self.send_edited_in_pane(session, target, text, cx);
+                return;
+            }
+            // The leaf was handed another conversation between the pencil and
+            // the send, so the target no longer names a row on this screen.
+            // The text goes out as an ordinary message rather than deleting
+            // history nobody is looking at.
+            logging::info(&format!(
+                "pane edit dropped: row {} belongs to session {}",
+                target.id, target.session
+            ));
+        }
         // A send ends that pane's offer, the same rule the window's own
         // composer follows (#2708).
         agent_bridge::options_take(session);
@@ -648,39 +675,7 @@ impl Dashboard {
     /// The window is re-read between the last two, so the rows the edit dropped
     /// leave the screen at the same moment they leave the store.
     fn send_edited(&mut self, target: chat_leaf::EditTarget, text: String, cx: &mut Context<Self>) {
-        if self.turn.busy {
-            if let Some(cancel) = self.turn.cancel.take() {
-                cancel.cancel();
-            }
-            self.turn.busy = false;
-            self.turn.live.thinking = false;
-            self.turn.live.stop();
-            logging::info(&format!(
-                "turn stopped for an edit of row {} in session {}",
-                target.id, target.session
-            ));
-        }
-        // A split leaf can be running the same conversation, and a row it
-        // appends would land under the truncation, so it is stopped too.
-        if let Some(pane) = self.pane_states.get(&target.session).cloned() {
-            let stopped = pane.update(cx, |pane, cx| {
-                let Some(cancel) = pane.cancel.take() else {
-                    return false;
-                };
-                cancel.cancel();
-                pane.busy = false;
-                pane.live.thinking = false;
-                pane.live.stop();
-                cx.notify();
-                true
-            });
-            if stopped {
-                logging::info(&format!(
-                    "pane turn stopped for an edit in session {}",
-                    target.session
-                ));
-            }
-        }
+        self.stop_turn_for_edit(target.session, cx);
         let db_path = self.db_path.clone();
         let session = target.session;
         let sequence = target.sequence;
@@ -711,6 +706,91 @@ impl Dashboard {
         cx.notify();
     }
 
+    /// The same edit, sent from a split leaf's composer (#2826).
+    ///
+    /// The difference is only where the answer lands: the truncation and the
+    /// new turn are the same, but the re-read goes into the leaf that owns the
+    /// conversation and the text goes back out through that leaf's own send.
+    /// Writing the window's transcript here would repaint a conversation the
+    /// pane is not showing.
+    fn send_edited_in_pane(
+        &mut self,
+        pane_id: Uuid,
+        target: chat_leaf::EditTarget,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.stop_turn_for_edit(target.session, cx);
+        let db_path = self.db_path.clone();
+        let session = target.session;
+        let sequence = target.sequence;
+        cx.spawn(async move |this, cx| {
+            let truncated = transcript::truncate_after(db_path.clone(), session, sequence).await;
+            let loaded = match &truncated {
+                Ok(_) => Some(transcript::load_recent(db_path, session).await),
+                Err(_) => None,
+            };
+            this.update(cx, |this, cx| match truncated {
+                Ok(deleted) => {
+                    logging::info(&format!(
+                        "pane edit: dropped {deleted} row(s) after sequence {sequence} in {session}"
+                    ));
+                    if let Some(Ok(loaded)) = loaded {
+                        this.install_loaded_in_pane(pane_id, loaded, cx);
+                    }
+                    this.send_from_pane(session, text, None, SendOrigin::Composer, cx);
+                }
+                Err(e) => {
+                    if let Some(pane) = this.pane_states.get(&pane_id).cloned() {
+                        pane.update(cx, |pane, cx| {
+                            pane.live.notices.push(format!("edit failed: {e}"));
+                            cx.notify();
+                        });
+                    }
+                }
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Stop whatever is streaming into this conversation before its history is
+    /// cut (#2826).
+    ///
+    /// The window's turn is only this edit's business when the window is
+    /// showing the same conversation; a pane running it is stopped either way,
+    /// because a row it appends would land under the truncation.
+    fn stop_turn_for_edit(&mut self, session: Uuid, cx: &mut Context<Self>) {
+        if self.chat_state.session() == Some(session) && self.turn.busy {
+            if let Some(cancel) = self.turn.cancel.take() {
+                cancel.cancel();
+            }
+            self.turn.busy = false;
+            self.turn.live.thinking = false;
+            self.turn.live.stop();
+            logging::info(&format!(
+                "turn stopped for an edit of a row in session {session}"
+            ));
+        }
+        if let Some(pane) = self.pane_states.get(&session).cloned() {
+            let stopped = pane.update(cx, |pane, cx| {
+                let Some(cancel) = pane.cancel.take() else {
+                    return false;
+                };
+                cancel.cancel();
+                pane.busy = false;
+                pane.live.thinking = false;
+                pane.live.stop();
+                cx.notify();
+                true
+            });
+            if stopped {
+                logging::info(&format!("pane turn stopped for an edit in session {session}"));
+            }
+        }
+    }
+
     /// Put a freshly read window on screen (#2826). The same fields the rail's
     /// open installs, so a re-read after a truncation leaves the window and the
     /// store saying the same thing.
@@ -726,6 +806,31 @@ impl Dashboard {
         self.chat_state.transcript.rows = loaded.rows;
         self.chat_state.transcript.reactions = loaded.reactions;
         cx.notify();
+    }
+
+    /// The same install, into the leaf that owns the conversation (#2826).
+    fn install_loaded_in_pane(
+        &mut self,
+        pane_id: Uuid,
+        loaded: transcript::Loaded,
+        cx: &mut Context<Self>,
+    ) {
+        let (hidden, turns) = transcript::turns_with_origins(
+            &loaded.rows,
+            loaded.total,
+            &self.metrics.by_anchor,
+            &loaded.origins,
+        );
+        let Some(pane) = self.pane_states.get(&pane_id).cloned() else {
+            return;
+        };
+        pane.update(cx, |pane, cx| {
+            pane.transcript.hidden = hidden;
+            pane.transcript.turns = turns;
+            pane.transcript.rows = loaded.rows;
+            pane.transcript.reactions = loaded.reactions;
+            cx.notify();
+        });
     }
 
     /// The two taps a plan waiting on approval offers (#2755).

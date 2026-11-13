@@ -4140,9 +4140,9 @@ pub struct ViewHooks {
     /// (#2825). Only the owning view can mint one, and only a chip that is
     /// drawn needs one.
     pub reaction_click: HashMap<(uuid::Uuid, String), ClickHandler>,
-    /// The edit behind one stored user row (#2826), keyed by message id. Only
-    /// the window's chat mints one: a split pane has no composer of its own to
-    /// put the text back into, so its rows carry no button.
+    /// The edit behind one stored user row (#2826), keyed by message id. Both
+    /// the window's chat and every split leaf mint these now: a pane owns its
+    /// rows, so it owns their pencils and puts the text back in its own field.
     pub edit: HashMap<uuid::Uuid, ClickHandler>,
 }
 

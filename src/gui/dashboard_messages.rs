@@ -403,8 +403,8 @@ impl Dashboard {
     ///
     /// The row's text replaces whatever the field held and the row is
     /// remembered, so the next send replaces it and drops the conversation
-    /// after it. Only the window's own chat mints the button, so this always
-    /// arms the window's composer.
+    /// after it. This is the window's own chat leaf; a split leaf goes through
+    /// [`Self::pane_edit_begin`] (#2826).
     pub(crate) fn msg_edit_begin(&mut self, id: Uuid, sequence: i32, cx: &mut Context<Self>) {
         let Some(session) = self.chat_state.session() else {
             return;
@@ -435,6 +435,61 @@ impl Dashboard {
         // this text, so the next keystroke is theirs.
         self.refocus_screen();
         logging::info(&format!("editing row {id} at sequence {sequence}"));
+        cx.notify();
+    }
+
+    /// Put one stored user row back in a split leaf's composer (#2826).
+    ///
+    /// The window's own version arms `self.composer`, which is the chat leaf's
+    /// field. A pane has a composer of its own, so the edit target and the
+    /// restored text both belong to the leaf the pencil was clicked in. Every
+    /// pane draws that pencil now, so this is the only door a split leaf uses.
+    pub(crate) fn pane_edit_begin(
+        &mut self,
+        session: Uuid,
+        id: Uuid,
+        sequence: i32,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pane) = self.pane_states.get(&session).cloned() else {
+            return;
+        };
+        // The row is read from the leaf's own transcript: that is the state it
+        // drew, so the text that lands in its field is the text under the
+        // pencil, not a second read that could disagree with the screen.
+        let text = pane
+            .read(cx)
+            .transcript
+            .rows
+            .iter()
+            .find(|m| m.id == id)
+            .map(|m| m.content.clone());
+        let Some(text) = text else {
+            return;
+        };
+        pane.update(cx, |pane, cx| {
+            pane.edit = Some(chat_leaf::EditTarget {
+                id,
+                session,
+                sequence,
+            });
+            let editor = pane.editor.clone();
+            editor.update(cx, |editor, cx| {
+                editor.restore_draft(text, cx);
+                editor.show_editing(cx);
+            });
+            cx.notify();
+        });
+        // The caret goes to the pane holding the edit, and the pane keeps the
+        // keyboard for the same reason the window does: the user asked to
+        // rewrite this text, so the next keystroke is theirs.
+        self.pane_focus = Some(session);
+        self.sync_composer_session();
+        self.request_composer_caret(cx);
+        self.refocus_screen();
+        logging::info(&format!(
+            "pane edit: row {id} at sequence {sequence} in {session}"
+        ));
         cx.notify();
     }
 

@@ -34,6 +34,7 @@ use std::rc::Rc;
 use uuid::Uuid;
 
 use crate::agent_bridge;
+use crate::chat_leaf;
 use crate::composer_view::{command_popup_view, emoji_popup_view, options_strip, queue_strip};
 use crate::editor;
 use crate::pane_chrome::{
@@ -98,6 +99,12 @@ pub(crate) struct PaneView {
     /// either, because the row text is stored by ordinal and two panes plus
     /// the window all count rows from zero.
     pub(crate) copy_drag: Rc<CopyDrag>,
+    /// The row this pane's composer is rewriting (#2826). The edit handlers
+    /// were minted from the window's own transcript, so only the chat leaf
+    /// ever grew a pencil: every other pane drew its user rows with no
+    /// affordance at all. A pane owns its rows, so it owns the target too,
+    /// and its own send path is what consumes it.
+    pub(crate) edit: Option<chat_leaf::EditTarget>,
     /// The window this leaf belongs to. The wheel hook reports through it,
     /// because a tick that releases this pane's follow is a change to the
     /// window's pane map and a leaf's own context cannot reach that.
@@ -148,6 +155,7 @@ impl PaneView {
             ctx_used: None,
             ctx_max,
             copy_drag,
+            edit: None,
             window,
             width,
             stamp: 0,
@@ -350,6 +358,9 @@ impl Render for PaneView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let weak = self.window.clone();
         let session = self.session;
+        // A second handle for the row pencils (#2826): the wheel closure below
+        // takes `weak` by move, and both are built in this same frame.
+        let edit_window = self.window.clone();
         let wheel = move |ev: &ScrollWheelEvent, _window: &mut Window, cx: &mut App| {
             if !wheel_releases_follow(wheel_dy(&ev.delta)) {
                 return;
@@ -418,6 +429,31 @@ impl Render for PaneView {
                     cx.notify();
                 }
             }));
+        // The pane owns its rows, so it owns their pencils too (#2826). These
+        // were minted by the window from its own transcript, which meant a
+        // split leaf drew every user row without an edit affordance: the
+        // button existed, on a conversation the pane was not showing. Each
+        // handler reports through the window, because arming the edit means
+        // writing this leaf's composer and this leaf's target, and a leaf
+        // cannot reach its own entity from here.
+        let pane_edit: HashMap<uuid::Uuid, transcript::ClickHandler> = self
+            .transcript
+            .rows
+            .iter()
+            .filter(|m| m.role == "user")
+            .map(|m| {
+                let (id, sequence) = (m.id, m.sequence);
+                let window = edit_window.clone();
+                let handler: transcript::ClickHandler = std::rc::Rc::new(
+                    move |_ev: &gpui::ClickEvent, _window: &mut Window, cx: &mut App| {
+                        let _ = window.update(cx, |this, cx| {
+                            this.pane_edit_begin(session, id, sequence, cx);
+                        });
+                    },
+                );
+                (id, handler)
+            })
+            .collect();
         let body = transcript::view(
             &self.transcript,
             &self.scroll,
@@ -442,6 +478,8 @@ impl Render for PaneView {
                 // menu lives in the window's chat, so a split pane has no
                 // toggle of its own to mint (#2825).
                 reactions: self.transcript.reactions.clone(),
+                // The pencil on its own user rows (#2826).
+                edit: pane_edit,
                 ..Default::default()
             },
         )
