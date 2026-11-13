@@ -86,3 +86,54 @@ fn cached_markdown_follows_dark_to_light() {
     parsed.assert_palette(ORGN);
     parsed.assert_palette(LIGHT);
 }
+
+/// The transcript reads every field on these types (`src/gui/transcript.rs`),
+/// but this module is included by path, so the bin that consumes them is not
+/// part of this compilation unit. Pinning the structure here keeps that
+/// contract honest, and is what stops the fields reading as dead code.
+#[test]
+fn parsed_markdown_carries_the_structure_the_transcript_paints() {
+    let heading = one_line("## Ship it");
+    assert!(heading.heading);
+    assert_eq!(heading.heading_level, 2);
+    assert_eq!(heading.text, "Ship it");
+    assert_eq!(heading.indent, 0);
+    assert!(!heading.mono);
+    assert!(heading.links.is_empty());
+
+    let quoted = one_line("> quoted");
+    assert_eq!(quoted.indent, 1);
+    assert!(!quoted.heading);
+    assert_eq!(quoted.heading_level, 0);
+
+    let link = one_line("[docs](https://example.com)");
+    assert_eq!(link.text, "docs");
+    assert_eq!(link.links.len(), 1);
+    assert_eq!(link.links[0].1, "https://example.com");
+    assert_eq!(
+        link.text.get(link.links[0].0.clone()),
+        Some("docs"),
+        "the link range must point at the label, which is what a click lands on"
+    );
+
+    let fenced = one_line("```\nfn main() {}\n```");
+    assert!(fenced.mono);
+    assert_eq!(fenced.text, "fn main() {}");
+
+    let blocks = markdown::blocks("| [a](https://example.com) | b |\n| --- | --- |\n| 1 | 2 |");
+    assert_eq!(blocks.len(), 1, "a table is one block, never flattened");
+    let table = match blocks.into_iter().next().expect("one block") {
+        MdBlock::Table(table) => table,
+        MdBlock::Line(line) => panic!("a table must stay a table, got {:?}", line.text),
+    };
+    assert_eq!(table.columns(), 2);
+    assert_eq!(table.header.len(), 2);
+    assert_eq!(table.header[0].text, "a");
+    assert_eq!(table.header[0].links[0].1, "https://example.com");
+    assert!(
+        !table.header[0].highlights.is_empty(),
+        "a link in a cell must carry its highlight run"
+    );
+    assert_eq!(table.rows.len(), 1);
+    assert_eq!(table.rows[0][1].text, "2");
+}
