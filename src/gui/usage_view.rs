@@ -521,7 +521,7 @@ mod tests {
 
     #[test]
     fn usage_render_includes_cache_header_without_truncating_model_names() {
-        let long_name = "development/qwen3.7-max-20260520-experimental".to_string();
+        let long_name = "development/qwen3.7-max-20260520-preview".to_string();
         let table = model_table(&[ModelRow {
             name: long_name.clone(),
             cost_str: "$1.23".into(),

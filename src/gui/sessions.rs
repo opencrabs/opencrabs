@@ -1,5 +1,5 @@
 //! The session rail: every real session from the ledger, most recent first,
-//! click to select. Phase 0's lessons are baked in: the fetch runs on a
+//! click to select. Three constraints shape this file: the fetch runs on a
 //! dedicated 4 MB thread (gpui's dispatch-queue workers have tiny stacks and
 //! the crash receipt lives in `main.rs`), the DB opens through
 //! `Database::connect`, the same no-migration read-only door the usage

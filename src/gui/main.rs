@@ -1,4 +1,5 @@
-//! OpenCrabs desktop client. Phase 1: the TUI mirrored into GPUI.
+//! OpenCrabs desktop client: the same sessions, chat and usage as the
+//! terminal client, drawn with GPUI.
 //!
 //! Built only with `--features gui` (`required-features` on the `[[bin]]`), so
 //! the TUI build and the CI gate never link gpui.
@@ -575,7 +576,7 @@ impl Drop for PreviewSlot {
     }
 }
 
-/// The phase 1 window. Every string on screen is real data or the real error.
+/// The window root. Every string on screen is real data or the real error.
 struct Dashboard {
     /// Which pane the right side draws: chat by default, usage on ctrl+u.
     screen: Screen,
