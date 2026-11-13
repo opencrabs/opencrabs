@@ -567,19 +567,10 @@ impl Dashboard {
         cx.notify();
     }
 
-    /// Fold or unfold one turn. Folding is the default, so the set holds the
-    /// anchors the user OPENED, keyed exactly as the TUI keys its override
-    /// map (#2155), which is what lets an opened turn survive a reload.
+    /// Fold or unfold one turn. The state transition lives on TranscriptState
+    /// so the main chat and every split pane share the same behavior (#2855).
     pub(crate) fn toggle_turn(&mut self, anchor: &str, cx: &mut Context<Self>) {
-        if !self.chat_state.transcript.expanded.remove(anchor) {
-            self.chat_state
-                .transcript
-                .expanded
-                .insert(anchor.to_string());
-        } else {
-            // A folded turn forgets its full details, so reopening starts at the top (#2440).
-            self.chat_state.transcript.details.remove(anchor);
-        }
+        self.chat_state.transcript.toggle_turn(anchor);
         cx.notify();
     }
 

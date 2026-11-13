@@ -388,10 +388,32 @@ impl Render for PaneView {
                     .map(|(_, half)| half),
             )
         };
+        // Settled and live cards act on this leaf's own transcript state. An
+        // empty handler map left every split-pane card inert (#2855).
+        let mut fold_handlers: HashMap<String, transcript::ClickHandler> = HashMap::new();
+        for anchor in self.transcript.anchors() {
+            let key = anchor.clone();
+            let handler = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
+                this.transcript.toggle_turn(&key);
+                cx.notify();
+            });
+            fold_handlers.insert(anchor, Rc::new(handler));
+        }
+        let live_click: transcript::ClickHandler =
+            Rc::new(cx.listener(|this, ev: &ClickEvent, _window, cx| {
+                // A copy-drag release is not a request to fold the card (#2678).
+                if let gpui::ClickEvent::Mouse(click) = ev
+                    && (click.up.position - click.down.position).magnitude() > 2.0
+                {
+                    return;
+                }
+                this.transcript.live_expanded = !this.transcript.live_expanded;
+                cx.notify();
+            }));
         // The pane owns its transcript state, so the click that loads the next
         // window of turns is minted here (#2805).
         let older_click: transcript::ClickHandler =
-            std::rc::Rc::new(cx.listener(|this, _ev: &gpui::ClickEvent, _window, cx| {
+            Rc::new(cx.listener(|this, _ev: &ClickEvent, _window, cx| {
                 if this.transcript.load_older() {
                     cx.notify();
                 }
@@ -404,7 +426,7 @@ impl Render for PaneView {
             // pane's live card never knew its turn was running.
             self.busy,
             self.width,
-            HashMap::new(),
+            fold_handlers,
             transcript::ViewHooks {
                 // The pane's own budget (#2854), not the window's.
                 ctx_used: self.ctx_used,
@@ -414,6 +436,7 @@ impl Render for PaneView {
                 // `drag: None`.
                 drag: Some(self.copy_drag.clone()),
                 wheel: Some(Rc::new(wheel)),
+                live_click: Some(live_click),
                 older: Some(older_click),
                 // A pane draws the chips its rows carry, read-only: the row
                 // menu lives in the window's chat, so a split pane has no

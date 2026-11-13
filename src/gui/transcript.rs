@@ -58,13 +58,14 @@ use crate::markdown;
 /// history stays behind the `Marker` block.
 const WINDOW: usize = 200;
 
-/// Lines of one message body a folded turn draws before it hands the rest to
-/// the reader (#2805). The pane builds one element per line, so a window that
-/// holds a 1.6 MB row built tens of thousands of them on every keystroke: the
-/// newest 200 rows of the largest local session measure 64,827 lines, and the
-/// composer paid that on every character typed. The TUI never shows more than
-/// an excerpt of its working-out for the same reason; expanding the turn is
-/// what asks for the whole thing.
+/// Lines of one non-answer body a folded turn draws before it hands the rest
+/// to the reader (#2805). The pane builds one element per line, so a window
+/// that holds a 1.6 MB row built tens of thousands of them on every keystroke:
+/// the newest 200 rows of the largest local session measure 64,827 lines, and
+/// the composer paid that on every character typed. The TUI never shows more
+/// than an excerpt of its working-out for the same reason; expanding the turn
+/// is what asks for the whole thing. A final or deliverable answer that stays
+/// visible in a folded turn always draws in full (#2855).
 const MSG_EXCERPT_LINES: usize = 20;
 
 /// Cut a body at `max` lines and report how many lines were left out. The cut
@@ -734,6 +735,16 @@ pub struct TranscriptState {
 }
 
 impl TranscriptState {
+    /// Fold or unfold one settled turn on whichever surface owns this state.
+    pub fn toggle_turn(&mut self, anchor: &str) {
+        if !self.expanded.remove(anchor) {
+            self.expanded.insert(anchor.to_string());
+        } else {
+            // Reopening starts at the first expansion, not full details (#2440).
+            self.details.remove(anchor);
+        }
+    }
+
     /// The session's true row total: the rows on screen plus the ones the
     /// window hid, which is the count `load_recent` reads straight from the
     /// ledger (#2705).
@@ -2145,10 +2156,10 @@ fn bubble(
     full: bool,
 ) -> Div {
     // The cut happens on the raw source, before anything walks it (#2805): a
-    // folded turn reads its first rows and the rest is one click away, so
-    // `strip_markers` and the markdown parse only ever see the excerpt instead
-    // of the tens of kilobytes a single stored answer can carry. The copy path
-    // still reads the whole block, so a drag is never handed the cut text.
+    // folded non-answer body reads its first rows and the rest is one click
+    // away, so `strip_markers` and the markdown parse only ever see the excerpt
+    // instead of the tens of kilobytes a single stored row can carry. Answers
+    // arrive with `full = true`; the copy path always reads the whole block.
     let (content, hidden) = if full {
         (std::borrow::Cow::Borrowed(content), 0)
     } else {
@@ -2239,9 +2250,10 @@ fn forward_block(
     selection: Option<&SelectionContext>,
     full: bool,
 ) -> Div {
-    // A forward carries the same excerpt rule as any other body (#2805): a
+    // A forwarded non-answer body carries the same excerpt rule (#2805): a
     // pasted report is exactly the shape that made a frame expensive, so the
-    // cut lands on the source before anything walks it.
+    // cut lands on the source before anything walks it. A forwarded answer
+    // that the fold keeps visible still arrives here with `full = true`.
     let (content, hidden) = if full {
         (std::borrow::Cow::Borrowed(content), 0)
     } else {
@@ -4274,6 +4286,12 @@ pub fn view(
             if folded && !visible_when_folded(block, turn.final_idx, i) {
                 continue;
             }
+            // Folding bounds working-out, never the answer. A deliverable
+            // report kept visible by the fold gets the same full-body path as
+            // the turn's final assistant message (#2855).
+            let full_body = !folded
+                || (matches!(block, Block::Msg { role, .. } if role == "assistant")
+                    && visible_when_folded(block, turn.final_idx, i));
             // Every row here belongs to a turn the live card is NOT drawing,
             // which is why it is on screen at all. Narration and thinking stay
             // inside the card; the answer a settled turn already produced
@@ -4302,13 +4320,13 @@ pub fn view(
                             content_width,
                             &attachment_handlers,
                             Some(&selection),
-                            !folded,
+                            full_body,
                         ),
                     }
                 }
                 _ => match block {
                     Block::Thinking { content } => thinking_block(content, full),
-                    _ => block_view(block, content_width, &attachment_handlers, None, !folded),
+                    _ => block_view(block, content_width, &attachment_handlers, None, full_body),
                 },
             };
             // A stored row carries its own menu anchor and pick box (#2613).

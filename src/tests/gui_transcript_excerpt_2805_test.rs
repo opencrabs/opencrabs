@@ -26,11 +26,11 @@ fn region(start: &str, end: &str) -> &'static str {
     region_in(TRANSCRIPT, start, end)
 }
 
-/// A folded turn draws an excerpt of its body and says how much it hid. The cut
-/// lands on the raw source, so the marker strip and the markdown parse only
-/// ever see the excerpt.
+/// A folded turn draws an excerpt of a non-answer body and says how much it
+/// hid. The cut lands on the raw source, so the marker strip and markdown parse
+/// only ever see the excerpt. Visible answers take the full-body path (#2855).
 #[test]
-fn a_folded_turn_draws_an_excerpt_and_announces_what_it_hid() {
+fn a_folded_turn_excerpts_non_answer_bodies_and_announces_what_it_hid() {
     let excerpt = region("fn excerpt_lines(", "/// Char-safe truncation");
     assert!(
         excerpt.contains("content[i + 1..].lines().count()"),
@@ -74,13 +74,30 @@ fn a_folded_turn_draws_an_excerpt_and_announces_what_it_hid() {
 }
 
 /// The transcript is redrawn on every keystroke, so what a turn costs to draw
-/// is the lag the owner feels. A folded turn must not draw its whole body.
+/// is the lag the owner feels. Working-out stays bounded, but an answer the
+/// fold keeps visible must reach the renderer whole (#2855).
 #[test]
-fn a_folded_turn_does_not_draw_its_whole_body() {
+fn a_folded_turn_bounds_working_out_without_cutting_the_answer() {
     let view = region("pub fn view(", "/// The owner's test feedback");
     assert!(
-        view.contains("block_view(block, content_width, &attachment_handlers, None, !folded)"),
-        "the persisted rows pass their own fold state, not a constant"
+        view.contains("let full_body = !folded"),
+        "expanded turns still draw every body in full"
+    );
+    assert!(
+        view.contains("role == \"assistant\""),
+        "the folded full-body exception is limited to assistant answers"
+    );
+    assert!(
+        view.contains("visible_when_folded(block, turn.final_idx, i)"),
+        "the final answer and deliverable reports use the same visibility decision as the fold"
+    );
+    assert!(
+        view.contains("Some(&selection),\n                            full_body,"),
+        "the selectable answer path receives the answer-aware fullness"
+    );
+    assert!(
+        view.contains("block_view(block, content_width, &attachment_handlers, None, full_body)"),
+        "the plain answer path receives the answer-aware fullness"
     );
     assert!(
         !view.contains("attachment_handlers, None)"),

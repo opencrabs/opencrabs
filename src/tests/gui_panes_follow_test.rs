@@ -125,3 +125,51 @@ fn markdown_is_parsed_once_per_source() {
         "no render path reaches the parser directly"
     );
 }
+
+/// Split panes passed no fold handlers, so their settled and live cards were
+/// painted with no click listener. Each leaf must mutate its own transcript,
+/// not the main chat's, and a copy-drag release must not toggle the card (#2855).
+#[test]
+fn a_pane_expands_its_own_settled_and_live_cards() {
+    let render = PANE_VIEW
+        .split("impl Render for PaneView {")
+        .nth(1)
+        .expect("the pane render implementation")
+        .split("/// Everything one leaf's frame draws")
+        .next()
+        .expect("the pane render ends before the leaf box");
+    for required in [
+        "for anchor in self.transcript.anchors()",
+        "this.transcript.toggle_turn(&key)",
+        "this.transcript.live_expanded = !this.transcript.live_expanded",
+        ".magnitude() > 2.0",
+    ] {
+        assert!(render.contains(required), "missing pane behavior: {required}");
+    }
+
+    let view = render
+        .split("let body = transcript::view(")
+        .nth(1)
+        .expect("the pane builds its transcript")
+        .split("// The topic strip")
+        .next()
+        .expect("the transcript call ends before the topic strip");
+    assert!(
+        view.contains("fold_handlers,"),
+        "settled cards receive the pane-local handlers"
+    );
+    assert!(
+        view.contains("live_click: Some(live_click),"),
+        "the live card receives its own click handler"
+    );
+    assert!(
+        !view.contains("HashMap::new(),"),
+        "an empty fold-handler map leaves every settled card inert"
+    );
+
+    let nav = include_str!("../gui/dashboard_nav.rs");
+    assert!(
+        nav.contains("self.chat_state.transcript.toggle_turn(anchor);"),
+        "the main chat and split panes share the same state transition"
+    );
+}
