@@ -117,14 +117,15 @@ A closed hit that already fixed the same defect means *reference it*, not *re-fi
 
 ### Mark core-surface changes
 
-A change that touches a core runtime surface — the agent loop, provider layer, channels, memory, config, migrations — is reviewed more carefully than docs or tooling. Mark it in the title so triage can route it:
+A change that touches a core runtime surface (the agent loop, provider layer, channels, memory, config, migrations) is reviewed more carefully than docs or tooling. That intent goes in the label, not in the title: the title keeps the plain `type(scope):` shape, with the area in the scope, and `core` when the surface is the core runtime itself.
 
 ```
-fix core(provider): tool-call arguments drop the final delta
-feat core(memory): expose vector index stats to /doctor
+fix(provider): tool-call arguments drop the final delta
+feat(memory): expose vector index stats to /doctor
+fix(core): the turn guard drops a callback queued mid-turn
 ```
 
-`fix core` and `feat core` are the two core prefixes; every other change uses the plain type.
+Add the area label on creation (`--label provider`) so triage can filter it. A space in the title head (`fix core(provider):`) is not a scope: the title check reads the type at the head, and there it finds `fix core(provider)` instead.
 
 ### Issue references in code
 

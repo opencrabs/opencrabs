@@ -68,7 +68,8 @@ EXEMPT_SUBJECTS = ("Merge ", "Revert ")
 
 # Title shape, shared by issues, PRs and commit subjects. A title that carries
 # a colon prefix must carry a real type in it: `TUI:`, `z.ai:`, `voice:` and
-# `fix core(scope):` are the documented ban, not a scope.
+# `fix core(scope):` all put something other than the type at the head, so none
+# of them is a scope.
 TITLE_HEAD = re.compile(r"^(?P<head>[^:]{1,60}):\s")
 VALID_TITLE_HEAD = re.compile(
     r"^(feat|fix|refactor|docs|test|tests|chore|perf|style|build|ci|revert"
