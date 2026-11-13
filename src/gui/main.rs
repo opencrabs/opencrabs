@@ -445,6 +445,10 @@ const FORWARD_PICKER_ROWS: usize = 6;
 /// A message actions menu never stays parked over history (#2862).
 const MSG_MENU_TTL: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// How long a row's copy icon shows a check before it goes back to the copy
+/// mark (#2750). Short enough to be a receipt, long enough to be seen.
+const COPIED_ICON_TTL: std::time::Duration = std::time::Duration::from_millis(1200);
+
 /// Only the timer belonging to the menu still on screen may close it.
 fn msg_menu_expiry_due(open: bool, current_generation: u64, timer_generation: u64) -> bool {
     open && current_generation == timer_generation
@@ -778,6 +782,12 @@ struct Dashboard {
     /// Which menu's expiry timer is current. Opening another menu invalidates
     /// the old timer, so it cannot close the new one early (#2862).
     msg_menu_generation: u64,
+    /// The row whose copy icon is showing its check (#2750). One at a time:
+    /// copying another row moves the mark rather than lighting two.
+    copied_row: Option<Uuid>,
+    /// Which copy's timer is current, the same generation rule the menu's
+    /// expiry follows (#2750).
+    copied_generation: u64,
     /// The row whose crab pack is open (#2825). One card at a time, so it
     /// closes the message menu that opened it.
     react_menu: Option<Uuid>,
@@ -2709,6 +2719,11 @@ impl Render for Dashboard {
             std::collections::HashMap::new();
         let mut message_press: std::collections::HashMap<Uuid, transcript::PressHandler> =
             std::collections::HashMap::new();
+        // The copy behind one answer's hover button (#2750). Only answers get
+        // one: the reader's own rows already carry a pencil, and two buttons in
+        // one corner would fight for the same pixel.
+        let mut message_copy: std::collections::HashMap<Uuid, transcript::ClickHandler> =
+            std::collections::HashMap::new();
         // The row itself goes with the press (#2827), so the menu's actions
         // read the message that was right-clicked rather than looking an id up
         // in whatever transcript happens to be on screen by then.
@@ -2730,6 +2745,14 @@ impl Render for Dashboard {
                     this.msg_toggle(id, ev.modifiers().shift, cx);
                 });
                 message_click.insert(id, std::rc::Rc::new(handler));
+            }
+            if row.role == "assistant" {
+                let content = row.content.clone();
+                let handler = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
+                    cx.stop_propagation();
+                    this.msg_copy_markdown(id, content.clone(), cx);
+                });
+                message_copy.insert(id, std::rc::Rc::new(handler));
             }
             let handler = cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
                 cx.stop_propagation();
@@ -2913,6 +2936,11 @@ impl Render for Dashboard {
                         // The field a rewrite draws in its own card (#2826),
                         // minted here because its two clicks are listeners.
                         edit_row: inline_edit,
+                        // The copy on an answer's hover (#2750) and the row
+                        // whose check is up, so a copy confirms itself without
+                        // moving the row.
+                        copy: message_copy.clone(),
+                        copied: self.copied_row(),
                     },
                 )
                 .into_any_element();
@@ -6085,6 +6113,8 @@ fn main() {
                         edit_row: None,
                         msg_menu_at: None,
                         msg_menu_generation: 0,
+                        copied_row: None,
+                        copied_generation: 0,
                         react_menu: None,
                         react_menu_at: None,
                         msg_select: Selection::new(),
@@ -9574,7 +9604,7 @@ mod tests {
             .nth(1)
             .and_then(|rest| rest.split("/// Toggle one row").next())
             .expect("message menu");
-        for action in ["CopyText", "React", "Reply", "Forward", "Select"] {
+        for action in ["CopyMarkdown", "React", "Reply", "Forward", "Select"] {
             assert!(
                 menu.contains(&format!("MessageAction::{action}.label()")),
                 "{action} is not offered"

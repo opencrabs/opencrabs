@@ -16,7 +16,7 @@ const TRANSCRIPT: &str = include_str!("../gui/transcript.rs");
 fn the_menu_offers_only_the_actions_this_version_wires() {
     assert_eq!(
         MessageAction::ALL.map(|action| action.label()),
-        ["Copy Text", "React", "Reply", "Forward", "Select"],
+        ["Copy as Markdown", "React", "Reply", "Forward", "Select"],
         "the menu is exactly the wired actions, in menu order"
     );
 
@@ -31,36 +31,47 @@ fn the_menu_offers_only_the_actions_this_version_wires() {
     }
 }
 
-/// Reply and Forward are the assistant's rows' actions (#2827). The owner's
-/// own history keeps the short menu: a message he already sent is not something
-/// he replies to or forwards from a right press.
+/// Reply and Forward read the row the press carried, on every row (#2827).
+///
+/// The earlier version of this test asserted a role gate, `let is_answer`,
+/// which #2827 removed when it offered the actions on the reader's own rows
+/// too. The gate went and the test stayed, so the suite read red against a
+/// feature that works: the contract is now that the menu reads the pressed row
+/// and never a role.
 #[test]
-fn reply_and_forward_hang_off_the_answer_rows_only() {
+fn reply_and_forward_read_the_pressed_row_on_every_row() {
     let menu = DASHBOARD
         .split("pub(crate) fn msg_menu_items(")
         .nth(1)
         .expect("one builder resolves the row menu")
-        .split("pub(crate) fn forward_destinations_for(")
+        // The next item in the impl: the menu ends where the pick toggle
+        // begins. The old anchor named a function that no longer exists, so
+        // the region ran to the end of the module and read code that is not
+        // the menu.
+        .split("/// Toggle one row")
         .next()
         .unwrap_or_default();
-    let gate = menu
-        .find("let is_answer")
-        .expect("the menu reads the row's own role");
     let reply = menu
         .find("MessageAction::Reply.label()")
-        .expect("an answer row offers Reply");
+        .expect("the menu offers Reply");
     let forward = menu
         .find("MessageAction::Forward.label()")
         .expect("and Forward");
-    assert!(gate < reply && gate < forward, "both sit behind the role check");
     assert!(
-        menu.contains(".is_some_and(|m| m.role != \"user\")"),
-        "the gate is the stored role, not a flag beside it"
+        reply < forward,
+        "Reply comes before Forward, the order Telegram shows"
     );
     assert!(
-        menu.contains("this.msg_reply_one(id, cx)")
-            && menu.contains("this.msg_forward_one(id, cx)"),
+        menu.contains("this.msg_reply_row(cx)") && menu.contains("this.msg_forward_row(cx)"),
         "each entry is wired to its own single-row path"
+    );
+    assert!(
+        menu.contains("self.msg_menu_row.clone()"),
+        "the actions read the row that was pressed"
+    );
+    assert!(
+        !menu.contains("row.role") && !menu.contains("let is_answer"),
+        "there is no role gate: an answer and the reader's own message share the menu"
     );
 }
 

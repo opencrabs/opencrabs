@@ -3787,6 +3787,8 @@ fn message_row(
     press: Option<&PressHandler>,
     picked: Option<bool>,
     edit: Option<&ClickHandler>,
+    copy: Option<&ClickHandler>,
+    copied: bool,
 ) -> Stateful<Div> {
     // The hover group a row's edit button answers to (#2826). One name per
     // row, or hovering any message would light up every button on screen.
@@ -3799,7 +3801,7 @@ fn message_row(
         .gap_1()
         .w_full()
         .rounded_sm();
-    if edit.is_some() {
+    if edit.is_some() || copy.is_some() {
         // The button is placed against the row's own box, so the row has to be
         // the containing block.
         row = row.relative().group(group.clone());
@@ -3863,12 +3865,49 @@ fn message_row(
                 .border_1()
                 .border_color(rgb(palette.text_faint))
                 .opacity(0.0)
-                .group_hover(group, |d| d.opacity(1.0))
+                .group_hover(group.clone(), |d| d.opacity(1.0))
                 .cursor_pointer()
                 // A pencil, not the word "Edit" (#2826). A label in a box was
                 // the placeholder, and the owner read it as one: every other
                 // affordance on this row is a picture, so this one is too.
                 .child(crate::icon::edit_icon(palette.text_muted, 0.8))
+                .on_click(move |ev, window, app| handler(ev, window, app)),
+        );
+    }
+    // An answer carries its copy on the same hover (#2750): one click puts the
+    // stored markdown on the clipboard, with no menu in the way. The glyph
+    // swaps to a check inside the same fixed box, so the confirmation costs
+    // the row no height.
+    if let Some(handler) = copy {
+        let handler = handler.clone();
+        let palette = palette::current();
+        row = row.child(
+            div()
+                .id(SharedString::from(format!("msg-copy-{id}")))
+                .absolute()
+                .bottom(px(8.0))
+                .right(px(10.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .w(rems(1.3))
+                .h(rems(1.3))
+                .rounded_sm()
+                .bg(rgb(palette.panel_hi))
+                .border_1()
+                .border_color(rgb(palette.text_faint))
+                .opacity(0.0)
+                .group_hover(group, |d| d.opacity(1.0))
+                .cursor_pointer()
+                .child(if copied {
+                    div()
+                        .text_size(rems(0.8))
+                        .text_color(rgb(palette.teal))
+                        .child(SharedString::from("\u{2713}"))
+                        .into_any_element()
+                } else {
+                    crate::icon::copy_icon(palette.text_muted, 0.8).into_any_element()
+                })
                 .on_click(move |ev, window, app| handler(ev, window, app)),
         );
     }
@@ -4269,6 +4308,14 @@ pub struct ViewHooks {
     /// the window's chat and every split leaf mint these now: a pane owns its
     /// rows, so it owns their pencils and opens the field in its own row.
     pub edit: HashMap<uuid::Uuid, ClickHandler>,
+    /// The copy behind one stored assistant row (#2750), keyed by message id.
+    /// One click puts that answer's stored markdown source on the clipboard,
+    /// with no menu in the way.
+    pub copy: HashMap<uuid::Uuid, ClickHandler>,
+    /// The row whose copy just landed, so its icon shows a check for a moment
+    /// (#2750). It swaps the glyph inside the same fixed box, so the row never
+    /// moves when the confirmation appears.
+    pub copied: Option<uuid::Uuid>,
     /// The row whose rewrite is open (#2826). Its message is replaced by a
     /// field and two buttons, in place, and the composer is not involved.
     pub edit_row: Option<InlineEditView>,
@@ -4299,6 +4346,8 @@ pub fn view(
         reaction_click,
         edit,
         edit_row,
+        copy,
+        copied,
     } = hooks;
     if let Some(d) = &drag {
         d.texts.borrow_mut().clear();
@@ -4501,6 +4550,15 @@ pub fn view(
                     } else {
                         None
                     };
+                    // Only an answer carries a copy (#2750): the reader's own
+                    // row is something he wrote, and a second way to copy it
+                    // beside the pencil would crowd a row that already has its
+                    // affordance.
+                    let copy_click = if role.as_str() == "assistant" {
+                        copy.get(id)
+                    } else {
+                        None
+                    };
                     let row = message_row(
                         *id,
                         // The rewrite happens inside the card (#2826): the row
@@ -4514,6 +4572,8 @@ pub fn view(
                         message_press.get(id),
                         picked,
                         edit_click,
+                        copy_click,
+                        copied == Some(*id),
                     )
                     .into_any_element();
                     let row = match (&drag, selectable, picked) {

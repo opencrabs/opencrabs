@@ -672,6 +672,7 @@ impl Dashboard {
     /// with rows picked this copies the whole selection in transcript order,
     /// and with nothing picked it copies the row the menu was opened on.
     pub(crate) fn msg_copy_row(&mut self, cx: &mut Context<Self>) {
+        let id = self.msg_menu_row.as_ref().map(|m| m.id);
         let texts: Vec<String> = if self.msg_select.is_empty() {
             self.msg_menu_row
                 .iter()
@@ -687,7 +688,47 @@ impl Dashboard {
         self.msg_menu = None;
         self.msg_menu_row = None;
         self.msg_menu_leaf = None;
+        // The row's own copy icon confirms the same copy (#2750): the menu and
+        // the button are two doors to one action, so both leave the same mark.
+        if let Some(id) = id {
+            self.mark_copied(id, cx);
+        }
         cx.notify();
+    }
+
+    /// Put one row's stored markdown on the clipboard and light its icon
+    /// (#2750). The content travels with the call because a split leaf's row
+    /// is not in the window's transcript, so an id alone could not find it.
+    pub(crate) fn msg_copy_markdown(&mut self, id: Uuid, content: String, cx: &mut Context<Self>) {
+        self.copy_texts(&[content], cx);
+        self.mark_copied(id, cx);
+    }
+
+    /// Show the check on one row's copy icon for a moment (#2750). The
+    /// generation is what stops an older timer from clearing a newer mark, the
+    /// same rule the message menu's expiry follows.
+    fn mark_copied(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        self.copied_row = Some(id);
+        self.copied_generation = self.copied_generation.wrapping_add(1);
+        let generation = self.copied_generation;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(COPIED_ICON_TTL).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.copied_generation == generation && this.copied_row.is_some() {
+                    this.copied_row = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// The row whose copy icon is showing a check (#2750). A split leaf reads
+    /// this from the window, because the mark is one per copy, not one per
+    /// pane.
+    pub(crate) fn copied_row(&self) -> Option<Uuid> {
+        self.copied_row
     }
 
     /// Join rows the way the drag selector joins them and put the result on the
@@ -718,8 +759,8 @@ impl Dashboard {
     ///
     /// The menu is the same on every row (#2827). A right press on the
     /// assistant's answer and one on the reader's own message both answer to
-    /// the same five picks, exactly as Telegram's menu does: Copy, React,
-    /// Reply, Forward, Select. There is no role gate, because quoting an
+    /// the same five picks, exactly as Telegram's menu does: Copy as Markdown,
+    /// React, Reply, Forward, Select. There is no role gate, because quoting an
     /// answer back, answering one's own message and sending either on are all
     /// things a reader does.
     pub(crate) fn msg_menu_items(
@@ -735,7 +776,10 @@ impl Dashboard {
             cx.stop_propagation();
             this.msg_copy_row(cx);
         });
-        items.push((MessageAction::CopyText.label().to_string(), Rc::new(copy)));
+        items.push((
+            MessageAction::CopyMarkdown.label().to_string(),
+            Rc::new(copy),
+        ));
         // React opens the pack at the same point the row menu opened at
         // (#2825): the menu it replaces is the thing that was clicked, so a
         // second placement rule would move the picker away from the pointer.

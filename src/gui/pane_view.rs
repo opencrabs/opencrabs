@@ -459,6 +459,27 @@ impl Render for PaneView {
                 (id, handler)
             })
             .collect();
+        // The copy on an answer's hover (#2750). The pane's rows are not in
+        // the window's transcript, so the content travels with the click and
+        // the mark lands on the window, which owns one copied row at a time.
+        let pane_copy: HashMap<uuid::Uuid, transcript::ClickHandler> = self
+            .transcript
+            .rows
+            .iter()
+            .filter(|m| m.role == "assistant")
+            .map(|m| {
+                let (id, content) = (m.id, m.content.clone());
+                let window = edit_window.clone();
+                let handler: transcript::ClickHandler = std::rc::Rc::new(
+                    move |_ev: &gpui::ClickEvent, _window: &mut Window, cx: &mut App| {
+                        let _ = window.update(cx, |this, cx| {
+                            this.msg_copy_markdown(id, content.clone(), cx);
+                        });
+                    },
+                );
+                (id, handler)
+            })
+            .collect();
         // One right-press handler per row, on every role (#2827): an answer
         // can be replied to, reacted to, copied or forwarded just as the
         // reader's own message can.
@@ -538,6 +559,9 @@ impl Render for PaneView {
                 cancel,
             }
         });
+        // The window owns the one copied row (#2750), so the leaf asks it
+        // rather than keeping a second mark of its own.
+        let copied = edit_window.read(cx).copied_row();
         let body = transcript::view(
             &self.transcript,
             &self.scroll,
@@ -563,6 +587,11 @@ impl Render for PaneView {
                 reactions: self.transcript.reactions.clone(),
                 // The pencil on its own user rows (#2826).
                 edit: pane_edit,
+                // The copy on its own answer rows (#2750), and the window's
+                // current mark so the check shows in the leaf that was
+                // clicked.
+                copy: pane_copy,
+                copied,
                 // A right press on any row of this leaf opens the same menu
                 // the window's chat opens (#2827). The row travels with the
                 // press, because the window's transcript does not hold this

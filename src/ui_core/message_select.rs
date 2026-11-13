@@ -127,7 +127,10 @@ pub fn span<K: PartialEq>(order: &[K], a: &K, b: &K) -> Option<(usize, usize)> {
 /// menu order; which of them a row shows is the caller's role check.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MessageAction {
-    CopyText,
+    /// Copy one answer's stored markdown source (#2750). The row menu names it
+    /// after the format it puts on the clipboard, so the reader knows the
+    /// headings and fences survive.
+    CopyMarkdown,
     /// Put one of the pack's crabs on the row (#2825).
     React,
     /// Quote one answer into the composer (#2827).
@@ -140,7 +143,7 @@ pub enum MessageAction {
 impl MessageAction {
     /// Every wired action, in menu order.
     pub const ALL: [MessageAction; 5] = [
-        MessageAction::CopyText,
+        MessageAction::CopyMarkdown,
         MessageAction::React,
         MessageAction::Reply,
         MessageAction::Forward,
@@ -150,7 +153,7 @@ impl MessageAction {
     /// The label the menu paints.
     pub fn label(self) -> &'static str {
         match self {
-            MessageAction::CopyText => "Copy Text",
+            MessageAction::CopyMarkdown => "Copy as Markdown",
             MessageAction::React => "React",
             MessageAction::Reply => "Reply",
             MessageAction::Forward => "Forward",
