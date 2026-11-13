@@ -244,6 +244,9 @@ pub fn start(spec: &TunnelSpec) -> Result<TunnelState> {
                 started_at: now_secs(),
             };
             save_state(&spec.state_dir, &state)?;
+            // Fresh stamp: a leftover one from an earlier tunnel would date
+            // this tunnel to a previous week and reap it on the first tick.
+            write_traffic_stamp(&spec.state_dir);
             tracing::info!(url = %state.url, pid, "quick tunnel up");
             Ok(state)
         }
@@ -297,7 +300,145 @@ pub fn stop(state_dir: &Path) -> Result<bool> {
     }
     reap(state.pid);
     let _ = std::fs::remove_file(state_path(state_dir));
+    let _ = std::fs::remove_file(traffic_stamp_path(state_dir));
     Ok(true)
+}
+
+// ---------------------------------------------------------------- idle reaper
+//
+// An idle tunnel is a public hostname somebody forgot about: `connect` starts
+// cloudflared and nothing ever stops it, so the URL stays reachable until the
+// machine reboots. This is the missing stop condition, and it is deliberately
+// NOT the `reap` function above: that one is a zombie `waitpid` for a child we
+// killed, with no notion of time or traffic, and reading its name is how this
+// feature came to look like it had already shipped.
+//
+// The signal is a stamp file touched by the gateway on every authenticated
+// request. A stamp that does not exist means "no traffic since start", so the
+// tunnel's own `started_at` is the baseline and a freshly connected tunnel is
+// never reaped on its first check.
+
+/// How long a quick tunnel may carry no traffic before it is stopped.
+///
+/// Long enough to survive a night without a disconnect, short enough that a
+/// tunnel nobody remembers is gone by the next working day.
+pub const IDLE_TIMEOUT_DEFAULT: Duration = Duration::from_secs(12 * 60 * 60);
+
+/// Reaper tick. One `stat` per tick, so the cost is noise, and ten minutes is
+/// two orders of magnitude below the idle window.
+pub const IDLE_CHECK_INTERVAL: Duration = Duration::from_secs(10 * 60);
+
+/// Floor between two stamp writes: traffic arrives per request, and the stamp
+/// only needs minute resolution.
+const TRAFFIC_STAMP_MIN_GAP: Duration = Duration::from_secs(60);
+
+static LAST_STAMP_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Whether enough time passed since the last stamp write. Pure so the throttle
+/// boundary is pinned by a test instead of by a sleep.
+pub(crate) fn stamp_due(now: u64, last: u64) -> bool {
+    now.saturating_sub(last) >= TRAFFIC_STAMP_MIN_GAP.as_secs()
+}
+
+/// `<state_dir>/tunnel.activity`
+pub(crate) fn traffic_stamp_path(state_dir: &Path) -> PathBuf {
+    state_dir.join("tunnel.activity")
+}
+
+pub(crate) fn write_traffic_stamp(state_dir: &Path) {
+    if let Err(e) = std::fs::create_dir_all(state_dir)
+        .and_then(|()| std::fs::write(traffic_stamp_path(state_dir), b""))
+    {
+        // Traffic accounting is best effort: a read-only state dir must never
+        // fail a gateway request.
+        tracing::debug!("tunnel activity stamp not written: {e}");
+    }
+}
+
+/// Record that the tunnel just carried traffic.
+///
+/// Cheap by design (the gateway calls it on every authenticated request) and
+/// throttled to one write a minute. The throttle is per process, and a process
+/// serves one tunnel, so a single global clock is the right scope.
+pub fn note_traffic(state_dir: &Path) {
+    let now = now_secs();
+    let last = LAST_STAMP_SECS.load(std::sync::atomic::Ordering::Relaxed);
+    if !stamp_due(now, last) {
+        return;
+    }
+    if LAST_STAMP_SECS
+        .compare_exchange(
+            last,
+            now,
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+        )
+        .is_err()
+    {
+        return;
+    }
+    write_traffic_stamp(state_dir);
+}
+
+/// When this tunnel last carried traffic, in unix seconds.
+///
+/// Falls back to the tunnel's `started_at` when no stamp exists: a tunnel that
+/// has never been used is not idle merely because nobody used it yet, and a
+/// fresh `connect` must not be reaped on the first tick.
+pub(crate) fn last_activity_secs(state_dir: &Path, state: &TunnelState) -> u64 {
+    match std::fs::metadata(traffic_stamp_path(state_dir)).and_then(|m| m.modified()) {
+        Ok(modified) => modified
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(state.started_at)
+            .max(state.started_at),
+        Err(_) => state.started_at,
+    }
+}
+
+/// Whether an activity reading is past the idle window. Split out so the
+/// boundary is testable without a filesystem or a clock.
+pub(crate) fn idle_expired(last_activity: u64, now: u64, timeout: Duration) -> bool {
+    now.saturating_sub(last_activity) >= timeout.as_secs()
+}
+
+/// Stop the recorded tunnel when it has been idle for `timeout`.
+///
+/// Returns the tunnel that was stopped, so the caller can report the URL. `Ok(None)`
+/// covers both "no tunnel running" and "tunnel has carried traffic recently",
+/// which are the same answer to the caller: nothing was reaped.
+pub fn reap_idle(state_dir: &Path, timeout: Duration) -> Result<Option<TunnelState>> {
+    let Some(state) = status(state_dir)? else {
+        return Ok(None);
+    };
+    let last = last_activity_secs(state_dir, &state);
+    if !idle_expired(last, now_secs(), timeout) {
+        return Ok(None);
+    }
+    tracing::info!(
+        url = %state.url,
+        pid = state.pid,
+        idle_secs = now_secs().saturating_sub(last),
+        "stopping idle quick tunnel (no traffic for the idle window)"
+    );
+    stop(state_dir)?;
+    Ok(Some(state))
+}
+
+/// Reap on `IDLE_CHECK_INTERVAL` until the process exits (#2537).
+///
+/// The gateway has no request stream to piggyback on: an idle tunnel produces
+/// no traffic precisely because it is idle, so the stop condition has to be a
+/// timer rather than a side effect of the next request.
+pub fn spawn_idle_reaper(state_dir: PathBuf) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(IDLE_CHECK_INTERVAL).await;
+            if let Err(e) = reap_idle(&state_dir, IDLE_TIMEOUT_DEFAULT) {
+                tracing::warn!("idle tunnel reaper: {e:#}");
+            }
+        }
+    });
 }
 
 /// Poll the log file until a trycloudflare URL appears or the deadline hits.

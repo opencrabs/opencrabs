@@ -1312,6 +1312,7 @@ pub mod tui_capture_test;
 pub mod tui_compact_notice_test;
 pub mod tui_render_panes_test;
 pub mod tui_tool_stack_test;
+pub mod tunnel_idle_reaper_test;
 pub mod turn_duration_test;
 pub mod turn_ranges_test;
 pub mod turn_retrieval_recording_test;

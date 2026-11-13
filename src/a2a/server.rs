@@ -265,6 +265,9 @@ pub async fn start_server(
         remote_state_dir: crate::remote::tunnel::default_state_dir(),
     };
 
+    // The reaper owns the same state dir the tunnel records into; capture it
+    // before the router takes ownership of `state` (#2537).
+    let reaper_dir = state.remote_state_dir.clone();
     let app = build_router(state, &config.allowed_origins);
     let addr: SocketAddr = match format!("{}:{}", config.bind, config.port).parse() {
         Ok(addr) => addr,
@@ -296,6 +299,11 @@ pub async fn start_server(
         let _ = tx.send(Ok(()));
     }
 
+    // A forgotten `connect` holds a public hostname until something stops it.
+    // Nothing else in the daemon has a reason to look at the tunnel again, so
+    // the stop condition is this timer (#2537).
+    crate::remote::tunnel::spawn_idle_reaper(reaper_dir);
+
     // ConnectInfo makes the socket peer available to the pairing rate
     // limiter, which trusts forwarded IP headers ONLY from loopback
     // peers (the local tunnel proxy) and keys everyone else by their
@@ -323,6 +331,11 @@ async fn handle_jsonrpc(
     Extension(granted): Extension<GrantedScopes>,
     Json(req): Json<JsonRpcRequest>,
 ) -> axum::response::Response {
+    // An authenticated call is the definition of "this tunnel is in use", and
+    // it is what keeps the idle reaper from stopping a tunnel somebody is
+    // talking to (#2537).
+    crate::remote::tunnel::note_traffic(&state.remote_state_dir);
+
     if req.jsonrpc != "2.0" {
         return (
             StatusCode::OK,
