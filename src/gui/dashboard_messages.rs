@@ -1245,14 +1245,6 @@ fn reply_label(rows: &[Message]) -> (String, String) {
     if rows.len() > 1 {
         return (author, format!("{} messages", rows.len()));
     }
-    let preview: String = row
-        .content
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("")
-        .chars()
-        .take(120)
-        .collect();
+    let preview = transcript::reply_preview(row);
     (author, preview)
 }

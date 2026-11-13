@@ -1927,6 +1927,34 @@ fn md_block(src: &str, selection: Option<&SelectionContext>) -> Div {
     out
 }
 
+/// One stored row as the human-readable text a reply quotes (#2868).
+///
+/// Reuse the transcript parser instead of reading raw storage: assistant rows
+/// keep reasoning and tool ledgers beside their answer, and those internal
+/// markers must not become the composer's preview or the reply's blockquote.
+fn reply_text(row: &Message) -> String {
+    row_blocks(row, None)
+        .into_iter()
+        .filter_map(|block| match block {
+            Block::Msg { content, .. } => Some(content),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// The first visible line of a reply, capped for the composer's chip (#2868).
+pub fn reply_preview(row: &Message) -> String {
+    reply_text(row)
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("")
+        .chars()
+        .take(120)
+        .collect()
+}
+
 /// The rows a reply quotes, as a blockquote the message text carries (#2827).
 ///
 /// The quote lives in the text itself rather than in a column of its own: it is
@@ -1935,7 +1963,11 @@ fn md_block(src: &str, selection: Option<&SelectionContext>) -> Div {
 pub fn quote_prefix(rows: &[Message]) -> String {
     let mut out = String::new();
     for row in rows {
-        for line in row.content.trim_end().split('\n') {
+        let text = reply_text(row);
+        if text.trim().is_empty() {
+            continue;
+        }
+        for line in text.trim_end().split('\n') {
             out.push_str("> ");
             out.push_str(line);
             out.push('\n');
@@ -5309,6 +5341,25 @@ mod tests {
             !calls[1].success,
             "a failed call must not render as success"
         );
+    }
+
+    #[test]
+    fn reply_quotes_the_visible_answer_without_storage_artifacts() {
+        let ledger = "\n<!-- tools-v2: [{\"d\":\"bash: cargo test\",\"s\":true}] -->\n";
+        let content = format!(
+            "<!-- reasoning -->\nI should check the parser.\n<!-- /reasoning -->\n{ledger}Talk to the crab..."
+        );
+        let answer = row("assistant", &content, 1);
+
+        assert_eq!(reply_text(&answer), "Talk to the crab...");
+        assert_eq!(reply_preview(&answer), "Talk to the crab...");
+        assert_eq!(
+            quote_prefix(std::slice::from_ref(&answer)),
+            "> Talk to the crab...\n"
+        );
+
+        let user = row("user", "<!-- reasoning --> is literal user text", 2);
+        assert_eq!(reply_text(&user), user.content);
     }
 
     #[test]
