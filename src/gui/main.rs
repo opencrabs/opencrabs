@@ -6291,7 +6291,15 @@ fn main() {
                             }
                             let falls_to_copy = weak
                                 .read_with(cx, |this, cx| {
-                                    let editor = this.composer.editor.read(cx);
+                                    // The selection that keeps its copy lives in
+                                    // the field the caret is on. A split draws a
+                                    // real editor per leaf, so the window's
+                                    // editor only answers for the chat leaf, and
+                                    // asking it meant a selection in a pane never
+                                    // copied and the quit ladder ran instead
+                                    // (#2885).
+                                    let composer = this.composer_entity(cx);
+                                    let editor = composer.read(cx);
                                     this.screen == Screen::Chat
                                         && editor.focus_handle.is_focused(window)
                                         && editor.has_selection()
