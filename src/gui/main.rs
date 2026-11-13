@@ -8914,11 +8914,15 @@ mod tests {
         let start = src
             .find("id(\"seeker-hint\")")
             .expect("the chat footer carries the Seeker hint");
-        let block = &src[start..];
+        let block = src
+            .get(start..)
+            .expect("find returns a char boundary, so the tail is sliceable");
         let end = block
             .find(".child(\"\u{b7} seek\")")
             .expect("the hint names what it opens");
-        let hint = &block[..end];
+        let hint = block
+            .get(..end)
+            .expect("find returns a char boundary, so the head is sliceable");
         assert!(
             hint.contains(".on_click(cx.listener("),
             "the hint must be a click target, not plain text"

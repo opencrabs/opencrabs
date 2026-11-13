@@ -3889,7 +3889,9 @@ mod tests {
         let (_, paint) = src
             .split_once("let caret_selection_empty")
             .expect("the caret state is read for the frame");
-        let paint = &paint[..paint.len().min(3000)];
+        // `get` so the window can end mid-character: the scan below is a
+        // substring check, so a short read is harmless and a panic is not.
+        let paint = paint.get(..3000).unwrap_or(paint);
         assert!(
             paint.contains("palette::current().accent"),
             "the accent token paints the caret"

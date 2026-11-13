@@ -2001,7 +2001,15 @@ fn split_quote(text: &str) -> (Vec<&str>, &str) {
         }
         rest += line.len();
     }
-    (quoted, text[rest..].trim_start_matches('\n'))
+    // `rest` sums the byte lengths of the lines `split_inclusive` just handed
+    // out, so it always lands on a char boundary. `get` states that without
+    // giving the compiler a range index to worry about.
+    (
+        quoted,
+        text.get(rest..)
+            .unwrap_or_default()
+            .trim_start_matches('\n'),
+    )
 }
 
 /// The quoted block above a reply (#2827): a bar down the left edge and the
