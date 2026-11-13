@@ -375,7 +375,86 @@ impl SessionRepository {
         Ok(())
     }
 
+    /// Fold every live topic of `parent` back into it and switch topics off
+    /// (#2863).
+    ///
+    /// A topic is a session of its own, so turning topics off has to answer
+    /// for the conversations already living there: each one's rows move to the
+    /// end of the parent's transcript, in topic order, roles untouched. Moving
+    /// rather than copying keeps one copy of every row, and appending at the
+    /// tail keeps a tool call next to its result instead of interleaving the
+    /// family by timestamp.
+    ///
+    /// The emptied topics are archived, never deleted: `usage_ledger` stays
+    /// with the session it was spent in, so cost history keeps its owner.
+    /// Returns how many topics were folded in.
+    pub async fn merge_topics_into_parent(&self, parent: Uuid) -> Result<usize> {
+        let parent_str = parent.to_string();
+        self.pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                let tx = conn.transaction()?;
+                let children: Vec<String> = {
+                    let mut stmt = tx.prepare(
+                        "SELECT id FROM sessions \
+                         WHERE parent_id = ?1 AND archived_at IS NULL \
+                         ORDER BY created_at ASC, id ASC",
+                    )?;
+                    let rows = stmt.query_map(params![parent_str], |r| r.get::<_, String>(0))?;
+                    rows.collect::<rusqlite::Result<Vec<_>>>()?
+                };
+                let merged = children.len();
+                for child in children {
+                    // Normalise as it moves: a topic's rows may carry gaps in
+                    // `sequence`, and the parent's tail is what decides where
+                    // they land. Subtracting the topic's own first value keeps
+                    // the appended block contiguous.
+                    let tail: i32 = tx
+                        .prepare_cached(
+                            "SELECT COALESCE(MAX(sequence), -1) FROM messages WHERE session_id = ?1",
+                        )?
+                        .query_row(params![parent_str], |r| r.get(0))?;
+                    let first: i32 = tx
+                        .prepare_cached(
+                            "SELECT COALESCE(MIN(sequence), 0) FROM messages WHERE session_id = ?1",
+                        )?
+                        .query_row(params![child], |r| r.get(0))?;
+                    tx.execute(
+                        "UPDATE messages SET session_id = ?1, sequence = sequence - ?2 + ?3 \
+                         WHERE session_id = ?4",
+                        params![parent_str, first, tail + 1, child],
+                    )?;
+                    tx.execute(
+                        "UPDATE files SET session_id = ?1 WHERE session_id = ?2",
+                        params![parent_str, child],
+                    )?;
+                    tx.execute(
+                        "UPDATE sessions SET archived_at = strftime('%s', 'now'), \
+                         parent_id = NULL, topics_enabled = 0 WHERE id = ?1",
+                        params![child],
+                    )?;
+                }
+                tx.execute(
+                    "UPDATE sessions SET topics_enabled = 0 WHERE id = ?1",
+                    params![parent_str],
+                )?;
+                tx.commit()?;
+                Ok::<usize, rusqlite::Error>(merged)
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to merge topics into their session")
+    }
+
     /// Every (topic, parent) pair, as ids. A topic is a session with a parent.
+    ///
+    /// Archived rows are left out, the same way [`family_of`] leaves them out:
+    /// a topic that was deleted or folded is not part of the family any more.
+    /// Keeping it here made its parent read as a parent forever, which hid it
+    /// from the group picker and counted ghosts in the disable dialog
+    /// (#2864, #2863).
     pub async fn topic_parents(&self) -> Result<Vec<(Uuid, Uuid)>> {
         self.pool
             .get()
@@ -970,6 +1049,11 @@ impl SessionRepository {
     /// Delete a session's messages but keep the session row for usage tracking.
     /// The session is archived (soft-deleted) so it no longer appears in the
     /// session list, while usage_ledger joins still resolve its metadata.
+    ///
+    /// When the deleted row was a topic and it was the last live one, the
+    /// parent's `topics_enabled` is cleared in the same transaction: a family
+    /// with no topics is not a family, and leaving the flag on drew a strip
+    /// whose only chip was `All` (#2863).
     pub async fn delete(&self, id: Uuid) -> Result<()> {
         let id_str = id.to_string();
         self.pool
@@ -977,17 +1061,43 @@ impl SessionRepository {
             .await
             .context("Failed to get connection")?
             .interact(move |conn| {
+                let tx = conn.transaction()?;
+                // Read the parent before the row is archived, so the flag
+                // check below still sees the family this row belonged to.
+                let parent: Option<String> = tx
+                    .query_row(
+                        "SELECT parent_id FROM sessions WHERE id = ?1",
+                        params![id_str],
+                        |r| r.get(0),
+                    )
+                    .optional()?
+                    .flatten();
                 // Remove heavy data (messages, files) but preserve the session row
-                conn.execute(
+                tx.execute(
                     "DELETE FROM messages WHERE session_id = ?1",
                     params![id_str],
                 )?;
-                conn.execute("DELETE FROM files WHERE session_id = ?1", params![id_str])?;
+                tx.execute("DELETE FROM files WHERE session_id = ?1", params![id_str])?;
                 // Mark as archived so it's hidden from the session list
-                conn.execute(
+                tx.execute(
                     "UPDATE sessions SET archived_at = strftime('%s', 'now') WHERE id = ?1",
                     params![id_str],
                 )?;
+                if let Some(parent_str) = parent {
+                    let live_kids: i64 = tx.query_row(
+                        "SELECT COUNT(*) FROM sessions \
+                         WHERE parent_id = ?1 AND archived_at IS NULL",
+                        params![parent_str],
+                        |r| r.get(0),
+                    )?;
+                    if live_kids == 0 {
+                        tx.execute(
+                            "UPDATE sessions SET topics_enabled = 0 WHERE id = ?1",
+                            params![parent_str],
+                        )?;
+                    }
+                }
+                tx.commit()?;
                 Ok::<_, rusqlite::Error>(())
             })
             .await
