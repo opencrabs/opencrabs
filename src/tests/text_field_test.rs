@@ -103,8 +103,8 @@ fn a_selection_splits_into_three_slices_on_char_boundaries() {
     field.move_caret_to(2);
     field.select_to(7);
     assert_eq!(field.render_spans(), ("hé", "llo w", "örld"));
-    assert_eq!(field.selection_bytes(), Some((3, 9)));
-    assert_eq!(field.caret_byte(), 9);
+    assert_eq!(field.selection_bytes(), Some((3, 8)));
+    assert_eq!(field.caret_byte(), 8);
     assert_eq!(field.selected_text(), Some("llo w"));
 }
 

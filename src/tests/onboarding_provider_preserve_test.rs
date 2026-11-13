@@ -70,14 +70,18 @@ fn a_run_that_went_through_the_provider_step_still_leaves_one_enabled() {
         crate::config::Config::write_key("providers.openrouter", "enabled", "true").unwrap();
         crate::config::Config::write_key("providers.anthropic", "enabled", "false").unwrap();
 
-        // Leaving ProviderAuth is what marks the run; the wizard default
-        // selection is Anthropic, so that is the one left on.
-        let w = OnboardingWizard {
+        // Leaving ProviderAuth is what marks the run, and the page this run
+        // configured had Anthropic selected, so that is the one left on.
+        let mut w = OnboardingWizard {
             step: OnboardingStep::Complete,
             quick_jump: true,
             provider_step_touched: true,
             ..OnboardingWizard::default()
         };
+        // The wizard opens on whichever provider the disk already has enabled,
+        // so name the page's selection instead of relying on that ladder.
+        w.ps.selected_provider = crate::tui::provider_selector::index_of_provider("anthropic")
+            .expect("anthropic is a known provider");
         w.apply_config().expect("apply succeeds");
 
         assert_eq!(
@@ -100,10 +104,12 @@ fn the_coming_sweep_is_visible_before_it_happens() {
         crate::config::Config::write_key("providers.openrouter", "enabled", "true").unwrap();
         crate::config::Config::write_key("providers.anthropic", "enabled", "false").unwrap();
 
-        let w = OnboardingWizard {
+        let mut w = OnboardingWizard {
             step: OnboardingStep::Complete,
             ..OnboardingWizard::default()
         };
+        w.ps.selected_provider = crate::tui::provider_selector::index_of_provider("anthropic")
+            .expect("anthropic is a known provider");
         let doomed = w.providers_to_be_disabled();
         assert_eq!(
             doomed,

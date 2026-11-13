@@ -367,9 +367,10 @@ fn the_readme_linux_one_liners_install_rtk() {
         checked += 1;
 
         assert!(
-            line.contains("mv opencrabs rtk /usr/local/bin/"),
-            "a Linux one-liner moves only opencrabs, so the rtk binary the \
-             archive ships is left behind in the working directory and the \
+            line.contains("mv opencrabs opencrabs-gui rtk /usr/local/bin/"),
+            "a Linux one-liner must move every binary the archive ships \
+             (opencrabs, opencrabs-gui and rtk) into /usr/local/bin, or the \
+             one it leaves out stays in the working directory and the \
              feature has to download itself again at runtime: {line}"
         );
     }

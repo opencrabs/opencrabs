@@ -6,7 +6,7 @@
 //! reads every source file in the module and fails on the first hit.
 
 /// Every source file in `ui_core`, with its contents.
-fn sources() -> [(&'static str, &'static str); 40] {
+fn sources() -> [(&'static str, &'static str); 41] {
     [
         ("ui_core/actions.rs", include_str!("../ui_core/actions.rs")),
         ("ui_core/bang.rs", include_str!("../ui_core/bang.rs")),
@@ -43,6 +43,7 @@ fn sources() -> [(&'static str, &'static str); 40] {
         ("ui_core/rail.rs", include_str!("../ui_core/rail.rs")),
         ("ui_core/rate.rs", include_str!("../ui_core/rate.rs")),
         ("ui_core/scroll.rs", include_str!("../ui_core/scroll.rs")),
+        ("ui_core/text_field.rs", include_str!("../ui_core/text_field.rs")),
         (
             "ui_core/session_preview.rs",
             include_str!("../ui_core/session_preview.rs"),

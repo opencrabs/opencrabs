@@ -34,6 +34,19 @@ fn read(dir: &std::path::Path, name: &str) -> String {
     fs::read_to_string(dir.join(name)).expect("read backup")
 }
 
+/// The save-burst window (#2265) counts a snapshot younger than five seconds
+/// as already covering the current burst, so a rotation test has to age the
+/// snapshot it wants rotated past first.
+fn age(path: &std::path::Path, secs: u64) {
+    let when = std::time::SystemTime::now() - std::time::Duration::from_secs(secs);
+    fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .expect("open backup")
+        .set_modified(when)
+        .expect("set mtime");
+}
+
 #[test]
 fn same_day_changed_content_rotates_to_timestamped_sibling() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -51,7 +64,10 @@ fn same_day_changed_content_rotates_to_timestamped_sibling() {
     assert_eq!(read(tmp.path(), &today_bak), "v1", "first snapshot wrong");
 
     // Caller writes v2, then calls daily_backup again pre-next-write:
-    // content differs from today's snapshot → must rotate, not skip.
+    // content differs from today's snapshot → must rotate, not skip. The
+    // snapshot is aged past the burst window so this is a second save, not a
+    // key later in the same one.
+    age(&tmp.path().join(&today_bak), 60);
     fs::write(&file, "v2").expect("write v2");
     daily_backup(&file, 7);
 
@@ -111,10 +127,15 @@ fn prune_counts_rotated_siblings_under_max_days() {
 
     // Seed an older history and a stale first snapshot (all with the real
     // stem: prune's prefix filter must see them as the same file's history).
-    for day in ["2026-09-04", "2026-09-03"] {
-        fs::write(tmp.path().join(format!("f.toml.{day}.bak")), "old").expect("seed");
+    for (day, age_days) in [("2026-09-04", 9u64), ("2026-09-03", 10u64)] {
+        let path = tmp.path().join(format!("f.toml.{day}.bak"));
+        fs::write(&path, "old").expect("seed");
+        age(&path, age_days * 86_400);
     }
-    fs::write(tmp.path().join(&today_bak), "v0").expect("seed today");
+    let today_path = tmp.path().join(&today_bak);
+    fs::write(&today_path, "v0").expect("seed today");
+    // Older than the save-burst window, so this write reaches the rotation.
+    age(&today_path, 60);
     fs::write(&file, "v1").expect("write v1");
 
     // Differs from today's snapshot → rotation path, then shared prune.

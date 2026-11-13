@@ -29,7 +29,12 @@ fn loaded_turn() -> StreamingState {
     s.msg_id = Some(mid(10));
     s.open_group_msg_id = Some(mid(11));
     s.intermediate_bubbles = vec![(mid(12), "first".to_string()), (mid(13), "second".to_string())];
-    s.media_intermediates = vec![(mid(14), "report".to_string())];
+    s.media_intermediates = vec![
+        (mid(14), "report".to_string()),
+        (mid(16), "screenshot".to_string()),
+    ];
+    // 14 is the bubble the report landed in, so deleting it would take the
+    // only chat copy of the file with it.
     s.delivered_files = vec![delivered(14)];
     s.voice_msg_ids = vec![mid(15)];
     s
@@ -42,7 +47,11 @@ fn covers_every_bubble_the_turn_is_showing() {
         .into_iter()
         .map(|id| id.0)
         .collect();
-    assert_eq!(ids, vec![10, 11, 12, 13, 14]);
+    assert_eq!(
+        ids,
+        vec![10, 11, 12, 13, 16],
+        "14 and 15 are the only chat copy of the report and the voice note"
+    );
 }
 
 #[test]
