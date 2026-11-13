@@ -1050,14 +1050,15 @@ impl App {
             for (program, args) in unix_text_backends() {
                 let mut cmd = Command::new(*program);
                 cmd.args(*args);
-                if let super::clipboard_exec::Capture::Finished {
+                let super::clipboard_exec::Capture::Finished {
                     success: true,
                     stdout,
                 } = super::clipboard_exec::capture(cmd, super::clipboard_exec::TEXT_READ)
-                {
-                    if let Some(text) = super::clipboard_exec::text_from_clipboard_bytes(&stdout) {
-                        return Some(text);
-                    }
+                else {
+                    continue;
+                };
+                if let Some(text) = super::clipboard_exec::text_from_clipboard_bytes(&stdout) {
+                    return Some(text);
                 }
             }
             return None;
