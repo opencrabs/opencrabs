@@ -113,29 +113,37 @@ pub fn span<K: PartialEq>(order: &[K], a: &K, b: &K) -> Option<(usize, usize)> {
 
 /// The actions the message menu wires, in the order it shows them (#2613).
 ///
-/// The type is the contract, not a label list: `Reply`, `Pin`, `Translate`,
-/// `Delete` and `Copy Message Link` each need state or a path that does not
-/// exist yet, and this repo never ships a dead menu entry. A caller that
-/// builds the menu by iterating [`MessageAction::ALL`] cannot offer an item
-/// the app cannot carry out, because there is no variant for it to reach for.
+/// The type is the contract, not a label list: `Pin`, `Translate`, `Delete`
+/// and `Copy Message Link` each need state or a path that does not exist yet,
+/// and this repo never ships a dead menu entry. A caller that builds the menu
+/// by iterating [`MessageAction::ALL`] cannot offer an item the app cannot
+/// carry out, because there is no variant for it to reach for.
 ///
-/// `Forward` was here and is gone on the owner's instruction: a right press on
-/// a history row is not how he wants to send a past message somewhere else
-/// (#2827). Bulk forward from the selection bar is untouched, because that is
-/// a deliberate flow he opened rather than a menu entry next to Copy.
+/// The menu is not the same on every row (#2827). `Reply` and `Forward` belong
+/// to the assistant's rows: quoting an answer back or sending it on is what a
+/// reader does with it. The owner's own rows keep the shorter menu, because a
+/// right press on a message he already sent should not offer to reply to it or
+/// send it somewhere else. [`MessageAction::ALL`] is the union of both, in
+/// menu order; which of them a row shows is the caller's role check.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MessageAction {
     CopyText,
     /// Put one of the pack's crabs on the row (#2825).
     React,
+    /// Quote one answer into the composer (#2827).
+    Reply,
+    /// Send one answer to another session (#2827).
+    Forward,
     Select,
 }
 
 impl MessageAction {
     /// Every wired action, in menu order.
-    pub const ALL: [MessageAction; 3] = [
+    pub const ALL: [MessageAction; 5] = [
         MessageAction::CopyText,
         MessageAction::React,
+        MessageAction::Reply,
+        MessageAction::Forward,
         MessageAction::Select,
     ];
 
@@ -144,6 +152,8 @@ impl MessageAction {
         match self {
             MessageAction::CopyText => "Copy Text",
             MessageAction::React => "React",
+            MessageAction::Reply => "Reply",
+            MessageAction::Forward => "Forward",
             MessageAction::Select => "Select",
         }
     }

@@ -541,6 +541,12 @@ impl Dashboard {
     /// The items a row's menu shows (#2613), resolved once per frame. Only
     /// the actions that work end to end are listed: a menu entry with nothing
     /// behind it is worse than an absent one.
+    ///
+    /// The answer rows carry two more (#2827). A reader who right-presses what
+    /// the assistant said wants to quote it back or send it on; the owner's own
+    /// rows do not, because a message he already sent is not something he needs
+    /// to reply to or forward from history. That is the whole difference, and
+    /// it is read from the row's own role rather than from a flag beside it.
     pub(crate) fn msg_menu_items(
         &self,
         id: Uuid,
@@ -560,15 +566,60 @@ impl Dashboard {
             this.msg_react_open(id, cx);
         });
         items.push((MessageAction::React.label().to_string(), Rc::new(react)));
-        // No Forward here on purpose (#2827). The owner does not want a right
-        // press on a history row to send that row somewhere else; bulk forward
-        // still lives in the selection bar, which is a flow he opens himself.
+        // An answer is the row these two are for (#2827): a right press on the
+        // user's own history does not offer to reply to it or forward it, which
+        // is the shorter menu he asked for. The role comes from the stored row,
+        // so a row that has no role (a live block) never reaches this builder.
+        let is_answer = self
+            .chat_state
+            .transcript
+            .rows
+            .iter()
+            .find(|m| m.id == id)
+            .is_some_and(|m| m.role != "user");
+        if is_answer {
+            let reply = cx.listener(move |this, _ev, _window, cx| {
+                cx.stop_propagation();
+                this.msg_reply_one(id, cx);
+            });
+            items.push((MessageAction::Reply.label().to_string(), Rc::new(reply)));
+            // Forward needs somewhere to go: with no other session on the rail
+            // the item would open an empty picker, so it is left out instead.
+            if !self.forward_destinations_for(id).is_empty() {
+                let forward = cx.listener(move |this, _ev, _window, cx| {
+                    cx.stop_propagation();
+                    this.msg_forward_one(id, cx);
+                });
+                items.push((MessageAction::Forward.label().to_string(), Rc::new(forward)));
+            }
+        }
         let select = cx.listener(move |this, _ev, _window, cx| {
             cx.stop_propagation();
             this.msg_select_row(id, cx);
         });
         items.push((MessageAction::Select.label().to_string(), Rc::new(select)));
         items
+    }
+
+    /// Whether a forward of `id` has a destination at all (#2608). The menu
+    /// asks before offering Forward, and it asks about the row's own session,
+    /// not about whatever pick happens to be open.
+    pub(crate) fn forward_destinations_for(&self, id: Uuid) -> Vec<(Uuid, String)> {
+        let Some(source) = self
+            .chat_state
+            .transcript
+            .rows
+            .iter()
+            .find(|m| m.id == id)
+            .map(|m| m.session_id)
+        else {
+            return Vec::new();
+        };
+        self.sessions
+            .ordered()
+            .filter(|s| s.id != source && !self.sessions.is_closed(s.id))
+            .map(|s| (s.id, self.session_label(s.id)))
+            .collect()
     }
 
     /// Toggle one row in select mode (#2613). A shift-click extends from the
@@ -604,15 +655,16 @@ impl Dashboard {
         cx.notify();
     }
 
-    /// Quote the picked rows into the composer (#2827).
+    /// Quote `rows` into the composer (#2827). The bar quotes the picks and a
+    /// row's menu quotes the one answer it was opened on; both land here so the
+    /// text, the caret and the log line cannot drift apart.
     ///
     /// The quote is written into the field rather than held in a slot beside
     /// it: the reply is text the user can see, edit and send, so what the model
     /// receives is exactly what was on screen. Whatever the field already held
     /// keeps its place under the quote, because a reply is an addition to that
     /// message and not a replacement for it.
-    pub(crate) fn msg_reply_begin(&mut self, cx: &mut Context<Self>) {
-        let rows = self.msg_picked_rows();
+    fn reply_rows(&mut self, rows: Vec<Message>, cx: &mut Context<Self>) {
         if rows.is_empty() {
             return;
         }
@@ -625,13 +677,39 @@ impl Dashboard {
             format!("{quote}\n{}", existing.text)
         };
         editor.update(cx, |editor, cx| editor.restore_draft(text, cx));
-        self.msg_select.cancel();
         self.msg_menu = None;
         // The caret goes to the field being written: the user asked to reply,
         // so the next keystroke is the reply.
         self.refocus_screen();
         logging::info(&format!("reply quoting {} row(s)", rows.len()));
         cx.notify();
+    }
+
+    /// Quote the picked rows into the composer (#2827): the selection bar's
+    /// Reply, which spends the picks once they are quoted.
+    pub(crate) fn msg_reply_begin(&mut self, cx: &mut Context<Self>) {
+        let rows = self.msg_picked_rows();
+        if rows.is_empty() {
+            return;
+        }
+        self.msg_select.cancel();
+        self.reply_rows(rows, cx);
+    }
+
+    /// Quote one answer into the composer (#2827): the row menu's Reply, which
+    /// is only offered on the assistant's rows. Select mode is left alone here,
+    /// because this press came from the menu and not from a pick the bar is
+    /// counting.
+    pub(crate) fn msg_reply_one(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        let rows: Vec<Message> = self
+            .chat_state
+            .transcript
+            .rows
+            .iter()
+            .filter(|m| m.id == id)
+            .cloned()
+            .collect();
+        self.reply_rows(rows, cx);
     }
 
     /// The rows the current picks stand for, in transcript order (#2608).
@@ -651,6 +729,24 @@ impl Dashboard {
                     .cloned()
             })
             .collect()
+    }
+
+    /// "Forward" on a single answer: pick it and go straight to the
+    /// destination picker, so one message does not need select mode first
+    /// (#2613). The row menu offers this only on the assistant's rows (#2827).
+    pub(crate) fn msg_forward_one(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        // A single-row forward never enters select mode: there is nothing to
+        // count, so the bar would be a step with one option.
+        let rows: Vec<Message> = self
+            .chat_state
+            .transcript
+            .rows
+            .iter()
+            .filter(|m| m.id == id)
+            .cloned()
+            .collect();
+        self.msg_menu = None;
+        self.forward_open(rows, cx);
     }
 
     /// Forward the picks: open the destination picker, or say why it cannot

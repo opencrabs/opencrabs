@@ -16,26 +16,52 @@ const TRANSCRIPT: &str = include_str!("../gui/transcript.rs");
 fn the_menu_offers_only_the_actions_this_version_wires() {
     assert_eq!(
         MessageAction::ALL.map(|action| action.label()),
-        ["Copy Text", "React", "Select"],
+        ["Copy Text", "React", "Reply", "Forward", "Select"],
         "the menu is exactly the wired actions, in menu order"
     );
 
     // Out of scope on purpose (#2613): `messages` has no `reply_to` and no pin
     // column, translation needs a provider, delete needs its own confirmation
     // path, and a message link does not apply to a local transcript.
-    for absent in [
-        "Reply",
-        "Pin",
-        "Translate",
-        "Delete",
-        "Copy Message Link",
-        "Report",
-    ] {
+    for absent in ["Pin", "Translate", "Delete", "Copy Message Link", "Report"] {
         assert!(
             !DASHBOARD.contains(&format!("\"{absent}\".to_string()")),
             "{absent} has no path yet, so it is not offered as a dead entry"
         );
     }
+}
+
+/// Reply and Forward are the assistant's rows' actions (#2827). The owner's
+/// own history keeps the short menu: a message he already sent is not something
+/// he replies to or forwards from a right press.
+#[test]
+fn reply_and_forward_hang_off_the_answer_rows_only() {
+    let menu = DASHBOARD
+        .split("pub(crate) fn msg_menu_items(")
+        .nth(1)
+        .expect("one builder resolves the row menu")
+        .split("pub(crate) fn forward_destinations_for(")
+        .next()
+        .unwrap_or_default();
+    let gate = menu
+        .find("let is_answer")
+        .expect("the menu reads the row's own role");
+    let reply = menu
+        .find("MessageAction::Reply.label()")
+        .expect("an answer row offers Reply");
+    let forward = menu
+        .find("MessageAction::Forward.label()")
+        .expect("and Forward");
+    assert!(gate < reply && gate < forward, "both sit behind the role check");
+    assert!(
+        menu.contains(".is_some_and(|m| m.role != \"user\")"),
+        "the gate is the stored role, not a flag beside it"
+    );
+    assert!(
+        menu.contains("this.msg_reply_one(id, cx)")
+            && menu.contains("this.msg_forward_one(id, cx)"),
+        "each entry is wired to its own single-row path"
+    );
 }
 
 /// Only a stored `Message` row can be picked. Tool output, system notices,

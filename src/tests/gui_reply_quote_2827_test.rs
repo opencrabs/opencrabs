@@ -16,9 +16,9 @@ const TRANSCRIPT: &str = include_str!("../gui/transcript.rs");
 #[test]
 fn the_quote_goes_into_the_composer_as_text() {
     let reply = DASHBOARD
-        .split("pub(crate) fn msg_reply_begin(")
+        .split("fn reply_rows(")
         .nth(1)
-        .expect("the bar's Reply has one entry point")
+        .expect("both Reply entry points quote through one function")
         .split("/// The rows the current picks stand for")
         .next()
         .unwrap_or_default();
