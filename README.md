@@ -716,7 +716,7 @@ Prefer windows and buttons over the TUI? [MonoCode](https://github.com/hardbeat9
 
 ### Built-in GUI
 
-`cargo build --features gui --bin opencrabs-gui` builds the native desktop app over the same sessions, providers and SQLite store as the TUI. A turn in flight draws the same shape Telegram does: one card with a collapsed header, the tool rows interleaved with the narration as it arrives, and a footer that carries the metrics, the context budget included, once the turn settles. `ctrl+o` or a click on the card folds it, and it folds the live card rather than a settled turn while one is running. Long `bash` commands run as detached tasks instead of blocking the turn: each running task shows as a `⏳` strip above the input with its elapsed seconds, its tool row carries the task id, and the row settles with the total elapsed time when the task ends. A finished task resumes the session with its output, queued as a system message when a turn is still running, so a 20 minute command neither holds the editor hostage nor collapses into a 600s timeout.
+`cargo build --features gui --bin opencrabs-gui` builds the native desktop client over the same sessions, providers and SQLite store as the TUI. Release archives ship it since v0.6.0 as `opencrabs-gui` beside the terminal client, with a launcher of its own on Linux and a second bundle on macOS (see [What each archive carries](#what-each-archive-carries)). A turn in flight draws the same shape Telegram does: one card with a collapsed header, the tool rows interleaved with the narration as it arrives, and a footer that carries the metrics, the context budget included, once the turn settles. `ctrl+o` or a click on the card folds it, and it folds the live card rather than a settled turn while one is running. Long `bash` commands run as detached tasks instead of blocking the turn: each running task shows as a `⏳` strip above the input with its elapsed seconds, its tool row carries the task id, and the row settles with the total elapsed time when the task ends. A finished task resumes the session with its output, queued as a system message when a turn is still running, so a 20 minute command neither holds the editor hostage nor collapses into a 600s timeout.
 
 A launch opens the conversation you were last in, on both surfaces, because the GUI and the terminal read and write the same `last_session` pointer. A first run, or a pointer at a conversation that has since been deleted, falls back to the newest session on the rail.
 
@@ -2248,11 +2248,11 @@ curl -fsSL https://raw.githubusercontent.com/opencrabs/opencrabs/main/src/script
 Grab a pre-built binary from [GitHub Releases](https://github.com/opencrabs/opencrabs/releases) — available for Linux (amd64/arm64), macOS (amd64/arm64), and Windows.
 
 ```bash
-# macOS (Apple Silicon) — installs OpenCrabs.app (with its icon) and links the CLI
-curl -sL "$(curl -s https://api.github.com/repos/opencrabs/opencrabs/releases/latest | sed -n 's/.*"\(https:\/\/[^"]*macos-arm64\.tar\.gz\)".*/\1/p')" | tar xz && sudo cp -R OpenCrabs.app /Applications/ && sudo mkdir -p /usr/local/bin && sudo ln -sf /Applications/OpenCrabs.app/Contents/MacOS/opencrabs /usr/local/bin/opencrabs && command -v opencrabs
+# macOS (Apple Silicon): installs both bundles and links the CLI
+curl -sL "$(curl -s https://api.github.com/repos/opencrabs/opencrabs/releases/latest | sed -n 's/.*"\(https:\/\/[^"]*macos-arm64\.tar\.gz\)".*/\1/p')" | tar xz && sudo cp -R OpenCrabs.app /Applications/ && sudo cp -R "OpenCrabs Desktop.app" /Applications/ && sudo mkdir -p /usr/local/bin && sudo ln -sf /Applications/OpenCrabs.app/Contents/MacOS/opencrabs /usr/local/bin/opencrabs && command -v opencrabs
 
-# macOS (Intel)
-curl -sL "$(curl -s https://api.github.com/repos/opencrabs/opencrabs/releases/latest | sed -n 's/.*"\(https:\/\/[^"]*macos-amd64\.tar\.gz\)".*/\1/p')" | tar xz && sudo cp -R OpenCrabs.app /Applications/ && sudo mkdir -p /usr/local/bin && sudo ln -sf /Applications/OpenCrabs.app/Contents/MacOS/opencrabs /usr/local/bin/opencrabs && command -v opencrabs
+# macOS (Intel): the same, for x86_64
+curl -sL "$(curl -s https://api.github.com/repos/opencrabs/opencrabs/releases/latest | sed -n 's/.*"\(https:\/\/[^"]*macos-amd64\.tar\.gz\)".*/\1/p')" | tar xz && sudo cp -R OpenCrabs.app /Applications/ && sudo cp -R "OpenCrabs Desktop.app" /Applications/ && sudo mkdir -p /usr/local/bin && sudo ln -sf /Applications/OpenCrabs.app/Contents/MacOS/opencrabs /usr/local/bin/opencrabs && command -v opencrabs
 ```
 
 ```powershell
@@ -2270,13 +2270,25 @@ The Windows script installs every file the release archive ships, which is `open
 
 ```bash
 # Linux (x86_64) — binary plus a desktop entry and icon
-curl -sL "$(curl -s https://api.github.com/repos/opencrabs/opencrabs/releases/latest | sed -n 's/.*"\(https:\/\/[^"]*linux-amd64\.tar\.gz\)".*/\1/p')" | tar xz && chmod +x opencrabs opencrabs-gui && sudo mkdir -p /usr/local/bin && sudo mv opencrabs opencrabs-gui rtk /usr/local/bin/ && install -Dm644 opencrabs.desktop ~/.local/share/applications/opencrabs.desktop && install -Dm644 opencrabs.png ~/.local/share/icons/hicolor/256x256/apps/opencrabs.png && command -v opencrabs
+curl -sL "$(curl -s https://api.github.com/repos/opencrabs/opencrabs/releases/latest | sed -n 's/.*"\(https:\/\/[^"]*linux-amd64\.tar\.gz\)".*/\1/p')" | tar xz && chmod +x opencrabs opencrabs-gui && sudo mkdir -p /usr/local/bin && sudo mv opencrabs opencrabs-gui rtk /usr/local/bin/ && install -Dm644 opencrabs.desktop ~/.local/share/applications/opencrabs.desktop && install -Dm644 opencrabs-gui.desktop ~/.local/share/applications/opencrabs-gui.desktop && install -Dm644 opencrabs.png ~/.local/share/icons/hicolor/256x256/apps/opencrabs.png && command -v opencrabs
 
 # Linux (ARM64)
-curl -sL "$(curl -s https://api.github.com/repos/opencrabs/opencrabs/releases/latest | sed -n 's/.*"\(https:\/\/[^"]*linux-arm64\.tar\.gz\)".*/\1/p')" | tar xz && chmod +x opencrabs opencrabs-gui && sudo mkdir -p /usr/local/bin && sudo mv opencrabs opencrabs-gui rtk /usr/local/bin/ && install -Dm644 opencrabs.desktop ~/.local/share/applications/opencrabs.desktop && install -Dm644 opencrabs.png ~/.local/share/icons/hicolor/256x256/apps/opencrabs.png && command -v opencrabs
+curl -sL "$(curl -s https://api.github.com/repos/opencrabs/opencrabs/releases/latest | sed -n 's/.*"\(https:\/\/[^"]*linux-arm64\.tar\.gz\)".*/\1/p')" | tar xz && chmod +x opencrabs opencrabs-gui && sudo mkdir -p /usr/local/bin && sudo mv opencrabs opencrabs-gui rtk /usr/local/bin/ && install -Dm644 opencrabs.desktop ~/.local/share/applications/opencrabs.desktop && install -Dm644 opencrabs-gui.desktop ~/.local/share/applications/opencrabs-gui.desktop && install -Dm644 opencrabs.png ~/.local/share/icons/hicolor/256x256/apps/opencrabs.png && command -v opencrabs
 ```
 
 The macOS archive ships `OpenCrabs.app`, not a loose binary: macOS reads an app icon only from a bundle, so a bare Mach-O shows the generic exec glyph in Finder. Copying the bundle to `/Applications` gives you the Finder and Launchpad entry with the real icon, and the symlink keeps `opencrabs` on your PATH. The TUI also gives its own process a Dock tile holding the crab at startup, so the icon is there whether you launch the bundle or run `opencrabs` straight from a terminal. Set `OPENCRABS_NO_DOCK_ICON=1` if you would rather not have a Dock tile, or point `OPENCRABS_DOCK_ICON` at your own `.icns`. The Linux archive carries `opencrabs.desktop` and `opencrabs.png` for the same reason, so your application menu has an entry with the real icon instead of a nameless terminal.
+
+#### What each archive carries
+
+Every archive ships both clients, `opencrabs` (the terminal client, which is also the CLI, the daemon and the ACP server) and `opencrabs-gui` (the desktop window), plus `rtk`. Until v0.6.0 the archives did not carry the window: the v0.5.15 linux tarball lists only `opencrabs`, `rtk`, `opencrabs.desktop` and `opencrabs.png`, so the release built the desktop client on every target and then packed it nowhere.
+
+| Archive | Files | What the window needs on top | What a server needs |
+|---|---|---|---|
+| Linux amd64 / arm64 | `opencrabs`, `opencrabs-gui`, `rtk`, `opencrabs.desktop`, `opencrabs-gui.desktop`, `opencrabs.png` | a running display (X11 or Wayland) and a Vulkan driver: `mesa-vulkan-drivers` for Intel and AMD, or the vendor driver on NVIDIA. With no Vulkan driver at all there is no renderer | the runtime libraries listed below and nothing else. The terminal client and the daemon link no display library and no Vulkan library, so never install a driver or display packages on a VPS |
+| macOS amd64 / arm64 | `OpenCrabs.app`, `OpenCrabs Desktop.app`, `opencrabs` and `opencrabs-gui` at the archive root, hard linked to the bundle copies | nothing. `otool -L` on the desktop client lists system frameworks only: AppKit, Metal, CoreText, CoreGraphics, QuartzCore and friends, with no third party dylib | the same archive. Launch `OpenCrabs.app/Contents/MacOS/opencrabs` over ssh |
+| Windows amd64 | `opencrabs.exe`, `opencrabs-gui.exe`, `rtk.exe`, `msvcp140.dll`, `vcruntime140.dll`, `vcruntime140_1.dll`, `vcomp140.dll` | the four DLLs above, which the archive already carries, so keep them beside both exes | the same archive |
+
+The two clients share one profile, one SQLite database and one `last_session` pointer, so a session started in the terminal is the session the window opens, and the channels keep answering whichever surface owns the profile.
 
 Then just type `opencrabs` to start. The onboarding wizard handles everything on first run.
 
@@ -2293,13 +2305,13 @@ Then just type `opencrabs` to start. The onboarding wizard handles everything on
 > **Linux runtime dependencies:** The pre-built binary links against system libraries that may not be installed on minimal/VPS images:
 > ```bash
 > # Debian/Ubuntu
-> sudo apt-get install libgomp1 libasound2t64
+> sudo apt-get install libgomp1 libssl3t64
 > # Fedora/RHEL
-> sudo dnf install libgomp alsa-lib
+> sudo dnf install libgomp openssl-libs
 > # Arch
-> sudo pacman -S gcc-libs alsa-lib
+> sudo pacman -S gcc-libs openssl
 > ```
-> `libgomp1` is required for the binary to start at all: it is a hard link-time dependency of the local embedding engine (`llama-cpp-2`), and without it every command fails with `error while loading shared libraries: libgomp.so.1`. `libasound2t64` is a hard dependency as well: the completion chime opens an audio output stream, so `libasound.so.2` is in the binary's NEEDED list and the loader refuses to start without it (`error while loading shared libraries: libasound.so.2`). On Ubuntu 24.04 and newer the audio package is `libasound2t64`: `libasound2` is a virtual package there, so `apt-get install libasound2` aborts the whole command and installs nothing, not even `libgomp1`. macOS binaries have no extra prerequisites. The Windows zip carries its four MSVC runtime DLLs beside the exes, so it needs no vc_redist install either, provided you keep the archive layout.
+> `libgomp1` is required for the binary to start at all: it is a hard link-time dependency of the local embedding engine (`llama-cpp-2`), and without it every command fails with `error while loading shared libraries: libgomp.so.1`. OpenSSL 3 is a hard dependency as well: `libssl.so.3` and `libcrypto.so.3` are in the shipped binary's `NEEDED` list (checked with `objdump -p` on the linux-amd64 archive), which Ubuntu 24.04 and newer package as `libssl3t64`. ALSA is not: `libasound.so.2` does not appear in that list, so `apt-get install libasound2` is not needed and the virtual-package trap there no longer applies. macOS binaries have no extra prerequisites. The Windows zip carries its four MSVC runtime DLLs beside the exes, so it needs no vc_redist install either, provided you keep the archive layout.
 >
 > **Local TTS (Piper) additionally requires Python 3 with the `venv` module:**
 > ```bash
