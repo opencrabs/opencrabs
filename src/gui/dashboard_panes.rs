@@ -132,11 +132,31 @@ impl Dashboard {
             .or_else(|| leaves.last().copied())
     }
 
-    /// Point recall at the composer that has the caret. A recall keeps the
-    /// session it took its messages from, so moving the caret cannot land an
-    /// edit in another pane's queue (#2629/#2637).
-    pub(crate) fn sync_composer_session(&mut self) {
-        agent_bridge::set_composer_session(self.focused_pane());
+    /// Point every composer at the conversation it draws (#2629, #2637, #2909).
+    ///
+    /// A recall reads the queue of the session its own field belongs to, so the
+    /// binding follows the leaf and nothing else. It used to be one
+    /// process-wide "composer session" that this method rewrote from the
+    /// focused leaf, which is what let a recall in one pane take another
+    /// conversation's queued messages: the caret, a closed pane, or a session
+    /// switch could leave that global naming a different chat from the field
+    /// the user was typing in.
+    ///
+    /// The chat composer follows the open conversation; each split pane's
+    /// composer keeps the session it was built for, and a pane whose leaf moved
+    /// gets its new id here because the same entity outlives the move.
+    pub(crate) fn sync_composer_session(&mut self, cx: &mut Context<Self>) {
+        let chat = self.chat_session;
+        self.composer
+            .editor
+            .update(cx, |editor, _| editor.set_session(chat));
+        for (session, pane) in self.pane_states.iter() {
+            let session = *session;
+            pane.update(cx, |pane, cx| {
+                pane.editor
+                    .update(cx, |editor, _| editor.set_session(Some(session)));
+            });
+        }
     }
 
     /// Write the split the window is showing, so the next launch puts the same
@@ -194,7 +214,7 @@ impl Dashboard {
         // The caret goes back where it was, unless that pane is gone or it is
         // the chat itself, which the window spells as `None`.
         self.pane_focus = saved.focus.filter(|id| *id != chat && leaves.contains(id));
-        self.sync_composer_session();
+        self.sync_composer_session(cx);
         // The pruned tree is what this run holds now, so the file matches it.
         self.persist_layout();
         logging::info(&format!(
@@ -370,7 +390,7 @@ impl Dashboard {
         self.parked_panes.remove(&session);
         self.split_drag = None;
         self.pane_focus = None;
-        self.sync_composer_session();
+        self.sync_composer_session(cx);
         if self.chat_session == Some(session) {
             self.open_session(absorbed, cx);
         } else {
@@ -431,7 +451,7 @@ impl Dashboard {
         // A receipt in the daily log, so "Tab did nothing" can be told apart
         // from "Tab moved the caret and the header did not show it".
         logging::debug(&format!("pane focus -> {:?}", self.pane_focus));
-        self.sync_composer_session();
+        self.sync_composer_session(cx);
         // The keyboard walks with the caret (#2610). Without this the split
         // highlighted the new pane while every keystroke still landed in the
         // chat leaf's field, so the chord appeared to rotate exactly once.
@@ -481,6 +501,9 @@ impl Dashboard {
             let history_path = composer::default_history_path();
             move |cx| editor::Editor::new_with_history(history, history_path, cx)
         });
+        // The pane's composer writes into this pane's conversation and no
+        // other, so its queue recall can never reach a neighbour (#2909).
+        pane_editor.update(cx, |editor, _| editor.set_session(Some(id)));
         // A draft filed before this pane was closed, moved, or switched comes
         // back with it.
         if let Some(draft) = self.composer.drafts.take(id) {
@@ -626,7 +649,7 @@ impl Dashboard {
         // The pane just picked is the one the caret and ctrl+x land on, so a
         // split opens ready to act on what was clicked (#2474).
         self.pane_focus = Some(id);
-        self.sync_composer_session();
+        self.sync_composer_session(cx);
         self.refocus_screen();
         let split = self
             .panes

@@ -1461,9 +1461,12 @@ static QUEUE: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashMap<Uuid, Vec<QueuedUserMessage>>>,
 > = std::sync::OnceLock::new();
 
-/// The session the composer is writing into, so Up can recall its last queued
-/// message without the editor knowing the session (#2441).
-static COMPOSER_SESSION: std::sync::Mutex<Option<Uuid>> = std::sync::Mutex::new(None);
+// A process-wide "composer session" used to live here, so Up could recall a
+// queued message without the editor knowing its session (#2441). It is gone
+// (#2909): one global let a recall in one pane take another conversation's
+// queue whenever the caret, a closed pane or a session switch left it naming a
+// different chat from the field being typed in. Each composer carries its own
+// session now and asks `queue_recall_take` for that one by id.
 
 fn queue() -> std::sync::MutexGuard<'static, std::collections::HashMap<Uuid, Vec<QueuedUserMessage>>>
 {
@@ -1519,8 +1522,13 @@ pub fn queue_take(session_id: Uuid) -> Vec<QueuedUserMessage> {
 /// edits; the owner asked for all of them at once (#2696). One take now yields
 /// the entire queue in the order it was written, and what the composer holds
 /// stays out of the queue until it is sent.
-pub fn queue_recall_take() -> Option<(Uuid, Vec<QueuedUserMessage>)> {
-    let session = (*COMPOSER_SESSION.lock().ok()?)?;
+pub fn queue_recall_take(session: Option<Uuid>) -> Option<(Uuid, Vec<QueuedUserMessage>)> {
+    // The composer's OWN session (#2909). This used to read a process-wide
+    // "composer session" that the window rewrote on every focus change, so a
+    // caret that had moved, or a pane that had been closed while its id stayed
+    // cached, took a different conversation's queued messages into this field.
+    // A field with no session recalls nothing.
+    let session = session?;
     // `queue_take` is the same take-all the Esc flush uses, so a recall and a
     // flush can never disagree about what is still waiting, and the take
     // leaves one receipt in the GUI log (#2695).
@@ -1536,13 +1544,6 @@ pub fn queue_recall_take() -> Option<(Uuid, Vec<QueuedUserMessage>)> {
 /// was queued is lost by looking at it (#2637).
 pub fn queue_recall_return(session_id: Uuid, msg: QueuedUserMessage) {
     queue_push(session_id, msg);
-}
-
-/// Point the composer at `session_id`, so recall and the strip agree with it.
-pub fn set_composer_session(session_id: Option<Uuid>) {
-    if let Ok(mut s) = COMPOSER_SESSION.lock() {
-        *s = session_id;
-    }
 }
 
 /// The follow-up options `suggest_options` offered, keyed by session (#2708).
@@ -2217,8 +2218,8 @@ mod tests {
     /// not be sent when the turn ends (#2637).
     #[test]
     fn up_recalls_the_whole_queue_at_once() {
-        // One test for the queue's recall path: `COMPOSER_SESSION` and `QUEUE`
-        // are process-wide, so two tests here would race on them.
+        // One test for the queue's recall path: `QUEUE` is process-wide, so
+        // two tests here would race on it.
         let session = Uuid::from_u128(0x2696_0001);
         let other = Uuid::from_u128(0x2696_0002);
 
@@ -2228,8 +2229,21 @@ mod tests {
         // A completion for another session must not enter this queue.
         queue_push(other, QueuedUserMessage::plain("elsewhere".to_string()));
 
-        set_composer_session(Some(session));
-        let (from, taken) = queue_recall_take().expect("the queue has messages");
+        // A field bound to another conversation takes only its own queue
+        // (#2909): the recall asks for the id it was given, never for one the
+        // window happened to write last.
+        assert!(
+            queue_recall_take(Some(other)).is_some(),
+            "the field bound to `other` sees `other`'s own message"
+        );
+        assert_eq!(
+            queue_snapshot(session).len(),
+            3,
+            "recalling another session's queue leaves this one untouched"
+        );
+        queue_push(other, QueuedUserMessage::plain("elsewhere".to_string()));
+        let (from, taken) =
+            queue_recall_take(Some(session)).expect("the queue has messages");
         assert_eq!(from, session, "a recall never reaches another session");
         let recalled: Vec<String> = taken.iter().map(|msg| msg.display_text.clone()).collect();
         assert_eq!(
@@ -2238,8 +2252,12 @@ mod tests {
             "one Up yields the whole queue, oldest first"
         );
         assert!(
-            queue_recall_take().is_none(),
+            queue_recall_take(Some(session)).is_none(),
             "the take emptied the queue, so a second Up has nothing to recall"
+        );
+        assert!(
+            queue_recall_take(None).is_none(),
+            "a field with no session recalls nothing at all"
         );
         assert!(
             queue_snapshot(session).is_empty(),
@@ -2268,7 +2286,6 @@ mod tests {
 
         let _ = queue_take(session);
         let _ = queue_take(other);
-        set_composer_session(None);
     }
 
     /// #2708: the follow-up offer is per session, so a pane or a session
@@ -2334,7 +2351,7 @@ mod tests {
     #[test]
     fn esc_flush_takes_all_queued_into_one_joined_turn() {
         // QUEUE is process-wide, but this test owns its session key and never
-        // touches COMPOSER_SESSION, so it cannot race the recall walk above.
+        // touches the recall path, so it cannot race the recall walk above.
         let session = Uuid::from_u128(0x2695_0001);
         for text in ["first", "second", "third"] {
             queue_push(session, QueuedUserMessage::plain(text.to_string()));

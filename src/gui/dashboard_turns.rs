@@ -1108,7 +1108,7 @@ impl Dashboard {
                         {
                             self.pane_focus = Some(session);
                         }
-                        self.sync_composer_session();
+                        self.sync_composer_session(cx);
                         self.refocus_screen();
                     }
                     cx.notify();

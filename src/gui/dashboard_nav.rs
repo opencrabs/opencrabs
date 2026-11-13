@@ -197,7 +197,7 @@ impl Dashboard {
         // file, so switching here means the terminal comes back to it too, and
         // a restart no longer lands on whatever the rail listed first (#2444).
         remember_open_session(id);
-        agent_bridge::set_composer_session(Some(id));
+        self.sync_composer_session(cx);
         self.chat_state.transcript.error = None;
         self.chat_state.transcript.turns = Vec::new();
         self.chat_state.transcript.rows = Vec::new();
@@ -361,7 +361,7 @@ impl Dashboard {
             // conversation in two leaves.
             self.pane_focus = Some(id);
             self.rail_focused = false;
-            self.sync_composer_session();
+            self.sync_composer_session(cx);
             self.request_composer_caret(cx);
             cx.notify();
             return;
@@ -382,7 +382,7 @@ impl Dashboard {
         self.open_pane_state(id, cx);
         self.pane_focus = Some(id);
         self.rail_focused = false;
-        self.sync_composer_session();
+        self.sync_composer_session(cx);
         self.request_composer_caret(cx);
         self.persist_layout();
         cx.notify();
@@ -427,7 +427,7 @@ impl Dashboard {
             // pick asks for nothing but the keyboard back.
             if hand_back {
                 self.rail_focused = false;
-                self.sync_composer_session();
+                self.sync_composer_session(cx);
                 self.request_composer_caret(cx);
                 self.refocus_screen();
                 cx.notify();
@@ -466,7 +466,7 @@ impl Dashboard {
         self.open_pane_state(id, cx);
         self.mark_rail_seen(id);
         self.pane_focus = Some(id);
-        self.sync_composer_session();
+        self.sync_composer_session(cx);
         self.persist_layout();
         if hand_back {
             self.rail_focused = false;

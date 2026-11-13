@@ -623,7 +623,7 @@ impl Dashboard {
         // the caret itself on its next frame, so the pane's own composer is
         // deliberately not refocused here.
         self.pane_focus = Some(session);
-        self.sync_composer_session();
+        self.sync_composer_session(cx);
         logging::info(&format!(
             "pane edit: row {id} at sequence {sequence} in {session}, in place"
         ));
@@ -877,7 +877,7 @@ impl Dashboard {
         // that is the leaf's own composer, never the window's.
         if let Some(session) = leaf {
             self.pane_focus = Some(session);
-            self.sync_composer_session();
+            self.sync_composer_session(cx);
         }
         self.refocus_screen();
         logging::info(&format!("reply quoting {} row(s)", rows.len()));
@@ -974,7 +974,7 @@ impl Dashboard {
         self.msg_menu = None;
         if let Some(session) = leaf {
             self.pane_focus = Some(session);
-            self.sync_composer_session();
+            self.sync_composer_session(cx);
             self.refocus_screen();
         }
         cx.notify();

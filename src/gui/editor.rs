@@ -319,6 +319,13 @@ pub struct Editor {
     /// shows. They are OUT of the queue while they are here, so a recall the
     /// user decides not to send is never sent behind their back (#2637).
     recall: Option<Recall>,
+    /// The session this composer writes into, set by the window that owns it
+    /// (#2909). Up recalls the queue of THIS session and no other: the recall
+    /// used to read one process-wide "composer session" that the window wrote
+    /// on every focus change, so a caret that had moved, or a pane that had
+    /// closed, left the field taking another conversation's queued messages
+    /// into its own text.
+    session: Option<Uuid>,
     /// Files attached to the next message. They live here, not in the window
     /// state, because the send action is what consumes them: the editor is
     /// the only place that can append the markers atomically with clearing
@@ -453,6 +460,7 @@ impl Editor {
             input_history_index: None,
             input_history_stash: String::new(),
             recall: None,
+            session: None,
             attachments: Vec::new(),
             reply: None,
             placeholder: "Talk to the crab…".into(),
@@ -962,6 +970,14 @@ impl Editor {
         }
     }
 
+    /// Point this composer at the session it writes into (#2909). The window
+    /// sets it when the composer is built and whenever the leaf it draws
+    /// changes conversation, so the queue Up recalls is always this field's own
+    /// and never a neighbour's.
+    pub fn set_session(&mut self, session: Option<Uuid>) {
+        self.session = session;
+    }
+
     /// The hint an empty field shows. It belongs to the window's state, not to
     /// the field's: what the composer can do depends on whether a turn runs and
     /// what is queued, and the editor sees neither (#2630).
@@ -987,7 +1003,7 @@ impl Editor {
         // the recall is holding with whatever arrived since.
         if self.content.is_empty()
             && self.recall.is_none()
-            && let Some((session, msgs)) = crate::agent_bridge::queue_recall_take()
+            && let Some((session, msgs)) = crate::agent_bridge::queue_recall_take(self.session)
         {
             // The display halves join with newlines and a synthetic entry keeps
             // its receipt tag, so a background task's payload never turns into
