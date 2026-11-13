@@ -155,6 +155,9 @@ impl OnboardingWizard {
                         Some("Select a model, or type its name in the Model field".to_string());
                     return;
                 }
+                // This run went through the provider page, so its exclusive
+                // enable sweep is legitimate (#2265).
+                self.provider_step_touched = true;
                 // QuickStart: skip channels, go straight to daemon
                 if self.mode == WizardMode::QuickStart {
                     self.step = OnboardingStep::Daemon;

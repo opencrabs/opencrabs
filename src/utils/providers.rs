@@ -354,7 +354,11 @@ pub fn tui_index_for_id(name: &str) -> Option<usize> {
         .position(|p| !p.id.is_empty() && p.id == normalized)
 }
 
-/// All config sections (for toggling enabled flags during model switch).
+/// All config sections, for the onboarding exclusive-enable sweep only.
+///
+/// A model switch does NOT touch enabled flags: direct_model_switch picks
+/// the session pair and leaves provider enablement alone (stale comment
+/// corrected, #2265).
 pub fn all_config_sections(providers: &ProviderConfigs) -> Vec<String> {
     let mut sections: Vec<String> = KNOWN_PROVIDERS
         .iter()

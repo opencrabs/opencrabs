@@ -3398,6 +3398,27 @@ fn render_complete(lines: &mut Vec<Line<'static>>, wizard: &OnboardingWizard) {
         ]));
     }
 
+    // #2265: the exclusive enable is deliberate, but a user who had more
+    // than one provider on deserves to see which flags this save clears.
+    let disabled = wizard.providers_to_be_disabled();
+    if wizard.provider_step_touched && !disabled.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled(
+                "  Disabling: ",
+                Style::default().fg(theme::role(Role::Gray)),
+            ),
+            Span::styled(
+                disabled.join(", "),
+                Style::default().fg(theme::role(Role::Warning)),
+            ),
+        ]));
+        lines.push(Line::from(Span::styled(
+            "  only the provider above stays enabled",
+            Style::default().fg(theme::role(Role::GrayMid)),
+        )));
+    }
+
     lines.push(Line::from(vec![
         Span::styled("  Workspace:", Style::default().fg(theme::role(Role::Gray))),
         Span::styled(

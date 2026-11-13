@@ -265,6 +265,9 @@ impl App {
                     // Quick-jump completed a step — save config then close
                     let mut needs_rebuild = false;
                     if let Some(ref wizard) = self.onboarding {
+                        // Read before the save: after it the flags are gone
+                        // and the message would have nothing true to say.
+                        let disabled_providers = wizard.providers_to_be_disabled();
                         if let Err(e) = wizard.apply_config() {
                             // An Err means the write did NOT happen. Calling it
                             // "saved with warnings" told the user their settings
@@ -297,10 +300,20 @@ impl App {
                                             wizard.ps.selected_model_name().to_string(),
                                         )
                                     };
-                                    format!(
+                                    let line = format!(
                                         "[Model changed to {}]",
                                         crate::utils::provider_pair::display_model(&pname, &mname)
-                                    )
+                                    );
+                                    // #2265: the exclusive enable is
+                                    // deliberate, but silence about it is not.
+                                    if disabled_providers.is_empty() {
+                                        line
+                                    } else {
+                                        format!(
+                                            "{line}\nProviders disabled: {}",
+                                            disabled_providers.join(", ")
+                                        )
+                                    }
                                 }
                                 OnboardingStep::VoiceSetup => {
                                     let stt_name = match wizard.stt_provider {

@@ -26,16 +26,24 @@ pub fn opencrabs_home() -> PathBuf {
     p
 }
 
+/// A save writes many keys in a row. One snapshot per burst is what protects
+/// the pre-save state, so a rotation younger than this window counts as
+/// already covering the current burst.
+const BACKUP_BURST_SECS: u64 = 5;
+
 /// Daily backup of a config file. One snapshot per day, keeps `max_days` files.
 ///
-/// Names backups `file.YYYY-MM-DD.bak`. If today's backup exists with identical
-/// content, skips (no spam). If content differs, rotates the current file to a
-/// timestamped sibling `file.YYYY-MM-DDTHH-MM-SS.bak` first, so a same-day write
-/// can never destroy the day's only pre-write copy (2026-09-07 keys wipe: the
-/// dedup skip left zero safety net for post-snapshot states). Prunes backups
-/// beyond `max_days` files — rotated siblings count, so heavy-rotation days
-/// consume more slots; bounded history stays bounded. Silently ignores errors —
-/// backup failure must never block a config write.
+/// Names backups `file.YYYY-MM-DD.bak`. Skips when the current content already
+/// matches the NEWEST existing backup, not merely today's snapshot: a save
+/// burst used to write one rotation per key even when nothing had changed
+/// since the last one (#2265). If content differs, rotates the current file to
+/// a timestamped sibling `file.YYYY-MM-DDTHH-MM-SS.bak` first, so a same-day
+/// write can never destroy the day's only pre-write copy (2026-09-07 keys
+/// wipe: the dedup skip left zero safety net for post-snapshot states). Prunes
+/// backups beyond `max_days` files, oldest MTIME first: sorting by name kept
+/// `file.bak` forever while deleting the current day's snapshot (#2265).
+/// Silently ignores errors, because a backup failure must never block a config
+/// write.
 pub fn daily_backup(path: &Path, max_days: usize) {
     if !path.exists() {
         return;
@@ -53,18 +61,35 @@ pub fn daily_backup(path: &Path, max_days: usize) {
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
     let today_backup = parent.join(format!("{stem}.{today}.bak"));
 
-    // Today's backup exists: skip only when content is identical. On a real
-    // change, rotate the current file to a timestamped sibling first — the
-    // day's first snapshot stays intact AND every later pre-write state gets
-    // its own copy. On read error, do nothing (never destroy on uncertainty).
-    if today_backup.exists() {
-        let identical = match (fs::read(path), fs::read(&today_backup)) {
+    // Compare against the newest backup of any age: a write that changes
+    // nothing since the last snapshot has nothing to protect. On read error,
+    // do nothing (never destroy on uncertainty).
+    if let Some(newest) = newest_backup(parent, &stem) {
+        let identical = match (fs::read(path), fs::read(&newest)) {
             (Ok(cur), Ok(bak)) => cur == bak,
             _ => true,
         };
         if identical {
             return;
         }
+        // One save writes many keys back to back. A rotation taken seconds ago
+        // is that save's pre-write state, already covering the rest of the
+        // burst: rotating again per key produced five copies of nearly the
+        // same file in two seconds and starved the retention budget (#2265).
+        let fresh = fs::metadata(&newest)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|when| std::time::SystemTime::now().duration_since(when).ok())
+            .is_some_and(|age| age < std::time::Duration::from_secs(BACKUP_BURST_SECS));
+        if fresh {
+            return;
+        }
+    }
+
+    // Today's backup exists: rotate the current file to a timestamped sibling
+    // first — the day's first snapshot stays intact AND every later pre-write
+    // state gets its own copy.
+    if today_backup.exists() {
         let stamp = chrono::Local::now().format("%Y-%m-%dT%H-%M-%S");
         let mut rotated = parent.join(format!("{stem}.{stamp}.bak"));
         let mut n = 1u32;
@@ -86,27 +111,59 @@ pub fn daily_backup(path: &Path, max_days: usize) {
         tracing::debug!("Daily backup: {}", today_backup.display());
     }
 
-    // Prune old backups beyond max_days
+    prune_backups(parent, &stem, max_days);
+}
+
+/// Newest backup for `stem` in `parent`, by modification time.
+fn newest_backup(parent: &Path, stem: &str) -> Option<PathBuf> {
     let prefix = format!("{stem}.");
-    let suffix = ".bak";
-    if let Ok(entries) = fs::read_dir(parent) {
-        let mut backups: Vec<String> = entries
-            .filter_map(|e| e.ok())
-            .filter_map(|e| {
-                let name = e.file_name().to_string_lossy().to_string();
-                if name.starts_with(&prefix) && name.ends_with(suffix) && name != stem {
-                    Some(name)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        backups.sort();
-        backups.reverse(); // newest first
-        for old in backups.iter().skip(max_days) {
-            let _ = fs::remove_file(parent.join(old));
-            tracing::debug!("Pruned old backup: {old}");
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    for entry in fs::read_dir(parent).ok()?.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.starts_with(&prefix) || !name.ends_with(".bak") || name == stem {
+            continue;
         }
+        let mtime = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        if best.as_ref().is_none_or(|(t, _)| mtime > *t) {
+            best = Some((mtime, entry.path()));
+        }
+    }
+    best.map(|(_, path)| path)
+}
+
+/// Keep the `max_days` newest backups by mtime, delete the rest.
+///
+/// Sorting by name was the bug (#2265): `config.toml.bak` sorts after every
+/// `config.toml.YYYY-MM-DD.bak`, so the reverse walk treated the undated file
+/// as the newest and deleted the current day's snapshot. mtime is the only
+/// ordering that matches what the files actually are; the name breaks ties so
+/// coarse-timestamp filesystems still prune deterministically.
+fn prune_backups(parent: &Path, stem: &str, max_days: usize) {
+    let prefix = format!("{stem}.");
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+    let mut backups: Vec<(std::time::SystemTime, String)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.starts_with(&prefix) || !name.ends_with(".bak") || name == stem {
+                return None;
+            }
+            let mtime = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            Some((mtime, name))
+        })
+        .collect();
+    backups.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    for (_, old) in backups.iter().skip(max_days) {
+        let _ = fs::remove_file(parent.join(old));
+        tracing::debug!("Pruned old backup: {old}");
     }
 }
 

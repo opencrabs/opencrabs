@@ -170,6 +170,11 @@ pub struct OnboardingWizard {
     /// preserves on-disk `[providers.stt.*]` / `[providers.tts.*]` truth
     /// instead of rewriting it from page state.
     pub voice_step_touched: bool,
+    /// True only after this run actually went through the provider step.
+    /// Gates the exclusive-enable sweep for the same reason voice flags are
+    /// gated: reaching Complete by another path must not rewrite flags from
+    /// stale page state (#2265).
+    pub provider_step_touched: bool,
     /// Whether onboarding auto-triggered because no config exists (true) vs
     /// user manually re-ran it via /onboard (false). Used to decide whether
     /// to send the first-time welcome message on completion.
@@ -532,6 +537,7 @@ impl OnboardingWizard {
             quick_jump: false,
             quick_jump_done: false,
             voice_step_touched: false,
+            provider_step_touched: false,
             is_first_time: false,
             resume_notice: None,
             user_scroll_offset: 0,

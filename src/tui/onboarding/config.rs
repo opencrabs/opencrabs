@@ -314,11 +314,17 @@ impl OnboardingWizard {
     /// overwriting unrelated channel/provider settings loaded with defaults.
     pub fn apply_config(&self) -> Result<(), String> {
         // Determine which sections to write based on quick_jump + current step
-        let write_provider = !self.quick_jump
-            || matches!(
-                self.step,
-                OnboardingStep::ProviderAuth | OnboardingStep::Complete
-            );
+        // Provider flags are disk truth the moment any writer lands them, on
+        // the same reasoning as voice below. A quick-jump run that opened a
+        // DIFFERENT page and walked to Complete used to count as a real
+        // provider save, sweep every flag to false, and leave one provider on
+        // (#2265). Only a run that actually went through ProviderAuth owns
+        // these writes.
+        let write_provider = if self.quick_jump {
+            matches!(self.step, OnboardingStep::ProviderAuth) || self.provider_step_touched
+        } else {
+            true
+        };
         let write_channels = !self.quick_jump
             || matches!(
                 self.step,
@@ -386,6 +392,58 @@ impl OnboardingWizard {
         .map_err(|e| format!("{} step: {}", section, e))
     }
 
+    /// Config section for the provider this run has selected.
+    pub(super) fn selected_provider_section(&self) -> String {
+        if self.ps.selected_provider < CUSTOM_PROVIDER_IDX {
+            let id = PROVIDERS[self.ps.selected_provider].id;
+            crate::utils::providers::find_provider_meta(id)
+                .map(|m| m.config_section.to_string())
+                .unwrap_or_else(|| "providers.anthropic".to_string())
+        } else {
+            format!("providers.custom.{}", self.ps.custom_name)
+        }
+    }
+
+    /// Providers enabled on disk right now that are NOT the one this run
+    /// selected, i.e. the flags a provider save is about to clear (#2265).
+    ///
+    /// Reads the file instead of the merged `Config`: the sweep writes through
+    /// `write_key`, so what matters is what is on disk before the save.
+    pub fn providers_to_be_disabled(&self) -> Vec<String> {
+        let path = crate::config::opencrabs_home().join("config.toml");
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return Vec::new();
+        };
+        let Ok(doc) = text.parse::<toml::Value>() else {
+            return Vec::new();
+        };
+        let Some(table) = doc.get("providers").and_then(|p| p.as_table()) else {
+            return Vec::new();
+        };
+        let selected = self.selected_provider_section();
+        let mut out = Vec::new();
+        for (name, value) in table {
+            if name == "custom" {
+                if let Some(customs) = value.as_table() {
+                    for (custom_name, custom_value) in customs {
+                        let section = format!("providers.custom.{custom_name}");
+                        if section != selected
+                            && custom_value.get("enabled").and_then(|v| v.as_bool()) == Some(true)
+                        {
+                            out.push(format!("custom.{custom_name}"));
+                        }
+                    }
+                }
+                continue;
+            }
+            let section = format!("providers.{name}");
+            if section != selected && value.get("enabled").and_then(|v| v.as_bool()) == Some(true) {
+                out.push(name.clone());
+            }
+        }
+        out
+    }
+
     /// Shared write path behind `apply_config` and `apply_step_config`.
     /// `finalize` also runs the completion-only tasks (template seeding,
     /// daemon install) in their original position; step-scoped saves pass
@@ -445,7 +503,11 @@ impl OnboardingWizard {
         };
 
         if write_provider {
-            // Disable all providers first, then enable selected one
+            // Disable all providers first, then enable selected one. The
+            // exclusive enable itself stays: a save that went through this
+            // step must leave exactly one provider on, for the resolver
+            // ladder (#2262). What must not happen is the sweep running for a
+            // run that never opened this page (#2265).
             {
                 let all_sections = if let Ok(cfg) = Config::load() {
                     crate::utils::providers::all_config_sections(&cfg.providers)
@@ -464,16 +526,8 @@ impl OnboardingWizard {
             }
 
             // Enable + configure the selected provider
-            let custom_section;
-            let section = if self.ps.selected_provider < CUSTOM_PROVIDER_IDX {
-                let id = PROVIDERS[self.ps.selected_provider].id;
-                crate::utils::providers::find_provider_meta(id)
-                    .map(|m| m.config_section)
-                    .unwrap_or("providers.anthropic")
-            } else {
-                custom_section = format!("providers.custom.{}", self.ps.custom_name);
-                &custom_section
-            };
+            let section_owned = self.selected_provider_section();
+            let section = section_owned.as_str();
             try_write!(write_errors, section, "enabled", "true");
             let model = self.ps.selected_model_name().to_string();
             if !model.is_empty() {
