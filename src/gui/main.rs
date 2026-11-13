@@ -759,6 +759,9 @@ struct Dashboard {
     /// `Some` is the split leaf of that session, whose composer an answer
     /// belongs in.
     msg_menu_leaf: Option<Uuid>,
+    /// The row open for an in-place rewrite in the window's chat (#2826).
+    /// A split leaf holds its own on its `PaneView`.
+    edit_row: Option<chat_leaf::InlineEdit>,
     /// Where that row's right press landed, in window coordinates (#2690).
     /// The card opens under the pointer instead of pinned to the row's top
     /// corner, so a long message cannot put it half a screen away.
@@ -775,12 +778,12 @@ struct Dashboard {
     /// A forward waiting for its destination (#2608): the rows picked when
     /// Forward was pressed. `Some` swaps the composer for the session picker.
     forward_pick: Option<Vec<Message>>,
-    /// The destination picker's query, typed into the bar itself.
-    forward_query: String,
-    /// The destination the picker points at, so the arrows walk it and Enter
     /// Which leaf opened that picker (#2827). `None` is the window's chat;
     /// `Some` puts the picker in the split leaf whose row was forwarded.
     forward_leaf: Option<Uuid>,
+    /// The destination picker's query, typed into the bar itself.
+    forward_query: String,
+    /// The destination the picker points at, so the arrows walk it and Enter
     /// takes it. `None` falls back to the first match.
     forward_cursor: Option<Uuid>,
     /// The icon picked for the topic being named; None means the default (#2414).
@@ -2394,11 +2397,11 @@ impl Render for Dashboard {
                 // Same rule for a transcript row's menu (#2613): the rail is
                 // outside the transcript, so the press closes it too.
                 this.msg_menu = None;
+                this.msg_menu_row = None;
+                this.msg_menu_leaf = None;
                 // A press is not a pick yet, and the caret does not wait for
                 // one: whatever the release does, the keys are the composer's
                 // from the press on (#2798).
-                this.msg_menu_row = None;
-                this.msg_menu_leaf = None;
                 this.rail_hands_back();
                 cx.notify();
             });
@@ -2728,18 +2731,18 @@ impl Render for Dashboard {
         for (id, name) in reaction_pairs {
             let picked = name.clone();
             let handler = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
-                this.msg_react_pick(id, picked.clone(), cx);
-            });
-            reaction_click.insert((id, name), std::rc::Rc::new(handler));
                 // A chip on the window's own row reacts on that row, whatever
                 // surface the last row menu happened to be opened in (#2827).
                 this.msg_menu_leaf = None;
                 this.msg_menu_row = None;
+                this.msg_react_pick(id, picked.clone(), cx);
+            });
+            reaction_click.insert((id, name), std::rc::Rc::new(handler));
         }
-        // One edit per stored user row (#2826): the button puts that row's
-        // text back in the composer and arms the send that replaces it.
-        // Answers are left out, so the map holds only the rows a rewrite makes
-        // sense for.
+        // One edit per stored user row (#2826): the pencil opens a field in
+        // that row's own card, with a check that sends the rewrite and a cross
+        // that closes it. Answers are left out, so the map holds only the rows
+        // a rewrite makes sense for.
         let edit_rows: Vec<(Uuid, i32)> = self
             .chat_state
             .transcript
@@ -2768,11 +2771,11 @@ impl Render for Dashboard {
                     this.react_menu_at = None;
                 }
                 if closed_menu || closed_picker {
+                    this.msg_menu_row = None;
+                    this.msg_menu_leaf = None;
                     cx.notify();
                 }
             }));
-                    this.msg_menu_row = None;
-                    this.msg_menu_leaf = None;
         // A wheel tick over the conversation is the reader's own hand on it
         // (#2698): GPUI moves the viewport, and this only says whether the
         // follow goes with it. A tick up releases it, and the frame loop
@@ -2783,11 +2786,11 @@ impl Render for Dashboard {
                 // scroll leaves it floating over a row it no longer names
                 // (#2690). The wheel closes it.
                 if this.msg_menu.take().is_some() {
+                    this.msg_menu_row = None;
+                    this.msg_menu_leaf = None;
                     cx.notify();
                 }
                 if this.react_menu.take().is_some() {
-                    this.msg_menu_row = None;
-                    this.msg_menu_leaf = None;
                     this.react_menu_at = None;
                     cx.notify();
                 }
@@ -2855,6 +2858,9 @@ impl Render for Dashboard {
                 // beside a sibling takes its share of it (#2472, #2473). A
                 // row is still never planned wider than its box.
                 let measure = chat_measure_px;
+                // Minted before the view borrows the transcript (#2826): the
+                // two clicks are listeners, so they need `self` mutably.
+                let inline_edit = self.inline_edit_hooks(cx);
                 let primary = transcript::view(
                     &self.chat_state.transcript,
                     &self.chat_state.scroll,
@@ -2880,6 +2886,9 @@ impl Render for Dashboard {
                         reactions: self.chat_state.transcript.reactions.clone(),
                         reaction_click: reaction_click.clone(),
                         edit: msg_edit.clone(),
+                        // The field a rewrite draws in its own card (#2826),
+                        // minted here because its two clicks are listeners.
+                        edit_row: inline_edit,
                     },
                 )
                 .into_any_element();
@@ -4823,6 +4832,8 @@ impl Render for Dashboard {
                     // not the transcript's to dismiss any more: every card
                     // closes on the same press, wherever it landed (#2690).
                     if this.msg_menu.take().is_some() {
+                        this.msg_menu_row = None;
+                        this.msg_menu_leaf = None;
                         cx.notify();
                     }
                     this.close_composer_menus(cx);
@@ -4832,8 +4843,6 @@ impl Render for Dashboard {
             // the handle: a 4px column cannot track a fast drag on its own.
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _window, cx| {
                 if this.dragging_rail
-                        this.msg_menu_row = None;
-                        this.msg_menu_leaf = None;
                     && let Some((from_x, from_w)) = this.drag_from
                 {
                     let dx = f32::from(ev.position.x) - from_x;
@@ -5893,24 +5902,25 @@ fn main() {
                         split_pick: None,
                         split_creating: false,
                         msg_menu: None,
+                        msg_menu_row: None,
+                        msg_menu_leaf: None,
+                        edit_row: None,
                         msg_menu_at: None,
                         react_menu: None,
                         react_menu_at: None,
                         msg_select: Selection::new(),
                         forward_pick: None,
+                        forward_leaf: None,
                         forward_query: String::new(),
                         forward_cursor: None,
                         topic_draft_icon: None,
                         icon_images: HashMap::new(),
-                        msg_menu_row: None,
-                        msg_menu_leaf: None,
                         help_scroll: ScrollHandle::new(),
                         dragging_rail: false,
                         drag_from: None,
                         drag_seen: None,
                         rail_menu_at: None,
                         rail_live: HashMap::new(),
-                        forward_leaf: None,
                         rail_swipe: None,
                         rail_slide_opened: None,
                         confirm_delete: None,
@@ -9309,16 +9319,37 @@ mod tests {
             "the pane's card reads the pane's own window"
         );
     }
-}
 
-#[cfg(test)]
-mod gui {
-    //! The window's own tests, under one module name so a selection can be
-    //! made with `cargo test -- gui::tests`: the panel and the popup are the
-    //! two places the GUI has behaviour of its own that no headless test can
-    //! reach through a real window.
-
-    mod tests {
+    /// The pencil opens a field in the row itself. Neither send path can fall
+    /// back to replacing the composer's draft or consuming a composer target.
+    #[test]
+    fn an_edit_is_confirmed_inside_its_own_card() {
+        let messages = include_str!("dashboard_messages.rs");
+        let begin = messages
+            .split("fn msg_edit_begin(")
+            .nth(1)
+            .and_then(|rest| rest.split("/// Send the rewrite open").next())
+            .expect("window edit begin");
+        assert!(begin.contains("self.new_inline_editor(text, cx)"));
+        assert!(begin.contains("self.edit_row = Some(chat_leaf::InlineEdit"));
+        assert!(!begin.contains("self.composer.editor"));
+        assert!(!begin.contains("show_editing"));
+        let confirm = messages
+            .split("fn msg_edit_confirm(")
+            .nth(1)
+            .and_then(|rest| rest.split("/// Close the rewrite").next())
+            .expect("window edit confirm");
+        assert!(confirm.contains("self.edit_row.take()"));
+        assert!(confirm.contains("self.send_edited(open.target, text, cx)"));
+        let transcript = include_str!("transcript.rs");
+        assert!(transcript.contains("Some(editing) => inline_edit_box(editing)"));
+        assert!(transcript.contains("msg-edit-confirm-{id}"));
+        assert!(transcript.contains("msg-edit-cancel-{id}"));
+        let sends = include_str!("dashboard_turns.rs");
+        assert!(!sends.contains("self.composer.edit.take()"));
+        assert!(!sends.contains("pane.edit.take()"));
+        assert!(PANE_VIEW.contains("this.pane_edit_confirm(session, text, cx)"));
+    }
 
     /// Copy, React, Reply and Forward are resolved from the row that was
     /// pressed, on either role and in either kind of leaf. Reply keeps the
@@ -9356,6 +9387,16 @@ mod gui {
         assert!(forward.contains("self.forward_leaf = leaf"));
         assert!(PANE_VIEW.contains("win.forward_picker(cx)"));
     }
+}
+
+#[cfg(test)]
+mod gui {
+    //! The window's own tests, under one module name so a selection can be
+    //! made with `cargo test -- gui::tests`: the panel and the popup are the
+    //! two places the GUI has behaviour of its own that no headless test can
+    //! reach through a real window.
+
+    mod tests {
         use super::super::Config;
         use crate::composer_view::popup_window;
         use crate::dashboard_source::DASHBOARD;

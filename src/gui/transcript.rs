@@ -3829,6 +3829,61 @@ fn message_row(
     row
 }
 
+/// A row with its rewrite open (#2826): the field sits where the message was,
+/// so the reader edits the message in place and sends it from there. Enter in
+/// the field confirms too; the composer below is never involved.
+fn inline_edit_box(editing: &InlineEditView) -> Div {
+    let palette = palette::current();
+    let id = editing.id;
+    let confirm = editing.confirm.clone();
+    let cancel = editing.cancel.clone();
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .w_full()
+        .child(editing.editor.clone())
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_end()
+                .gap_2()
+                .child(
+                    div()
+                        .id(SharedString::from(format!("msg-edit-cancel-{id}")))
+                        .cursor_pointer()
+                        .w(rems(1.4))
+                        .h(rems(1.4))
+                        .rounded_sm()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_color(rgb(palette.text_muted))
+                        .hover(|d| d.bg(rgb(palette.panel_hi)))
+                        .child(SharedString::from("\u{2715}"))
+                        .on_click(move |ev, window, app| cancel(ev, window, app)),
+                )
+                .child(
+                    div()
+                        .id(SharedString::from(format!("msg-edit-confirm-{id}")))
+                        .cursor_pointer()
+                        .w(rems(1.4))
+                        .h(rems(1.4))
+                        .rounded_sm()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(rgb(palette.teal))
+                        .text_color(rgb(palette.bg))
+                        .hover(|d| d.opacity(0.9))
+                        .child(SharedString::from("\u{2713}"))
+                        .on_click(move |ev, window, app| confirm(ev, window, app)),
+                ),
+        )
+}
+
 /// The reaction chips under one stored row (#2825): the crab picture and, when
 /// the row carries more than one of it, the count.
 ///
@@ -4101,6 +4156,23 @@ fn block_text(block: &Block) -> Rc<str> {
     }
 }
 
+/// The row open for an in-place rewrite (#2826).
+///
+/// The pencil on a user row does not put the message back in the composer: it
+/// opens a field inside the row itself, so the reader edits the message where
+/// it stands and confirms it there. Only the owning view can mint the two
+/// clicks, because they need the leaf's own context.
+pub struct InlineEditView {
+    /// The stored row being rewritten.
+    pub id: uuid::Uuid,
+    /// The field drawn in the row. Enter in it is the confirm.
+    pub editor: gpui::Entity<crate::editor::Editor>,
+    /// Truncate after the row and send the field's text as the next turn.
+    pub confirm: ClickHandler,
+    /// Close the field and leave the message as it was.
+    pub cancel: ClickHandler,
+}
+
 /// What the transcript view listens to besides its turns: the attachment
 /// tiles' handlers, and the drag-to-copy state of the pane that copies (#2383).
 #[derive(Default)]
@@ -4142,8 +4214,11 @@ pub struct ViewHooks {
     pub reaction_click: HashMap<(uuid::Uuid, String), ClickHandler>,
     /// The edit behind one stored user row (#2826), keyed by message id. Both
     /// the window's chat and every split leaf mint these now: a pane owns its
-    /// rows, so it owns their pencils and puts the text back in its own field.
+    /// rows, so it owns their pencils and opens the field in its own row.
     pub edit: HashMap<uuid::Uuid, ClickHandler>,
+    /// The row whose rewrite is open (#2826). Its message is replaced by a
+    /// field and two buttons, in place, and the composer is not involved.
+    pub edit_row: Option<InlineEditView>,
 }
 
 pub fn view(
@@ -4170,6 +4245,7 @@ pub fn view(
         reactions,
         reaction_click,
         edit,
+        edit_row,
     } = hooks;
     if let Some(d) = &drag {
         d.texts.borrow_mut().clear();
@@ -4362,17 +4438,25 @@ pub fn view(
                     ..
                 } => {
                     let picked = selected.as_ref().map(|picks| picks.contains(id));
+                    let editing = edit_row.as_ref().filter(|editing| editing.id == *id);
                     // Only a user row is editable (#2826): an answer is the
                     // model's, and rewriting one would leave a transcript that
-                    // says the model wrote something it never did.
-                    let edit_click = if role.as_str() == "user" {
+                    // says the model wrote something it never did. A row whose
+                    // field is already open gets no second pencil on top of it.
+                    let edit_click = if role.as_str() == "user" && editing.is_none() {
                         edit.get(id)
                     } else {
                         None
                     };
                     let row = message_row(
                         *id,
-                        child,
+                        // The rewrite happens inside the card (#2826): the row
+                        // becomes a field with a confirm and a cancel, rather
+                        // than handing the text to the composer below.
+                        match editing {
+                            Some(editing) => inline_edit_box(editing),
+                            None => child,
+                        },
                         message_click.get(id),
                         message_press.get(id),
                         picked,

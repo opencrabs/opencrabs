@@ -99,12 +99,13 @@ pub(crate) struct PaneView {
     /// either, because the row text is stored by ordinal and two panes plus
     /// the window all count rows from zero.
     pub(crate) copy_drag: Rc<CopyDrag>,
-    /// The row this pane's composer is rewriting (#2826). The edit handlers
-    /// were minted from the window's own transcript, so only the chat leaf
-    /// ever grew a pencil: every other pane drew its user rows with no
-    /// affordance at all. A pane owns its rows, so it owns the target too,
-    /// and its own send path is what consumes it.
-    pub(crate) edit: Option<chat_leaf::EditTarget>,
+    /// The row being rewritten in this pane, and the field it is rewritten
+    /// in (#2826). The edit handlers were minted from the window's own
+    /// transcript, so only the chat leaf ever grew a pencil: every other pane
+    /// drew its user rows with no affordance at all. A pane owns its rows, so
+    /// it owns the field too, and the field is drawn in the row's card rather
+    /// than in the pane's composer.
+    pub(crate) edit: Option<chat_leaf::InlineEdit>,
     /// The window this leaf belongs to. The wheel hook reports through it,
     /// because a tick that releases this pane's follow is a change to the
     /// window's pane map and a leaf's own context cannot reach that.
@@ -223,8 +224,8 @@ impl PaneView {
                 win.topic_draft.is_none(),
                 win.split_focus() == Some(session),
                 win.running_tasks_label_for(session),
-            )
                 win.forward_pick.is_some() && win.forward_leaf == Some(session),
+            )
         };
         // How much plan this pane can read (#2624): a wall of panes keeps a
         // bar, a pair keeps the running task and the next one or two. The
@@ -437,9 +438,9 @@ impl Render for PaneView {
         // were minted by the window from its own transcript, which meant a
         // split leaf drew every user row without an edit affordance: the
         // button existed, on a conversation the pane was not showing. Each
-        // handler reports through the window, because arming the edit means
-        // writing this leaf's composer and this leaf's target, and a leaf
-        // cannot reach its own entity from here.
+        // handler reports through the window, because the field's editor is
+        // built from the window's shared history and a leaf cannot reach its
+        // own entity from here.
         let pane_edit: HashMap<uuid::Uuid, transcript::ClickHandler> = self
             .transcript
             .rows
@@ -458,7 +459,6 @@ impl Render for PaneView {
                 (id, handler)
             })
             .collect();
-        let body = transcript::view(
         // One right-press handler per row, on every role (#2827): an answer
         // can be replied to, reacted to, copied or forwarded just as the
         // reader's own message can.
@@ -498,6 +498,47 @@ impl Render for PaneView {
                 });
             },
         );
+        // The open rewrite's field, with the two clicks that end it (#2826).
+        // Confirm reads the field at click time and sends through the window,
+        // which owns the send path that truncates and re-runs the turn.
+        let edit_row = self.edit.as_ref().map(|open| {
+            let confirm_window = self.window.clone();
+            let cancel_window = self.window.clone();
+            let confirm: transcript::ClickHandler = std::rc::Rc::new(
+                move |_ev: &ClickEvent, _window: &mut Window, cx: &mut App| {
+                    cx.stop_propagation();
+                    let _ = confirm_window.update(cx, |this, cx| {
+                        let text = this
+                            .pane_states
+                            .get(&session)
+                            .and_then(|pane| {
+                                pane.read(cx)
+                                    .edit
+                                    .as_ref()
+                                    .map(|open| open.editor.read(cx).draft().text)
+                            });
+                        if let Some(text) = text {
+                            this.pane_edit_confirm(session, text, cx);
+                        }
+                    });
+                },
+            );
+            let cancel: transcript::ClickHandler = std::rc::Rc::new(
+                move |_ev: &ClickEvent, _window: &mut Window, cx: &mut App| {
+                    cx.stop_propagation();
+                    let _ = cancel_window.update(cx, |this, cx| {
+                        this.pane_edit_cancel(session, cx);
+                    });
+                },
+            );
+            transcript::InlineEditView {
+                id: open.target.id,
+                editor: open.editor.clone(),
+                confirm,
+                cancel,
+            }
+        });
+        let body = transcript::view(
             &self.transcript,
             &self.scroll,
             &self.live,
@@ -522,6 +563,16 @@ impl Render for PaneView {
                 reactions: self.transcript.reactions.clone(),
                 // The pencil on its own user rows (#2826).
                 edit: pane_edit,
+                // A right press on any row of this leaf opens the same menu
+                // the window's chat opens (#2827). The row travels with the
+                // press, because the window's transcript does not hold this
+                // leaf's messages and could not look an id up in it.
+                message_press,
+                // A left press anywhere in the leaf dismisses that menu, the
+                // same rule the window's transcript applies (#2613).
+                menu_dismiss: Some(menu_dismiss),
+                // The rewrite's field, drawn in its own row (#2826).
+                edit_row,
                 ..Default::default()
             },
         )
@@ -563,14 +614,6 @@ pub(crate) struct LeafBox {
     pub(crate) title: SharedString,
     /// Whether this leaf is the window's own conversation, which is the leaf
     /// the keyboard falls back to when no pane owns it.
-                // A right press on any row of this leaf opens the same menu
-                // the window's chat opens (#2827). The row travels with the
-                // press, because the window's transcript does not hold this
-                // leaf's messages and could not look an id up in it.
-                message_press,
-                // A left press anywhere in the leaf dismisses that menu, the
-                // same rule the window's transcript applies (#2613).
-                menu_dismiss: Some(menu_dismiss),
     pub(crate) is_chat: bool,
     pub(crate) focused: bool,
     pub(crate) interactive: bool,

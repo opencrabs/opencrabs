@@ -113,10 +113,10 @@ impl Dashboard {
     pub(crate) fn begin_conversation(&mut self, id: Uuid, cx: &mut Context<Self>) {
         let switched = self.chat_state.session() != Some(id);
         self.sessions.selected = Some(id);
-        // An edit names a row in one conversation (#2826). Leaving that
-        // conversation ends it, or the next send in the destination would
-        // truncate history the user is not looking at.
-        self.composer.edit = None;
+        // An in-place rewrite names a row in one conversation (#2826). Leaving
+        // that conversation ends it, or the row would still be open for a
+        // rewrite in a chat the user is no longer looking at.
+        self.edit_row = None;
         if switched {
             // The turn on screen belongs to the conversation being left. A
             // turn still running there is parked under it, and the
@@ -210,9 +210,9 @@ impl Dashboard {
         self.msg_menu_leaf = None;
         self.msg_select.cancel();
         self.forward_pick = None;
+        self.forward_leaf = None;
         self.forward_query.clear();
         self.forward_cursor = None;
-        self.forward_leaf = None;
     }
 
     /// Keep the chat transcript on its newest row (#2685).

@@ -174,10 +174,11 @@ impl ChatState {
     }
 }
 
-/// The user row the composer is editing (#2826).
+/// The stored user row an in-place rewrite replaces (#2826).
 ///
-/// The next send replaces that row and drops everything after it, so the
-/// conversation continues from the point the reader picked. It carries the
+/// Confirming the field drops everything after that row and sends the new
+/// text, so the conversation continues from the point the reader picked. It
+/// carries the
 /// sequence rather than a position, because the rows on screen are a window
 /// over a longer conversation and an index would point at the wrong row the
 /// moment older history loads.
@@ -191,6 +192,19 @@ pub(crate) struct EditTarget {
     /// The row's own sequence: the truncation keeps it and drops what is
     /// after it.
     pub(crate) sequence: i32,
+}
+
+/// A stored user row open for an in-place rewrite (#2826).
+///
+/// The field lives inside the row, not in the composer: the pencil opens it,
+/// Enter or the check confirms it, the cross closes it. The target is what the
+/// confirm truncates and resends, so the row under the pencil is the one that
+/// gets replaced even if history moved while the field was open.
+pub(crate) struct InlineEdit {
+    /// Which row and which conversation the rewrite replaces.
+    pub(crate) target: EditTarget,
+    /// The field drawn inside the row.
+    pub(crate) editor: Entity<Editor>,
 }
 
 /// The composer on screen and the messages waiting behind it (#2805).
@@ -217,10 +231,6 @@ pub(crate) struct Composer {
     /// drains between tool calls; a second list here let the strip show
     /// messages the agent could not see, so they never went out (#2629).
     pub(crate) unsent: Vec<PendingMessage>,
-    /// The stored user row this composer is editing (#2826). The send that
-    /// follows replaces that row and drops what came after it; `None` for
-    /// every ordinary send.
-    pub(crate) edit: Option<EditTarget>,
     /// Whether the queue strip is showing every message or only its head. Five
     /// rows push the conversation off the screen, so past two the strip folds
     /// and a click opens it (#2629).
@@ -245,7 +255,6 @@ impl Composer {
             editor,
             drafts: DraftStore::new(),
             unsent: Vec::new(),
-            edit: None,
             queue_expanded: false,
             agent_error: None,
             hint_painted: None,

@@ -308,6 +308,7 @@ impl Dashboard {
             })
             .collect()
     }
+
     /// Every session a row from `source` could be forwarded into (#2608).
     /// The row's own conversation is never offered: a forward into the chat
     /// it came from is not a forward. Used by the picker, and by the menu to
@@ -320,9 +321,13 @@ impl Dashboard {
             .collect()
     }
 
-
     /// Open the message menu on a stored row (#2613), at the press that
     /// asked for it (#2690).
+    ///
+    /// The row travels with the press (#2827): a right press in a split leaf
+    /// opens the same menu as one in the window's chat, and the actions read
+    /// the row that was pressed rather than looking it up in the window's own
+    /// transcript, where a pane's rows never were.
     pub(crate) fn msg_menu_open(
         &mut self,
         row: Message,
@@ -334,11 +339,6 @@ impl Dashboard {
         // other row's.
         self.sessions.close_rail_menu();
         self.msg_menu = Some(row.id);
-    ///
-    /// The row travels with the press (#2827): a right press in a split leaf
-    /// opens the same menu as one in the window's chat, and the actions read
-    /// the row that was pressed rather than looking it up in the window's own
-    /// transcript, where a pane's rows never were.
         self.msg_menu_row = Some(row);
         self.msg_menu_leaf = leaf;
         self.msg_menu_at = Some(at);
@@ -388,6 +388,11 @@ impl Dashboard {
     pub(crate) fn msg_react_pick(&mut self, id: Uuid, name: String, cx: &mut Context<Self>) {
         self.react_menu = None;
         self.react_menu_at = None;
+        // The row the pack was opened on may live in a split leaf (#2827): its
+        // chips belong to that leaf's transcript, not the window's, or a react
+        // picked there would paint on a row that is not on screen.
+        let leaf = self.msg_menu_leaf.take();
+        self.msg_menu_row = None;
         let db_path = self.db_path.clone();
         cx.spawn(async move |this, cx| {
             let result = transcript::toggle_reaction(db_path, id, name.clone()).await;
@@ -407,11 +412,6 @@ impl Dashboard {
                                 state.reactions.remove(&id);
                             }
                         };
-        // The row the pack was opened on may live in a split leaf (#2827): its
-        // chips belong to that leaf's transcript, not the window's, or a react
-        // picked there would paint on a row that is not on screen.
-        let leaf = self.msg_menu_leaf.take();
-        self.msg_menu_row = None;
                         match leaf.and_then(|session| this.pane_states.get(&session).cloned()) {
                             Some(pane) => {
                                 pane.update(cx, |pane, cx| {
@@ -431,12 +431,32 @@ impl Dashboard {
         .detach();
     }
 
-    /// Put one stored user row back in the composer to be edited (#2826).
+    /// The field a rewrite opens inside its own row (#2826).
     ///
-    /// The row's text replaces whatever the field held and the row is
-    /// remembered, so the next send replaces it and drops the conversation
-    /// after it. This is the window's own chat leaf; a split leaf goes through
-    /// [`Self::pane_edit_begin`] (#2826).
+    /// It walks the same shared history as every other composer, so a message
+    /// sent from a card is recalled the way one sent from the composer is.
+    fn new_inline_editor(&self, text: String, cx: &mut Context<Self>) -> Entity<editor::Editor> {
+        let editor = cx.new({
+            let history = self.history.clone();
+            let history_path = composer::default_history_path();
+            move |cx| editor::Editor::new_with_history(history, history_path, cx)
+        });
+        editor.update(cx, |editor, cx| {
+            editor.restore_draft(text, cx);
+            // The row's field takes the keyboard: the pencil was clicked to
+            // type, so the next keystroke is the reader's. The request waits
+            // for a frame that holds a window (#2665).
+            editor.focus_pending = true;
+        });
+        editor
+    }
+
+    /// Open one stored user row for a rewrite, inside its own card (#2826).
+    ///
+    /// The field is drawn in the row itself: the reader edits the message
+    /// where it stands, and nothing is copied into the composer or armed on
+    /// it. Enter in the field, or the check under it, truncates after the row
+    /// and sends the new text; the cross closes it and changes nothing.
     pub(crate) fn msg_edit_begin(&mut self, id: Uuid, sequence: i32, cx: &mut Context<Self>) {
         let Some(session) = self.chat_state.session() else {
             return;
@@ -451,31 +471,82 @@ impl Dashboard {
         else {
             return;
         };
-        // Whatever was waiting in the field belongs to the message that was
-        // about to be written, not to the one being rewritten.
-        self.composer.edit = Some(chat_leaf::EditTarget {
-            id,
-            session,
-            sequence,
+        let editor = self.new_inline_editor(text, cx);
+        // Enter in the row's field is the same confirm as the check under it.
+        cx.subscribe(&editor, move |this, _editor, event, cx| {
+            if let editor::EditorEvent::Sent(text) = event {
+                this.msg_edit_confirm(text.clone(), cx);
+            }
+        })
+        .detach();
+        self.edit_row = Some(chat_leaf::InlineEdit {
+            target: chat_leaf::EditTarget {
+                id,
+                session,
+                sequence,
+            },
+            editor,
         });
-        let editor = self.composer.editor.clone();
-        editor.update(cx, |editor, cx| {
-            editor.restore_draft(text, cx);
-            editor.show_editing(cx);
-        });
-        // The caret goes to the field being edited: the user asked to rewrite
-        // this text, so the next keystroke is theirs.
-        self.refocus_screen();
-        logging::info(&format!("editing row {id} at sequence {sequence}"));
+        logging::info(&format!("editing row {id} at sequence {sequence} in place"));
         cx.notify();
     }
 
-    /// Put one stored user row back in a split leaf's composer (#2826).
+    /// Send the rewrite open in the window's chat (#2826). An empty field
+    /// sends nothing: the row stays as it was and the field simply closes.
+    pub(crate) fn msg_edit_confirm(&mut self, text: String, cx: &mut Context<Self>) {
+        let Some(open) = self.edit_row.take() else {
+            return;
+        };
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            cx.notify();
+            return;
+        }
+        self.send_edited(open.target, text, cx);
+    }
+
+    /// Close the rewrite without sending it (#2826).
+    pub(crate) fn msg_edit_cancel(&mut self, cx: &mut Context<Self>) {
+        if self.edit_row.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// The hooks the window's transcript needs to draw the open rewrite
+    /// (#2826): the row it belongs to, the field, and the two clicks that end
+    /// it. `None` when no row is being rewritten.
+    pub(crate) fn inline_edit_hooks(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<transcript::InlineEditView> {
+        let open = self.edit_row.as_ref()?;
+        let confirm = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+            cx.stop_propagation();
+            let text = this
+                .edit_row
+                .as_ref()
+                .map(|open| open.editor.read(cx).draft().text);
+            if let Some(text) = text {
+                this.msg_edit_confirm(text, cx);
+            }
+        });
+        let cancel = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+            cx.stop_propagation();
+            this.msg_edit_cancel(cx);
+        });
+        Some(transcript::InlineEditView {
+            id: open.target.id,
+            editor: open.editor.clone(),
+            confirm: Rc::new(confirm),
+            cancel: Rc::new(cancel),
+        })
+    }
+
+    /// Open one stored user row for a rewrite in a split leaf (#2826).
     ///
-    /// The window's own version arms `self.composer`, which is the chat leaf's
-    /// field. A pane has a composer of its own, so the edit target and the
-    /// restored text both belong to the leaf the pencil was clicked in. Every
-    /// pane draws that pencil now, so this is the only door a split leaf uses.
+    /// The field belongs to the leaf that owns the row, so it is held on that
+    /// pane rather than on the window: a pane's transcript is the only place
+    /// the field is drawn, and the confirm sends through that leaf.
     pub(crate) fn pane_edit_begin(
         &mut self,
         session: Uuid,
@@ -487,8 +558,7 @@ impl Dashboard {
             return;
         };
         // The row is read from the leaf's own transcript: that is the state it
-        // drew, so the text that lands in its field is the text under the
-        // pencil, not a second read that could disagree with the screen.
+        // drew, so the field opens with the text under the pencil.
         let text = pane
             .read(cx)
             .transcript
@@ -499,29 +569,70 @@ impl Dashboard {
         let Some(text) = text else {
             return;
         };
+        let editor = self.new_inline_editor(text, cx);
+        cx.subscribe(&editor, move |this, _editor, event, cx| {
+            if let editor::EditorEvent::Sent(text) = event {
+                this.pane_edit_confirm(session, text.clone(), cx);
+            }
+        })
+        .detach();
         pane.update(cx, |pane, cx| {
-            pane.edit = Some(chat_leaf::EditTarget {
-                id,
-                session,
-                sequence,
-            });
-            let editor = pane.editor.clone();
-            editor.update(cx, |editor, cx| {
-                editor.restore_draft(text, cx);
-                editor.show_editing(cx);
+            pane.edit = Some(chat_leaf::InlineEdit {
+                target: chat_leaf::EditTarget {
+                    id,
+                    session,
+                    sequence,
+                },
+                editor,
             });
             cx.notify();
         });
-        // The caret goes to the pane holding the edit, and the pane keeps the
-        // keyboard for the same reason the window does: the user asked to
-        // rewrite this text, so the next keystroke is theirs.
+        // The leaf owns the keyboard while its row is open: the field asks for
+        // the caret itself on its next frame, so the pane's own composer is
+        // deliberately not refocused here.
         self.pane_focus = Some(session);
         self.sync_composer_session();
-        self.request_composer_caret(cx);
-        self.refocus_screen();
         logging::info(&format!(
-            "pane edit: row {id} at sequence {sequence} in {session}"
+            "pane edit: row {id} at sequence {sequence} in {session}, in place"
         ));
+        cx.notify();
+    }
+
+    /// Send the rewrite open in a split leaf (#2826).
+    pub(crate) fn pane_edit_confirm(
+        &mut self,
+        session: Uuid,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pane) = self.pane_states.get(&session).cloned() else {
+            return;
+        };
+        let target = pane.update(cx, |pane, cx| {
+            let target = pane.edit.take().map(|open| open.target);
+            cx.notify();
+            target
+        });
+        let Some(target) = target else {
+            return;
+        };
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        self.send_edited_in_pane(session, target, text, cx);
+    }
+
+    /// Close a split leaf's rewrite without sending it (#2826).
+    pub(crate) fn pane_edit_cancel(&mut self, session: Uuid, cx: &mut Context<Self>) {
+        let Some(pane) = self.pane_states.get(&session).cloned() else {
+            return;
+        };
+        pane.update(cx, |pane, cx| {
+            if pane.edit.take().is_some() {
+                cx.notify();
+            }
+        });
         cx.notify();
     }
 
@@ -542,6 +653,8 @@ impl Dashboard {
         };
         self.copy_texts(&texts, cx);
         self.msg_menu = None;
+        self.msg_menu_row = None;
+        self.msg_menu_leaf = None;
         cx.notify();
     }
 
@@ -581,6 +694,10 @@ impl Dashboard {
         &self,
         cx: &mut Context<Self>,
     ) -> Vec<(String, transcript::ClickHandler)> {
+        let Some(row) = self.msg_menu_row.clone() else {
+            return Vec::new();
+        };
+        let id = row.id;
         let mut items: Vec<(String, transcript::ClickHandler)> = Vec::new();
         let copy = cx.listener(move |this, _ev, _window, cx| {
             cx.stop_propagation();
@@ -682,8 +799,6 @@ impl Dashboard {
         // The caret goes to the field the reply will be sent from: the user
         // asked to reply, so the next keystroke is the reply. In a split leaf
         // that is the leaf's own composer, never the window's.
-        self.msg_menu_row = None;
-        self.msg_menu_leaf = None;
         if let Some(session) = leaf {
             self.pane_focus = Some(session);
             self.sync_composer_session();
@@ -691,6 +806,18 @@ impl Dashboard {
         self.refocus_screen();
         logging::info(&format!("reply quoting {} row(s)", rows.len()));
         cx.notify();
+    }
+
+    /// The composer a reply chip belongs on: the pressed row's own surface
+    /// (#2827). A row in a split leaf is answered from that leaf's field, and
+    /// a row in the window's chat from the window's.
+    fn composer_for(&self, leaf: Option<Uuid>, cx: &Context<Self>) -> Entity<editor::Editor> {
+        leaf.and_then(|session| {
+            self.pane_states
+                .get(&session)
+                .map(|pane| pane.read(cx).editor.clone())
+        })
+        .unwrap_or_else(|| self.composer.editor.clone())
     }
 
     /// Quote the picked rows into the composer (#2827): the selection bar's
@@ -725,10 +852,6 @@ impl Dashboard {
                 self.chat_state
                     .transcript
                     .rows
-        let Some(row) = self.msg_menu_row.clone() else {
-            return Vec::new();
-        };
-        let id = row.id;
                     .iter()
                     .find(|m| m.id == id)
                     .cloned()
@@ -769,9 +892,15 @@ impl Dashboard {
             return;
         }
         self.forward_pick = Some(rows);
+        self.forward_leaf = leaf;
         self.forward_query.clear();
         self.forward_cursor = self.forward_destinations().first().map(|(id, _)| *id);
         self.msg_menu = None;
+        if let Some(session) = leaf {
+            self.pane_focus = Some(session);
+            self.sync_composer_session();
+            self.refocus_screen();
+        }
         cx.notify();
     }
 
@@ -779,6 +908,7 @@ impl Dashboard {
     /// mistake lands back in select mode with the same rows still chosen.
     pub(crate) fn forward_cancel(&mut self, cx: &mut Context<Self>) {
         self.forward_pick = None;
+        self.forward_leaf = None;
         self.forward_query.clear();
         self.forward_cursor = None;
         cx.notify();
@@ -820,18 +950,6 @@ impl Dashboard {
             return;
         };
         self.forward_into(target, cx);
-    /// The composer a reply chip belongs on: the pressed row's own surface
-    /// (#2827). A row in a split leaf is answered from that leaf's field, and
-    /// a row in the window's chat from the window's.
-    fn composer_for(&self, leaf: Option<Uuid>, cx: &Context<Self>) -> Entity<editor::Editor> {
-        leaf.and_then(|session| {
-            self.pane_states
-                .get(&session)
-                .map(|pane| pane.read(cx).editor.clone())
-        })
-        .unwrap_or_else(|| self.composer.editor.clone())
-    }
-
     }
 
     /// Copy the picked rows into `target`. The write runs off the UI thread;
@@ -850,6 +968,7 @@ impl Dashboard {
         let label = self.session_label(source);
         let db_path = self.db_path.clone();
         self.forward_pick = None;
+        self.forward_leaf = None;
         self.forward_query.clear();
         self.forward_cursor = None;
         self.msg_select.cancel();
@@ -910,16 +1029,10 @@ impl Dashboard {
             .turn
             .settle
             .deadline
-        self.forward_leaf = leaf;
             .get_or_insert_with(|| std::time::Instant::now() + SETTLE_BUDGET);
         cx.spawn(async move |this, cx| {
             let result = transcript::load_recent(db_path, sid).await;
             this.update(cx, |this, cx| {
-        if let Some(session) = leaf {
-            self.pane_focus = Some(session);
-            self.sync_composer_session();
-            self.refocus_screen();
-        }
                 if this.chat_state.session() != Some(sid) {
                     return;
                 }
@@ -932,7 +1045,6 @@ impl Dashboard {
                             &loaded.origins,
                         );
                         let landed = settle_landed(expect, loaded.total);
-        self.forward_leaf = None;
                         // Taken before `rows` is moved out below: every retry
                         // log names the row total it was comparing against.
                         let total = loaded.total;
@@ -993,7 +1105,6 @@ impl Dashboard {
                             ));
                             this.reload_transcript(sid, cx);
                         } else if this.turn.settle.rechecks < SETTLE_RECHECKS {
-        self.forward_leaf = None;
                             // The budget ran out, but the payload is usually
                             // written by now and only this read missed it. One
                             // more look after a pause turns a permanently

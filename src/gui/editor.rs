@@ -413,11 +413,6 @@ pub const COPIED_NOTICE: &str = "Copied to clipboard";
 /// have to explain where it went.
 pub const STOPPED_NOTICE: &str = "Stopped, message back in the composer";
 
-/// What the composer says when a stored message has been put back in the
-/// field to be rewritten (#2826). The text alone cannot tell an edit from a
-/// fresh draft, and the difference is that the next send replaces history.
-pub const EDITING_NOTICE: &str = "Editing message, Enter replaces it";
-
 /// True once a notice has outlived the TTL. Pure, so the expiry rule stays a
 /// test instead of a wall-clock guess.
 pub fn notice_expired(shown_at: Instant, now: Instant, ttl: Duration) -> bool {
@@ -438,12 +433,12 @@ impl Editor {
             focus_pending: false,
             content: String::new(),
             history,
-            reply: None,
             history_path,
             input_history_index: None,
             input_history_stash: String::new(),
             recall: None,
             attachments: Vec::new(),
+            reply: None,
             placeholder: "Talk to the crab…".into(),
             selected_range: 0..0,
             selection_reversed: false,
@@ -523,12 +518,6 @@ impl Editor {
         self.show_notice(COPIED_NOTICE, cx);
     }
 
-    /// A stored message was put back in the field to be rewritten (#2826).
-    /// Same transient line, because the field itself cannot say that the next
-    /// send replaces history rather than appending to it.
-    pub fn show_editing(&mut self, cx: &mut Context<Self>) {
-        self.show_notice(EDITING_NOTICE, cx);
-    }
 
     /// The notice still inside its window, if any. Read through this so an
     /// expired notice never paints while its timer is still in flight.
@@ -560,6 +549,17 @@ impl Editor {
         added
     }
 
+    fn take_attachments(&mut self) -> Vec<Attachment> {
+        std::mem::take(&mut self.attachments)
+    }
+
+    fn remove_attachment(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index < self.attachments.len() {
+            self.attachments.remove(index);
+            cx.notify();
+        }
+    }
+
     /// The message this composer is answering (#2827). The chip replaces any
     /// earlier one: a composer answers one message at a time, the way every
     /// messaging client treats a reply.
@@ -585,17 +585,6 @@ impl Editor {
         }
     }
 
-
-    fn take_attachments(&mut self) -> Vec<Attachment> {
-        std::mem::take(&mut self.attachments)
-    }
-
-    fn remove_attachment(&mut self, index: usize, cx: &mut Context<Self>) {
-        if index < self.attachments.len() {
-            self.attachments.remove(index);
-            cx.notify();
-        }
-    }
 
     /// The paperclip: the platform's own file picker, then the same attach
     /// path a Finder drop takes. Cancelled means nothing was attached, so
@@ -1143,6 +1132,17 @@ impl Editor {
             cx.emit(EditorEvent::Sent(name.to_string()));
             return;
         }
+        let text = self.content.trim().to_string();
+        let attachments = self.take_attachments();
+        if text.is_empty() && attachments.is_empty() {
+            return;
+        }
+        let payload = self.payload_with_reply(&text, &attachments);
+        self.remember(&text);
+        self.clear_after_send(cx);
+        cx.emit(EditorEvent::Sent(payload));
+    }
+
     /// The payload one send puts on the wire (#2827): the reply's quote, then
     /// the user's own words with their attachment markers. The quote is taken
     /// here, so a send spends the reply and the chip leaves with the message
@@ -1153,17 +1153,6 @@ impl Editor {
             Some(reply) => format!("{}\n{}", reply.quote.trim_end(), body),
             None => body,
         }
-    }
-
-        let text = self.content.trim().to_string();
-        let attachments = self.take_attachments();
-        if text.is_empty() && attachments.is_empty() {
-            return;
-        }
-        let payload = self.payload_with_reply(&text, &attachments);
-        self.remember(&text);
-        self.clear_after_send(cx);
-        cx.emit(EditorEvent::Sent(payload));
     }
 
     /// Record one sent entry in the shared list and on disk.
@@ -1237,9 +1226,6 @@ impl Editor {
         self.command_dismissed = false;
         self.emoji_dismissed = false;
         self.emoji_index = 0;
-        // A reply belongs to the conversation it was opened in, so leaving
-        // that conversation drops the chip with the draft (#2827).
-        self.reply = None;
         cx.notify();
     }
 
@@ -1251,6 +1237,9 @@ impl Editor {
     pub fn begin_conversation(&mut self, cx: &mut Context<Self>) {
         self.content.clear();
         self.attachments.clear();
+        // A reply belongs to the conversation it was opened in, so leaving
+        // that conversation drops the chip with the draft (#2827).
+        self.reply = None;
         self.selected_range = 0..0;
         self.selection_reversed = false;
         self.marked_range = None;
@@ -2232,12 +2221,6 @@ impl Render for Editor {
         }
         // The box is capped at `COMPOSER_MAX_ROWS`, so a caret below the fold
         // asked prepaint for a scroll. Applying it here, where the handle
-        // The reply chip sits above the field and above the attachments
-        // (#2827): it says what the message answers, so it belongs next to the
-        // text rather than next to the files.
-        if let Some(reply) = self.reply.clone() {
-            body = body.child(reply_strip(&reply, cx));
-        }
         // lives, keeps the height question and the scroll question on the
         // frames that own them (#2773).
         if let Some(target) = self.reveal.take()
@@ -2249,6 +2232,12 @@ impl Render for Editor {
         // biggest thing in the box and the attachment row never pushes the
         // caret around.
         let mut body = div().flex().flex_col().gap_2();
+        // The reply chip sits above the field and above the attachments
+        // (#2827): it says what the message answers, so it belongs next to the
+        // text rather than next to the files.
+        if let Some(reply) = self.reply.clone() {
+            body = body.child(reply_strip(&reply, cx));
+        }
         if !self.attachments.is_empty() {
             body = body.child(attachment_strip(&self.attachments, cx));
         }
@@ -2341,6 +2330,17 @@ impl Render for Editor {
         // Deferred, so the card paints over the field that opened it and the
         // conversation above it rather than under the next sibling (#2690).
         match self.ctx_menu_at {
+            Some(at) => root
+                .child(gpui::deferred(self.context_menu(at, cx)).with_priority(2))
+                .into_any_element(),
+            None => root.into_any_element(),
+        }
+    }
+}
+
+/// One transient line inside the composer, in the terminal's own voice
+/// (#2587). Faint and one row tall: it confirms the copy without competing
+/// with the draft right above it.
 /// The reply strip above the field (#2827), drawn the way Telegram draws it:
 /// an accent bar, "Reply to" and the author, one line of the quoted text and
 /// a cross that cancels the reply. It is not part of the field's text: the
@@ -2403,17 +2403,6 @@ fn reply_strip(reply: &ReplyAttachment, cx: &mut Context<Editor>) -> gpui::State
         )
 }
 
-            Some(at) => root
-                .child(gpui::deferred(self.context_menu(at, cx)).with_priority(2))
-                .into_any_element(),
-            None => root.into_any_element(),
-        }
-    }
-}
-
-/// One transient line inside the composer, in the terminal's own voice
-/// (#2587). Faint and one row tall: it confirms the copy without competing
-/// with the draft right above it.
 fn notice_row(text: &str) -> impl IntoElement {
     div()
         .w_full()
@@ -3818,6 +3807,17 @@ mod tests {
                     .concat()
                     .as_str()
             ),
+            "a draft gets the notice on its own row under the text"
+        );
+        assert!(
+            src.contains(
+                ["cx.background_executor().", "timer(NOTICE_TTL)"]
+                    .concat()
+                    .as_str()
+            ),
+            "and the line clears itself on a timer"
+        );
+    }
 
     /// A reply is a Telegram-style attachment, not quote text dumped into the
     /// draft. The send spends it once and prepends its quote to the payload.
@@ -3865,17 +3865,6 @@ mod tests {
         assert!(
             reply < files,
             "the reply sits above the field and ahead of file attachments"
-        );
-    }
-            "a draft gets the notice on its own row under the text"
-        );
-        assert!(
-            src.contains(
-                ["cx.background_executor().", "timer(NOTICE_TTL)"]
-                    .concat()
-                    .as_str()
-            ),
-            "and the line clears itself on a timer"
         );
     }
 }

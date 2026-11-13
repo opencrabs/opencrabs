@@ -42,33 +42,6 @@ impl Dashboard {
             ));
             return;
         }
-        // An edit armed in this leaf rewrites a stored row instead of
-        // appending a new one (#2826). It is taken before anything is queued:
-        // the row it replaces is about to be deleted, so letting it wait
-        // behind a running turn would send it against history that moved.
-        let armed = self
-            .pane_states
-            .get(&session)
-            .cloned()
-            .and_then(|pane| {
-                // An `Entity`'s update hands the closure's own value back, so
-                // a pane that is already gone has no edit to hand back.
-                pane.update(cx, |pane, _| pane.edit.take())
-            });
-        if let Some(target) = armed {
-            if target.session == session {
-                self.send_edited_in_pane(session, target, text, cx);
-                return;
-            }
-            // The leaf was handed another conversation between the pencil and
-            // the send, so the target no longer names a row on this screen.
-            // The text goes out as an ordinary message rather than deleting
-            // history nobody is looking at.
-            logging::info(&format!(
-                "pane edit dropped: row {} belongs to session {}",
-                target.id, target.session
-            ));
-        }
         // A send ends that pane's offer, the same rule the window's own
         // composer follows (#2708).
         agent_bridge::options_take(session);
@@ -535,23 +508,6 @@ impl Dashboard {
             cx.notify();
             return;
         }
-        // An edit is a rewrite, not an append (#2826). It is answered before
-        // the closed-topic and offline gates, because both of those would leave
-        // the composer armed for an edit that never happened.
-        if let Some(target) = self.composer.edit.take() {
-            if self.chat_state.session() == Some(target.session) {
-                self.send_edited(target, text, cx);
-                return;
-            }
-            // Another conversation was opened between the click and the send,
-            // so the edit no longer names a row on screen. The text goes out as
-            // an ordinary message instead of deleting history nobody is
-            // looking at.
-            logging::info(&format!(
-                "edit dropped: row {} belongs to session {}",
-                target.id, target.session
-            ));
-        }
         // A closed topic refuses new turns. The notice says why, so the send is
         // never dropped without a word (#2305). It sits after the parse above
         // because a command is not a turn: `/new` and `/sessions` still work
@@ -674,7 +630,12 @@ impl Dashboard {
     /// exists, so the stop comes first, the truncate second, and the send last.
     /// The window is re-read between the last two, so the rows the edit dropped
     /// leave the screen at the same moment they leave the store.
-    fn send_edited(&mut self, target: chat_leaf::EditTarget, text: String, cx: &mut Context<Self>) {
+    pub(crate) fn send_edited(
+        &mut self,
+        target: chat_leaf::EditTarget,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
         self.stop_turn_for_edit(target.session, cx);
         let db_path = self.db_path.clone();
         let session = target.session;
@@ -706,14 +667,14 @@ impl Dashboard {
         cx.notify();
     }
 
-    /// The same edit, sent from a split leaf's composer (#2826).
+    /// The same edit, confirmed from a field inside a split leaf's row (#2826).
     ///
     /// The difference is only where the answer lands: the truncation and the
     /// new turn are the same, but the re-read goes into the leaf that owns the
     /// conversation and the text goes back out through that leaf's own send.
     /// Writing the window's transcript here would repaint a conversation the
     /// pane is not showing.
-    fn send_edited_in_pane(
+    pub(crate) fn send_edited_in_pane(
         &mut self,
         pane_id: Uuid,
         target: chat_leaf::EditTarget,
