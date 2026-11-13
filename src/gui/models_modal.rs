@@ -68,7 +68,15 @@ impl Dashboard {
                 active_provider,
                 onboarding: false,
                 search_focused: true,
-                max_models: 24,
+                // Sized for the 440 body, not for a terminal's 24 rows. A row
+                // is about 40px (py_2 plus a line of small text, plus the
+                // column gap) and the search field takes roughly 46, so nine
+                // is what the body actually shows. A larger window makes the
+                // list taller than its own body: the selection then walks off
+                // the visible area while the scroll offset stays put (#2918).
+                // With the window matched to the body, `visible_window` slides
+                // it instead, which is the rolling list the card should have.
+                max_models: 9,
                 row_layout: opencrabs::ui_core::model_layout::ModelRowLayout::Stacked,
                 provider_label_width: 0.0,
                 show_provider_labels: false,
@@ -81,17 +89,37 @@ impl Dashboard {
             .w_full()
             .h(px(440.0))
             .min_h_0()
+            // The row is a fixed 440 and the picker is taller than that on a
+            // long catalogue, so the row itself must clip (#2918). Without
+            // this the list painted past the card's bottom edge and across
+            // its footer.
+            .overflow_hidden()
             .child(
                 div()
                     .id("models-providers")
                     .w(px(180.0))
                     .flex_none()
                     .h_full()
+                    .min_h_0()
                     .overflow_y_scroll()
                     .pr_2()
                     .child(provider_list),
             )
-            .child(div().flex_1().min_w_0().h_full().child(picker.body));
+            // A column flex parent, not a plain block: `picker.body` asks for
+            // `flex_1`, and under a block parent that resolves against the
+            // content instead of the 440, so the inner scroll container had no
+            // height to scroll in (#2918).
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .h_full()
+                    .overflow_hidden()
+                    .child(picker.body),
+            );
         let footer = div()
             .flex()
             .flex_col()
