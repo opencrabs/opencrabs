@@ -2000,6 +2000,21 @@ fn cross_platform_refusal(origin: Option<&str>, owner: Option<i64>) -> Option<St
     }
 }
 
+/// Pull the poll id out of a sent-message payload (#2288).
+///
+/// teloxide models a poll as message media, so the id sits three levels down.
+/// A send_poll response always carries one, but the match is exhaustive rather
+/// than unwrapped: losing the id means silently dropping every vote.
+fn poll_id_of(message: &teloxide::types::Message) -> Option<String> {
+    match &message.kind {
+        teloxide::types::MessageKind::Common(common) => match &common.media_kind {
+            teloxide::types::MediaKind::Poll(media) => Some(media.poll.id.0.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod cross_platform_tests {
     use super::*;
@@ -2039,20 +2054,5 @@ mod cross_platform_tests {
         // Without an owner id, this guard has nothing to route to; the None
         // branch in chat_or_err still fires its own message.
         assert_eq!(cross_platform_refusal(Some("discord"), None), None);
-    }
-}
-
-/// Pull the poll id out of a sent-message payload (#2288).
-///
-/// teloxide models a poll as message media, so the id sits three levels down.
-/// A send_poll response always carries one, but the match is exhaustive rather
-/// than unwrapped: losing the id means silently dropping every vote.
-fn poll_id_of(message: &teloxide::types::Message) -> Option<String> {
-    match &message.kind {
-        teloxide::types::MessageKind::Common(common) => match &common.media_kind {
-            teloxide::types::MediaKind::Poll(media) => Some(media.poll.id.0.clone()),
-            _ => None,
-        },
-        _ => None,
     }
 }
