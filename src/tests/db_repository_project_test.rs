@@ -147,7 +147,7 @@ async fn assignable_sessions_include_other_projects_but_not_topics_or_archives()
         .expect("assign session");
     sessions.archive(archived.id).await.expect("archive session");
     sessions
-        .create_topic(plain.id, "Topic".to_string())
+        .create_topic(plain.id, "Topic")
         .await
         .expect("create topic");
 
