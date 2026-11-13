@@ -319,7 +319,11 @@ jobs:
           # src/gui is the desktop client, and since v0.6.0 it ships in the
           # Windows zip as a second exe. A GUI-only PR that skips this lane is
           # a GUI-only PR whose Windows build nobody compiled.
-          pattern='^(Cargo\.toml|Cargo\.lock|rust-toolchain\.toml|build\.rs|\.github/workflows/ci\.yml|scripts/(check-pe-imports\.py|stage-windows-runtime\.sh)|src/utils/(shell|cwd)\.rs|src/brain/tools/(bash|read)\.rs|src/tui/app/input\.rs|src/config/(winlock|profile)\.rs|src/gui/.+\.rs)$'
+          # src/ui_core is where that window keeps the code it shares with the
+          # terminal, so a change there breaks the GUI exe without touching
+          # src/gui. The import gate inspects that exe, so the lane has to
+          # fire for ui_core too (#2917).
+          pattern='^(Cargo\.toml|Cargo\.lock|rust-toolchain\.toml|build\.rs|\.github/workflows/ci\.yml|scripts/(check-pe-imports\.py|stage-windows-runtime\.sh)|src/utils/(shell|cwd)\.rs|src/brain/tools/(bash|read)\.rs|src/tui/app/input\.rs|src/config/(winlock|profile)\.rs|src/(gui|ui_core)/.+\.rs)$'
           if echo "$files" | grep -qE "$pattern"; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
