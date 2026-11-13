@@ -558,7 +558,10 @@ impl Render for PaneView {
         });
         // The window owns the one copied row (#2750), so the leaf asks it
         // rather than keeping a second mark of its own.
-        let copied = edit_window.read(cx).copied_row();
+        let copied = match edit_window.upgrade() {
+            Some(window) => window.read(cx).copied_row(),
+            None => None,
+        };
         let body = transcript::view(
             &self.transcript,
             &self.scroll,
