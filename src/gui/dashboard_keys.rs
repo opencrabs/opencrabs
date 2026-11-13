@@ -616,7 +616,10 @@ impl Dashboard {
             if self.cancel_focused_pane_turn("Esc", cx) {
                 return;
             }
-            if !self.turn.busy {
+            // The window's own turn is the chat leaf's, so a caret on another
+            // pane must not reach it either. Same branch as idle, because from
+            // where the caret is that turn is already out of sight (#2616).
+            if !self.turn.busy || self.split_focus().is_some() {
                 // Idle Esc hands the keyboard back. The rail's mode is the
                 // only thing Esc owns here, and Tab is what arms it. The old
                 // blur bridge existed only because focus never moved off the
@@ -646,7 +649,11 @@ impl Dashboard {
                 && self.turn.busy
                 && self.turn.live.untouched()
             {
-                let composer = self.composer_entity(cx);
+                // The question belongs to the chat leaf, so it goes back to the
+                // field that owns that session. `composer_entity` resolves the
+                // caret, and with a split that would hand one conversation's
+                // question to another.
+                let composer = self.composer.editor.clone();
                 // Only into an empty field: anything typed since the send is
                 // the user's, and taking the question back must never cost it.
                 // One condition, not two nested ones: the take has to run only
