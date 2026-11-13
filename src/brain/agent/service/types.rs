@@ -601,18 +601,63 @@ impl AgentService {
     }
 
     /// Post-process an LLM-generated auto-title: trim whitespace, strip
-    /// surrounding quotes, and cap at 60 characters.
+    /// surrounding quotes, cap at three words, then cap at 60 characters.
+    ///
+    /// The prompt asks for three words, but a prompt is only a request and
+    /// a model can ignore it, so the limit is enforced here too (#2743).
+    /// A `[chat:ID]` suffix is preserved verbatim: it is the stable session
+    /// identifier used by `find_session_by_title_suffix`, so it must never
+    /// be counted as title words or truncated (issue #115).
     pub(crate) fn clean_auto_title(raw: &str) -> String {
         let trimmed = raw.trim().trim_matches('"').trim_matches('\'');
         if trimmed.is_empty() {
             return String::new();
         }
-        let char_count = trimmed.chars().count();
-        if char_count > 60 {
-            trimmed.chars().take(60).collect()
-        } else {
-            trimmed.to_string()
+        // Defensive: a title candidate can carry the stable session suffix
+        // (a model may echo the existing session name). Detach it before the
+        // word cap so the cap can never eat it, then reattach untouched.
+        let (body, suffix) = match trimmed.rfind("[chat:") {
+            Some(pos) if trimmed[pos..].ends_with(']') => {
+                (trimmed[..pos].trim_end(), &trimmed[pos..])
+            }
+            _ => (trimmed, ""),
+        };
+        let mut capped = Self::cap_title_words(body, 3);
+        if capped.chars().count() > 60 {
+            capped = capped.chars().take(60).collect::<String>();
+            capped = capped.trim_end().to_string();
         }
+        if suffix.is_empty() {
+            capped
+        } else {
+            format!("{capped} {suffix}")
+        }
+    }
+
+    /// Reduce a title to at most `max` words, dropping filler words first so
+    /// the result stays descriptive instead of losing its head. The issue's
+    /// own example: `Análise do espaço em disco e lixo` becomes
+    /// `Análise espaço disco`, not `Análise do espaço` (#2743).
+    ///
+    /// Falls back to the original word order when every word is filler, so a
+    /// title is never emptied by the trim.
+    fn cap_title_words(title: &str, max: usize) -> String {
+        let words: Vec<&str> = title.split_whitespace().collect();
+        if words.len() <= max {
+            return title.trim().to_string();
+        }
+        let kept: Vec<&str> = words
+            .iter()
+            .copied()
+            .filter(|w| !is_filler_word(w))
+            .collect();
+        if kept.is_empty() {
+            return words[..max].join(" ");
+        }
+        if kept.len() > max {
+            return kept[..max].join(" ");
+        }
+        kept.join(" ")
     }
 
     /// Check if a session title is a default channel-generated title that
@@ -687,6 +732,25 @@ impl AgentService {
         }
         ""
     }
+}
+
+/// Words dropped first when an auto-title runs past its three-word budget
+/// (#2743). Kept deliberately small: English function words plus the
+/// Portuguese articles and prepositions the rail already sees, so the trim
+/// removes glue instead of meaning.
+fn is_filler_word(word: &str) -> bool {
+    const FILLER: &[&str] = &[
+        // English
+        "a", "an", "the", "of", "for", "and", "or", "to", "in", "on", "at", "with", "from", "by",
+        "is", "are", "be", "as", "that", "this", "it", "its",
+        // Portuguese
+        "o", "os", "as", "do", "da", "dos", "das", "de", "em", "no", "na", "nos", "nas", "um",
+        "uma", "e", "ou", "para", "por", "com", "ao", "à",
+    ];
+    let lower = word
+        .trim_matches(|c: char| !c.is_alphanumeric())
+        .to_lowercase();
+    !lower.is_empty() && FILLER.contains(&lower.as_str())
 }
 
 /// Pull a likely title out of a Thinking block. Reasoning models that

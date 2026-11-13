@@ -105,6 +105,71 @@ mod clean_auto_title {
         // The LLM prompt says no punctuation but we don't enforce it in code
         assert_eq!(AgentService::clean_auto_title("Fix Bug."), "Fix Bug.");
     }
+
+    /// #2743: the prompt asks for three words, but a model can ignore it, so
+    /// a six-word answer must be stored as at most three words.
+    #[test]
+    fn caps_six_word_answer_at_three_words() {
+        let result = AgentService::clean_auto_title("Investigate the failing build on staging now");
+        assert!(
+            result.split_whitespace().count() <= 3,
+            "expected at most 3 words, got {result:?}"
+        );
+        assert!(!result.is_empty());
+    }
+
+    /// #2743: filler goes first so the title keeps its meaning. This is the
+    /// issue's own example verbatim.
+    #[test]
+    fn drops_filler_words_before_content() {
+        assert_eq!(
+            AgentService::clean_auto_title("Análise do espaço em disco e lixo"),
+            "Análise espaço disco"
+        );
+    }
+
+    #[test]
+    fn three_word_title_unchanged() {
+        assert_eq!(
+            AgentService::clean_auto_title("Análise espaço disco"),
+            "Análise espaço disco"
+        );
+    }
+
+    /// #2743: the word cap is multibyte safe (regression for #884). Three
+    /// accented Portuguese words survive intact, never split mid-char.
+    #[test]
+    fn three_word_cap_is_multibyte_safe() {
+        let result = AgentService::clean_auto_title("Análise espaço configuração lixo servidor");
+        assert_eq!(result, "Análise espaço configuração");
+        assert_eq!(result.chars().count(), 27);
+    }
+
+    /// Issue #115: the `[chat:ID]` suffix is the stable session identifier.
+    /// It is not a title word and must survive the cap untouched.
+    #[test]
+    fn keeps_chat_suffix_when_capping_words() {
+        let result = AgentService::clean_auto_title(
+            "Investigate the failing build on staging now [chat:7711740248]",
+        );
+        assert!(
+            result.ends_with("[chat:7711740248]"),
+            "suffix must survive the cap, got {result:?}"
+        );
+        let body = result.trim_end_matches("[chat:7711740248]").trim();
+        assert!(
+            body.split_whitespace().count() <= 3,
+            "title body should be at most 3 words, got {body:?}"
+        );
+    }
+
+    /// A title made only of filler must not be emptied by the trim.
+    #[test]
+    fn all_filler_title_keeps_words() {
+        let result = AgentService::clean_auto_title("the of and to in on");
+        assert!(!result.is_empty(), "must not return an empty title");
+        assert!(result.split_whitespace().count() <= 3);
+    }
 }
 
 mod is_default_channel_title {

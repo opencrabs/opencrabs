@@ -1117,7 +1117,7 @@ impl AgentService {
                 let title_request = LLMRequest::new(
                     title_model,
                     vec![Message::user(format!(
-                        "Generate a concise session title (3-7 words) based on this user message. \
+                        "Generate a concise session title of at most 3 words based on this user message. \
                          Return ONLY the title text, nothing else. No quotes, no punctuation at the end.\n\n\
                          Message: {}",
                         title_msg
