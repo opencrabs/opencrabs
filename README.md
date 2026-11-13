@@ -716,7 +716,7 @@ Prefer windows and buttons over the TUI? [MonoCode](https://github.com/hardbeat9
 
 ### Built-in GUI
 
-`cargo build --features gui --bin opencrabs-gui` builds the native desktop app over the same sessions, providers and SQLite store as the TUI. Release archives ship it since v0.6.0 as `opencrabs-gui` beside the terminal app, with a launcher of its own on Linux and a second bundle on macOS (see [What each archive carries](#what-each-archive-carries)). A turn in flight draws the same shape Telegram does: one card with a collapsed header, the tool rows interleaved with the narration as it arrives, and a footer that carries the metrics, the context budget included, once the turn settles. `ctrl+o` or a click on the card folds it, and it folds the live card rather than a settled turn while one is running. Long `bash` commands run as detached tasks instead of blocking the turn: each running task shows as a `⏳` strip above the input with its elapsed seconds, its tool row carries the task id, and the row settles with the total elapsed time when the task ends. A finished task resumes the session with its output, queued as a system message when a turn is still running, so a 20 minute command neither holds the editor hostage nor collapses into a 600s timeout.
+`cargo build --features gui --bin opencrabs-gui` builds the native desktop app over the same sessions, providers and SQLite store as the TUI. It is a peer of the terminal app, not a viewer attached to it: whichever one is running owns the profile, claims the instance lock, serves the configured channels, runs the cron scheduler and keeps background maintenance alive, so the window on its own is a complete install. Release archives ship it since v0.6.0 as `opencrabs-gui` beside the terminal app, with a launcher of its own on Linux and a second bundle on macOS (see [What each archive carries](#what-each-archive-carries)). A turn in flight draws the same shape Telegram does: one card with a collapsed header, the tool rows interleaved with the narration as it arrives, and a footer that carries the metrics, the context budget included, once the turn settles. `ctrl+o` or a click on the card folds it, and it folds the live card rather than a settled turn while one is running. Long `bash` commands run as detached tasks instead of blocking the turn: each running task shows as a `⏳` strip above the input with its elapsed seconds, its tool row carries the task id, and the row settles with the total elapsed time when the task ends. A finished task resumes the session with its output, queued as a system message when a turn is still running, so a 20 minute command neither holds the editor hostage nor collapses into a 600s timeout.
 
 A launch opens the conversation you were last in, on both surfaces, because the GUI and the terminal read and write the same `last_session` pointer. A first run, or a pointer at a conversation that has since been deleted, falls back to the newest session on the rail.
 
@@ -2334,7 +2334,7 @@ brew install opencrabs
 
 Installs from homebrew-core, with prebuilt bottles for macOS and Linux maintained by Homebrew. The formula is bumped automatically on every release, and `brew upgrade opencrabs` tracks the latest version.
 
-> **No Dock icon with Homebrew on macOS.** The formula installs a bare binary into the Homebrew prefix, and macOS can only show an app icon for a bundle. Until a cask is accepted upstream, a `brew install` has no Dock, Finder or Launchpad icon. Use the release archive in Option 1 if you want the icon.
+> **Homebrew ships the terminal app only.** The homebrew-core formula runs a plain `cargo install` with no `gui` feature, and that feature is the build toggle for the second binary, so a brew bottle carries `opencrabs` and never `opencrabs-gui`. Nothing else is missing from it: both apps are full front ends, and whichever one is running owns the profile, serves your channels, runs the cron scheduler and keeps background work alive. On macOS there is also no Dock, Finder or Launchpad icon, because the formula installs a bare binary into the Homebrew prefix and macOS only shows an icon for a bundle. For the window itself, use the release archive in Option 1, which ships both apps, or build from source with `cargo install opencrabs --features gui` (Option 3).
 
 ### Option 3: Install via Cargo
 
@@ -2350,7 +2350,7 @@ cargo install opencrabs
 
 #### Feature Flags
 
-All features are enabled by default. To customize, use `--no-default-features` and pick what you need:
+All features are enabled by default except `gui`, which is a build toggle rather than a capability: it decides whether the second binary, `opencrabs-gui`, gets compiled at all. The terminal app and the desktop app are peers, and whichever one is running owns the profile, serves your channels, runs the cron scheduler and keeps background work alive, so you do not need both and you can have both. `gui` stays off by default only so a plain build does not compile the gpui tree. To customize, use `--no-default-features` and pick what you need:
 
 ```bash
 # Install with only Telegram and Discord
@@ -2375,6 +2375,7 @@ cargo install opencrabs --no-default-features --features "telegram,whatsapp,disc
 | `rtk` | — | Bash output filtering via RTK, cutting tokens on supported commands |
 | `pdfium` | pdfium-render | PDF page rendering, the primary renderer; falls back to `pdftoppm` when the system Pdfium library is absent |
 | `notification-sound` | rodio | Plan chime: plays the embedded notification WAV when a plan task settles and when the plan reaches 100% at turn settle. Opt-in via `[agent] completion_notification_enabled` (default false), TUI and GUI. OS banners are a separate, always-compiled transport (`src/utils/desktop_notify.rs`, #2729) with its own four keys |
+| `gui` | gpui | Builds the desktop app (`opencrabs-gui`). A build toggle, not a capability: the terminal app and the desktop app are peers, and either one owns the profile, serves channels, runs cron and keeps background work alive. Off by default so a plain build stays free of the gpui tree |
 
 ### Option 4: Build from Source (full control)
 
