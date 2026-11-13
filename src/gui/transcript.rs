@@ -424,16 +424,29 @@ pub struct LiveTurn {
 
 impl LiveTurn {
     /// Nothing in flight: the transcript draws only what the DB holds.
+    ///
+    /// A notice alone is not in flight. It is a line ABOUT a turn (a model
+    /// switch, a slash reply, a rename that failed), and it carries no
+    /// question and no work, so the card must not be drawn over it: doing so
+    /// showed "OpenCrabs is thinking" with a spinner and a zeroed ctx footer
+    /// the instant anyone switched models, when nothing had been sent (#2895).
+    /// The amber line still draws; only the card is gone.
     pub fn is_empty(&self) -> bool {
-        self.user.is_none()
-            && !self.thinking
-            && self.stream.is_empty()
-            && self.tools.is_empty()
-            && self.entries.is_empty()
-            && self.notices.is_empty()
-            && self.injected.is_empty()
-            && self.settled.is_none()
-            && !self.stopped
+        self.notices.is_empty() && !self.has_turn_content()
+    }
+
+    /// Anything the live card is for: a question, work in flight, or a
+    /// verdict. Everything `is_empty` counted except the notices, so the two
+    /// answers cannot drift apart.
+    pub fn has_turn_content(&self) -> bool {
+        self.user.is_some()
+            || self.thinking
+            || !self.stream.is_empty()
+            || !self.tools.is_empty()
+            || !self.entries.is_empty()
+            || !self.injected.is_empty()
+            || self.settled.is_some()
+            || self.stopped
     }
 
     /// The model has not said anything yet: no reasoning, no text, no tool
@@ -3395,14 +3408,21 @@ fn live_view(
     // ONE card for the whole turn: header, body when open, footer. The three
     // loose children it replaces (a ledger, a status line below it, and a bare
     // reasoning line) are what made a busy turn unreadable (#2442).
-    let card = live_card(live, expanded, ctx, drag);
-    col = col.child(match live_click {
-        Some(click) => {
-            let click = click.clone();
-            card.on_click(move |event, window, cx| click(event, window, cx))
-        }
-        None => card,
-    });
+    //
+    // The card needs a turn to describe. A live turn holding only notices has
+    // no question and no work, and the card answered that silence with
+    // "OpenCrabs is thinking" over a spinner on a session that never sent
+    // anything (#2895). The notices above still draw; the card does not.
+    if live.has_turn_content() {
+        let card = live_card(live, expanded, ctx, drag);
+        col = col.child(match live_click {
+            Some(click) => {
+                let click = click.clone();
+                card.on_click(move |event, window, cx| click(event, window, cx))
+            }
+            None => card,
+        });
+    }
     if let Some(answer) = live.answer() {
         let block = Block::Msg {
             role: "assistant".into(),
@@ -5801,6 +5821,36 @@ mod tests {
         live.clear();
         assert!(live.is_empty());
         assert_eq!(live.answer(), None);
+    }
+
+    /// A notice is a line ABOUT a turn, not a turn (#2895). Model switches,
+    /// slash replies and failed renames all land in `notices`, and the live
+    /// card read that as work in flight: a spinner and "OpenCrabs is
+    /// thinking" over a session that had sent nothing.
+    #[test]
+    fn a_notice_alone_draws_no_card() {
+        let mut live = LiveTurn::default();
+        live.notices.push("model: switched".into());
+        assert!(
+            !live.is_empty(),
+            "the amber notice line is still drawn"
+        );
+        assert!(
+            !live.has_turn_content(),
+            "but a notice is not a turn, so the card stays away"
+        );
+
+        // Anything the card is actually for still counts.
+        live.begin("hello".into());
+        assert!(live.has_turn_content(), "a question is a turn");
+        live.clear();
+        assert!(!live.has_turn_content() && live.is_empty());
+
+        live.stopped = true;
+        assert!(live.has_turn_content(), "a stopped turn keeps its card");
+        live.stopped = false;
+        live.settled = Some("done".into());
+        assert!(live.has_turn_content(), "so does a settled one");
     }
 
     /// A started tool is neither success nor failure: the live row says so,
