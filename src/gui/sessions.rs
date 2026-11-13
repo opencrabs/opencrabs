@@ -2293,10 +2293,10 @@ fn brand_header() -> Div {
 #[cfg(test)]
 mod tests {
     use super::{
-        Database, FindMatch, MenuKind, PlanFilter, RailFilter, SessionsState, accent_bar_visible,
-        chip_width_at, filter_is_active, fit, icon_write_needed, load_sessions, merge_find_results,
-        pack_rows, palette, pin_mark, preview_line, rail_cost, rail_filter_allows,
-        rail_menu_entries, rail_stamp, strip_budgets,
+        Database, FindMatch, MenuKind, PlanFilter, RailChip, RailFilter, SessionsState,
+        accent_bar_visible, chip_order_key, chip_width_at, filter_is_active, fit,
+        icon_write_needed, load_sessions, merge_find_results, pack_rows, palette, pin_mark,
+        preview_line, rail_cost, rail_filter_allows, rail_menu_entries, rail_stamp, strip_budgets,
     };
     use opencrabs::db::models::Session;
     use opencrabs::db::repository::ContentSearchRow;
