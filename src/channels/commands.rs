@@ -2477,6 +2477,16 @@ pub async fn switch_model(
                 format!("Model saved but failed to reload provider: {}", e)
             })?;
     let display_name = provider_display_name(&provider_name);
+    // #2289: a catalogue may store its models with the provider's own prefix.
+    // Persisting the user's spelling verbatim then stores a doubled one
+    // (`ngodeai/ngodeai/glm-5.3-flash`), which the turn guard cannot find in
+    // the catalogue and silently replaces. Persist what the catalogue lists.
+    let canonical = crate::utils::provider_pair::canonical_model(
+        &provider_name,
+        model_name,
+        &new_provider.supported_models(),
+    )
+    .unwrap_or_else(|| model_name.to_string());
     // Pin per-session when possible; only touch the global slot for
     // callers without a session (kept for the bootstrap path).
     match session_id {
@@ -2484,22 +2494,28 @@ pub async fn switch_model(
             // Provider+model are a pair: the user picked model_name, so set
             // it atomically. The freshly-created provider's default_model()
             // is the global config default, NOT the user's pick.
-            agent.swap_provider_for_session(sid, new_provider, model_name.to_string());
+            agent.swap_provider_for_session(sid, new_provider, canonical.clone());
             // Pin as a USER switch so an in-flight turn's fallback can't
             // permanently overwrite it (restored after that turn completes).
-            agent.mark_manual_switch(sid, model_name.to_string());
+            agent.mark_manual_switch(sid, canonical.clone());
         }
         None => agent.swap_provider(new_provider),
     }
 
-    let change_msg = format!("[Model changed to {}/{}]", display_name, model_name);
+    let change_msg = format!(
+        "[Model changed to {}]",
+        crate::utils::provider_pair::display_model(
+            &display_name,
+            crate::utils::provider_pair::bare_model(&provider_name, &canonical),
+        )
+    );
 
     // Persist provider + model to session DB record so it survives restarts
     if let Some(sid) = session_id {
         let session_svc = crate::services::SessionService::new(agent.context().clone());
         if let Ok(Some(mut session)) = session_svc.get_session(sid).await {
             session.provider_name = Some(provider_name.clone());
-            session.model = Some(model_name.to_string());
+            session.model = Some(canonical.clone());
             if let Err(e) = session_svc.update_session(&session).await {
                 tracing::warn!("Failed to persist provider to session: {}", e);
             }

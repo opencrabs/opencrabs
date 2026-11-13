@@ -250,12 +250,21 @@ pub(crate) fn compute_streaming_tok_per_sec(
 /// out keeps the guard unit-testable from a synchronous test file under
 /// `src/tests/` without spinning a runtime or mocking SessionService.
 pub(crate) fn guard_cross_provider_model_leak(
+    provider: &str,
     resolved: String,
     provider_default: &str,
     supported: &[String],
 ) -> (String, Option<String>) {
-    if supported.is_empty() || supported.iter().any(|m| m == &resolved) {
-        (resolved, None)
+    if supported.is_empty() {
+        return (resolved, None);
+    }
+    // #2289: a catalogue may store its models with the provider's own prefix,
+    // so a bare pin and a self-prefixed one both have to resolve to the
+    // catalogue spelling before a miss is treated as stale.
+    if let Some(canonical) =
+        crate::utils::provider_pair::canonical_model(provider, &resolved, supported)
+    {
+        (canonical, None)
     } else {
         (provider_default.to_string(), Some(resolved))
     }
@@ -1025,8 +1034,12 @@ impl AgentService {
             .unwrap_or_else(|| session_provider.default_model().to_string());
         let provider_default = session_provider.default_model().to_string();
         let supported = session_provider.supported_models();
-        let (mut model_name, leaked) =
-            guard_cross_provider_model_leak(resolved_model, &provider_default, &supported);
+        let (mut model_name, leaked) = guard_cross_provider_model_leak(
+            session_provider.name(),
+            resolved_model,
+            &provider_default,
+            &supported,
+        );
         if let Some(stale) = leaked {
             tracing::warn!(
                 "Stale model pin '{}' for session {} is not in active provider '{}' catalogue ({} entries) — \

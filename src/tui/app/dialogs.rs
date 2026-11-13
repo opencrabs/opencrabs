@@ -276,9 +276,17 @@ impl App {
                                 OnboardingStep::ProviderAuth => {
                                     needs_rebuild = true;
                                     let (pname, mname) = if wizard.ps.is_custom() {
+                                        // #2289: the banner shows the custom
+                                        // name as a label, but the model may
+                                        // already carry the provider prefix.
+                                        // Peel it so the line never doubles.
                                         (
                                             format!("Custom ({})", wizard.ps.custom_name),
-                                            wizard.ps.custom_model.clone(),
+                                            crate::utils::provider_pair::bare_model(
+                                                &wizard.ps.custom_name,
+                                                &wizard.ps.custom_model,
+                                            )
+                                            .to_string(),
                                         )
                                     } else {
                                         (
@@ -289,7 +297,10 @@ impl App {
                                             wizard.ps.selected_model_name().to_string(),
                                         )
                                     };
-                                    format!("[Model changed to {}/{}]", pname, mname)
+                                    format!(
+                                        "[Model changed to {}]",
+                                        crate::utils::provider_pair::display_model(&pname, &mname)
+                                    )
                                 }
                                 OnboardingStep::VoiceSetup => {
                                     let stt_name = match wizard.stt_provider {

@@ -36,6 +36,7 @@ fn stale_pin_from_other_provider_is_substituted_with_active_default() {
         "Qwen-Ambassador/Qwen3.5-Plus".to_string(),
     ];
     let (chosen, leaked) = guard_cross_provider_model_leak(
+        "modelscope-qwen",
         "qwen-3.7-max-thinking".to_string(),
         "Qwen-Ambassador/Qwen3.7-Max",
         &supported,
@@ -55,6 +56,7 @@ fn pinned_model_in_active_catalogue_passes_through_untouched() {
     // and the next turn finds it in the supported list. No substitution.
     let supported = vec!["Qwen-Ambassador/Qwen3.7-Max".to_string()];
     let (chosen, leaked) = guard_cross_provider_model_leak(
+        "modelscope-qwen",
         "Qwen-Ambassador/Qwen3.7-Max".to_string(),
         "Qwen-Ambassador/Qwen3.7-Max",
         &supported,
@@ -76,6 +78,7 @@ fn empty_catalogue_accepts_any_pin() {
     // change.
     let supported: Vec<String> = vec![];
     let (chosen, leaked) = guard_cross_provider_model_leak(
+        "minimal",
         "any-model-name-the-user-typed".to_string(),
         "provider-default",
         &supported,
@@ -92,8 +95,12 @@ fn substitution_uses_active_provider_default_not_the_pin() {
     // substitute-on-miss test but break the user's intent (the active
     // provider may have a curated default that isn't supported[0]).
     let supported = vec!["list-first-model".to_string(), "active-default".to_string()];
-    let (chosen, leaked) =
-        guard_cross_provider_model_leak("stale-pin".to_string(), "active-default", &supported);
+    let (chosen, leaked) = guard_cross_provider_model_leak(
+        "someprovider",
+        "stale-pin".to_string(),
+        "active-default",
+        &supported,
+    );
     assert_eq!(chosen, "active-default");
     assert_eq!(leaked.as_deref(), Some("stale-pin"));
 }
@@ -106,6 +113,7 @@ fn case_sensitive_match_no_partial_substring_pass_through() {
     // some routers (notably ModelScope where casing matters in the path).
     let supported = vec!["Qwen-Ambassador/Qwen3.7-Max".to_string()];
     let (chosen, leaked) = guard_cross_provider_model_leak(
+        "modelscope-qwen",
         "qwen-ambassador/qwen3.7-max".to_string(),
         "Qwen-Ambassador/Qwen3.7-Max",
         &supported,
@@ -159,4 +167,65 @@ fn persist_sticky_pair_does_not_write_session_state() {
              2026-06-04 fd72101f incident notes."
         );
     }
+}
+
+// ── #2289: self-prefixed catalogues ───────────────────────────────
+//
+// A custom OpenAI-compatible provider may list its `models = [...]` with its
+// own prefix while other providers list bare names. A pin can then be bare,
+// self-prefixed once, or self-prefixed twice, and all three name the same
+// model. The guard canonicalises before it treats a miss as stale, so only a
+// genuinely absent model is replaced.
+
+#[test]
+fn bare_pin_resolves_against_self_prefixed_catalogue() {
+    let supported = vec!["ngodeai/glm-5.3-flash".to_string()];
+    let (chosen, leaked) = guard_cross_provider_model_leak(
+        "ngodeai",
+        "glm-5.3-flash".to_string(),
+        "ngodeai/glm-5.3-flash",
+        &supported,
+    );
+    assert_eq!(chosen, "ngodeai/glm-5.3-flash");
+    assert!(leaked.is_none(), "in-catalogue model must not be a leak");
+}
+
+#[test]
+fn doubled_prefix_pin_collapses_to_catalogue_spelling() {
+    let supported = vec!["ngodeai/glm-5.3-flash".to_string()];
+    let (chosen, leaked) = guard_cross_provider_model_leak(
+        "ngodeai",
+        "ngodeai/ngodeai/glm-5.3-flash".to_string(),
+        "ngodeai/glm-5.3-flash",
+        &supported,
+    );
+    assert_eq!(chosen, "ngodeai/glm-5.3-flash");
+    assert!(leaked.is_none());
+}
+
+#[test]
+fn self_prefixed_pin_resolves_against_bare_catalogue() {
+    let supported = vec!["glm-5.3-flash".to_string()];
+    let (chosen, leaked) = guard_cross_provider_model_leak(
+        "ngodeai",
+        "ngodeai/glm-5.3-flash".to_string(),
+        "glm-5.3-flash",
+        &supported,
+    );
+    assert_eq!(chosen, "glm-5.3-flash");
+    assert!(leaked.is_none());
+}
+
+#[test]
+fn sub_vendor_path_is_not_mistaken_for_the_provider_prefix() {
+    // inferhub serves alicn/... paths; the guard must not peel the vendor.
+    let supported = vec!["inferhub/alicn/qwen3.8-max".to_string()];
+    let (chosen, leaked) = guard_cross_provider_model_leak(
+        "inferhub",
+        "alicn/qwen3.8-max".to_string(),
+        "inferhub/alicn/qwen3.8-max",
+        &supported,
+    );
+    assert_eq!(chosen, "inferhub/alicn/qwen3.8-max");
+    assert!(leaked.is_none());
 }
