@@ -286,7 +286,7 @@ impl Dashboard {
         }
         self.topic_draft_icon = None;
         self.topic_menu = None;
-        self.topic_draft = Some(String::new());
+        self.topic_draft = Some(TextField::new());
         // The prompt is the field being typed into, so it takes the keyboard
         // while it is open; without this the name landed in the composer
         // behind it (#2665).
@@ -294,10 +294,37 @@ impl Dashboard {
         cx.notify();
     }
 
+    /// Apply one editing chord to the name prompt. The translation and the
+    /// edit both live in `ui_core::text_field`, shared with the seeker and
+    /// the composer, so a chord that works in the card works when renaming
+    /// a topic or a conversation (#2892). This method only supplies the
+    /// window's clipboard.
+    pub(crate) fn apply_topic_edit(
+        &mut self,
+        edit: text_field::TextFieldEdit,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(draft) = self.topic_draft.as_mut() else {
+            return;
+        };
+        match text_field::apply(draft, edit) {
+            Some(text_field::ClipboardRequest::Write(text)) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+            }
+            Some(text_field::ClipboardRequest::Read) => {
+                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                    draft.insert_text(&text);
+                }
+            }
+            None => {}
+        }
+        cx.notify();
+    }
+
     /// Create the named topic under the open session, then open it. An empty
     /// name is refused and the prompt stays open.
     pub(crate) fn submit_topic(&mut self, cx: &mut Context<Self>) {
-        let Some(name) = self.topic_draft.as_ref().map(|d| d.trim().to_string()) else {
+        let Some(name) = self.topic_draft.as_ref().map(|d| d.trimmed().to_string()) else {
             return;
         };
         if name.is_empty() {

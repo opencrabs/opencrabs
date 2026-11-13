@@ -281,8 +281,11 @@ impl Dashboard {
             return;
         }
         // The topic name prompt owns the keyboard while it is open (#2303):
-        // typed characters extend the name, Enter creates the topic, Esc
-        // cancels. Nothing leaks into the chat editor behind it.
+        // Enter creates the topic, Esc cancels, and everything else is the
+        // composer's own editing, because the name is a real text field
+        // (#2892). A bare `String` could only append and backspace: `cmd-a`
+        // selected nothing, `alt+left` walked nothing and `cmd+x` cut
+        // nothing. Nothing leaks into the chat editor behind it.
         if self.topic_draft.is_some() {
             let ks = &ev.keystroke;
             match ks.key.as_str() {
@@ -292,19 +295,31 @@ impl Dashboard {
                     self.topic_rename = None;
                     cx.notify();
                 }
-                "backspace" => {
-                    if let Some(draft) = self.topic_draft.as_mut() {
-                        draft.pop();
-                    }
-                    cx.notify();
-                }
                 _ => {
-                    if let Some(ch) = ks.key_char.as_ref().and_then(|s| s.chars().next())
-                        && !ch.is_control()
-                        && let Some(draft) = self.topic_draft.as_mut()
+                    if let Some(edit) = text_field::editing_chord(
+                        &ks.key,
+                        ks.modifiers.control,
+                        ks.modifiers.platform,
+                        ks.modifiers.alt,
+                        ks.modifiers.shift,
+                    ) {
+                        self.apply_topic_edit(edit, cx);
+                    } else if !(ks.modifiers.control || ks.modifiers.platform || ks.modifiers.alt)
                     {
-                        draft.push(ch);
-                        cx.notify();
+                        // A printable key carries its character and inserts
+                        // at the caret; space arrives as its own key name, so
+                        // it is spelled out rather than guessed from the char.
+                        let typed = if ks.key == "space" {
+                            Some(' ')
+                        } else {
+                            ks.key_char.as_ref().and_then(|s| s.chars().next())
+                        };
+                        if let Some(ch) = typed
+                            && let Some(draft) = self.topic_draft.as_mut()
+                            && draft.type_char(ch)
+                        {
+                            cx.notify();
+                        }
                     }
                 }
             }

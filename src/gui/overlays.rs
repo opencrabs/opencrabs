@@ -17,6 +17,7 @@ use gpui::{
     div, prelude::*, px, rems, rgb, rgba,
 };
 use opencrabs::ui_core::card::{CARD_RADIUS, glass_fill};
+use opencrabs::ui_core::text_field::TextField;
 use opencrabs::ui_core::split::Layout;
 
 use crate::palette;
@@ -174,18 +175,30 @@ pub(crate) const DEFAULT_TOPIC_ICON: &str = "topic:opencrabs-topic-general";
 /// The card holds the name field with the chosen icon before it, and the whole
 /// icon pack to pick from, one captioned family after another (#2824). Enter
 /// creates, Esc or a click outside cancels.
+///
+/// The name arrives as the window's own [`TextField`], not a `String`: the
+/// prompt paints a caret where the next character lands and a wash over the
+/// selection, so the chords the composer answers show what they did (#2892).
 pub(crate) fn topic_prompt_overlay(
     label: &str,
-    draft: &str,
+    draft: &TextField,
     icon: &str,
     families: Vec<(&'static str, Vec<Stateful<Div>>)>,
     custom_picture: Option<AnyElement>,
     pick_image: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     cancel: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
+    // `render_spans` splits at char boundaries in the core, so the window
+    // never slices a string and never does UTF-8 math. With no selection the
+    // middle slice is empty and the caret is the only mark; with one, the
+    // wash covers the selection and the caret still sits at its live end.
+    let (before, selected, after) = draft.render_spans();
     let field = div()
         .flex_1()
         .min_w_0()
+        .flex()
+        .flex_row()
+        .items_center()
         .px_3()
         .py_2()
         .rounded(px(CARD_RADIUS))
@@ -193,7 +206,22 @@ pub(crate) fn topic_prompt_overlay(
         .border_color(rgb(palette::current().accent))
         .bg(glass_fill(palette::current().bg))
         .text_color(rgb(palette::current().text))
-        .child(SharedString::from(format!("{draft}|")));
+        .child(SharedString::from(before.to_string()))
+        .when(!selected.is_empty(), |d| {
+            d.child(
+                div()
+                    .bg(rgb(palette::current().selection))
+                    .child(SharedString::from(selected.to_string())),
+            )
+        })
+        .child(
+            div()
+                .flex_none()
+                .w(px(1.5))
+                .h(rems(1.1))
+                .bg(rgb(palette::current().accent)),
+        )
+        .child(SharedString::from(after.to_string()));
     // The chosen icon, as a picture when it names an embedded one and as the
     // stored glyph when the row predates the picture set (#2478). A custom
     // image arrives already built from the view's cache (#2790); an img:

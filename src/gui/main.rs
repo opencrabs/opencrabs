@@ -132,7 +132,7 @@ use opencrabs::ui_core::pane_tree::{DropHalf, PaneTree};
 use opencrabs::ui_core::rail;
 use opencrabs::ui_core::scroll::{Follow, scrolled_from_top, wheel_releases_follow};
 use opencrabs::ui_core::split::{self, Layout};
-use opencrabs::ui_core::text_field;
+use opencrabs::ui_core::text_field::{self, TextField};
 use opencrabs::ui_core::topic_bar;
 use transcript::CopyDrag;
 // The terminal's own command table, shared rather than copied.
@@ -904,7 +904,11 @@ struct Dashboard {
     /// a split was not even the pane whose tab was pressed.
     topic_menu_at: Option<gpui::Point<gpui::Pixels>>,
     /// The topic name being typed, while the name prompt is open (#2303).
-    topic_draft: Option<String>,
+    /// A real text field, so the prompt carries a caret and a selection and
+    /// answers the composer's editing chords (#2892). A bare `String` put the
+    /// caret at the end and gave `cmd-a`, `alt+left` and `cmd+x` nothing to
+    /// act on, so a rename could only be typed or backspaced.
+    topic_draft: Option<TextField>,
     /// The pick the window has to explain before it goes on (#2605): the
     /// seeker's topic pick named a topic, and a topic cannot hold topics, so
     /// this carries that row's title for the warning instead of opening a

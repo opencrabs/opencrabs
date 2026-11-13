@@ -574,7 +574,10 @@ impl Dashboard {
             .unwrap_or_default();
         self.topic_menu = None;
         self.topic_rename = Some(id);
-        self.topic_draft = Some(current);
+        // The old name is there to edit, not to select: the caret lands at
+        // the end so typing appends the way it did before, and everything
+        // else the prompt can now do starts from a real field (#2892).
+        self.topic_draft = Some(TextField::from_text(&current));
         // The dialog opens on the session's own icon, so a rename that never
         // touches the picker keeps it (#2791). No stored icon means None, and
         // the default the badge shows is never written back over nothing.
