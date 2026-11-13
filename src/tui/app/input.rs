@@ -5,6 +5,7 @@ use super::mission_control::McPanel;
 use super::*;
 use crate::tui::input_layout;
 use crate::ui_core::input_history::{input_history_down, input_history_up};
+use crate::ui_core::text_field::{self, TextField, TextFieldEdit};
 use anyhow::Result;
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -34,6 +35,46 @@ fn byte_offset_at_display_col(text: &str, target_col: usize) -> usize {
         width += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
     }
     text.len()
+}
+
+/// Translate a prompt keystroke into an editing chord (#2892). The terminal
+/// has no command key, so Control and Alt carry the intents the window binds
+/// to Command and Option: the same table, read with the same fingers.
+fn prompt_edit(event: &crossterm::event::KeyEvent) -> Option<TextFieldEdit> {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    let key = match event.code {
+        KeyCode::Char(c) => c.to_ascii_lowercase().to_string(),
+        KeyCode::Left => "left".to_string(),
+        KeyCode::Right => "right".to_string(),
+        KeyCode::Home => "home".to_string(),
+        KeyCode::End => "end".to_string(),
+        KeyCode::Backspace => "backspace".to_string(),
+        KeyCode::Delete => "delete".to_string(),
+        _ => return None,
+    };
+    text_field::editing_chord(
+        &key,
+        event.modifiers.contains(KeyModifiers::CONTROL),
+        false,
+        event.modifiers.contains(KeyModifiers::ALT),
+        event.modifiers.contains(KeyModifiers::SHIFT),
+    )
+}
+
+/// Apply one chord to a prompt buffer. The edit lives in the shared core; the
+/// terminal only supplies its own clipboard (#2892).
+fn apply_prompt_edit(field: &mut TextField, edit: TextFieldEdit) {
+    match text_field::apply(field, edit) {
+        Some(text_field::ClipboardRequest::Write(text)) => {
+            App::copy_to_clipboard(&text);
+        }
+        Some(text_field::ClipboardRequest::Read) => {
+            if let Some(text) = App::read_clipboard_text() {
+                field.insert_text(&text);
+            }
+        }
+        None => {}
+    }
 }
 
 impl App {
@@ -2645,16 +2686,23 @@ impl App {
             return Ok(());
         }
 
-        // Rename mode: typing the new name
+        // Rename mode: typing the new name. The buffer is a real text field
+        // and answers the composer's chords, so `ctrl-a`, `alt-left`,
+        // `ctrl-x` and `alt-backspace` work here as they do in the input
+        // (#2892). Before, the prompt could only append and pop.
         if self.session_renaming {
+            if let Some(edit) = prompt_edit(event) {
+                apply_prompt_edit(&mut self.session_rename_buffer, edit);
+                return Ok(());
+            }
             match event.code {
                 KeyCode::Enter => {
                     // Save the new name
                     if let Some(session) = self.sessions.get(self.selected_session_index) {
-                        let new_title = if self.session_rename_buffer.trim().is_empty() {
+                        let new_title = if self.session_rename_buffer.trimmed().is_empty() {
                             None
                         } else {
-                            Some(self.session_rename_buffer.trim().to_string())
+                            Some(self.session_rename_buffer.trimmed().to_string())
                         };
                         let session_id = session.id;
                         self.session_service
@@ -2664,10 +2712,10 @@ impl App {
                         if let Some(ref mut current) = self.current_session
                             && current.id == session_id
                         {
-                            current.title = if self.session_rename_buffer.trim().is_empty() {
+                            current.title = if self.session_rename_buffer.trimmed().is_empty() {
                                 None
                             } else {
-                                Some(self.session_rename_buffer.trim().to_string())
+                                Some(self.session_rename_buffer.trimmed().to_string())
                             };
                         }
                         self.load_sessions().await?;
@@ -2679,11 +2727,15 @@ impl App {
                     self.session_renaming = false;
                     self.session_rename_buffer.clear();
                 }
-                KeyCode::Backspace => {
-                    self.session_rename_buffer.pop();
-                }
                 KeyCode::Char(c) => {
-                    self.session_rename_buffer.push(c);
+                    // Only unmodified text types. A chord the table did not
+                    // claim must never land in the name as a letter.
+                    if !event
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                    {
+                        self.session_rename_buffer.type_char(c);
+                    }
                 }
                 _ => {}
             }
@@ -2693,16 +2745,25 @@ impl App {
         // Topic name prompt: typing the name of a topic under the selected
         // session (#2306). Enter creates it, Esc cancels.
         if self.topic_naming {
+            if let Some(edit) = prompt_edit(event) {
+                apply_prompt_edit(&mut self.topic_name_buffer, edit);
+                return Ok(());
+            }
             match event.code {
                 KeyCode::Enter => self.submit_topic_name().await?,
                 KeyCode::Esc => {
                     self.topic_naming = false;
                     self.topic_name_buffer.clear();
                 }
-                KeyCode::Backspace => {
-                    self.topic_name_buffer.pop();
+                KeyCode::Char(c) => {
+                    // Same guard as the rename prompt: a chord is not text.
+                    if !event
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                    {
+                        self.topic_name_buffer.type_char(c);
+                    }
                 }
-                KeyCode::Char(c) => self.topic_name_buffer.push(c),
                 _ => {}
             }
             return Ok(());
@@ -2872,7 +2933,10 @@ impl App {
                 .and_then(|i| self.sessions.get(i))
             {
                 self.session_renaming = true;
-                self.session_rename_buffer = session.title.clone().unwrap_or_default();
+                // The old name is seeded for editing, caret at the end, the same way
+                // the window's rename prompt opens (#2892).
+                self.session_rename_buffer =
+                    TextField::from_text(&session.title.clone().unwrap_or_default());
             }
         } else if event.code == KeyCode::Char('n') || event.code == KeyCode::Char('N') {
             // Create a new session and switch to it

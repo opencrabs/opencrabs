@@ -1163,7 +1163,7 @@ impl App {
     /// Create the topic named in the prompt under the selected session, then
     /// reload the list so it appears under its parent (#2306).
     pub(crate) async fn submit_topic_name(&mut self) -> Result<()> {
-        let name = self.topic_name_buffer.trim().to_string();
+        let name = self.topic_name_buffer.trimmed().to_string();
         self.topic_naming = false;
         self.topic_name_buffer.clear();
         if name.is_empty() {

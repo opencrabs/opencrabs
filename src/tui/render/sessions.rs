@@ -22,6 +22,7 @@ use super::responsive::{self, SessionRowTier};
 use super::theme::{self, Role};
 use super::utils::{format_token_count_raw, format_token_count_with_label, truncate_to_width};
 use crate::db::models::Session;
+use crate::ui_core::text_field::TextField;
 use crate::tui::app::dialog_keys::{DialogScope, dialog_keys};
 use ratatui::{
     Frame,
@@ -1064,35 +1065,77 @@ fn session_row(
 ///
 /// Padded to the plan's name width so the editor sits exactly where the names
 /// it replaces sit.
+/// A prompt buffer as spans: the prefix, the text before the caret, the
+/// selection, the caret itself, then the rest, cut to the row (#2892).
+///
+/// The caret sits where the next character lands instead of being welded to
+/// the end of the string, which is what makes the chords visible: a
+/// `ctrl-a` paints the whole name reversed, `alt-left` walks the caret back a
+/// word. Reversed video is the terminal's own selection wash, so a selection
+/// needs no colour of its own.
+fn prompt_spans(
+    prefix: &str,
+    field: &TextField,
+    width: usize,
+    style: Style,
+) -> Vec<Span<'static>> {
+    let mut budget = width
+        .saturating_sub(UnicodeWidthStr::width(prefix))
+        .saturating_sub(1);
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    if !prefix.is_empty() {
+        spans.push(Span::styled(prefix.to_string(), style));
+    }
+    // Each piece is cut to what is left, so a long name truncates inside the
+    // selection instead of pushing the caret off the row.
+    let push = |text: &str, selected: bool, spans: &mut Vec<Span<'static>>, budget: &mut usize| {
+        if text.is_empty() || *budget == 0 {
+            return;
+        }
+        let cut = truncate_to_width(text, *budget);
+        *budget = budget.saturating_sub(UnicodeWidthStr::width(cut.as_str()));
+        let mut piece = style;
+        if selected {
+            piece = piece.add_modifier(Modifier::REVERSED);
+        }
+        spans.push(Span::styled(cut, piece));
+    };
+    let (before, selected, after) = field.render_spans();
+    push(before, false, &mut spans, &mut budget);
+    push(selected, true, &mut spans, &mut budget);
+    if budget > 0 {
+        spans.push(Span::styled("▏".to_string(), style));
+    }
+    push(after, false, &mut spans, &mut budget);
+    spans
+}
+
 /// The prompt row for a new topic under the selected session (#2306).
 fn topic_name_row(app: &App, plan: &RowPlan) -> Line<'static> {
-    let text = truncate_to_width(
-        &format!("  └ new topic: {}▏", app.topic_name_buffer),
+    let style = Style::default()
+        .fg(theme::role(Role::TextPrimary))
+        .add_modifier(Modifier::BOLD);
+    let mut spans = vec![Span::raw(" ".repeat(GUTTER))];
+    spans.extend(prompt_spans(
+        "  └ new topic: ",
+        &app.topic_name_buffer,
         plan.name_width,
-    );
-    let spans = vec![
-        Span::raw(" ".repeat(GUTTER)),
-        Span::styled(
-            text,
-            Style::default()
-                .fg(theme::role(Role::TextPrimary))
-                .add_modifier(Modifier::BOLD),
-        ),
-    ];
+        style,
+    ));
     finish_row(spans, plan.width, true)
 }
 
 fn rename_row(app: &App, plan: &RowPlan) -> Line<'static> {
-    let text = truncate_to_width(&format!("{}▏", app.session_rename_buffer), plan.name_width);
-    let spans = vec![
-        Span::raw(" ".repeat(GUTTER)),
-        Span::styled(
-            text,
-            Style::default()
-                .fg(theme::role(Role::TextPrimary))
-                .add_modifier(Modifier::BOLD),
-        ),
-    ];
+    let style = Style::default()
+        .fg(theme::role(Role::TextPrimary))
+        .add_modifier(Modifier::BOLD);
+    let mut spans = vec![Span::raw(" ".repeat(GUTTER))];
+    spans.extend(prompt_spans(
+        "",
+        &app.session_rename_buffer,
+        plan.name_width,
+        style,
+    ));
     finish_row(spans, plan.width, true)
 }
 

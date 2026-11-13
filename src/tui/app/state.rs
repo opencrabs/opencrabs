@@ -14,6 +14,7 @@ use crate::brain::{BrainLoader, CommandLoader, SelfUpdater, UserCommand};
 use crate::db::models::{Message, Session};
 use crate::services::{FileService, MessageService, ServiceContext, SessionService};
 use crate::tui::pane::PaneManager;
+use crate::ui_core::text_field::TextField;
 use crate::tui::render::notice::{CLIPBOARD_HINT_TTL, ERROR_TTL, NOTIFICATION_TTL, notice_expired};
 pub use crate::ui_core::rate::StreamingTpsTracker;
 use crate::utils::prompt_analyzer::PromptAnalyzer;
@@ -422,7 +423,9 @@ pub struct App {
     pub(crate) delete_confirm: Option<super::session_cards::DeleteConfirm>,
     /// The name prompt for a new topic in the sessions dialog (#2306).
     pub(crate) topic_naming: bool,
-    pub(crate) topic_name_buffer: String,
+    /// A real text field, shared with the window's prompts, so the terminal
+    /// answers the composer's chords while naming a topic (#2892).
+    pub(crate) topic_name_buffer: TextField,
     /// All-time usage stats from the ledger (survives session deletes)
     pub usage_ledger_stats: Vec<crate::db::repository::usage_ledger::ModelUsageStats>,
     /// Usage dashboard state (populated when /usage is opened)
@@ -605,7 +608,8 @@ pub struct App {
 
     /// Session rename state
     pub session_renaming: bool,
-    pub session_rename_buffer: String,
+    /// A real text field, shared with the window's prompts (#2892).
+    pub session_rename_buffer: TextField,
 
     /// Session search/filter state (activated with `/` in /sessions)
     pub session_search: String,
@@ -1086,7 +1090,7 @@ impl App {
             group_topics: None,
             delete_confirm: None,
             topic_naming: false,
-            topic_name_buffer: String::new(),
+            topic_name_buffer: TextField::new(),
             usage_ledger_stats: Vec::new(),
             dashboard_state: None,
             mode: AppMode::Chat,
@@ -1158,7 +1162,7 @@ impl App {
             followup_suggestions: Vec::new(),
             followup_selected_index: 0,
             session_renaming: false,
-            session_rename_buffer: String::new(),
+            session_rename_buffer: TextField::new(),
             session_search: String::new(),
             session_search_active: false,
             session_filter: crate::tui::session_filter::SessionFilter::default(),
