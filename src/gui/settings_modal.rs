@@ -8,12 +8,6 @@ use gpui::{Div, ScrollHandle, SharedString, Stateful, div, prelude::*, px, rgb};
 use crate::palette;
 use crate::theme::{Size, text};
 
-/// A section heading inside the modal.
-pub fn section_header(title: &'static str) -> Div {
-    let shown = palette::current();
-    div().pt_2().pb_1().child(text(title, Size::Sm, shown.text_title))
-}
-
 /// The row shell: cursor highlight, label and blurb on the left, the control
 /// (built by the caller, listeners included) on the right.
 pub fn row_shell(
@@ -45,15 +39,15 @@ pub fn row_shell(
         .px_2()
         .py_1()
         .rounded(px(6.0))
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_w_0()
-                .child(caption)
-                .child(text(blurb, Size::Xs, shown.text_faint)),
-        )
+        .child({
+            let mut left = div().flex().flex_col().flex_1().min_w_0().child(caption);
+            // An empty blurb is how a row says "the label above is the whole
+            // story", so it paints nothing instead of a blank line.
+            if !blurb.is_empty() {
+                left = left.child(text(blurb, Size::Xs, shown.text_faint));
+            }
+            left
+        })
         .child(control);
     if selected {
         row = row.bg(rgb(shown.panel_hi));
@@ -61,9 +55,41 @@ pub fn row_shell(
     row
 }
 
+/// One category in the settings rail (#2890). The dashboard attaches the
+/// click listener; this only paints the label, the hint and the active state.
+pub fn rail_item(
+    id: SharedString,
+    label: &'static str,
+    hint: &'static str,
+    active: bool,
+) -> Stateful<Div> {
+    let shown = palette::current();
+    let mut item = div()
+        .id(id)
+        .flex()
+        .flex_col()
+        .gap_0p5()
+        .w_full()
+        .px_2()
+        .py_1p5()
+        .rounded(px(8.0))
+        .cursor_pointer()
+        .child(text(
+            label,
+            Size::Sm,
+            if active { shown.text_strong } else { shown.text_muted },
+        ))
+        .child(text(hint, Size::Xs, shown.text_faint));
+    if active {
+        item = item.bg(rgb(shown.panel_hi));
+    }
+    item
+}
+
 /// The modal shell: the same scrim-and-card idiom as the theme modal (#2619),
 /// with a scrollable body so the whole table fits a short window.
 pub fn modal(
+    rail: Vec<gpui::AnyElement>,
     body: Vec<gpui::AnyElement>,
     footer: &str,
     scroll: &ScrollHandle,
@@ -93,7 +119,7 @@ pub fn modal(
         .flex_col()
         .gap_2()
         .p_4()
-        .w(px(640.0))
+        .w(px(760.0))
         .rounded(px(18.0))
         .border_1()
         .border_color(rgb(shown.panel_hi))
@@ -124,14 +150,34 @@ pub fn modal(
         )
         .child(
             div()
-                .id("settings-modal-body")
                 .flex()
-                .flex_col()
-                .gap_1()
+                .flex_row()
+                .gap_3()
+                .w_full()
                 .h(px(420.0))
-                .overflow_y_scroll()
-                .track_scroll(scroll)
-                .children(body),
+                .child(
+                    div()
+                        .id("settings-modal-rail")
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .w(px(156.0))
+                        .flex_shrink_0()
+                        .children(rail),
+                )
+                .child(
+                    div()
+                        .id("settings-modal-body")
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .overflow_y_scroll()
+                        .track_scroll(scroll)
+                        .children(body),
+                ),
         )
         .child(
             div()

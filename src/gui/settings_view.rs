@@ -25,12 +25,81 @@ pub enum SettingKind {
     Number { min: u64, step: u64, max: u64 },
 }
 
+/// The rail categories (#2890). Every row declares its own group, so a new
+/// setting has to pick one at compile time instead of landing in whichever
+/// bucket a catch-all arm happened to name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingsSection {
+    General,
+    Notifications,
+    Privacy,
+    Advanced,
+    Memory,
+    Credentials,
+}
+
+impl SettingsSection {
+    /// Rail order, top to bottom.
+    pub const ALL: [SettingsSection; 6] = [
+        SettingsSection::General,
+        SettingsSection::Notifications,
+        SettingsSection::Privacy,
+        SettingsSection::Advanced,
+        SettingsSection::Memory,
+        SettingsSection::Credentials,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SettingsSection::General => "General",
+            SettingsSection::Notifications => "Notifications",
+            SettingsSection::Privacy => "Privacy",
+            SettingsSection::Advanced => "Advanced",
+            SettingsSection::Memory => "Memory",
+            SettingsSection::Credentials => "Credentials",
+        }
+    }
+
+    /// The one-line hint under the rail label.
+    pub fn hint(self) -> &'static str {
+        match self {
+            SettingsSection::General => "approval and behaviour",
+            SettingsSection::Notifications => "sound and OS alerts",
+            SettingsSection::Privacy => "what output may show",
+            SettingsSection::Advanced => "tools, timeouts, logging",
+            SettingsSection::Memory => "indexing and shared sessions",
+            SettingsSection::Credentials => "provider api keys",
+        }
+    }
+
+    pub fn position(self) -> usize {
+        Self::ALL
+            .iter()
+            .position(|s| *s == self)
+            .unwrap_or_default()
+    }
+
+    /// tab / shift+tab on the rail, wrapping at both ends.
+    pub fn step(self, dir: i32) -> SettingsSection {
+        let count = Self::ALL.len();
+        let at = self.position();
+        let next = if dir < 0 {
+            (at + count - 1) % count
+        } else {
+            (at + 1) % count
+        };
+        Self::ALL[next]
+    }
+}
+
 /// One row of the modal, bound to one config key.
 pub struct SettingSpec {
     pub section: &'static str,
     pub key: &'static str,
     pub label: &'static str,
     pub kind: SettingKind,
+    /// Which rail category paints this row.
+    pub group: SettingsSection,
     /// True when the running process cannot pick the change up: the row
     /// carries a `restart` chip instead of pretending to apply live.
     pub restart: bool,
@@ -46,8 +115,9 @@ pub enum RowValue {
     Number(u64),
 }
 
-/// The rows, in paint order. Agent first, then memory: that is the order the
-/// owner asked for them.
+/// Every row, in index order. This array is the storage order: a row's index
+/// here is the index into the live values, so the rail filters it and never
+/// reorders it.
 pub const SPECS: &[SettingSpec] = &[
     SettingSpec {
         section: "agent",
@@ -56,6 +126,7 @@ pub const SPECS: &[SettingSpec] = &[
         kind: SettingKind::Choice(&["ask", "auto-session", "auto-always"]),
         restart: false,
         blurb: "how tool calls are approved",
+        group: SettingsSection::General,
     },
     SettingSpec {
         section: "agent",
@@ -63,7 +134,8 @@ pub const SPECS: &[SettingSpec] = &[
         label: "Completion feedback",
         kind: SettingKind::Toggle,
         restart: false,
-        blurb: "master switch for sound and OS notifications",
+        blurb: "master switch for sound and OS notifications; the four below need it on",
+        group: SettingsSection::Notifications,
     },
     SettingSpec {
         section: "agent",
@@ -71,7 +143,8 @@ pub const SPECS: &[SettingSpec] = &[
         label: "Notify when a turn finishes",
         kind: SettingKind::Toggle,
         restart: false,
-        blurb: "OS notification; needs the master switch",
+        blurb: "",
+        group: SettingsSection::Notifications,
     },
     SettingSpec {
         section: "agent",
@@ -79,7 +152,8 @@ pub const SPECS: &[SettingSpec] = &[
         label: "Notify when a turn fails",
         kind: SettingKind::Toggle,
         restart: false,
-        blurb: "OS notification; needs the master switch",
+        blurb: "",
+        group: SettingsSection::Notifications,
     },
     SettingSpec {
         section: "agent",
@@ -87,7 +161,8 @@ pub const SPECS: &[SettingSpec] = &[
         label: "Notify when a plan task settles",
         kind: SettingKind::Toggle,
         restart: false,
-        blurb: "OS notification; needs the master switch",
+        blurb: "",
+        group: SettingsSection::Notifications,
     },
     SettingSpec {
         section: "agent",
@@ -95,7 +170,8 @@ pub const SPECS: &[SettingSpec] = &[
         label: "Notify when a plan finishes",
         kind: SettingKind::Toggle,
         restart: false,
-        blurb: "OS notification; needs the master switch",
+        blurb: "",
+        group: SettingsSection::Notifications,
     },
     SettingSpec {
         section: "agent",
@@ -104,6 +180,7 @@ pub const SPECS: &[SettingSpec] = &[
         kind: SettingKind::Toggle,
         restart: false,
         blurb: "hide keys, tokens, passwords and IPs in output",
+        group: SettingsSection::Privacy,
     },
     SettingSpec {
         section: "agent",
@@ -112,6 +189,7 @@ pub const SPECS: &[SettingSpec] = &[
         kind: SettingKind::OptBool,
         restart: false,
         blurb: "default follows the global switch",
+        group: SettingsSection::Privacy,
     },
     SettingSpec {
         section: "agent",
@@ -120,6 +198,7 @@ pub const SPECS: &[SettingSpec] = &[
         kind: SettingKind::OptBool,
         restart: false,
         blurb: "default shows secrets in owner-private DMs",
+        group: SettingsSection::Privacy,
     },
     SettingSpec {
         section: "agent",
@@ -128,6 +207,7 @@ pub const SPECS: &[SettingSpec] = &[
         kind: SettingKind::Toggle,
         restart: true,
         blurb: "ship core tools only, discover the rest on demand",
+        group: SettingsSection::Advanced,
     },
     SettingSpec {
         section: "agent",
@@ -136,6 +216,7 @@ pub const SPECS: &[SettingSpec] = &[
         kind: SettingKind::Number { min: 0, step: 60, max: 7200 },
         restart: false,
         blurb: "kill a stream that produces no output; 0 disables",
+        group: SettingsSection::Advanced,
     },
     SettingSpec {
         section: "agent",
@@ -144,6 +225,7 @@ pub const SPECS: &[SettingSpec] = &[
         kind: SettingKind::Number { min: 0, step: 60, max: 7200 },
         restart: false,
         blurb: "mid-turn time notices in long tool loops; 0 disables",
+        group: SettingsSection::Advanced,
     },
     SettingSpec {
         section: "agent",
@@ -152,6 +234,7 @@ pub const SPECS: &[SettingSpec] = &[
         kind: SettingKind::Toggle,
         restart: false,
         blurb: "hot-reloads; the --debug flag always wins",
+        group: SettingsSection::Advanced,
     },
     SettingSpec {
         section: "memory",
@@ -160,6 +243,7 @@ pub const SPECS: &[SettingSpec] = &[
         kind: SettingKind::Toggle,
         restart: true,
         blurb: "semantic memory search",
+        group: SettingsSection::Memory,
     },
     SettingSpec {
         section: "memory",
@@ -168,6 +252,7 @@ pub const SPECS: &[SettingSpec] = &[
         kind: SettingKind::Number { min: 10, step: 30, max: 86400 },
         restart: false,
         blurb: "freshness sweeps of the external index paths",
+        group: SettingsSection::Memory,
     },
     SettingSpec {
         section: "memory",
@@ -176,6 +261,7 @@ pub const SPECS: &[SettingSpec] = &[
         kind: SettingKind::Number { min: 0, step: 60, max: 86400 },
         restart: false,
         blurb: "re-reads config each tick; 0 disables",
+        group: SettingsSection::Memory,
     },
     SettingSpec {
         section: "memory",
@@ -184,6 +270,7 @@ pub const SPECS: &[SettingSpec] = &[
         kind: SettingKind::Toggle,
         restart: false,
         blurb: "default deny outside the owner session",
+        group: SettingsSection::Memory,
     },
     SettingSpec {
         section: "memory",
@@ -192,6 +279,7 @@ pub const SPECS: &[SettingSpec] = &[
         kind: SettingKind::Toggle,
         restart: false,
         blurb: "default deny outside the owner session",
+        group: SettingsSection::Memory,
     },
 ];
 
@@ -373,28 +461,36 @@ pub fn value_label(value: &RowValue) -> String {
     }
 }
 
-/// Map a setting or credential row to its child index in the scrolling body.
-/// Section headers are children too, so the cursor index alone is not enough.
-pub fn body_index(row: usize, setting_count: usize) -> usize {
-    let setting_count = setting_count.min(SPECS.len());
-    let mut headers = 0;
-    let mut section = "";
-    for spec in SPECS.iter().take(setting_count) {
-        if spec.section != section {
-            section = spec.section;
-            headers += 1;
-        }
+/// The global row indices a rail section paints, in paint order: its settings
+/// first, then the credential rows when the section is Credentials.
+pub fn section_rows(
+    group: SettingsSection,
+    setting_count: usize,
+    cred_count: usize,
+) -> Vec<usize> {
+    let settings = setting_count.min(SPECS.len());
+    let mut rows: Vec<usize> = SPECS
+        .iter()
+        .take(settings)
+        .enumerate()
+        .filter(|(_, spec)| spec.group == group)
+        .map(|(index, _)| index)
+        .collect();
+    if group == SettingsSection::Credentials {
+        rows.extend(settings..settings + cred_count);
     }
-    if row < setting_count {
-        let memory_header = usize::from(
-            SPECS
-                .iter()
-                .take(row + 1)
-                .any(|spec| spec.section == "memory"),
-        );
-        row + 1 + memory_header
-    } else {
-        // The credentials section has its own header.
-        setting_count + headers + 1 + row.saturating_sub(setting_count)
-    }
+    rows
+}
+
+/// A row's child index inside its section pane, for scrolling to the cursor.
+pub fn pane_index(
+    group: SettingsSection,
+    row: usize,
+    setting_count: usize,
+    cred_count: usize,
+) -> usize {
+    section_rows(group, setting_count, cred_count)
+        .iter()
+        .position(|candidate| *candidate == row)
+        .unwrap_or_default()
 }

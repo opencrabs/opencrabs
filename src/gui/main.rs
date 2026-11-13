@@ -956,6 +956,8 @@ struct Dashboard {
     settings_values: Vec<settings_view::RowValue>,
     settings_creds: Vec<settings_view::CredSpec>,
     settings_cursor: usize,
+    /// Which rail category the settings modal paints (#2890).
+    settings_section: settings_view::SettingsSection,
     settings_scroll: ScrollHandle,
     settings_status: Option<String>,
     settings_secret: Option<(usize, String)>,
@@ -6057,6 +6059,7 @@ fn main() {
                         settings_values: Vec::new(),
                         settings_creds: Vec::new(),
                         settings_cursor: 0,
+                        settings_section: settings_view::SettingsSection::General,
                         settings_scroll: ScrollHandle::new(),
                         settings_status: None,
                         settings_secret: None,

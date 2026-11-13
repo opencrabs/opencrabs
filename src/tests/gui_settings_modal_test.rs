@@ -96,8 +96,8 @@ fn the_modal_owns_the_keyboard_and_paints_above_the_window() {
         "fn toggle_settings",
         "fn close_settings",
         "fn settings_modal_key",
-        ".take(self.settings_values.len())",
-        "settings_view::body_index(self.settings_cursor",
+        "settings_view::pane_index(",
+        "settings_view::section_rows(active, setting_count, cred_count)",
     ] {
         assert!(GUI_SETTINGS.contains(needle), "missing settings behaviour: {needle}");
     }
@@ -117,11 +117,48 @@ fn the_modal_owns_the_keyboard_and_paints_above_the_window() {
 }
 
 #[test]
+fn the_rail_paints_one_section_and_switches_on_click() {
+    for needle in [
+        "pub enum SettingsSection",
+        "pub const ALL: [SettingsSection; 6]",
+        "pub fn section_rows(",
+        "pub fn pane_index(",
+    ] {
+        assert!(SETTINGS_VIEW.contains(needle), "missing section model: {needle}");
+    }
+    for needle in [
+        "pub fn rail_item(",
+        "rail: Vec<gpui::AnyElement>",
+        ".id(\"settings-modal-rail\")",
+    ] {
+        assert!(SETTINGS_MODAL.contains(needle), "missing rail shell: {needle}");
+    }
+    for needle in [
+        "self.settings_section = settings_view::SettingsSection::General;",
+        "for section in settings_view::SettingsSection::ALL {",
+        "this.settings_select_section(section, cx);",
+        "\"tab\" => {",
+        "let rows = settings_view::section_rows(active, setting_count, cred_count);",
+    ] {
+        assert!(GUI_SETTINGS.contains(needle), "missing rail wiring: {needle}");
+    }
+    assert!(
+        GUI_MAIN.contains("settings_section: settings_view::SettingsSection,"),
+        "the dashboard must remember the active section"
+    );
+    // The old full-table paint is gone: no header walk over every section.
+    assert!(
+        !GUI_SETTINGS.contains("body.push(settings_modal::section_header"),
+        "the pane paints one section, not a stack of headers"
+    );
+}
+
+#[test]
 fn a_failed_config_load_paints_no_invented_settings() {
     for needle in [
         "self.settings_values = Vec::new();",
         "self.settings_values.len() + self.settings_creds.len()",
-        ".take(self.settings_values.len())",
+        "let setting_count = self.settings_values.len();",
         "if self.settings_row_count() == 0 {",
     ] {
         assert!(GUI_SETTINGS.contains(needle), "missing empty-config guard: {needle}");

@@ -15,6 +15,7 @@ impl Dashboard {
             self.close_settings(cx);
             return;
         }
+        self.settings_section = settings_view::SettingsSection::General;
         self.settings_cursor = 0;
         self.settings_scroll.scroll_to_item(0);
         self.settings_secret = None;
@@ -210,12 +211,12 @@ impl Dashboard {
         }
         match ks.key.as_str() {
             "escape" => self.close_settings(cx),
-            "up" => {
-                self.settings_cursor = self.settings_cursor.saturating_sub(1);
-            }
-            "down" => {
-                let last = self.settings_row_count().saturating_sub(1);
-                self.settings_cursor = (self.settings_cursor + 1).min(last);
+            "up" => self.settings_move(-1),
+            "down" => self.settings_move(1),
+            "tab" => {
+                let dir = if ks.modifiers.shift { -1 } else { 1 };
+                let next = self.settings_section.step(dir);
+                self.settings_select_section(next, cx);
             }
             "left" => self.settings_step(self.settings_cursor, -1, cx),
             "right" => self.settings_step(self.settings_cursor, 1, cx),
@@ -223,101 +224,174 @@ impl Dashboard {
             _ => {}
         }
         if matches!(ks.key.as_str(), "up" | "down") {
-            let item = settings_view::body_index(self.settings_cursor, self.settings_values.len());
+            let item = settings_view::pane_index(
+                self.settings_section,
+                self.settings_cursor,
+                self.settings_values.len(),
+                self.settings_creds.len(),
+            );
             self.settings_scroll.scroll_to_item(item);
         }
         cx.notify();
     }
 
-    /// The modal's rows: agent settings, memory settings, credentials, then
-    /// the status line. Listeners live here, the shells in settings_modal.
+    /// The active section's rows, in paint order.
+    fn settings_section_rows(&self) -> Vec<usize> {
+        settings_view::section_rows(
+            self.settings_section,
+            self.settings_values.len(),
+            self.settings_creds.len(),
+        )
+    }
+
+    /// Move the cursor inside the active section, wrapping at both ends so a
+    /// two-row section still reaches both rows with one arrow key.
+    fn settings_move(&mut self, dir: i32) {
+        let rows = self.settings_section_rows();
+        let Some(at) = rows.iter().position(|row| *row == self.settings_cursor) else {
+            self.settings_cursor = rows.first().copied().unwrap_or(0);
+            return;
+        };
+        let next = if dir < 0 {
+            (at + rows.len() - 1) % rows.len()
+        } else {
+            (at + 1) % rows.len()
+        };
+        self.settings_cursor = rows[next];
+    }
+
+    /// Switch the rail. The cursor lands on the section's first row, so the
+    /// keyboard never points at a row the pane does not paint.
+    pub(crate) fn settings_select_section(
+        &mut self,
+        section: settings_view::SettingsSection,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings_section = section;
+        // An armed key edit owns the whole keyboard, so leaving its pane must
+        // disarm it: otherwise typing into another section feeds a buffer the
+        // user can no longer see.
+        if section != settings_view::SettingsSection::Credentials {
+            self.settings_secret = None;
+        }
+        self.settings_cursor = self.settings_section_rows().first().copied().unwrap_or(0);
+        self.settings_scroll.scroll_to_item(0);
+        cx.notify();
+    }
+
+    /// The modal: the rail on the left, the active section on the right, the
+    /// status line under both. Listeners live here, shells in `settings_modal`.
     pub(crate) fn settings_modal(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let shown = palette::current();
+        let active = self.settings_section;
+        let setting_count = self.settings_values.len();
+        let cred_count = self.settings_creds.len();
+
+        let mut rail: Vec<AnyElement> = Vec::new();
+        for section in settings_view::SettingsSection::ALL {
+            let item = settings_modal::rail_item(
+                SharedString::from(format!("settings-rail-{}", section.position())),
+                section.label(),
+                section.hint(),
+                section == active,
+            );
+            let select = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
+                this.settings_select_section(section, cx);
+            });
+            rail.push(item.on_click(select).into_any_element());
+        }
+
         let mut body: Vec<AnyElement> = Vec::new();
-        let mut section = "";
-        for (index, spec) in settings_view::SPECS
-            .iter()
-            .enumerate()
-            .take(self.settings_values.len())
-        {
-            if spec.section != section {
-                section = spec.section;
-                let title = if section == "agent" { "Agent" } else { "Memory" };
-                body.push(settings_modal::section_header(title).into_any_element());
-            }
-            let selected = self.settings_cursor == index;
-            let Some(value) = self.settings_values.get(index).cloned() else {
-                continue;
-            };
-            let control = if matches!(spec.kind, settings_view::SettingKind::Number { .. }) {
-                let minus = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
-                    // The row's own click steps up; the buttons must not
-                    // bubble into it or one press would step twice.
-                    cx.stop_propagation();
-                    this.settings_step(index, -1, cx);
-                });
-                let plus = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
-                    cx.stop_propagation();
-                    this.settings_step(index, 1, cx);
-                });
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("settings-minus-{index}")))
-                            .cursor_pointer()
-                            .px_1()
-                            .on_click(minus)
-                            .child(text("-", Size::Sm, shown.text_muted)),
-                    )
-                    .child(text(
+        let rows = settings_view::section_rows(active, setting_count, cred_count);
+        if rows.is_empty() {
+            body.push(
+                text(
+                    if self.settings_row_count() == 0 {
+                        "The config could not be read; the error is below."
+                    } else {
+                        "Nothing in this section."
+                    },
+                    Size::Sm,
+                    shown.text_muted,
+                )
+                .into_any_element(),
+            );
+        }
+        for index in rows {
+            if index < setting_count {
+                let Some(spec) = settings_view::SPECS.get(index) else {
+                    continue;
+                };
+                let Some(value) = self.settings_values.get(index).cloned() else {
+                    continue;
+                };
+                let control = if matches!(spec.kind, settings_view::SettingKind::Number { .. }) {
+                    let minus = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
+                        // The row's own click steps up; the buttons must not
+                        // bubble into it or one press would step twice.
+                        cx.stop_propagation();
+                        this.settings_step(index, -1, cx);
+                    });
+                    let plus = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
+                        cx.stop_propagation();
+                        this.settings_step(index, 1, cx);
+                    });
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("settings-minus-{index}")))
+                                .cursor_pointer()
+                                .px_1()
+                                .on_click(minus)
+                                .child(text("-", Size::Sm, shown.text_muted)),
+                        )
+                        .child(text(
+                            settings_view::value_label(&value),
+                            Size::Sm,
+                            shown.text_strong,
+                        ))
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("settings-plus-{index}")))
+                                .cursor_pointer()
+                                .px_1()
+                                .on_click(plus)
+                                .child(text("+", Size::Sm, shown.text_muted)),
+                        )
+                } else {
+                    div().child(text(
                         settings_view::value_label(&value),
                         Size::Sm,
-                        shown.text_strong,
+                        shown.accent,
                     ))
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("settings-plus-{index}")))
-                            .cursor_pointer()
-                            .px_1()
-                            .on_click(plus)
-                            .child(text("+", Size::Sm, shown.text_muted)),
-                    )
-            } else {
-                div().child(text(
-                    settings_view::value_label(&value),
-                    Size::Sm,
-                    shown.accent,
-                ))
-            };
-            let row = settings_modal::row_shell(
-                SharedString::from(format!("settings-row-{index}")),
-                selected,
-                spec.label,
-                spec.blurb,
-                spec.restart,
-                control,
-            );
-            let pick = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
-                this.settings_cursor = index;
-                this.settings_advance(index, cx);
-            });
-            body.push(row.on_click(pick).into_any_element());
-        }
-        body.push(settings_modal::section_header("Credentials").into_any_element());
-        let creds = self.settings_creds.len();
-        for row in 0..creds {
-            let index = self.settings_values.len() + row;
-            let Some(cred) = self.settings_creds.get(row) else {
+                };
+                let row = settings_modal::row_shell(
+                    SharedString::from(format!("settings-row-{index}")),
+                    self.settings_cursor == index,
+                    spec.label,
+                    spec.blurb,
+                    spec.restart,
+                    control,
+                );
+                let pick = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
+                    this.settings_cursor = index;
+                    this.settings_advance(index, cx);
+                });
+                body.push(row.on_click(pick).into_any_element());
+                continue;
+            }
+            let cred_row = index - setting_count;
+            let Some(cred) = self.settings_creds.get(cred_row) else {
                 continue;
             };
             let editing = self
                 .settings_secret
                 .as_ref()
-                .is_some_and(|(armed, _)| *armed == row);
+                .is_some_and(|(armed, _)| *armed == cred_row);
             let control = if editing {
                 let len = self
                     .settings_secret
@@ -344,10 +418,9 @@ impl Dashboard {
                     },
                 ))
             };
-            let selected = self.settings_cursor == index;
             let shell = settings_modal::row_shell(
-                SharedString::from(format!("settings-cred-{row}")),
-                selected,
+                SharedString::from(format!("settings-cred-{cred_row}")),
+                self.settings_cursor == index,
                 &cred.label,
                 "api key; enter to replace",
                 false,
@@ -359,16 +432,6 @@ impl Dashboard {
             });
             body.push(shell.on_click(arm).into_any_element());
         }
-        if self.settings_row_count() == 0 {
-            body.push(
-                text(
-                    "The config could not be read; the error is below.",
-                    Size::Sm,
-                    shown.text_muted,
-                )
-                .into_any_element(),
-            );
-        }
         if let Some(status) = &self.settings_status {
             body.push(text(status.clone(), Size::Xs, shown.amber).into_any_element());
         }
@@ -376,8 +439,9 @@ impl Dashboard {
             this.close_settings(cx);
         });
         settings_modal::modal(
+            rail,
             body,
-            "up/down move · enter changes · left/right adjust · credentials stay masked",
+            "tab sections · up/down move · enter changes · left/right adjust · keys stay masked",
             &self.settings_scroll,
             dismiss,
         )

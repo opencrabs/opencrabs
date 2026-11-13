@@ -3,12 +3,19 @@
 use opencrabs::config::{Config, ProviderConfig};
 
 use crate::settings_view::{
-    RowValue, SPECS, SettingKind, SettingSpec, WriteOp, advance, body_index, credential_rows,
-    current_values, step_number, value_label, write_op,
+    RowValue, SPECS, SettingKind, SettingSpec, SettingsSection, WriteOp, advance, credential_rows,
+    current_values, pane_index, section_rows, step_number, value_label, write_op,
 };
 
 fn spec_of(key: &str) -> &'static SettingSpec {
     SPECS.iter().find(|s| s.key == key).expect("spec exists")
+}
+
+fn spec_index(key: &str) -> usize {
+    SPECS
+        .iter()
+        .position(|s| s.key == key)
+        .expect("spec exists")
 }
 
 fn value_of(config: &Config, key: &str) -> RowValue {
@@ -33,7 +40,15 @@ fn every_spec_has_a_reader_and_a_real_control() {
     let mut seen: Vec<(&str, &str)> = Vec::new();
     for spec in SPECS {
         assert!(!spec.label.is_empty(), "{} has no label", spec.key);
-        assert!(!spec.blurb.is_empty(), "{} has no blurb", spec.key);
+        // The four notification children are explained once, by the master
+        // switch above them, so they are the only rows allowed to stay quiet.
+        let quiet_allowed = spec.group == SettingsSection::Notifications
+            && spec.key != "completion_notification_enabled";
+        assert!(
+            quiet_allowed || !spec.blurb.is_empty(),
+            "{} has no blurb",
+            spec.key
+        );
         assert!(
             !seen.contains(&(spec.section, spec.key)),
             "{}.{} is listed twice",
@@ -57,17 +72,86 @@ fn every_spec_has_a_reader_and_a_real_control() {
 }
 
 #[test]
-fn body_indices_include_section_headers() {
-    let memory = SPECS
-        .iter()
-        .position(|spec| spec.section == "memory")
-        .expect("memory section");
-    assert_eq!(body_index(0, SPECS.len()), 1);
-    assert_eq!(body_index(memory, SPECS.len()), memory + 2);
-    assert_eq!(body_index(SPECS.len(), SPECS.len()), SPECS.len() + 3);
-    // A failed config read has no bogus setting rows, but a credential row
-    // would still follow the credentials header.
-    assert_eq!(body_index(0, 0), 1);
+fn every_row_declares_a_paintable_section() {
+    let mut painted = 0;
+    for section in SettingsSection::ALL {
+        if section == SettingsSection::Credentials {
+            continue;
+        }
+        let rows = section_rows(section, SPECS.len(), 0);
+        assert!(
+            !rows.is_empty(),
+            "{} paints no rows, so the rail would open an empty pane",
+            section.label()
+        );
+        painted += rows.len();
+    }
+    // No row is orphaned and none is painted twice.
+    assert_eq!(painted, SPECS.len());
+}
+
+#[test]
+fn sections_paint_their_own_rows_only() {
+    let notifications = section_rows(SettingsSection::Notifications, SPECS.len(), 0);
+    assert_eq!(notifications.len(), 5);
+    for index in &notifications {
+        assert_eq!(SPECS[*index].group, SettingsSection::Notifications);
+    }
+    // The approval policy is General, never swept into a neighbouring pane.
+    let general = section_rows(SettingsSection::General, SPECS.len(), 0);
+    assert_eq!(general, vec![spec_index("approval_policy")]);
+}
+
+#[test]
+fn credentials_are_the_last_section_only() {
+    let creds = section_rows(SettingsSection::Credentials, SPECS.len(), 3);
+    assert_eq!(creds, vec![SPECS.len(), SPECS.len() + 1, SPECS.len() + 2]);
+    for section in SettingsSection::ALL {
+        if section == SettingsSection::Credentials {
+            continue;
+        }
+        let rows = section_rows(section, SPECS.len(), 3);
+        assert!(
+            rows.iter().all(|row| *row < SPECS.len()),
+            "{} must not paint a credential row",
+            section.label()
+        );
+    }
+}
+
+#[test]
+fn pane_index_tracks_the_cursor_inside_its_section() {
+    let memory = section_rows(SettingsSection::Memory, SPECS.len(), 2);
+    for (position, row) in memory.iter().enumerate() {
+        assert_eq!(
+            pane_index(SettingsSection::Memory, *row, SPECS.len(), 2),
+            position
+        );
+    }
+    // A credential row scrolls to its own place in the credentials pane.
+    assert_eq!(
+        pane_index(SettingsSection::Credentials, SPECS.len() + 1, SPECS.len(), 2),
+        1
+    );
+}
+
+#[test]
+fn tab_walks_the_rail_both_ways_and_wraps() {
+    assert_eq!(
+        SettingsSection::General.step(1),
+        SettingsSection::Notifications
+    );
+    assert_eq!(
+        SettingsSection::Credentials.step(1),
+        SettingsSection::General
+    );
+    assert_eq!(
+        SettingsSection::General.step(-1),
+        SettingsSection::Credentials
+    );
+    for (position, section) in SettingsSection::ALL.iter().enumerate() {
+        assert_eq!(section.position(), position);
+    }
 }
 
 #[test]
