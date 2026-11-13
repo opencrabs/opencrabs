@@ -665,6 +665,13 @@ impl EvolveTool {
             }
         }
 
+        // Install the desktop client the same archive carries. It is a
+        // separate executable, so swapping only `opencrabs` leaves the window
+        // running the previous release forever. Best effort like RTK above: a
+        // TUI-only archive has nothing to extract and must not fail the
+        // upgrade.
+        install_desktop_client(&archive_bytes, &exe_path, is_windows, sid).await;
+
         // Schedule a delayed daemon restart for systemd-managed services.
         // This runs 3 seconds after the tool returns, giving the current
         // response enough time to be delivered before the daemon exits.
@@ -774,5 +781,256 @@ impl EvolveTool {
         Ok(ToolResult::success(
             restart_status.user_message(current_version, latest_version),
         ))
+    }
+}
+
+/// Replace the desktop client beside the running binary with the one the
+/// release archive carries.
+///
+/// The client has no version surface of its own (#2841): it cannot be asked
+/// what it is, so there is nothing to compare and no skip path. Whenever the
+/// archive ships a client it is installed. A TUI-only archive (an older
+/// release, or a build without the `gui` feature) carries no client, and that
+/// is not an error: the installed one is left exactly as it was.
+///
+/// The bytes land through a temporary file and a rename rather than a direct
+/// write, because the window may be open while evolve runs: truncating the
+/// inode a running process has mapped is a crash on macOS and `ETXTBSY` on
+/// Linux, while a rename leaves the old inode alive for the running image.
+/// The rename also breaks the hard link the macOS packaging shares between
+/// the two bundles, so the second bundle is written separately when present.
+async fn install_desktop_client(
+    archive_bytes: &[u8],
+    exe_path: &std::path::Path,
+    is_windows: bool,
+    sid: uuid::Uuid,
+) {
+    let gui_name = if is_windows {
+        "opencrabs-gui.exe"
+    } else {
+        "opencrabs-gui"
+    };
+
+    let extracted = if is_windows {
+        extract_from_zip(archive_bytes, gui_name)
+    } else {
+        extract_from_tar_gz(archive_bytes, gui_name)
+    };
+
+    let data = match extracted {
+        Ok(data) => data,
+        Err(e) => {
+            tracing::debug!(
+                target: "evolve",
+                error = %e,
+                session_id = %sid,
+                "evolve: no desktop client in the release archive (expected for a TUI-only build)"
+            );
+            return;
+        }
+    };
+
+    // A tar link entry carries no payload. Writing zero bytes over a working
+    // client would leave a window that cannot start, so an empty extraction
+    // counts as "not shipped" rather than as a client of length zero.
+    if data.is_empty() {
+        tracing::warn!(
+            target: "evolve",
+            session_id = %sid,
+            "evolve: desktop client entry in the archive carried no bytes; leaving the installed one alone"
+        );
+        return;
+    }
+
+    let dir = exe_path.parent().unwrap_or(std::path::Path::new("."));
+
+    #[cfg(target_os = "macos")]
+    let targets = {
+        let mut paths = vec![dir.join(gui_name)];
+        // Double-clicking "OpenCrabs Desktop" runs this copy, so it has to
+        // carry the new build too: the rename below gives the first path a new
+        // inode, so the shared hard link no longer reaches this one.
+        let desktop = dir
+            .join("../../../OpenCrabs Desktop.app/Contents/MacOS")
+            .join(gui_name);
+        if desktop.exists() {
+            paths.push(desktop);
+        }
+        paths
+    };
+    #[cfg(not(target_os = "macos"))]
+    let targets = vec![dir.join(gui_name)];
+
+    for path in targets {
+        let tmp = path.with_extension(format!("evolve-tmp-{}", std::process::id()));
+        if let Err(e) = tokio::fs::write(&tmp, &data).await {
+            tracing::warn!(
+                target: "evolve",
+                path = %tmp.display(),
+                error = %e,
+                session_id = %sid,
+                "evolve: failed to write the bundled desktop client; the window keeps the previous build"
+            );
+            continue;
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(e) = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)) {
+                tracing::warn!(
+                    target: "evolve",
+                    path = %tmp.display(),
+                    error = %e,
+                    "evolve: installed the desktop client but failed to set executable permissions"
+                );
+            }
+        }
+
+        match std::fs::rename(&tmp, &path) {
+            Ok(()) => {
+                tracing::info!(
+                    target: "evolve",
+                    path = %path.display(),
+                    bytes = data.len(),
+                    session_id = %sid,
+                    "evolve: installed bundled desktop client"
+                );
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                tracing::warn!(
+                    target: "evolve",
+                    path = %path.display(),
+                    error = %e,
+                    session_id = %sid,
+                    "evolve: failed to install the bundled desktop client; the window keeps the previous build"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::install_desktop_client;
+
+    /// Build a .tar.gz in memory from `(name, bytes)` pairs, which is the
+    /// shape the release asset uses on unix.
+    fn tar_gz(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        use std::io::Write;
+
+        let mut builder = tar::Builder::new(Vec::new());
+        for (name, bytes) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o644);
+            builder
+                .append_data(&mut header, name, *bytes)
+                .expect("append tar entry");
+        }
+        let tar_bytes = builder.into_inner().expect("finish tar");
+
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(&tar_bytes).expect("gzip archive");
+        encoder.finish().expect("finish gzip")
+    }
+
+    /// A throwaway install root: `bin/opencrabs`, plus the temp home around
+    /// it so a test can never reach the live profile.
+    fn prepared_bin() -> (tempfile::TempDir, std::path::PathBuf) {
+        let home = tempfile::tempdir().expect("temp dir");
+        let bin = home.path().join("bin");
+        std::fs::create_dir_all(&bin).expect("create bin");
+        std::fs::write(bin.join("opencrabs"), b"terminal").expect("write exe");
+        (home, bin)
+    }
+
+    /// Run the install with the profile home pointed at the test's tempdir.
+    /// The extraction is path-parameterised and never reads a home, but the
+    /// override keeps that true if a future code path starts asking for one
+    /// (#1399).
+    async fn install(
+        home: &tempfile::TempDir,
+        exe_path: &std::path::Path,
+        entries: &[(&str, &[u8])],
+    ) {
+        let archive = tar_gz(entries);
+        crate::config::profile::with_home_override_async(home.path().to_path_buf(), async {
+            install_desktop_client(&archive, exe_path, false, uuid::Uuid::nil()).await;
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn installs_the_client_the_archive_ships() {
+        let (home, bin) = prepared_bin();
+        let exe_path = bin.join("opencrabs");
+
+        install(
+            &home,
+            &exe_path,
+            &[("opencrabs", b"terminal"), ("opencrabs-gui", b"window")],
+        )
+        .await;
+
+        let gui_path = bin.join("opencrabs-gui");
+        assert_eq!(
+            std::fs::read(&gui_path).expect("client installed beside the binary"),
+            b"window".to_vec()
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&gui_path)
+                .expect("client metadata")
+                .permissions()
+                .mode();
+            assert_eq!(
+                mode & 0o777,
+                0o755,
+                "the installed client must be executable"
+            );
+        }
+
+        // The temporary file used for the swap must not survive it.
+        let leftovers: Vec<_> = std::fs::read_dir(&bin)
+            .expect("read bin")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("evolve-tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "leftover temp files: {leftovers:?}");
+    }
+
+    #[tokio::test]
+    async fn tui_only_archive_leaves_the_installed_client_alone() {
+        let (home, bin) = prepared_bin();
+        let exe_path = bin.join("opencrabs");
+
+        let gui_path = bin.join("opencrabs-gui");
+        std::fs::write(&gui_path, b"previous").expect("write existing client");
+
+        install(&home, &exe_path, &[("opencrabs", b"terminal")]).await;
+
+        assert_eq!(
+            std::fs::read(&gui_path).expect("existing client survives"),
+            b"previous".to_vec(),
+            "a TUI-only archive must not touch an installed client"
+        );
+    }
+
+    #[tokio::test]
+    async fn tui_only_archive_creates_no_client() {
+        let (home, bin) = prepared_bin();
+        let exe_path = bin.join("opencrabs");
+
+        install(&home, &exe_path, &[("opencrabs", b"terminal")]).await;
+
+        assert!(
+            !bin.join("opencrabs-gui").exists(),
+            "a TUI-only archive must not create a client"
+        );
     }
 }
