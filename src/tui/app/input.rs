@@ -2727,15 +2727,14 @@ impl App {
                     self.session_renaming = false;
                     self.session_rename_buffer.clear();
                 }
-                KeyCode::Char(c) => {
-                    // Only unmodified text types. A chord the table did not
-                    // claim must never land in the name as a letter.
+                KeyCode::Char(c)
                     if !event
                         .modifiers
-                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-                    {
-                        self.session_rename_buffer.type_char(c);
-                    }
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
+                    // Only unmodified text types. A chord the table did not
+                    // claim must never land in the name as a letter.
+                    self.session_rename_buffer.type_char(c);
                 }
                 _ => {}
             }
@@ -2755,14 +2754,13 @@ impl App {
                     self.topic_naming = false;
                     self.topic_name_buffer.clear();
                 }
-                KeyCode::Char(c) => {
-                    // Same guard as the rename prompt: a chord is not text.
+                KeyCode::Char(c)
                     if !event
                         .modifiers
-                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-                    {
-                        self.topic_name_buffer.type_char(c);
-                    }
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
+                    // Same guard as the rename prompt: a chord is not text.
+                    self.topic_name_buffer.type_char(c);
                 }
                 _ => {}
             }
