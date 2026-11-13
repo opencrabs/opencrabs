@@ -399,7 +399,13 @@ pub(crate) fn last_activity_secs(state_dir: &Path, state: &TunnelState) -> u64 {
 /// Whether an activity reading is past the idle window. Split out so the
 /// boundary is testable without a filesystem or a clock.
 pub(crate) fn idle_expired(last_activity: u64, now: u64, timeout: Duration) -> bool {
-    now.saturating_sub(last_activity) >= timeout.as_secs()
+    // A clock that moved backwards cannot measure idleness, and leaving a
+    // public hostname up forever is the failure this reaper exists to
+    // prevent, so an activity stamp from the future reads as idle (#2537).
+    if now < last_activity {
+        return true;
+    }
+    now - last_activity >= timeout.as_secs()
 }
 
 /// Stop the recorded tunnel when it has been idle for `timeout`.
