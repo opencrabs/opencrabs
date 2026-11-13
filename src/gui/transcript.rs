@@ -6772,4 +6772,57 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn excerpt_lines_cut_multibyte_bodies_on_a_char_boundary() {
+        let lines = [
+            "ação pedaço",
+            "日本語 🦀",
+            "olá :cry: mundo",
+            "ação fim",
+            "漢字",
+        ];
+        let content = lines.join("\n");
+        for max in 1..lines.len() {
+            let (cut, hidden) = excerpt_lines(&content, max);
+            let expected = lines[..max].join("\n");
+            assert_eq!(
+                &*cut,
+                expected.as_str(),
+                "max={max}: the cut must keep exactly the first {max} lines"
+            );
+            assert_eq!(hidden, lines.len() - max, "max={max}: hidden line count");
+            assert!(
+                content.starts_with(&*cut),
+                "max={max}: the cut is not a prefix of the body"
+            );
+            assert!(
+                content.is_char_boundary(cut.len()),
+                "max={max}: the cut splits a character at byte {}",
+                cut.len()
+            );
+        }
+    }
+
+    #[test]
+    fn excerpt_lines_keep_a_multibyte_body_that_fits_the_window() {
+        let (cut, hidden) = excerpt_lines("ação 🦀 日本語", 20);
+        assert_eq!(&*cut, "ação 🦀 日本語");
+        assert_eq!(hidden, 0, "a body with no newline hides nothing");
+
+        let trailing = "ação\n日本語 🦀\n";
+        let (cut, hidden) = excerpt_lines(trailing, 2);
+        assert_eq!(&*cut, trailing, "nothing follows the last newline");
+        assert_eq!(hidden, 0);
+
+        let body = "🦀ação\n日本";
+        let (cut, hidden) = excerpt_lines(body, 1);
+        assert_eq!(&*cut, "🦀ação");
+        assert_eq!(hidden, 1);
+        assert!(
+            body.is_char_boundary(cut.len()),
+            "the cut splits the emoji at byte {}",
+            cut.len()
+        );
+    }
 }
