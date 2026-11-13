@@ -1313,7 +1313,7 @@ impl AgentService {
 
         let summary = Self::extract_text_from_response(&response);
 
-        if let Err(e) = Self::save_compaction_summary_to_memory(&summary).await {
+        if let Err(e) = Self::save_compaction_summary_to_memory(session_id, &summary).await {
             tracing::warn!("Failed to save compaction summary to daily log: {}", e);
         }
 
@@ -1787,7 +1787,17 @@ impl AgentService {
     ///
     /// Multiple compactions per day append to the same file. The brain workspace's
     /// `MEMORY.md` is left untouched — it stays as user-curated durable memory.
+    /// Save a compaction summary to a daily memory log at `~/.opencrabs/memory/YYYY-MM-DD.md`.
+    ///
+    /// The daily file is shared by every session in the profile, so only the
+    /// durable half of the summary is written: the continuation prompt's
+    /// session-local sections (immediate task, pending tasks, recovery
+    /// playbook, next step, continuation message, harness plan state) belong to
+    /// one session and would read as instructions to the next one. One entry
+    /// per session per day: a second compaction replaces the earlier entry
+    /// instead of stacking a copy, and one entry is capped.
     pub(super) async fn save_compaction_summary_to_memory(
+        session_id: Uuid,
         summary: &str,
     ) -> std::result::Result<(), String> {
         let memory_dir = crate::config::opencrabs_home().join("memory");
@@ -1798,16 +1808,11 @@ impl AgentService {
         let date = chrono::Local::now().format("%Y-%m-%d");
         let memory_path = memory_dir.join(format!("{}.md", date));
 
-        // Read existing content (if any — multiple compactions per day stack)
         let existing = std::fs::read_to_string(&memory_path).unwrap_or_default();
 
         let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-        let new_content = format!(
-            "{}\n\n---\n\n## Auto-Compaction Summary ({})\n\n{}\n",
-            existing.trim(),
-            timestamp,
-            summary
-        );
+        let entry = compaction_memory_entry(session_id, &timestamp.to_string(), summary);
+        let new_content = replace_session_entry(&existing, session_id, &entry);
 
         std::fs::write(&memory_path, new_content.trim_start())
             .map_err(|e| format!("Failed to write daily memory log: {}", e))?;
@@ -1815,6 +1820,156 @@ impl AgentService {
         tracing::info!("Saved compaction summary to {}", memory_path.display());
         Ok(())
     }
+}
+
+/// One compaction entry may not exceed this. A continuation document measures
+/// 6 to 15 KB, and the daily file is read whole by every session in the
+/// profile, so a handful of uncapped entries cost more context than they
+/// return.
+const MAX_COMPACTION_ENTRY_BYTES: usize = 8 * 1024;
+
+/// Build the daily-memory entry for one compaction: the durable half of the
+/// summary, wrapped in markers so a later compaction in the same session can
+/// replace it instead of appending a second copy.
+pub(crate) fn compaction_memory_entry(session_id: Uuid, timestamp: &str, summary: &str) -> String {
+    let header = format!(
+        "<!-- compaction:session:{session_id} -->\n\
+         ## Auto-Compaction Summary ({timestamp})\n\n"
+    );
+    let footer = format!("\n<!-- /compaction:session:{session_id} -->");
+    let budget = MAX_COMPACTION_ENTRY_BYTES.saturating_sub(header.len() + footer.len());
+    let stripped = strip_session_local_sections(summary);
+    let body = if stripped.trim().is_empty() {
+        "[the summary carried no durable sections]".to_string()
+    } else {
+        stripped
+    };
+    format!("{header}{}{footer}", cap_entry_body(&body, budget))
+}
+
+/// Cut `body` to `budget` bytes on a character boundary, and say so when it
+/// had to: silent truncation would leave a summary that looks complete.
+pub(crate) fn cap_entry_body(body: &str, budget: usize) -> String {
+    if body.len() <= budget {
+        return body.to_string();
+    }
+    const NOTE: &str = "\n\n[truncated at the daily-memory entry cap]";
+    let mut end = budget.saturating_sub(NOTE.len());
+    while end > 0 && !body.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{NOTE}", &body[..end])
+}
+
+/// Write `entry` into `existing`: replace an earlier entry for the same
+/// session in place, or append a new one. The markers make the replace exact,
+/// and entries written before the markers existed are left alone.
+pub(crate) fn replace_session_entry(existing: &str, session_id: Uuid, entry: &str) -> String {
+    let open = format!("<!-- compaction:session:{session_id} -->");
+    let close = format!("<!-- /compaction:session:{session_id} -->");
+    if let Some(start) = existing.find(&open) {
+        if let Some(rel_end) = existing[start..].find(&close) {
+            let end = start + rel_end + close.len();
+            let mut out = String::with_capacity(existing.len() + entry.len());
+            out.push_str(&existing[..start]);
+            out.push_str(entry);
+            out.push_str(&existing[end..]);
+            return out;
+        }
+    }
+    let trimmed = existing.trim_end();
+    if trimmed.is_empty() {
+        format!("{entry}\n")
+    } else {
+        format!("{trimmed}\n\n---\n\n{entry}\n")
+    }
+}
+
+/// Sections of a compaction continuation document that belong to the session
+/// that produced it, so they never reach the shared daily file.
+fn is_session_local_heading(heading: &str) -> bool {
+    let head = heading.trim().to_ascii_uppercase();
+    if [
+        "IMMEDIATE TASK",
+        "PENDING TASKS",
+        "RECOVERY PLAYBOOK",
+        "NEXT STEP",
+        "CONTINUATION MESSAGE",
+        "PLAN STATE",
+        "CONTEXT MANIFEST",
+    ]
+    .iter()
+    .any(|needle| head.contains(needle))
+    {
+        return true;
+    }
+    // Numbered fallback for a heading whose title changed: 0 is the immediate
+    // task, 6 to 10 are execution state.
+    let number = head.split('.').next().unwrap_or_default();
+    matches!(number, "0" | "6" | "7" | "8" | "9" | "10")
+}
+
+/// Keep only the durable sections of a compaction continuation document.
+///
+/// Line based on purpose: the summary embeds fenced blocks, and a regex over
+/// `## ` headings would cut the document at a heading that lives inside a
+/// fence. A `context-manifest` block is dropped wherever it appears, fence and
+/// all, because it is a machine snapshot of one session.
+pub(crate) fn strip_session_local_sections(summary: &str) -> String {
+    let mut out = String::with_capacity(summary.len());
+    let mut in_fence = false;
+    let mut dropping = false;
+    let mut skipping_manifest = false;
+
+    for line in summary.lines() {
+        let trimmed = line.trim_start();
+        let is_fence = trimmed.starts_with("```");
+
+        if skipping_manifest {
+            if is_fence {
+                skipping_manifest = false;
+            }
+            continue;
+        }
+
+        if is_fence {
+            if !in_fence {
+                let info = trimmed.trim_start_matches('`').trim();
+                if info.starts_with("context-manifest") {
+                    skipping_manifest = true;
+                    continue;
+                }
+            }
+            in_fence = !in_fence;
+            if !dropping {
+                out.push_str(line);
+                out.push('\n');
+            }
+            continue;
+        }
+
+        if in_fence {
+            if !dropping {
+                out.push_str(line);
+                out.push('\n');
+            }
+            continue;
+        }
+
+        if let Some(heading) = trimmed.strip_prefix("## ") {
+            dropping = is_session_local_heading(heading);
+            if dropping {
+                continue;
+            }
+        }
+        if dropping {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+
+    out.trim_end().to_string()
 }
 
 /// Harness-written plan-state block appended to every compaction summary
