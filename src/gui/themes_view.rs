@@ -633,88 +633,34 @@ pub fn modal(
     dismiss: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     let shown = crate::palette::current();
-    // One dismiss handler, two doors: the close control in the header and the
-    // scrim around the card. The closure is not `Clone`, so both doors share
-    // it behind an `Rc` instead of the second door dropping the first.
-    let dismiss = Rc::new(dismiss);
-    let close_door = {
-        let dismiss = dismiss.clone();
-        move |ev: &ClickEvent, window: &mut Window, app: &mut App| dismiss(ev, window, app)
-    };
-    let scrim_door =
-        move |ev: &ClickEvent, window: &mut Window, app: &mut App| dismiss(ev, window, app);
     let mut rows = div().flex().flex_row().gap_3().justify_center();
     for card in cards {
         rows = rows.child(card);
     }
-    let card = div()
-        .id("theme-modal-card")
-        // A click on the card stops here: only the scrim dismisses.
-        .on_click(|_ev, _window, cx| cx.stop_propagation())
-        .flex()
-        .flex_col()
-        .gap_3()
-        .p_4()
-        .w(px(588.0))
-        .rounded(px(concentric_radius(18.0)))
-        .border_1()
-        .border_color(rgb(shown.panel_hi))
-        .bg(rgb(shown.panel))
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .w_full()
-                .child(text("Theme".to_string(), Size::Sm, shown.text))
-                .child(
-                    div()
-                        .id("theme-modal-close")
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap_1()
-                        .text_xs()
-                        .text_color(rgb(shown.text_faint))
-                        .cursor_pointer()
-                        .hover(|d| d.text_color(rgb(shown.text)))
-                        .on_click(close_door)
-                        .child("Close")
-                        .child("esc"),
-                ),
-        )
-        .child(rows)
-        .child(base)
-        .children(accent)
-        .child(fonts)
-        .child(
-            div()
-                .text_xs()
-                .text_color(rgb(shown.text_muted))
-                .child(SharedString::from(footer.to_string())),
-        );
-    div()
-        .id("theme-modal-scrim")
-        .occlude()
-        .absolute()
-        .top_0()
-        .bottom_0()
-        .left_0()
-        .right_0()
-        .flex()
-        .items_center()
-        .justify_center()
-        // The scrim dims whatever the window is painting, so it follows the
-        // palette in force rather than the system's appearance (#2746).
-        .bg(if gui_theme::relative_luminance(shown.bg) < 0.18 {
-            rgba(0x0a0a0a88)
-        } else {
-            rgba(0x1b191733)
-        })
-        .cursor_pointer()
-        .on_click(scrim_door)
-        .child(card)
+    let mut body = div().flex().flex_col().gap_3().child(rows).child(base);
+    if let Some(accent) = accent {
+        body = body.child(accent);
+    }
+    let body = body.child(fonts);
+    crate::modal_shell::render(
+        crate::modal_shell::ModalView {
+            id: "theme-modal",
+            title: "Theme".to_string(),
+            subtitle: String::new(),
+            actions: None,
+            body: body.into_any_element(),
+            footer: Some(
+                div()
+                    .text_xs()
+                    .text_color(rgb(shown.text_muted))
+                    .child(SharedString::from(footer.to_string()))
+                    .into_any_element(),
+            ),
+            width: 588.0,
+            max_height: 760.0,
+        },
+        dismiss,
+    )
 }
 
 /// The box a wheel records, as the dashboard reads it.

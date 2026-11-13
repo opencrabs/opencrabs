@@ -58,9 +58,11 @@ mod markdown;
 mod menu;
 mod mission_control;
 mod mission_control_view;
+mod modal_shell;
 mod model_fetch;
 mod model_picker;
 mod models;
+mod models_modal;
 mod onboard;
 mod overlays;
 mod palette;
@@ -5729,6 +5731,14 @@ impl Render for Dashboard {
                 gpui::deferred(transcript::react_picker_popover(&cells, at, dismiss))
                     .with_priority(2),
             );
+        }
+        // These window-level cards share Theme's scrim and pointer ownership.
+        // Their screen state remains the compatibility keyboard owner.
+        if self.screen == Screen::Models {
+            root = root.child(self.models_modal(cx));
+        }
+        if self.screen == Screen::Projects {
+            root = root.child(self.projects_modal(cx));
         }
         // The theme modal is attached last, so it paints over every other
         // surface: while it is open it is what the user is looking at, and the
