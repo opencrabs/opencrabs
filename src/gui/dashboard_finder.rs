@@ -168,7 +168,7 @@ impl Dashboard {
         // Any key is activity: the caret comes back and its idle clock
         // restarts before the key does its work (#2531).
         self.finder_activity_reset();
-        if let Some(edit) = find::editing_chord(
+        if let Some(edit) = text_field::editing_chord(
             &ks.key,
             ks.modifiers.control,
             ks.modifiers.platform,
@@ -213,64 +213,28 @@ impl Dashboard {
         cx.notify();
     }
 
-    pub(crate) fn apply_finder_edit(&mut self, edit: find::SeekerEdit, cx: &mut Context<Self>) {
+    /// Apply one editing chord to the field. The translation and the edit
+    /// both live in `ui_core::text_field`, shared with the name prompts so a
+    /// chord that works in the card works when renaming too (#2892). This
+    /// method only supplies the window's clipboard.
+    pub(crate) fn apply_finder_edit(
+        &mut self,
+        edit: text_field::TextFieldEdit,
+        cx: &mut Context<Self>,
+    ) {
         let Some(state) = self.finder.as_mut() else {
             return;
         };
-        match edit {
-            find::SeekerEdit::Move {
-                delta,
-                word,
-                select,
-            } => match (word, select) {
-                (true, true) => state.select_word_to(delta),
-                (true, false) => state.move_caret_word(delta),
-                (false, true) => {
-                    let len = state.query().chars().count();
-                    let target = if delta < 0 {
-                        state.caret().saturating_sub(delta.unsigned_abs())
-                    } else {
-                        state.caret().saturating_add(delta.unsigned_abs()).min(len)
-                    };
-                    state.select_to(target);
-                }
-                (false, false) => state.move_caret(delta),
-            },
-            find::SeekerEdit::Home { select } => {
-                if select {
-                    state.select_to(0);
-                } else {
-                    state.move_caret_to(0);
-                }
+        match text_field::apply(state.field_mut(), edit) {
+            Some(text_field::ClipboardRequest::Write(text)) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
             }
-            find::SeekerEdit::End { select } => {
-                let end = state.query().chars().count();
-                if select {
-                    state.select_to(end);
-                } else {
-                    state.move_caret_to(end);
-                }
-            }
-            find::SeekerEdit::Backspace { word: true } => state.delete_word_back(),
-            find::SeekerEdit::Backspace { word: false } => state.backspace(),
-            find::SeekerEdit::Delete { word: true } => state.delete_word_forward(),
-            find::SeekerEdit::Delete { word: false } => state.delete_forward(),
-            find::SeekerEdit::SelectAll => state.select_all(),
-            find::SeekerEdit::Copy => {
-                if let Some(text) = state.selected_text() {
-                    cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
-                }
-            }
-            find::SeekerEdit::Cut => {
-                if let Some(text) = state.take_selected_text() {
-                    cx.write_to_clipboard(ClipboardItem::new_string(text));
-                }
-            }
-            find::SeekerEdit::Paste => {
+            Some(text_field::ClipboardRequest::Read) => {
                 if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                    state.insert_text(&text);
+                    state.field_mut().insert_text(&text);
                 }
             }
+            None => {}
         }
         self.seeker_find_if_changed(cx);
     }

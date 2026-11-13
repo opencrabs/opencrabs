@@ -12,8 +12,14 @@
 //! and no UI toolkit in sight (#2458).
 
 use super::query::{NormalizedQuery, field_tokens};
+use super::text_field::TextField;
 use std::time::{Duration, Instant};
-use unicode_segmentation::UnicodeSegmentation;
+
+// The word walks and the caret math moved to `text_field` when the name
+// prompts needed the same engine (#2892). They stay re-exported here so the
+// composers and the window keep importing them from the module they always
+// did, and there is exactly one copy of the walk.
+pub use super::text_field::{byte_to_char, next_word_end, previous_word_start};
 
 /// How long the field's caret keeps blinking after the last keystroke. Past
 /// this the field goes quiet and the caret hides, the way Spotlight's does
@@ -27,72 +33,6 @@ pub const CARET_IDLE_AFTER: Duration = Duration::from_millis(1600);
 /// a UI (#2531).
 pub fn caret_blinks(last: Instant, now: Instant, idle_after: Duration) -> bool {
     now.saturating_duration_since(last) < idle_after
-}
-
-/// Byte offset where the word before `offset` begins. The walk skips
-/// separators and then the word, matching the terminal and GUI composers.
-/// Grapheme boundaries keep the walk from splitting a multibyte character.
-pub fn previous_word_start(content: &str, offset: usize) -> usize {
-    let clamped = offset.min(content.len());
-    let graphemes: Vec<(usize, &str)> = content.grapheme_indices(true).collect();
-    let mut index = graphemes
-        .iter()
-        .position(|(start, _)| *start >= clamped)
-        .unwrap_or(graphemes.len());
-    while index > 0 && !is_word_grapheme(graphemes[index - 1].1) {
-        index -= 1;
-    }
-    while index > 0 && is_word_grapheme(graphemes[index - 1].1) {
-        index -= 1;
-    }
-    graphemes.get(index).map(|(start, _)| *start).unwrap_or(0)
-}
-
-/// Byte offset the word after `offset` ends on, past the word and the
-/// separators that follow it, matching the terminal composer.
-pub fn next_word_end(content: &str, offset: usize) -> usize {
-    let clamped = offset.min(content.len());
-    let graphemes: Vec<(usize, &str)> = content.grapheme_indices(true).collect();
-    let mut index = graphemes
-        .iter()
-        .position(|(start, _)| *start >= clamped)
-        .unwrap_or(graphemes.len());
-    while index < graphemes.len() && is_word_grapheme(graphemes[index].1) {
-        index += 1;
-    }
-    while index < graphemes.len() && !is_word_grapheme(graphemes[index].1) {
-        index += 1;
-    }
-    graphemes
-        .get(index)
-        .map(|(start, _)| *start)
-        .unwrap_or(content.len())
-}
-
-/// Letters and digits are word content; whitespace and punctuation separate
-/// words. A grapheme counts as a word when any of its characters is a letter.
-fn is_word_grapheme(grapheme: &str) -> bool {
-    grapheme.chars().any(|ch| ch.is_alphanumeric())
-}
-
-/// Byte index of a character offset, clamped to the end. The Seeker caret is
-/// counted in chars so it can never land inside a UTF-8 codepoint.
-fn char_to_byte(content: &str, offset: usize) -> usize {
-    content
-        .char_indices()
-        .nth(offset)
-        .map(|(index, _)| index)
-        .unwrap_or(content.len())
-}
-
-/// Character index of a byte offset produced by a word walk or a shaped-text
-/// mouse hit. Public so the GUI can translate GPUI's byte index without doing
-/// UTF-8 arithmetic of its own.
-pub fn byte_to_char(content: &str, offset: usize) -> usize {
-    content
-        .char_indices()
-        .take_while(|(index, _)| *index < offset)
-        .count()
 }
 
 /// What a row is, which decides how it is labelled and how ties break.
@@ -670,84 +610,6 @@ pub fn opens_in_terminal(alt: bool, key: &str) -> bool {
     (alt && (key == " " || key.eq_ignore_ascii_case("space"))) || key == "\u{a0}"
 }
 
-/// One editing chord, translated before the GUI touches its state. Keeping
-/// the reading here makes the key behavior testable without a window and
-/// keeps platform chords out of the query text (#2534).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SeekerEdit {
-    Move {
-        delta: isize,
-        word: bool,
-        select: bool,
-    },
-    Home {
-        select: bool,
-    },
-    End {
-        select: bool,
-    },
-    Backspace {
-        word: bool,
-    },
-    Delete {
-        word: bool,
-    },
-    SelectAll,
-    Copy,
-    Cut,
-    Paste,
-}
-
-/// Translate the Seeker's editing keys. Command is the primary modifier on
-/// macOS; Control does the same clipboard work elsewhere. Alt or Control
-/// walks words, Command+Left/Right reaches the line edges, and Shift extends
-/// the selection instead of collapsing it.
-pub fn editing_chord(
-    key: &str,
-    control: bool,
-    platform: bool,
-    alt: bool,
-    shift: bool,
-) -> Option<SeekerEdit> {
-    let primary = control || platform;
-    if primary && !alt {
-        match key {
-            "a" => return Some(SeekerEdit::SelectAll),
-            "c" => return Some(SeekerEdit::Copy),
-            "x" => return Some(SeekerEdit::Cut),
-            "v" => return Some(SeekerEdit::Paste),
-            _ => {}
-        }
-    }
-    match key {
-        "left" | "right" => {
-            let delta = if key == "left" { -1 } else { 1 };
-            if platform && !control && !alt {
-                Some(if delta < 0 {
-                    SeekerEdit::Home { select: shift }
-                } else {
-                    SeekerEdit::End { select: shift }
-                })
-            } else {
-                Some(SeekerEdit::Move {
-                    delta,
-                    word: alt || control,
-                    select: shift,
-                })
-            }
-        }
-        "home" => Some(SeekerEdit::Home { select: shift }),
-        "end" => Some(SeekerEdit::End { select: shift }),
-        "backspace" => Some(SeekerEdit::Backspace {
-            word: alt || control,
-        }),
-        "delete" => Some(SeekerEdit::Delete {
-            word: alt || control,
-        }),
-        _ => None,
-    }
-}
-
 /// The line to print when the query matched nothing. Chosen by a hash of the
 /// query, so the same query always gets the same line and the card does not
 /// flicker while the user keeps typing.
@@ -929,13 +791,9 @@ pub struct PaletteRow {
 /// items the frontend handed over when it opened.
 #[derive(Clone, Debug)]
 pub struct PaletteState {
-    query: String,
-    /// Insertion point as a character offset into `query`, never a byte
-    /// offset, so editing cannot split a UTF-8 codepoint (#2534).
-    caret: usize,
-    /// Where a shift or mouse selection began. `None` means no selection;
-    /// the live end is always `caret` (#2534).
-    selection_anchor: Option<usize>,
+    /// The query and its caret. The editing engine is shared with the name
+    /// prompts, so the chords that work in one work in the other (#2892).
+    field: TextField,
     /// Index into `visible()`, not into `items`: the list is re-ranked on every
     /// keystroke, so a raw index would arm a different row than the one the
     /// user is looking at.
@@ -971,9 +829,7 @@ pub const IDLE_REVEAL_DELAY: Duration = Duration::from_secs(3);
 impl PaletteState {
     pub fn new(items: Vec<PaletteItem>) -> Self {
         Self {
-            query: String::new(),
-            caret: 0,
-            selection_anchor: None,
+            field: TextField::new(),
             cursor: None,
             scroll: 0,
             items,
@@ -987,9 +843,7 @@ impl PaletteState {
     /// every conversation prints until typing narrows the list (#2482).
     pub fn picking(purpose: PickFor, items: Vec<PaletteItem>) -> Self {
         Self {
-            query: String::new(),
-            caret: 0,
-            selection_anchor: None,
+            field: TextField::new(),
             cursor: None,
             scroll: 0,
             items,
@@ -999,121 +853,81 @@ impl PaletteState {
         }
     }
 
+    /// The field itself, for the callers that hand it to the shared editing
+    /// engine instead of going through the palette's own wrappers (#2892).
+    /// Public because the window is its own crate: `pub(crate)` here would
+    /// stop at the library boundary and the card could not reach it.
+    pub fn field_mut(&mut self) -> &mut TextField {
+        &mut self.field
+    }
+
     pub fn query(&self) -> &str {
-        &self.query
+        &self.field.text()
     }
 
     /// The insertion point as a character offset into [`PaletteState::query`].
     pub fn caret(&self) -> usize {
-        self.caret
+        self.field.caret()
     }
 
     /// Move by whole characters and clamp at both ends. With a selection, an
     /// ordinary arrow collapses to its near edge, as the composer does.
     /// Movement alone never re-ranks the result list (#2534).
     pub fn move_caret(&mut self, delta: isize) {
-        if let Some((start, end)) = self.selection() {
-            if delta != 0 {
-                self.caret = if delta < 0 { start } else { end };
-            }
-            self.collapse();
-            return;
-        }
-        let len = self.query.chars().count();
-        self.caret = if delta < 0 {
-            self.caret.saturating_sub(delta.unsigned_abs())
-        } else {
-            self.caret.saturating_add(delta.unsigned_abs()).min(len)
-        };
-        self.collapse();
+        self.field.move_caret(delta);
     }
 
     /// Move to an absolute character offset and collapse any selection.
     /// Home, End and mouse clicks use the same clamped landing rule.
     pub fn move_caret_to(&mut self, offset: usize) {
-        self.caret = offset.min(self.query.chars().count());
-        self.collapse();
+        self.field.move_caret_to(offset);
     }
 
     /// Move by the same word boundaries as the composer. The engine stores
     /// chars, while the shared word walk speaks bytes, so convert at the seam.
     pub fn move_caret_word(&mut self, delta: isize) {
-        let byte_caret = char_to_byte(&self.query, self.caret);
-        let target = if delta < 0 {
-            previous_word_start(&self.query, byte_caret)
-        } else if delta > 0 {
-            next_word_end(&self.query, byte_caret)
-        } else {
-            byte_caret
-        };
-        self.caret = byte_to_char(&self.query, target);
-        self.collapse();
+        self.field.move_caret_word(delta);
     }
 
     /// Extend a selection to an absolute character offset. The first call
     /// anchors at the current caret; later calls keep that anchor, including
     /// when the direction reverses (#2534).
     pub fn select_to(&mut self, offset: usize) {
-        let len = self.query.chars().count();
-        let anchor = *self.selection_anchor.get_or_insert(self.caret);
-        self.caret = offset.min(len);
-        if self.caret == anchor {
-            self.selection_anchor = None;
-        }
+        self.field.select_to(offset);
     }
 
     /// Extend the selection by one composer word boundary. The original
     /// anchor survives repeated presses and direction reversals (#2534).
     pub fn select_word_to(&mut self, delta: isize) {
-        let byte_caret = char_to_byte(&self.query, self.caret);
-        let target = if delta < 0 {
-            previous_word_start(&self.query, byte_caret)
-        } else if delta > 0 {
-            next_word_end(&self.query, byte_caret)
-        } else {
-            byte_caret
-        };
-        self.select_to(byte_to_char(&self.query, target));
+        self.field.select_word_to(delta);
     }
 
     /// Select the whole query, ready for copy, cut, or replacement typing.
     pub fn select_all(&mut self) {
-        self.selection_anchor = Some(0);
-        self.caret = self.query.chars().count();
+        self.field.select_all();
     }
 
     /// Drop the selection without moving the caret or touching the ranking.
     pub fn collapse(&mut self) {
-        self.selection_anchor = None;
+        self.field.collapse();
     }
 
     /// Selected character offsets in ascending order. An empty selection is
     /// no selection, so editing falls back to the caret.
     pub fn selection(&self) -> Option<(usize, usize)> {
-        let anchor = self.selection_anchor?;
-        (anchor != self.caret).then_some((anchor.min(self.caret), anchor.max(self.caret)))
+        self.field.selection()
     }
 
     /// The selected text without changing anything, for copy.
     pub fn selected_text(&self) -> Option<&str> {
-        let (start, end) = self.selection()?;
-        let start = char_to_byte(&self.query, start);
-        let end = char_to_byte(&self.query, end);
-        self.query.get(start..end)
+        self.field.selected_text()
     }
 
     /// Text slices before the caret or selection, inside the selection, and
     /// after it. With no selection the middle slice is empty and the split is
     /// the caret, which lets a frontend paint all three without UTF-8 math.
     pub fn render_spans(&self) -> (&str, &str, &str) {
-        let (start, end) = self.selection().unwrap_or((self.caret, self.caret));
-        let start = char_to_byte(&self.query, start);
-        let end = char_to_byte(&self.query, end);
-        (
-            self.query.get(..start).unwrap_or(""),
-            self.query.get(start..end).unwrap_or(""),
-            self.query.get(end..).unwrap_or(""),
-        )
+        self.field.render_spans()
     }
 
     pub fn cursor(&self) -> Option<usize> {
@@ -1175,109 +989,87 @@ impl PaletteState {
         self.scroll = self.scroll.min(len.saturating_sub(1));
     }
 
+    /// Drop the armed row and return the list to its first page. Every real
+    /// edit does this, so a keystroke can never leave the cursor pointing at
+    /// a row that no longer matches (#2534).
+    fn reset_rows(&mut self) {
+        self.cursor = None;
+        self.scroll = 0;
+    }
+
     /// Replace a character range and put the caret after the replacement.
     /// Every real edit funnels through here, so every edit also disarms the
     /// old result row and returns the list to its first page (#2534).
     fn replace_range(&mut self, start: usize, end: usize, replacement: &str) {
-        let len = self.query.chars().count();
-        let start = start.min(len);
-        let end = end.min(len).max(start);
-        let byte_start = char_to_byte(&self.query, start);
-        let byte_end = char_to_byte(&self.query, end);
-        self.query.replace_range(byte_start..byte_end, replacement);
-        self.caret = start + replacement.chars().count();
-        self.selection_anchor = None;
-        self.cursor = None;
-        self.scroll = 0;
+        if self.field.replace_range(start, end, replacement) {
+            self.reset_rows();
+        }
     }
 
     /// Insert text at the caret, replacing any selection. Paste uses the same
     /// path as typing, so both frontends inherit identical editing (#2534).
     pub fn insert_text(&mut self, text: &str) {
-        let (start, end) = self.selection().unwrap_or((self.caret, self.caret));
-        if text.is_empty() && start == end {
-            return;
+        if self.field.insert_text(text) {
+            self.reset_rows();
         }
-        self.replace_range(start, end, text);
     }
 
     /// A typed character inserts at the caret rather than always appending.
     pub fn type_char(&mut self, c: char) {
-        if c.is_control() {
-            return;
+        if self.field.type_char(c) {
+            self.reset_rows();
         }
-        let mut encoded = [0; 4];
-        let text = c.encode_utf8(&mut encoded);
-        self.insert_text(text);
     }
 
     /// Remove the selection, if one exists. Returns without touching the
     /// ranking when there is nothing to delete.
     pub fn delete_selection(&mut self) {
-        if let Some((start, end)) = self.selection() {
-            self.replace_range(start, end, "");
+        if self.field.delete_selection() {
+            self.reset_rows();
         }
     }
 
     /// Remove and return the selected text, for cut. Copy uses
     /// [`PaletteState::selected_text`] and leaves the query alone.
     pub fn take_selected_text(&mut self) -> Option<String> {
-        let taken = self.selected_text().map(str::to_owned);
+        let taken = self.field.take_selected_text();
         if taken.is_some() {
-            self.delete_selection();
+            self.reset_rows();
         }
         taken
     }
 
     pub fn backspace(&mut self) {
-        if self.selection().is_some() {
-            self.delete_selection();
-        } else if self.caret > 0 {
-            self.replace_range(self.caret - 1, self.caret, "");
+        if self.field.backspace() {
+            self.reset_rows();
         }
     }
 
     /// Delete the character after the caret, or the whole selection.
     pub fn delete_forward(&mut self) {
-        if self.selection().is_some() {
-            self.delete_selection();
-        } else if self.caret < self.query.chars().count() {
-            self.replace_range(self.caret, self.caret + 1, "");
+        if self.field.delete_forward() {
+            self.reset_rows();
         }
     }
 
     /// Delete back to the previous composer word boundary.
     pub fn delete_word_back(&mut self) {
-        if self.selection().is_some() {
-            self.delete_selection();
-            return;
-        }
-        let byte_caret = char_to_byte(&self.query, self.caret);
-        let start = byte_to_char(&self.query, previous_word_start(&self.query, byte_caret));
-        if start < self.caret {
-            self.replace_range(start, self.caret, "");
+        if self.field.delete_word_back() {
+            self.reset_rows();
         }
     }
 
     /// Delete forward through the next composer word boundary.
     pub fn delete_word_forward(&mut self) {
-        if self.selection().is_some() {
-            self.delete_selection();
-            return;
-        }
-        let byte_caret = char_to_byte(&self.query, self.caret);
-        let end = byte_to_char(&self.query, next_word_end(&self.query, byte_caret));
-        if end > self.caret {
-            self.replace_range(self.caret, end, "");
+        if self.field.delete_word_forward() {
+            self.reset_rows();
         }
     }
 
     /// Clear the query but keep the card open. Esc closes the card, so this is
     /// the key that clears the field without leaving.
     pub fn clear(&mut self) {
-        self.query.clear();
-        self.caret = 0;
-        self.selection_anchor = None;
+        self.field.clear();
         self.cursor = None;
         self.scroll = 0;
     }
@@ -1318,14 +1110,14 @@ impl PaletteState {
     /// frontends gate the idle block on this; the ranker stays clock-free so
     /// its tests stay deterministic (#2491).
     pub fn idle_ready(&self, now: Instant) -> bool {
-        self.query.trim().is_empty()
+        self.field.text().trim().is_empty()
             && self.pick.is_none()
             && now.duration_since(self.opened_at) >= IDLE_REVEAL_DELAY
     }
 
     pub fn visible(&self) -> Vec<PaletteRow> {
-        let normalized = NormalizedQuery::parse(&self.query);
-        let idle = self.query.trim().is_empty();
+        let normalized = NormalizedQuery::parse(self.field.text());
+        let idle = self.field.text().trim().is_empty();
         let mut rows: Vec<PaletteRow> = self
             .items
             .iter()
@@ -1393,7 +1185,7 @@ impl PaletteState {
             rows.is_empty() && !idle && self.pick.is_none() && self.kind_filter.is_none();
         rows.truncate(MAX_ROWS);
         if offer_ask {
-            let query = self.query.clone();
+            let query = self.field.text().to_string();
             rows.push(PaletteRow {
                 item: PaletteItem {
                     title: query.clone(),

@@ -34,6 +34,7 @@ pub mod rate;
 pub mod scroll;
 pub mod session_preview;
 pub mod split;
+pub mod text_field;
 pub mod topic_bar;
 pub mod usage;
 // Which window controls a window draws itself, and what each maps to

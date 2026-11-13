@@ -132,6 +132,7 @@ use opencrabs::ui_core::pane_tree::{DropHalf, PaneTree};
 use opencrabs::ui_core::rail;
 use opencrabs::ui_core::scroll::{Follow, scrolled_from_top, wheel_releases_follow};
 use opencrabs::ui_core::split::{self, Layout};
+use opencrabs::ui_core::text_field;
 use opencrabs::ui_core::topic_bar;
 use transcript::CopyDrag;
 // The terminal's own command table, shared rather than copied.

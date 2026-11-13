@@ -1,28 +1,29 @@
 //! Seeker editing chords and the GUI wiring that applies them (#2534).
 
-use crate::ui_core::palette::{PaletteState, SeekerEdit, byte_to_char, editing_chord};
+use crate::ui_core::palette::{PaletteState, byte_to_char};
+use crate::ui_core::text_field::{TextFieldEdit, editing_chord};
 
 #[test]
 fn seeker_editing_chords_cover_clipboard_words_and_line_edges() {
     assert_eq!(
         editing_chord("a", false, true, false, false),
-        Some(SeekerEdit::SelectAll)
+        Some(TextFieldEdit::SelectAll)
     );
     assert_eq!(
         editing_chord("c", true, false, false, false),
-        Some(SeekerEdit::Copy)
+        Some(TextFieldEdit::Copy)
     );
     assert_eq!(
         editing_chord("x", false, true, false, false),
-        Some(SeekerEdit::Cut)
+        Some(TextFieldEdit::Cut)
     );
     assert_eq!(
         editing_chord("v", true, false, false, false),
-        Some(SeekerEdit::Paste)
+        Some(TextFieldEdit::Paste)
     );
     assert_eq!(
         editing_chord("left", false, false, true, true),
-        Some(SeekerEdit::Move {
+        Some(TextFieldEdit::Move {
             delta: -1,
             word: true,
             select: true,
@@ -30,7 +31,7 @@ fn seeker_editing_chords_cover_clipboard_words_and_line_edges() {
     );
     assert_eq!(
         editing_chord("right", true, false, false, false),
-        Some(SeekerEdit::Move {
+        Some(TextFieldEdit::Move {
             delta: 1,
             word: true,
             select: false,
@@ -38,19 +39,19 @@ fn seeker_editing_chords_cover_clipboard_words_and_line_edges() {
     );
     assert_eq!(
         editing_chord("left", false, true, false, true),
-        Some(SeekerEdit::Home { select: true })
+        Some(TextFieldEdit::Home { select: true })
     );
     assert_eq!(
         editing_chord("end", false, false, false, false),
-        Some(SeekerEdit::End { select: false })
+        Some(TextFieldEdit::End { select: false })
     );
     assert_eq!(
         editing_chord("backspace", false, false, true, false),
-        Some(SeekerEdit::Backspace { word: true })
+        Some(TextFieldEdit::Backspace { word: true })
     );
     assert_eq!(
         editing_chord("delete", false, false, false, false),
-        Some(SeekerEdit::Delete { word: false })
+        Some(TextFieldEdit::Delete { word: false })
     );
     assert_eq!(editing_chord("c", false, false, false, false), None);
 }
@@ -110,8 +111,10 @@ fn seeker_editing_gui_uses_clipboard_shaped_hits_and_selection_paint() {
     assert!(main.contains("cx.read_from_clipboard()"));
     assert!(main.contains("fn seeker_index_for_position"));
     assert!(main.contains("closest_index_for_position"));
-    assert!(main.contains("find::editing_chord("));
-    assert!(main.contains("state.select_word_to(delta)"));
+    assert!(main.contains("text_field::editing_chord("));
+    // The edit itself lives in the shared field now (#2892): the finder
+    // hands the palette its field and only supplies the clipboard.
+    assert!(main.contains("text_field::apply(state.field_mut(), edit)"));
     let palette = include_str!("../gui/command_palette.rs");
     assert!(palette.contains("fn selection_highlight"));
     assert!(palette.contains("position_for_index"));
