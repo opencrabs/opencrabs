@@ -14,18 +14,73 @@
 //! highlighting inside fences is not attempted (the TUI's syntect pass
 //! stays terminal-side for now).
 
-use crate::palette;
 use std::ops::Range;
 
 use gpui::{FontStyle, FontWeight, HighlightStyle, StrikethroughStyle, UnderlineStyle, rgb};
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
+
+/// A palette role, stored in parsed markdown instead of a resolved colour.
+/// The transcript cache can therefore survive any number of theme switches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MdTint {
+    Strong,
+    Blue,
+    PanelHi,
+    Faint,
+    Muted,
+}
+
+/// The small slice of the window palette markdown needs. Keeping this as a
+/// trait leaves the parser independent of the config crate and window state.
+pub trait MdPalette {
+    fn tint(&self, tint: MdTint) -> u32;
+}
+
+/// Theme-independent inline styling. Font attributes are ready to paint;
+/// colours stay semantic until the renderer supplies the live palette.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MdStyle {
+    pub font_weight: Option<FontWeight>,
+    pub font_style: Option<FontStyle>,
+    pub underline: Option<UnderlineStyle>,
+    pub strikethrough: Option<StrikethroughStyle>,
+    pub color: Option<MdTint>,
+    pub background: Option<MdTint>,
+}
+
+impl MdStyle {
+    pub fn resolve<P: MdPalette>(self, palette: &P) -> HighlightStyle {
+        HighlightStyle {
+            color: self.color.map(|tint| rgb(palette.tint(tint)).into()),
+            background_color: self
+                .background
+                .map(|tint| rgb(palette.tint(tint)).into()),
+            font_weight: self.font_weight,
+            font_style: self.font_style,
+            underline: self.underline,
+            strikethrough: self.strikethrough,
+            ..Default::default()
+        }
+    }
+}
+
+/// Resolve cached markdown runs for this frame's palette.
+pub fn resolve_highlights<P: MdPalette>(
+    highlights: &[(Range<usize>, MdStyle)],
+    palette: &P,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    highlights
+        .iter()
+        .map(|(range, style)| (range.clone(), style.resolve(palette)))
+        .collect()
+}
 
 /// One renderable line: the text plus byte-range highlight runs into it,
 /// whether it belongs to a code fence (mono, grouped by the renderer), the
 /// list/quote nesting depth, and whether it is a heading line.
 pub struct MdLine {
     pub text: String,
-    pub highlights: Vec<(Range<usize>, HighlightStyle)>,
+    pub highlights: Vec<(Range<usize>, MdStyle)>,
     /// Every link label on this line, as a byte range into `text` and the
     /// destination it pointed at (#2317). The label alone carries no url, so
     /// without this a click on `[docs](https://x)` has nothing to open.
@@ -40,7 +95,7 @@ pub struct MdLine {
 /// ranges relative to `text` so the renderer can style the cell on its own.
 pub struct MdCell {
     pub text: String,
-    pub highlights: Vec<(Range<usize>, HighlightStyle)>,
+    pub highlights: Vec<(Range<usize>, MdStyle)>,
     /// Link labels inside the cell, ranges relative to `text` like the
     /// highlights above (#2317).
     pub links: Vec<(Range<usize>, String)>,
@@ -88,8 +143,8 @@ struct Inline {
 }
 
 impl Inline {
-    fn style(&self, code_bg: bool) -> HighlightStyle {
-        let mut s = HighlightStyle::default();
+    fn style(&self, code_bg: bool) -> MdStyle {
+        let mut s = MdStyle::default();
         if self.strong > 0 {
             s.font_weight = Some(FontWeight::BOLD);
         }
@@ -98,18 +153,18 @@ impl Inline {
         }
         if self.heading {
             s.font_weight = Some(FontWeight::BOLD);
-            s.color = Some(rgb(palette::current().text_strong).into());
+            s.color = Some(MdTint::Strong);
         }
         if self.link {
-            s.color = Some(rgb(palette::current().blue).into());
+            s.color = Some(MdTint::Blue);
             s.underline = Some(UnderlineStyle::default());
         }
         if self.strike {
             s.strikethrough = Some(StrikethroughStyle::default());
         }
         if code_bg {
-            s.color = Some(rgb(palette::current().blue).into());
-            s.background_color = Some(rgb(palette::current().panel_hi).into());
+            s.color = Some(MdTint::Blue);
+            s.background = Some(MdTint::PanelHi);
         }
         s
     }
@@ -118,7 +173,7 @@ impl Inline {
 struct Builder {
     out: Vec<MdBlock>,
     buf: String,
-    hl: Vec<(Range<usize>, HighlightStyle)>,
+    hl: Vec<(Range<usize>, MdStyle)>,
     links: Vec<(Range<usize>, String)>,
     mono: bool,
     indent: u8,
@@ -232,7 +287,7 @@ impl Builder {
 /// leading whitespace the trim removes.
 fn cell_from(
     text: String,
-    hl: Vec<(Range<usize>, HighlightStyle)>,
+    hl: Vec<(Range<usize>, MdStyle)>,
     links: Vec<(Range<usize>, String)>,
 ) -> MdCell {
     let trimmed = text.trim();
@@ -320,8 +375,8 @@ pub fn blocks(src: &str) -> Vec<MdBlock> {
             Event::Html(t) | Event::InlineHtml(t) => {
                 // Stored answers rarely carry HTML; when they do, show the
                 // raw text dim rather than silently dropping content.
-                let dim = HighlightStyle {
-                    color: Some(rgb(palette::current().text_faint).into()),
+                let dim = MdStyle {
+                    color: Some(MdTint::Faint),
                     ..Default::default()
                 };
                 let start = b.buf.len();
@@ -363,8 +418,8 @@ fn start_tag(b: &mut Builder, tag: Tag) {
                     b.buf.push_str(&format!("{n}. "));
                     b.hl.push((
                         start..b.buf.len(),
-                        HighlightStyle {
-                            color: Some(rgb(palette::current().text_muted).into()),
+                        MdStyle {
+                            color: Some(MdTint::Muted),
                             ..Default::default()
                         },
                     ));
@@ -374,8 +429,8 @@ fn start_tag(b: &mut Builder, tag: Tag) {
                     b.buf.push_str("\u{2022}  ");
                     b.hl.push((
                         start..b.buf.len(),
-                        HighlightStyle {
-                            color: Some(rgb(palette::current().text_muted).into()),
+                        MdStyle {
+                            color: Some(MdTint::Muted),
                             ..Default::default()
                         },
                     ));

@@ -375,6 +375,8 @@ pub mod gui_esc_screens_test;
 pub mod gui_font_test;
 pub mod gui_footer_title_test;
 pub mod gui_layout_test;
+#[cfg(feature = "gui")]
+pub mod gui_markdown_theme_test;
 pub mod gui_message_copy_2750_test;
 pub mod gui_message_edit_2826_test;
 pub mod gui_message_reaction_2825_test;

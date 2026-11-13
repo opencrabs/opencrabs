@@ -54,6 +54,18 @@ use crate::attachment_view;
 use crate::editor::{Attachment, marker_paths, strip_markers};
 use crate::markdown;
 
+impl markdown::MdPalette for palette::Palette {
+    fn tint(&self, tint: markdown::MdTint) -> u32 {
+        match tint {
+            markdown::MdTint::Strong => self.text_strong,
+            markdown::MdTint::Blue => self.blue,
+            markdown::MdTint::PanelHi => self.panel_hi,
+            markdown::MdTint::Faint => self.text_faint,
+            markdown::MdTint::Muted => self.text_muted,
+        }
+    }
+}
+
 /// Newest rows shown per load, matching the TUI display window. Older
 /// history stays behind the `Marker` block.
 const WINDOW: usize = 200;
@@ -1647,7 +1659,7 @@ fn md_line(l: &markdown::MdLine, selection: Option<&SelectionContext>) -> Div {
     let text = inline_crabs(
         l.text.clone(),
         style,
-        l.highlights.clone(),
+        markdown::resolve_highlights(&l.highlights, &palette::current()),
         &l.links,
         selection,
     );
@@ -1679,7 +1691,7 @@ fn table_cell(cell: &markdown::MdCell, header: bool, selection: Option<&Selectio
     let text = selectable_styled_text(
         cell.text.clone(),
         style,
-        cell.highlights.clone(),
+        markdown::resolve_highlights(&cell.highlights, &palette::current()),
         &cell.links,
         selection,
     );
@@ -1913,7 +1925,7 @@ fn md_block(src: &str, selection: Option<&SelectionContext>) -> Div {
                             code = code.child(selectable_styled_text(
                                 l.text.clone(),
                                 mono_style(),
-                                l.highlights.clone(),
+                                markdown::resolve_highlights(&l.highlights, &palette::current()),
                                 &[],
                                 selection,
                             ));
