@@ -276,6 +276,22 @@ struct Recall {
     draft: String,
 }
 
+/// The message the next send answers (#2827).
+///
+/// A reply rides as a chip above the field and goes out ahead of the message
+/// as a quote, the shape every messaging client uses. It is not text in the
+/// field: the quote is context for the reply, so it cannot be edited away one
+/// keystroke at a time, and the field stays free for the user's own words.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReplyAttachment {
+    /// Who wrote the quoted row, as the transcript labels the author.
+    pub author: String,
+    /// The first line of the quoted row, trimmed, for the chip.
+    pub preview: String,
+    /// The whole quote in `> ` form, which is what the send prepends.
+    pub quote: String,
+}
+
 /// The editor view. Ranges internal to this struct are utf8; every value
 /// crossing the `EntityInputHandler` boundary is utf16, per the contract.
 pub struct Editor {
@@ -308,6 +324,11 @@ pub struct Editor {
     /// the only place that can append the markers atomically with clearing
     /// the text.
     attachments: Vec<Attachment>,
+    /// The message the next send answers (#2827). A reply is a chip above the
+    /// field, not text inside it: the quote is context for what the user is
+    /// about to write, so it must not be editable character by character and
+    /// it must not read as the message itself. `None` for an ordinary send.
+    reply: Option<ReplyAttachment>,
     placeholder: SharedString,
     selected_range: Range<usize>,
     selection_reversed: bool,
@@ -417,6 +438,7 @@ impl Editor {
             focus_pending: false,
             content: String::new(),
             history,
+            reply: None,
             history_path,
             input_history_index: None,
             input_history_stash: String::new(),
@@ -537,6 +559,32 @@ impl Editor {
         }
         added
     }
+
+    /// The message this composer is answering (#2827). The chip replaces any
+    /// earlier one: a composer answers one message at a time, the way every
+    /// messaging client treats a reply.
+    pub fn attach_reply(
+        &mut self,
+        author: String,
+        preview: String,
+        quote: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.reply = Some(ReplyAttachment {
+            author,
+            preview,
+            quote,
+        });
+        cx.notify();
+    }
+
+    /// Drop the reply chip without sending (#2827).
+    pub fn drop_reply(&mut self, cx: &mut Context<Self>) {
+        if self.reply.take().is_some() {
+            cx.notify();
+        }
+    }
+
 
     fn take_attachments(&mut self) -> Vec<Attachment> {
         std::mem::take(&mut self.attachments)
@@ -1095,12 +1143,24 @@ impl Editor {
             cx.emit(EditorEvent::Sent(name.to_string()));
             return;
         }
+    /// The payload one send puts on the wire (#2827): the reply's quote, then
+    /// the user's own words with their attachment markers. The quote is taken
+    /// here, so a send spends the reply and the chip leaves with the message
+    /// it belonged to.
+    fn payload_with_reply(&mut self, text: &str, attachments: &[Attachment]) -> String {
+        let body = message_with_markers(text, attachments);
+        match self.reply.take() {
+            Some(reply) => format!("{}\n{}", reply.quote.trim_end(), body),
+            None => body,
+        }
+    }
+
         let text = self.content.trim().to_string();
         let attachments = self.take_attachments();
         if text.is_empty() && attachments.is_empty() {
             return;
         }
-        let payload = message_with_markers(&text, &attachments);
+        let payload = self.payload_with_reply(&text, &attachments);
         self.remember(&text);
         self.clear_after_send(cx);
         cx.emit(EditorEvent::Sent(payload));
@@ -1177,6 +1237,9 @@ impl Editor {
         self.command_dismissed = false;
         self.emoji_dismissed = false;
         self.emoji_index = 0;
+        // A reply belongs to the conversation it was opened in, so leaving
+        // that conversation drops the chip with the draft (#2827).
+        self.reply = None;
         cx.notify();
     }
 
@@ -1201,10 +1264,11 @@ impl Editor {
     }
 
     /// Whether there is anything to throw away: text in the field, or a chip
-    /// waiting to fly with it. A recall counts as text, because its joined
+    /// waiting to fly with it. A reply counts too, because its quoted context
+    /// belongs to the next send. A recall counts as text, because its joined
     /// entries are what the field is showing.
     pub fn is_empty(&self) -> bool {
-        self.content.trim().is_empty() && self.attachments.is_empty()
+        self.content.trim().is_empty() && self.attachments.is_empty() && self.reply.is_none()
     }
 
     /// A Ctrl+C that throws the draft away (#2308). The text and the chips go,
@@ -2168,6 +2232,12 @@ impl Render for Editor {
         }
         // The box is capped at `COMPOSER_MAX_ROWS`, so a caret below the fold
         // asked prepaint for a scroll. Applying it here, where the handle
+        // The reply chip sits above the field and above the attachments
+        // (#2827): it says what the message answers, so it belongs next to the
+        // text rather than next to the files.
+        if let Some(reply) = self.reply.clone() {
+            body = body.child(reply_strip(&reply, cx));
+        }
         // lives, keeps the height question and the scroll question on the
         // frames that own them (#2773).
         if let Some(target) = self.reveal.take()
@@ -2271,6 +2341,68 @@ impl Render for Editor {
         // Deferred, so the card paints over the field that opened it and the
         // conversation above it rather than under the next sibling (#2690).
         match self.ctx_menu_at {
+/// The reply strip above the field (#2827), drawn the way Telegram draws it:
+/// an accent bar, "Reply to" and the author, one line of the quoted text and
+/// a cross that cancels the reply. It is not part of the field's text: the
+/// quote is context for the reply, so the user cannot edit it away.
+fn reply_strip(reply: &ReplyAttachment, cx: &mut Context<Editor>) -> gpui::Stateful<Div> {
+    let palette = palette::current();
+    let drop = cx.listener(|this, _ev: &MouseDownEvent, _window, cx| {
+        // The cross must not also reach the field: a click there would move
+        // the caret while the user drops the chip.
+        cx.stop_propagation();
+        this.drop_reply(cx);
+    });
+    div()
+        .id("composer-reply")
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .w_full()
+        .min_w_0()
+        .child(
+            div()
+                .w(px(2.0))
+                .h(px(30.0))
+                .flex_shrink_0()
+                .rounded(px(1.0))
+                .bg(rgb(palette.teal)),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .line_height(px(16.0))
+                        .text_color(rgb(palette.teal))
+                        .child(format!("Reply to {}", reply.author)),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .line_height(px(16.0))
+                        .text_color(rgb(palette.text_muted))
+                        .whitespace_nowrap()
+                        .overflow_hidden()
+                        .child(reply.preview.clone()),
+                ),
+        )
+        .child(
+            div()
+                .id("composer-reply-cancel")
+                .cursor_pointer()
+                .px_1()
+                .text_color(rgb(palette.text_faint))
+                .child(SharedString::from("\u{2715}"))
+                .on_mouse_down(MouseButton::Left, drop),
+        )
+}
+
             Some(at) => root
                 .child(gpui::deferred(self.context_menu(at, cx)).with_priority(2))
                 .into_any_element(),
@@ -3686,6 +3818,55 @@ mod tests {
                     .concat()
                     .as_str()
             ),
+
+    /// A reply is a Telegram-style attachment, not quote text dumped into the
+    /// draft. The send spends it once and prepends its quote to the payload.
+    #[test]
+    fn a_reply_rides_above_the_field_and_sends_once() {
+        let src = include_str!("editor.rs");
+        let strip = src
+            .split("fn reply_strip(")
+            .nth(1)
+            .and_then(|rest| rest.split("fn notice_row(").next())
+            .expect("reply strip");
+        for needle in [
+            "\"composer-reply\"",
+            "\"composer-reply-cancel\"",
+            "Reply to {}",
+            "reply.preview.clone()",
+            ".whitespace_nowrap()",
+            "this.drop_reply(cx)",
+        ] {
+            assert!(strip.contains(needle), "reply chip is missing {needle}");
+        }
+        let payload = src
+            .split("fn payload_with_reply(")
+            .nth(1)
+            .and_then(|rest| rest.split("/// Record one sent entry").next())
+            .expect("reply payload");
+        assert!(payload.contains("self.reply.take()"), "a send spends the chip");
+        assert!(
+            payload.contains("reply.quote.trim_end()"),
+            "the quote goes ahead of the user's own text"
+        );
+        assert!(
+            payload.contains("message_with_markers(text, attachments)"),
+            "ordinary attachment markers still ride in the same payload"
+        );
+        let render = src
+            .split("impl Render for Editor")
+            .nth(1)
+            .and_then(|rest| rest.split("/// The reply strip above").next())
+            .expect("editor render");
+        let reply = render.find("reply_strip(&reply, cx)").expect("reply hook");
+        let files = render
+            .find("attachment_strip(&self.attachments, cx)")
+            .expect("attachment hook");
+        assert!(
+            reply < files,
+            "the reply sits above the field and ahead of file attachments"
+        );
+    }
             "a draft gets the notice on its own row under the text"
         );
         assert!(
