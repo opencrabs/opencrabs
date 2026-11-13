@@ -853,6 +853,10 @@ struct Dashboard {
     group_cursor: usize,
     group_error: Option<String>,
     group_busy: bool,
+    /// Whether the picker has already shown its fold warning (#2864). The
+    /// owner asked for a refusal that can be forced: the first Enter names
+    /// what will happen to the selected families, the second one goes ahead.
+    group_warned: bool,
     /// What has been typed into the picker's field (#2864). Narrowing happens
     /// against this, never against the list in place, so clearing the field
     /// brings every candidate back.
@@ -5070,6 +5074,8 @@ impl Render for Dashboard {
                     if !this.group_selected.insert(sid) {
                         this.group_selected.remove(&sid);
                     }
+                    // A new selection re-asks the fold question (#2864).
+                    this.group_warned = false;
                     cx.notify();
                 });
                 let mark = div()
@@ -5215,6 +5221,23 @@ impl Render for Dashboard {
                             self.group_filter.clone()
                         })),
                 )
+                // A selected family keeps its own topics, and grouping it
+                // folds them in first (#2864). The first attempt names that
+                // instead of writing; Enter again goes ahead.
+                .when(self.group_warned, |d| {
+                    d.child(
+                        div()
+                            .id("group-pick-warning")
+                            .text_xs()
+                            .text_color(rgb(palette::current().amber))
+                            .child(SharedString::from(
+                                "The selected sessions have topics of their \
+                                 own. Grouping folds those into them first, \
+                                 and that cannot be undone. Enter again to go \
+                                 ahead, or Esc to leave them as they are.",
+                            )),
+                    )
+                })
                 .when_some(self.group_error.clone(), |d, e| {
                     d.child(
                         div()
@@ -5257,6 +5280,8 @@ impl Render for Dashboard {
                                 .hover(|d| d.bg(rgb(palette::current().selection)))
                                 .child(SharedString::from(if self.group_busy {
                                     "grouping...".to_string()
+                                } else if self.group_warned {
+                                    format!("fold and group ({count})")
                                 } else {
                                     format!("group ({count})")
                                 }))
@@ -6065,6 +6090,7 @@ fn main() {
                         group_cursor: 0,
                         group_error: None,
                         group_busy: false,
+                        group_warned: false,
                         group_filter: String::new(),
                         preview: None,
                         preview_zoom: 1.0,

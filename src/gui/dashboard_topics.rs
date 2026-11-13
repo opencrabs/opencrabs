@@ -430,6 +430,7 @@ impl Dashboard {
         self.group_cursor = 0;
         self.group_error = None;
         self.group_busy = false;
+        self.group_warned = false;
         self.group_filter.clear();
         self.refocus_screen();
         let db_path = self.db_path.clone();
@@ -502,6 +503,17 @@ impl Dashboard {
             self.close_group_topics();
             return;
         }
+        // A selected family keeps topics of its own, and grouping it folds
+        // them into it first (#2864). The owner asked for a refusal that can
+        // be forced, so the first answer names the fold and writes nothing:
+        // the second one goes ahead, and Esc leaves the family alone.
+        let folds = selection_folds_topics(&children, &self.sessions.parents);
+        if folds && !self.group_warned {
+            self.group_warned = true;
+            self.group_error = None;
+            cx.notify();
+            return;
+        }
         self.group_busy = true;
         self.group_error = None;
         let db_path = self.db_path.clone();
@@ -550,6 +562,7 @@ impl Dashboard {
         self.group_cursor = 0;
         self.group_error = None;
         self.group_busy = false;
+        self.group_warned = false;
         self.group_filter.clear();
         self.refocus_screen();
     }
@@ -720,9 +733,21 @@ pub(crate) fn filter_group_candidates(
         .collect()
 }
 
+/// Whether grouping this selection would fold a family on the way in
+/// (#2864): a selected session that is itself a parent carries live topics.
+pub(crate) fn selection_folds_topics(
+    selected: &[Uuid],
+    parents: &std::collections::HashMap<Uuid, Uuid>,
+) -> bool {
+    selected
+        .iter()
+        .any(|child| parents.values().any(|parent| parent == child))
+}
+
 #[cfg(test)]
 mod group_filter_tests {
     use super::filter_group_candidates;
+    use super::selection_folds_topics;
     use uuid::Uuid;
 
     fn rows() -> Vec<(Uuid, String, String)> {
@@ -757,5 +782,29 @@ mod group_filter_tests {
     #[test]
     fn a_search_that_matches_nothing_returns_no_rows() {
         assert!(filter_group_candidates(&rows(), "zzz").is_empty());
+    }
+
+    /// Grouping a session that has topics folds them first (#2864), so the
+    /// picker asks before it writes. Only a selected row that is itself a
+    /// parent triggers the question: a plain session has nothing to fold.
+    #[test]
+    fn only_a_selected_family_triggers_the_fold_warning() {
+        use std::collections::HashMap;
+        let mut parents = HashMap::new();
+        parents.insert(Uuid::from_u128(7), Uuid::from_u128(1));
+        parents.insert(Uuid::from_u128(8), Uuid::from_u128(1));
+
+        assert!(
+            !selection_folds_topics(&[Uuid::from_u128(2)], &parents),
+            "a session with no topics of its own groups in one step"
+        );
+        assert!(
+            selection_folds_topics(&[Uuid::from_u128(2), Uuid::from_u128(1)], &parents),
+            "the family in the selection is what the fold warning is about"
+        );
+        assert!(
+            !selection_folds_topics(&[], &parents),
+            "nothing selected asks nothing"
+        );
     }
 }

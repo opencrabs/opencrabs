@@ -422,11 +422,14 @@ impl Dashboard {
                     }
                 }
                 "space" => {
-                    if let Some((id, _, _)) = self.group_visible().get(self.group_cursor) {
+                    let shown = self.group_visible();
+                    if let Some((id, _, _)) = shown.get(self.group_cursor) {
                         let id = *id;
                         if !self.group_selected.insert(id) {
                             self.group_selected.remove(&id);
                         }
+                        // A new selection re-asks the fold question (#2864).
+                        self.group_warned = false;
                     }
                 }
                 "backspace" => {
