@@ -17,6 +17,17 @@ fn theme_consumes_the_shared_modal_shell() {
 }
 
 #[test]
+fn topic_prompt_offers_one_open_crabs_family_in_a_larger_card() {
+    let overlays = include_str!("../gui/overlays.rs");
+    assert!(overlays.contains("DEFAULT_TOPIC_ICON: &str = \"topic:crab_general\""));
+    assert!(overlays.contains(".w(rems(40.0))"));
+    assert!(overlays.contains(".max_h(rems(24.0))"));
+    let icons = include_str!("../gui/topic_icons.rs");
+    assert!(icons.contains("(\"OpenCrabs\", \"crab_\")"));
+    assert!(!icons.contains("(\"Crabs\", \"crab_\")"));
+}
+
+#[test]
 fn models_use_the_shared_shell_and_one_provider_filter() {
     let view = include_str!("../gui/models_modal.rs");
     let actions = include_str!("../gui/dashboard_models.rs");

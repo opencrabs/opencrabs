@@ -167,9 +167,9 @@ pub(crate) fn split_pick_overlay(layout: Layout, rail_px: gpui::Pixels) -> impl 
 /// The icon a topic gets when none is picked (#2414, #2824).
 ///
 /// A real badge from the pack rather than the bare speech-balloon glyph it
-/// used to be: the picker offers the whole set now, so a topic created
-/// without a pick still looks like one of them.
-pub(crate) const DEFAULT_TOPIC_ICON: &str = "topic:opencrabs-topic-general";
+/// used to be: the picker offers the current set now, so a topic created
+/// without a pick still looks like one of them (#2897).
+pub(crate) const DEFAULT_TOPIC_ICON: &str = "topic:crab_general";
 
 /// The name prompt for a topic (#2398, #2414): a centred card over a dark scrim.
 /// The card holds the name field with the chosen icon before it, and the whole
@@ -254,16 +254,17 @@ pub(crate) fn topic_prompt_overlay(
             |d| d.child(SharedString::from(icon.to_string())),
         )
         .children(picture);
-    // The pack is 110 pictures, so the grid scrolls inside a fixed height
+    // The pack is 102 pictures, so the grid scrolls inside a fixed height
     // instead of growing the card past the window (#2824). Each family keeps
     // its caption: that is what makes the pack readable rather than one long
-    // wall of crabs.
+    // wall of crabs. The larger card and picker give the badges room to breathe
+    // (#2897).
     let picker = div()
         .id("topic-prompt-picker")
         .flex()
         .flex_col()
         .gap_2()
-        .max_h(rems(18.0))
+        .max_h(rems(24.0))
         .overflow_y_scroll()
         .children(families.into_iter().map(|(caption, cells)| {
             div()
@@ -284,7 +285,7 @@ pub(crate) fn topic_prompt_overlay(
         .flex()
         .flex_col()
         .gap_3()
-        .w(rems(30.0))
+        .w(rems(40.0))
         .p_4()
         .rounded(px(CARD_RADIUS))
         .border_1()

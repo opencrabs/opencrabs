@@ -6,8 +6,9 @@
 //! - [`TOPIC_ICONS`] are the illustrated crab badges under
 //!   `src/assets/icon-packs/topics/`. They belong to topic creation: a topic
 //!   tab draws one before its name, the way Telegram's topic bar does. The
-//!   whole pack ships, 110 pictures in four families, downscaled to 256x256
-//!   so the binary carries every badge without carrying the originals (#2824).
+//!   current pack ships, 102 pictures in three families, downscaled to 256x256
+//!   so the binary carries every badge without carrying the originals (#2824,
+//!   #2897).
 //! - [`CRAB_ICONS`] are the reaction-style crabs under
 //!   `src/assets/icon-packs/emojis/`. They are the input's emoji set, and they
 //!   are embedded here so nothing has to load a file at run time.
@@ -26,7 +27,7 @@ use std::sync::Arc;
 /// One PNG from the topic pack, named by its file stem.
 ///
 /// `include_bytes!` needs a literal path, so the stem is spliced into the
-/// pack path once here instead of being written out on all 110 rows below.
+/// pack path once here instead of being written out on every row below.
 macro_rules! topic_png {
     ($name:literal) => {
         include_bytes!(concat!(
@@ -45,39 +46,12 @@ macro_rules! topic_png {
 /// database has to be rewritten. A name is the pack's own file stem, so the
 /// value a row holds names the picture it draws.
 ///
-/// The whole pack ships. Each picture is downscaled to 256x256 (#2824): the
+/// Every offered picture ships. Each is downscaled to 256x256 (#2824): the
 /// tab draws one at about 26px and the picker at 64px, so 256 covers a 2x
 /// screen, and embedding the 30.8 MB of 1024x1024 originals would have cost
 /// 4 MB of RGBA per icon decoded.
 pub const TOPIC_ICONS: &[(&str, &[u8])] = &[
-    // The eight OpenCrabs badges, first because they are the default set.
-    (
-        "opencrabs-topic-bug-reports",
-        topic_png!("opencrabs-topic-bug-reports"),
-    ),
-    (
-        "opencrabs-topic-development",
-        topic_png!("opencrabs-topic-development"),
-    ),
-    (
-        "opencrabs-topic-general",
-        topic_png!("opencrabs-topic-general"),
-    ),
-    ("opencrabs-topic-ideas", topic_png!("opencrabs-topic-ideas")),
-    (
-        "opencrabs-topic-off-topic",
-        topic_png!("opencrabs-topic-off-topic"),
-    ),
-    ("opencrabs-topic-ops", topic_png!("opencrabs-topic-ops")),
-    (
-        "opencrabs-topic-releases",
-        topic_png!("opencrabs-topic-releases"),
-    ),
-    (
-        "opencrabs-topic-showcase",
-        topic_png!("opencrabs-topic-showcase"),
-    ),
-    // The crab renders, one per piece of work.
+    // The OpenCrabs renders, one per piece of work.
     ("crab_agents", topic_png!("crab_agents")),
     ("crab_ai-models", topic_png!("crab_ai-models")),
     ("crab_announcements", topic_png!("crab_announcements")),
@@ -188,10 +162,11 @@ pub const TOPIC_ICONS: &[(&str, &[u8])] = &[
 ];
 
 /// The families the pack is grouped in, in the order the prompt lists them
-/// (#2824): the caption first, then the prefix every name in it carries.
+/// (#2824, #2897): the caption first, then the prefix every name in it carries.
+/// The current crab art is the single OpenCrabs family; the eight old badges
+/// are no longer offered.
 pub const TOPIC_FAMILIES: &[(&str, &str)] = &[
-    ("OpenCrabs", "opencrabs-topic-"),
-    ("Crabs", "crab_"),
+    ("OpenCrabs", "crab_"),
     ("Generic", "generic_"),
     ("Pilot", "pilot_"),
 ];
@@ -206,9 +181,10 @@ pub fn family_icons(prefix: &'static str) -> impl Iterator<Item = (&'static str,
 
 /// The eight names the picker stored before the full pack arrived (#2824).
 ///
-/// A topic created then holds `topic:general` rather than
-/// `topic:opencrabs-topic-general`, and its row still has to draw, so these
-/// names keep resolving to the badge family.
+/// A topic created then holds `topic:general` or
+/// `topic:opencrabs-topic-general`, and its row still has to draw. Both forms
+/// now resolve to the matching current crab render (#2897), so existing topics
+/// pick up the new art without a database rewrite.
 pub const LEGACY_TOPIC_NAMES: &[&str] = &[
     "general",
     "development",
@@ -433,13 +409,15 @@ pub fn topic_icon(name: &str) -> Option<&'static [u8]> {
     {
         return Some(bytes);
     }
-    // A row written before the pack grew holds a bare family name, and the
-    // badge it always drew is still the one it should draw (#2824).
-    if LEGACY_TOPIC_NAMES
+    // A row written before the pack grew holds either a bare name or the old
+    // `opencrabs-topic-` stem. Both map to the matching current crab render
+    // (#2897), so an existing topic shows the new art without a row rewrite.
+    let legacy_name = name.strip_prefix("opencrabs-topic-").unwrap_or(name);
+    if let Some(legacy) = LEGACY_TOPIC_NAMES
         .iter()
-        .any(|legacy| legacy.eq_ignore_ascii_case(name))
+        .find(|legacy| legacy.eq_ignore_ascii_case(legacy_name))
     {
-        let stem = format!("opencrabs-topic-{name}");
+        let stem = format!("crab_{legacy}");
         return TOPIC_ICONS
             .iter()
             .find(|(candidate, _)| candidate.eq_ignore_ascii_case(&stem))
@@ -836,38 +814,47 @@ mod tests {
             let stored = store_name(name);
             assert_eq!(topic_icon(&stored), Some(*bytes), "{stored} as stored");
         }
-        // A topic created before the pack grew holds `topic:general`, and the
-        // badge it always drew is the one it still draws (#2824).
+        // A topic created before the pack grew holds a bare name or the old
+        // opencrabs-topic- stem. Both resolve to the current crab render
+        // (#2897), so an existing topic shows the new art.
         for legacy in LEGACY_TOPIC_NAMES {
-            let bytes = topic_icon(legacy).unwrap_or_else(|| panic!("{legacy} resolves"));
-            let stem = format!("opencrabs-topic-{legacy}");
-            assert_eq!(topic_icon(&stem), Some(bytes), "{stem} is the same picture");
-            assert_eq!(topic_icon(&store_name(legacy)), Some(bytes));
+            let crab = format!("crab_{legacy}");
+            let bytes =
+                topic_icon(&crab).unwrap_or_else(|| panic!("{crab} resolves to a crab"));
+            for stored in [
+                legacy.to_string(),
+                format!("opencrabs-topic-{legacy}"),
+                store_name(legacy),
+                store_name(&format!("opencrabs-topic-{legacy}")),
+            ] {
+                assert_eq!(topic_icon(&stored), Some(bytes), "{stored} maps to {crab}");
+            }
         }
     }
 
-    /// The picker offers the whole pack, split into the four families it
-    /// ships, and no two names collide (#2824).
+    /// The picker offers the current pack in three families, with one
+    /// OpenCrabs caption and none of the eight old badges (#2897).
     #[test]
-    fn the_picker_offers_the_whole_pack_in_four_families() {
-        assert_eq!(TOPIC_ICONS.len(), 110);
+    fn the_picker_offers_the_current_pack_in_three_families() {
+        assert_eq!(TOPIC_ICONS.len(), 102);
         let mut names: Vec<&str> = TOPIC_ICONS.iter().map(|(name, _)| *name).collect();
         let total = names.len();
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), total, "a name appears twice");
+        assert!(
+            TOPIC_ICONS
+                .iter()
+                .all(|(name, _)| !name.starts_with("opencrabs-topic-")),
+            "the eight old badges are no longer offered"
+        );
         let counts: Vec<(&str, usize)> = TOPIC_FAMILIES
             .iter()
             .map(|&(caption, prefix)| (caption, family_icons(prefix).count()))
             .collect();
         assert_eq!(
             counts,
-            [
-                ("OpenCrabs", 8),
-                ("Crabs", 50),
-                ("Generic", 48),
-                ("Pilot", 4)
-            ]
+            [("OpenCrabs", 50), ("Generic", 48), ("Pilot", 4)]
         );
         // Every icon belongs to exactly one family, so the picker cannot drop
         // one on the floor between captions.
