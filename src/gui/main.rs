@@ -684,9 +684,6 @@ struct Dashboard {
     rail_index: rail_activity::PlanIndex,
     /// The plans the owner has already opened, so their rings stop (#2636).
     rail_seen: rail_activity::SeenPlans,
-    /// The one monotonic origin every rail animation reads, so all rows blink
-    /// on the same frame instead of one clock each.
-    rail_clock: std::time::Instant,
     /// When the rail's live previews were last re-read, so a stream of chunks
     /// costs at most one query a second instead of one per token.
     preview_refreshed_at: Option<std::time::Instant>,
@@ -5554,7 +5551,6 @@ fn main() {
                         rail_seen: rail_activity::SeenPlans::load(Some(
                             opencrabs::config::opencrabs_home().join("rail_seen.json"),
                         )),
-                        rail_clock: std::time::Instant::now(),
                         preview_refreshed_at: None,
                         previews_in_flight: std::rc::Rc::new(std::cell::Cell::new(0)),
                         previews_dirty: std::rc::Rc::new(std::cell::Cell::new(false)),
