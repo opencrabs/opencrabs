@@ -22,9 +22,12 @@ static CURRENT: RwLock<Palette> = RwLock::new(ORGN);
 /// The system appearance last seen. Starts dark, the window's own default.
 static SYSTEM_DARK: AtomicBool = AtomicBool::new(true);
 
+/// The `[gui]` mode, accent and base as the mirror holds them.
+type SavedTheme = Option<(GuiTheme, Option<String>, Option<u32>)>;
+
 /// The `[gui]` mode, accent and base last read or saved. The outer `None`
 /// means the mirror has not been asked yet.
-static SAVED: RwLock<Option<(GuiTheme, Option<String>, Option<u32>)>> = RwLock::new(None);
+static SAVED: RwLock<SavedTheme> = RwLock::new(None);
 
 /// The palette to draw with right now.
 pub fn current() -> Palette {

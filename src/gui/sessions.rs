@@ -2807,7 +2807,7 @@ mod tests {
         let now = stamp(100);
         // The ledger load order at the moment the owner looked: UX had spoken
         // last, two idle topics sat above the topic that had just started.
-        let mut chips = vec![
+        let mut chips = [
             RailChip {
                 id: uuid::Uuid::from_u128(1),
                 title: "UX".to_string(),
@@ -2853,7 +2853,7 @@ mod tests {
             chrono::DateTime::from_timestamp(1_700_000_000 + secs, 0).expect("a fixed stamp")
         };
         let now = stamp(100);
-        let mut chips = vec![
+        let mut chips = [
             RailChip {
                 id: uuid::Uuid::from_u128(1),
                 title: "older idle".to_string(),

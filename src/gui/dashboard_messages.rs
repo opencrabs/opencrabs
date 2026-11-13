@@ -1066,10 +1066,10 @@ impl Dashboard {
                             } else {
                                 this.reload_transcript(target, cx);
                             }
-                        } else if this.pane_states.contains_key(&target) {
-                            if let Some(Ok(loaded)) = loaded {
-                                this.install_loaded_in_pane(target, loaded, cx);
-                            }
+                        } else if this.pane_states.contains_key(&target)
+                            && let Some(Ok(loaded)) = loaded
+                        {
+                            this.install_loaded_in_pane(target, loaded, cx);
                         }
                         logging::info(&format!("forward: {landed} row(s) into {target}"));
                     }
