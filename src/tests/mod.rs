@@ -1288,6 +1288,7 @@ pub mod telegram_tool_group_test;
 pub mod telegram_topic_actions_test;
 pub mod telegram_topic_listing_test;
 pub mod text_complete_test;
+pub mod text_field_test;
 pub mod theme_catalog_converter_test;
 pub mod theme_light_contrast_test;
 pub mod theme_pack_test;
