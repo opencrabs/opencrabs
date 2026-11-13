@@ -266,6 +266,27 @@ impl ProjectRepository {
             .context("Failed to find unassigned sessions")
     }
 
+    /// List every active top-level session for project assignment and repair.
+    /// Topics inherit their parent's project and are never independent picks.
+    pub async fn find_assignable_sessions(&self) -> Result<Vec<Session>> {
+        self.pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                let mut stmt = conn.prepare_cached(
+                    "SELECT * FROM sessions
+                     WHERE archived_at IS NULL AND parent_id IS NULL
+                     ORDER BY updated_at DESC",
+                )?;
+                let rows = stmt.query_map([], Session::from_row)?;
+                rows.collect::<std::result::Result<Vec<_>, _>>()
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to find assignable sessions")
+    }
+
     /// Count sessions in a project
     pub async fn count_sessions(&self, project_id: Uuid) -> Result<i64> {
         let pid = project_id.to_string();

@@ -37,7 +37,8 @@ fn projects_is_a_real_service_backed_dashboard_screen() {
         "projects_view::session_card",
         "projects_view::create_panel",
         "projects_view::delete_panel",
-        "concentric_radius(18.0)",
+        "modal_shell::render(",
+        "id: \"projects-modal\"",
     ] {
         assert!(
             PROJECTS_SCREEN.contains(needle),
@@ -46,6 +47,17 @@ fn projects_is_a_real_service_backed_dashboard_screen() {
     }
     assert!(PROJECTS_VIEW.contains("glass_fill"));
     assert!(PROJECTS_VIEW.contains("token_count(session.token_count)"));
+}
+
+#[test]
+fn assignment_can_repair_sessions_from_other_projects() {
+    assert!(PROJECTS.contains("pub fn visible_assignments(&self, target: Uuid)"));
+    assert!(PROJECTS.contains("AssignmentFilter::Project(id) => session.project_id == Some(id)"));
+    assert!(PROJECTS_SCREEN.contains("Current project: {membership}"));
+    assert!(PROJECTS_SCREEN.contains("assignment_rows.iter().enumerate()"));
+    let repository = include_str!("../db/repository/project.rs");
+    assert!(repository.contains("pub async fn find_assignable_sessions(&self)"));
+    assert!(repository.contains("archived_at IS NULL AND parent_id IS NULL"));
 }
 
 #[test]
@@ -60,6 +72,7 @@ fn project_actions_use_the_shared_service_and_reject_stale_results() {
         "service.unassign_session(session_id).await?",
         "service.get_sessions_for_project(id).await?",
         "service.get_unassigned_sessions().await?",
+        "service.get_assignable_sessions().await?",
         ".stack_size(4 * 1024 * 1024)",
         ".name(\"gui-projects\".into())",
     ] {

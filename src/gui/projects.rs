@@ -28,12 +28,22 @@ pub struct ProjectRow {
     pub files: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AssignmentFilter {
+    #[default]
+    All,
+    Unassigned,
+    Project(Uuid),
+}
+
 #[derive(Debug, Clone)]
 pub struct ProjectsState {
     pub mode: ProjectsMode,
     pub rows: Vec<ProjectRow>,
     pub sessions: Vec<Session>,
     pub unassigned: Vec<Session>,
+    pub assignable: Vec<Session>,
+    pub assignment_filter: AssignmentFilter,
     pub selected: usize,
     pub session_selected: usize,
     pub creating: bool,
@@ -53,6 +63,8 @@ impl Default for ProjectsState {
             rows: Vec::new(),
             sessions: Vec::new(),
             unassigned: Vec::new(),
+            assignable: Vec::new(),
+            assignment_filter: AssignmentFilter::All,
             selected: 0,
             session_selected: 0,
             creating: false,
@@ -92,15 +104,30 @@ impl ProjectsState {
         self.sessions.get(self.session_selected)
     }
 
-    pub fn selected_unassigned(&self) -> Option<&Session> {
-        self.unassigned.get(self.session_selected)
+    pub fn selected_assignment(&self, target: Uuid) -> Option<Session> {
+        self.visible_assignments(target)
+            .into_iter()
+            .nth(self.session_selected)
+    }
+
+    pub fn visible_assignments(&self, target: Uuid) -> Vec<Session> {
+        self.assignable
+            .iter()
+            .filter(|session| session.project_id != Some(target))
+            .filter(|session| match self.assignment_filter {
+                AssignmentFilter::All => true,
+                AssignmentFilter::Unassigned => session.project_id.is_none(),
+                AssignmentFilter::Project(id) => session.project_id == Some(id),
+            })
+            .cloned()
+            .collect()
     }
 
     pub fn move_selection(&mut self, delta: i64) {
         let len = match self.mode {
             ProjectsMode::List | ProjectsMode::AssignSession(_) => self.rows.len(),
             ProjectsMode::Detail(_) => self.sessions.len(),
-            ProjectsMode::Assign(_) => self.unassigned.len(),
+            ProjectsMode::Assign(id) => self.visible_assignments(id).len(),
         };
         if len == 0 {
             self.selected = 0;
@@ -117,7 +144,7 @@ impl ProjectsState {
     pub fn clamp(&mut self) {
         self.selected = self.selected.min(self.rows.len().saturating_sub(1));
         let session_len = match self.mode {
-            ProjectsMode::Assign(_) => self.unassigned.len(),
+            ProjectsMode::Assign(id) => self.visible_assignments(id).len(),
             _ => self.sessions.len(),
         };
         self.session_selected = self.session_selected.min(session_len.saturating_sub(1));
@@ -130,6 +157,7 @@ impl ProjectsState {
             .map(|(_, sessions)| sessions)
             .unwrap_or_default();
         self.unassigned = data.unassigned;
+        self.assignable = data.assignable;
         self.notice = data.notice;
         self.clamp();
     }
@@ -154,6 +182,7 @@ pub struct ProjectsData {
     pub rows: Vec<ProjectRow>,
     pub detail: Option<(Project, Vec<Session>)>,
     pub unassigned: Vec<Session>,
+    pub assignable: Vec<Session>,
     pub notice: Option<String>,
 }
 
@@ -212,10 +241,12 @@ async fn execute(db_path: PathBuf, action: ProjectAction) -> anyhow::Result<Proj
         None => None,
     };
     let unassigned = service.get_unassigned_sessions().await?;
+    let assignable = service.get_assignable_sessions().await?;
     Ok(ProjectsData {
         rows,
         detail,
         unassigned,
+        assignable,
         notice,
     })
 }

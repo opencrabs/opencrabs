@@ -309,7 +309,7 @@ impl Dashboard {
                 "enter" => {
                     if let Some(session_id) = self
                         .projects
-                        .selected_unassigned()
+                        .selected_assignment(project_id)
                         .map(|session| session.id)
                     {
                         self.assign_project_session(project_id, session_id, cx);

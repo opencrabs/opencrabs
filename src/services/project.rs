@@ -181,6 +181,13 @@ impl ProjectService {
         repo.find_unassigned_sessions().await
     }
 
+    /// Get every active top-level session, including sessions assigned to
+    /// another project, so the assignment picker can repair wrong membership.
+    pub async fn get_assignable_sessions(&self) -> Result<Vec<Session>> {
+        let repo = ProjectRepository::new(self.context.pool());
+        repo.find_assignable_sessions().await
+    }
+
     /// Link a session to the project its working directory names, if it is not
     /// already linked and the directory matches one.
     ///

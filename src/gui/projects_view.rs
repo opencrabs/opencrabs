@@ -155,6 +155,24 @@ pub fn action_button(
         ))
 }
 
+pub fn filter_button(
+    id: String,
+    label: String,
+    selected: bool,
+    shown: Palette,
+) -> Stateful<Div> {
+    div()
+        .id(SharedString::from(id))
+        .px_3()
+        .py_1()
+        .rounded(px(6.0))
+        .border_1()
+        .border_color(rgb(if selected { shown.accent } else { shown.panel_hi }))
+        .bg(rgb(if selected { shown.panel_hi } else { shown.panel }))
+        .cursor_pointer()
+        .child(text(label, Size::Xs, shown.text))
+}
+
 pub fn create_panel(input: &str, shown: Palette) -> Div {
     div()
         .flex()
