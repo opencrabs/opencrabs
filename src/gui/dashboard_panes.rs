@@ -7,6 +7,10 @@
 
 use super::*;
 
+/// How often a leaf's detached-command line is rebuilt (#2805). The label
+/// prints whole seconds, so a faster rebuild cannot produce different text.
+const TASK_LABEL_TICK: std::time::Duration = std::time::Duration::from_secs(1);
+
 impl Dashboard {
     /// The sessions rail: `/sessions` and ctrl+s share one toggle, so the
     /// command and the chord can never disagree about what showing it means.
@@ -942,18 +946,31 @@ impl Dashboard {
         // and the caret resolve it (#2620).
         let focus = self.split_focus();
         let mut footers: HashMap<Uuid, SharedString> = HashMap::new();
-        let mut tasks: HashMap<Uuid, SharedString> = HashMap::new();
         for (ix, session) in leaves.iter().enumerate() {
             footers.insert(
                 *session,
                 SharedString::from(self.pane_footer_text(*session, ix + 1, count)),
             );
-            if let Some(label) = self.running_tasks_label_for(*session) {
-                tasks.insert(*session, SharedString::from(label));
-            }
         }
         self.frame_footers = footers.clone();
-        self.frame_tasks = tasks;
+        // The detached-command line is rebuilt at most once a second (#2805).
+        // Its text carries the elapsed time to the second, so nothing in it can
+        // change between two frames inside the same second, and each rebuild
+        // takes the background manager's lock and formats a string per leaf. A
+        // task that starts or ends shows on the next tick.
+        if self
+            .frame_tasks_at
+            .is_none_or(|at| at.elapsed() >= TASK_LABEL_TICK)
+        {
+            let mut tasks: HashMap<Uuid, SharedString> = HashMap::new();
+            for session in leaves.iter() {
+                if let Some(label) = self.running_tasks_label_for(*session) {
+                    tasks.insert(*session, SharedString::from(label));
+                }
+            }
+            self.frame_tasks = tasks;
+            self.frame_tasks_at = Some(std::time::Instant::now());
+        }
         // The tree is borrowed again here: the label pass above wrote the
         // window's own fields, which the first borrow could not outlive.
         let Some(tree) = self.panes.as_ref() else {
@@ -1089,8 +1106,11 @@ impl Dashboard {
                     let rows = self.option_rows(*session, offers, cx);
                     col = col.child(options_strip(&rows));
                 }
-                if let Some(label) = self.running_tasks_label_for(*session) {
-                    col = col.child(task_strip(label));
+                // The same line the walk resolved above (#2805): asking for
+                // it again here took the manager's lock a second time for a
+                // string the window already held.
+                if let Some(label) = self.frame_tasks.get(session).cloned() {
+                    col = col.child(task_strip(label.to_string()));
                 }
                 // The pane holding the keyboard draws the real composer; the
                 // others show the draft they hold, dimmed and inert, which is

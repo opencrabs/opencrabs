@@ -740,6 +740,10 @@ struct Dashboard {
     /// The detached-command line per leaf for this frame (#2899). Same reason:
     /// the label takes the background manager's lock and formats a string.
     frame_tasks: HashMap<Uuid, SharedString>,
+    /// When `frame_tasks` was last rebuilt. The label ticks in whole seconds,
+    /// so a second rebuild inside the same second would take the lock and
+    /// allocate the same strings for text that cannot have changed (#2805).
+    frame_tasks_at: Option<std::time::Instant>,
     /// A newer release, when the update check found one (#2406).
     update_available: Option<String>,
     /// The update dialog: None when closed, Some(false) asks whether to update,
@@ -6011,6 +6015,7 @@ fn main() {
                         chime_last: None,
                         frame_footers: HashMap::new(),
                         frame_tasks: HashMap::new(),
+                        frame_tasks_at: None,
                         update_available: None,
                         update_prompt: None,
                         help_filter: None,

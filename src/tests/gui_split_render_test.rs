@@ -807,6 +807,30 @@ fn a_cached_pane_is_told_when_the_scroll_or_the_copy_mark_moves() {
 }
 
 #[test]
+fn a_task_label_is_rebuilt_on_its_own_tick() {
+    // The detached-command line prints whole seconds, so rebuilding it on every
+    // frame took the background manager's lock and formatted the same text up
+    // to sixty times a second, for every leaf (#2805). It is rebuilt on its own
+    // one-second tick, and the chat leaf's strip reads the line the walk
+    // already resolved instead of asking for it a second time.
+    let body = flat(panes_body());
+    assert!(
+        body.contains(".is_none_or(|at| at.elapsed() >= TASK_LABEL_TICK)"),
+        "the task line is rebuilt on a one-second tick, not on every frame the window draws"
+    );
+    assert!(
+        flat(DASHBOARD_PANES).contains(
+            "const TASK_LABEL_TICK: std::time::Duration = std::time::Duration::from_secs(1);"
+        ),
+        "the tick is a second: the label cannot print anything finer"
+    );
+    assert!(
+        body.contains("if let Some(label) = self.frame_tasks.get(session).cloned() {"),
+        "the chat leaf's strip reads the line the walk resolved, not a second lock and a second string"
+    );
+}
+
+#[test]
 fn a_pane_is_handed_its_frame_and_draws_when_it_changes() {
     // The walk resolves each pane's frame and hands it over, so a pane knows
     // when its own box moved (#2805). A pane the walk did not re-stamp is not
