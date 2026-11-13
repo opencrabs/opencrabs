@@ -3,6 +3,7 @@
 pub(crate) mod answer_placement;
 pub(crate) mod background_session;
 pub(crate) mod clickable;
+pub(crate) mod clipboard_exec;
 pub(crate) mod clipboard_route;
 pub(crate) mod dialog_keys;
 pub(crate) mod dialogs;

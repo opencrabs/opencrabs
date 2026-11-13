@@ -102,10 +102,20 @@ fn windows_shellouts_are_windowless_and_never_hold_the_pipe() {
     );
 
     // clip.exe reads stdin to EOF; the child handle keeps the pipe open, so
-    // stdin must be dropped before waiting or the last-resort path hangs.
+    // stdin must be closed before the wait or the last-resort path hangs.
+    // Since #2702 both halves live in the deadline helper: it takes the pipe
+    // off the child, writes, drops the handle, and only then waits.
+    let exec = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/tui/app/clipboard_exec.rs"),
+    )
+    .expect("clipboard_exec.rs readable");
     assert!(
-        src.contains("drop(child.stdin.take())"),
-        "clip.exe stdin closed before wait"
+        exec.contains("child.stdin.take()"),
+        "the writer owns the pipe so it can close it"
+    );
+    assert!(
+        src.contains("super::clipboard_exec::write_bytes"),
+        "clip.exe and every write backend go through the bounded helper"
     );
 }
 

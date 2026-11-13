@@ -140,29 +140,39 @@ pub(crate) fn kinds_from_windows_probe(out: &str) -> ClipboardKinds {
     }
 }
 
-/// Run a probe command and return its stdout, or `None` when it is missing or
-/// fails. A missing tool is normal (no Wayland, no X11), not an error worth
-/// surfacing.
+/// Run a probe command and return its stdout, or `None` when it is missing,
+/// fails or misses its deadline. A missing tool is normal (no Wayland, no
+/// X11), not an error worth surfacing, and a probe that hangs must not take
+/// the event loop with it (#2702).
 fn run_probe(program: &str, args: &[&str]) -> Option<String> {
-    use std::process::{Command, Stdio};
+    use super::clipboard_exec::{self, Capture};
+    use std::process::Command;
     let mut cmd = Command::new(program);
-    cmd.args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+    cmd.args(args);
     #[cfg(windows)]
     {
         // No console flash on a probe that runs on focus and tick.
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0800_0000);
     }
-    let out = cmd.output().ok()?;
-    if !out.status.success() {
-        tracing::debug!(program, "clipboard probe failed");
-        return None;
+    match clipboard_exec::capture(cmd, clipboard_exec::probe_timeout()) {
+        Capture::Finished {
+            success: true,
+            stdout,
+        } => {
+            let text = String::from_utf8_lossy(&stdout).to_string();
+            (!text.trim().is_empty()).then_some(text)
+        }
+        Capture::Finished { success: false, .. } => {
+            tracing::debug!(program, "clipboard probe failed");
+            None
+        }
+        Capture::TimedOut => {
+            tracing::debug!(program, "clipboard probe missed its deadline");
+            None
+        }
+        Capture::Unavailable => None,
     }
-    let text = String::from_utf8_lossy(&out.stdout).to_string();
-    (!text.trim().is_empty()).then_some(text)
 }
 
 /// Where a clipboard paste goes, decided from the clipboard's text alone.

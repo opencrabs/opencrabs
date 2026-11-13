@@ -706,9 +706,7 @@ impl App {
     /// Copy text to system clipboard
     fn copy_to_clipboard(text: &str) -> bool {
         #[cfg(windows)]
-        use std::io::Write;
-        #[cfg(windows)]
-        use std::process::{Command, Stdio};
+        use std::process::Command;
 
         // Windows first, and only its own backends. The old arm fell through
         // to pbcopy/xclip/xsel, all of which fail to spawn here, so every
@@ -729,22 +727,23 @@ impl App {
                     path.display().to_string().replace('\'', "''")
                 );
                 use std::os::windows::process::CommandExt;
-                let ok = Command::new("powershell.exe")
-                    .args([
-                        "-NoProfile",
-                        "-NonInteractive",
-                        "-ExecutionPolicy",
-                        "Bypass",
-                        "-Command",
-                        &ps,
-                    ])
-                    // CREATE_NO_WINDOW: no console flash on every Ctrl+C.
-                    .creation_flags(0x0800_0000)
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()
-                    .is_ok_and(|s| s.success());
+                let mut cmd = Command::new("powershell.exe");
+                cmd.args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    &ps,
+                ])
+                // CREATE_NO_WINDOW: no console flash on every Ctrl+C.
+                .creation_flags(0x0800_0000);
+                // Bounded (#2702): a stalled clipboard write must not freeze
+                // the event loop that asked for the copy.
+                let ok = matches!(
+                    super::clipboard_exec::capture(cmd, super::clipboard_exec::POWERSHELL),
+                    super::clipboard_exec::Capture::Finished { success: true, .. }
+                );
                 let _ = std::fs::remove_file(&path);
                 if ok {
                     return true;
@@ -754,22 +753,17 @@ impl App {
             // eats a trailing newline, which is strictly better than nothing.
             let mut utf16: Vec<u8> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
             utf16.extend(0u16.to_le_bytes());
-            if let Ok(mut child) = Command::new("clip.exe")
-                .stdin(Stdio::piped())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-            {
-                if let Some(stdin) = child.stdin.as_mut() {
-                    let _ = stdin.write_all(&utf16);
-                }
-                // Close the pipe before waiting: clip.exe reads to EOF, and
-                // the child handle keeps stdin open until dropped, so a
-                // wait-with-pipe-open hangs the TUI on the last-resort path.
-                drop(child.stdin.take());
-                return child.wait().is_ok_and(|s| s.success());
-            }
-            return false;
+            // The pipe is closed after the write and the wait is bounded
+            // (#2702): clip.exe reads to EOF, and a child that never does
+            // used to hang the TUI on the last-resort path.
+            return matches!(
+                super::clipboard_exec::write_bytes(
+                    Command::new("clip.exe"),
+                    utf16,
+                    super::clipboard_exec::WRITE
+                ),
+                super::clipboard_exec::Capture::Finished { success: true, .. }
+            );
         }
 
         // Unix backends, now gated: on Windows the arm above always returns.
@@ -818,9 +812,10 @@ impl App {
     #[allow(clippy::needless_return)]
     fn read_clipboard_image() -> Option<Vec<u8>> {
         // Platform backends below (macOS/Linux/Windows) all spawn; the
-        // import would be unused (and warned) on any other target.
+        // import would be unused (and warned) on any other target. Stdio is
+        // not here any more: the deadline helper owns every pipe (#2702).
         #[cfg(any(target_os = "macos", target_os = "linux", windows))]
-        use std::process::{Command, Stdio};
+        use std::process::Command;
 
         // macOS: pbpaste is text-only, so dump the clipboard PNG to a scratch
         // file via osascript (built in). Fails cleanly when there's no image.
@@ -835,14 +830,14 @@ impl App {
                  close access fp",
                 scratch.display()
             );
-            let ok = Command::new("osascript")
-                .arg("-e")
-                .arg(&script)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
+            let mut cmd = Command::new("osascript");
+            cmd.arg("-e").arg(&script);
+            // Bounded (#2702): a clipboard read that never returns used to
+            // freeze the event loop, and this one runs on Ctrl+V.
+            let ok = matches!(
+                super::clipboard_exec::capture(cmd, super::clipboard_exec::IMAGE_READ),
+                super::clipboard_exec::Capture::Finished { success: true, .. }
+            );
             if !ok {
                 // #1740: clipboard holds no PNGf class (or osascript failed).
                 // Say so, or logs can never distinguish "never invoked" from
@@ -886,23 +881,23 @@ impl App {
                 ),
             ];
             for (cmd, cmd_args) in attempts {
-                if let Ok(out) = Command::new(cmd)
-                    .args(cmd_args)
-                    .stderr(Stdio::null())
-                    .output()
-                {
-                    if out.status.success() && Self::looks_like_image(&out.stdout) {
-                        return Some(out.stdout);
+                let mut command = Command::new(cmd);
+                command.args(cmd_args);
+                match super::clipboard_exec::capture(command, super::clipboard_exec::IMAGE_READ) {
+                    super::clipboard_exec::Capture::Finished { success, stdout } => {
+                        if success && Self::looks_like_image(&stdout) {
+                            return Some(stdout);
+                        }
+                        // #1740: distinguish "backend missing" from "backend
+                        // ran but the clipboard was not an image".
+                        tracing::debug!(
+                            "clipboard image: {cmd} success={success} bytes={} (not a usable image)",
+                            stdout.len()
+                        );
                     }
-                    // #1740: distinguish "backend missing" from "backend ran
-                    // but the clipboard was not an image".
-                    tracing::debug!(
-                        "clipboard image: {cmd} exit={} bytes={} (not a usable image)",
-                        out.status,
-                        out.stdout.len()
-                    );
-                } else {
-                    tracing::debug!("clipboard image: {cmd} not available");
+                    other => {
+                        tracing::debug!("clipboard image: {cmd} unavailable: {other:?}");
+                    }
                 }
             }
             return None;
@@ -924,24 +919,26 @@ impl App {
                 // PS single-quote escaping is doubling; O'Brien profiles exist.
                 scratch.display().to_string().replace('\'', "''")
             );
-            let out = {
+            let ok = {
                 use std::os::windows::process::CommandExt;
-                Command::new("powershell.exe")
-                    .args([
-                        "-STA",
-                        "-NoProfile",
-                        "-NonInteractive",
-                        "-ExecutionPolicy",
-                        "Bypass",
-                        "-Command",
-                        &ps,
-                    ])
-                    .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
-                    .stdin(Stdio::null())
-                    .stderr(Stdio::null())
-                    .output()
+                let mut cmd = Command::new("powershell.exe");
+                cmd.args([
+                    "-STA",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    &ps,
+                ])
+                .creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+                // Bounded (#2702): a stalled runtime start is not worth a
+                // frozen event loop.
+                matches!(
+                    super::clipboard_exec::capture(cmd, super::clipboard_exec::POWERSHELL),
+                    super::clipboard_exec::Capture::Finished { success: true, .. }
+                )
             };
-            let ok = out.is_ok_and(|o| o.status.success());
             if !ok {
                 tracing::debug!(
                     "clipboard image: powershell GetImage failed or clipboard has no image"
@@ -1039,35 +1036,29 @@ impl App {
     #[allow(clippy::needless_return)]
     fn read_clipboard_text() -> Option<String> {
         #[cfg(any(target_os = "macos", target_os = "linux", windows))]
-        use std::process::{Command, Stdio};
+        use std::process::Command;
 
-        #[cfg(target_os = "macos")]
+        // One table for every unix backend (#2702): `pbpaste` on macOS, then
+        // `wl-paste` and `xclip` on Linux. The type is explicit on Wayland.
+        // Without it `wl-paste` hands back whatever the clipboard offers, so an
+        // image-only clipboard came back as raw PNG bytes with exit 0 and the
+        // paste inserted binary instead of attaching the picture.
+        #[cfg(unix)]
         {
-            if let Ok(out) = Command::new("pbpaste").stderr(Stdio::null()).output()
-                && out.status.success()
-            {
-                let s = String::from_utf8_lossy(&out.stdout).to_string();
-                if !s.trim().is_empty() {
-                    return Some(s);
-                }
-            }
-            return None;
-        }
-
-        #[cfg(target_os = "linux")]
-        {
-            // Wayland first, X11 fallback: mirrors read_clipboard_image's
-            // backend order.
-            for (cmd, args) in [
-                ("wl-paste", vec!["--no-newline"]),
-                ("xclip", vec!["-selection", "clipboard", "-o"]),
-            ] {
-                if let Ok(out) = Command::new(cmd).args(args).stderr(Stdio::null()).output()
-                    && out.status.success()
+            // Bounded: every read here runs on Ctrl+V, and a backend that
+            // never answers must not hold the event loop.
+            for (program, args) in unix_text_backends() {
+                let mut cmd = Command::new(*program);
+                cmd.args(*args);
+                if let super::clipboard_exec::Capture::Finished {
+                    success: true,
+                    stdout,
+                } = super::clipboard_exec::capture(cmd, super::clipboard_exec::TEXT_READ)
                 {
-                    let s = String::from_utf8_lossy(&out.stdout).to_string();
-                    if !s.trim().is_empty() {
-                        return Some(s);
+                    if let Some(text) =
+                        super::clipboard_exec::text_from_clipboard_bytes(&stdout)
+                    {
+                        return Some(text);
                     }
                 }
             }
@@ -1092,21 +1083,22 @@ impl App {
             );
             let ran = {
                 use std::os::windows::process::CommandExt;
-                Command::new("powershell.exe")
-                    .args([
-                        "-NoProfile",
-                        "-NonInteractive",
-                        "-ExecutionPolicy",
-                        "Bypass",
-                        "-Command",
-                        &ps,
-                    ])
-                    .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()
-                    .is_ok_and(|s| s.success())
+                let mut cmd = Command::new("powershell.exe");
+                cmd.args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    &ps,
+                ])
+                .creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+                // Bounded (#2702): starting the runtime is the slow part, and
+                // it must not outlast the keystroke that asked for the paste.
+                matches!(
+                    super::clipboard_exec::capture(cmd, super::clipboard_exec::POWERSHELL),
+                    super::clipboard_exec::Capture::Finished { success: true, .. }
+                )
             };
             let text = if ran {
                 std::fs::read(&path).ok().map(|b| {
@@ -3356,6 +3348,24 @@ pub(crate) fn clipboard_backends() -> &'static [(&'static str, &'static [&'stati
     }
 }
 
+/// Clipboard TEXT read backends for this platform, in the order they are
+/// tried. Pure so the argument vector is pinned by a test: `--type text` is
+/// what keeps an image-only clipboard from being read as bytes (#2702).
+#[cfg(unix)]
+pub(crate) fn unix_text_backends() -> &'static [(&'static str, &'static [&'static str])] {
+    #[cfg(target_os = "macos")]
+    {
+        &[("pbpaste", &[])]
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        &[
+            ("wl-paste", &["--no-newline", "--type", "text"]),
+            ("xclip", &["-selection", "clipboard", "-o"]),
+        ]
+    }
+}
+
 /// Try every backend in order until one actually owns the text.
 ///
 /// A backend counts as successful only when it spawned, accepted the whole
@@ -3365,29 +3375,23 @@ pub(crate) fn clipboard_backends() -> &'static [(&'static str, &'static [&'stati
 /// (#2171).
 #[cfg(not(windows))]
 pub(crate) fn copy_with_backends(backends: &[(&str, &[&str])], text: &str) -> bool {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
+    use std::process::Command;
 
     for (program, args) in backends {
-        let Ok(mut child) = Command::new(program)
-            .args(*args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        else {
-            continue;
-        };
-        // A write failure means this backend never got the payload, so it
-        // cannot be trusted even if it exits 0.
-        let wrote = match child.stdin.as_mut() {
-            Some(stdin) => stdin.write_all(text.as_bytes()).is_ok(),
-            None => false,
-        };
-        // Close the pipe before waiting: the tools read to EOF, and holding
-        // stdin open makes `wait` hang on the last backend.
-        drop(child.stdin.take());
-        if wrote && child.wait().is_ok_and(|s| s.success()) {
+        let mut cmd = Command::new(program);
+        cmd.args(*args);
+        // One call that writes the payload, closes the pipe and waits with a
+        // deadline (#2702). A backend that takes the bytes but never exits is
+        // killed rather than waited on, and a write that failed means this
+        // backend never got the text, so its exit code cannot be trusted.
+        if matches!(
+            super::clipboard_exec::write_bytes(
+                cmd,
+                text.as_bytes().to_vec(),
+                super::clipboard_exec::WRITE
+            ),
+            super::clipboard_exec::Capture::Finished { success: true, .. }
+        ) {
             return true;
         }
     }
