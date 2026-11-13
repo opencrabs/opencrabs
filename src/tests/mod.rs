@@ -593,6 +593,8 @@ pub mod telegram_mentions_other_bot_test;
 #[cfg(feature = "telegram")]
 pub mod telegram_menu_scope_test;
 #[cfg(feature = "telegram")]
+pub mod telegram_poll_vote_test;
+#[cfg(feature = "telegram")]
 pub mod telegram_push_target_test;
 #[cfg(feature = "telegram")]
 pub mod telegram_queued_origin_test;

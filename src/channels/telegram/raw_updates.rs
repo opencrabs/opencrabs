@@ -221,6 +221,9 @@ async fn poll_once_inner(st: &mut RawPollState) -> usize {
             "callback_query",
             "message_reaction",
             "my_chat_member",
+            // Poll votes (#2288). An update type missing from this filter is
+            // never delivered at all, which is why polls were one-way.
+            "poll_answer",
             // Guest mode (#2087). Bot API 10.0 added the update type; the
             // pinned teloxide-core does not know it, so this list is the only
             // place it can be asked for. `allowed_updates` is a FILTER: an
@@ -530,6 +533,7 @@ fn update_kind_name(u: &Update) -> &'static str {
         UpdateKind::EditedMessage(_) => "edited_message",
         UpdateKind::CallbackQuery(_) => "callback_query",
         UpdateKind::MessageReaction(_) => "message_reaction",
+        UpdateKind::PollAnswer(_) => "poll_answer",
         UpdateKind::Error(_) => "ERROR(unparsed)",
         _ => "other",
     }

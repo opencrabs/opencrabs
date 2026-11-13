@@ -474,6 +474,10 @@ impl Tool for TelegramSendTool {
                     "items": {"type": "string"},
                     "description": "Array of poll option strings (2–10) for send_poll"
                 },
+                "poll_anonymous": {
+                    "type": "boolean",
+                    "description": "send_poll only. Defaults to false so votes are attributed. An anonymous poll returns no voter, so the bot sees the option picked but not who picked it."
+                },
                 "buttons": {
                     "type": "array",
                     "items": {
@@ -1262,6 +1266,14 @@ impl TelegramSendTool {
                 "'poll_options' must have at least 2 options.".to_string(),
             ));
         }
+        // Anonymous by default in the Bot API, and an anonymous vote carries
+        // no voter, so the agent could never tell who answered (#2288). Callers
+        // have to ask for it explicitly.
+        let anonymous = input
+            .get("poll_anonymous")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let poll_labels = opts.clone();
         let poll_opts: Vec<teloxide::types::InputPollOption> =
             opts.into_iter().map(|s| s.into()).collect();
         match send_retrying_rate_limit("telegram_send send_poll", || {
@@ -1271,11 +1283,30 @@ impl TelegramSendTool {
                 thread_id,
                 question.clone(),
                 poll_opts.clone(),
+                anonymous,
             )
         })
         .await
         {
             Ok(m) => {
+                // The vote arrives later as its own update carrying only the
+                // poll id, so remember the send now or the vote is unroutable.
+                match poll_id_of(&m) {
+                    Some(poll_id) => self.telegram_state.register_poll(
+                        &poll_id,
+                        crate::channels::telegram::state::PollOrigin::new(
+                            context.session_id,
+                            chat_id,
+                            thread_id.map(|t| t.0.0),
+                            question.clone(),
+                            poll_labels,
+                        ),
+                    ),
+                    None => tracing::warn!(
+                        "Telegram: send_poll returned a message without a poll payload; \
+                         votes for this poll cannot be routed (#2288)"
+                    ),
+                }
                 log_send_success(
                     "tool",
                     "send_poll",
@@ -2008,5 +2039,20 @@ mod cross_platform_tests {
         // Without an owner id, this guard has nothing to route to; the None
         // branch in chat_or_err still fires its own message.
         assert_eq!(cross_platform_refusal(Some("discord"), None), None);
+    }
+}
+
+/// Pull the poll id out of a sent-message payload (#2288).
+///
+/// teloxide models a poll as message media, so the id sits three levels down.
+/// A send_poll response always carries one, but the match is exhaustive rather
+/// than unwrapped: losing the id means silently dropping every vote.
+fn poll_id_of(message: &teloxide::types::Message) -> Option<String> {
+    match &message.kind {
+        teloxide::types::MessageKind::Common(common) => match &common.media_kind {
+            teloxide::types::MediaKind::Poll(media) => Some(media.poll.id.0.clone()),
+            _ => None,
+        },
+        _ => None,
     }
 }

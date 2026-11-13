@@ -2254,12 +2254,35 @@ impl TelegramAgent {
                 }
             });
 
+            // Poll votes (#2288). A vote is its own update type with no chat
+            // and no message, so it is spawned off the dependency graph and
+            // routed through the poll map the send side fills in.
+            let poll_handler = Update::filter_poll_answer().endpoint({
+                let deps = deps.clone();
+                move |bot: Bot, answer: teloxide::types::PollAnswer| {
+                    let deps = deps.clone();
+                    async move {
+                        let agent = deps.agent.clone();
+                        let state = deps.telegram_state.clone();
+                        let config_rx = deps.config_rx.clone();
+                        tokio::spawn(async move {
+                            super::poll_answer::handle_poll_answer(
+                                bot, answer, agent, state, config_rx,
+                            )
+                            .await;
+                        });
+                        ResponseResult::Ok(())
+                    }
+                }
+            });
+
             let tree = dptree::entry()
                 .branch(msg_handler)
                 .branch(edited_handler)
                 .branch(cb_handler)
                 .branch(reaction_handler)
-                .branch(my_chat_member_handler);
+                .branch(my_chat_member_handler)
+                .branch(poll_handler);
 
             // Guest queries (#2087) never reach the typed dispatcher: the
             // pinned teloxide-core 0.13.0 has no `guest_message` kind, so a

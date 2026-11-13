@@ -380,7 +380,46 @@ pub struct TelegramState {
     /// chat.  Entries are ephemeral, in-memory, and evictable (LIFO
     /// overwrite is fine; one active set per session is the norm).
     callback_origins: std::sync::Mutex<HashMap<String, Uuid>>,
+    /// Polls this bot sent, keyed by Telegram poll id (#2288). A vote arrives
+    /// as its own update type carrying only the poll id, so the send has to be
+    /// remembered: without this map a vote cannot be routed to a session.
+    poll_origins: std::sync::Mutex<HashMap<String, PollOrigin>>,
 }
+
+/// Which session, chat, and topic a poll came from (#2288).
+#[derive(Clone)]
+pub(crate) struct PollOrigin {
+    pub session_id: Uuid,
+    pub chat_id: i64,
+    pub thread_id: Option<i32>,
+    pub question: String,
+    pub options: Vec<String>,
+    recorded: std::time::Instant,
+}
+
+impl PollOrigin {
+    pub(crate) fn new(
+        session_id: Uuid,
+        chat_id: i64,
+        thread_id: Option<i32>,
+        question: String,
+        options: Vec<String>,
+    ) -> Self {
+        Self {
+            session_id,
+            chat_id,
+            thread_id,
+            question,
+            options,
+            recorded: std::time::Instant::now(),
+        }
+    }
+}
+
+/// Poll ids never repeat, so a day of history is plenty.
+const POLL_ORIGIN_TTL: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+/// Hard bound, so a long-running bot cannot grow this map without limit.
+const POLL_ORIGIN_CAP: usize = 256;
 
 impl Default for TelegramState {
     fn default() -> Self {
@@ -489,6 +528,7 @@ impl TelegramState {
             last_sticky_action: std::sync::Mutex::new(HashMap::new()),
             media_dedup: super::outbound_dedup::MediaSendDedup::default(),
             callback_origins: std::sync::Mutex::new(HashMap::new()),
+            poll_origins: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -598,6 +638,36 @@ impl TelegramState {
             .lock()
             .ok()
             .and_then(|map| map.get(callback_data).copied())
+    }
+
+    /// Remember where a poll was sent so its votes can find their session
+    /// (#2288). Evicts entries older than a day, then the oldest beyond the
+    /// cap: a vote for an evicted poll is logged and dropped, never misrouted.
+    pub(crate) fn register_poll(&self, poll_id: &str, origin: PollOrigin) {
+        let Ok(mut map) = self.poll_origins.lock() else {
+            return;
+        };
+        let now = std::time::Instant::now();
+        map.retain(|_, poll| now.duration_since(poll.recorded) < POLL_ORIGIN_TTL);
+        while map.len() >= POLL_ORIGIN_CAP {
+            let Some(oldest) = map
+                .iter()
+                .min_by_key(|(_, poll)| poll.recorded)
+                .map(|(id, _)| id.clone())
+            else {
+                break;
+            };
+            map.remove(&oldest);
+        }
+        map.insert(poll_id.to_string(), origin);
+    }
+
+    /// Resolve a poll id back to the session that sent it (#2288).
+    pub(crate) fn lookup_poll(&self, poll_id: &str) -> Option<PollOrigin> {
+        self.poll_origins
+            .lock()
+            .ok()
+            .and_then(|map| map.get(poll_id).cloned())
     }
 
     /// Store the connected Bot instance.

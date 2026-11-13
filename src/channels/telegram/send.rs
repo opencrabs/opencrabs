@@ -196,18 +196,27 @@ where
     }
 }
 
-/// `bot.send_poll(chat_id, question, options)` with optional `message_thread_id` (#1079).
+/// `bot.send_poll(chat_id, question, options)` with optional `message_thread_id`
+/// (#1079).
+///
+/// `anonymous` is explicit because the Bot API default is TRUE, and an
+/// anonymous vote carries no voter in `poll_answer`: the bot sees the option
+/// but not who chose it, which makes a poll unless for a group decision (#2288
+/// default is non-anonymous).
 pub fn poll_in_thread<C>(
     bot: &Bot,
     chat_id: C,
     thread_id: Option<ThreadId>,
     question: String,
     options: Vec<teloxide::types::InputPollOption>,
+    anonymous: bool,
 ) -> JsonRequest<teloxide::payloads::SendPoll>
 where
     C: Into<ChatId>,
 {
-    let req = bot.send_poll(chat_id.into(), question, options);
+    let req = bot
+        .send_poll(chat_id.into(), question, options)
+        .is_anonymous(anonymous);
     match thread_id {
         Some(t) => req.message_thread_id(t),
         None => req,
