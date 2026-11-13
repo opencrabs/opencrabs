@@ -121,6 +121,23 @@ pub const fn follows_system(mode: GuiTheme) -> bool {
 pub const TEXT_FLOOR: f64 = 4.5;
 pub const FAINT_FLOOR: f64 = 3.0;
 
+/// The slack a raised surface is held to, in contrast ratio.
+///
+/// The panel is the surface text has the least room on. A base can sit close
+/// enough to the pivot that no step off the canvas leaves the full floor
+/// reachable there, so the panel is allowed this much less than the canvas
+/// (#2746).
+pub const PANEL_SLACK: f64 = 0.05;
+
+/// Where a base stops being dark, as WCAG relative luminance.
+///
+/// The derivation and the accent's legibility walk have to agree on a base's
+/// polarity, or they pull in opposite directions: a mid base called light by
+/// one and dark by the other gets an accent walked toward white on a canvas
+/// that needed black, and the floor is missed. One constant, one answer
+/// (#2746).
+pub const DARK_PIVOT: f64 = 0.179;
+
 /// The bases the Theme screen offers (#2746), and the name each one goes by.
 ///
 /// They are backgrounds, not palettes: every surface, border and text tone is
@@ -161,6 +178,20 @@ fn tone(surface: u32, pole: u32, floor: f64) -> u32 {
     pole
 }
 
+/// The largest step off the canvas in `1..=step` that still lets `pole` read.
+///
+/// The panel is a surface text has to read on, so it may not step so far that
+/// the pole stops clearing the floor: a base just under the pivot is already
+/// within a few thousandths of the luminance where white reaches it, and a
+/// flat six units of lift carries the panel past that and leaves no ink that
+/// reads on both the canvas and the panel (#2746).
+fn readable_step(bg: u32, step: i32, pole: u32) -> i32 {
+    (1..=step)
+        .rev()
+        .find(|candidate| contrast_ratio(shift(bg, *candidate), pole) >= TEXT_FLOOR - PANEL_SLACK)
+        .unwrap_or(1)
+}
+
 /// `ink` moved toward `pole` until it clears `floor` on `bg`. A colour that
 /// already reads is returned untouched, so a role keeps its hue where it can.
 fn lift(ink: u32, bg: u32, pole: u32, floor: f64) -> u32 {
@@ -179,11 +210,13 @@ fn lift(ink: u32, bg: u32, pole: u32, floor: f64) -> u32 {
 /// The whole palette, derived from one background and, if one is picked, one
 /// accent (#2746).
 ///
-/// Surfaces and borders are fixed steps off the canvas. Every text tier is the
-/// mix of the tighter of the two surfaces with the pole that first clears its
-/// floor, so the ladder is the floors, not a table of greys: the tiers are 18,
-/// 15, 11, 6, 5.2 and 4.6 to 1, and the faint tier sits just above
-/// `FAINT_FLOOR`.
+/// Surfaces and borders step off the canvas, and the panel's step is the one
+/// that is bounded: it lifts as far as the pole still reads on it, so a base
+/// a hair under the pivot cannot raise a surface nothing is legible on
+/// (`readable_step`). Every text tier is the mix of the tighter of the two
+/// surfaces with the pole that first clears its floor, so the ladder is the
+/// floors, not a table of greys: the tiers are 18, 15, 11, 6, 5.2 and 4.6 to
+/// 1, and the faint tier sits just above `FAINT_FLOOR`.
 ///
 /// "Tighter" is whichever surface sits closer to the pole, and it flips with
 /// the polarity: the panel is lighter than the canvas in both, so on a dark
@@ -196,13 +229,16 @@ fn lift(ink: u32, bg: u32, pole: u32, floor: f64) -> u32 {
 /// derives the focus ring and the selection wash from it.
 pub fn derive(bg: u32, accent: Option<u32>) -> Palette {
     let bg = bg & 0x00ff_ffff;
-    let dark = relative_luminance(bg) < 0.179;
+    let dark = relative_luminance(bg) < DARK_PIVOT;
     let pole = if dark { 0x00ff_ffff } else { 0x0000_0000 };
     // The two shipped palettes step this way; keeping the step per polarity
     // means a derived dark base looks like `orgn` and a derived light one
     // looks like `light` (#2746).
     let (panel_step, hi_step, track_step) = if dark { (6, 10, 20) } else { (8, 4, -14) };
-    let panel = shift(bg, panel_step);
+    // The panel lifts off the canvas, but never so far that the pole stops
+    // reading on it: past that point no ink clears the floor on both surfaces,
+    // and a base a hair under the pivot would be unreadable (#2746).
+    let panel = shift(bg, readable_step(bg, panel_step, pole));
     // The surface the text has least room on, which is the one nearer the pole
     // (see above): the panel on a dark base, the canvas on a light one.
     let ink = if dark { panel } else { bg };
@@ -483,7 +519,7 @@ pub fn legible_accent(picked: u32, base: Palette) -> u32 {
     if contrast_ratio(picked, base.bg) >= MIN_ACCENT_CONTRAST {
         return picked;
     }
-    let towards = if relative_luminance(base.bg) < 0.5 {
+    let towards = if relative_luminance(base.bg) < DARK_PIVOT {
         0x00ff_ffff
     } else {
         0x000000
