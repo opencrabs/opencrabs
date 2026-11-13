@@ -514,7 +514,15 @@ jobs:
             rm -f dist/opencrabs dist/opencrabs-gui
             ln "dist/OpenCrabs.app/Contents/MacOS/opencrabs" dist/opencrabs
             ln "dist/OpenCrabs.app/Contents/MacOS/opencrabs-gui" dist/opencrabs-gui
-            tar czf "${ASSET_NAME}.tar.gz" -C dist OpenCrabs.app opencrabs opencrabs-gui
+            # The window has its own bundle, or a double-click opens the
+            # terminal client. Missing means the packaging script changed
+            # shape, which must fail here rather than ship one bundle.
+            [ -d "dist/OpenCrabs Desktop.app" ] || {
+              echo "::error::OpenCrabs Desktop.app was not built; refusing to publish a partial archive"
+              exit 1
+            }
+            tar czf "${ASSET_NAME}.tar.gz" -C dist \
+              OpenCrabs.app "OpenCrabs Desktop.app" opencrabs opencrabs-gui
           else
             # A Linux desktop needs a menu entry and an icon next to the binary,
             # or a file manager shows the generic exec glyph. Two entries, one

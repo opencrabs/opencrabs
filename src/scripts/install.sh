@@ -192,7 +192,8 @@ as_root() {
 if [ "$DRY_RUN" -eq 1 ]; then
   info "Dry run: would install ${TAG} for ${OS}-${ARCH}"
   info "Dry run: CLI goes to ${INSTALL_DIR}$([ "$NEEDS_SUDO" -eq 1 ] && echo " (via sudo -n)")"
-  [ "$OS" = "macos" ] && info "Dry run: a bundled release would also land OpenCrabs.app in ${APP_DIR}"
+  [ "$OS" = "macos" ] &&
+    info "Dry run: a bundled release would also land OpenCrabs.app and OpenCrabs Desktop.app in ${APP_DIR}"
   [ "$WITH_DEPS" -eq 1 ] && info "Dry run: would also make sure poppler (pdftoppm) is present"
   [ "$WITH_PATH_ENTRY" -eq 1 ] &&
     info "Dry run: would add ${INSTALL_DIR} to your shell startup file if it is not already on PATH"
@@ -246,6 +247,17 @@ if [ -d "${TMPDIR}/OpenCrabs.app" ]; then
   as_root cp -R "${TMPDIR}/OpenCrabs.app" "${APP_DIR}/OpenCrabs.app"
   as_root ln -sf "${APP_DIR}/OpenCrabs.app/Contents/MacOS/opencrabs" "${INSTALL_DIR}/opencrabs"
   info "Installed OpenCrabs.app in ${APP_DIR}, CLI linked into ${INSTALL_DIR}"
+
+  # The window's own bundle, when the archive carries one. OpenCrabs.app has to
+  # keep the CLI's executable name for /evolve, so double-clicking it opens the
+  # terminal client; this is the entry that opens the window. cp -R follows the
+  # archive's hard link and writes a real file, so the installed copy does not
+  # depend on the other bundle staying put.
+  if [ -d "${TMPDIR}/OpenCrabs Desktop.app" ]; then
+    as_root rm -rf "${APP_DIR}/OpenCrabs Desktop.app"
+    as_root cp -R "${TMPDIR}/OpenCrabs Desktop.app" "${APP_DIR}/OpenCrabs Desktop.app"
+    info "Installed OpenCrabs Desktop.app in ${APP_DIR}"
+  fi
 else
   [ -f "${TMPDIR}/opencrabs" ] ||
     error "The archive contained neither OpenCrabs.app nor an opencrabs binary, so the release layout changed."

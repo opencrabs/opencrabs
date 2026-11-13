@@ -117,6 +117,53 @@ fn the_prerelease_workflow_ships_the_same_linux_desktop_files() {
 }
 
 #[test]
+fn the_bundle_script_emits_a_bundle_that_opens_the_window() {
+    let script = read("scripts/package-macos-app.sh");
+
+    assert!(
+        script.contains(r#"DESKTOP_APP="$OUT/OpenCrabs Desktop.app""#),
+        "the packaging script no longer emits OpenCrabs Desktop.app, so double-clicking the only bundle opens the terminal client and the window is reachable only from a shell"
+    );
+    assert!(
+        script.contains("com.opencrabs.desktop"),
+        "the second bundle reuses the terminal bundle's CFBundleIdentifier, and LaunchServices treats two bundles with one identifier as the same app"
+    );
+    // One plist per bundle: the terminal client must keep the name /evolve
+    // replaces in place, the window must name the GUI binary.
+    for exec in ["<string>opencrabs</string>", "<string>opencrabs-gui</string>"] {
+        assert!(
+            script.contains(&format!("<key>CFBundleExecutable</key>\n    {exec}")),
+            "no Info.plist in the packaging script declares CFBundleExecutable {exec}"
+        );
+    }
+}
+
+#[test]
+fn the_release_workflow_packs_both_macos_bundles() {
+    let workflow = read(".github/workflows/release.yml");
+
+    assert!(
+        workflow.contains("\"OpenCrabs Desktop.app\""),
+        "the release workflow does not pack OpenCrabs Desktop.app, so the download carries the window with no way to launch it"
+    );
+    assert!(
+        workflow.contains("OpenCrabs.app opencrabs opencrabs-gui")
+            || workflow.contains("OpenCrabs.app \"OpenCrabs Desktop.app\""),
+        "the archive step no longer names the macOS bundles"
+    );
+}
+
+#[test]
+fn the_installer_installs_both_macos_bundles() {
+    let installer = read("src/scripts/install.sh");
+
+    assert!(
+        installer.contains("OpenCrabs Desktop.app"),
+        "the macOS installer copies only OpenCrabs.app, so an install script user gets the terminal bundle and no window"
+    );
+}
+
+#[test]
 fn the_desktop_icon_matches_the_shipped_asset() {
     let shipped = std::fs::read(repo().join("packaging/linux/opencrabs.png"))
         .expect("packaging/linux/opencrabs.png is missing");
@@ -136,6 +183,10 @@ fn the_homebrew_cask_installs_the_bundle() {
     assert!(
         cask.contains("app \"OpenCrabs.app\""),
         "the cask does not install OpenCrabs.app, so a Homebrew install would still have no Dock icon"
+    );
+    assert!(
+        cask.contains("app \"OpenCrabs Desktop.app\""),
+        "the cask installs only the terminal bundle, so a Homebrew user gets a Dock icon that opens a terminal instead of the window"
     );
     for suffix in ["macos-arm64.tar.gz", "macos-amd64.tar.gz"] {
         assert!(

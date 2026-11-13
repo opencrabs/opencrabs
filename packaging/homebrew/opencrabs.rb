@@ -33,7 +33,11 @@ cask "opencrabs" do
   desc "AI agent for the terminal"
   homepage "https://github.com/opencrabs/opencrabs"
 
+  # Two bundles: OpenCrabs.app keeps the CLI's executable name so /evolve can
+  # replace it in place, which means double-clicking it opens the terminal
+  # client. OpenCrabs Desktop.app is the entry that opens the window.
   app "OpenCrabs.app"
+  app "OpenCrabs Desktop.app"
 
   # Keep the CLI reachable from a shell without the user touching PATH.
   binary "#{appdir}/OpenCrabs.app/Contents/MacOS/opencrabs"
