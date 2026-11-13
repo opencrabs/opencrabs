@@ -3279,7 +3279,8 @@ impl Render for Dashboard {
                     );
                 (scroller.into_any_element(), footer.into_any_element())
             }
-            Screen::Projects => self.projects_screen(cx),
+            // The shared modal paints Projects once, above the window chrome.
+            Screen::Projects => (div().flex_1().into_any_element(), div().into_any_element()),
             Screen::MissionControl => {
                 let shown = palette::current();
                 // The cards reflow with the width the pane actually has, read
