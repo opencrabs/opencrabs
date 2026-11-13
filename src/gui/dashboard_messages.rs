@@ -712,12 +712,17 @@ impl Dashboard {
         self.copied_generation = self.copied_generation.wrapping_add(1);
         let generation = self.copied_generation;
         cx.notify();
+        // A split leaf draws the check on its own row from this one mark
+        // (#2750), and a cached pane (#2805) only redraws when it is told the
+        // mark moved.
+        self.notify_panes(cx);
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(COPIED_ICON_TTL).await;
             let _ = this.update(cx, |this, cx| {
                 if this.copied_generation == generation && this.copied_row.is_some() {
                     this.copied_row = None;
                     cx.notify();
+                    this.notify_panes(cx);
                 }
             });
         })

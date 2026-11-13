@@ -8,6 +8,8 @@ const GUI_MAIN: &str = include_str!("../gui/main.rs");
 /// The dashboard's inherent impl split into modules by concern (#2822). Each
 /// region below reads the one file the code it pins now lives in.
 const DASHBOARD_KEYS: &str = include_str!("../gui/dashboard_keys.rs");
+const DASHBOARD_NAV: &str = include_str!("../gui/dashboard_nav.rs");
+const DASHBOARD_MESSAGES: &str = include_str!("../gui/dashboard_messages.rs");
 const DASHBOARD_PANES: &str = include_str!("../gui/dashboard_panes.rs");
 const DASHBOARD_TURNS: &str = include_str!("../gui/dashboard_turns.rs");
 
@@ -721,12 +723,8 @@ fn a_pane_turn_settles_its_own_leaf() {
     );
     let walk = flat(pane_element());
     assert!(
-        walk.contains("AnyView::from(pane.clone()).into_any_element()"),
-        "the leaf is drawn by the pane's own entity, so the window never holds a pane's state (#2805)"
-    );
-    assert!(
-        !walk.contains(".cached("),
-        "the pane is not inserted through gpui's cached view path: that path lays a view out with no children and replays its last prepaint, so a scroll inside a pane never reached the screen and a resized box painted over its neighbour (#2805)"
+        walk.contains("AnyView::from(pane.clone())") && walk.contains(".cached(pane_root_style())"),
+        "the leaf is drawn by the pane's own entity through gpui's cached view path, so a window repaint replays it instead of re-walking its transcript (#2805)"
     );
     assert!(
         flat(PANE_VIEW).contains("&self.live,"),
@@ -735,22 +733,96 @@ fn a_pane_turn_settles_its_own_leaf() {
 }
 
 #[test]
+fn a_cached_pane_fills_the_box_it_was_given() {
+    // The cached path lays a view out as a ROOT at the box the parent reserved
+    // for it (`gpui-0.2.2/src/view.rs`, `layout_as_root(bounds.size)`), where
+    // `flex_1` sizes nothing: a leaf that asked for it was laid out at its
+    // natural height, painted over the strips under it and the leaf beside it,
+    // and its transcript's overflow container was unbounded, so no scroll moved
+    // (#2805). The pane's frame fills that box with `size_full` instead, and the
+    // style the walk hands the cache is the same box, spelled once.
+    let view = flat(PANE_VIEW);
+    assert!(
+        view.contains("div().flex().flex_col().size_full().min_w_0().min_h_0()"),
+        "the pane's root box resolves against the box the walk reserved, in both the drawn and the replayed pass"
+    );
+    assert!(
+        view.contains("pane_root().child(leaf_box(LeafBox {"),
+        "the frame is drawn inside that box, so the cached box and the drawn one cannot differ"
+    );
+    assert!(
+        view.contains("pub(crate) fn pane_root_style() -> gpui::StyleRefinement {")
+            && view.contains("root.style().clone()"),
+        "the cached style is read off the same box the frame is drawn in, never a second copy of it"
+    );
+}
+
+#[test]
+fn a_cached_pane_is_told_when_the_scroll_or_the_copy_mark_moves() {
+    // A cached pane only prepaints when it is notified, so the two window
+    // gestures that only set a flag or a field have to say so: a scroll to
+    // bottom is read in the pane's prepaint, and the copy check is drawn from
+    // the window's one mark (#2805, #2750).
+    // Split the raw source first: the flat form folds indentation away, so a
+    // boundary written as `"\n    pub(crate) fn "` would never match it.
+    let nav = DASHBOARD_NAV;
+    let rearm = flat(
+        nav.split("fn rearm_pane_follow(")
+            .nth(1)
+            .expect("the follow rearm is defined")
+            .split("\n    pub(crate) fn ")
+            .next()
+            .expect("the follow rearm has a body"),
+    );
+    assert!(
+        rearm.contains("pane.scroll.scroll_to_bottom();") && rearm.contains("cx.notify();"),
+        "rearming a pane's follow notifies the pane, or the scroll flag is never read"
+    );
+    let follow = flat(
+        nav.split("fn follow_pane(")
+            .nth(1)
+            .expect("the pane follow is defined")
+            .split("\n    pub(crate) fn ")
+            .next()
+            .expect("the pane follow has a body"),
+    );
+    assert!(
+        follow.contains("pane.snap_if_following();") && follow.contains("cx.notify();"),
+        "snapping a pane notifies it, or the snap lands on a frame that never prepaints"
+    );
+    let copied = flat(
+        DASHBOARD_MESSAGES
+            .split("fn mark_copied(")
+            .nth(1)
+            .expect("the copy mark is defined")
+            .split("\n    /// The row whose copy icon")
+            .next()
+            .expect("the copy mark has a body"),
+    );
+    assert_eq!(
+        copied.matches("notify_panes(cx);").count(),
+        2,
+        "the copy mark reaching a leaf and leaving it both notify the panes that draw it"
+    );
+}
+
+#[test]
 fn a_pane_is_handed_its_frame_and_draws_when_it_changes() {
     // The walk resolves each pane's frame and hands it over, so a pane knows
-    // when its own box moved (#2805). This is bookkeeping, not a paint cache:
-    // the pane is inserted as a plain entity element, so it draws on every
-    // frame the window draws and its scroll and its layout stay live.
+    // when its own box moved (#2805). A pane the walk did not re-stamp is not
+    // notified, and the cached path replays its last frame instead of drawing
+    // it again.
     let body = flat(panes_body());
     assert!(
         body.contains("pane.sync_frame(width, stamp, cx)"),
         "the walk hands each pane the frame it resolved, width and stamp together"
     );
     assert!(
-        body.contains("let stamp = self.pane_stamp(*session, width, ix + 1, count);"),
+        body.contains("let stamp = self.pane_stamp(*session, width, count);"),
         "the stamp is built from the pane's own frame, not from a counter that moves every frame"
     );
     assert!(
         flat(PANE_VIEW).contains("if self.stamp == stamp && self.plan.mtime() == before {"),
-        "an unchanged stamp leaves the pane alone instead of notifying it every frame"
+        "an unchanged stamp leaves the pane cached instead of notifying it every frame"
     );
 }

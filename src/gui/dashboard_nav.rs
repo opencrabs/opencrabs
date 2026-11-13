@@ -329,9 +329,14 @@ impl Dashboard {
 
     pub(crate) fn rearm_pane_follow(&mut self, session: Uuid, cx: &mut Context<Self>) {
         if let Some(pane) = self.pane_states.get(&session) {
-            pane.update(cx, |pane, _| {
+            pane.update(cx, |pane, cx| {
                 pane.follow.rearm();
                 pane.scroll.scroll_to_bottom();
+                // A pane is cached (#2805): the scroll lands in its next
+                // prepaint, so the pane has to be told to prepaint again. A
+                // flag nobody reads leaves the reader where they were, which is
+                // what "scroll to bottom does nothing" looked like.
+                cx.notify();
             });
         }
     }
@@ -339,7 +344,12 @@ impl Dashboard {
     /// The same for one pane's transcript (#2685).
     pub(crate) fn follow_pane(&mut self, session: Uuid, cx: &mut Context<Self>) {
         if let Some(pane) = self.pane_states.get(&session) {
-            pane.update(cx, |pane, _| pane.snap_if_following());
+            pane.update(cx, |pane, cx| {
+                pane.snap_if_following();
+                // The snap only sets the handle's flag, and a cached pane that
+                // is not notified never prepaints to read it (#2805).
+                cx.notify();
+            });
         }
     }
 

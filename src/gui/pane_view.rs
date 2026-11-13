@@ -609,7 +609,9 @@ impl Render for PaneView {
         // (#2686, #2687).
         let topics = window.update(cx, |win, cx| win.pane_topics(session, cx));
         let chrome = self.chrome(cx).into_any_element();
-        leaf_box(LeafBox {
+        // The frame fills a box of its own, and that box is what the cached
+        // view path lays out (`pane_root`, #2805).
+        pane_root().child(leaf_box(LeafBox {
             session,
             title: SharedString::from(self.title.clone()),
             is_chat: false,
@@ -623,8 +625,33 @@ impl Render for PaneView {
             body,
             landing,
             window: self.window.clone(),
-        })
+        }))
     }
+}
+
+/// The box one pane's frame fills, and the one style that describes it.
+///
+/// A cached view is laid out in two passes. `AnyView::request_layout` asks the
+/// parent for a box built from this style alone, with no children, and
+/// `prepaint` then lays the view's own root out as a ROOT at exactly that box
+/// (`gpui-0.2.2/src/view.rs`, `element.layout_as_root(bounds.size, ..)`).
+///
+/// `flex_1` means nothing at a root: it grows inside a flex parent, and a root
+/// has none. A leaf that asked for `flex_1` was therefore laid out at its
+/// natural height, taller than the box the walk gave it, painted over the strips
+/// under it and over the leaf beside it, with its transcript's overflow
+/// container unbounded, which is why no scroll moved either. `size_full`
+/// resolves against the box in both passes, so a leaf that draws and a leaf that
+/// replays are the same size (#2805).
+pub(crate) fn pane_root() -> Div {
+    div().flex().flex_col().size_full().min_w_0().min_h_0()
+}
+
+/// The style [`pane_root`] draws with, handed to the cached view path so the box
+/// the parent reserves and the box the view fills cannot drift (#2805).
+pub(crate) fn pane_root_style() -> gpui::StyleRefinement {
+    let mut root = pane_root();
+    root.style().clone()
 }
 
 /// Everything one leaf's frame draws (#2612, #2683, #2687): the box the pane
