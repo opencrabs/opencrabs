@@ -29,9 +29,10 @@ clap_complete = "4.6"
 ratatui = { version = "0.30", features = ["all-widgets"] }
 crossterm = { version = "0.29", features = ["event-stream"] }
 
-# Native desktop client (experimental, phase 0). Zed's GPU-accelerated UI
-# framework. Optional on purpose: the TUI binary, the release build, and CI
-# never pull this tree. Declared per target below (macOS / Linux / Windows)
+# Native desktop app. Zed's GPU-accelerated UI framework. Optional on purpose:
+# a plain `cargo build` stays TUI-only and never pulls this tree, while the
+# release build and CI enable the feature and ship the app beside the TUI
+# binary. Declared per target below (macOS / Linux / Windows)
 # because the Linux window backend lives behind gpui's `wayland` and `x11`
 # features (#2765): one all-target declaration carrying only the macOS
 # features left Linux on gpui's HeadlessClient, so the window never opened.
@@ -322,8 +323,8 @@ notification-sound = ["rodio", "rodio/wav"]
 browser = ["chromey"]
 pdfium = ["dep:pdfium-render"]
 code-graph = ["tree-sitter", "tree-sitter-rust"]
-# Native desktop client (experimental). Off by default so the TUI-only build
-# and the CI gate stay free of the gpui dependency tree.
+# Native desktop app. Off by default so a plain `cargo build` stays free of the
+# gpui dependency tree; the release build and CI enable it.
 gui = ["dep:gpui", "dep:objc2", "dep:objc2-foundation", "dep:objc2-app-kit"]
 [profile.dev]
 # Our own crate is optimised too: the GUI re-runs transcript layout on every
@@ -368,8 +369,8 @@ codegen-units = 16
 name = "opencrabs"
 path = "src/main.rs"
 
-# Native desktop client (experimental). Only built when the `gui` feature is
-# enabled, so a normal `cargo build` produces the TUI exactly as before.
+# Native desktop app. Only built when the `gui` feature is enabled, so a normal
+# `cargo build` produces the TUI exactly as before.
 [[bin]]
 name = "opencrabs-gui"
 path = "src/gui/main.rs"
