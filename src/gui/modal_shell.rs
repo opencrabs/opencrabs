@@ -2,7 +2,7 @@
 
 use crate::palette;
 use crate::theme::{Size, text};
-use gpui::{AnyElement, ClickEvent, Div, SharedString, Window, div, prelude::*, px, rgb, rgba};
+use gpui::{AnyElement, ClickEvent, Div, Rgba, SharedString, Window, div, prelude::*, px, rgb, rgba};
 use opencrabs::config::gui_theme;
 use opencrabs::ui_core::card::concentric_radius;
 use std::rc::Rc;
@@ -17,6 +17,35 @@ pub struct ModalView {
     pub footer: Option<AnyElement>,
     pub width: f32,
     pub max_height: f32,
+}
+
+/// The wash behind every modal (#2891).
+///
+/// The card fill sits six levels above the window background, so a light scrim
+/// leaves the two surfaces indistinguishable. Dark themes therefore go nearly
+/// black under the card; light themes keep a soft wash so the card still reads
+/// as raised.
+pub fn scrim() -> Rgba {
+    let shown = palette::current();
+    if gui_theme::relative_luminance(shown.bg) < 0.18 {
+        rgba(0x050505d9)
+    } else {
+        rgba(0x1b19174d)
+    }
+}
+
+/// The hairline around a modal card (#2891).
+///
+/// `panel_hi` sits four levels above the card fill, which is invisible in a
+/// screenshot and reads as no edge at all. The ring comes from the ink instead:
+/// a faint white line on dark themes, a faint black line on light ones.
+pub fn ring() -> Rgba {
+    let shown = palette::current();
+    if gui_theme::relative_luminance(shown.bg) < 0.18 {
+        rgba(0xffffff26)
+    } else {
+        rgba(0x0000001f)
+    }
 }
 
 /// The card owns its clicks; only the surrounding scrim dismisses it.
@@ -85,7 +114,7 @@ pub fn render(
         .max_h(px(view.max_height))
         .rounded(px(concentric_radius(18.0)))
         .border_1()
-        .border_color(rgb(shown.panel_hi))
+        .border_color(ring())
         .bg(rgb(shown.panel))
         .child(header)
         .child(view.body);
@@ -101,11 +130,7 @@ pub fn render(
         .items_center()
         .justify_center()
         .p_6()
-        .bg(if gui_theme::relative_luminance(shown.bg) < 0.18 {
-            rgba(0x0a0a0a88)
-        } else {
-            rgba(0x1b191733)
-        })
+        .bg(scrim())
         .cursor_pointer()
         .on_click(scrim_door)
         .child(card)

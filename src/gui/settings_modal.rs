@@ -122,7 +122,7 @@ pub fn modal(
         .w(px(760.0))
         .rounded(px(18.0))
         .border_1()
-        .border_color(rgb(shown.panel_hi))
+        .border_color(crate::modal_shell::ring())
         .bg(rgb(shown.panel))
         .child(
             div()
@@ -196,6 +196,7 @@ pub fn modal(
         .flex()
         .items_center()
         .justify_center()
+        .bg(crate::modal_shell::scrim())
         .on_click(scrim_door)
         .child(card)
 }
