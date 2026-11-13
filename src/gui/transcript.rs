@@ -2275,10 +2275,10 @@ fn bubble(
     }
     if !text.trim().is_empty() {
         col = col.child(if role == "assistant" {
-            md_block(&text, selection)
+            md_block(text, selection)
         } else {
             plain_block(
-                &text,
+                text,
                 if role == "user" {
                     USER_TEXT_SIZE
                 } else {
@@ -3793,8 +3793,10 @@ fn message_row(
     press: Option<&PressHandler>,
     picked: Option<bool>,
     edit: Option<&ClickHandler>,
-    copy: Option<&ClickHandler>,
-    copied: bool,
+    // The copy mark and whether this row is the one just copied (#2750).
+    // They travel together: the handler without the state paints the wrong
+    // glyph, and the state without the handler has nothing to paint.
+    copy: Option<(&ClickHandler, bool)>,
 ) -> Stateful<Div> {
     // The hover group a row's edit button answers to (#2826). One name per
     // row, or hovering any message would light up every button on screen.
@@ -3884,7 +3886,7 @@ fn message_row(
     // stored markdown on the clipboard, with no menu in the way. The glyph
     // swaps to a check inside the same fixed box, so the confirmation costs
     // the row no height.
-    if let Some(handler) = copy {
+    if let Some((handler, copied)) = copy {
         let handler = handler.clone();
         let palette = palette::current();
         row = row.child(
@@ -4578,8 +4580,7 @@ pub fn view(
                         message_press.get(id),
                         picked,
                         edit_click,
-                        copy_click,
-                        copied == Some(*id),
+                        copy_click.map(|handler| (handler, copied == Some(*id))),
                     )
                     .into_any_element();
                     let row = match (&drag, selectable, picked) {
