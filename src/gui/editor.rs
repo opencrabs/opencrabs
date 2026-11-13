@@ -2367,10 +2367,8 @@ impl Render for Editor {
                 )
                 .child(paperclip(cx)),
         );
-        if let Some(notice) = notice_row_text {
-            body = body.child(notice_row(&notice));
-        }
         let root = div()
+            .relative()
             .flex()
             .flex_col()
             .justify_center()
@@ -2417,6 +2415,14 @@ impl Render for Editor {
             .text_color(rgb(palette::current().text))
             .min_h(px(44.))
             .child(body);
+        // The notice rides on the card instead of joining the column (#2748):
+        // as a flow row it grew the composer for as long as it was up, so
+        // every copy nudged the conversation above it. Absolute inside the
+        // card costs no layout at all.
+        let root = match notice_row_text {
+            Some(notice) => root.child(notice_row(&notice)),
+            None => root,
+        };
         // Deferred, so the card paints over the field that opened it and the
         // conversation above it rather than under the next sibling (#2690).
         match self.ctx_menu_at {
@@ -2495,7 +2501,10 @@ fn reply_strip(reply: &ReplyAttachment, cx: &mut Context<Editor>) -> gpui::State
 
 fn notice_row(text: &str) -> impl IntoElement {
     div()
-        .w_full()
+        .absolute()
+        .bottom(px(3.))
+        .right(px(12.))
+        .max_w(px(260.))
         .min_w_0()
         .text_size(px(12.))
         .line_height(px(16.))
@@ -3927,11 +3936,19 @@ mod tests {
         );
         assert!(
             src.contains(
-                ["body = body.child(", "notice_row(&notice))"]
+                ["Some(notice) => root.child(", "notice_row(&notice))"]
                     .concat()
                     .as_str()
             ),
-            "a draft gets the notice on its own row under the text"
+            "a draft gets the notice on the card itself, never in its column"
+        );
+        let (_, row) = src
+            .split_once("fn notice_row(")
+            .expect("the notice row is a function");
+        let row = row.split("\n}").next().unwrap_or(row);
+        assert!(
+            row.contains(".absolute()"),
+            "the notice is an overlay, so it costs the composer no height (#2748)"
         );
         assert!(
             src.contains(
