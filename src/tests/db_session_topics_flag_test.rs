@@ -5,6 +5,7 @@ use crate::db::Database;
 use crate::db::models::{Message, Session};
 use crate::db::repository::message::MessageRepository;
 use crate::db::repository::session::SessionRepository;
+use rusqlite::params;
 
 #[tokio::test]
 async fn topics_flag_round_trips_and_keeps_recency() {
@@ -249,6 +250,51 @@ async fn folding_topics_moves_every_row_into_the_parent_in_topic_order() {
     }
 }
 
+/// #2916: `created_at` is whole seconds, so two topics made inside the same
+/// second tie on it. The fold order used to fall back to the topic's random
+/// UUID, so the same family could fold in either order. Pin the tie and assert
+/// creation order wins.
+#[tokio::test]
+async fn folding_same_second_topics_follows_creation_order() {
+    let (db, sessions, messages, parent, topics) = seeded_family().await;
+
+    let ids: Vec<String> = topics.iter().map(|t| t.to_string()).collect();
+    db.pool()
+        .get()
+        .await
+        .expect("pool connection")
+        .interact(move |conn| {
+            for id in ids {
+                conn.execute(
+                    "UPDATE sessions SET created_at = 1700000000 WHERE id = ?1",
+                    params![id],
+                )?;
+            }
+            Ok::<(), rusqlite::Error>(())
+        })
+        .await
+        .expect("interact")
+        .expect("tie both topics to one second");
+
+    sessions
+        .merge_topics_into_parent(parent)
+        .await
+        .expect("fold the family");
+
+    let bodies: Vec<String> = messages
+        .find_recent_by_session(parent, 50)
+        .await
+        .expect("read the parent")
+        .into_iter()
+        .map(|m| m.content)
+        .collect();
+    assert_eq!(
+        bodies,
+        vec!["p0", "p1", "t0-0", "t0-1", "t1-0", "t1-1"],
+        "topics sharing a second still fold in the order they were made"
+    );
+}
+
 #[tokio::test]
 async fn folding_topics_archives_them_and_switches_the_flag_off() {
     let (_db, sessions, _messages, parent, topics) = seeded_family().await;
@@ -313,12 +359,12 @@ async fn folding_keeps_a_tool_call_next_to_its_result() {
     }
 
     sessions
-        .merge_topics_into_parent(parent)
+        .merge_topics_into_parent(parent.id)
         .await
         .expect("fold");
 
     let landed = messages
-        .find_recent_by_session(parent, 50)
+        .find_recent_by_session(parent.id, 50)
         .await
         .expect("read the parent");
     let bodies: Vec<&str> = landed.iter().map(|m| m.content.as_str()).collect();

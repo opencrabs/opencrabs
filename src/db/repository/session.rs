@@ -340,10 +340,13 @@ impl SessionRepository {
             .context("Failed to get connection")?
             .interact(move |conn| {
                 let mut stmt = conn.prepare_cached(
+                    // Root first, then topics in creation order. `created_at` is
+                    // whole seconds so same-second topics tie; `rowid` breaks it
+                    // by insertion order instead of by random UUID (#2916).
                     "SELECT id, COALESCE(title, '') FROM sessions
                      WHERE (id = ?1 OR parent_id = ?1)
                        AND archived_at IS NULL
-                     ORDER BY created_at ASC, id ASC",
+                     ORDER BY created_at ASC, rowid ASC",
                 )?;
                 let rows = stmt.query_map(params![root_str], |r| {
                     Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
@@ -403,9 +406,13 @@ impl SessionRepository {
                 let tx = conn.transaction()?;
                 let children: Vec<String> = {
                     let mut stmt = tx.prepare(
+                        // `created_at` is whole seconds, so two topics made in
+                        // the same second tie on it. The tiebreak must be the
+                        // insertion order, not `id`: that is a random UUID, so
+                        // the fold order changed run to run (#2916).
                         "SELECT id FROM sessions \
                          WHERE parent_id = ?1 AND archived_at IS NULL \
-                         ORDER BY created_at ASC, id ASC",
+                         ORDER BY created_at ASC, rowid ASC",
                     )?;
                     let rows = stmt.query_map(params![parent_str], |r| r.get::<_, String>(0))?;
                     rows.collect::<rusqlite::Result<Vec<_>>>()?
