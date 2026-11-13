@@ -176,7 +176,7 @@ pub const ROWS: &[HelpRow] = &[
         HelpSection::Global,
         "ctrl+,",
         "ctrl-comma",
-        "Settings: agent, memory, keys (/settings)",
+        "Settings modal (/settings)",
     ),
     row(
         HelpSection::Global,
