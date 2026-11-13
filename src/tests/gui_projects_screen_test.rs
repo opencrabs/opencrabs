@@ -50,6 +50,37 @@ fn projects_is_a_real_service_backed_dashboard_screen() {
 }
 
 #[test]
+fn projects_commands_live_in_the_footer_and_delete_is_neutral_at_rest() {
+    assert!(PROJECTS_SCREEN.contains("actions: None"));
+    assert!(PROJECTS_SCREEN.contains("header_close: false"));
+    assert!(PROJECTS_SCREEN.contains(
+        "ProjectsMode::List => \"up/down select  enter open  esc close\""
+    ));
+    let modal = PROJECTS_SCREEN
+        .find("modal_shell::render(")
+        .expect("the modal shell renders Projects");
+    let commands = PROJECTS_SCREEN
+        .rfind("let mut actions =")
+        .expect("the footer builds the command actions");
+    let footer = PROJECTS_SCREEN
+        .rfind("let footer = div()")
+        .expect("the footer lays out summary and commands");
+    assert!(modal < commands && commands < footer);
+
+    for needle in [
+        "action_button(\"project-new\", \"new n\", false, shown)",
+        "action_button(\"project-assign\", \"assign a\", false, shown)",
+        "action_button(\"project-delete\", \"delete d\", false, shown)",
+        "\"confirm delete\",\n                true,",
+    ] {
+        assert!(
+            PROJECTS_SCREEN.contains(needle),
+            "missing command styling: {needle}"
+        );
+    }
+}
+
+#[test]
 fn assignment_can_repair_sessions_from_other_projects() {
     assert!(PROJECTS.contains("pub fn visible_assignments(&self, target: Uuid)"));
     assert!(PROJECTS.contains("AssignmentFilter::Project(id) => session.project_id == Some(id)"));

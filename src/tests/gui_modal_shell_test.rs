@@ -9,6 +9,7 @@ fn theme_consumes_the_shared_modal_shell() {
         .nth(1)
         .expect("Theme exposes its modal renderer");
     assert!(modal.contains("crate::modal_shell::render("));
+    assert!(modal.contains("header_close: true"));
     assert!(!modal.contains(".occlude()"));
     assert!(shell.contains(".id(SharedString::from(format!(\"{prefix}-scrim\")))"));
     assert!(shell.contains(".on_click(|_ev, _window, cx| cx.stop_propagation())"));
@@ -20,6 +21,7 @@ fn models_use_the_shared_shell_and_one_provider_filter() {
     let view = include_str!("../gui/models_modal.rs");
     let actions = include_str!("../gui/dashboard_models.rs");
     assert!(view.contains("modal_shell::render("));
+    assert!(view.contains("header_close: true"));
     assert!(view.contains("let model_rows = self.visible_model_rows();"));
     assert!(view.contains("rows: &model_rows"));
     assert!(actions.contains("rows.retain(|row| row.provider == provider)"));

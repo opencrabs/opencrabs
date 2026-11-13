@@ -648,6 +648,7 @@ pub fn modal(
             title: "Theme".to_string(),
             subtitle: String::new(),
             actions: None,
+            header_close: true,
             body: body.into_any_element(),
             footer: Some(
                 div()

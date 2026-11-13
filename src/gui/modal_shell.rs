@@ -12,6 +12,7 @@ pub struct ModalView {
     pub title: String,
     pub subtitle: String,
     pub actions: Option<AnyElement>,
+    pub header_close: bool,
     pub body: AnyElement,
     pub footer: Option<AnyElement>,
     pub width: f32,
@@ -51,8 +52,9 @@ pub fn render(
                         .max_w_full()
                         .truncate(),
                 ),
-        )
-        .child(
+        );
+    if view.header_close {
+        header = header.child(
             div()
                 .id(SharedString::from(format!("{prefix}-close")))
                 .flex_none()
@@ -67,6 +69,7 @@ pub fn render(
                 .child("Close")
                 .child("esc"),
         );
+    }
     if let Some(actions) = view.actions {
         header = header.child(actions);
     }

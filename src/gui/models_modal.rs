@@ -111,6 +111,7 @@ impl Dashboard {
                 title: "Models".to_string(),
                 subtitle: pair,
                 actions: None,
+                header_close: true,
                 body: body.into_any_element(),
                 footer: Some(footer.into_any_element()),
                 width: 880.0,

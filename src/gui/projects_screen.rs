@@ -36,73 +36,6 @@ impl Dashboard {
                 "Choose a project for this session and every topic inside it".to_string()
             }
         };
-        let mut actions = div().flex().flex_row().items_center().gap_2();
-        match mode {
-            ProjectsMode::List => {
-                actions = actions.child(
-                    projects_view::action_button("project-new", "new", false, palette::current())
-                        .on_click(cx.listener(|this, _ev, _window, cx| {
-                            this.begin_project_create(cx)
-                        })),
-                );
-                if self.projects.selected_project().is_some() {
-                    actions = actions.child(
-                        projects_view::action_button(
-                            "project-assign",
-                            "assign",
-                            false,
-                            palette::current(),
-                        )
-                        .on_click(cx.listener(|this, _ev, _window, cx| {
-                            if let Some(id) =
-                                this.projects.selected_project().map(|project| project.id)
-                            {
-                                this.begin_project_assign(id, cx);
-                            }
-                        })),
-                    );
-                    actions = actions.child(
-                        projects_view::action_button(
-                            "project-delete",
-                            "delete",
-                            true,
-                            palette::current(),
-                        )
-                        .on_click(cx.listener(|this, _ev, _window, cx| {
-                            this.request_project_delete(cx)
-                        })),
-                    );
-                }
-            }
-            ProjectsMode::Detail(project_id) => {
-                actions = actions.child(
-                    projects_view::action_button("project-back", "back", false, palette::current())
-                        .on_click(cx.listener(|this, _ev, _window, cx| this.projects_escape(cx))),
-                );
-                actions = actions.child(
-                    projects_view::action_button(
-                        "project-detail-assign",
-                        "assign",
-                        false,
-                        palette::current(),
-                    )
-                    .on_click(cx.listener(move |this, _ev, _window, cx| {
-                        this.begin_project_assign(project_id, cx)
-                    })),
-                );
-            }
-            ProjectsMode::Assign(_) | ProjectsMode::AssignSession(_) => {
-                actions = actions.child(
-                    projects_view::action_button(
-                        "project-assign-back",
-                        "back",
-                        false,
-                        palette::current(),
-                    )
-                    .on_click(cx.listener(|this, _ev, _window, cx| this.projects_escape(cx))),
-                );
-            }
-        }
         let (body, footer) = self.projects_screen(cx);
         let dismiss = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
             this.close_projects(cx);
@@ -112,7 +45,8 @@ impl Dashboard {
                 id: "projects-modal",
                 title,
                 subtitle,
-                actions: Some(actions.into_any_element()),
+                actions: None,
+                header_close: false,
                 body,
                 footer: Some(footer),
                 width: 760.0,
@@ -374,23 +308,81 @@ impl Dashboard {
                 }
             }
         }
-        let hints = match mode {
-            ProjectsMode::List => "up/down select  enter open  n new  a assign  d delete  esc close",
-            ProjectsMode::Detail(_) => "up/down select  enter open  a assign  u unassign  esc back",
-            ProjectsMode::Assign(_) => {
-                "space check  enter assign  c clear project  d archive  esc back"
+        let mut actions = div().flex().flex_row().items_center().gap_2().flex_none();
+        match mode {
+            ProjectsMode::List => {
+                actions = actions.child(
+                    projects_view::action_button("project-new", "new n", false, shown).on_click(
+                        cx.listener(|this, _ev, _window, cx| this.begin_project_create(cx)),
+                    ),
+                );
+                if self.projects.selected_project().is_some() {
+                    actions = actions.child(
+                        projects_view::action_button("project-assign", "assign a", false, shown)
+                            .on_click(cx.listener(|this, _ev, _window, cx| {
+                                if let Some(id) =
+                                    this.projects.selected_project().map(|project| project.id)
+                                {
+                                    this.begin_project_assign(id, cx);
+                                }
+                            })),
+                    );
+                    actions = actions.child(
+                        projects_view::action_button("project-delete", "delete d", false, shown)
+                            .on_click(cx.listener(|this, _ev, _window, cx| {
+                                this.request_project_delete(cx)
+                            })),
+                    );
+                }
             }
-            ProjectsMode::AssignSession(_) => "up/down select  enter assign  esc cancel",
+            ProjectsMode::Detail(project_id) => {
+                actions = actions.child(
+                    projects_view::action_button("project-back", "back esc", false, shown)
+                        .on_click(cx.listener(|this, _ev, _window, cx| this.projects_escape(cx))),
+                );
+                actions = actions.child(
+                    projects_view::action_button(
+                        "project-detail-assign",
+                        "assign a",
+                        false,
+                        shown,
+                    )
+                    .on_click(cx.listener(move |this, _ev, _window, cx| {
+                        this.begin_project_assign(project_id, cx)
+                    })),
+                );
+            }
+            ProjectsMode::Assign(_) | ProjectsMode::AssignSession(_) => {
+                actions = actions.child(
+                    projects_view::action_button("project-assign-back", "back esc", false, shown)
+                        .on_click(cx.listener(|this, _ev, _window, cx| this.projects_escape(cx))),
+                );
+            }
+        }
+        let hints = match mode {
+            ProjectsMode::List => "up/down select  enter open  esc close",
+            ProjectsMode::Detail(_) => "up/down select  enter open  u unassign",
+            ProjectsMode::Assign(_) => "space check  enter assign  c clear project  d archive",
+            ProjectsMode::AssignSession(_) => "up/down select  enter assign",
         };
         let noun = match mode {
             ProjectsMode::List | ProjectsMode::AssignSession(_) => "project",
             ProjectsMode::Detail(_) | ProjectsMode::Assign(_) => "session",
         };
-        let footer = modal_shell::footer(format!(
+        let summary = modal_shell::footer(format!(
             "{count} {noun}{}  ·  {hints}",
             if count == 1 { "" } else { "s" }
-        ))
-        .into_any_element();
+        ));
+        let footer = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap_3()
+            .w_full()
+            .child(summary)
+            .child(actions)
+            .into_any_element();
         (content.into_any_element(), footer)
     }
 }
