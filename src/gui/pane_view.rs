@@ -477,6 +477,28 @@ impl Render for PaneView {
                 (id, handler)
             })
             .collect();
+        // Every attachment tile in this leaf opens its own file (#2914). The
+        // window mints these from its own transcript (#2395), so a split pane
+        // drew each picture and file inert: the map stayed empty and
+        // `transcript::view` found no handler for the path. The overlay lives
+        // on the window, so the click reports through it, the same way the
+        // pencils above do.
+        let pane_attachments: HashMap<String, transcript::ClickHandler> =
+            transcript::attachment_paths_with_live(&self.transcript, &self.live)
+                .into_iter()
+                .map(|key| {
+                    let path = std::path::PathBuf::from(&key);
+                    let window = edit_window.clone();
+                    let handler: transcript::ClickHandler = std::rc::Rc::new(
+                        move |_ev: &gpui::ClickEvent, _window: &mut Window, cx: &mut App| {
+                            let _ = window.update(cx, |this, cx| {
+                                this.open_preview(path.clone(), cx);
+                            });
+                        },
+                    );
+                    (key, handler)
+                })
+                .collect();
         // One right-press handler per row, on every role (#2827): an answer
         // can be replied to, reacted to, copied or forwarded just as the
         // reader's own message can.
@@ -579,6 +601,8 @@ impl Render for PaneView {
                 wheel: Some(Rc::new(wheel)),
                 live_click: Some(live_click),
                 older: Some(older_click),
+                // Every tile in this leaf opens its own file (#2914).
+                attachments: pane_attachments,
                 // A pane draws the chips its rows carry (#2825). The toggle
                 // is minted by the row menu, which every pane now opens.
                 reactions: self.transcript.reactions.clone(),
