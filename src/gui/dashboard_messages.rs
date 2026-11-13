@@ -321,6 +321,36 @@ impl Dashboard {
             .collect()
     }
 
+    /// Close the message menu or its reaction picker after an outside press or
+    /// expiry (#2862). The press itself keeps travelling to what was clicked.
+    pub(crate) fn msg_menu_close(&mut self, cx: &mut Context<Self>) {
+        self.msg_menu = None;
+        self.msg_menu_row = None;
+        self.msg_menu_leaf = None;
+        self.msg_menu_at = None;
+        self.react_menu = None;
+        self.react_menu_at = None;
+        self.msg_menu_generation = self.msg_menu_generation.wrapping_add(1);
+        cx.notify();
+    }
+
+    /// Expire the current message menu after five seconds. A new menu or a
+    /// manual close bumps the generation, so an older timer cannot close it.
+    fn msg_menu_arm_timeout(&mut self, cx: &mut Context<Self>) {
+        self.msg_menu_generation = self.msg_menu_generation.wrapping_add(1);
+        let generation = self.msg_menu_generation;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(MSG_MENU_TTL).await;
+            let _ = this.update(cx, |this, cx| {
+                let open = this.msg_menu.is_some() || this.react_menu.is_some();
+                if msg_menu_expiry_due(open, this.msg_menu_generation, generation) {
+                    this.msg_menu_close(cx);
+                }
+            });
+        })
+        .detach();
+    }
+
     /// Open the message menu on a stored row (#2613), at the press that
     /// asked for it (#2690).
     ///
@@ -346,6 +376,7 @@ impl Dashboard {
         // menu was open, so a new press on another row ends it.
         self.react_menu = None;
         self.react_menu_at = None;
+        self.msg_menu_arm_timeout(cx);
         cx.notify();
     }
 
@@ -356,6 +387,7 @@ impl Dashboard {
         self.msg_menu = None;
         self.react_menu = Some(id);
         self.react_menu_at = self.msg_menu_at;
+        self.msg_menu_arm_timeout(cx);
         cx.notify();
     }
 

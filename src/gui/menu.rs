@@ -9,8 +9,8 @@
 use crate::palette;
 
 use gpui::{
-    AnyElement, Div, Edges, InteractiveElement, MouseButton, Pixels, Point, SharedString, Stateful,
-    Styled, anchored, div, point, prelude::*, px, rems, rgb,
+    AnyElement, App, Div, Edges, InteractiveElement, MouseButton, MouseDownEvent, Pixels, Point,
+    SharedString, Stateful, Styled, Window, anchored, div, point, prelude::*, px, rems, rgb,
 };
 
 /// Which row action a context-menu item performs.
@@ -127,5 +127,24 @@ pub fn menu_popover(id: &'static str, items: Vec<Stateful<Div>>, at: Point<Pixel
         .offset(point(px(2.0), px(2.0)))
         .snap_to_window_with_margin(Edges::all(px(8.0)))
         .child(menu_card(id, items))
+        .into_any_element()
+}
+
+/// A popover whose card closes when any mouse button goes down outside it.
+///
+/// This runs in the capture phase, before transcript text can stop the press
+/// in the bubble phase. The press still reaches the surface underneath; only
+/// the menu's own state is dismissed (#2862).
+pub fn dismissible_menu_popover(
+    id: &'static str,
+    items: Vec<Stateful<Div>>,
+    at: Point<Pixels>,
+    dismiss: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    anchored()
+        .position(at)
+        .offset(point(px(2.0), px(2.0)))
+        .snap_to_window_with_margin(Edges::all(px(8.0)))
+        .child(menu_card(id, items).on_mouse_down_out(dismiss))
         .into_any_element()
 }

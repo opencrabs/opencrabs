@@ -441,6 +441,14 @@ const CARET_IDLE_AFTER: std::time::Duration = opencrabs::ui_core::palette::CARET
 /// the head of the match and the query narrows from there.
 const FORWARD_PICKER_ROWS: usize = 6;
 
+/// A message actions menu never stays parked over history (#2862).
+const MSG_MENU_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Only the timer belonging to the menu still on screen may close it.
+fn msg_menu_expiry_due(open: bool, current_generation: u64, timer_generation: u64) -> bool {
+    open && current_generation == timer_generation
+}
+
 /// Which messaging channels the config says are live: enabled and carrying the
 /// credential that channel needs. Read once when Seeker opens, so the hint says
 /// "not set up" only when that is true (#2462).
@@ -766,6 +774,9 @@ struct Dashboard {
     /// The card opens under the pointer instead of pinned to the row's top
     /// corner, so a long message cannot put it half a screen away.
     msg_menu_at: Option<gpui::Point<gpui::Pixels>>,
+    /// Which menu's expiry timer is current. Opening another menu invalidates
+    /// the old timer, so it cannot close the new one early (#2862).
+    msg_menu_generation: u64,
     /// The row whose crab pack is open (#2825). One card at a time, so it
     /// closes the message menu that opened it.
     react_menu: Option<Uuid>,
@@ -5485,8 +5496,12 @@ impl Render for Dashboard {
             && let Some(at) = self.msg_menu_at
         {
             let items = self.msg_menu_items(cx);
+            let dismiss = cx.listener(|this, _ev: &MouseDownEvent, _window, cx| {
+                this.msg_menu_close(cx);
+            });
             root = root.child(
-                gpui::deferred(transcript::message_menu_popover(&items, at)).with_priority(2),
+                gpui::deferred(transcript::message_menu_popover(&items, at, dismiss))
+                    .with_priority(2),
             );
         }
         // The crab pack is a window-level card for the same reason (#2825): it
@@ -5496,8 +5511,12 @@ impl Render for Dashboard {
             && let Some(at) = self.react_menu_at
         {
             let cells = self.react_cells(cx);
+            let dismiss = cx.listener(|this, _ev: &MouseDownEvent, _window, cx| {
+                this.msg_menu_close(cx);
+            });
             root = root.child(
-                gpui::deferred(transcript::react_picker_popover(&cells, at)).with_priority(2),
+                gpui::deferred(transcript::react_picker_popover(&cells, at, dismiss))
+                    .with_priority(2),
             );
         }
         // The theme modal is attached last, so it paints over every other
@@ -5906,6 +5925,7 @@ fn main() {
                         msg_menu_leaf: None,
                         edit_row: None,
                         msg_menu_at: None,
+                        msg_menu_generation: 0,
                         react_menu: None,
                         react_menu_at: None,
                         msg_select: Selection::new(),
@@ -9386,6 +9406,37 @@ mod tests {
             .expect("forward open");
         assert!(forward.contains("self.forward_leaf = leaf"));
         assert!(PANE_VIEW.contains("win.forward_picker(cx)"));
+    }
+
+    /// History menus close on an outside press even when text selection stops
+    /// the bubble event, and only the current menu's five-second timer fires.
+    #[test]
+    fn message_menu_dismisses_outside_and_expires_only_current_menu() {
+        assert_eq!(MSG_MENU_TTL, std::time::Duration::from_secs(5));
+        assert!(msg_menu_expiry_due(true, 8, 8));
+        assert!(!msg_menu_expiry_due(false, 8, 8));
+        assert!(!msg_menu_expiry_due(true, 9, 8));
+
+        let messages = include_str!("dashboard_messages.rs");
+        assert!(messages.contains("cx.background_executor().timer(MSG_MENU_TTL)"));
+        assert_eq!(
+            messages.matches("self.msg_menu_arm_timeout(cx);").count(),
+            2,
+            "the row menu and its reaction picker both expire"
+        );
+        let menu = include_str!("menu.rs");
+        assert!(
+            menu.contains("menu_card(id, items).on_mouse_down_out(dismiss)"),
+            "outside presses must dismiss during capture, before text stops them"
+        );
+        let transcript = include_str!("transcript.rs");
+        assert!(transcript.contains(
+            "dismissible_menu_popover(\"message-context-menu\", rows, at, dismiss)"
+        ));
+        assert!(transcript.contains(
+            "dismissible_menu_popover(\"react-picker\", vec![grid_row], at, dismiss)"
+        ));
+        assert!(DASHBOARD.contains("this.msg_menu_close(cx)"));
     }
 }
 

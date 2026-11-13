@@ -31,9 +31,9 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use gpui::{
-    AbsoluteLength, AnyElement, App, ClickEvent, Div, HighlightStyle, MouseButton, Pixels, Point,
-    ScrollHandle, SharedString, Stateful, Styled, StyledText, TextLayout, TextStyle, Window, div,
-    prelude::*, px, rems, rgb, rgba,
+    AbsoluteLength, AnyElement, App, ClickEvent, Div, HighlightStyle, MouseButton, MouseDownEvent,
+    Pixels, Point, ScrollHandle, SharedString, Stateful, Styled, StyledText, TextLayout, TextStyle,
+    Window, div, prelude::*, px, rems, rgb, rgba,
 };
 
 use opencrabs::db::Database;
@@ -3957,7 +3957,11 @@ fn reaction_chips(
 /// It is a [`crate::menu::menu_popover`] card, the same primitive the row menu
 /// uses, so it opens at the point that asked for it and snaps to the window
 /// margin by the one placement rule every menu shares (#2690).
-pub fn react_picker_popover(cells: &[(String, ClickHandler)], at: Point<Pixels>) -> AnyElement {
+pub fn react_picker_popover(
+    cells: &[(String, ClickHandler)],
+    at: Point<Pixels>,
+    dismiss: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
     let palette = palette::current();
     let grid: Vec<Stateful<Div>> = cells
         .iter()
@@ -3988,13 +3992,17 @@ pub fn react_picker_popover(cells: &[(String, ClickHandler)], at: Point<Pixels>)
         .max_w(rems(16.0))
         .gap_0p5()
         .children(grid);
-    crate::menu::menu_popover("react-picker", vec![grid_row], at)
+    crate::menu::dismissible_menu_popover("react-picker", vec![grid_row], at, dismiss)
 }
 
 /// The menu card itself: one row per resolved item, drawn at the pointer that
 /// opened it. It reuses the rail's card and popover so every menu is one
 /// surface with one placement rule (#2690).
-pub fn message_menu_popover(items: &[(String, ClickHandler)], at: Point<Pixels>) -> AnyElement {
+pub fn message_menu_popover(
+    items: &[(String, ClickHandler)],
+    at: Point<Pixels>,
+    dismiss: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
     let palette = palette::current();
     let rows: Vec<Stateful<Div>> = items
         .iter()
@@ -4013,10 +4021,9 @@ pub fn message_menu_popover(items: &[(String, ClickHandler)], at: Point<Pixels>)
                 .on_click(move |ev, window, app| pick(ev, window, app))
         })
         .collect();
-    // The card stops its own presses, so the transcript's dismiss handler
-    // never removes it before its item's click lands: the pick fires on
-    // mouse-up, the dismiss on mouse-down (#2613).
-    crate::menu::menu_popover("message-context-menu", rows, at)
+    // Outside presses dismiss in the capture phase (#2862). Inside presses
+    // still stop at the card, so its item's click lands on mouse-up (#2613).
+    crate::menu::dismissible_menu_popover("message-context-menu", rows, at, dismiss)
 }
 
 /// A row that takes part in a drag. Text segments provide exact offsets; these
