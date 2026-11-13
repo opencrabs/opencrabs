@@ -626,6 +626,7 @@ impl Render for PaneView {
             landing,
             window: self.window.clone(),
         }))
+        .into_any_element()
     }
 }
 
