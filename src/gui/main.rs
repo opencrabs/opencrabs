@@ -2989,14 +2989,34 @@ impl Render for Dashboard {
                             .justify_between()
                             .gap_3()
                             .w_full()
+                            // The Seeker opens with a chord nothing on
+                            // screen named (#2747). The hint is permanent and
+                            // clickable: a hover tooltip is invisible to
+                            // exactly the people who need it, and the chord
+                            // printed matches the platform the window runs on.
                             .child(
                                 div()
+                                    .id("seeker-hint")
                                     .flex()
+                                    .flex_none()
                                     .flex_row()
-                                    .gap_3()
+                                    .items_center()
+                                    .gap_1()
+                                    .rounded_sm()
+                                    .px_1()
                                     .text_xs()
                                     .text_color(rgb(palette::current().text_muted))
-                                    .child("alt+space · seek help"),
+                                    .cursor_pointer()
+                                    .hover(|d| d.bg(rgb(palette::current().panel_hi)))
+                                    .on_click(cx.listener(
+                                        |this, _ev: &gpui::ClickEvent, _window, cx| {
+                                            this.open_finder(cx);
+                                        },
+                                    ))
+                                    .child(SharedString::from(
+                                        opencrabs::ui_core::palette::seeker_chord_label(),
+                                    ))
+                                    .child("· seek"),
                             )
                             .child(
                                 div()
@@ -8843,6 +8863,36 @@ mod tests {
         ] {
             assert!(src.contains(needle), "{needle} is part of the wiring");
         }
+    }
+
+    #[test]
+    fn the_seeker_hint_is_visible_and_clickable() {
+        // #2747: the chord that opens the Seeker was invisible unless you
+        // already knew it. The chat screen draws no header (#2596), so the
+        // hint sits on the footer row that already carries the session name,
+        // and it is a click target, not a hover tooltip: hover-only hints are
+        // invisible to exactly the people who need them.
+        let src = DASHBOARD;
+        let start = src
+            .find("id(\"seeker-hint\")")
+            .expect("the chat footer carries the Seeker hint");
+        let block = &src[start..];
+        let end = block
+            .find(".child(\"\u{b7} seek\")")
+            .expect("the hint names what it opens");
+        let hint = &block[..end];
+        assert!(
+            hint.contains(".on_click(cx.listener("),
+            "the hint must be a click target, not plain text"
+        );
+        assert!(
+            hint.contains("this.open_finder(cx)"),
+            "clicking the hint must open the Seeker"
+        );
+        assert!(
+            hint.contains("seeker_chord_label()"),
+            "the chord printed must match the platform"
+        );
     }
 
     #[test]

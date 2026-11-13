@@ -643,6 +643,20 @@ pub fn opens(alt: bool, platform: bool, key: &str) -> bool {
         || (platform && key.eq_ignore_ascii_case("k"))
 }
 
+/// The Seeker's chord as it is printed on screen, matching the platform the
+/// window runs on: the command key exists only on a Mac, and everywhere else
+/// the platform modifier `opens` reads is ctrl (#2747).
+///
+/// The label lives here, beside the predicate, so the hint a user clicks can
+/// never drift from the chord the handler answers.
+pub fn seeker_chord_label() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "\u{2318}K"
+    } else {
+        "Ctrl+K"
+    }
+}
+
 /// The chord that opens the card in a terminal. Alt arrives there as the ESC
 /// prefix, which crossterm reports as the ALT modifier on the space event, so
 /// `alt+space` reaches this gate intact; the ctrl byte-collision hack of
@@ -2523,6 +2537,19 @@ mod tests {
         assert!(!opens(true, false, "k"));
         assert!(!opens(true, false, "f"));
         assert!(!opens(false, true, " "));
+    }
+
+    /// #2747: the hint printed on screen names the chord the handler answers
+    /// on this platform, so the label can never promise a key the window
+    /// ignores.
+    #[test]
+    fn the_printed_chord_matches_the_platform() {
+        let expected = if cfg!(target_os = "macos") {
+            "\u{2318}K"
+        } else {
+            "Ctrl+K"
+        };
+        assert_eq!(seeker_chord_label(), expected);
     }
 
     /// The terminal gets the bare chord: crossterm reports the ESC prefix of
