@@ -9,11 +9,6 @@
 
 const GUI_MAIN: &str = include_str!("../gui/main.rs");
 
-/// The dialogs themselves, which live in their own module (#2817 follow-up).
-/// The order guards above read the render in the crate root, where each one is
-/// attached; the guards below read the dialog they pin.
-const OVERLAYS: &str = include_str!("../gui/overlays.rs");
-
 /// The Help Center moved to its own module when it became four section cards
 /// (#2893), so the layer guards read the screen where it is now painted.
 const HELP_VIEW: &str = include_str!("../gui/help_view.rs");
