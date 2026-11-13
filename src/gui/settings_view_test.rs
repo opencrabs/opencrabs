@@ -98,7 +98,7 @@ fn values_come_from_the_real_config() {
 }
 
 #[test]
-fn every_keyed_provider_is_listed_without_keeping_its_secret() {
+fn every_keyed_chat_provider_is_listed_without_keeping_its_secret() {
     let mut config = Config::default();
     config.providers.qwen = Some(ProviderConfig {
         api_key: Some("test-qwen-secret".to_string()),
@@ -212,7 +212,7 @@ fn number_steps_clamp_to_the_range() {
     assert_eq!(step_number(guard, 7200, 1), 7200);
     assert_eq!(step_number(guard, 99999, -1), 7140, "out of range snaps first");
     let sweep = spec_of("sweep_interval_secs");
-    assert_eq!(step_number(sweep, 30, -1), 30, "the minimum is respected");
+    assert_eq!(step_number(sweep, 10, -1), 10, "the engine minimum is respected");
 }
 
 #[test]

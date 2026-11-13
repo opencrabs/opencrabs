@@ -332,7 +332,7 @@ impl Dashboard {
             } else {
                 div().child(text(
                     if cred.configured {
-                        "\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}".to_string()
+                        "\u{2022}".repeat(8)
                     } else {
                         "not set".to_string()
                     },

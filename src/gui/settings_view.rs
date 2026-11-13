@@ -60,10 +60,10 @@ pub const SPECS: &[SettingSpec] = &[
     SettingSpec {
         section: "agent",
         key: "completion_notification_enabled",
-        label: "Completion sound",
+        label: "Completion feedback",
         kind: SettingKind::Toggle,
         restart: false,
-        blurb: "master switch for completion feedback",
+        blurb: "master switch for sound and OS notifications",
     },
     SettingSpec {
         section: "agent",
@@ -165,7 +165,7 @@ pub const SPECS: &[SettingSpec] = &[
         section: "memory",
         key: "sweep_interval_secs",
         label: "External sweep interval (s)",
-        kind: SettingKind::Number { min: 30, step: 30, max: 86400 },
+        kind: SettingKind::Number { min: 10, step: 30, max: 86400 },
         restart: false,
         blurb: "freshness sweeps of the external index paths",
     },
@@ -291,8 +291,12 @@ pub fn current_values(config: &Config) -> Vec<RowValue> {
             ("memory", "vector_enabled") => RowValue::Bool(m.vector_enabled),
             ("memory", "sweep_interval_secs") => RowValue::Number(m.sweep_interval_secs),
             ("memory", "backfill_interval_secs") => RowValue::Number(m.backfill_interval_secs),
-            ("memory", "external_allowed_in_shared") => RowValue::Bool(m.external_allowed_in_shared),
-            ("memory", "internal_allowed_in_shared") => RowValue::Bool(m.internal_allowed_in_shared),
+            ("memory", "external_allowed_in_shared") => {
+                RowValue::Bool(m.external_allowed_in_shared)
+            }
+            ("memory", "internal_allowed_in_shared") => {
+                RowValue::Bool(m.internal_allowed_in_shared)
+            }
             // A spec without a reader is a table bug; the Bool is a paintable
             // placeholder, and the dedicated descriptor test is what fails.
             _ => RowValue::Bool(false),
@@ -308,7 +312,7 @@ pub struct CredSpec {
     pub configured: bool,
 }
 
-/// The providers that take an API key, in display order. CLI subprocess
+/// The chat providers that take an API key, in display order. CLI subprocess
 /// providers carry no key and are not listed.
 pub fn credential_rows(config: &Config) -> Vec<CredSpec> {
     let p = &config.providers;

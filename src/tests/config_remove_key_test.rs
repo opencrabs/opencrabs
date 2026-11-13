@@ -22,7 +22,13 @@ fn config_content(home: &Path) -> String {
 
 #[test]
 fn removing_an_override_restores_the_absent_state_and_preserves_neighbours() {
-    let original = "# retained comment\n[agent]\napproval_policy = \"ask\"\nredact_group = true\nredact_dm = false\n";
+    let original = concat!(
+        "# retained comment\n",
+        "[agent]\n",
+        "approval_policy = \"ask\"\n",
+        "redact_group = true\n",
+        "redact_dm = false\n",
+    );
     let (_temp, home) = test_home(original);
     with_home_override(home.clone(), || {
         Config::remove_key("agent", "redact_group").expect("remove the override");

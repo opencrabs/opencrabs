@@ -754,13 +754,13 @@ Code blocks are the exception that needs its own key. They draw in a monospaced 
 
 #### Settings modal
 
-`ctrl+,` opens the settings card over the conversation, in the same centred shape as the theme picker. It writes each change at once through the config file's own locked, revalidating path, so the modal and a hand edit never disagree: values are re-read from `config.toml` every time the card opens.
+`ctrl+,` opens the settings card over the conversation, in the same centred shape as the theme picker. It writes each change at once through the config file's own locked, revalidating path and re-reads `config.toml` every time the card opens, so a hand edit between visits is picked up.
 
 | Section | What you can change |
 |---------|---------------------|
-| **Agent** | approval policy (`ask`, `auto-session`, `auto-always`), the completion-sound master switch and the four OS-notification switches, redaction (global plus the group/DM overrides, where `default` means the key stays absent), lazy tool schemas, thinking-loop guard, time-marker interval, debug file logging |
+| **Agent** | approval policy (`ask`, `auto-session`, `auto-always`), the completion-feedback master switch and the four OS-notification switches, redaction (global plus the group/DM overrides, where `default` means the key stays absent), lazy tool schemas, thinking-loop guard, time-marker interval, debug file logging |
 | **Memory** | vector embeddings, the external sweep and embedding backfill intervals, and the two shared-session gates |
-| **Credentials** | every keyed provider, custom providers included, with the current state shown as `••••••••` or `not set`; enter arms a masked edit (one bullet per typed character), enter saves to `keys.toml`, esc cancels. The key's value is never displayed |
+| **Credentials** | every keyed chat provider, custom providers included, with the current state shown as `••••••••` or `not set`; enter arms a masked edit (one bullet per typed character), enter saves to `keys.toml`, esc cancels. The key's value is never displayed |
 
 `↑`/`↓` walk the rows, `enter` flips or cycles a value, `←`/`→` step the numeric rows, and the `-`/`+` controls do the same with the mouse. Settings that only take effect at startup (lazy tools, vector embeddings) carry an amber `restart` tag, and the status line says so again after the save. `esc` or a click outside the card closes it.
 
