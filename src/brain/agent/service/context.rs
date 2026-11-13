@@ -1867,15 +1867,15 @@ pub(crate) fn cap_entry_body(body: &str, budget: usize) -> String {
 pub(crate) fn replace_session_entry(existing: &str, session_id: Uuid, entry: &str) -> String {
     let open = format!("<!-- compaction:session:{session_id} -->");
     let close = format!("<!-- /compaction:session:{session_id} -->");
-    if let Some(start) = existing.find(&open) {
-        if let Some(rel_end) = existing[start..].find(&close) {
-            let end = start + rel_end + close.len();
-            let mut out = String::with_capacity(existing.len() + entry.len());
-            out.push_str(&existing[..start]);
-            out.push_str(entry);
-            out.push_str(&existing[end..]);
-            return out;
-        }
+    if let Some(start) = existing.find(&open)
+        && let Some(rel_end) = existing[start..].find(&close)
+    {
+        let end = start + rel_end + close.len();
+        let mut out = String::with_capacity(existing.len() + entry.len());
+        out.push_str(&existing[..start]);
+        out.push_str(entry);
+        out.push_str(&existing[end..]);
+        return out;
     }
     let trimmed = existing.trim_end();
     if trimmed.is_empty() {

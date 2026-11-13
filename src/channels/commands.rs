@@ -2505,7 +2505,7 @@ pub async fn switch_model(
     let change_msg = format!(
         "[Model changed to {}]",
         crate::utils::provider_pair::display_model(
-            &display_name,
+            display_name,
             crate::utils::provider_pair::bare_model(&provider_name, &canonical),
         )
     );
