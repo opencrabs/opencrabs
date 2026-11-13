@@ -17,7 +17,7 @@ fn body_row() -> &'static str {
         .split_once("let body = div()")
         .expect("the body row is built in models_modal.rs");
     let (row, _) = from_body
-        .split_once("let footer = div()")
+        .split_once("let footer")
         .expect("the footer follows the body row");
     row
 }
@@ -68,8 +68,23 @@ fn the_window_is_sized_for_the_fixed_body() {
     // The window has to match what the body shows so `visible_window` can
     // slide it instead.
     assert!(
-        MODAL.contains("max_models: 9,"),
-        "the picker window must fit the 440 body, or the selection leaves the \
-         visible area (#2918)"
+        MODAL.contains("max_models: 8,"),
+        "the picker window must fit the padded 440 body, or the selection \
+         leaves the visible area (#2918)"
+    );
+}
+
+#[test]
+fn the_two_panels_and_rows_share_the_concentric_radius_family() {
+    assert_eq!(
+        body_row()
+            .matches(".rounded(px(concentric_radius(6.0)))")
+            .count(),
+        2,
+        "the provider and result panels must have the same 18px radius (#2921)"
+    );
+    assert!(
+        PICKER.contains(".rounded(px(concentric_radius(12.0)))"),
+        "search and model rows use the nested 12px radius (#2921)"
     );
 }

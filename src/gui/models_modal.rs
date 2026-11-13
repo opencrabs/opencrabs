@@ -1,19 +1,24 @@
 //! Standalone model browser. Onboarding keeps its own wizard layout.
 
 use super::*;
+use opencrabs::ui_core::card::concentric_radius;
 
 impl Dashboard {
     pub(crate) fn models_modal(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let shown = palette::current();
         let visible = models::filtered_rows(&self.models_rows, &self.models_query);
         let providers = models::providers(&visible);
-        let live = agent_bridge::bridge().map(|bridge| match self.models_session.or(self.chat_session) {
-            Some(sid) => (
-                bridge.service.provider_name_for_session(sid),
-                bridge.service.provider_model_for_session(sid),
-            ),
-            None => (bridge.service.provider_name(), bridge.service.provider_model()),
-        });
+        let live =
+            agent_bridge::bridge().map(|bridge| match self.models_session.or(self.chat_session) {
+                Some(sid) => (
+                    bridge.service.provider_name_for_session(sid),
+                    bridge.service.provider_model_for_session(sid),
+                ),
+                None => (
+                    bridge.service.provider_name(),
+                    bridge.service.provider_model(),
+                ),
+            });
         let pair = live
             .as_ref()
             .map(|(provider, model)| format!("{provider} / {model}"))
@@ -29,7 +34,7 @@ impl Dashboard {
             let id = row.provider.clone();
             let selected = selected_provider.as_deref() == Some(id.as_str());
             let single = models::single_model_pair(&visible, &row);
-            let mut entry = div()
+            let entry = div()
                 .id(SharedString::from(format!("models-provider-{id}")))
                 .flex()
                 .flex_row()
@@ -37,23 +42,36 @@ impl Dashboard {
                 .gap_2()
                 .px_3()
                 .py_2()
-                .rounded(px(8.0))
+                .rounded(px(concentric_radius(12.0)))
+                .border_1()
+                .border_color(rgb(if selected { shown.track } else { shown.bg }))
+                .bg(rgb(if selected { shown.panel_hi } else { shown.bg }))
                 .cursor_pointer()
-                .child(text(row.name.clone(), Size::Sm, shown.text).flex_1().min_w_0().truncate())
+                .hover(|d| d.bg(rgb(shown.panel_hi)).border_color(rgb(shown.track)))
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(3.0))
+                        .h(px(16.0))
+                        .rounded(px(2.0))
+                        .when(selected, |marker| marker.bg(rgb(shown.accent))),
+                )
+                .child(
+                    text(row.name.clone(), Size::Sm, shown.text)
+                        .flex_1()
+                        .min_w_0()
+                        .truncate(),
+                )
                 .child(text(row.count.to_string(), Size::Xs, shown.text_muted));
-            if selected {
-                entry = entry.bg(rgb(shown.panel_hi)).border_1().border_color(rgb(shown.accent));
-            }
-            provider_list = provider_list.child(entry.on_click(cx.listener(
-                move |this, _ev, _window, cx| {
+            provider_list =
+                provider_list.child(entry.on_click(cx.listener(move |this, _ev, _window, cx| {
                     this.models_provider = Some(id.clone());
                     this.models_index = 0;
                     if let Some(pair) = single.clone() {
                         this.switch_model(pair, cx);
                     }
                     cx.notify();
-                },
-            )));
+                })));
         }
         let model_rows = self.visible_model_rows();
         let picker = model_picker::render(
@@ -68,15 +86,14 @@ impl Dashboard {
                 active_provider,
                 onboarding: false,
                 search_focused: true,
-                // Sized for the 440 body, not for a terminal's 24 rows. A row
-                // is about 40px (py_2 plus a line of small text, plus the
-                // column gap) and the search field takes roughly 46, so nine
-                // is what the body actually shows. A larger window makes the
-                // list taller than its own body: the selection then walks off
-                // the visible area while the scroll offset stays put (#2918).
-                // With the window matched to the body, `visible_window` slides
-                // it instead, which is the rolling list the card should have.
-                max_models: 9,
+                // Sized for the 440 body after the panel's padding, not for a
+                // terminal's 24 rows. A row is about 40px and the search field
+                // plus provider heading take the top of the panel, so eight
+                // rows stay visible. A larger window makes the list taller
+                // than its own body: the selection then walks off the visible
+                // area while the scroll offset stays put (#2918). With the
+                // window matched to the body, `visible_window` slides it.
+                max_models: 8,
                 row_layout: opencrabs::ui_core::model_layout::ModelRowLayout::Stacked,
                 provider_label_width: 0.0,
                 show_provider_labels: false,
@@ -102,7 +119,11 @@ impl Dashboard {
                     .h_full()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .pr_2()
+                    .p_2()
+                    .rounded(px(concentric_radius(6.0)))
+                    .border_1()
+                    .border_color(rgb(shown.track))
+                    .bg(rgb(shown.bg))
                     .child(provider_list),
             )
             // A column flex parent, not a plain block: `picker.body` asks for
@@ -118,16 +139,22 @@ impl Dashboard {
                     .min_h_0()
                     .h_full()
                     .overflow_hidden()
+                    .p_3()
+                    .rounded(px(concentric_radius(6.0)))
+                    .border_1()
+                    .border_color(rgb(shown.track))
+                    .bg(rgb(shown.bg))
                     .child(picker.body),
             );
-        let footer = div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .child(picker.footer)
-            .child(modal_shell::footer(
-                "type filter or custom id  enter switch  esc close".to_string(),
-            ));
+        let footer =
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(picker.footer)
+                .child(modal_shell::footer(
+                    "type filter or custom id  enter switch  esc close".to_string(),
+                ));
         let dismiss = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
             this.screen = Screen::Chat;
             this.refocus_screen();

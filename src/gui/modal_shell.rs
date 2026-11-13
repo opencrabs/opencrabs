@@ -2,9 +2,11 @@
 
 use crate::palette;
 use crate::theme::{Size, text};
-use gpui::{AnyElement, ClickEvent, Div, Rgba, SharedString, Window, div, prelude::*, px, rgb, rgba};
+use gpui::{
+    AnyElement, ClickEvent, Div, Rgba, SharedString, Window, div, prelude::*, px, rgb, rgba,
+};
 use opencrabs::config::gui_theme;
-use opencrabs::ui_core::card::concentric_radius;
+use opencrabs::ui_core::card::{CARD_RADIUS, concentric_radius, glass_fill};
 use std::rc::Rc;
 
 pub struct ModalView {
@@ -69,6 +71,9 @@ pub fn render(
         .justify_between()
         .gap_3()
         .w_full()
+        .pb_3()
+        .border_b_1()
+        .border_color(rgb(shown.track))
         .child(
             div()
                 .flex()
@@ -90,10 +95,16 @@ pub fn render(
                 .flex_row()
                 .items_center()
                 .gap_1()
+                .px_2()
+                .py_1()
+                .rounded(px(concentric_radius(14.0)))
+                .border_1()
+                .border_color(rgb(shown.track))
+                .bg(rgb(shown.bg))
                 .text_xs()
                 .text_color(rgb(shown.text_faint))
                 .cursor_pointer()
-                .hover(|d| d.text_color(rgb(shown.text)))
+                .hover(|d| d.text_color(rgb(shown.text)).border_color(rgb(shown.text_muted)))
                 .on_click(close_door)
                 .child("Close")
                 .child("esc"),
@@ -107,19 +118,26 @@ pub fn render(
         .on_click(|_ev, _window, cx| cx.stop_propagation())
         .flex()
         .flex_col()
-        .gap_3()
-        .p_4()
+        .gap_4()
+        .p_5()
         .w(px(view.width))
         .max_w(px(view.width))
         .max_h(px(view.max_height))
-        .rounded(px(concentric_radius(18.0)))
+        .rounded(px(CARD_RADIUS))
         .border_1()
         .border_color(ring())
-        .bg(rgb(shown.panel))
+        .bg(glass_fill(shown.panel))
         .child(header)
         .child(view.body);
     if let Some(footer) = view.footer {
-        card = card.child(footer);
+        card = card.child(
+            div()
+                .w_full()
+                .pt_3()
+                .border_t_1()
+                .border_color(rgb(shown.track))
+                .child(footer),
+        );
     }
     div()
         .id(SharedString::from(format!("{prefix}-scrim")))

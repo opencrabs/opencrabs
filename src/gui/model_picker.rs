@@ -3,6 +3,7 @@
 use super::theme::{Size, text};
 use super::{Dashboard, agent_bridge, models, palette};
 use gpui::{Context, Div, SharedString, div, prelude::*, px, rgb};
+use opencrabs::ui_core::card::concentric_radius;
 use opencrabs::ui_core::model_layout::ModelRowLayout;
 
 pub struct ModelPickerView<'a> {
@@ -51,7 +52,7 @@ pub fn render(cx: &mut Context<Dashboard>, view: ModelPickerView<'_>) -> Rendere
         .min_w_0()
         .px_3()
         .py_2()
-        .rounded(px(6.0))
+        .rounded(px(concentric_radius(12.0)))
         .bg(rgb(if search_focused {
             shown.panel_hi
         } else {
@@ -80,7 +81,7 @@ pub fn render(cx: &mut Context<Dashboard>, view: ModelPickerView<'_>) -> Rendere
         .child(text(
             if search_focused { "\u{258f}" } else { "" },
             Size::Sm,
-            shown.amber,
+            shown.accent,
         ))
         .on_click(cx.listener(move |this, _ev, _window, cx| {
             if onboarding {
@@ -121,7 +122,7 @@ pub fn render(cx: &mut Context<Dashboard>, view: ModelPickerView<'_>) -> Rendere
                         .pt_3()
                         .pb_1()
                         .child(
-                            text(name, Size::Xs, shown.amber)
+                            text(name, Size::Xs, shown.text_muted)
                                 .flex_1()
                                 .min_w_0()
                                 .truncate(),
@@ -144,7 +145,7 @@ pub fn render(cx: &mut Context<Dashboard>, view: ModelPickerView<'_>) -> Rendere
                         if row.current { "\u{25cf}" } else { " " },
                         Size::Sm,
                         if row.current {
-                            shown.amber
+                            shown.accent
                         } else {
                             shown.text_muted
                         },
@@ -158,7 +159,9 @@ pub fn render(cx: &mut Context<Dashboard>, view: ModelPickerView<'_>) -> Rendere
                     .min_w_0()
                     .px_3()
                     .py_2()
-                    .rounded(px(6.0));
+                    .rounded(px(concentric_radius(12.0)))
+                    .cursor_pointer()
+                    .hover(|d| d.bg(rgb(shown.panel_hi)));
                 entry = match view.row_layout {
                     ModelRowLayout::Columns => entry
                         .flex_row()
@@ -234,7 +237,7 @@ pub fn render(cx: &mut Context<Dashboard>, view: ModelPickerView<'_>) -> Rendere
                     .child(text(
                         format!("Use custom model: {pair}"),
                         Size::Sm,
-                        shown.amber,
+                        shown.accent,
                     ))
                     .on_click(cx.listener(move |this, _ev, _window, cx| {
                         this.activate_model_pair(pair.clone(), onboarding, cx);

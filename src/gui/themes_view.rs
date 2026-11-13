@@ -131,8 +131,8 @@ fn split_miniature(accent: u32) -> Div {
         .overflow_hidden()
         .border_1()
         .border_color(rgb(ORGN.track))
-        .child(div().flex_1().h_full().child(half(ORGN)))
-        .child(div().flex_1().h_full().child(half(LIGHT)))
+        .child(div().flex_1().h_full().overflow_hidden().child(half(ORGN)))
+        .child(div().flex_1().h_full().overflow_hidden().child(half(LIGHT)))
 }
 
 /// One card: the miniature, its name, and the radio ring that marks the
@@ -140,10 +140,9 @@ fn split_miniature(accent: u32) -> Div {
 /// theme when the modal opens, and the card under the keyboard as the arrows
 /// walk it, because the preview has already repainted the window.
 ///
-/// `shown` is the palette that card would paint, resolved by the caller from
-/// the base the Theme screen holds (#2746). The card does not ask the system
-/// itself: the system only decides what `auto` means, and the caller already
-/// knows the answer.
+/// `shown` is the candidate palette for the miniature, resolved by the caller
+/// from the base the Theme screen holds (#2746). The surrounding card reads the
+/// window's live palette instead, so every card keeps the same chrome (#2921).
 pub fn card(
     mode: GuiTheme,
     label: &str,
@@ -152,6 +151,10 @@ pub fn card(
     accent: u32,
     shown: Palette,
 ) -> Stateful<Div> {
+    // The modal owns the card chrome. Candidate palettes belong in the
+    // miniature only, so Light and Custom do not turn the picker itself into
+    // a patchwork of unrelated surfaces (#2921).
+    let chrome = crate::palette::current();
     let ring = if selected {
         div()
             .flex_none()
@@ -161,32 +164,32 @@ pub fn card(
             .justify_center()
             .rounded(px(7.0))
             .bg(rgb(accent))
-            .child(div().size(px(5.0)).rounded(px(3.0)).bg(rgb(shown.panel)))
+            .child(div().size(px(5.0)).rounded(px(3.0)).bg(rgb(chrome.panel)))
     } else {
         div()
             .flex_none()
             .size(px(14.0))
             .rounded(px(7.0))
             .border_1()
-            .border_color(rgb(shown.text_faint))
+            .border_color(rgb(chrome.text_faint))
     };
     div()
         .id(SharedString::from(format!("theme-card-{label}")))
         .flex()
         .flex_col()
         .gap_2()
-        .p_2()
+        .p_3()
         .w(px(132.0))
-        .rounded(px(concentric_radius(14.0)))
+        .rounded(px(concentric_radius(6.0)))
         .border_1()
         .border_color(if selected {
             rgb(accent)
         } else {
-            rgb(shown.panel_hi)
+            rgb(chrome.track)
         })
-        .bg(rgb(shown.panel))
+        .bg(rgb(chrome.bg))
         .cursor_pointer()
-        .hover(|d| d.bg(rgb(shown.panel_hi)))
+        .hover(|d| d.bg(rgb(chrome.panel_hi)))
         .child(if mode == GuiTheme::Auto {
             split_miniature(accent)
         } else {
@@ -199,13 +202,13 @@ pub fn card(
                 .items_center()
                 .justify_between()
                 .w_full()
-                .child(text(label.to_string(), Size::Xs, shown.text))
+                .child(text(label.to_string(), Size::Sm, chrome.text))
                 .child(ring),
         )
         .child(
             div()
                 .text_xs()
-                .text_color(rgb(shown.text_faint))
+                .text_color(rgb(chrome.text_muted))
                 .child(SharedString::from(hint.to_string())),
         )
 }
@@ -243,6 +246,11 @@ pub fn base_row(current: Option<u32>, swatches: Vec<Stateful<Div>>, shown: Palet
         .flex_col()
         .gap_2()
         .w_full()
+        .p_3()
+        .rounded(px(concentric_radius(6.0)))
+        .border_1()
+        .border_color(rgb(shown.track))
+        .bg(rgb(shown.bg))
         .child(
             div()
                 .flex()
@@ -416,7 +424,11 @@ pub fn accent_row(
         .items_center()
         .gap_4()
         .w_full()
-        .pt_2()
+        .p_3()
+        .rounded(px(concentric_radius(6.0)))
+        .border_1()
+        .border_color(rgb(shown.track))
+        .bg(rgb(shown.bg))
         .child(wheel(hue, saturation, value, areas.wheel))
         .child(
             div()
@@ -563,43 +575,53 @@ pub fn font_row(
     rows: Vec<Stateful<Div>>,
 ) -> Div {
     let shown = crate::palette::current();
-    let mut column = div().flex().flex_col().gap_1().w_full().child(
-        div()
-            .id("theme-font-head")
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_between()
-            .w_full()
-            .py_1()
-            .cursor_pointer()
-            .on_click(toggle)
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(shown.text_muted))
-                    .child("Font"),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(shown.text))
-                            .child(SharedString::from(gui_font::row_label(current))),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(shown.text_faint))
-                            .child(if open { "close" } else { "change" }),
-                    ),
-            ),
-    );
+    let mut column = div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .w_full()
+        .p_3()
+        .rounded(px(concentric_radius(6.0)))
+        .border_1()
+        .border_color(rgb(shown.track))
+        .bg(rgb(shown.bg))
+        .child(
+            div()
+                .id("theme-font-head")
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .w_full()
+                .py_1()
+                .cursor_pointer()
+                .on_click(toggle)
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(shown.text_muted))
+                        .child("Font"),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(shown.text))
+                                .child(SharedString::from(gui_font::row_label(current))),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(shown.text_faint))
+                                .child(if open { "close" } else { "change" }),
+                        ),
+                ),
+        );
     if open {
         // A bounded height with a scroll, because the catalog is every family
         // the machine has: a few hundred on a stock macOS install.
@@ -657,8 +679,8 @@ pub fn modal(
                     .child(SharedString::from(footer.to_string()))
                     .into_any_element(),
             ),
-            width: 588.0,
-            max_height: 760.0,
+            width: 620.0,
+            max_height: 840.0,
         },
         dismiss,
     )

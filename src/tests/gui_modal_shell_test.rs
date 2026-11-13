@@ -14,6 +14,26 @@ fn theme_consumes_the_shared_modal_shell() {
     assert!(shell.contains(".id(SharedString::from(format!(\"{prefix}-scrim\")))"));
     assert!(shell.contains(".on_click(|_ev, _window, cx| cx.stop_propagation())"));
     assert!(shell.contains(".id(SharedString::from(format!(\"{prefix}-close\")))"));
+    assert!(shell.contains(".rounded(px(CARD_RADIUS))"));
+    assert!(shell.contains(".bg(glass_fill(shown.panel))"));
+    assert!(shell.contains(".border_b_1()"));
+    assert!(shell.contains(".border_t_1()"));
+}
+
+#[test]
+fn theme_previews_do_not_recolor_their_cards() {
+    let theme = include_str!("../gui/themes_view.rs");
+    let card = theme
+        .split("pub fn card(")
+        .nth(1)
+        .and_then(|tail| tail.split("pub fn swatch(").next())
+        .expect("Theme exposes its card renderer");
+    assert!(card.contains("let chrome = crate::palette::current();"));
+    assert!(card.contains(".rounded(px(concentric_radius(6.0)))"));
+    assert!(card.contains(".bg(rgb(chrome.bg))"));
+    assert!(card.contains("Size::Sm, chrome.text"));
+    assert!(card.contains("miniature(shown, accent)"));
+    assert!(!card.contains(".bg(rgb(shown.panel))"));
 }
 
 #[test]
