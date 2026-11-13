@@ -234,20 +234,29 @@ jobs:
           # Ubuntu 24.04 and every older distribution with "GLIBC_2.43 not
           # found" (#2206). The arm64 job below is pinned for the same reason;
           # both stay on the oldest image we intend to support.
+          #
+          # Thin LTO on both Linux targets. A fat-LTO link of the whole binary
+          # takes a single rustc past 14.8 GB RSS on the hosted arm runner
+          # (16 GB, no real swap): memory hits 63 MB available, the VM freezes,
+          # and GitHub kills the runner with a shutdown signal and exit 143
+          # after 25 to 30 silent minutes. Measured on a sampled build of
+          # v0.5.2; waproto 0.7.0 alone generates 164k lines that all land in
+          # the fat-LTO module.
+          #
+          # amd64 does link the fat module with the desktop client in it: the
+          # 2026-11-11 prerelease built it that way and finished (run
+          # 42999729817). It is thin anyway. That margin belongs to a hosted
+          # 16 GB runner and it shrank when gpui, blade-graphics, ash and the
+          # wayland and x11 stacks joined the link; a few minutes of extra link
+          # time is the cheaper side of that trade on a tag run nobody can
+          # debug. Darwin and Windows build elsewhere and keep the profile
+          # value.
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             artifact_name: opencrabs
             asset_suffix: linux-amd64
+            release_lto: thin
 
-          # Thin LTO on this target only. The fat-LTO link of the whole binary
-          # takes a single rustc past 14.8 GB RSS on the hosted arm runner
-          # (16 GB, no real swap): memory hits 63 MB available, the VM
-          # freezes, and GitHub kills the runner with a shutdown signal and
-          # exit 143 after 25 to 30 silent minutes. Measured on a sampled
-          # build of v0.5.2; waproto 0.7.0 alone generates 164k lines that
-          # all land in the fat-LTO module. The amd64 runner squeaks through
-          # the same link, so every other target keeps the Cargo.toml
-          # profile.
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             artifact_name: opencrabs
