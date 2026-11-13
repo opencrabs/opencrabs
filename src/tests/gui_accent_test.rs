@@ -8,8 +8,8 @@
 
 use crate::config::GuiTheme;
 use crate::config::gui_theme::{
-    DEFAULT_ACCENT, LIGHT, MIN_ACCENT_CONTRAST, ORGN, contrast_ratio, format_accent, inside,
-    legible_accent, parse_accent, resolve, slider_value, wheel_drag, wheel_hit,
+    DEFAULT_ACCENT, LIGHT, MIN_ACCENT_CONTRAST, ORGN, contrast_ratio, derive, format_accent,
+    inside, legible_accent, parse_accent, resolve, slider_value, wheel_drag, wheel_hit,
 };
 
 /// A wheel hundred pixels square, so its centre is (150, 150) and its radius
@@ -207,7 +207,7 @@ fn custom_stores_the_pick_and_paints_a_legible_one() {
     let picked = 0x101010u32;
     let hex = format_accent(picked);
     assert_eq!(parse_accent(&hex), Some(picked), "the hex round trips");
-    let shown = resolve(GuiTheme::Custom, true, Some(&hex));
+    let shown = resolve(GuiTheme::Custom, true, Some(&hex), None);
     assert_eq!(shown.bg, ORGN.bg, "the base is still the dark one");
     assert_ne!(shown.accent, picked, "the painted accent was lifted");
     assert!(contrast_ratio(shown.accent, shown.bg) >= MIN_ACCENT_CONTRAST);
@@ -229,6 +229,10 @@ fn a_malformed_accent_falls_back_to_the_mode() {
         Some(0x123456),
         "spaces are trimmed"
     );
-    let shown = resolve(GuiTheme::Custom, false, Some("not a colour"));
-    assert_eq!(shown, LIGHT, "an unparseable accent leaves the base alone");
+    let shown = resolve(GuiTheme::Custom, false, Some("not a colour"), None);
+    assert_eq!(
+        shown,
+        derive(LIGHT.bg, None),
+        "an unparseable accent leaves the derived base alone"
+    );
 }

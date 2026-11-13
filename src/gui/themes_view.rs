@@ -24,11 +24,7 @@ use crate::theme::{Size, text};
 pub const CARDS: [(GuiTheme, &str, &str); 4] = [
     (GuiTheme::Orgn, "Orgn", "the window's own dark palette"),
     (GuiTheme::Light, "Light", "soft paper, easy on the eyes"),
-    (
-        GuiTheme::Custom,
-        "Custom",
-        "your accent on the system's base",
-    ),
+    (GuiTheme::Custom, "Custom", "your base and accent, everything derived"),
     (GuiTheme::Auto, "Auto", "follows the system appearance"),
 ];
 
@@ -139,8 +135,19 @@ fn split_miniature(accent: u32) -> Div {
 /// theme in force. `selected` is the card the window is drawing: the saved
 /// theme when the modal opens, and the card under the keyboard as the arrows
 /// walk it, because the preview has already repainted the window.
-pub fn card(mode: GuiTheme, label: &str, hint: &str, selected: bool, accent: u32) -> Stateful<Div> {
-    let shown = gui_theme::base_for(mode, crate::palette::system_is_dark());
+///
+/// `shown` is the palette that card would paint, resolved by the caller from
+/// the base the Theme screen holds (#2746). The card does not ask the system
+/// itself: the system only decides what `auto` means, and the caller already
+/// knows the answer.
+pub fn card(
+    mode: GuiTheme,
+    label: &str,
+    hint: &str,
+    selected: bool,
+    accent: u32,
+    shown: Palette,
+) -> Stateful<Div> {
     let ring = if selected {
         div()
             .flex_none()
@@ -196,6 +203,76 @@ pub fn card(mode: GuiTheme, label: &str, hint: &str, selected: bool, accent: u32
                 .text_xs()
                 .text_color(rgb(shown.text_faint))
                 .child(SharedString::from(hint.to_string())),
+        )
+}
+
+/// One base in the picker (#2746): the canvas colour, and the ring that marks
+/// the one in force. It shows a background only, because that is all a base
+/// is: every surface, border and text tone is derived from it.
+pub fn swatch(bg: u32, name: &str, selected: bool, shown: Palette) -> Stateful<Div> {
+    div()
+        .id(SharedString::from(format!("theme-base-{name}")))
+        .flex_none()
+        .size(px(26.0))
+        .rounded(px(concentric_radius(8.0)))
+        .bg(rgb(bg))
+        .border_2()
+        .border_color(rgb(if selected { shown.accent } else { shown.track }))
+        .cursor_pointer()
+        .hover(|d| d.border_color(rgb(shown.text_muted)))
+}
+
+/// The base picker (#2746): the canvases the window can sit on, under the
+/// cards. A pick saves the base and switches the window to `custom`, so the
+/// whole interface follows the one colour that was chosen.
+pub fn base_row(current: Option<u32>, swatches: Vec<Stateful<Div>>, shown: Palette) -> Div {
+    let name = current
+        .and_then(|bg| {
+            gui_theme::BASES
+                .iter()
+                .find(|(known, _)| *known == bg)
+                .map(|(_, name)| *name)
+        })
+        .unwrap_or("the system's");
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .w_full()
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .w_full()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(shown.text_muted))
+                        .child("Base"),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(shown.text_faint))
+                        .child(SharedString::from(name.to_string())),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .w_full()
+                .children(swatches),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(shown.text_faint))
+                .child("the canvas; surfaces, borders and text are derived from it"),
         )
 }
 
@@ -541,9 +618,11 @@ pub fn font_row(
 }
 
 /// The modal itself: a scrim that dismisses, and a centred card that does
-/// not. `accent` is the custom row, present only while Custom is in force.
+/// not. `base` is the background picker, `accent` the custom row, which is
+/// present only while Custom is in force.
 pub fn modal(
     cards: Vec<Stateful<Div>>,
+    base: Div,
     accent: Option<AnyElement>,
     fonts: Div,
     footer: &str,
@@ -602,6 +681,7 @@ pub fn modal(
                 ),
         )
         .child(rows)
+        .child(base)
         .children(accent)
         .child(fonts)
         .child(
@@ -621,7 +701,9 @@ pub fn modal(
         .flex()
         .items_center()
         .justify_center()
-        .bg(if crate::palette::system_is_dark() {
+        // The scrim dims whatever the window is painting, so it follows the
+        // palette in force rather than the system's appearance (#2746).
+        .bg(if gui_theme::relative_luminance(shown.bg) < 0.18 {
             rgba(0x0a0a0a88)
         } else {
             rgba(0x1b191733)

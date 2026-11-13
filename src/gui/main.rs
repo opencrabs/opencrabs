@@ -6926,7 +6926,7 @@ mod tests {
         let modal = ["themes_view::", "modal("].concat();
         let card = [
             "themes_view::card(mode, label, hint, self.themes_card == ",
-            "index, accent)",
+            "index, accent, shown)",
         ]
         .concat();
         let cards = [

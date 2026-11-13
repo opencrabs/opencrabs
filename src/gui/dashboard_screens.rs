@@ -431,6 +431,7 @@ impl Dashboard {
             mode,
             palette::system_is_dark(),
             accent.as_deref(),
+            palette::saved_base(),
         ));
         cx.notify();
     }
@@ -531,7 +532,41 @@ impl Dashboard {
             mode,
             palette::system_is_dark(),
             accent.as_deref(),
+            palette::saved_base(),
         ));
+        cx.notify();
+    }
+
+    /// Keep a background from the base picker (#2746).
+    ///
+    /// The base belongs to `custom`, so a pick switches the window to it and
+    /// saves both halves of the pair: the canvas, and the accent the wheel
+    /// holds. Everything else in the palette is derived, so nothing else has
+    /// to be stored.
+    pub(crate) fn pick_base(&mut self, bg: u32, cx: &mut Context<Self>) {
+        let base = gui_theme::format_accent(bg);
+        match Config::write_key_string("gui", "base", &base) {
+            Ok(()) => logging::info(&format!("themes: kept base {base}")),
+            Err(e) => logging::error(&format!("themes: could not save base {base}: {e}")),
+        }
+        let accent = gui_theme::format_accent(self.themes_accent());
+        match Config::write_key_string("gui", "custom_accent", &accent) {
+            Ok(()) => logging::info(&format!("themes: kept accent {accent}")),
+            Err(e) => logging::error(&format!("themes: could not save accent {accent}: {e}")),
+        }
+        match Config::write_key_string("gui", "theme", "custom") {
+            Ok(()) => logging::info("themes: kept 'custom' as [gui] theme"),
+            Err(e) => logging::error(&format!("themes: could not save 'custom': {e}")),
+        }
+        palette::remember_base(Some(bg));
+        palette::remember_mode(GuiTheme::Custom, Some(accent.clone()));
+        palette::adopt(gui_theme::resolve(
+            GuiTheme::Custom,
+            palette::system_is_dark(),
+            Some(&accent),
+            Some(bg),
+        ));
+        self.themes_card = 2;
         cx.notify();
     }
 
@@ -571,7 +606,10 @@ impl Dashboard {
     /// the surface the user is looking at and the only one the pointer reaches.
     pub(crate) fn themes_modal(&self, cx: &mut Context<Self>) -> AnyElement {
         let saved = palette::saved_mode().0;
-        let accent = palette::current().accent;
+        let shown = palette::current();
+        let accent = shown.accent;
+        let base = palette::saved_base();
+        let dark = palette::system_is_dark();
         let mut cards: Vec<Stateful<Div>> = Vec::with_capacity(themes_view::CARDS.len());
         for (index, &(mode, label, hint)) in themes_view::CARDS.iter().enumerate() {
             let pick = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
@@ -583,11 +621,33 @@ impl Dashboard {
                     this.close_themes(cx);
                 }
             });
+            // A card is a miniature of the window it would paint, so it is
+            // resolved here, where the chosen base and the wheel's accent are
+            // both known, instead of asking the system inside the card
+            // (#2746).
+            let card_accent = (mode == GuiTheme::Custom)
+                .then(|| gui_theme::format_accent(self.themes_accent()));
+            let shown = gui_theme::resolve(mode, dark, card_accent.as_deref(), base);
             cards.push(
-                themes_view::card(mode, label, hint, self.themes_card == index, accent)
+                themes_view::card(mode, label, hint, self.themes_card == index, accent, shown)
                     .on_click(pick),
             );
         }
+        // The base picker (#2746): six canvases, each a background and nothing
+        // else, because every other token is derived from it. The rows are
+        // minted here for the same reason the font rows are: only this `cx`
+        // can make a click listener.
+        let base_picks: Vec<Stateful<Div>> = gui_theme::BASES
+            .iter()
+            .map(|&(bg, name)| {
+                let selected = base == Some(bg);
+                let pick = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
+                    this.pick_base(bg, cx);
+                });
+                themes_view::swatch(bg, name, selected, shown).on_click(pick)
+            })
+            .collect();
+        let base_row = themes_view::base_row(base, base_picks, shown);
         // The wheel is the only draggable thing in the window: a press seeds
         // the hue and the drag repaints live, with the save landing on release,
         // so a drag never writes the config once per frame.
@@ -642,7 +702,6 @@ impl Dashboard {
         // because only this `cx` can mint a click listener, and only while the
         // list is open: the catalog is the whole machine, so a closed row must
         // not build three hundred elements on every frame.
-        let shown = palette::current();
         let current_font = fonts::current_ui();
         let font_picks: Vec<Stateful<Div>> = if self.fonts_open {
             fonts::picker_rows()
@@ -691,6 +750,7 @@ impl Dashboard {
         });
         themes_view::modal(
             cards,
+            base_row,
             accent_row,
             font_row,
             "A click saves the card at once; the arrows walk them and Enter picks.",

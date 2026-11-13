@@ -1,9 +1,9 @@
 //! The desktop window's colour model (#2619).
 //!
 //! Four themes only: `orgn`, the window's own dark palette, `light`, a soft
-//! native light palette, `custom`, which paints the saved accent on whichever
-//! base the system asks for, and `auto`, which follows the system with no
-//! accent override.
+//! native light palette, `custom`, which derives its whole palette from a
+//! background the user picks and an accent that stays independent of it
+//! (#2746), and `auto`, which follows the system with no accent override.
 //!
 //! The resolution is pure and lives here, in the library, so the regression
 //! tests reach it without a window. `src/gui/palette.rs` owns the live value
@@ -87,6 +87,11 @@ pub const LIGHT: Palette = Palette {
 };
 
 /// The base a mode draws, before any accent is painted.
+///
+/// `orgn` and `light` are the two palettes the window ships. `auto` follows
+/// the system. `custom` names the system's base only as a default: its base is
+/// the one the Theme screen holds, and `derive` builds the palette from it
+/// (#2746).
 pub const fn base_for(mode: GuiTheme, system_dark: bool) -> Palette {
     match (mode, system_dark) {
         (GuiTheme::Orgn, _) => ORGN,
@@ -101,9 +106,138 @@ pub const fn base_for(mode: GuiTheme, system_dark: bool) -> Palette {
     }
 }
 
-/// Whether a mode re-picks its base when the system appearance flips.
+/// Whether a mode re-picks its base when the system appearance flips. `custom`
+/// only follows the system until a base is picked, which pins it (#2746).
 pub const fn follows_system(mode: GuiTheme) -> bool {
     matches!(mode, GuiTheme::Auto | GuiTheme::Custom)
+}
+
+/// The floors the derivation is held to (#2746).
+///
+/// They are the WCAG numbers the shipped palettes were already tuned against:
+/// body text clears 4.5:1 on the canvas and on a panel, and the faint tier is
+/// decoration, so it clears 3:1. The derivation below is built so these hold on
+/// any base, not just on the two that were drawn by hand.
+pub const TEXT_FLOOR: f64 = 4.5;
+pub const FAINT_FLOOR: f64 = 3.0;
+
+/// The bases the Theme screen offers (#2746), and the name each one goes by.
+///
+/// They are backgrounds, not palettes: every surface, border and text tone is
+/// derived from whichever one is picked, so adding a base cannot introduce a
+/// palette that misses the contrast floor.
+pub const BASES: [(u32, &str); 6] = [
+    (0x101010, "ink"),
+    (0x14181f, "slate"),
+    (0x1b1714, "walnut"),
+    (0x1a2430, "midnight"),
+    (0xeef0f2, "cloud"),
+    (0xf7f5f2, "paper"),
+];
+
+/// `rgb` with `delta` added to every channel, clamped to the cube. The
+/// surfaces step off the canvas by a fixed number of units, so the shape of a
+/// dark base survives near black where a percentage of the gap would not.
+fn shift(rgb: u32, delta: i32) -> u32 {
+    let channel = |s: u32| (((rgb >> s) & 0xff) as i32 + delta).clamp(0, 255) as u32;
+    (channel(16) << 16) | (channel(8) << 8) | channel(0)
+}
+
+/// The tone closest to `pole` that clears `floor` against the surface it sits
+/// on.
+///
+/// `pole` is the end the ladder climbs toward: white on a dark base, black on
+/// a light one. The walk stops at the first step that clears, so the tone is
+/// the floor made visible instead of a number picked by eye. A surface that
+/// cannot reach the floor with its pole saturates at the pole rather than
+/// overshooting, which is what keeps the ladder readable on a mid grey.
+fn tone(surface: u32, pole: u32, floor: f64) -> u32 {
+    for step in 0..=100 {
+        let candidate = mix(surface, pole, step, 100);
+        if contrast_ratio(candidate, surface) >= floor {
+            return candidate;
+        }
+    }
+    pole
+}
+
+/// `ink` moved toward `pole` until it clears `floor` on `bg`. A colour that
+/// already reads is returned untouched, so a role keeps its hue where it can.
+fn lift(ink: u32, bg: u32, pole: u32, floor: f64) -> u32 {
+    if contrast_ratio(ink, bg) >= floor {
+        return ink;
+    }
+    for step in 1..=100 {
+        let candidate = mix(ink, pole, step, 100);
+        if contrast_ratio(candidate, bg) >= floor {
+            return candidate;
+        }
+    }
+    pole
+}
+
+/// The whole palette, derived from one background and, if one is picked, one
+/// accent (#2746).
+///
+/// Surfaces and borders are fixed steps off the canvas. Every text tier is the
+/// mix of the tighter of the two surfaces with the pole that first clears its
+/// floor, so the ladder is the floors, not a table of greys: the tiers are 18,
+/// 15, 11, 6, 5.2 and 4.6 to 1, and the faint tier sits just above
+/// `FAINT_FLOOR`.
+///
+/// "Tighter" is whichever surface sits closer to the pole, and it flips with
+/// the polarity: the panel is lighter than the canvas in both, so on a dark
+/// base the panel crowds the white text and on a light one the canvas crowds
+/// the black text. A tier derived on the tighter surface therefore clears the
+/// same floor on the other one as well, and no base can produce a palette that
+/// reads on the panel and vanishes on the canvas.
+///
+/// The accent is the second, independent input: `with_accent` paints it and
+/// derives the focus ring and the selection wash from it.
+pub fn derive(bg: u32, accent: Option<u32>) -> Palette {
+    let bg = bg & 0x00ff_ffff;
+    let dark = relative_luminance(bg) < 0.179;
+    let pole = if dark { 0x00ff_ffff } else { 0x0000_0000 };
+    // The two shipped palettes step this way; keeping the step per polarity
+    // means a derived dark base looks like `orgn` and a derived light one
+    // looks like `light` (#2746).
+    let (panel_step, hi_step, track_step) = if dark { (6, 10, 20) } else { (8, 4, -14) };
+    let panel = shift(bg, panel_step);
+    // The surface the text has least room on, which is the one nearer the pole
+    // (see above): the panel on a dark base, the canvas on a light one.
+    let ink = if dark { panel } else { bg };
+    let role = |dark_seed: u32, light_seed: u32| {
+        lift(
+            if dark { dark_seed } else { light_seed },
+            ink,
+            pole,
+            TEXT_FLOOR,
+        )
+    };
+    let mut palette = Palette {
+        bg,
+        panel,
+        panel_hi: shift(bg, hi_step),
+        track: shift(bg, track_step),
+        text: tone(ink, pole, 15.0),
+        text_strong: tone(ink, pole, 18.0),
+        text_normal: tone(ink, pole, 11.0),
+        text_muted: tone(ink, pole, 6.0),
+        text_title: tone(ink, pole, 5.2),
+        text_hint: tone(ink, pole, TEXT_FLOOR + 0.1),
+        text_faint: tone(ink, pole, FAINT_FLOOR + 0.2),
+        green: role(0x4f8f6f, 0x2c7250),
+        blue: role(0x6f8fbf, 0x2b5a95),
+        amber: role(0xbf8f5f, 0x8a5f2c),
+        accent: accent.unwrap_or(if dark { ORGN.accent } else { LIGHT.accent }),
+        teal: role(0x5fbfbf, 0x1b7a7a),
+        red: role(0xe07050, 0xb33824),
+        warn: role(0xb0885a, 0x7a5418),
+        focus: 0,
+        selection: 0,
+    };
+    palette = with_accent(palette, palette.accent);
+    palette
 }
 
 /// Parse a `#RRGGBB` or `RRGGBB` accent. Anything else is not an accent.
@@ -145,16 +279,26 @@ pub fn with_accent(mut palette: Palette, accent: u32) -> Palette {
     palette
 }
 
-/// The palette a mode draws, given the system appearance and the saved accent.
+/// The palette a mode draws, given the system appearance, the saved accent
+/// and the base the Theme screen holds.
 ///
 /// `orgn` and `light` are fixed: they ignore the system. `auto` follows the
-/// system. `custom` follows the system too, then paints the accent on top.
-/// An accent that does not parse is ignored rather than failing the draw.
-pub fn resolve(mode: GuiTheme, system_dark: bool, accent: Option<&str>) -> Palette {
-    let base = base_for(mode, system_dark);
-    match (mode, accent.and_then(parse_accent)) {
-        (GuiTheme::Custom, Some(rgb)) => with_accent(base, rgb),
-        _ => base,
+/// system. `custom` derives its whole palette from the chosen base and the
+/// chosen accent (#2746); with no base saved it starts from the system's own
+/// background, so a fresh install looks like it always did. An accent that
+/// does not parse is ignored rather than failing the draw.
+pub fn resolve(
+    mode: GuiTheme,
+    system_dark: bool,
+    accent: Option<&str>,
+    base: Option<u32>,
+) -> Palette {
+    match mode {
+        GuiTheme::Custom => {
+            let bg = base.unwrap_or(base_for(GuiTheme::Custom, system_dark).bg);
+            derive(bg, accent.and_then(parse_accent))
+        }
+        _ => base_for(mode, system_dark),
     }
 }
 

@@ -2575,9 +2575,10 @@ impl MemoryConfig {
 /// The desktop window's colour theme (#2619).
 ///
 /// `Orgn` is the window's own dark palette, `Light` its native light palette,
-/// `Custom` paints the saved accent on whichever base the system asks for,
-/// and `Auto` follows the system with no accent override. `Auto` is the
-/// default, so a first install tracks the system appearance.
+/// `Custom` derives the whole palette from the background the user picked and
+/// the accent they kept independent of it (#2746), and `Auto` follows the
+/// system with no accent override. `Auto` is the default, so a first install
+/// tracks the system appearance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum GuiTheme {
@@ -2599,6 +2600,13 @@ pub struct GuiConfig {
     /// palette's own accent.
     #[serde(default)]
     pub custom_accent: Option<String>,
+
+    /// The background `custom` draws on, as `#RRGGBB` (#2746). Surfaces,
+    /// borders and every text tone are derived from it, so this is the one
+    /// value the whole interface follows. Unset or unparsable means the
+    /// system's own background, which is what the theme used to do.
+    #[serde(default)]
+    pub base: Option<String>,
 
     /// Where the topic tab row sits: `top`, `left`, `bottom` or `right`.
     /// Unset or unknown means top.

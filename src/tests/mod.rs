@@ -392,6 +392,7 @@ pub mod gui_split_render_test;
 pub mod gui_stop_recovery_row_2850_test;
 pub mod gui_stopped_answer_2851_test;
 pub mod gui_stopped_clock_2849_test;
+pub mod gui_theme_base_2746_test;
 pub mod gui_theme_config_test;
 pub mod gui_themes_screen_test;
 pub mod gui_tls_provider_2452_test;

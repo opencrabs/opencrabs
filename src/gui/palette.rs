@@ -9,7 +9,7 @@ use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use gpui::WindowAppearance;
-use opencrabs::config::{Config, GuiTheme};
+use opencrabs::config::{Config, GuiTheme, gui_theme};
 
 use crate::logging;
 
@@ -22,9 +22,9 @@ static CURRENT: RwLock<Palette> = RwLock::new(ORGN);
 /// The system appearance last seen. Starts dark, the window's own default.
 static SYSTEM_DARK: AtomicBool = AtomicBool::new(true);
 
-/// The `[gui]` mode and accent last read or saved. `None` means the mirror has
-/// not been asked yet.
-static SAVED: RwLock<Option<(GuiTheme, Option<String>)>> = RwLock::new(None);
+/// The `[gui]` mode, accent and base last read or saved. The outer `None`
+/// means the mirror has not been asked yet.
+static SAVED: RwLock<Option<(GuiTheme, Option<String>, Option<u32>)>> = RwLock::new(None);
 
 /// The palette to draw with right now.
 pub fn current() -> Palette {
@@ -43,33 +43,62 @@ fn set(palette: Palette) {
 /// drag, so it never touches the disk: the in-memory config mirror answers the
 /// first read and the modal updates the cache the moment it saves a pick.
 pub fn saved_mode() -> (GuiTheme, Option<String>) {
+    let (mode, accent, _) = saved_triple();
+    (mode, accent)
+}
+
+/// The base `[gui]` saved (#2746), as the `#RRGGBB` value the derivation needs.
+/// Unset means the theme's own background, so nothing changes for a user who
+/// never opened the base picker.
+pub fn saved_base() -> Option<u32> {
+    saved_triple().2
+}
+
+fn saved_triple() -> (GuiTheme, Option<String>, Option<u32>) {
     if let Some(saved) = SAVED.read().ok().and_then(|saved| saved.clone()) {
         return saved;
     }
     let gui = Config::current().gui.clone();
-    let pair = (gui.theme, gui.custom_accent);
-    remember_mode(pair.0, pair.1.clone());
-    pair
+    let triple = (
+        gui.theme,
+        gui.custom_accent,
+        gui.base.as_deref().and_then(gui_theme::parse_accent),
+    );
+    if let Ok(mut saved) = SAVED.write() {
+        *saved = Some(triple.clone());
+    }
+    triple
 }
 
 /// Record what the modal just saved, so the next frame draws the choice without
 /// waiting for the config watcher to refresh the mirror (#2619).
 pub fn remember_mode(mode: GuiTheme, accent: Option<String>) {
+    let (_, _, base) = saved_triple();
     if let Ok(mut saved) = SAVED.write() {
-        *saved = Some((mode, accent));
+        *saved = Some((mode, accent, base));
+    }
+}
+
+/// Record the base the picker just saved (#2746), the way `remember_mode`
+/// records the mode and the accent: the window repaints from the mirror, not
+/// from a config re-read.
+pub fn remember_base(base: Option<u32>) {
+    let (mode, accent, _) = saved_triple();
+    if let Ok(mut saved) = SAVED.write() {
+        *saved = Some((mode, accent, base));
     }
 }
 
 /// The palette the saved config picks for the last-seen system appearance.
 pub fn saved() -> Palette {
     let (mode, accent) = saved_mode();
-    resolve(mode, system_is_dark(), accent.as_deref())
+    resolve(mode, system_is_dark(), accent.as_deref(), saved_base())
 }
 
 /// Show a candidate palette without saving it. The theme modal paints the
 /// colour wheel this way while the user drags, then saves on release.
 pub fn preview(mode: GuiTheme, accent: Option<&str>) {
-    set(resolve(mode, system_is_dark(), accent));
+    set(resolve(mode, system_is_dark(), accent, saved_base()));
 }
 
 /// Adopt a palette the modal already resolved and previewed.

@@ -5,7 +5,8 @@
 //! picks, whether it follows the system, and how a custom accent lands.
 
 use crate::config::gui_theme::{
-    LIGHT, ORGN, base_for, contrast_ratio, follows_system, format_accent, parse_accent, resolve,
+    LIGHT, ORGN, base_for, contrast_ratio, derive, follows_system, format_accent, parse_accent,
+    resolve,
 };
 use crate::config::types::{GuiConfig, GuiTheme};
 
@@ -116,36 +117,41 @@ fn auto_and_custom_follow_the_system() {
 
 #[test]
 fn an_accent_only_paints_the_custom_theme() {
-    let custom = resolve(GuiTheme::Custom, true, Some("#00ff88"));
+    let custom = resolve(GuiTheme::Custom, true, Some("#00ff88"), None);
     assert_eq!(custom.accent, 0x00ff88);
     assert_eq!(custom.bg, ORGN.bg, "custom keeps the system base");
     for mode in [GuiTheme::Orgn, GuiTheme::Light, GuiTheme::Auto] {
-        let palette = resolve(mode, true, Some("#00ff88"));
+        let palette = resolve(mode, true, Some("#00ff88"), None);
         assert_eq!(palette.accent, base_for(mode, true).accent);
     }
 }
 
 #[test]
 fn the_focus_ring_and_selection_follow_the_accent() {
-    let painted = resolve(GuiTheme::Custom, true, Some("#00ff88"));
+    let painted = resolve(GuiTheme::Custom, true, Some("#00ff88"), None);
     assert_ne!(painted.focus, ORGN.focus);
     assert_ne!(painted.selection, ORGN.selection);
     // The wash is over the background, so it stays on the canvas rather than
     // becoming a solid block of the accent.
     assert!(contrast_ratio(painted.selection, ORGN.bg) < 2.0);
     assert_eq!(
-        resolve(GuiTheme::Custom, true, Some("#d76414")).accent,
+        resolve(GuiTheme::Custom, true, Some("#d76414"), None).accent,
         ORGN.accent
     );
 }
 
 #[test]
-fn an_unparsable_custom_accent_leaves_the_base_palette_alone() {
+fn an_unparsable_custom_accent_leaves_the_derived_base_alone() {
+    // `custom` derives from the system's own background when no base is
+    // picked, so an accent that does not parse leaves exactly that (#2746).
     assert_eq!(
-        resolve(GuiTheme::Custom, true, Some("not-a-colour")),
-        base_for(GuiTheme::Custom, true)
+        resolve(GuiTheme::Custom, true, Some("not-a-colour"), None),
+        derive(ORGN.bg, None)
     );
-    assert_eq!(resolve(GuiTheme::Custom, true, None), ORGN);
+    assert_eq!(
+        resolve(GuiTheme::Custom, true, None, None),
+        derive(ORGN.bg, None)
+    );
 }
 
 #[test]
