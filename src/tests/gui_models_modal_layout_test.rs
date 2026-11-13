@@ -13,14 +13,13 @@ const PICKER: &str = include_str!("../gui/model_picker.rs");
 /// Only the body builder, so a guard cannot be satisfied by a `overflow_hidden`
 /// somewhere else in the file.
 fn body_row() -> &'static str {
-    let start = MODAL
-        .find("let body = div()")
+    let (_, from_body) = MODAL
+        .split_once("let body = div()")
         .expect("the body row is built in models_modal.rs");
-    let end = MODAL
-        .find("let footer = div()")
+    let (row, _) = from_body
+        .split_once("let footer = div()")
         .expect("the footer follows the body row");
-    assert!(start < end, "the footer must follow the body row");
-    &MODAL[start..end]
+    row
 }
 
 #[test]
@@ -35,14 +34,12 @@ fn the_body_row_clips_what_it_holds() {
 #[test]
 fn the_picker_body_sits_in_a_column_flex_parent() {
     let row = body_row();
-    let at = row
-        .find(".child(picker.body)")
+    let (before, _) = row
+        .split_once(".child(picker.body)")
         .expect("the body row attaches the picker");
-    let before = &row[..at];
-    let parent = before
-        .rfind(".child(")
+    let (_, wrapper) = before
+        .rsplit_once(".child(")
         .expect("the picker is a child of some element");
-    let wrapper = &before[parent..];
     assert!(
         wrapper.contains(".flex()") && wrapper.contains(".flex_col()"),
         "the picker's parent must be a column flex container, or `flex_1` \
