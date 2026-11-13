@@ -1434,29 +1434,25 @@ mod sidebar_action_tests {
         // does it itself, or a press on a rail affordance leaves the composer
         // waiting for an Esc.
         let src = DASHBOARD;
-        let render = dashboard_render(src);
-        for (anchor, why) in [
-            ("let ask_menu = cx.listener", "a row's right press"),
-            ("let toggle_pin = cx.listener", "a row's pin"),
-            ("let ask = cx.listener", "a topic chip's right press"),
+        // The rail asks the window by name now (#2933): each affordance has a
+        // method of its own, and the hand back lives in it rather than in the
+        // closure that used to be minted inside the window's render.
+        for (method, why) in [
+            ("rail_row_menu", "a row's right press"),
+            ("rail_toggle_pin", "a row's pin"),
+            ("rail_chip_menu", "a topic chip's right press"),
         ] {
-            let (_head, tail) = render
-                .split_once(anchor)
-                .unwrap_or_else(|| panic!("{why} still opens its card from here"));
-            let listener = tail.split("});").next().unwrap_or("");
+            let body = fn_body(src, method);
             assert!(
-                listener.contains("this.rail_hands_back();"),
+                body.contains("self.rail_hands_back();"),
                 "{why} hands the keys back before it opens the card"
             );
         }
         // A row press is not a pick yet, and the caret does not wait for the
         // release to find out what it was.
-        let (_head, tail) = render
-            .split_once("this.rail_slide_opened = None;")
-            .unwrap_or_else(|| panic!("the row press still starts the slide"));
-        let listener = tail.split("});").next().unwrap_or("");
+        let press = fn_body(src, "rail_row_press");
         assert!(
-            listener.contains("this.rail_hands_back();"),
+            press.contains("self.rail_hands_back();"),
             "a press on a row hands the keys back whether or not it commits"
         );
     }
@@ -1705,9 +1701,11 @@ mod sidebar_action_tests {
             keys.contains(preview.as_str()),
             "the walk previews in the focused pane without the hand back"
         );
-        let render = dashboard_render(src);
+        // The row's click handler moved with the rail (#2933): the view asks
+        // the window by name, so the commit is pinned on the method it calls.
+        let row_pick = fn_body(src, "rail_row_pick");
         assert!(
-            render.contains(commit.as_str()),
+            row_pick.contains(commit.as_str()),
             "the row click moves the focused pane"
         );
         let pick = fn_body(src, "pick_or_open");
@@ -6405,7 +6403,7 @@ mod tests {
         //    meant for it.
         let panes = main.find(&["root = root.child(ri", "ght)"].concat());
         let overlay = main.find(&["root = root.child(preview::over", "lay("].concat());
-        let help = main.find(&["root = root.child(help_", "overlay("].concat());
+        let help = main.find(&["root = root.child(help_", "screen("].concat());
         let (Some(panes), Some(overlay), Some(help)) = (panes, overlay, help) else {
             panic!(
                 "the paint order changed shape: panes={panes:?} overlay={overlay:?} help={help:?}"
@@ -6451,9 +6449,11 @@ mod tests {
     fn theme_modal_is_centred_and_saves_on_the_pick() {
         let src = DASHBOARD;
         let view = include_str!("themes_view.rs");
-        // The scrim lives with the modal it belongs to; the wiring that
-        // opens it lives with the dashboard.
-        let scrim = [".id(\"theme-modal-", "scrim\")"].concat();
+        // The scrim and the close control belong to the shell now (#2893): it
+        // builds both ids from the prefix the modal hands it, so the themes
+        // view names the modal and the shell owns what dismisses it.
+        let shell = include_str!("modal_shell.rs");
+        let scrim = ["format!(\"{prefix}", "-scrim\")"].concat();
         let modal = ["themes_view::", "modal("].concat();
         let card = [
             "themes_view::card(mode, label, hint, self.themes_card == ",
@@ -6465,10 +6465,14 @@ mod tests {
             ".iter().enumerate()",
         ]
         .concat();
-        let close = [".id(\"theme-modal-", "close\")"].concat();
-        assert!(view.contains(&scrim), "the scrim is what dismisses");
+        let close = ["format!(\"{prefix}", "-close\")"].concat();
         assert!(
-            view.contains(&close),
+            view.contains("id: \"theme-modal\""),
+            "the modal names itself, and the shell derives the scrim from it"
+        );
+        assert!(shell.contains(&scrim), "the scrim is what dismisses");
+        assert!(
+            shell.contains(&close),
             "the header carries a close control, as the README says"
         );
         assert!(src.contains(&modal), "the modal is built in one place");
@@ -7552,13 +7556,15 @@ mod tests {
         // the chip's (#2741). The helper is defined outside the render, so the
         // body scan below still needs the whole file.
         let src = DASHBOARD;
-        let render = dashboard_render(src);
+        // The chip's listener moved with the rail (#2933) and asks the window
+        // by name, so the pick is pinned on the method it calls.
+        let chip_pick = fn_body(src, "rail_chip_pick");
         assert!(
-            !render.contains("this.open_session(kid_id, cx)"),
+            !chip_pick.contains("self.open_session("),
             "the chip must not open the topic directly"
         );
         assert!(
-            render.contains("this.pick_or_open(kid_id, cx)"),
+            chip_pick.contains("self.pick_or_open(id, cx)"),
             "the chip answers the picker the way a row does"
         );
         let helper = fn_body(src, "pick_or_open");

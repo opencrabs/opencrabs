@@ -2967,7 +2967,9 @@ mod tests {
     /// the sort and the marker would disagree about which topics are working.
     #[test]
     fn the_strip_orders_the_chips_it_builds() {
-        let source = include_str!("main.rs");
+        // The chip set is built where the rail's frame is now (#2933), so the
+        // scan follows it there instead of reading the window's file.
+        let source = include_str!("dashboard_rail.rs");
         let block = source
             .split("let mut children_by_parent")
             .nth(1)
@@ -3008,7 +3010,7 @@ mod tests {
             !row_source.contains("rail_stamp(s.updated_at"),
             "the card's own ledger row never stamps it"
         );
-        let wired = include_str!("main.rs")
+        let wired = include_str!("dashboard_rail.rs")
             .split("stamp_at:")
             .nth(1)
             .expect("the card builder wires stamp_at");
@@ -3584,15 +3586,15 @@ mod tests {
 
         // The paint loop drops a chip child from the row stream, so it never
         // paints as its own row while its parent is visible.
-        let main_source = include_str!("main.rs");
+        let rail_source = include_str!("dashboard_rail.rs");
         assert!(
-            main_source.contains("if chip_children.contains(&id)"),
+            rail_source.contains("if chip_children.contains(&id)"),
             "the rail skips a child that paints as a chip"
         );
 
         // A pinned topic stays a chip: the chip set must never filter out
         // favorites, or they eject to top-level rows and scatter (#2701).
-        let chip_block = main_source
+        let chip_block = rail_source
             .split("let chip_children:")
             .nth(1)
             .expect("chip set resolver")
