@@ -255,16 +255,10 @@ pub(crate) async fn save_telegram_file(
         }
     };
     let url = format!("https://api.telegram.org/file/bot{bot_token}/{}", file.path);
-    let bytes = match reqwest::get(&url).await {
-        Ok(r) => match r.bytes().await {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::warn!("Telegram: tmp save: read bytes failed: {e}");
-                return;
-            }
-        },
+    let bytes = match crate::utils::download::fetch_bytes(&url).await {
+        Ok(b) => b,
         Err(e) => {
-            tracing::warn!("Telegram: tmp save: download failed: {e}");
+            tracing::warn!("Telegram: tmp save: download failed: {e:#}");
             return;
         }
     };

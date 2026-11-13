@@ -90,30 +90,12 @@ pub(crate) async fn ingest_message_text(
             file.path
         );
 
-        let audio_bytes = match reqwest::get(&download_url).await {
-            Ok(resp) => match resp.bytes().await {
-                Ok(b) => b.to_vec(),
-                Err(e) => {
-                    tracing::error!("Telegram: failed to read voice file bytes: {}", e);
-                    message_in_thread(
-                        bot,
-                        msg.chat.id,
-                        thread_id,
-                        "Failed to download voice note.",
-                    )
-                    .await?;
-                    return Ok(Ingested::Handled);
-                }
-            },
+        let audio_bytes = match crate::utils::download::fetch_bytes(&download_url).await {
+            Ok(b) => b,
             Err(e) => {
-                tracing::error!("Telegram: failed to download voice file: {}", e);
-                message_in_thread(
-                    bot,
-                    msg.chat.id,
-                    thread_id,
-                    "Failed to download voice note.",
-                )
-                .await?;
+                tracing::error!("Telegram: voice note download failed: {e:#}");
+                message_in_thread(bot, msg.chat.id, thread_id, e.user_message("voice note"))
+                    .await?;
                 return Ok(Ingested::Handled);
             }
         };
@@ -163,19 +145,12 @@ pub(crate) async fn ingest_message_text(
             file.path
         );
 
-        let photo_bytes = match reqwest::get(&download_url).await {
-            Ok(resp) => match resp.bytes().await {
-                Ok(b) => b.to_vec(),
-                Err(e) => {
-                    tracing::error!("Telegram: failed to read photo bytes: {}", e);
-                    message_in_thread(bot, msg.chat.id, thread_id, "Failed to download photo.")
-                        .await?;
-                    return Ok(Ingested::Handled);
-                }
-            },
+        let photo_bytes = match crate::utils::download::fetch_bytes(&download_url).await {
+            Ok(b) => b,
             Err(e) => {
-                tracing::error!("Telegram: failed to download photo: {}", e);
-                message_in_thread(bot, msg.chat.id, thread_id, "Failed to download photo.").await?;
+                tracing::error!("Telegram: photo download failed: {e:#}");
+                message_in_thread(bot, msg.chat.id, thread_id, e.user_message("photo"))
+                    .await?;
                 return Ok(Ingested::Handled);
             }
         };
@@ -304,19 +279,12 @@ pub(crate) async fn ingest_message_text(
             file.path
         );
 
-        let bytes = match reqwest::get(&download_url).await {
-            Ok(resp) => match resp.bytes().await {
-                Ok(b) => b.to_vec(),
-                Err(e) => {
-                    tracing::error!("Telegram: failed to read video bytes: {}", e);
-                    message_in_thread(bot, msg.chat.id, thread_id, "Failed to download video.")
-                        .await?;
-                    return Ok(Ingested::Handled);
-                }
-            },
+        let bytes = match crate::utils::download::fetch_bytes(&download_url).await {
+            Ok(b) => b,
             Err(e) => {
-                tracing::error!("Telegram: failed to download video: {}", e);
-                message_in_thread(bot, msg.chat.id, thread_id, "Failed to download video.").await?;
+                tracing::error!("Telegram: video download failed: {e:#}");
+                message_in_thread(bot, msg.chat.id, thread_id, e.user_message("video"))
+                    .await?;
                 return Ok(Ingested::Handled);
             }
         };
@@ -361,19 +329,11 @@ pub(crate) async fn ingest_message_text(
             file.path
         );
 
-        let bytes = match reqwest::get(&download_url).await {
-            Ok(resp) => match resp.bytes().await {
-                Ok(b) => b.to_vec(),
-                Err(e) => {
-                    tracing::error!("Telegram: failed to read animation bytes: {}", e);
-                    message_in_thread(bot, msg.chat.id, thread_id, "Failed to download animation.")
-                        .await?;
-                    return Ok(Ingested::Handled);
-                }
-            },
+        let bytes = match crate::utils::download::fetch_bytes(&download_url).await {
+            Ok(b) => b,
             Err(e) => {
-                tracing::error!("Telegram: failed to download animation: {}", e);
-                message_in_thread(bot, msg.chat.id, thread_id, "Failed to download animation.")
+                tracing::error!("Telegram: animation download failed: {e:#}");
+                message_in_thread(bot, msg.chat.id, thread_id, e.user_message("animation"))
                     .await?;
                 return Ok(Ingested::Handled);
             }
@@ -411,30 +371,12 @@ pub(crate) async fn ingest_message_text(
             file.path
         );
 
-        let bytes = match reqwest::get(&download_url).await {
-            Ok(resp) => match resp.bytes().await {
-                Ok(b) => b.to_vec(),
-                Err(e) => {
-                    tracing::error!("Telegram: failed to read video_note bytes: {}", e);
-                    message_in_thread(
-                        bot,
-                        msg.chat.id,
-                        thread_id,
-                        "Failed to download video note.",
-                    )
-                    .await?;
-                    return Ok(Ingested::Handled);
-                }
-            },
+        let bytes = match crate::utils::download::fetch_bytes(&download_url).await {
+            Ok(b) => b,
             Err(e) => {
-                tracing::error!("Telegram: failed to download video_note: {}", e);
-                message_in_thread(
-                    bot,
-                    msg.chat.id,
-                    thread_id,
-                    "Failed to download video note.",
-                )
-                .await?;
+                tracing::error!("Telegram: video note download failed: {e:#}");
+                message_in_thread(bot, msg.chat.id, thread_id, e.user_message("video note"))
+                    .await?;
                 return Ok(Ingested::Handled);
             }
         };
@@ -478,19 +420,12 @@ pub(crate) async fn ingest_message_text(
             file.path
         );
 
-        let bytes = match reqwest::get(&download_url).await {
-            Ok(resp) => match resp.bytes().await {
-                Ok(b) => b.to_vec(),
-                Err(e) => {
-                    tracing::error!("Telegram: failed to read document bytes: {}", e);
-                    message_in_thread(bot, msg.chat.id, thread_id, "Failed to download file.")
-                        .await?;
-                    return Ok(Ingested::Handled);
-                }
-            },
+        let bytes = match crate::utils::download::fetch_bytes(&download_url).await {
+            Ok(b) => b,
             Err(e) => {
-                tracing::error!("Telegram: failed to download document: {}", e);
-                message_in_thread(bot, msg.chat.id, thread_id, "Failed to download file.").await?;
+                tracing::error!("Telegram: file download failed: {e:#}");
+                message_in_thread(bot, msg.chat.id, thread_id, e.user_message("file"))
+                    .await?;
                 return Ok(Ingested::Handled);
             }
         };

@@ -619,19 +619,37 @@ pub(crate) async fn handle_message(
 
     if let Some(audio) = audio_attachment
         && voice_config.stt_enabled
-        && let Ok(resp) = reqwest::get(&audio.url).await
-        && let Ok(bytes) = resp.bytes().await
     {
-        match crate::channels::voice::transcribe(bytes.to_vec(), &voice_config).await {
-            Ok(transcript) => {
-                tracing::info!(
-                    "Discord: transcribed voice: {}",
-                    truncate_str(&transcript, 80)
-                );
-                content = transcript;
-                is_voice = true;
+        // A failed voice download used to fall straight through as "no voice
+        // note": no log, no message, and the attachment silently vanished
+        // (#2261). The status is checked before the body is read, so an error
+        // page is never transcribed as if it were speech.
+        match crate::utils::download::fetch_bytes(&audio.url).await {
+            Ok(bytes) => match crate::channels::voice::transcribe(bytes, &voice_config).await {
+                Ok(transcript) => {
+                    tracing::info!(
+                        "Discord: transcribed voice: {}",
+                        truncate_str(&transcript, 80)
+                    );
+                    content = transcript;
+                    is_voice = true;
+                }
+                Err(e) => tracing::error!("Discord: STT error: {e}"),
+            },
+            Err(e) => {
+                tracing::warn!("Discord: voice attachment download failed: {e:#}");
+                if let Err(send_err) = super::governor::say(
+                    &discord_state.governor,
+                    msg.channel_id,
+                    &ctx.http,
+                    super::governor::Surface::Send,
+                    e.user_message("voice message"),
+                )
+                .await
+                {
+                    tracing::warn!("Discord: could not report the voice download failure: {send_err}");
+                }
             }
-            Err(e) => tracing::error!("Discord: STT error: {e}"),
         }
     }
 
@@ -690,16 +708,12 @@ pub(crate) async fn handle_message(
                 content.push_str(&format!(" <<IMG:{}>>", attachment.url));
             }
 
-            let bytes = match reqwest::get(attachment.url.as_str()).await {
-                Ok(resp) => match resp.bytes().await {
-                    Ok(b) => b,
-                    Err(e) => {
-                        tracing::warn!("Discord: failed to read attachment {fname}: {e}");
-                        continue;
-                    }
-                },
+            // Status checked before the body is read: an error page used to be
+            // saved and shown as the attachment (#2261).
+            let bytes = match crate::utils::download::fetch_bytes(attachment.url.as_str()).await {
+                Ok(b) => b,
                 Err(e) => {
-                    tracing::warn!("Discord: failed to download attachment {fname}: {e}");
+                    tracing::warn!("Discord: attachment download failed for {fname}: {e:#}");
                     continue;
                 }
             };

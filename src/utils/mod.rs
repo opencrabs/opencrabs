@@ -9,6 +9,7 @@ pub mod cwd;
 pub mod desktop_notify;
 pub mod directives;
 pub mod dock_icon;
+pub mod download;
 pub mod drop_agent;
 pub mod drop_landing;
 pub mod drop_transfer;

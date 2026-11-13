@@ -413,6 +413,7 @@ pub mod help_catalog_test;
 pub mod help_mode_entry_test;
 pub mod help_table_test;
 pub mod init_command_test;
+pub mod inbound_download_guard_test;
 pub mod install_homebrew_test;
 pub mod install_ps1_test;
 pub mod install_script_test;

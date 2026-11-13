@@ -1037,7 +1037,19 @@ pub(crate) async fn handle_message(
                     token.as_str(),
                     file.path
                 );
-                let bytes = reqwest::get(&url).await.ok()?.bytes().await.ok()?.to_vec();
+                // A failed download used to vanish here: `.ok()?` on the send
+                // and on the body read returned None with no log and no message,
+                // so an attachment that never arrived looked like a user who
+                // said nothing. Loud now, with the cause chain (#2261).
+                let bytes = match crate::utils::download::fetch_bytes(&url).await {
+                    Ok(b) => b,
+                    Err(e) => {
+                        tracing::warn!(
+                            "Telegram: attachment download failed ({msg_type} {fname}): {e:#}"
+                        );
+                        return None;
+                    }
+                };
                 Some((msg_type, bytes, fname))
             }
         };
