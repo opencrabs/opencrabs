@@ -7737,7 +7737,9 @@ mod tests {
         );
         let lookup = fn_body(src, "rail_activity_for");
         for source in [
-            "self.pane_states.get(&id)",
+            // The split left the leaf in one map and the parked ones in
+            // another, so the lookup asks `pane_view` for both (#2871).
+            "self.pane_view(id)",
             "self.stashed.get(&id)",
             // The open session's turn reads through the hoisted state since
             // the chat leaf moved its session out of the window (#2805).
