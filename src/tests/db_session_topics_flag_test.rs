@@ -380,3 +380,40 @@ async fn a_session_whose_topics_are_all_archived_can_be_grouped() {
             .contains(&(parent, target.id))
     );
 }
+
+#[tokio::test]
+async fn grouping_a_family_folds_it_first_then_attaches_it() {
+    let (_db, sessions, _messages, family, topics) = seeded_family().await;
+    let target = Session::new(Some("target".to_string()), None, None);
+    sessions.create(&target).await.expect("create target");
+
+    // The picker's order (#2864): fold whatever the row carries, then attach
+    // it. Doing it the other way round hits the depth guard.
+    let folded = sessions
+        .merge_topics_into_parent(family)
+        .await
+        .expect("fold the family");
+    assert_eq!(folded, topics.len(), "every topic came home first");
+
+    sessions
+        .attach_topic(family, target.id)
+        .await
+        .expect("the folded family is attached under the target");
+
+    assert!(
+        sessions
+            .topic_parents()
+            .await
+            .expect("list parents")
+            .contains(&(family, target.id)),
+        "the family is a topic of the target now"
+    );
+    assert!(
+        !sessions
+            .topic_enabled_ids()
+            .await
+            .expect("list")
+            .contains(&family),
+        "the folded family carries no topics of its own any more"
+    );
+}
