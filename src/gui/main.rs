@@ -9094,6 +9094,83 @@ mod tests {
             "the editor still binds the key to copy"
         );
     }
+
+    /// A pane that switches conversation keeps the turn it was running (#2854).
+    /// The switch used to file the draft and drop the whole view, so the live
+    /// turn lost its tool blocks, its thinking card and its budget, and no
+    /// reload could bring them back. Read off the source because a switch needs
+    /// a live window: each of these is one line a later edit could drop without
+    /// any test noticing.
+    #[test]
+    fn a_pane_switch_parks_the_view_it_leaves_behind() {
+        // Every needle is split in two: `include_str!` puts this test's own
+        // text inside the source it scans, so a whole literal would match
+        // itself right here and pin nothing at all.
+        let parks = ["self.park_p", "ane("].concat();
+        let drops = ["pane_states", ".remove"].concat();
+
+        for door in ["open_topic_in_pane", "open_picked_in_focused_pane"] {
+            let body = fn_body(DASHBOARD, door);
+            assert!(body.contains(&parks), "{door} parks the pane it leaves");
+            assert!(
+                !body.contains(&drops),
+                "{door} must not drop the view it leaves"
+            );
+        }
+
+        // The parking lot itself: the view moves under its session and comes
+        // back into the drawn map, restored rather than rebuilt.
+        let park = fn_body(DASHBOARD, "park_pane");
+        assert!(
+            park.contains(&["parked_panes", ".insert("].concat()),
+            "a parked view is kept under its session"
+        );
+        let open = fn_body(DASHBOARD, "open_pane_state");
+        assert!(
+            open.contains(&["parked_panes", ".remove(&id)"].concat()),
+            "opening a pane takes the parked view back"
+        );
+        assert!(
+            open.contains(&["pane_states", ".insert(id, view)"].concat()),
+            "the parked view is re-inserted, not rebuilt"
+        );
+    }
+
+    /// A turn settles where it ran, not where the user is looking (#2854).
+    /// `settle_pane` returned early whenever the pane was off screen, so a turn
+    /// that finished after a switch recorded no metrics, reloaded no rows and
+    /// never drained its queue.
+    #[test]
+    fn a_pane_settles_while_it_is_off_screen() {
+        let settle = fn_body(DASHBOARD, "settle_pane");
+        assert!(
+            settle.contains(&["self.pane_view(", "session)"].concat()),
+            "settling resolves the pane, drawn or parked"
+        );
+        assert!(
+            !settle.contains(&["pane_states", ".get(&session)"].concat()),
+            "settling must not read only the drawn map"
+        );
+    }
+
+    /// The leaf's live card carries its own turn (#2854): it was handed a
+    /// hardcoded `false` and a default budget, so a running pane drew no live
+    /// card and printed a zero window.
+    #[test]
+    fn a_pane_live_card_carries_its_own_turn() {
+        assert!(
+            PANE_VIEW.contains(&["            self.b", "usy,\n"].concat()),
+            "the pane passes its own busy flag to the transcript"
+        );
+        assert!(
+            PANE_VIEW.contains(&["ctx_used: self.ctx_u", "sed,"].concat()),
+            "the pane's card reads the pane's own ctx"
+        );
+        assert!(
+            PANE_VIEW.contains(&["ctx_max: self.ctx_m", "ax,"].concat()),
+            "the pane's card reads the pane's own window"
+        );
+    }
 }
 
 #[cfg(test)]
