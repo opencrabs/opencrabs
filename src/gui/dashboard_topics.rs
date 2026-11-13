@@ -95,7 +95,13 @@ impl Dashboard {
         // not to every topic inside it: a wall of topic panes repeated the
         // same bar once per pane (#2761).
         let carries_topics = leaves.len() == 1 || pane_root == session;
-        if !carries_topics || !self.sessions.is_topic_enabled(pane_root) {
+        // The flag is not enough (#2863): a family whose topics were all
+        // archived or folded still carried it, and the strip painted a bar
+        // whose only chip was `All`.
+        if !carries_topics
+            || !self.sessions.is_topic_enabled(pane_root)
+            || !self.family_has_topics(pane_root)
+        {
             return None;
         }
         let pane_key = session.to_string();

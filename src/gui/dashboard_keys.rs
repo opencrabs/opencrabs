@@ -456,6 +456,23 @@ impl Dashboard {
             cx.notify();
             return;
         }
+        // The disable-topics dialog owns both keys for the same reason
+        // (#2863): Enter folds the family, Esc leaves it alone, and nothing
+        // behind the card answers while it is up.
+        if let Some(id) = self.confirm_disable_topics {
+            match ev.keystroke.key.as_str() {
+                "enter" => {
+                    self.confirm_disable_topics = None;
+                    self.disable_topics(id, cx);
+                }
+                "escape" => {
+                    self.confirm_disable_topics = None;
+                }
+                _ => {}
+            }
+            cx.notify();
+            return;
+        }
         if ev.keystroke.key == "escape" {
             // The key reference paints above everything and costs nothing to
             // close, so it goes first: the nearest thing to the user answers.

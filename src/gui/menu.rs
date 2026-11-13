@@ -25,6 +25,8 @@ pub enum MenuKind {
     Delete,
     EnableTopics,
     NewTopic,
+    /// Fold every topic back into this session and switch topics off (#2863).
+    DisableTopics,
     /// Attach existing sessions as topics of this row, transcripts untouched.
     GroupTopics,
     SplitSide,

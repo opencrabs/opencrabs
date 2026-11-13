@@ -96,7 +96,8 @@ use crate::mission_control_view::{
     mission_control_body, mission_control_detail, mission_control_logs,
 };
 use crate::overlays::{
-    DEFAULT_TOPIC_ICON, HelpView, TopicPick, cd_entries_for, confirm_delete_overlay, help_overlay,
+    DEFAULT_TOPIC_ICON, HelpView, TopicPick, cd_entries_for, confirm_delete_overlay,
+    confirm_disable_topics_overlay, help_overlay,
     split_pick_overlay, topic_info_overlay, topic_pick, topic_prompt_overlay,
     update_prompt_overlay, warning_overlay,
 };
@@ -839,6 +840,10 @@ struct Dashboard {
     /// and only the dialog's own button erases, so no gesture can cost a
     /// conversation.
     confirm_delete: Option<Uuid>,
+    /// The conversation whose topics are about to be folded in and switched
+    /// off (#2863). Arming this is the first click; the dialog's own button is
+    /// the second, because the fold cannot be undone.
+    confirm_disable_topics: Option<Uuid>,
     /// The Group topics picker: the parent row being grouped under, the
     /// candidate sessions (id, title, date), the multi-selection, the keyboard
     /// cursor, a guard sentence on refusal, and a busy flag while attaching.
@@ -4991,6 +4996,40 @@ impl Render for Dashboard {
             });
             root = root.child(confirm_delete_overlay(title, confirm, cancel));
         }
+        // Turning topics off folds the family into the conversation (#2863).
+        // Same shape as the delete dialog: the menu arms it, the dialog's own
+        // button is what writes, and the topic count is named so the fold is
+        // never a surprise.
+        if let Some(id) = self.confirm_disable_topics {
+            let title = self
+                .sessions
+                .items
+                .iter()
+                .find(|s| s.id == id)
+                .and_then(|s| s.title.clone())
+                .unwrap_or_else(|| "(untitled)".to_string());
+            // Live topics only: `parents` already drops archived rows, so
+            // this is the number the fold will actually move.
+            let topics = self
+                .sessions
+                .parents
+                .values()
+                .filter(|parent| **parent == id)
+                .count();
+            let confirm = cx.listener(move |this, _ev, _window, cx| {
+                this.confirm_disable_topics = None;
+                this.refocus_screen();
+                this.disable_topics(id, cx);
+            });
+            let cancel = cx.listener(|this, _ev, _window, cx| {
+                this.confirm_disable_topics = None;
+                this.refocus_screen();
+                cx.notify();
+            });
+            root = root.child(confirm_disable_topics_overlay(
+                title, topics, confirm, cancel,
+            ));
+        }
         // The Group topics picker: a multi select card painted above both
         // panes. Rows toggle on click, the keyboard cursor and Space mirror
         // the same selection, and only the group button writes anything.
@@ -5944,6 +5983,7 @@ fn main() {
                         rail_swipe: None,
                         rail_slide_opened: None,
                         confirm_delete: None,
+                        confirm_disable_topics: None,
                         group_target: None,
                         group_candidates: Vec::new(),
                         group_selected: std::collections::HashSet::new(),

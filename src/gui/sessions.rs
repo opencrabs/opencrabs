@@ -273,6 +273,18 @@ impl SessionsState {
         self.topics.contains(&id)
     }
 
+    /// Whether `root` still has at least one live topic under it (#2863).
+    ///
+    /// The flag alone is not the answer. A session can carry `topics_enabled`
+    /// with every topic archived or folded, and the strip then drew a bar
+    /// whose only chip was `All`. `items` holds live rows only, so a root with
+    /// no child in it has no family to draw.
+    pub fn has_live_topics(&self, root: uuid::Uuid) -> bool {
+        self.items
+            .iter()
+            .any(|s| self.parents.get(&s.id) == Some(&root))
+    }
+
     /// Move the cursor one row down (positive delta) or up (negative),
     /// walking the same pinned-first order the rail paints and clamping at
     /// both ends. An unarmed cursor starts at the first row either way, so
@@ -1255,6 +1267,43 @@ pub async fn set_topics(
     }
 }
 
+/// Fold every topic of `id` back into it and switch topics off (#2863).
+///
+/// The whole fold is one repository transaction, so this either reports how
+/// many topics came home or reports nothing changed. The caller refreshes the
+/// rail and the topic store afterwards rather than patching its own copy: a
+/// topic that moved is a session row that changed, and guessing at that in
+/// memory is how two surfaces end up disagreeing.
+pub async fn merge_topics(db_path: std::path::PathBuf, id: uuid::Uuid) -> Result<usize, String> {
+    let (tx, rx) = futures::channel::oneshot::channel::<Result<usize, String>>();
+    let spawned = std::thread::Builder::new()
+        .name("topics-fold".into())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let result = match runtime {
+                Ok(rt) => rt
+                    .block_on(async {
+                        let db = Database::connect(&db_path).await?;
+                        let repo = SessionRepository::new(db.pool().clone());
+                        repo.merge_topics_into_parent(id).await
+                    })
+                    .map_err(|e| format!("{e:#}")),
+                Err(e) => Err(format!("tokio runtime failed: {e}")),
+            };
+            let _ = tx.send(result);
+        });
+    match spawned {
+        Ok(_) => match rx.await {
+            Ok(result) => result,
+            Err(_) => Err("topics fold thread dropped its result".into()),
+        },
+        Err(e) => Err(format!("topics fold thread failed to spawn: {e}")),
+    }
+}
+
 /// Pin or unpin one session in the shared sidecar table. The caller refetches
 /// afterwards instead of patching its own list, so the rail can never show a
 /// pin the ledger does not have.
@@ -1449,11 +1498,17 @@ pub fn rail_menu_entries(
     }
     // Topics are opt-in per session (#2302): the item is offered only while
     // they are off, so it cannot be flipped twice by accident. Once they are
-    // on, the same slot offers a new topic under the row (#2397).
+    // on, the same slot offers a new topic under the row (#2397), and the
+    // way back out sits next to it (#2863). Turning them off folds whatever
+    // lives in the topics into this session, so the entry asks first.
     if topics_enabled {
         entries.push(MenuEntry {
             kind: MenuKind::NewTopic,
             label: "New topic",
+        });
+        entries.push(MenuEntry {
+            kind: MenuKind::DisableTopics,
+            label: "Disable topics...",
         });
     } else {
         entries.push(MenuEntry {
@@ -3162,17 +3217,20 @@ mod tests {
         let on = rail_menu_entries(false, true, false);
         assert_eq!(
             on.len(),
-            8,
-            "pin, rename, assign project, new topic, group topics, two splits and delete"
+            9,
+            "pin, rename, assign project, new topic, disable topics, group topics, \
+             two splits and delete"
         );
         assert_eq!(on[3].label, "New topic");
         assert!(matches!(on[3].kind, MenuKind::NewTopic));
-        assert_eq!(on[7].label, "Delete");
+        assert_eq!(on[4].label, "Disable topics...");
+        assert!(matches!(on[4].kind, MenuKind::DisableTopics));
+        assert_eq!(on[8].label, "Delete");
 
         let pinned = rail_menu_entries(true, true, false);
         assert_eq!(pinned[0].label, "Unpin", "a pinned row offers the way out");
         assert!(matches!(pinned[0].kind, MenuKind::Pin));
-        assert_eq!(pinned[7].label, "Delete");
+        assert_eq!(pinned[8].label, "Delete");
     }
 
     /// A rail row can take a new name from its own menu (#2668). The prompt
@@ -3218,6 +3276,56 @@ mod tests {
         assert!(
             on.iter().all(|e| e.label != "Enable topics"),
             "a session with topics on cannot be flipped twice"
+        );
+    }
+
+    /// Turning topics off is the only way back out, and it is offered exactly
+    /// while they are on, next to New topic (#2863). It asks before writing,
+    /// because the topics are folded into the session and cannot be split out
+    /// again.
+    #[test]
+    fn rail_menu_offers_disable_topics_only_while_topics_are_on() {
+        let on = rail_menu_entries(false, true, false);
+        let disable = on
+            .iter()
+            .position(|e| matches!(e.kind, MenuKind::DisableTopics))
+            .expect("topics on offers the way back out");
+        assert_eq!(on[disable].label, "Disable topics...");
+        assert_eq!(
+            on[disable - 1].label,
+            "New topic",
+            "the two topic actions sit together"
+        );
+
+        let off = rail_menu_entries(false, false, false);
+        assert!(
+            off.iter()
+                .all(|e| !matches!(e.kind, MenuKind::DisableTopics)),
+            "a session with topics off has nothing to disable"
+        );
+    }
+
+    /// The strip is drawn for a family, not for a flag (#2863). A session
+    /// whose topics were all archived or folded still carries
+    /// `topics_enabled`, and painting a bar whose only chip is `All` reads as
+    /// a broken topic feature.
+    #[test]
+    fn a_family_with_no_live_topic_has_nothing_to_draw() {
+        let mut state = SessionsState::default();
+        let root = uuid::Uuid::from_u128(1);
+        let topic = uuid::Uuid::from_u128(2);
+        state.items = vec![session(1, "root")];
+        state.topics.insert(root);
+        assert!(
+            !state.has_live_topics(root),
+            "the flag is on but no topic is live, so there is no family"
+        );
+
+        state.items.push(session(2, "topic"));
+        state.parents.insert(topic, root);
+        assert!(
+            state.has_live_topics(root),
+            "one live child is a family again"
         );
     }
 

@@ -387,6 +387,57 @@ impl Dashboard {
         cx.notify();
     }
 
+    /// Arm the disable dialog (#2863). Turning topics off folds every topic
+    /// into this conversation, so it is never one click: the menu arms the
+    /// dialog and the dialog's own button does the fold.
+    pub(crate) fn request_disable_topics(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        self.confirm_disable_topics = Some(id);
+        cx.notify();
+    }
+
+    /// Fold the topics into the session and switch the flag off, then rebuild
+    /// what the rail and the strips read (#2863).
+    ///
+    /// The refresh is the whole point: the folded topics are archived rows and
+    /// the parent's flag is now 0, so a rail that only cleared its own dialog
+    /// would keep drawing the family it just dissolved.
+    pub(crate) fn disable_topics(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        // A topic can be the conversation on screen while its family is
+        // switched off from the rail, and the fold archives that row. The
+        // open chat moves back to the session it was folded into, so the
+        // window is never left drawing a row that no longer exists (#2863).
+        let open_was_topic = self
+            .chat_session
+            .is_some_and(|open| self.sessions.parents.get(&open) == Some(&id));
+        let db_path = self.db_path.clone();
+        cx.spawn(async move |this, cx| {
+            match sessions::merge_topics(db_path, id).await {
+                Ok(folded) => {
+                    this.update(cx, |this, cx| {
+                        logging::info(&format!("topics disabled on {id}: folded {folded}"));
+                        this.refresh_rail(cx);
+                        this.refresh_topic_state(cx);
+                        if open_was_topic {
+                            this.open_session(id, cx);
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                }
+                Err(e) => {
+                    logging::error(&format!("disable topics {id}: {e}"));
+                    this.update(cx, |this, cx| {
+                        this.turn.live.notices.push(format!("disable topics: {e}"));
+                        cx.notify();
+                    })
+                    .ok();
+                }
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
     /// Re-read the pinned ids. A separate fetch from the rows because the
     /// sidecar can change on its own (the TUI pins too).
     pub(crate) fn refresh_favorites(&mut self, cx: &mut Context<Self>) {
@@ -585,7 +636,17 @@ impl Dashboard {
     /// Whether the open chat is a session with topics turned on.
     pub(crate) fn open_chat_topics_on(&self) -> bool {
         self.chat_session
-            .is_some_and(|id| self.sessions.is_topic_enabled(id))
+            .is_some_and(|id| self.sessions.is_topic_enabled(id) && self.family_has_topics(id))
+    }
+
+    /// Whether a session still has at least one live topic under it (#2863).
+    ///
+    /// The flag alone is not the answer: a session can carry `topics_enabled`
+    /// with every topic archived or folded, and the strip then draws a bar
+    /// whose only chip is `All`. A family with no topics is not a family, so
+    /// the strip asks this before it paints anything.
+    pub(crate) fn family_has_topics(&self, root: Uuid) -> bool {
+        self.sessions.has_live_topics(root)
     }
 
     /// The session a new topic hangs under (#2686): the leaf that owns the

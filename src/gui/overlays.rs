@@ -719,6 +719,116 @@ pub(crate) fn confirm_delete_overlay(
         )
 }
 
+/// The disable-topics confirmation (#2863): a dim card naming the
+/// conversation and how many topics are about to be folded into it, with the
+/// fold on its own button.
+///
+/// It is a second click because the fold has no way back: the topics are
+/// archived and their rows live in the parent from then on. The count is
+/// spelled out, so nobody folds a family of six by accident.
+pub(crate) fn confirm_disable_topics_overlay(
+    title: String,
+    topics: usize,
+    confirm: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    cancel: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let fold = if topics == 0 {
+        // A family that was already emptied still carries the flag, so the
+        // way back out is offered and has nothing to fold (#2863).
+        "Topics are switched off. Nothing is folded: this conversation has no \
+         live topic."
+            .to_string()
+    } else if topics == 1 {
+        "Its 1 topic is folded into this conversation and topics are switched \
+         off. This cannot be undone."
+            .to_string()
+    } else {
+        format!(
+            "Its {topics} topics are folded into this conversation, in order, \
+             and topics are switched off. This cannot be undone."
+        )
+    };
+    div()
+        .id("confirm-disable-topics-scrim")
+        .occlude()
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .bg(rgba(0x0a0a0acc))
+        .child(
+            div()
+                .id("confirm-disable-topics")
+                .flex()
+                .flex_col()
+                .gap_3()
+                .w(rems(26.0))
+                .p_4()
+                .rounded(px(CARD_RADIUS))
+                .border_1()
+                .border_color(rgb(palette::current().panel_hi))
+                .bg(glass_fill(palette::current().panel))
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(palette::current().text))
+                        .child(SharedString::from("Disable topics?")),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(palette::current().text_muted))
+                        .truncate()
+                        .child(SharedString::from(title)),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(palette::current().text_muted))
+                        .child(SharedString::from(fold)),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .justify_end()
+                        .gap_2()
+                        .child(
+                            div()
+                                .id("confirm-disable-topics-cancel")
+                                .px_3()
+                                .py_1()
+                                .rounded(px(4.0))
+                                .text_xs()
+                                .text_color(rgb(palette::current().text_normal))
+                                .cursor_pointer()
+                                .hover(|d| d.bg(rgb(palette::current().panel_hi)))
+                                .child(SharedString::from("cancel"))
+                                .on_click(cancel),
+                        )
+                        .child(
+                            div()
+                                .id("confirm-disable-topics-yes")
+                                .px_3()
+                                .py_1()
+                                .rounded(px(4.0))
+                                .text_xs()
+                                .text_color(rgb(palette::current().red))
+                                .cursor_pointer()
+                                .border_1()
+                                .border_color(rgb(palette::current().red))
+                                .hover(|d| d.bg(rgb(palette::current().selection)))
+                                .child(SharedString::from("disable"))
+                                .on_click(confirm),
+                        ),
+                ),
+        )
+}
+
 /// The /cd picker's rows (#2527): the parent entry first when one exists,
 /// then the subdirectories, dotfile directories hidden until toggled, all
 /// sorted by name. A free function so the tests can exercise the real

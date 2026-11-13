@@ -66,6 +66,9 @@ impl Dashboard {
                             this.open_session_project_assignment(id, cx)
                         }
                         sessions::MenuKind::EnableTopics => this.enable_topics(id, cx),
+                        // Turning topics off folds the family into this row,
+                        // so the menu only arms the dialog (#2863).
+                        sessions::MenuKind::DisableTopics => this.request_disable_topics(id, cx),
                         sessions::MenuKind::NewTopic => {
                             // The prompt hangs the topic under the pane
                             // holding the caret, so the row opens there first
