@@ -8975,13 +8975,20 @@ mod tests {
         // ctx budget) and exactly one hint: the door to the Seeker card. A
         // strip of chords taught keys the window no longer binds and went
         // stale the moment a binding moved, so every screen answers with the
-        // same three words instead.
+        // same one door instead.
         let src = DASHBOARD;
+        // The chat footer prints the chord the handler answers on this
+        // platform beside that door (#2747), so the static sentence now stands
+        // on the two screens that have no chord of their own to print.
         let door = ["\"alt+space · ", "seek help\""].concat();
         assert_eq!(
             src.matches(&door).count(),
-            3,
-            "chat, usage and files each carry the one door, and nothing else"
+            2,
+            "usage and files carry the static door, and nothing else"
+        );
+        assert!(
+            src.contains("palette::seeker_chord_label()"),
+            "the chat door names the chord the window answers"
         );
         assert!(
             !src.contains(&["back to ", "chat"].concat()),
