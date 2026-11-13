@@ -3047,6 +3047,12 @@ impl Render for Dashboard {
                             )
                             .child(
                                 div()
+                                    .text_xs()
+                                    .text_color(rgb(palette::current().text_muted))
+                                    .child("ctrl+s · sidebar"),
+                            )
+                            .child(
+                                div()
                                     .flex_1()
                                     .min_w_0()
                                     .truncate()
@@ -3214,7 +3220,8 @@ impl Render for Dashboard {
                         div()
                             .text_xs()
                             .text_color(rgb(palette::current().text_muted))
-                            .child("alt+space · seek help"),
+                            .child("alt+space · seek help")
+                            .child("ctrl+s · sidebar"),
                     );
                 (scroller.into_any_element(), footer.into_any_element())
             }
@@ -3248,7 +3255,8 @@ impl Render for Dashboard {
                         div()
                             .text_xs()
                             .text_color(rgb(palette::current().text_muted))
-                            .child("alt+space · seek help"),
+                            .child("alt+space · seek help")
+                            .child("ctrl+s · sidebar"),
                     );
                 (scroller.into_any_element(), footer.into_any_element())
             }
@@ -8972,10 +8980,11 @@ mod tests {
     fn chat_footer_points_at_the_seeker() {
         // The footer stopped being a hand-maintained keymap (#2321). It carries
         // live state (provider, model, directory, branch, tokens per second,
-        // ctx budget) and exactly one hint: the door to the Seeker card. A
-        // strip of chords taught keys the window no longer binds and went
-        // stale the moment a binding moved, so every screen answers with the
-        // same one door instead.
+        // ctx budget), the door to the Seeker card, and the sidebar chord
+        // (#2877): ctrl+s opens and closes the rail, and a user who does not
+        // know the chord had no on-screen way to learn it. The rest of the
+        // retired strip taught keys the window no longer binds and went stale
+        // the moment a binding moved, so it stays banned below.
         let src = DASHBOARD;
         // The chat footer prints the chord the handler answers on this
         // platform beside that door (#2747), so the static sentence now stands
@@ -8984,11 +8993,17 @@ mod tests {
         assert_eq!(
             src.matches(&door).count(),
             2,
-            "usage and files carry the static door, and nothing else"
+            "usage and files carry the static Seeker door"
         );
         assert!(
             src.contains("palette::seeker_chord_label()"),
             "the chat door names the chord the window answers"
+        );
+        let sidebar = ["\"ctrl+s · ", "sidebar\""].concat();
+        assert_eq!(
+            src.matches(&sidebar).count(),
+            3,
+            "chat, usage and files each advertise the sidebar's real chord"
         );
         assert!(
             !src.contains(&["back to ", "chat"].concat()),

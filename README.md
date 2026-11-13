@@ -766,7 +766,7 @@ The window runs the terminal's whole slash-command surface, not a subset. All 34
 
 `/whisper` installs and launches the same WhisperCrabs binary the terminal uses (the install path is not reimplemented here), and `/cowork` composes the tool turn, so neither one asks the model to guess at a shell command.
 
-`ctrl+k` opens the command palette: every command the window knows, plus every channel, session, skill and screen, filtered as you type. `ctrl+g` opens the session files browser. Picking a row and pressing the key land in the same place, because the palette routes through the same toggles.
+`ctrl+k` opens the command palette: every command the window knows, plus every channel, session, skill and screen, filtered as you type. `ctrl+g` opens the session files browser. Picking a row and pressing the key land in the same place, because the palette routes through the same toggles. The chat, usage and files footers name the Seeker door and `ctrl+s · sidebar`, so both are discoverable without reading anything.
 
 #### Skills screen
 
