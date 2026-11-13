@@ -997,15 +997,6 @@ impl PaletteState {
         self.scroll = 0;
     }
 
-    /// Replace a character range and put the caret after the replacement.
-    /// Every real edit funnels through here, so every edit also disarms the
-    /// old result row and returns the list to its first page (#2534).
-    fn replace_range(&mut self, start: usize, end: usize, replacement: &str) {
-        if self.field.replace_range(start, end, replacement) {
-            self.reset_rows();
-        }
-    }
-
     /// Insert text at the caret, replacing any selection. Paste uses the same
     /// path as typing, so both frontends inherit identical editing (#2534).
     pub fn insert_text(&mut self, text: &str) {
