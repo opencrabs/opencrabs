@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=OpenCrabs Desktop
+GenericName=AI Agent
+Comment=AI agent desktop client
+Exec=opencrabs-gui
+Icon=opencrabs
+Terminal=false
+Categories=Development;
+Keywords=ai;agent;desktop;gui;
+StartupNotify=false

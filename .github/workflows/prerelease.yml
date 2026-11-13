@@ -213,21 +213,23 @@ jobs:
           VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
           ARCHIVE="opencrabs-v${VERSION}-pre-${SHA}-${{ matrix.asset_suffix }}"
           # A Linux desktop needs a menu entry and an icon next to the binary,
-          # or a file manager shows the generic exec glyph. Same two files the
+          # or a file manager shows the generic exec glyph. Two entries, one per
+          # client: the terminal app and the desktop window. Same three files the
           # release workflow ships, copied before the cd below.
-          cp packaging/linux/opencrabs.desktop packaging/linux/opencrabs.png \
+          cp packaging/linux/opencrabs.desktop packaging/linux/opencrabs-gui.desktop \
+            packaging/linux/opencrabs.png \
             "target/${{ matrix.target }}/release/"
           cd target/${{ matrix.target }}/release
           # A missing binary used to produce a smaller archive and no error.
           # The GUI was lost exactly that way on every target.
-          for b in opencrabs opencrabs-gui rtk opencrabs.desktop opencrabs.png; do
+          for b in opencrabs opencrabs-gui rtk opencrabs.desktop opencrabs-gui.desktop opencrabs.png; do
             if [ ! -f "$b" ]; then
               echo "::error::$b was not built; refusing to publish a partial archive"
               exit 1
             fi
           done
           tar czf "../../../${ARCHIVE}.tar.gz" opencrabs opencrabs-gui rtk \
-            opencrabs.desktop opencrabs.png
+            opencrabs.desktop opencrabs-gui.desktop opencrabs.png
 
       # Same gate as the release workflow: the floor check above reads what the
       # binary asks for, this runs it on the distribution that floor names, out

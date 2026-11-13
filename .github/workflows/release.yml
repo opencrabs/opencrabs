@@ -517,19 +517,21 @@ jobs:
             tar czf "${ASSET_NAME}.tar.gz" -C dist OpenCrabs.app opencrabs opencrabs-gui
           else
             # A Linux desktop needs a menu entry and an icon next to the binary,
-            # or a file manager shows the generic exec glyph.
-            cp packaging/linux/opencrabs.desktop packaging/linux/opencrabs.png \
+            # or a file manager shows the generic exec glyph. Two entries, one
+            # per client: the terminal app and the desktop window.
+            cp packaging/linux/opencrabs.desktop packaging/linux/opencrabs-gui.desktop \
+              packaging/linux/opencrabs.png \
               target/${{ matrix.target }}/release/
             cd target/${{ matrix.target }}/release
             # A missing binary used to produce a smaller archive and no error.
-            for b in ${{ matrix.artifact_name }} opencrabs-gui rtk opencrabs.desktop opencrabs.png; do
+            for b in ${{ matrix.artifact_name }} opencrabs-gui rtk opencrabs.desktop opencrabs-gui.desktop opencrabs.png; do
               if [ ! -f "$b" ]; then
                 echo "::error::$b was not built; refusing to publish a partial archive"
                 exit 1
               fi
             done
             tar czf ../../../${ASSET_NAME}.tar.gz ${{ matrix.artifact_name }} opencrabs-gui rtk \
-              opencrabs.desktop opencrabs.png
+              opencrabs.desktop opencrabs-gui.desktop opencrabs.png
           fi
 
       # The floor check above reads what the binary asks for. This runs it, on

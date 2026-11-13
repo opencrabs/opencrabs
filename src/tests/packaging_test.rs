@@ -3,8 +3,9 @@
 //! The release tarballs are the only thing most users ever touch, and the
 //! pipeline that builds them is not compiled, so a dropped line there is
 //! invisible to `cargo test` unless something reads the workflow. These tests
-//! pin the three packaging decisions that give the binary an icon: the macOS
-//! app bundle, the Linux desktop entry, and the Homebrew cask scaffold.
+//! pin the packaging decisions that give the binaries an icon and a launcher:
+//! the macOS app bundle, the two Linux desktop entries, and the Homebrew cask
+//! scaffold.
 
 use std::path::{Path, PathBuf};
 
@@ -43,7 +44,7 @@ fn the_release_workflow_bundles_the_macos_app() {
 fn the_release_workflow_ships_the_linux_desktop_files() {
     let workflow = read(".github/workflows/release.yml");
 
-    for file in ["opencrabs.desktop", "opencrabs.png"] {
+    for file in ["opencrabs.desktop", "opencrabs-gui.desktop", "opencrabs.png"] {
         assert!(
             workflow.contains(file),
             "the release workflow does not pack {file}, so a Linux install has no menu entry and no icon"
@@ -73,6 +74,44 @@ fn the_desktop_entry_declares_what_a_launcher_needs() {
         assert!(
             entry.lines().any(|l| l == line),
             "missing `{line}` in the desktop entry"
+        );
+    }
+}
+
+#[test]
+fn the_gui_desktop_entry_launches_the_window() {
+    let entry = read("packaging/linux/opencrabs-gui.desktop");
+
+    assert!(
+        entry.starts_with("[Desktop Entry]"),
+        "a .desktop file must open with the [Desktop Entry] group"
+    );
+    for line in [
+        "Type=Application",
+        "Exec=opencrabs-gui",
+        "Icon=opencrabs",
+        "Terminal=false",
+        "Categories=Development;",
+    ] {
+        assert!(
+            entry.lines().any(|l| l == line),
+            "missing `{line}` in the GUI desktop entry"
+        );
+    }
+    assert!(
+        !entry.lines().any(|l| l == "Exec=opencrabs"),
+        "the GUI entry points at the terminal client, so a menu click opens a terminal instead of the window"
+    );
+}
+
+#[test]
+fn the_prerelease_workflow_ships_the_same_linux_desktop_files() {
+    let workflow = read(".github/workflows/prerelease.yml");
+
+    for file in ["opencrabs.desktop", "opencrabs-gui.desktop", "opencrabs.png"] {
+        assert!(
+            workflow.contains(file),
+            "the prerelease workflow does not pack {file}, so a prerelease install has one launcher fewer than a release install"
         );
     }
 }
