@@ -75,6 +75,29 @@ fn reply_and_forward_read_the_pressed_row_on_every_row() {
     );
 }
 
+/// Right-click belongs to the whole row, including structured card padding
+/// (#2923). The inner body keeps left-click selection only.
+#[test]
+fn right_press_is_on_the_outer_message_row() {
+    let row = TRANSCRIPT
+        .split("fn message_row(")
+        .nth(1)
+        .and_then(|rest| rest.split("fn inline_edit_box(").next())
+        .expect("one stored-message row builder");
+    let body = row
+        .split("let mut body = div()")
+        .nth(1)
+        .and_then(|rest| rest.split("row = row.child(body);").next())
+        .expect("message body");
+    assert!(!body.contains("MouseButton::Right"));
+    assert!(row.contains("row = row.on_mouse_down(MouseButton::Right"));
+    assert!(
+        row.find("row = row.child(body);").unwrap()
+            < row.find("row = row.on_mouse_down(MouseButton::Right").unwrap(),
+        "the outer row owns the press after its body and controls are attached"
+    );
+}
+
 /// Only a stored `Message` row can be picked. Tool output, system notices,
 /// plan cards and the live turn carry no `MessageId`, so they fall to the arm
 /// that draws a plain row: no pick box, no menu, and a click in select mode is

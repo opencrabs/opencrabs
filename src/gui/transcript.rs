@@ -3884,12 +3884,6 @@ fn message_row(
             .cursor_pointer()
             .on_click(move |ev, window, app| handler(ev, window, app));
     }
-    if let Some(handler) = press {
-        let handler = handler.clone();
-        body = body.on_mouse_down(MouseButton::Right, move |ev, window, app| {
-            handler(ev, window, app);
-        });
-    }
     row = row.child(body);
     // A user row offers its edit on hover (#2826). It is drawn at the bubble's
     // bottom right and stays clickable while invisible, so the pointer reaches
@@ -3958,6 +3952,15 @@ fn message_row(
                 })
                 .on_click(move |ev, window, app| handler(ev, window, app)),
         );
+    }
+    // The whole stored row owns the right press (#2923), not just its text
+    // body. Padding, structured card children and the hover-control area all
+    // bubble to this same menu without changing their left-click behavior.
+    if let Some(handler) = press {
+        let handler = handler.clone();
+        row = row.on_mouse_down(MouseButton::Right, move |ev, window, app| {
+            handler(ev, window, app);
+        });
     }
     row
 }
