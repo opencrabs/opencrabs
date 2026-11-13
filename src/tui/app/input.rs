@@ -2691,7 +2691,7 @@ impl App {
         // `ctrl-x` and `alt-backspace` work here as they do in the input
         // (#2892). Before, the prompt could only append and pop.
         if self.session_renaming {
-            if let Some(edit) = prompt_edit(event) {
+            if let Some(edit) = prompt_edit(&event) {
                 apply_prompt_edit(&mut self.session_rename_buffer, edit);
                 return Ok(());
             }
@@ -2745,7 +2745,7 @@ impl App {
         // Topic name prompt: typing the name of a topic under the selected
         // session (#2306). Enter creates it, Esc cancels.
         if self.topic_naming {
-            if let Some(edit) = prompt_edit(event) {
+            if let Some(edit) = prompt_edit(&event) {
                 apply_prompt_edit(&mut self.topic_name_buffer, edit);
                 return Ok(());
             }

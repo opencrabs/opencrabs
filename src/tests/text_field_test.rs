@@ -131,6 +131,10 @@ fn the_three_prompts_hold_the_shared_field() {
     assert!(input.contains("fn apply_prompt_edit(field: &mut TextField"));
     assert!(input.contains("apply_prompt_edit(&mut self.session_rename_buffer, edit)"));
     assert!(input.contains("apply_prompt_edit(&mut self.topic_name_buffer, edit)"));
+    // `prompt_edit` takes the event by reference, so both prompt arms have to
+    // borrow it. Handing it over by value does not compile (#2892).
+    assert!(input.contains("prompt_edit(&event)"));
+    assert!(!input.contains("prompt_edit(event)"));
     assert!(input.contains("TextField::from_text(&session.title"));
     let state = include_str!("../tui/app/state.rs");
     assert!(state.contains("pub session_rename_buffer: TextField,"));
