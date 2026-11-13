@@ -316,7 +316,7 @@ jobs:
           # The two scripts own the Windows-only checks added for #2257. If
           # either changes and this lane does not fire, the check is edited
           # without ever running, so they belong in the pattern too.
-          pattern='^(Cargo\.toml|Cargo\.lock|rust-toolchain\.toml|build\.rs|\.github/workflows/ci\.yml|scripts/(check-pe-imports\.py|stage-windows-runtime\.sh)|src/utils/(shell|cwd)\.rs|src/brain/tools/(bash|read)\.rs|src/tui/app/input\.rs|src/config/(winlock|profile)\.rs)$'
+          pattern='^(Cargo\.toml|Cargo\.lock|rust-toolchain\.toml|build\.rs|\.github/workflows/ci\.yml|scripts/(check-pe-imports\.py|stage-windows-runtime\.sh)|src/gui/.*|src/utils/(shell|cwd)\.rs|src/brain/tools/(bash|read)\.rs|src/tui/app/input\.rs|src/config/(winlock|profile)\.rs)$'
           if echo "$files" | grep -qE "$pattern"; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
@@ -432,7 +432,15 @@ jobs:
         shell: bash
         run: |
           python scripts/check-pe-imports.py --self-test
-          python scripts/check-pe-imports.py target/x86_64-pc-windows-msvc/ci/opencrabs.exe
+          shopt -s nullglob
+          exes=(target/x86_64-pc-windows-msvc/ci/*.exe)
+          if [ "${#exes[@]}" -eq 0 ]; then
+            echo "::error::no executables found in target/x86_64-pc-windows-msvc/ci/"
+            exit 1
+          fi
+          for exe in "${exes[@]}"; do
+            python scripts/check-pe-imports.py "$exe"
+          done
 
       # No step-level `if:` on either step below, deliberately. This job is
       # gated at job level on needs.windows-filter.outputs.run (#1831) and
