@@ -1229,6 +1229,20 @@ fn row_blocks(m: &Message, forward: Option<ForwardMark>) -> Vec<Block> {
             },
         );
     }
+    // `push_text` splits the stored row into working-out and answer blocks,
+    // but only a block with its stored id gets the row's mouse handlers. Put
+    // that id on the last answer block: before this, a tool-only placeholder
+    // opened the menu while the ordinary completion beside it did nothing
+    // (#2860). One block per stored row also keeps the GPUI element ids unique
+    // when the parser produced more than one text segment.
+    if let Some(answer) = blocks[row_start..].iter_mut().rev().find(|block| {
+        matches!(block, Block::Msg { message_id: None, .. })
+    }) {
+        let Block::Msg { message_id, .. } = answer else {
+            unreachable!("the find predicate only matches message blocks")
+        };
+        *message_id = Some(m.id);
+    }
     blocks
 }
 
@@ -5250,7 +5264,9 @@ mod tests {
         let content = format!(
             "<!-- reasoning -->I should check the parser.<!-- /reasoning -->{ledger}Done: the fix is in."
         );
-        let blocks = flat(&[row("assistant", &content, 1)], 1);
+        let answer_row = row("assistant", &content, 1);
+        let answer_id = answer_row.id;
+        let blocks = flat(&[answer_row], 1);
 
         let thinking = blocks.iter().position(
             |b| matches!(b, Block::Thinking { content } if content.contains("check the parser")),
@@ -5265,6 +5281,13 @@ mod tests {
         assert!(
             thinking < tools && tools < answer,
             "order must follow the row"
+        );
+        assert!(
+            matches!(
+                &blocks[answer],
+                Block::Msg { message_id: Some(id), .. } if *id == answer_id
+            ),
+            "the completion keeps the stored id its right-click menu needs (#2860)"
         );
 
         let calls = match &blocks[tools] {
