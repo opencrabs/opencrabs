@@ -4907,7 +4907,17 @@ impl Render for Dashboard {
                         this.persist_layout();
                     }
                 }),
-            );
+            )
+            // A release ends the slide even when the element under the pointer
+            // swallows the bubble. A topic chip, the "+N" pill and the collapse
+            // pill all stop propagation in their click listeners, so the
+            // handler above never ran for them: the armed swipe outlived the
+            // click and the next pointer move tripped `slide_reveals`, opening
+            // the card's menu on a plain left click (#2911). Capture runs root
+            // first, so no child can swallow this one.
+            .capture_any_mouse_up(cx.listener(|this, _ev: &MouseUpEvent, _window, _cx| {
+                this.rail_swipe = None;
+            }));
         if self.rail_open {
             let width = self.rail_width;
             let grab = cx.listener(move |this, _ev: &MouseDownEvent, window, _cx| {
@@ -7848,6 +7858,45 @@ mod tests {
             slide.contains("this.rail_slide_opened = Some(id);"),
             "the release that ends a slide must not pick the row"
         );
+    }
+
+    #[test]
+    fn a_release_clears_the_slide_before_a_chip_can_swallow_it() {
+        // #2911: the chip, the "+N" pill and the collapse pill all stop the
+        // bubble in their click listeners, so the root's mouse-up never ran for
+        // a press on any of them. The armed swipe outlived the click and the
+        // next pointer move opened the card's menu on a plain left click.
+        // Capture runs root first, so no child can swallow the clear.
+        let src = DASHBOARD;
+        let render = dashboard_render(src);
+        let clear = render
+            .split("capture_any_mouse_up")
+            .nth(1)
+            .expect("the window root clears the swipe in the capture phase")
+            .split("});")
+            .next()
+            .expect("the capture listener");
+        assert!(
+            clear.contains("this.rail_swipe = None;"),
+            "a release disarms the slide before any child can stop the bubble"
+        );
+        // The three listeners that swallow the bubble are why it has to be
+        // capture. If one of them stops doing that, this test re-reads why the
+        // clear sits in the capture phase rather than the bubble.
+        for anchor in [
+            "let open = cx.listener",
+            "let expand = cx.listener",
+            "let collapse = cx.listener",
+        ] {
+            let (_head, tail) = render
+                .split_once(anchor)
+                .unwrap_or_else(|| panic!("{anchor} still exists"));
+            let listener = tail.split("});").next().unwrap_or("");
+            assert!(
+                listener.contains("cx.stop_propagation();"),
+                "{anchor} is why the release has to be caught on the way down"
+            );
+        }
     }
 
     #[test]
