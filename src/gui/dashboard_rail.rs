@@ -50,7 +50,8 @@ impl Dashboard {
         }
         let favorite = self.sessions.is_favorite(id);
         let topics_on = self.sessions.is_topic_enabled(id);
-        let items = sessions::rail_menu_entries(favorite, topics_on)
+        let is_topic = self.sessions.parents.contains_key(&id);
+        let items = sessions::rail_menu_entries(favorite, topics_on, is_topic)
             .into_iter()
             .map(|entry| {
                 let kind = entry.kind;
@@ -60,6 +61,10 @@ impl Dashboard {
                     match kind {
                         sessions::MenuKind::Pin => this.toggle_favorite(id, cx),
                         sessions::MenuKind::Rename => this.start_rename(id, cx),
+                        // Assign project... is emitted only for parent sessions.
+                        sessions::MenuKind::AssignProject => {
+                            this.open_session_project_assignment(id, cx)
+                        }
                         sessions::MenuKind::EnableTopics => this.enable_topics(id, cx),
                         sessions::MenuKind::NewTopic => {
                             // The prompt hangs the topic under the pane

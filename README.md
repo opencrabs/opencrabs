@@ -776,6 +776,8 @@ The window runs the terminal's whole slash-command surface, not a subset. All 34
 
 `/projects` opens the project organizer on both clients, and Seeker lists the same destination. The terminal also opens it with `P` in the sessions list; the window uses `alt+p`, leaving bare `p` available for rail search and `ctrl+shift+p` for pinning. Projects and their session and file counts come from the shared project service. You can create or delete a project, assign or unassign sessions, and open a session from its project. Deletion asks for confirmation and leaves its sessions unassigned. On the window, `esc` closes the create or delete prompt first, then returns from assignment or project details before leaving the screen.
 
+For direct assignment on the window, right-click a top-level session card and choose **Assign project...**. Click a project or press `enter` to assign or reassign that session, then return to chat; `esc` cancels. The parent session's project covers every topic inside it. Topics have no independent project action and never appear as unassigned-session picks.
+
 #### Seeker
 
 `Alt+Space` opens Seeker on both surfaces, and the window opens the same card with `cmd+k`. It is one field in the Spotlight style: type a few words, `enter` runs the row. It finds conversations, slash commands, screens, skills, the setup for a messaging channel, and the matching page on docs.opencrabs.com. `trello` surfaces the `/channels` row plus the channels docs page, `terminal voice` surfaces `/whisper`, `daemon trouble` surfaces the Troubleshooting page, `update` surfaces `/evolve`. A docs row opens the official page in your browser, and a channel that is not configured yet prints the steps it takes under the field before you commit.
@@ -4235,6 +4237,8 @@ A session is one to three rows. Under the name line, a session with a live plan 
 Open the project organizer with `/projects` on either interface. In the terminal, `P` opens it from Sessions Mode. In the GUI, `Alt+P` toggles it, and both Help and Seeker list it.
 
 The organizer shows projects with their session and file counts. Enter opens a project and its sessions. `n` creates a project, `d` deletes one after confirmation, `a` assigns a session, and `u` removes a session from its project. Deleting a project leaves its sessions available as unassigned.
+
+In the GUI, **Assign project...** on a top-level session card's right-click menu opens a project picker for that session. A successful pick returns to chat. Assigning the parent session covers all topics inside it; topics do not get separate project assignments or appear as unassigned picks.
 
 OpenCrabs automatically tracks files created or edited during your sessions. No manual setup needed: every `write_file`, `edit_file`, and `hashline_edit` call logs the path to the session's file list. Clipboard paste images are tracked too.
 

@@ -384,6 +384,7 @@ pub mod gui_projects_screen_test;
 pub mod gui_rail_last_activity_test;
 pub mod gui_rail_letters_test;
 pub mod gui_reply_quote_2827_test;
+pub mod gui_session_project_assignment_test;
 pub mod gui_sessions_rail_test;
 pub mod gui_split_command_session_2672_test;
 pub mod gui_split_render_test;

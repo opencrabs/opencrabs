@@ -6,10 +6,27 @@ use crate::projects::{ProjectAction, ProjectsMode};
 impl Dashboard {
     /// `/projects` and alt+p open the same service-backed project list.
     pub(crate) fn open_projects(&mut self, cx: &mut Context<Self>) {
+        self.open_projects_mode(ProjectsMode::List, cx);
+    }
+
+    /// A top-level session owns its project. Topics inside it share that
+    /// assignment, so only the parent session can open this picker.
+    pub(crate) fn open_session_project_assignment(
+        &mut self,
+        session_id: Uuid,
+        cx: &mut Context<Self>,
+    ) {
+        if self.sessions.parents.contains_key(&session_id) {
+            return;
+        }
+        self.open_projects_mode(ProjectsMode::AssignSession(session_id), cx);
+    }
+
+    fn open_projects_mode(&mut self, mode: ProjectsMode, cx: &mut Context<Self>) {
         self.onboard = None;
         self.screen = Screen::Projects;
         self.sessions.rail_menu = None;
-        self.projects.mode = ProjectsMode::List;
+        self.projects.mode = mode;
         self.projects.sessions.clear();
         self.projects.unassigned.clear();
         self.projects.selected = 0;
@@ -47,6 +64,10 @@ impl Dashboard {
             cx.notify();
             return;
         }
+        if matches!(self.projects.mode, ProjectsMode::AssignSession(_)) {
+            self.close_projects(cx);
+            return;
+        }
         if self.projects.mode != ProjectsMode::List {
             self.projects.next_generation();
             self.projects.loading = false;
@@ -69,6 +90,16 @@ impl Dashboard {
         self.projects.next_generation();
         let generation = self.projects.generation;
         let db_path = self.db_path.clone();
+        let session_assignment = match (self.projects.mode, &action) {
+            (
+                ProjectsMode::AssignSession(expected_session),
+                ProjectAction::Assign {
+                    project_id,
+                    session_id,
+                },
+            ) if expected_session == *session_id => Some((*session_id, *project_id)),
+            _ => None,
+        };
         cx.spawn(async move |this, cx| {
             let result = crate::projects::run(db_path, action).await;
             let updated = this.update(cx, |this, cx| {
@@ -77,7 +108,20 @@ impl Dashboard {
                 }
                 this.projects.loading = false;
                 match result {
-                    Ok(data) => this.projects.apply(data),
+                    Ok(data) => {
+                        this.projects.apply(data);
+                        if let Some((session_id, project_id)) = session_assignment {
+                            if let Some(session) = this
+                                .sessions
+                                .items
+                                .iter_mut()
+                                .find(|session| session.id == session_id)
+                            {
+                                session.project_id = Some(project_id);
+                            }
+                            this.close_projects(cx);
+                        }
+                    }
                     Err(error) => this.projects.error = Some(error),
                 }
                 cx.notify();
@@ -155,6 +199,24 @@ impl Dashboard {
         cx: &mut Context<Self>,
     ) {
         self.projects.mode = ProjectsMode::Detail(project_id);
+        self.request_projects(
+            ProjectAction::Assign {
+                project_id,
+                session_id,
+            },
+            cx,
+        );
+        cx.notify();
+    }
+
+    pub(crate) fn assign_session_to_project(
+        &mut self,
+        project_id: Uuid,
+        cx: &mut Context<Self>,
+    ) {
+        let ProjectsMode::AssignSession(session_id) = self.projects.mode else {
+            return;
+        };
         self.request_projects(
             ProjectAction::Assign {
                 project_id,
@@ -255,6 +317,18 @@ impl Dashboard {
                         .map(|session| session.id)
                     {
                         self.assign_project_session(project_id, session_id, cx);
+                    }
+                }
+                _ => {}
+            },
+            ProjectsMode::AssignSession(_) => match ks.key.as_str() {
+                "up" => self.projects.move_selection(-1),
+                "down" => self.projects.move_selection(1),
+                "enter" => {
+                    if let Some(project_id) =
+                        self.projects.selected_project().map(|project| project.id)
+                    {
+                        self.assign_session_to_project(project_id, cx);
                     }
                 }
                 _ => {}

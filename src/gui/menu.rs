@@ -20,6 +20,8 @@ pub enum MenuKind {
     /// managed, and the prompt used to be reachable only from the body's own
     /// menu (#2668).
     Rename,
+    /// Choose the project for a top-level session and every topic inside it.
+    AssignProject,
     Delete,
     EnableTopics,
     NewTopic,

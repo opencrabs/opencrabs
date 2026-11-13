@@ -1419,10 +1419,14 @@ pub fn pin_toggle(id: uuid::Uuid, favorited: bool) -> Stateful<Div> {
         .child(pin_icon(favorited, 0.9))
 }
 
-/// The menu's contents, resolved from the row's pin state. Pure, so the
-/// labels are pinned by test and the render only draws what this returns
+/// The menu's contents, resolved from the row's pin and topic state. Pure, so
+/// the labels are pinned by test and the render only draws what this returns
 /// (#2354).
-pub fn rail_menu_entries(favorited: bool, topics_enabled: bool) -> Vec<MenuEntry> {
+pub fn rail_menu_entries(
+    favorited: bool,
+    topics_enabled: bool,
+    is_topic: bool,
+) -> Vec<MenuEntry> {
     let mut entries = vec![MenuEntry {
         kind: MenuKind::Pin,
         label: if favorited { "Unpin" } else { "Pin" },
@@ -1435,6 +1439,14 @@ pub fn rail_menu_entries(favorited: bool, topics_enabled: bool) -> Vec<MenuEntry
         kind: MenuKind::Rename,
         label: "Rename",
     });
+    // A project belongs to the parent session. Topics inside that session
+    // share its assignment and never get an independent project action.
+    if !is_topic {
+        entries.push(MenuEntry {
+            kind: MenuKind::AssignProject,
+            label: "Assign project...",
+        });
+    }
     // Topics are opt-in per session (#2302): the item is offered only while
     // they are off, so it cannot be flipped twice by accident. Once they are
     // on, the same slot offers a new topic under the row (#2397).
@@ -3130,35 +3142,37 @@ mod tests {
     /// on adds New topic in the same slot (#2397).
     #[test]
     fn rail_menu_offers_pin_and_delete() {
-        let off = rail_menu_entries(false, false);
+        let off = rail_menu_entries(false, false, false);
         assert_eq!(
             off.len(),
-            7,
-            "pin, rename, enable topics, group topics, two splits and delete"
+            8,
+            "pin, rename, assign project, enable topics, group topics, two splits and delete"
         );
         assert_eq!(off[0].label, "Pin");
         assert!(matches!(off[0].kind, MenuKind::Pin));
         assert_eq!(off[1].label, "Rename");
         assert!(matches!(off[1].kind, MenuKind::Rename));
-        assert_eq!(off[3].label, "Group topics...");
-        assert!(matches!(off[3].kind, MenuKind::GroupTopics));
-        assert_eq!(off[6].label, "Delete");
-        assert!(matches!(off[6].kind, MenuKind::Delete));
+        assert_eq!(off[2].label, "Assign project...");
+        assert!(matches!(off[2].kind, MenuKind::AssignProject));
+        assert_eq!(off[4].label, "Group topics...");
+        assert!(matches!(off[4].kind, MenuKind::GroupTopics));
+        assert_eq!(off[7].label, "Delete");
+        assert!(matches!(off[7].kind, MenuKind::Delete));
 
-        let on = rail_menu_entries(false, true);
+        let on = rail_menu_entries(false, true, false);
         assert_eq!(
             on.len(),
-            7,
-            "pin, rename, new topic, group topics, two splits and delete"
+            8,
+            "pin, rename, assign project, new topic, group topics, two splits and delete"
         );
-        assert_eq!(on[2].label, "New topic");
-        assert!(matches!(on[2].kind, MenuKind::NewTopic));
-        assert_eq!(on[6].label, "Delete");
+        assert_eq!(on[3].label, "New topic");
+        assert!(matches!(on[3].kind, MenuKind::NewTopic));
+        assert_eq!(on[7].label, "Delete");
 
-        let pinned = rail_menu_entries(true, true);
+        let pinned = rail_menu_entries(true, true, false);
         assert_eq!(pinned[0].label, "Unpin", "a pinned row offers the way out");
         assert!(matches!(pinned[0].kind, MenuKind::Pin));
-        assert_eq!(pinned[6].label, "Delete");
+        assert_eq!(pinned[7].label, "Delete");
     }
 
     /// A rail row can take a new name from its own menu (#2668). The prompt
@@ -3166,7 +3180,7 @@ mod tests {
     #[test]
     fn rail_menu_offers_rename_on_every_row() {
         for (favorited, topics) in [(false, false), (false, true), (true, true)] {
-            let menu = rail_menu_entries(favorited, topics);
+            let menu = rail_menu_entries(favorited, topics, false);
             let rename = menu
                 .iter()
                 .find(|e| matches!(e.kind, MenuKind::Rename))
@@ -3179,7 +3193,7 @@ mod tests {
     /// from the row that was clicked (#2438).
     #[test]
     fn rail_menu_offers_both_splits_before_delete() {
-        let menu = rail_menu_entries(false, true);
+        let menu = rail_menu_entries(false, true, false);
         let labels: Vec<&str> = menu.iter().map(|e| e.label).collect();
         let split = labels
             .iter()
@@ -3195,12 +3209,12 @@ mod tests {
     /// pin and delete (#2302).
     #[test]
     fn rail_menu_offers_enable_topics_only_while_topics_are_off() {
-        let off = rail_menu_entries(false, false);
-        assert_eq!(off.len(), 7);
-        assert_eq!(off[2].label, "Enable topics");
-        assert!(matches!(off[2].kind, MenuKind::EnableTopics));
+        let off = rail_menu_entries(false, false, false);
+        assert_eq!(off.len(), 8);
+        assert_eq!(off[3].label, "Enable topics");
+        assert!(matches!(off[3].kind, MenuKind::EnableTopics));
 
-        let on = rail_menu_entries(false, true);
+        let on = rail_menu_entries(false, true, false);
         assert!(
             on.iter().all(|e| e.label != "Enable topics"),
             "a session with topics on cannot be flipped twice"

@@ -22,6 +22,7 @@ impl Dashboard {
                 .map(|project| project.name.clone())
                 .unwrap_or_else(|| "Project".to_string()),
             ProjectsMode::Assign(_) => "Assign a session".to_string(),
+            ProjectsMode::AssignSession(_) => "Assign project".to_string(),
         };
         let subtitle = match mode {
             ProjectsMode::List => "Group related sessions and their tracked files".to_string(),
@@ -36,6 +37,9 @@ impl Dashboard {
                     .map(|project| project.name.as_str())
                     .unwrap_or("this project")
             ),
+            ProjectsMode::AssignSession(_) => {
+                "Choose a project for this session and every topic inside it".to_string()
+            }
         };
         let mut actions = div().flex().flex_row().items_center().gap_2();
         match mode {
@@ -83,7 +87,7 @@ impl Dashboard {
                         })),
                 );
             }
-            ProjectsMode::Assign(_) => {
+            ProjectsMode::Assign(_) | ProjectsMode::AssignSession(_) => {
                 actions = actions.child(
                     projects_view::action_button("project-assign-back", "back", false, shown)
                         .on_click(cx.listener(|this, _ev, _window, cx| {
@@ -155,7 +159,7 @@ impl Dashboard {
         }
 
         let count = match mode {
-            ProjectsMode::List => self.projects.rows.len(),
+            ProjectsMode::List | ProjectsMode::AssignSession(_) => self.projects.rows.len(),
             ProjectsMode::Detail(_) => self.projects.sessions.len(),
             ProjectsMode::Assign(_) => self.projects.unassigned.len(),
         };
@@ -172,6 +176,9 @@ impl Dashboard {
                         "No unassigned sessions",
                         "every session already belongs to a project",
                     ),
+                    ProjectsMode::AssignSession(_) => {
+                        ("No projects yet", "open /projects to create one first")
+                    }
                 }
             };
             content = content.child(projects_view::empty(message, hint, shown));
@@ -184,7 +191,7 @@ impl Dashboard {
             }
         } else {
             match mode {
-                ProjectsMode::List => {
+                ProjectsMode::List | ProjectsMode::AssignSession(_) => {
                     for (index, row) in self.projects.rows.iter().enumerate() {
                         let id = row.project.id;
                         let card = projects_view::project_card(
@@ -194,7 +201,11 @@ impl Dashboard {
                         )
                         .on_click(cx.listener(move |this, _ev, _window, cx| {
                             this.projects.selected = index;
-                            this.open_project(id, cx);
+                            if matches!(mode, ProjectsMode::AssignSession(_)) {
+                                this.assign_session_to_project(id, cx);
+                            } else {
+                                this.open_project(id, cx);
+                            }
                         }));
                         content = content.child(card);
                     }
@@ -269,6 +280,7 @@ impl Dashboard {
                 "up/down select  enter open  a assign  u unassign  d delete  esc back"
             }
             ProjectsMode::Assign(_) => "up/down select  enter assign  esc back",
+            ProjectsMode::AssignSession(_) => "up/down select  enter assign  esc cancel",
         };
         let footer = div()
             .flex()

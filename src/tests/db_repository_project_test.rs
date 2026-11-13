@@ -206,3 +206,50 @@ async fn test_delete_project_unassigns_sessions() {
         .expect("session should exist");
     assert!(found.project_id.is_none());
 }
+
+#[tokio::test]
+async fn unassigned_sessions_exclude_topics() {
+    let db = Database::connect_in_memory()
+        .await
+        .expect("Failed to create database");
+    db.run_migrations().await.expect("Failed to run migrations");
+    let project_repo = ProjectRepository::new(db.pool().clone());
+    let session_repo = SessionRepository::new(db.pool().clone());
+
+    let project = Project::new("Parent sessions".to_string(), None);
+    project_repo.create(&project).await.expect("create project");
+    let parent = Session::new(Some("Parent".to_string()), Some("m".to_string()), None);
+    session_repo.create(&parent).await.expect("create parent");
+    let topic_id = session_repo
+        .create_topic(parent.id, "Topic inside parent")
+        .await
+        .expect("create topic");
+
+    let unassigned = project_repo
+        .find_unassigned_sessions()
+        .await
+        .expect("find unassigned parents");
+    assert_eq!(unassigned.len(), 1);
+    assert_eq!(unassigned[0].id, parent.id);
+    assert!(unassigned.iter().all(|session| session.id != topic_id));
+
+    project_repo
+        .assign_session(parent.id, project.id)
+        .await
+        .expect("assign parent");
+
+    let assigned = project_repo
+        .find_sessions_by_project(project.id)
+        .await
+        .expect("find assigned parents");
+    assert_eq!(assigned.len(), 1);
+    assert_eq!(assigned[0].id, parent.id);
+    assert!(
+        project_repo
+            .find_unassigned_sessions()
+            .await
+            .expect("find remaining parents")
+            .is_empty(),
+        "a topic never remains as an independent unassigned pick"
+    );
+}

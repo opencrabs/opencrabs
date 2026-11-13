@@ -15,7 +15,10 @@ pub enum ProjectsMode {
     #[default]
     List,
     Detail(Uuid),
+    /// Pick an unassigned session for the contained project id.
     Assign(Uuid),
+    /// Pick a project for the contained top-level session id.
+    AssignSession(Uuid),
 }
 
 #[derive(Debug, Clone)]
@@ -67,7 +70,7 @@ impl Default for ProjectsState {
 impl ProjectsMode {
     pub fn project_id(self) -> Option<Uuid> {
         match self {
-            ProjectsMode::List => None,
+            ProjectsMode::List | ProjectsMode::AssignSession(_) => None,
             ProjectsMode::Detail(id) | ProjectsMode::Assign(id) => Some(id),
         }
     }
@@ -95,7 +98,7 @@ impl ProjectsState {
 
     pub fn move_selection(&mut self, delta: i64) {
         let len = match self.mode {
-            ProjectsMode::List => self.rows.len(),
+            ProjectsMode::List | ProjectsMode::AssignSession(_) => self.rows.len(),
             ProjectsMode::Detail(_) => self.sessions.len(),
             ProjectsMode::Assign(_) => self.unassigned.len(),
         };
@@ -105,7 +108,7 @@ impl ProjectsState {
             return;
         }
         let index = match self.mode {
-            ProjectsMode::List => &mut self.selected,
+            ProjectsMode::List | ProjectsMode::AssignSession(_) => &mut self.selected,
             ProjectsMode::Detail(_) | ProjectsMode::Assign(_) => &mut self.session_selected,
         };
         *index = (*index as i64 + delta).clamp(0, len as i64 - 1) as usize;

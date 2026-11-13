@@ -245,7 +245,8 @@ impl ProjectRepository {
             .context("Failed to find sessions by project")
     }
 
-    /// List sessions not assigned to any project (most recently updated first)
+    /// List top-level sessions not assigned to any project, newest first.
+    /// Topics belong to their parent session and are never independent picks.
     pub async fn find_unassigned_sessions(&self) -> Result<Vec<Session>> {
         self.pool
             .get()
@@ -253,7 +254,8 @@ impl ProjectRepository {
             .context("Failed to get connection")?
             .interact(move |conn| {
                 let mut stmt = conn.prepare_cached(
-                    "SELECT * FROM sessions WHERE project_id IS NULL AND archived_at IS NULL
+                    "SELECT * FROM sessions
+                     WHERE project_id IS NULL AND archived_at IS NULL AND parent_id IS NULL
                      ORDER BY updated_at DESC",
                 )?;
                 let rows = stmt.query_map([], Session::from_row)?;
