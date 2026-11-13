@@ -14,6 +14,10 @@ const GUI_MAIN: &str = include_str!("../gui/main.rs");
 /// attached; the guards below read the dialog they pin.
 const OVERLAYS: &str = include_str!("../gui/overlays.rs");
 
+/// The Help Center moved to its own module when it became four section cards
+/// (#2893), so the layer guards read the screen where it is now painted.
+const HELP_VIEW: &str = include_str!("../gui/help_view.rs");
+
 fn position(needle: &str) -> usize {
     GUI_MAIN
         .find(needle)
@@ -23,7 +27,7 @@ fn position(needle: &str) -> usize {
 #[test]
 fn the_panes_are_attached_before_the_key_reference() {
     assert!(
-        position(".child(right)") < position(".child(help_overlay("),
+        position(".child(right)") < position(".child(help_screen("),
         "the key reference must paint above the panes"
     );
 }
@@ -75,10 +79,10 @@ fn the_key_reference_fills_the_window() {
     // panel this guard used to watch). What has to hold now is that the screen
     // covers the window and takes the pointer, so a click lands in the
     // reference and not on a pane behind it.
-    let screen = OVERLAYS
+    let screen = HELP_VIEW
         .find(".id(\"help-screen\")")
         .expect("the help screen names itself");
-    let after = OVERLAYS
+    let after = HELP_VIEW
         .get(screen..)
         .expect("the help screen marker is a char boundary");
     let header = after

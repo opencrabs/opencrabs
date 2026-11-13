@@ -51,6 +51,7 @@ mod dashboard_topics;
 mod dashboard_turns;
 mod editor;
 mod fonts;
+mod help_view;
 mod icon;
 mod layout_store;
 mod logging;
@@ -99,14 +100,14 @@ mod window_controls;
 use crate::composer_view::{
     command_popup_view, composer_hint_for, emoji_popup_view, options_strip, queue_strip,
 };
+use crate::help_view::{HelpView, help_screen};
 use crate::mission_control_view::{
     mission_control_body, mission_control_detail, mission_control_logs,
 };
 use crate::overlays::{
-    DEFAULT_TOPIC_ICON, HelpView, TopicPick, cd_entries_for, confirm_delete_overlay,
-    confirm_disable_topics_overlay, help_overlay,
-    split_pick_overlay, topic_info_overlay, topic_pick, topic_prompt_overlay,
-    update_prompt_overlay, warning_overlay,
+    DEFAULT_TOPIC_ICON, TopicPick, cd_entries_for, confirm_delete_overlay,
+    confirm_disable_topics_overlay, split_pick_overlay, topic_info_overlay, topic_pick,
+    topic_prompt_overlay, update_prompt_overlay, warning_overlay,
 };
 use crate::pane_chrome::{
     central, chat_measure, chat_measure_column, pane_composer_dim, rotation_chord, split_chord,
@@ -5276,8 +5277,9 @@ impl Render for Dashboard {
                 update: self.update_available.clone(),
                 filter: self.help_filter.clone(),
                 scroll: self.help_scroll.clone(),
+                narrow: f32::from(window.viewport_size().width) < 760.0,
             };
-            root = root.child(help_overlay(&view));
+            root = root.child(help_screen(&view));
         }
         // The topic info panel sits above the panes, like the key reference (#2304).
         if let Some(info) = self.topic_info.clone() {
@@ -8702,11 +8704,12 @@ mod tests {
         );
         assert!(src.contains("help_keys::section_rows"));
         assert!(src.contains("filter(|row| row.gui.is_some())"));
-        // The panel's body moved to its own module (#2817 follow-up), so the
-        // row loop is read where it is written.
-        let panel = include_str!("overlays.rs");
+        // The panel's body moved to its own module (#2817 follow-up) and then
+        // to the card view (#2893), so the row loop is read where it is
+        // written.
+        let panel = include_str!("help_view.rs");
         assert!(
-            panel.contains("for (section, row) in help_rows()"),
+            panel.contains("help_rows()"),
             "the renderer must paint the list the test checks"
         );
     }

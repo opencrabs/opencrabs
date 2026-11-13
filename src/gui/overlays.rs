@@ -1,6 +1,7 @@
 //! The dialogs that take the window: the update prompt, the warning line, the
-//! delete confirmation, the Help Center, the split's session picker and the
-//! seeker's topic prompts.
+//! delete confirmation, the split's session picker and the seeker's topic
+//! prompts. The Help Center moved to `help_view.rs` when it became four
+//! section cards (#2893).
 //!
 //! Everything here draws from arguments. The window owns the state each one
 //! reads and mints the listeners it needs, so a dialog can be built and checked
@@ -9,12 +10,12 @@
 //!
 //! Moved out of the crate root (#2817 follow-up) as pure code motion: the
 //! functions, the two types they hand back, their comments and the constants
-//! are unchanged, only the module boundary is new. `HelpView` and `TopicPick`
-//! are `pub(crate)` because the window builds one and matches on the other.
+//! are unchanged, only the module boundary is new. `TopicPick` is `pub(crate)`
+//! because the window matches on it.
 
 use gpui::{
-    AnyElement, App, ClickEvent, Div, IntoElement, ScrollHandle, SharedString, Stateful, Window,
-    div, prelude::*, px, rems, rgb, rgba,
+    AnyElement, App, ClickEvent, Div, IntoElement, SharedString, Stateful, Window, div, prelude::*,
+    px, rems, rgb, rgba,
 };
 use opencrabs::ui_core::card::{CARD_RADIUS, glass_fill};
 use opencrabs::ui_core::text_field::TextField;
@@ -22,7 +23,6 @@ use opencrabs::ui_core::split::Layout;
 
 use crate::palette;
 use crate::sessions;
-use crate::status::help_rows;
 use crate::topic_icons;
 
 /// The update dialog (#2406). The first stage asks whether to update by
@@ -393,166 +393,6 @@ pub(crate) fn topic_info_overlay(
         .bg(rgba(0x0a0a0acc))
         .on_click(close)
         .child(panel)
-}
-
-/// What the Help Center shows: the running version, a newer release if the
-/// check found one, the `/` filter, and the scroll position the arrows move.
-pub(crate) struct HelpView {
-    pub(crate) version: &'static str,
-    pub(crate) update: Option<String>,
-    pub(crate) filter: Option<String>,
-    pub(crate) scroll: ScrollHandle,
-}
-
-/// The Help Center (#2407): a full-window screen. The header carries the logo,
-/// the title and the version; the body lists every key and scrolls; the footer
-/// names the keys that drive the screen. Esc closes it.
-pub(crate) fn help_overlay(view: &HelpView) -> impl IntoElement {
-    let query = view.filter.as_deref().unwrap_or("").to_lowercase();
-    let mut body = div().flex().flex_col().gap_2().px_4().py_2();
-    let mut printed: Option<opencrabs::ui_core::help_keys::HelpSection> = None;
-    for (section, row) in help_rows() {
-        let chord = row.gui.unwrap_or_default();
-        let matches = query.is_empty()
-            || row.description.to_lowercase().contains(&query)
-            || chord.to_lowercase().contains(&query);
-        if !matches {
-            continue;
-        }
-        if printed != Some(section) {
-            body = body.child(
-                div()
-                    .mt_2()
-                    .text_xs()
-                    .text_color(rgb(palette::current().accent))
-                    .child(SharedString::from(section.title())),
-            );
-            printed = Some(section);
-        }
-        body = body.child(
-            div()
-                .flex()
-                .flex_row()
-                .gap_3()
-                .child(
-                    div()
-                        .w(rems(9.0))
-                        .flex_shrink_0()
-                        .text_xs()
-                        .text_color(rgb(palette::current().text_normal))
-                        .child(SharedString::from(chord)),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .text_xs()
-                        .text_color(rgb(palette::current().text_muted))
-                        .child(SharedString::from(row.description)),
-                ),
-        );
-    }
-
-    let mut title = div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap_2()
-        .child(
-            div()
-                .text_base()
-                .text_color(rgb(palette::current().text))
-                .child(SharedString::from("OpenCrabs Help Center")),
-        )
-        .child(
-            div()
-                .text_xs()
-                .text_color(rgb(palette::current().text_muted))
-                .child(SharedString::from(format!("v{}", view.version))),
-        );
-    if let Some(latest) = &view.update {
-        title = title.child(
-            div()
-                .text_xs()
-                .text_color(rgb(palette::current().accent))
-                .child(SharedString::from(format!("v{latest} available"))),
-        );
-    }
-    let header = div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .justify_between()
-        .px_4()
-        .py_3()
-        .border_b_1()
-        .border_color(rgb(palette::current().panel_hi))
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_3()
-                .child(div().text_lg().child(SharedString::from("🦀")))
-                .child(title),
-        )
-        .child(
-            div()
-                .text_xs()
-                .text_color(rgb(palette::current().text_muted))
-                .child(SharedString::from("esc")),
-        );
-
-    let scroller = div()
-        .id("help-body")
-        .flex_1()
-        .min_h_0()
-        .overflow_y_scroll()
-        .track_scroll(&view.scroll)
-        .child(body);
-
-    let keys = div()
-        .flex()
-        .flex_row()
-        .gap_3()
-        .text_xs()
-        .text_color(rgb(palette::current().text_muted))
-        .child(SharedString::from("↑↓ scroll"))
-        .child(SharedString::from("/ search"))
-        .child(SharedString::from("esc back"));
-    let mut footer = div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .justify_between()
-        .px_4()
-        .py_2()
-        .border_t_1()
-        .border_color(rgb(palette::current().panel_hi))
-        .child(keys);
-    if let Some(filter) = &view.filter {
-        footer = footer.child(
-            div()
-                .text_xs()
-                .text_color(rgb(palette::current().accent))
-                .child(SharedString::from(format!("/ {filter}"))),
-        );
-    }
-
-    div()
-        .id("help-screen")
-        .occlude()
-        .absolute()
-        .top_0()
-        .left_0()
-        .size_full()
-        .flex()
-        .flex_col()
-        .bg(rgb(palette::current().bg))
-        .text_color(rgb(palette::current().text))
-        .child(header)
-        .child(scroller)
-        .child(footer)
 }
 
 /// What the seeker's topic pick means (#2604, #2605). The window already
