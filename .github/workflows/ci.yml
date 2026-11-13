@@ -813,6 +813,168 @@ jobs:
     timeout-minutes: 90
     steps: *test-steps
 
+  # ── Stage 2a3: GUI path filter (decides whether Stage 2c runs) ───────────
+  # Same shape as Stage 2a2 and for the same reason: a job-level gate renders
+  # the honest "skipped", while a step-level `if:` renders a green job that
+  # compiled nothing (#1831).
+  #
+  # The desktop client ships in every archive since v0.6.0 and until this
+  # gate existed no job had ever executed it. Booting it costs a full build on
+  # a hosted runner, so it fires on the paths that can break it: the GUI, the
+  # terminal-free core it renders from, the dependency graph and the release
+  # workflows. A `gui` label forces it for anything this list misses.
+  gui-filter:
+    name: GUI path filter
+    # Carries the event gate Stage 2c would otherwise own: on a main push
+    # neither job is evaluated, so a routine commit does not pay for a desktop
+    # build. The same tradeoff Stage 2b already makes (#627).
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      run: ${{ steps.relevant.outputs.run }}
+    steps:
+      # fetch-depth 0: the filter below diffs against the PR base sha.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+
+      - name: GUI-relevant changes?
+        id: relevant
+        shell: bash
+        run: |
+          set -u
+          if [[ "${{ github.event_name }}" != "pull_request" ]]; then
+            echo "not a pull_request, booting"
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ "${{ contains(github.event.pull_request.labels.*.name, 'gui') }}" == "true" ]]; then
+            echo "gui label present, booting"
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          base="${{ github.event.pull_request.base.sha }}"
+          if ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            echo "base sha ${base} not in this clone, booting (fail open)"
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          files=$(git diff --name-only "$base" HEAD)
+          echo "changed files:"
+          echo "$files"
+          # src/ui_core is the terminal-free core the window renders from, and
+          # scripts/check-gui-boot.sh is the check itself: editing either
+          # without booting is how a gate stops covering what it claims.
+          pattern='^(Cargo\.toml|Cargo\.lock|rust-toolchain\.toml|build\.rs|\.github/workflows/(ci|release|prerelease)\.yml|scripts/check-gui-boot\.sh|src/gui/.+\.rs|src/ui_core/.+\.rs)$'
+          if echo "$files" | grep -qE "$pattern"; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "no GUI-relevant paths touched, skipping the boot check"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Fail fast from inside the job that failed (#2595): the fan-in `abort`
+      # job cannot do it, because `needs` holds it until the run is over.
+      - name: Cancel this run on failure
+        if: "always() && !success()"  # always() required: GitHub skips steps of a cancelled job
+        uses: ./.github/actions/cancel-run
+        with:
+          token: ${{ github.token }}
+          run-id: ${{ github.run_id }}
+
+  # ── Stage 2c: GUI boot (Linux, advisory) ─────────────────────────────────
+  # Deliberately NOT in the required set (`CI Required Gate`) and not in
+  # `abort`'s needs: booting a desktop application on a machine with no GPU is
+  # the kind of check whose first weeks produce flakes rather than findings,
+  # and a required flake is worse than an advisory check. It lands advisory,
+  # proves green, and then it can be promoted. windows-build sits outside the
+  # required set for the same class of reason.
+  #
+  # What it answers that nothing else does: does the client users download
+  # actually come up on Linux? Every other leg compiles opencrabs-gui, strips
+  # it and archives it, so "it builds" was the whole of our knowledge about
+  # that file. --version is not a cheap probe either: #2841 means it boots the
+  # whole application, so the check has to look for a real window instead. See
+  # scripts/check-gui-boot.sh.
+  #
+  # #2842 is the known wart: an idle window under llvmpipe keeps a core busy.
+  # The script kills the client the moment the window exists, so a pinned core
+  # cannot outlive the check.
+  gui-boot:
+    name: GUI boot (Linux, advisory)
+    # No `needs: [lint, audit]` ordering trap here: this job is advisory, so
+    # queuing it behind the test legs would only delay a signal that blocks
+    # nothing. gui-filter has already decided whether it is worth running.
+    needs: [gui-filter]
+    if: >-
+      always() &&
+      needs.gui-filter.result == 'success' &&
+      needs.gui-filter.outputs.run == 'true'
+    # ubuntu-24.04 rather than ubuntu-latest: 24.04 is the image release.yml
+    # builds the Linux artifacts on (glibc floor 2.39), so the client is booted
+    # on the distribution it was linked against.
+    runs-on: ubuntu-24.04
+    # The boot itself is bounded at 90s inside the script. This cap is for the
+    # build, which is the only slow part: 16 GB of RAM on four cores is what
+    # forced CARGO_BUILD_JOBS=1 on the test leg (#2699), and the same eviction
+    # applies here.
+    timeout-minutes: 60
+    env:
+      # One rustc at a time, for the reason above (#2699): two of our units
+      # compiling together climb past 8 GB each and the VM dies before the job
+      # reaches its own check.
+      CARGO_BUILD_JOBS: 1
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Install Rust (from rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.98.1
+
+      - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install build toolchain, display and software renderer (Linux)
+        # Two groups, both required before the client can be built and booted:
+        #   mold/clang/-dev headers: the same link line the test leg needs
+        #     (#2765: gpui's x11 backend carries -lxcb, -lxkbcommon and
+        #     -lxkbcommon-x11, and ubuntu-24.04 ships none of the dev packages).
+        #   xvfb/x11-utils: a real X server with no hardware behind it, plus
+        #     xwininfo, which is what the check reads the window tree with.
+        #   libvulkan1/mesa-vulkan-drivers: lavapipe, the software Vulkan ICD.
+        #     A hosted runner has no GPU, so without it the renderer finds no
+        #     device and open_window has nothing to draw into.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            mold clang libasound2-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            xvfb x11-utils libvulkan1 mesa-vulkan-drivers libwayland-client0
+
+      - name: Build the desktop client
+        # Default features plus gui, in the dev profile: the quickest honest
+        # build of the real binary. Release archives are built --all-features
+        # --profile ci; what this step is for is a binary that boots, and the
+        # boot path is the same code either way. The alternative costs a
+        # thin-LTO link of the whole optional stack on every PR.
+        run: cargo build --locked --features gui --bin opencrabs-gui
+
+      - name: Boot it and look for the window
+        # Exit 0: a window was mapped and titled. Exit 1: it was not, and the
+        # step prints the window tree, the client log, stdout and stderr.
+        # Exit 2: the check could not run, which is a red step here rather than
+        # a quiet pass.
+        run: ./scripts/check-gui-boot.sh target/debug/opencrabs-gui
+
+      # No `Cancel this run on failure` step here, unlike every other job in
+      # this workflow: that step exists to stop work that can no longer pass
+      # (#2595), and an advisory job failing is not that. Cancelling here would
+      # let a runner-specific flake kill the lint and test legs of a run whose
+      # required gate was still going to be green.
+
   # ── Stage 1b: Security (fast gate — runs alongside lint, before build/test)
   # cargo-audit only scans Cargo.lock; it needs no compile, so it runs in
   # PARALLEL with lint as a second fast gate rather than after it. build/test/
