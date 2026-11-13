@@ -5774,6 +5774,15 @@ fn main() {
 
     // First, so a panic during the first fetch still lands in the trail.
     logging::init();
+    // A banner click arrives as a protocol launch (#2751): the shell starts
+    // this binary with the activation URI in argv, so the click is queued here,
+    // before any window exists, and the poll tick opens it once there is one to
+    // open it in. On Windows the scheme is registered first, so a click that
+    // arrives before this point has a handler next time.
+    #[cfg(target_os = "windows")]
+    opencrabs::utils::desktop_notify::ensure_activation_handler();
+    opencrabs::utils::desktop_notify::post_activation_from_args(std::env::args().skip(1));
+
     // The ledger path is resolved once, here, on the main thread: every
     // later fetch reuses it instead of re-running `Config::load` on a
     // tiny-stack background thread.

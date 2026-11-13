@@ -18,11 +18,16 @@ use uuid::Uuid;
 use crate::config::AgentConfig;
 use crate::tui::plan::{PlanDocument, PlanStatus, PlanTask, TaskStatus, TaskType};
 use crate::utils::desktop_notify::{
-    NotificationEvent, bannerable_settles, enabled, first_time, fresh_settled_tasks, should_raise,
-    summary_line, truncate, xml_escape,
+    ACTIVATION_SCHEME, MAX_PENDING_ACTIVATIONS, NotificationEvent, activation_from_arg,
+    bannerable_settles, enabled, first_time, fresh_settled_tasks, post_activation,
+    post_activation_from_args, should_raise, summary_line, take_activation, toast_xml, truncate,
+    xml_escape,
 };
 
 const SOURCE: &str = include_str!("../utils/desktop_notify.rs");
+
+/// The window's poll tick, where a click is taken off the queue.
+const DASHBOARD_TURNS: &str = include_str!("../gui/dashboard_turns.rs");
 
 fn plan_with(title: &str, statuses: &[TaskStatus]) -> PlanDocument {
     let mut plan = PlanDocument::new(Uuid::new_v4(), title.to_string());
@@ -88,6 +93,7 @@ fn one_finish_keeps_one_key_and_turns_carry_none() {
     let plan = NotificationEvent::PlanCompleted {
         title: "Ship it".to_string(),
         tasks: 3,
+        session: None,
     };
     let key = format!("plan:Ship it {}", Uuid::new_v4());
     assert!(key.starts_with("plan:"), "the plan event owns the finish key");
@@ -102,14 +108,16 @@ fn one_finish_keeps_one_key_and_turns_carry_none() {
     // Asking the same thing twice deserves two banners, so turns carry no key.
     assert_eq!(
         NotificationEvent::TurnCompleted {
-            summary: "all set".to_string()
+            summary: "all set".to_string(),
+            session: None,
         }
         .dedupe_key(),
         None
     );
     assert_eq!(
         NotificationEvent::TurnFailed {
-            reason: "boom".to_string()
+            reason: "boom".to_string(),
+            session: None,
         }
         .dedupe_key(),
         None
@@ -212,6 +220,7 @@ fn a_key_is_recorded_only_once() {
 fn should_raise_refuses_without_consent() {
     let event = NotificationEvent::TurnFailed {
         reason: "boom".to_string(),
+        session: None,
     };
     assert!(
         !should_raise(&event, Some("1"), true),
@@ -284,4 +293,233 @@ fn focus_suppression_and_dedupe_are_wired_into_the_transport() {
     ] {
         assert!(SOURCE.contains(needle), "desktop_notify.rs lost {needle:?}");
     }
+}
+
+#[test]
+fn every_banner_names_the_session_it_is_about() {
+    // #2751: a click on the banner has to land on the conversation that
+    // finished. The id rides on the event itself so the transport never looks
+    // it up, and a variant that forgot it would ship a banner going nowhere.
+    let session = Uuid::new_v4();
+    let events = [
+        NotificationEvent::PlanCompleted {
+            title: "Ship it".to_string(),
+            tasks: 3,
+            session: Some(session),
+        },
+        NotificationEvent::TaskCompleted {
+            label: "write the test".to_string(),
+            success: true,
+            elapsed_secs: 12,
+            session: Some(session),
+        },
+        NotificationEvent::TurnCompleted {
+            summary: "all set".to_string(),
+            session: Some(session),
+        },
+        NotificationEvent::TurnFailed {
+            reason: "boom".to_string(),
+            session: Some(session),
+        },
+    ];
+    for event in &events {
+        assert_eq!(
+            event.session(),
+            Some(session),
+            "{:?} lost the session it is about",
+            event.title()
+        );
+    }
+
+    // A banner with nothing to open stays informational and invents nothing.
+    let bare = NotificationEvent::TurnCompleted {
+        summary: "all set".to_string(),
+        session: None,
+    };
+    assert_eq!(bare.session(), None);
+}
+
+#[test]
+fn a_click_waits_for_the_window_and_the_queue_stays_bounded() {
+    // The transport runs off the UI thread, so a click cannot call the window:
+    // it is queued and drained on the surface's own tick (#2751). One test for
+    // the whole static, because two tests posting into the same queue would
+    // race each other under the parallel harness.
+    let first = Uuid::new_v4();
+    let second = Uuid::new_v4();
+    post_activation(first);
+    post_activation(second);
+    assert_eq!(
+        take_activation(),
+        Some(first),
+        "the oldest click is taken first: the person clicks the banner in front of them"
+    );
+    assert_eq!(take_activation(), Some(second));
+    assert_eq!(take_activation(), None, "the queue empties");
+
+    // A window nobody looks at must not turn every banner into a leaked id.
+    for _ in 0..(MAX_PENDING_ACTIVATIONS + 4) {
+        post_activation(Uuid::new_v4());
+    }
+    let mut taken = 0;
+    while take_activation().is_some() {
+        taken += 1;
+    }
+    assert_eq!(
+        taken, MAX_PENDING_ACTIVATIONS,
+        "the queue caps at its bound instead of growing"
+    );
+}
+
+#[test]
+fn a_settled_task_banner_points_at_its_plan() {
+    // The session comes off the plan file, which is written by the turn that
+    // owns the conversation. A plan from before the hook stamped its session
+    // carries the nil id, and the nil id is not a click target (#2751).
+    assert!(
+        SOURCE.contains("(plan.session_id != Uuid::nil()).then_some(plan.session_id)"),
+        "a settled task must take its session from the plan"
+    );
+}
+
+#[test]
+fn a_click_has_a_way_back_on_linux() {
+    // `notify-send` reports a click as the action name on stdout, and only
+    // when it is still alive to hear it: `--wait` is the difference between a
+    // clickable banner and a banner that leaves nothing behind (#2751).
+    for needle in [
+        "--action",
+        "--wait",
+        "ACTION_OPEN",
+        "post_activation(session)",
+        "stdout(Stdio::piped())",
+    ] {
+        assert!(
+            SOURCE.contains(needle),
+            "the linux transport lost {needle:?}"
+        );
+    }
+}
+
+#[test]
+fn the_window_takes_a_click_and_drops_a_dead_session() {
+    // The drain sits above the empty-events early return: an idle window is
+    // exactly when a banner gets clicked, so a click must not wait for the
+    // next turn to arrive (#2751).
+    let drain = DASHBOARD_TURNS
+        .find("take_activation()")
+        .expect("the poll tick drains the click queue");
+    let early_return = DASHBOARD_TURNS
+        .find("if events.is_empty()")
+        .expect("the poll tick still has its idle path");
+    assert!(
+        drain < early_return,
+        "the click is drained before the idle path returns"
+    );
+    for needle in [
+        "cx.activate(true)",
+        "self.sessions.items.iter().any(|row| row.id == session)",
+        "self.open_session(session, cx)",
+        "the session is gone",
+    ] {
+        assert!(
+            DASHBOARD_TURNS.contains(needle),
+            "the poll tick lost {needle:?}"
+        );
+    }
+}
+
+#[test]
+fn an_activation_uri_names_exactly_one_session() {
+    // #2751: a protocol launch is the only thing a fresh process learns from a
+    // banner click, so the URI has to round-trip and nothing else may be taken
+    // for one. Anything unrecognised stays unrecognised rather than becoming a
+    // queue entry the window would then fail to open.
+    let session = Uuid::new_v4();
+    let uri = format!("{ACTIVATION_SCHEME}{session}");
+    assert_eq!(activation_from_arg(&uri), Some(session));
+    assert_eq!(activation_from_arg(&format!("  {uri}  ")), Some(session));
+
+    for junk in [
+        "",
+        "opencrabs",
+        "opencrabs://session/",
+        "opencrabs://session/not-a-uuid",
+        "https://example.com/session/",
+        "opencrabs://topic/8f1f0b1e-2f7c-4f0e-9a3a-5d0f0f0f0f0f",
+    ] {
+        assert_eq!(
+            activation_from_arg(junk),
+            None,
+            "{junk:?} must not be read as a session"
+        );
+    }
+
+    // An argv with no activation queues nothing: the same call runs on every
+    // launch, including the ones a person started from a terminal.
+    assert!(!post_activation_from_args(["--help", "something-else"]));
+}
+
+#[test]
+fn a_toast_about_a_session_offers_a_way_back() {
+    // #2867: the toast was text only, so Windows had nobody to tell. It now
+    // names the activation URI on the toast itself and on one action, and both
+    // use `protocol` because the process that shows the toast exits long before
+    // a click arrives: a `foreground` activation would be delivered to nobody.
+    let session = Uuid::new_v4();
+    let uri = format!("{ACTIVATION_SCHEME}{session}");
+    let xml = toast_xml("Plan complete: ship it", "3 tasks settled", Some(session));
+
+    assert!(xml.starts_with("<toast"), "the document is a toast");
+    assert!(
+        xml.contains(&format!("activationType=\"protocol\" launch=\"{uri}\"")),
+        "the toast names its session: {xml}"
+    );
+    assert!(
+        xml.contains("<actions><action content=\"Open session\""),
+        "the toast offers an action: {xml}"
+    );
+    assert!(
+        xml.contains(&format!("arguments=\"{uri}\" activationType=\"protocol\"")),
+        "the action names the same session: {xml}"
+    );
+    assert!(xml.contains("<text id=\"1\">Plan complete: ship it</text>"));
+    assert!(xml.contains("<text id=\"2\">3 tasks settled</text>"));
+    assert!(xml.ends_with("</actions></toast>"), "the document closes");
+
+    // A banner with no session stays informational: no action, no launch, and
+    // nothing for a click to land on.
+    let bare = toast_xml("Turn complete", "all set", None);
+    assert!(!bare.contains("activationType"), "no session, no launch");
+    assert!(!bare.contains("<actions>"), "no session, no button");
+    assert!(bare.contains("<text id=\"2\">all set</text>"));
+
+    // The title is escaped, so a label containing markup cannot rewrite the
+    // document it travels in.
+    let hostile = toast_xml("a <b> & \"c\"", "d", Some(session));
+    assert!(hostile.contains("<text id=\"1\">a &lt;b&gt; &amp; &quot;c&quot;</text>"));
+}
+
+#[test]
+fn both_clickable_platforms_are_wired_and_the_gui_takes_the_uri() {
+    // The transport has to hand the session to the two arms that can use it,
+    // and the window has to drain the URI a protocol launch hands it (#2751).
+    assert!(
+        SOURCE.contains("fn dispatch(title: &str, body: &str, session: Option<Uuid>)"),
+        "both clickable arms take the session"
+    );
+    for needle in [
+        "$env:OC_NOTIFY_XML",
+        "fn ensure_activation_handler()",
+        "URL Protocol",
+        "HKCU\\Software\\Classes\\opencrabs",
+        "CREATE_NO_WINDOW",
+    ] {
+        assert!(SOURCE.contains(needle), "the windows arm lost {needle:?}");
+    }
+    let gui = include_str!("../gui/main.rs");
+    assert!(
+        gui.contains("post_activation_from_args(std::env::args().skip(1))"),
+        "the window takes the activation URI off argv"
+    );
 }

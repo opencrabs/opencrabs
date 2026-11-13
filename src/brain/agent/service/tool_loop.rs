@@ -813,6 +813,7 @@ impl AgentService {
                 crate::utils::desktop_notify::raise(
                     crate::utils::desktop_notify::NotificationEvent::TurnFailed {
                         reason: err.to_string(),
+                        session: Some(session_id),
                     },
                 );
             }
@@ -8505,6 +8506,7 @@ impl AgentService {
                         crate::utils::desktop_notify::NotificationEvent::PlanCompleted {
                             title: finished.title.clone(),
                             tasks: resolved,
+                            session: Some(session_id),
                         },
                     );
                     plan_announced = true;
@@ -8569,6 +8571,7 @@ impl AgentService {
             crate::utils::desktop_notify::raise(
                 crate::utils::desktop_notify::NotificationEvent::TurnCompleted {
                     summary: crate::utils::desktop_notify::summary_line(&final_text),
+                    session: Some(session_id),
                 },
             );
         }

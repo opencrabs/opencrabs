@@ -834,6 +834,23 @@ impl Dashboard {
     /// the turn on Done/Failed, reload the transcript so the DB becomes the
     /// rendering.
     pub(crate) fn poll(&mut self, cx: &mut Context<Self>) {
+        // A click on a desktop banner posts the conversation it named (#2751).
+        // Drained before the early return below, because an idle window is
+        // exactly when a banner gets clicked. The app comes forward first: a
+        // click on a notification is a request to look at the window, and
+        // opening the conversation behind a hidden window would answer half of
+        // it. A session missing from the ledger is dropped with one line
+        // rather than opening a window onto a conversation that is gone.
+        while let Some(session) = opencrabs::utils::desktop_notify::take_activation() {
+            cx.activate(true);
+            if !self.sessions.items.iter().any(|row| row.id == session) {
+                logging::debug(&format!(
+                    "banner click for {session} dropped: the session is gone"
+                ));
+                continue;
+            }
+            self.open_session(session, cx);
+        }
         // Retire a drag whose moves stopped before the drop arrived: the
         // window must not stay tinted after the pointer leaves it.
         if self.drag_seen.is_some() && !self.file_drag_active() {

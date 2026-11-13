@@ -35,7 +35,7 @@
 //! log line and a `false` return. Nothing here ever blocks the caller, and
 //! nothing here panics.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -65,21 +65,38 @@ const MAX_BODY_CHARS: usize = 200;
 /// settling, a turn ending normally, and a turn dying. Every variant is plain
 /// data with no handle to the app, so the transport stays callable from the
 /// agent loop, the TUI and the GUI without any of them owning a window.
+///
+/// Every variant also names the session it is about (#2751). A banner you can
+/// click is only worth raising if the click can land somewhere: the id travels
+/// with the event, the transport hands it back when the banner is activated,
+/// and the window opens that conversation. `None` means the caller has no
+/// conversation to point at and the banner stays informational.
 #[derive(Debug, Clone)]
 pub enum NotificationEvent {
     /// A whole plan reached completion. `tasks` is how many had settled.
-    PlanCompleted { title: String, tasks: usize },
+    PlanCompleted {
+        title: String,
+        tasks: usize,
+        session: Option<Uuid>,
+    },
     /// One plan task settled. `success` is false when the task was skipped or
     /// failed, so the banner never claims work that was abandoned.
     TaskCompleted {
         label: String,
         success: bool,
         elapsed_secs: u64,
+        session: Option<Uuid>,
     },
     /// The turn ended with an answer.
-    TurnCompleted { summary: String },
+    TurnCompleted {
+        summary: String,
+        session: Option<Uuid>,
+    },
     /// The turn ended in an error the user might have walked away from.
-    TurnFailed { reason: String },
+    TurnFailed {
+        reason: String,
+        session: Option<Uuid>,
+    },
 }
 
 impl NotificationEvent {
@@ -125,6 +142,19 @@ impl NotificationEvent {
                 }
             }
             Self::TurnFailed { reason } => truncate(reason, MAX_BODY_CHARS),
+        }
+    }
+
+    /// The conversation this banner is about (#2751), when it names one.
+    ///
+    /// The transport reads this to decide whether a click can go anywhere, so
+    /// it is the single place a variant says which session it belongs to.
+    pub fn session(&self) -> Option<Uuid> {
+        match self {
+            Self::PlanCompleted { session, .. }
+            | Self::TaskCompleted { session, .. }
+            | Self::TurnCompleted { session, .. }
+            | Self::TurnFailed { session, .. } => *session,
         }
     }
 
@@ -310,6 +340,91 @@ pub(crate) fn bannerable_settles<'a>(
     fresh
 }
 
+/// A banner click waiting to be taken (#2751).
+///
+/// The transport runs on a thread the window does not own: on Linux the click
+/// arrives as a line on `notify-send`'s stdout, long after the event that
+/// raised the banner. So the window is never called from there. The transport
+/// posts the session here instead and the surface that owns the window drains
+/// the queue on its next tick, on the thread that can actually move a window.
+static PENDING_ACTIVATIONS: OnceLock<Mutex<VecDeque<Uuid>>> = OnceLock::new();
+
+/// Bound on undrained clicks. A click nobody is awake to take is not worth
+/// remembering forever, and eight is far more than a person produces before
+/// looking at the window.
+pub(crate) const MAX_PENDING_ACTIVATIONS: usize = 8;
+
+fn pending_activations() -> &'static Mutex<VecDeque<Uuid>> {
+    PENDING_ACTIVATIONS.get_or_init(|| Mutex::new(VecDeque::new()))
+}
+
+/// Record that the user clicked a banner about `session`.
+///
+/// A poisoned lock is recovered rather than propagated, the same rule the
+/// announce set follows: a panic elsewhere must not silence a later click.
+pub fn post_activation(session: Uuid) {
+    let mut pending = match pending_activations().lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if pending.len() >= MAX_PENDING_ACTIVATIONS {
+        pending.pop_front();
+    }
+    pending.push_back(session);
+}
+
+/// Take the oldest banner click, if one is waiting.
+///
+/// A plain pop with no callback and no window handle, so the caller decides
+/// when and where it runs. The oldest first: a person clicks the banner they
+/// are looking at, and a later click must not jump the queue in front of it.
+pub fn take_activation() -> Option<Uuid> {
+    let mut pending = match pending_activations().lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    pending.pop_front()
+}
+
+/// The URI a banner click uses to reach the app (#2751).
+///
+/// Every platform that can hand a click back to a fresh process does it the
+/// same way: it asks the shell to open this URI, and the shell starts OpenCrabs
+/// with it as an argument. Keeping the shape here means the transport never has
+/// to know how a given desktop delivers activations, and the Windows toast can
+/// name it in its XML without the PowerShell script building a string.
+pub const ACTIVATION_SCHEME: &str = "opencrabs://session/";
+
+/// The session named by an activation argument, when it names one.
+///
+/// Pure, so it is exercised on every platform: a protocol launch hands the URI
+/// over as a plain argv element and nothing else about the click survives, so
+/// this is the whole of what a fresh process learns from it.
+pub fn activation_from_arg(arg: &str) -> Option<Uuid> {
+    let rest = arg.trim().strip_prefix(ACTIVATION_SCHEME)?;
+    Uuid::parse_str(rest.trim()).ok()
+}
+
+/// Queue the session named by any activation argument in `args`.
+///
+/// A protocol launch starts a fresh process with the URI as argv, so the click
+/// is queued before a window exists; the poll tick opens it once there is one to
+/// open it in. Returns whether anything was queued.
+pub fn post_activation_from_args<I, S>(args: I) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut posted = false;
+    for arg in args {
+        if let Some(session) = activation_from_arg(arg.as_ref()) {
+            post_activation(session);
+            posted = true;
+        }
+    }
+    posted
+}
+
 /// Record settled plan tasks in `seen` and announce each new one.
 ///
 /// Returns the number of tasks this call recorded, which is exactly the count
@@ -329,11 +444,18 @@ pub fn announce_settled_tasks(seen: &mut HashSet<Uuid>, plans: &[Option<&PlanDoc
         let Some(plan) = *entry else { continue };
         let fresh = fresh_settled_tasks(seen, &[Some(plan)]);
         recorded += fresh.len();
+        // The session comes off the plan itself (#2751): the plan file is
+        // written by the turn that owns the conversation, so the banner points
+        // at the row the user would have clicked. A plan written before the
+        // hook stamped its session carries the nil id, which is not a session
+        // and must never become a click target.
+        let session = (plan.session_id != Uuid::nil()).then_some(plan.session_id);
         for (_, label, success) in bannerable_settles(plan, &fresh, plan_banners) {
             let _ = raise(NotificationEvent::TaskCompleted {
                 label: (*label).to_string(),
                 success: *success,
                 elapsed_secs: 0,
+                session,
             });
         }
     }
@@ -360,7 +482,19 @@ pub fn raise(event: NotificationEvent) -> bool {
     let title = event.title();
     let body = event.body();
 
-    match dispatch(&title, &body) {
+    // Linux and Windows both have a click path, so both are handed the session
+    // the banner names (#2751). macOS takes the banner alone: the helper that
+    // draws it accepts a title and a body and nothing else, it has no
+    // notification delegate to hear a click, and its source is not in this
+    // repository, so there is nothing here to wire. The intake below is shared,
+    // so the day the helper can report a click the macOS arm needs no more than
+    // passing the URI through.
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    let dispatched = dispatch(&title, &body, event.session());
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    let dispatched = dispatch(&title, &body);
+
+    match dispatched {
         Ok(()) => true,
         Err(err) => {
             tracing::debug!("desktop notify: {err}");
@@ -435,6 +569,41 @@ pub(crate) fn xml_escape(text: &str) -> String {
     out
 }
 
+/// The toast document handed to the Windows shell (#2751, #2867).
+///
+/// Built in Rust and passed to PowerShell through the environment rather than
+/// concatenated inside the script. Two reasons: the XML becomes a pure value the
+/// test file can check on any platform, and a title containing a quote can no
+/// longer break out of a PowerShell string literal. A banner about a session
+/// carries one action, and both the toast and the action name the activation
+/// URI, so a click on the body or on the button reaches the app.
+#[cfg(any(test, target_os = "windows"))]
+pub(crate) fn toast_xml(title: &str, body: &str, session: Option<Uuid>) -> String {
+    // `protocol` hands the URI to the shell, which starts the registered
+    // handler. The alternative, a `foreground` activation, is delivered to the
+    // process that showed the toast, and that process has already exited: the
+    // click has to work with the window closed (#2867).
+    let launch = session.map(|session| format!("{ACTIVATION_SCHEME}{session}"));
+    let mut xml = String::from("<toast");
+    if let Some(uri) = launch.as_deref() {
+        xml.push_str(&format!(
+            " activationType=\"protocol\" launch=\"{uri}\""
+        ));
+    }
+    xml.push_str("><visual><binding template=\"ToastText02\"><text id=\"1\">");
+    xml.push_str(&xml_escape(title));
+    xml.push_str("</text><text id=\"2\">");
+    xml.push_str(&xml_escape(body));
+    xml.push_str("</text></binding></visual>");
+    if let Some(uri) = launch.as_deref() {
+        xml.push_str(&format!(
+            "<actions><action content=\"Open session\" arguments=\"{uri}\" activationType=\"protocol\"/></actions>"
+        ));
+    }
+    xml.push_str("</toast>");
+    xml
+}
+
 /// Spawn the helper and reap it off the calling thread.
 ///
 /// Arguments are handed over as argv (or as environment for the PowerShell
@@ -499,20 +668,104 @@ fn dispatch(title: &str, body: &str) -> Result<(), String> {
     spawn_detached(Command::new("osascript").args(["-e", SCRIPT, title, body]))
 }
 
+/// The name a click reports back (#2751).
+///
+/// `notify-send` prints the action's *name* on stdout, not its text, so this is
+/// the string compared against the answer. It is never shown to the user.
 #[cfg(target_os = "linux")]
-fn dispatch(title: &str, body: &str) -> Result<(), String> {
-    spawn_detached(Command::new("notify-send").args([
-        "--app-name",
-        APP_NAME,
-        "--urgency",
-        "normal",
-        title,
-        body,
-    ]))
+const ACTION_OPEN: &str = "open";
+
+/// How long the banner stays clickable.
+///
+/// Past this the daemon withdraws it and the reader thread ends on its own, so
+/// a banner nobody touches does not hold a thread for the life of the process.
+/// A minute is long enough to come back to the desk and notice it.
+#[cfg(target_os = "linux")]
+const CLICK_WINDOW_MS: u32 = 60_000;
+
+#[cfg(target_os = "linux")]
+fn dispatch(title: &str, body: &str, session: Option<Uuid>) -> Result<(), String> {
+    // No session, nowhere to go: raise the plain banner and let it be.
+    let Some(session) = session else {
+        return spawn_detached(Command::new("notify-send").args([
+            "--app-name",
+            APP_NAME,
+            "--urgency",
+            "normal",
+            title,
+            body,
+        ]));
+    };
+
+    // A banner with somewhere to go carries one action. `--wait` is what makes
+    // `notify-send` stay alive to hear the click: without it the process
+    // returns as soon as the daemon accepts the banner, and the action line
+    // would never arrive at all (#2751).
+    // Built before the argv so every element is a `&str`: an array literal
+    // mixing `&String` with `&str` does not unify, and the argv is handed over
+    // as argv, never concatenated into a shell string.
+    let action = format!("{ACTION_OPEN}=Open session");
+    let window = CLICK_WINDOW_MS.to_string();
+    let mut command = Command::new("notify-send");
+    command
+        .args([
+            "--app-name",
+            APP_NAME,
+            "--urgency",
+            "normal",
+            "--action",
+            action.as_str(),
+            "--wait",
+            "--expire-time",
+            window.as_str(),
+            title,
+            body,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+
+    let mut child = command.spawn().map_err(|err| err.to_string())?;
+    let title = title.to_string();
+    let body = body.to_string();
+
+    // The wait happens on its own thread: the caller is the agent loop and must
+    // never block on a notification. One line on stdout is the whole protocol,
+    // the action name when the banner was clicked, nothing when it was
+    // dismissed or expired.
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        if let Some(stdout) = child.stdout.take() {
+            let mut reader = std::io::BufReader::new(stdout);
+            let _ = std::io::BufRead::read_line(&mut reader, &mut line);
+        }
+        let status = child.wait();
+        if line.trim() == ACTION_OPEN {
+            post_activation(session);
+            return;
+        }
+        // A daemon that does not advertise actions refuses the banner outright
+        // and `notify-send` exits non-zero without showing anything. Losing the
+        // notification to gain a click would be a bad trade, so it is raised
+        // again without the action: no click, but the banner still arrives.
+        let failed = status.map(|code| !code.success()).unwrap_or(true);
+        if failed && line.trim().is_empty() {
+            let _ = spawn_detached(Command::new("notify-send").args([
+                "--app-name",
+                APP_NAME,
+                "--urgency",
+                "normal",
+                title.as_str(),
+                body.as_str(),
+            ]));
+        }
+    });
+
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
-fn dispatch(title: &str, body: &str) -> Result<(), String> {
+fn dispatch(title: &str, body: &str, session: Option<Uuid>) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
 
     // Windows attributes a toast to an AppUserModelID. Without one set for
@@ -524,14 +777,15 @@ fn dispatch(title: &str, body: &str) -> Result<(), String> {
     /// `CREATE_NO_WINDOW`: the toast must not flash a console window.
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-    // WinRT toast. Values arrive through the environment and are XML-escaped
-    // above, so no quoting or markup can break the script.
+    // WinRT toast. The document arrives through the environment already built
+    // and escaped by `toast_xml`, so the script never concatenates user text
+    // into its own string and no quoting can break it (#2751).
     const SCRIPT: &str = "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null\n\
                           $sig = '[DllImport(\"shell32.dll\", SetLastError = true)] public static extern int SetCurrentProcessExplicitAppUserModelID([MarshalAs(UnmanagedType.LPWStr)] string AppID);'\n\
                           $aumid = Add-Type -MemberDefinition $sig -Name 'Aumid' -Namespace 'OpenCrabsNotify' -PassThru\n\
                           $aumid::SetCurrentProcessExplicitAppUserModelID('com.opencrabs.app') > $null\n\
                           $xml = New-Object Windows.Data.Xml.Dom.XmlDocument\n\
-                          $xml.LoadXml('<toast><visual><binding template=\"ToastText02\"><text id=\"1\">' + $env:OC_NOTIFY_TITLE + '</text><text id=\"2\">' + $env:OC_NOTIFY_BODY + '</text></binding></visual></toast>')\n\
+                          $xml.LoadXml($env:OC_NOTIFY_XML)\n\
                           $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)\n\
                           [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('com.opencrabs.app').Show($toast)";
 
@@ -545,11 +799,83 @@ fn dispatch(title: &str, body: &str) -> Result<(), String> {
             "-Command",
             SCRIPT,
         ])
-        .env("OC_NOTIFY_TITLE", xml_escape(title))
-        .env("OC_NOTIFY_BODY", xml_escape(body))
+        .env("OC_NOTIFY_XML", toast_xml(title, body, session))
         .creation_flags(CREATE_NO_WINDOW);
 
     spawn_detached(&mut command)
+}
+
+/// Register the activation URI for the current user (#2751, #2867).
+///
+/// A toast click on Windows is a protocol activation: the shell opens
+/// `opencrabs://session/<id>` and the registered command starts the app with
+/// that URI as an argument. The scheme therefore has to exist in the user's hive
+/// before a click can reach anything. It is written once at window start, never
+/// from the notification path: raising a banner must not mutate the registry.
+///
+/// `reg.exe` rather than a bindings crate because the shell already ships it and
+/// every write here is idempotent, so a second run costs one hidden process and
+/// changes nothing. Only `HKCU` is touched, so no elevation is involved and
+/// removing the key undoes the whole thing.
+#[cfg(target_os = "windows")]
+pub fn ensure_activation_handler() {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let Ok(exe) = std::env::current_exe() else {
+        tracing::debug!("activation handler: no current executable");
+        return;
+    };
+    // `%1` is the URI the shell hands over; it is quoted so a path containing a
+    // space still resolves to one argument.
+    let open = format!("\"{}\" \"%1\"", exe.display());
+
+    // `URL Protocol` is the empty value that marks the key as a scheme rather
+    // than a file type: without it the shell treats `opencrabs://` as a path.
+    // `reg add` takes the default value through `/ve` with no name argument, so
+    // the argv is built per write instead of forcing one shape on all three.
+    let writes: [(&str, Option<&str>, &str); 3] = [
+        (r"HKCU\Software\Classes\opencrabs", None, "URL:OpenCrabs"),
+        (
+            r"HKCU\Software\Classes\opencrabs",
+            Some("URL Protocol"),
+            "",
+        ),
+        (
+            r"HKCU\Software\Classes\opencrabs\shell\open\command",
+            None,
+            open.as_str(),
+        ),
+    ];
+
+    for (key, name, value) in writes {
+        let mut argv: Vec<&str> = vec!["add", key];
+        match name {
+            Some(name) => argv.extend(["/v", name]),
+            None => argv.push("/ve"),
+        }
+        argv.extend(["/t", "REG_SZ", "/d", value, "/f"]);
+
+        let mut command = Command::new("reg");
+        command
+            .args(&argv)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW);
+        match command.spawn() {
+            Ok(mut child) => {
+                // Reaped on this thread: the window start must not leave a
+                // zombie per write, and the write itself is instantaneous.
+                let _ = child.wait();
+            }
+            Err(err) => {
+                tracing::debug!("activation handler: {err}");
+                return;
+            }
+        }
+    }
 }
 
 /// Every other target is a deliberate no-op. The module still compiles so a
