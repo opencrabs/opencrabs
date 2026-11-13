@@ -287,6 +287,49 @@ impl StreamingState {
             is_cli,
         }
     }
+
+    /// Every bubble this turn is currently showing in the chat, in the order
+    /// a final answer replaces them: the response placeholder, the progress
+    /// block, then the intermediate bubbles.
+    ///
+    /// This is the set a rich final must delete before it ships its own copy,
+    /// which is exactly what #2370 reports going wrong: an orphan bubble
+    /// stayed behind when the rich final replaced the turn. Two id classes are
+    /// deliberately NOT in the set, both for the same reason (the bubble they
+    /// name is the only chat copy of something the user can no longer get
+    /// back): a voice note id and a delivered file id. A media intermediate
+    /// that carries documents lands in `delivered_files` for that exact
+    /// reason, so excluding delivered ids also protects it (#1939).
+    ///
+    /// Deduped, because the same message can be recorded in more than one
+    /// field as the turn moves between surfaces.
+    pub(crate) fn live_bubble_ids(&self) -> Vec<MessageId> {
+        let protected: Vec<MessageId> = self
+            .voice_msg_ids
+            .iter()
+            .copied()
+            .chain(
+                self.delivered_files
+                    .iter()
+                    .map(|file| MessageId(file.message_id)),
+            )
+            .collect();
+        let mut ids: Vec<MessageId> = Vec::new();
+        let candidates = self
+            .msg_id
+            .iter()
+            .copied()
+            .chain(self.open_group_msg_id.iter().copied())
+            .chain(self.intermediate_bubbles.iter().map(|(id, _)| *id))
+            .chain(self.media_intermediates.iter().map(|(id, _)| *id));
+        for id in candidates {
+            if protected.contains(&id) || ids.contains(&id) {
+                continue;
+            }
+            ids.push(id);
+        }
+        ids
+    }
 }
 
 /// A resolved line in the processing-log flow, ready to render. Tool lines

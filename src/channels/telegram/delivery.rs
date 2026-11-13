@@ -69,6 +69,51 @@ fn options_pending(streaming: &Arc<std::sync::Mutex<StreamingState>>) -> bool {
         .is_some()
 }
 
+/// Delete every bubble this turn is still showing, then forget those ids.
+///
+/// #2370: a rich final replaces the whole turn, not just the response
+/// placeholder. The reported turn left an orphan bubble behind beside a rich
+/// answer, and the placeholder id was already `None` on the branch that runs
+/// the fresh send, so clearing `msg_id` alone could never cover it. This
+/// clears the SET: placeholder, progress block, intermediate bubbles, media
+/// intermediates (minus the ids [`StreamingState::live_bubble_ids`] protects,
+/// which are the bubbles holding the only chat copy of a file or a voice
+/// note).
+///
+/// Deliberately does NOT touch `sent_intermediates`: that list is the text
+/// dedupe against the final answer (#2156), which has to survive the delete
+/// or the final repeats every narration line it already replaced.
+///
+/// Returns how many ids it removed, so the caller can log a rich final that
+/// found nothing to clean: that count is the telemetry this fix ships with,
+/// because the root-cause path for #2370 is not confirmed from logs.
+async fn delete_live_bubbles(
+    bot: &Bot,
+    chat_id: ChatId,
+    streaming: &Arc<std::sync::Mutex<StreamingState>>,
+    why: &str,
+) -> usize {
+    let ids = {
+        let mut s = streaming.lock().unwrap_or_else(|e| e.into_inner());
+        let ids = s.live_bubble_ids();
+        if !ids.is_empty() {
+            if s.msg_id.is_some_and(|id| ids.contains(&id)) {
+                s.msg_id = None;
+            }
+            if s.open_group_msg_id.is_some_and(|id| ids.contains(&id)) {
+                s.open_group_msg_id = None;
+            }
+            s.intermediate_bubbles.retain(|(id, _)| !ids.contains(id));
+            s.media_intermediates.retain(|(id, _)| !ids.contains(id));
+        }
+        ids
+    };
+    for mid in &ids {
+        best_effort_delete(bot, chat_id, *mid, why).await;
+    }
+    ids.len()
+}
+
 /// Which intermediate bubbles does the final answer already deliver (#2156)?
 ///
 /// Pure over the pairs so a test can assert on ids: the reported turn must
@@ -708,18 +753,17 @@ pub(crate) async fn deliver_final_response(
                 .await
                 {
                     Ok(rich_msg_id) => {
-                        // Delete the HTML intermediates now that rich message succeeded
-                        let intermediate_ids: Vec<MessageId> = {
-                            let s = streaming.lock().unwrap_or_else(|e| e.into_inner());
-                            s.intermediate_bubbles.iter().map(|(id, _)| *id).collect()
-                        };
-                        for mid in &intermediate_ids {
-                            best_effort_delete(bot, chat_id, *mid, "intermediate cleanup").await;
-                        }
+                        // Delete the HTML intermediates now that rich message
+                        // succeeded. #2370: the SET, not just the narration
+                        // bubbles, or a stale placeholder or progress block
+                        // sits beside the rich answer as an orphan.
+                        let deleted =
+                            delete_live_bubbles(bot, chat_id, streaming, "intermediate cleanup")
+                                .await;
                         tracing::info!(
-                            "Telegram: rich fallback delivered ({} chars), deleted {} HTML intermediates",
+                            "Telegram: rich fallback delivered ({} chars), deleted {} live bubbles",
                             rich_md.len(),
-                            intermediate_ids.len()
+                            deleted
                         );
                         // Merge candidate (#tg-suggest-merge): every rich
                         // bubble can carry the suggestion controls now —
@@ -917,12 +961,28 @@ pub(crate) async fn deliver_final_response(
                     // Delete the placeholder FIRST so the fresh rich message is
                     // the LAST thing added to the chat — deleting it AFTER the
                     // send pulls the content up and leaves the view mid-chat
-                    // instead of scrolling to the bottom on completion. `.take()`
-                    // clears the id so the HTML fallback below sends a fresh
-                    // message (not an edit of a deleted one) if the rich send fails.
-                    if let Some(mid) = streaming_msg_id.take() {
-                        best_effort_delete(bot, chat_id, mid, "pre-rich-fallback cleanup").await;
+                    // instead of scrolling to the bottom on completion.
+                    // Delete EVERY bubble this turn is still showing before
+                    // the fresh rich send: the placeholder, the progress block
+                    // and any remaining intermediates (#2370). A rich final
+                    // that only cleared the placeholder left the rest of the
+                    // turn beside its own answer.
+                    let deleted =
+                        delete_live_bubbles(bot, chat_id, streaming, "pre-rich-fallback cleanup")
+                            .await;
+                    if deleted == 0 && streaming_msg_id.is_some() {
+                        // Telemetry for #2370: the state held a placeholder the
+                        // set did not cover, so a bubble this set cannot see is
+                        // still live. A rich final that logs this line is the
+                        // next data point the issue needs.
+                        tracing::info!(
+                            "Telegram: rich final cleaned 0 bubbles but the turn had a placeholder (#2370 telemetry)"
+                        );
                     }
+                    // The placeholder is gone either way: clear the local so the
+                    // HTML fallback below sends a fresh message (not an edit of a
+                    // deleted one) if the rich send fails.
+                    streaming_msg_id = None;
                     // Native BLOCKS first (#476 path B) for NON-table content: the
                     // block value is sent as-is, so code fences render natively with
                     // no server-side parser to mangle them into <code> artifacts. A
