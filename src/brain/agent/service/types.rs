@@ -666,6 +666,56 @@ impl AgentService {
         kept.join(" ")
     }
 
+    /// Words worth comparing between a session title and its recent turns.
+    ///
+    /// Lowercased alphanumeric runs of three or more characters, digits kept so
+    /// a version or a job number still counts. Common words fall out on the
+    /// length rule alone, which is why there is no stopword table here.
+    fn title_tokens(text: &str) -> std::collections::HashSet<String> {
+        text.split(|c: char| !c.is_alphanumeric())
+            .map(str::to_lowercase)
+            .filter(|word| word.chars().count() >= 3)
+            .collect()
+    }
+
+    /// Does the stored title still describe what this session is doing? (#2882)
+    ///
+    /// A title was generated once, from the first user message, and the flag
+    /// guarding that call never re-armed, so a channel session that lives for
+    /// months keeps naming the work it opened with: a 619-message WhatsApp
+    /// session still read "PayrollTSJ v5 September" while its November turns
+    /// were harvest workbooks. Answers `true` when nothing in the title appears
+    /// anywhere in the recent user turns.
+    ///
+    /// Deliberately conservative. It needs at least three substantial turns
+    /// (20+ characters each) totalling 200+ characters, so a one-word follow-up
+    /// ("ok", "thanks") never re-titles anything, and a title sharing even one
+    /// distinctive word ("payrolltsj", "harvest") is left alone. The retitle it
+    /// authorises is self-limiting: the new title is generated from these same
+    /// recent turns, so it stops drifting.
+    pub(crate) fn title_drifted_from(title: Option<&str>, recent_user_texts: &[String]) -> bool {
+        let Some(title) = title else {
+            return false;
+        };
+        let title_tokens = Self::title_tokens(title);
+        if title_tokens.is_empty() {
+            return false;
+        }
+        let substantial: Vec<&String> = recent_user_texts
+            .iter()
+            .filter(|text| text.trim().chars().count() >= 20)
+            .collect();
+        let total: usize = substantial.iter().map(|text| text.chars().count()).sum();
+        if substantial.len() < 3 || total < 200 {
+            return false;
+        }
+        let recent: std::collections::HashSet<String> = substantial
+            .iter()
+            .flat_map(|text| Self::title_tokens(text))
+            .collect();
+        title_tokens.is_disjoint(&recent)
+    }
+
     /// Check if a session title is a default channel-generated title that
     /// should be replaced by auto-title. Default titles follow specific patterns:
     /// - Telegram DM: "Telegram: DM <name> (<id>) [chat:<id>]"

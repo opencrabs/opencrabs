@@ -1054,6 +1054,17 @@ impl AgentService {
         }
         let context_window = self.context_limit_for_session(session_id);
 
+        // Recent user turns, read before the compaction load takes ownership of
+        // the list below. The title's staleness is judged against these (#2882):
+        // a summary row is not a user turn, so marker banners are skipped.
+        let recent_user_texts: Vec<String> = all_db_messages
+            .iter()
+            .rev()
+            .filter(|msg| msg.role == "user" && !msg.content.starts_with("[CONTEXT COMPACTION"))
+            .take(5)
+            .map(|msg| msg.content.clone())
+            .collect();
+
         // Load from last compaction point — find the last CONTEXT COMPACTION marker
         // and only load messages from there forward. No arbitrary trimming.
         let mut db_messages = Self::messages_from_last_compaction(all_db_messages);
@@ -1091,13 +1102,20 @@ impl AgentService {
             }
         }
 
+        let title_is_placeholder = session
+            .title
+            .as_deref()
+            .map(|t| t.is_empty() || Self::is_default_channel_title(t))
+            .unwrap_or(true);
+        // #2882: a title was generated once, from the first message, and the
+        // flag that guards the attempt never re-armed. Allow a retitle when the
+        // stored title no longer shares a word with the recent turns, so a
+        // months-old channel session stops advertising the job it opened with.
+        let title_drifted = !title_is_placeholder
+            && Self::title_drifted_from(session.title.as_deref(), &recent_user_texts);
+
         if !user_message.trim().is_empty()
-            && !session.auto_title_attempted
-            && session
-                .title
-                .as_deref()
-                .map(|t| t.is_empty() || Self::is_default_channel_title(t))
-                .unwrap_or(true)
+            && ((!session.auto_title_attempted && title_is_placeholder) || title_drifted)
         {
             let title_provider = self.provider_for_session(session_id);
             let title_model = model_name.clone();

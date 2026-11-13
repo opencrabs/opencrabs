@@ -388,3 +388,79 @@ mod strip_channel_preamble {
         assert_eq!(AgentService::strip_channel_preamble(input), "Fix the bug");
     }
 }
+
+/// #2882: a title was generated once, from the first message, and the flag
+/// guarding that call never re-armed. These pin the drift test that decides
+/// when a stored title has stopped describing the conversation, using the
+/// reporter's own case: a 619-message WhatsApp session still titled
+/// "PayrollTSJ v5 September" while its November turns were harvest workbooks.
+mod title_drift {
+    use super::*;
+
+    fn turns(texts: &[&str]) -> Vec<String> {
+        texts.iter().map(|text| text.to_string()).collect()
+    }
+
+    #[test]
+    fn a_title_naming_none_of_the_recent_work_has_drifted() {
+        let recent = turns(&[
+            "harvest workbook for November, three sheets to reconcile before the Friday deadline",
+            "the poster job needs a darker crop on the left side and a tighter bleed margin",
+            "send the finished files to the client on Thursday morning once the numbers agree",
+        ]);
+        assert!(
+            AgentService::title_drifted_from(Some("PayrollTSJ v5 September"), &recent),
+            "a months-old title naming none of the recent work is drift"
+        );
+    }
+
+    #[test]
+    fn a_title_sharing_one_distinctive_word_is_left_alone() {
+        let recent = turns(&[
+            "harvest workbook for November, three sheets to reconcile before the Friday deadline",
+            "the poster job needs a darker crop on the left side and a tighter bleed margin",
+            "send the finished harvest files to the client on Thursday morning once the numbers agree",
+        ]);
+        assert!(
+            !AgentService::title_drifted_from(Some("Harvest workbook"), &recent),
+            "one shared distinctive word means the title still fits"
+        );
+    }
+
+    /// The 200-character floor is what let the fixture above pass vacuously
+    /// once. Pin it so a short fixture can never masquerade as a real check.
+    #[test]
+    fn two_substantial_turns_are_not_enough() {
+        let recent = turns(&[
+            "harvest workbook for November, three sheets to reconcile before the Friday deadline",
+            "send the finished files to the client on Thursday morning once the numbers agree",
+        ]);
+        assert!(
+            !AgentService::title_drifted_from(Some("PayrollTSJ v5 September"), &recent),
+            "two turns are below the three-turn floor even when they are long"
+        );
+    }
+
+    #[test]
+    fn three_short_turns_are_not_enough() {
+        let recent = turns(&["ok thanks", "yes please", "sounds good"]);
+        assert!(
+            !AgentService::title_drifted_from(Some("PayrollTSJ v5 September"), &recent),
+            "three turns under twenty characters carry no topic signal"
+        );
+    }
+
+    #[test]
+    fn a_one_word_follow_up_never_re_titles() {
+        let recent = turns(&["ok", "thanks", "yes"]);
+        assert!(
+            !AgentService::title_drifted_from(Some("PayrollTSJ v5 September"), &recent),
+            "short turns carry no topic signal"
+        );
+    }
+
+    #[test]
+    fn a_missing_title_is_not_drift() {
+        assert!(!AgentService::title_drifted_from(None, &turns(&[])));
+    }
+}
