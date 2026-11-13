@@ -18,10 +18,11 @@ impl Dashboard {
             .as_ref()
             .map(|(provider, model)| format!("{provider} / {model}"))
             .unwrap_or_else(|| "Choose a model for this session".to_string());
-        let active_provider = live
-            .as_ref()
-            .map(|(provider, _)| provider.as_str())
-            .unwrap_or_default();
+        let active_provider = self.models_provider.as_deref().unwrap_or_else(|| {
+            live.as_ref()
+                .map(|(provider, _)| provider.as_str())
+                .unwrap_or_default()
+        });
         let selected_provider = self.models_provider.clone();
         let mut provider_list = div().flex().flex_col().gap_1().w_full();
         for row in providers {

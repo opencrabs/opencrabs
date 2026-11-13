@@ -281,10 +281,12 @@ impl Dashboard {
                                 }
                             })
                         } else {
-                            let target = self.models_session.or(self.chat_session);
-                            agent_bridge::bridge().map(|bridge| match target {
-                                Some(sid) => bridge.service.provider_name_for_session(sid),
-                                None => bridge.service.provider_name(),
+                            self.models_provider.clone().or_else(|| {
+                                let target = self.models_session.or(self.chat_session);
+                                agent_bridge::bridge().map(|bridge| match target {
+                                    Some(sid) => bridge.service.provider_name_for_session(sid),
+                                    None => bridge.service.provider_name(),
+                                })
                             })
                         };
                         models::manual_pair(
