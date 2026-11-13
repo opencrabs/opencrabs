@@ -145,8 +145,13 @@ impl Dashboard {
                 }
             ));
             // Metrics belong to the turn they settled, never to the session
-            // the user just switched to.
-            self.metrics.pending.clear();
+            // the user just switched to. Only the window's own numbers are
+            // dropped here: a pane's settled card is claimed by its own
+            // session, and clearing the whole map wiped it before the claim
+            // ever ran (#2854).
+            if let Some(from) = self.chat_state.session() {
+                self.metrics.pending.remove(&from);
+            }
             if let Some(b) = agent_bridge::bridge() {
                 self.ctx_max = b.service.context_limit_for_session(id);
             }
@@ -353,8 +358,9 @@ impl Dashboard {
         // The pane's transcript, live turn, plan strip and editor all belong
         // to the conversation that just left the leaf; its draft is filed
         // under that conversation first.
-        self.stash_pane_draft(pane, cx);
-        self.pane_states.remove(&pane);
+        // Parked, not dropped (#2854): the view keeps its live turn and its
+        // cancel token, and comes back if this conversation returns to a leaf.
+        self.park_pane(pane, cx);
         self.open_pane_state(id, cx);
         self.pane_focus = Some(id);
         self.rail_focused = false;
@@ -436,8 +442,9 @@ impl Dashboard {
         }
         // The leaf's transcript, live turn, plan strip and editor all belong to
         // the conversation that just left it, so its draft is filed first.
-        self.stash_pane_draft(caret, cx);
-        self.pane_states.remove(&caret);
+        // Parked, not dropped (#2854): the same round trip the topic chip
+        // door makes, so a pick never destroys a turn that is still running.
+        self.park_pane(caret, cx);
         self.open_pane_state(id, cx);
         self.mark_rail_seen(id);
         self.pane_focus = Some(id);

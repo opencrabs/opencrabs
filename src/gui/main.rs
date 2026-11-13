@@ -707,6 +707,14 @@ struct Dashboard {
     /// The state every pane but the chat keeps, keyed by session (#2472). Each
     /// leaf is its own entity, so it repaints and is read on its own (#2805).
     pane_states: HashMap<Uuid, Entity<PaneView>>,
+    /// A pane switched to another conversation, kept whole under the session it
+    /// was showing (#2854). A switch used to drop the entity, and with it the
+    /// live turn, the tool blocks, the thinking flag and the cancel token, so a
+    /// turn that was still running came back as an empty pane. The window has
+    /// parked its own turn this way since #2616; this is the same idea for a
+    /// leaf. Keyed by the session the view was showing, so switching back
+    /// restores exactly what left.
+    parked_panes: HashMap<Uuid, Entity<PaneView>>,
     /// The session holding the caret and answering `ctrl+x`; `None` is the
     /// window's own chat (#2474, #2475).
     pane_focus: Option<Uuid>,
@@ -5744,6 +5752,7 @@ fn main() {
                         help_filter: None,
                         panes: None,
                         pane_states: HashMap::new(),
+                        parked_panes: HashMap::new(),
                         pane_focus: None,
                         split_areas: Rc::new(std::cell::RefCell::new(HashMap::new())),
                         split_drag: None,

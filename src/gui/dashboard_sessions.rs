@@ -75,9 +75,10 @@ impl Dashboard {
         if self.chat_session == Some(session) && self.turn.busy {
             return true;
         }
+        // Drawn or parked: a leaf switched to another conversation is still
+        // running this one's turn (#2854).
         if self
-            .pane_states
-            .get(&session)
+            .pane_view(session)
             .is_some_and(|pane| pane.read(cx).busy)
         {
             return true;
@@ -499,6 +500,9 @@ impl Dashboard {
         // it can never reach. Its pane's editor leaves with the conversation.
         self.composer.drafts.remove(id);
         self.pane_states.remove(&id);
+        // A parked pane of a deleted conversation must not come back to a
+        // session that no longer exists (#2854).
+        self.parked_panes.remove(&id);
         // The pin is part of the row: it leaves with the row.
         self.sessions.favorites.retain(|f| *f != id);
         cx.notify();

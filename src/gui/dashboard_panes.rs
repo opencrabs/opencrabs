@@ -354,6 +354,9 @@ impl Dashboard {
         // the editor goes, so reopening it returns the draft.
         self.stash_pane_draft(session, cx);
         self.pane_states.remove(&session);
+        // The pane is gone for good, so a parked view of the same conversation
+        // has nothing left to return to (#2854).
+        self.parked_panes.remove(&session);
         self.split_drag = None;
         self.pane_focus = None;
         self.sync_composer_session();
@@ -432,6 +435,25 @@ impl Dashboard {
     /// and its newest messages. Split out of `choose_split` so a restored
     /// layout builds a pane exactly the way a split does (#2675).
     pub(crate) fn open_pane_state(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        // A pane parked by a switch comes back whole (#2854). Its live turn,
+        // its tool blocks and its cancel token are still in the entity, so
+        // rebuilding here would throw away exactly what the switch was
+        // supposed to preserve.
+        if let Some(view) = self.parked_panes.remove(&id) {
+            // Parking files the half-typed text under the conversation, so it
+            // goes back into the editor that came with the view.
+            if let Some(draft) = self.composer.drafts.take(id) {
+                let editor = view.read(cx).editor.clone();
+                editor.update(cx, |ed, cx| ed.restore_state(draft, cx));
+            }
+            self.pane_states.insert(id, view);
+            // The rows it drew are stale: the conversation kept working while
+            // the pane was away, so they are re-read before the pane is
+            // trusted again.
+            self.reload_pane(id, cx);
+            cx.notify();
+            return;
+        }
         let title = self
             .sessions
             .items
@@ -486,7 +508,23 @@ impl Dashboard {
         let window = cx.entity().downgrade();
         // The leaf is an entity of its own, so it can be drawn, notified and
         // read without the window holding every field (#2805).
-        let pane = cx.new(|_| PaneView::new(id, title, pane_editor, pane_copy, pane_width, window));
+        // The leaf's own context window, read for ITS session (#2854): a pane
+        // can run a different provider from the window, so borrowing the
+        // window's number would print another conversation's budget.
+        let pane_ctx_max = agent_bridge::bridge()
+            .map(|b| b.service.context_limit_for_session(id))
+            .unwrap_or(0);
+        let pane = cx.new(|_| {
+            PaneView::new(
+                id,
+                title,
+                pane_editor,
+                pane_copy,
+                pane_width,
+                pane_ctx_max,
+                window,
+            )
+        });
         self.pane_states.insert(id, pane);
         // Paint the pane now, with its header, rather than waiting for the
         // transcript load to come back: an empty pane that appears at once
@@ -597,6 +635,55 @@ impl Dashboard {
         self.persist_layout();
     }
 
+    /// Park one pane's whole view under the conversation it was showing (#2854).
+    ///
+    /// A switch used to drop the entity outright, and the live turn, its tool
+    /// blocks, the thinking flag and the cancel token went with it. The
+    /// conversation kept working while the pane came back empty. The view is
+    /// kept under the session it draws, so `open_pane_state` restores it when
+    /// that session returns to a leaf: the same round trip the window already
+    /// makes with `swap_visible_turn` for its own card (#2616).
+    pub(crate) fn park_pane(&mut self, session: Uuid, cx: &mut Context<Self>) {
+        // The text typed here is filed under the conversation before anything
+        // is moved, so a draft survives even if the parked view is later
+        // pruned.
+        self.stash_pane_draft(session, cx);
+        if let Some(view) = self.pane_states.remove(&session) {
+            self.parked_panes.insert(session, view);
+        }
+        // A parked view is memory, so how many are kept is bounded. Idle ones
+        // go first, which means a conversation still working is never evicted
+        // to make room for one that already finished.
+        const MAX_PARKED_PANES: usize = 12;
+        if self.parked_panes.len() > MAX_PARKED_PANES {
+            let excess = self.parked_panes.len() - MAX_PARKED_PANES;
+            let idle: Vec<Uuid> = self
+                .parked_panes
+                .iter()
+                .filter(|(_, view)| !view.read(cx).busy)
+                .map(|(id, _)| *id)
+                .take(excess)
+                .collect();
+            for id in idle {
+                self.parked_panes.remove(&id);
+            }
+        }
+    }
+
+    /// The view drawing one conversation, whether it is on screen or parked
+    /// (#2854).
+    ///
+    /// A turn does not stop being that session's turn because its pane was
+    /// switched to another conversation. Settling, folding progress into the
+    /// card, reloading rows and stopping the turn all resolve through here, so
+    /// an off-screen leaf keeps receiving what it owns.
+    pub(crate) fn pane_view(&self, session: Uuid) -> Option<Entity<PaneView>> {
+        self.pane_states
+            .get(&session)
+            .or_else(|| self.parked_panes.get(&session))
+            .cloned()
+    }
+
     /// File one pane's half-typed text under the conversation it belongs to,
     /// before the pane's editor is dropped (#2494).
     pub(crate) fn stash_pane_draft(&mut self, session: Uuid, cx: &mut Context<Self>) {
@@ -655,6 +742,9 @@ impl Dashboard {
             }
             self.stash_pane_draft(id, cx);
             self.pane_states.remove(&id);
+            // The chat leaf draws this conversation now, so a parked pane for
+            // it would be a second copy waiting to come back (#2854).
+            self.parked_panes.remove(&id);
             return;
         }
         if let Some(was) = previous
@@ -665,6 +755,9 @@ impl Dashboard {
         self.panes = Some(PaneTree::leaf(id));
         self.stash_all_pane_drafts(cx);
         self.pane_states.clear();
+        // The tree was replaced wholesale, so no parked view has a leaf left to
+        // return to (#2854).
+        self.parked_panes.clear();
     }
 
     /// Grab the divider between two children of one split (#2472, #2476).

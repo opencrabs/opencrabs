@@ -106,7 +106,9 @@ impl Dashboard {
         };
         let cancel = tokio_util::sync::CancellationToken::new();
         let shown = display.clone().unwrap_or_else(|| text.clone());
-        if let Some(pane) = self.pane_states.get(&session) {
+        // A command can send into a conversation whose pane was switched away,
+        // and that turn belongs to the same card (#2854).
+        if let Some(pane) = self.pane_view(session) {
             pane.update(cx, |pane, cx| {
                 pane.live = transcript::LiveTurn::default();
                 pane.live.begin(shown);
@@ -151,7 +153,9 @@ impl Dashboard {
             let text = rail_activity_line(live);
             (!text.is_empty()).then(|| SharedString::from(text))
         };
-        if let Some(pane) = self.pane_states.get(&id) {
+        // A parked leaf keeps its line too (#2854): its card is what the user
+        // sees when the rail scrolls past a conversation that is still working.
+        if let Some(pane) = self.pane_view(id) {
             let pane = pane.read(cx);
             if pane.busy {
                 return line(&pane.live);
@@ -176,7 +180,9 @@ impl Dashboard {
         at: std::time::Instant,
         cx: &mut Context<Self>,
     ) {
-        if let Some(pane) = self.pane_states.get(&session).cloned() {
+        // Drawn or parked: a conversation does not stop owning its turn
+        // because its pane was switched away (#2854).
+        if let Some(pane) = self.pane_view(session) {
             pane.update(cx, |pane, cx| {
                 fold_live(&mut pane.live, progress, at);
                 // Rows landing under a reader who scrolled up must not drag
@@ -241,10 +247,14 @@ impl Dashboard {
         tokens_per_second: Option<f64>,
         cx: &mut Context<Self>,
     ) {
-        let Some(pane) = self.pane_states.get(&session).cloned() else {
+        // A turn settles where it ran, not where the user is looking (#2854).
+        // This used to return early when the pane was off screen, so a turn
+        // that finished after a switch recorded no metrics, reloaded no rows
+        // and never drained its queue, and no reload could recover any of it.
+        let Some(pane) = self.pane_view(session) else {
             return;
         };
-        let calls = pane.update(cx, |pane, cx| {
+        let (calls, ctx_used, ctx_max) = pane.update(cx, |pane, cx| {
             pane.live.finalize(tokens_per_second);
             pane.live.thinking = false;
             pane.busy = false;
@@ -252,16 +262,17 @@ impl Dashboard {
             // The turn ends where the reader is, not where it ended (#2698).
             pane.snap_if_following();
             cx.notify();
-            pane.live.tools.len()
+            (pane.live.tools.len(), pane.ctx_used, pane.ctx_max)
         });
         // The leaf's card keeps the numbers it showed in flight, the same ones
-        // the window's card keeps (#2632): the ctx budget every pane shares,
-        // and the calls this leaf made.
+        // the window's card keeps (#2632). The budget is the PANE's (#2854):
+        // this read the window's counter and window, so a leaf could print
+        // another conversation's ctx and another provider's limit.
         self.metrics.pending.insert(
             session,
             transcript::TurnMetrics {
-                ctx_used: self.turn.ctx_tokens.unwrap_or(0),
-                ctx_max: self.ctx_max,
+                ctx_used: ctx_used.unwrap_or(0),
+                ctx_max,
                 tps: tokens_per_second,
                 tool_calls: calls,
             },
@@ -276,7 +287,8 @@ impl Dashboard {
     /// The pane's turn failed: the reason lands in that leaf's notices instead
     /// of the window's (#2614).
     pub(crate) fn fail_pane(&mut self, session: Uuid, text: String, cx: &mut Context<Self>) {
-        let Some(pane) = self.pane_states.get(&session).cloned() else {
+        // A failure reaches the card it belongs to, drawn or parked (#2854).
+        let Some(pane) = self.pane_view(session) else {
             return;
         };
         pane.update(cx, |pane, cx| {
@@ -303,7 +315,7 @@ impl Dashboard {
     /// unwinding, and a user who already sent the next turn by hand is never
     /// doubled up on.
     pub(crate) fn drain_pane_pending(&mut self, session: Uuid, cx: &mut Context<Self>) {
-        let Some(pane) = self.pane_states.get(&session) else {
+        let Some(pane) = self.pane_view(session) else {
             return;
         };
         if pane.read(cx).busy {
@@ -326,7 +338,7 @@ impl Dashboard {
             msgs.len()
         ));
         let cancel = tokio_util::sync::CancellationToken::new();
-        if let Some(pane) = self.pane_states.get(&session) {
+        if let Some(pane) = self.pane_view(session) {
             pane.update(cx, |pane, cx| {
                 pane.live = transcript::LiveTurn::default();
                 pane.live.begin(joined.display_text.clone());
@@ -373,7 +385,7 @@ impl Dashboard {
                     // takes the numbers it showed in flight before the rows are
                     // drawn (#2632).
                     let turns = this.claim_pane_metrics(session, turns);
-                    if let Some(pane) = this.pane_states.get(&session) {
+                    if let Some(pane) = this.pane_view(session) {
                         pane.update(cx, |pane, cx| {
                             pane.transcript.hidden = hidden;
                             pane.transcript.turns = turns;
@@ -395,7 +407,7 @@ impl Dashboard {
                     cx.notify();
                 }
                 Err(e) => {
-                    if let Some(pane) = this.pane_states.get(&session) {
+                    if let Some(pane) = this.pane_view(session) {
                         pane.update(cx, |pane, cx| {
                             pane.transcript.error = Some(e.into());
                             pane.scroll.scroll_to_bottom();
@@ -839,7 +851,7 @@ impl Dashboard {
                     if self.plan_for == Some(session) {
                         self.plan.set_path(path);
                         cx.notify();
-                    } else if let Some(pane) = self.pane_states.get(&session).cloned() {
+                    } else if let Some(pane) = self.pane_view(session) {
                         // The path belongs to the session the pane was opened
                         // for, so a leaf for another conversation ignores it.
                         if pane.read(cx).plan_for == Some(session) {
@@ -1059,8 +1071,20 @@ impl Dashboard {
                     self.turn.live.injected.push(text);
                     cx.notify();
                 }
-                agent_bridge::TurnEvent::ProgressFor(_, ProgressEvent::TokenCount(count), _) => {
-                    self.turn.ctx_tokens = Some(count.min(u32::MAX as usize) as u32);
+                agent_bridge::TurnEvent::ProgressFor(sid, ProgressEvent::TokenCount(count), _) => {
+                    let used = count.min(u32::MAX as usize) as u32;
+                    // The count belongs to the conversation that produced it
+                    // (#2854). This wrote the window's counter for every
+                    // session, so a pane's prompt size landed on the window's
+                    // card and the pane's own stayed empty.
+                    if self.chat_state.session() == Some(sid) {
+                        self.turn.ctx_tokens = Some(used);
+                    } else if let Some(pane) = self.pane_view(sid) {
+                        pane.update(cx, |pane, cx| {
+                            pane.ctx_used = Some(used);
+                            cx.notify();
+                        });
+                    }
                 }
                 // A detached command's row lands synchronously, while the
                 // turn that spawned it is still live, and its finish finds it
@@ -1137,6 +1161,15 @@ impl Dashboard {
                         // when the user opens it again (#2616). A split pane's
                         // own turn settles in its leaf.
                         self.stashed.remove(&session);
+                        // The provider's own prompt size for the turn that just
+                        // answered, recorded on the leaf before it settles so
+                        // the settled card prints what the turn cost (#2854).
+                        if let Some(pane) = self.pane_view(session) {
+                            pane.update(cx, |pane, cx| {
+                                pane.ctx_used = Some(context_tokens);
+                                cx.notify();
+                            });
+                        }
                         self.settle_pane(session, tokens_per_second, cx);
                         // A sub-agent's turn ends the same way and has no pane
                         // to settle (#2636). Clearing is idempotent, so a leaf
@@ -1322,7 +1355,7 @@ impl Dashboard {
                         // A split leaf: same settle inside its own card, and
                         // the parked copy of a switched-away turn retires.
                         self.stashed.remove(&session);
-                        if let Some(pane) = self.pane_states.get(&session) {
+                        if let Some(pane) = self.pane_view(session) {
                             pane.update(cx, |pane, cx| {
                                 pane.live.finalize(None);
                                 pane.live.thinking = false;

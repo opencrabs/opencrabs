@@ -82,6 +82,15 @@ pub(crate) struct PaneView {
     /// The token that cancels THIS pane's turn, so `/stop` in one leaf leaves
     /// the other running.
     pub(crate) cancel: Option<tokio_util::sync::CancellationToken>,
+    /// The prompt size the provider last reported for this conversation, and
+    /// the window it runs against (#2854).
+    ///
+    /// A pane's live card printed only the call count and the clock because the
+    /// footer skips the ctx segment when the window is zero, and every pane was
+    /// handed a default. The budget belongs to the conversation, not to the
+    /// window the user happens to be reading.
+    pub(crate) ctx_used: Option<u32>,
+    pub(crate) ctx_max: u32,
     /// This pane's own drag-to-copy state (#2623). A pane transcript used to
     /// be built with default hooks, which leave `drag: None`, so every pane
     /// had no anchor, no highlight and no release handler: the gesture was
@@ -118,6 +127,7 @@ impl PaneView {
         editor: Entity<editor::Editor>,
         copy_drag: Rc<CopyDrag>,
         width: f32,
+        ctx_max: u32,
         window: WeakEntity<Dashboard>,
     ) -> Self {
         Self {
@@ -135,6 +145,8 @@ impl PaneView {
             live: transcript::LiveTurn::default(),
             busy: false,
             cancel: None,
+            ctx_used: None,
+            ctx_max,
             copy_drag,
             window,
             width,
@@ -388,10 +400,15 @@ impl Render for PaneView {
             &self.transcript,
             &self.scroll,
             &self.live,
-            false,
+            // The pane's own flag (#2854). This was hardcoded `false`, so a
+            // pane's live card never knew its turn was running.
+            self.busy,
             self.width,
             HashMap::new(),
             transcript::ViewHooks {
+                // The pane's own budget (#2854), not the window's.
+                ctx_used: self.ctx_used,
+                ctx_max: self.ctx_max,
                 // The pane's own drag-to-copy (#2623): the gesture was dead in
                 // every split because this was `default()`, which leaves
                 // `drag: None`.
