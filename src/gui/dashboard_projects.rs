@@ -34,6 +34,8 @@ impl Dashboard {
         self.projects.creating = false;
         self.projects.create_input.clear();
         self.projects.delete_confirm = false;
+        self.projects.archive_confirm = false;
+        self.projects.selected_sessions.clear();
         self.projects.notice = None;
         self.projects.directory = opencrabs::services::ProjectService::projects_dir();
         self.request_projects(ProjectAction::Refresh { detail: None }, cx);
@@ -46,6 +48,8 @@ impl Dashboard {
         self.projects.loading = false;
         self.projects.creating = false;
         self.projects.delete_confirm = false;
+        self.projects.archive_confirm = false;
+        self.projects.selected_sessions.clear();
         self.screen = Screen::Chat;
         self.refocus_screen();
         cx.notify();
@@ -53,6 +57,11 @@ impl Dashboard {
 
     /// Escape resolves the nearest surface before leaving the screen.
     pub(crate) fn projects_escape(&mut self, cx: &mut Context<Self>) {
+        if self.projects.archive_confirm {
+            self.projects.archive_confirm = false;
+            cx.notify();
+            return;
+        }
         if self.projects.creating {
             self.projects.creating = false;
             self.projects.create_input.clear();
@@ -90,6 +99,19 @@ impl Dashboard {
         self.projects.next_generation();
         let generation = self.projects.generation;
         let db_path = self.db_path.clone();
+        let membership_update = match &action {
+            ProjectAction::AssignMany { project_id, session_ids } => {
+                Some((Some(*project_id), session_ids.clone()))
+            }
+            ProjectAction::ClearMany { session_ids, .. } => Some((None, session_ids.clone())),
+            _ => None,
+        };
+        let clear_selection = matches!(
+            &action,
+            ProjectAction::AssignMany { .. }
+                | ProjectAction::ClearMany { .. }
+                | ProjectAction::ArchiveMany { .. }
+        );
         let session_assignment = match (self.projects.mode, &action) {
             (
                 ProjectsMode::AssignSession(expected_session),
@@ -110,6 +132,16 @@ impl Dashboard {
                 match result {
                     Ok(data) => {
                         this.projects.apply(data);
+                        if let Some((project_id, session_ids)) = membership_update {
+                            for session in this.sessions.items.iter_mut().filter(|session| {
+                                session_ids.contains(&session.id)
+                            }) {
+                                session.project_id = project_id;
+                            }
+                        }
+                        if clear_selection {
+                            this.projects.selected_sessions.clear();
+                        }
                         if let Some((session_id, project_id)) = session_assignment {
                             if let Some(session) = this
                                 .sessions
@@ -154,6 +186,8 @@ impl Dashboard {
         self.projects.creating = false;
         self.projects.delete_confirm = false;
         self.projects.mode = ProjectsMode::Assign(id);
+        self.projects.selected_sessions.clear();
+        self.projects.archive_confirm = false;
         self.projects.sessions.clear();
         self.projects.unassigned.clear();
         self.projects.session_selected = 0;
@@ -209,6 +243,38 @@ impl Dashboard {
         cx.notify();
     }
 
+    pub(crate) fn assign_selected_sessions(&mut self, project_id: Uuid, cx: &mut Context<Self>) {
+        let session_ids: Vec<Uuid> = self.projects.selected_sessions.iter().copied().collect();
+        if session_ids.is_empty() {
+            return;
+        }
+        self.request_projects(ProjectAction::AssignMany { project_id, session_ids }, cx);
+    }
+
+    pub(crate) fn clear_selected_projects(&mut self, project_id: Uuid, cx: &mut Context<Self>) {
+        let session_ids: Vec<Uuid> = self.projects.selected_sessions.iter().copied().collect();
+        if session_ids.is_empty() {
+            return;
+        }
+        self.request_projects(ProjectAction::ClearMany { project_id, session_ids }, cx);
+    }
+
+    pub(crate) fn request_selected_archive(&mut self, cx: &mut Context<Self>) {
+        if !self.projects.selected_sessions.is_empty() {
+            self.projects.archive_confirm = true;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn confirm_selected_archive(&mut self, project_id: Uuid, cx: &mut Context<Self>) {
+        self.projects.archive_confirm = false;
+        let session_ids: Vec<Uuid> = self.projects.selected_sessions.iter().copied().collect();
+        if session_ids.is_empty() {
+            return;
+        }
+        self.request_projects(ProjectAction::ArchiveMany { project_id, session_ids }, cx);
+    }
+
     pub(crate) fn assign_session_to_project(&mut self, project_id: Uuid, cx: &mut Context<Self>) {
         let ProjectsMode::AssignSession(session_id) = self.projects.mode else {
             return;
@@ -248,6 +314,14 @@ impl Dashboard {
                         cx.notify();
                     }
                 }
+            }
+            return;
+        }
+        if self.projects.archive_confirm {
+            if matches!(ks.key.as_str(), "d" | "enter")
+                && let ProjectsMode::Assign(project_id) = self.projects.mode
+            {
+                self.confirm_selected_archive(project_id, cx);
             }
             return;
         }
@@ -306,15 +380,30 @@ impl Dashboard {
             ProjectsMode::Assign(project_id) => match ks.key.as_str() {
                 "up" => self.projects.move_selection(-1),
                 "down" => self.projects.move_selection(1),
-                "enter" => {
+                "space" => {
                     if let Some(session_id) = self
                         .projects
                         .selected_assignment(project_id)
                         .map(|session| session.id)
                     {
-                        self.assign_project_session(project_id, session_id, cx);
+                        self.projects.toggle_assignment(project_id, session_id);
                     }
                 }
+                "enter" => {
+                    if self.projects.selected_sessions.is_empty() {
+                        if let Some(session_id) = self
+                            .projects
+                            .selected_assignment(project_id)
+                            .map(|session| session.id)
+                        {
+                            self.assign_project_session(project_id, session_id, cx);
+                        }
+                    } else {
+                        self.assign_selected_sessions(project_id, cx);
+                    }
+                }
+                "c" => self.clear_selected_projects(project_id, cx),
+                "d" => self.request_selected_archive(cx),
                 _ => {}
             },
             ProjectsMode::AssignSession(_) => match ks.key.as_str() {

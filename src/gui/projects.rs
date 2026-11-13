@@ -6,7 +6,9 @@
 
 use opencrabs::db::Database;
 use opencrabs::db::models::{Project, Session};
+use opencrabs::db::repository::SessionRepository;
 use opencrabs::services::{ProjectService, ServiceContext};
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use uuid::Uuid;
 
@@ -44,6 +46,8 @@ pub struct ProjectsState {
     pub unassigned: Vec<Session>,
     pub assignable: Vec<Session>,
     pub assignment_filter: AssignmentFilter,
+    pub selected_sessions: BTreeSet<Uuid>,
+    pub archive_confirm: bool,
     pub selected: usize,
     pub session_selected: usize,
     pub creating: bool,
@@ -65,6 +69,8 @@ impl Default for ProjectsState {
             unassigned: Vec::new(),
             assignable: Vec::new(),
             assignment_filter: AssignmentFilter::All,
+            selected_sessions: BTreeSet::new(),
+            archive_confirm: false,
             selected: 0,
             session_selected: 0,
             creating: false,
@@ -108,6 +114,19 @@ impl ProjectsState {
         self.visible_assignments(target)
             .into_iter()
             .nth(self.session_selected)
+    }
+
+    pub fn toggle_assignment(&mut self, target: Uuid, session_id: Uuid) {
+        if !self
+            .visible_assignments(target)
+            .iter()
+            .any(|session| session.id == session_id)
+        {
+            return;
+        }
+        if !self.selected_sessions.insert(session_id) {
+            self.selected_sessions.remove(&session_id);
+        }
     }
 
     pub fn visible_assignments(&self, target: Uuid) -> Vec<Session> {
@@ -175,6 +194,9 @@ pub enum ProjectAction {
     Delete { id: Uuid },
     Assign { project_id: Uuid, session_id: Uuid },
     Unassign { project_id: Uuid, session_id: Uuid },
+    AssignMany { project_id: Uuid, session_ids: Vec<Uuid> },
+    ClearMany { project_id: Uuid, session_ids: Vec<Uuid> },
+    ArchiveMany { project_id: Uuid, session_ids: Vec<Uuid> },
 }
 
 #[derive(Debug, Clone)]
@@ -189,6 +211,7 @@ pub struct ProjectsData {
 async fn execute(db_path: PathBuf, action: ProjectAction) -> anyhow::Result<ProjectsData> {
     let db = Database::connect(&db_path).await?;
     let service = ProjectService::new(ServiceContext::new(db.pool().clone()));
+    let sessions = SessionRepository::new(db.pool().clone());
     let mut detail_id = None;
     let notice = match action {
         ProjectAction::Refresh { detail } => {
@@ -220,6 +243,37 @@ async fn execute(db_path: PathBuf, action: ProjectAction) -> anyhow::Result<Proj
             service.unassign_session(session_id).await?;
             detail_id = Some(project_id);
             Some("Session removed from project".to_string())
+        }
+        ProjectAction::AssignMany {
+            project_id,
+            session_ids,
+        } => {
+            service.get_project_required(project_id).await?;
+            for session_id in &session_ids {
+                service.assign_session(*session_id, project_id).await?;
+            }
+            detail_id = Some(project_id);
+            Some(format!("{} sessions assigned to project", session_ids.len()))
+        }
+        ProjectAction::ClearMany {
+            project_id,
+            session_ids,
+        } => {
+            for session_id in &session_ids {
+                service.unassign_session(*session_id).await?;
+            }
+            detail_id = Some(project_id);
+            Some(format!("{} sessions removed from their projects", session_ids.len()))
+        }
+        ProjectAction::ArchiveMany {
+            project_id,
+            session_ids,
+        } => {
+            for session_id in &session_ids {
+                sessions.archive(*session_id).await?;
+            }
+            detail_id = Some(project_id);
+            Some(format!("{} sessions archived", session_ids.len()))
         }
     };
 

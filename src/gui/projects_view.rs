@@ -211,6 +211,29 @@ pub fn delete_panel(name: &str, shown: Palette) -> Div {
         ))
 }
 
+pub fn archive_panel(count: usize, shown: Palette) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .p_3()
+        .rounded(px(CARD_RADIUS))
+        .border_1()
+        .border_color(rgb(shown.red))
+        .bg(glass_fill(shown.panel))
+        .child(text(
+            format!("Archive {count} selected session{}?", if count == 1 { "" } else { "s" }),
+            Size::Sm,
+            shown.red,
+        ))
+        .child(text(
+            "Archived sessions leave the active rail. Their transcripts are not deleted.",
+            Size::Xs,
+            shown.text_muted,
+        ))
+        .child(text("enter confirm  esc cancel", Size::Xs, shown.text_faint))
+}
+
 pub fn empty(message: &'static str, hint: &'static str, shown: Palette) -> Div {
     div()
         .flex()

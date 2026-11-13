@@ -185,6 +185,56 @@ impl Dashboard {
         if let Some(notice) = self.projects.notice.clone() {
             content = content.child(text(notice, Size::Xs, shown.green));
         }
+        if let ProjectsMode::Assign(project_id) = mode {
+            let selected_count = self.projects.selected_sessions.len();
+            if selected_count > 0 {
+                let mut bulk = div().flex().flex_row().flex_wrap().gap_2();
+                bulk = bulk.child(
+                    projects_view::action_button("project-bulk-assign", "assign selected", false, shown)
+                        .on_click(cx.listener(move |this, _ev, _window, cx| {
+                            this.assign_selected_sessions(project_id, cx);
+                        })),
+                );
+                bulk = bulk.child(
+                    projects_view::action_button("project-bulk-clear", "clear project", false, shown)
+                        .on_click(cx.listener(move |this, _ev, _window, cx| {
+                            this.clear_selected_projects(project_id, cx);
+                        })),
+                );
+                bulk = bulk.child(
+                    projects_view::action_button("project-bulk-archive", "archive", true, shown)
+                        .on_click(cx.listener(|this, _ev, _window, cx| {
+                            this.request_selected_archive(cx);
+                        })),
+                );
+                content = content.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(text(
+                            format!("{selected_count} selected"),
+                            Size::Xs,
+                            shown.accent,
+                        ))
+                        .child(bulk),
+                );
+            }
+            if self.projects.archive_confirm {
+                content = content.child(projects_view::archive_panel(selected_count, shown));
+                content = content.child(
+                    projects_view::action_button(
+                        "project-bulk-archive-confirm",
+                        "confirm archive",
+                        true,
+                        shown,
+                    )
+                    .on_click(cx.listener(move |this, _ev, _window, cx| {
+                        this.confirm_selected_archive(project_id, cx);
+                    })),
+                );
+            }
+        }
         let assignment_rows = match mode {
             ProjectsMode::Assign(project_id) => self.projects.visible_assignments(project_id),
             _ => Vec::new(),
@@ -297,6 +347,7 @@ impl Dashboard {
                 ProjectsMode::Assign(project_id) => {
                     for (index, session) in assignment_rows.iter().enumerate() {
                         let id = session.id;
+                        let checked = self.projects.selected_sessions.contains(&id);
                         let membership = session
                             .project_id
                             .and_then(|project_id| self.projects.project(project_id))
@@ -309,13 +360,14 @@ impl Dashboard {
                             shown,
                         )
                         .child(text(
-                            format!("Current project: {membership}"),
+                            format!("{} Current project: {membership}", if checked { "[x]" } else { "[ ]" }),
                             Size::Xs,
                             shown.amber,
                         ))
                         .on_click(cx.listener(move |this, _ev, _window, cx| {
                             this.projects.session_selected = index;
-                            this.assign_project_session(project_id, id, cx);
+                            this.projects.toggle_assignment(project_id, id);
+                            cx.notify();
                         }));
                         content = content.child(card);
                     }
@@ -325,7 +377,9 @@ impl Dashboard {
         let hints = match mode {
             ProjectsMode::List => "up/down select  enter open  n new  a assign  d delete  esc close",
             ProjectsMode::Detail(_) => "up/down select  enter open  a assign  u unassign  esc back",
-            ProjectsMode::Assign(_) => "up/down select  enter assign  esc back",
+            ProjectsMode::Assign(_) => {
+                "space check  enter assign  c clear project  d archive  esc back"
+            }
             ProjectsMode::AssignSession(_) => "up/down select  enter assign  esc cancel",
         };
         let footer = modal_shell::footer(format!("{count} rows  ·  {hints}")).into_any_element();

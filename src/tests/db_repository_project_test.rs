@@ -125,6 +125,41 @@ async fn test_assign_unassign_session() {
 }
 
 #[tokio::test]
+async fn assignable_sessions_include_other_projects_but_not_topics_or_archives() {
+    let db = Database::connect_in_memory()
+        .await
+        .expect("Failed to create database");
+    db.run_migrations().await.expect("Failed to run migrations");
+    let projects = ProjectRepository::new(db.pool().clone());
+    let sessions = SessionRepository::new(db.pool().clone());
+    let project = Project::new("Existing project".to_string(), None);
+    projects.create(&project).await.expect("create project");
+
+    let plain = Session::new(Some("Plain".to_string()), Some("m".to_string()), None);
+    let assigned = Session::new(Some("Assigned".to_string()), Some("m".to_string()), None);
+    let archived = Session::new(Some("Archived".to_string()), Some("m".to_string()), None);
+    for session in [&plain, &assigned, &archived] {
+        sessions.create(session).await.expect("create session");
+    }
+    projects
+        .assign_session(assigned.id, project.id)
+        .await
+        .expect("assign session");
+    sessions.archive(archived.id).await.expect("archive session");
+    sessions
+        .create_topic(plain.id, "Topic".to_string())
+        .await
+        .expect("create topic");
+
+    let rows = projects.find_assignable_sessions().await.expect("list");
+    let ids: Vec<_> = rows.iter().map(|session| session.id).collect();
+    assert!(ids.contains(&plain.id));
+    assert!(ids.contains(&assigned.id));
+    assert!(!ids.contains(&archived.id));
+    assert_eq!(rows.len(), 2, "the child topic is not an independent pick");
+}
+
+#[tokio::test]
 async fn test_count_sessions_and_files() {
     let db = Database::connect_in_memory()
         .await

@@ -61,6 +61,25 @@ fn assignment_can_repair_sessions_from_other_projects() {
 }
 
 #[test]
+fn bulk_assignment_clear_and_archive_keep_their_own_service_paths() {
+    for needle in [
+        "AssignMany { project_id: Uuid, session_ids: Vec<Uuid> }",
+        "ClearMany { project_id: Uuid, session_ids: Vec<Uuid> }",
+        "ArchiveMany { project_id: Uuid, session_ids: Vec<Uuid> }",
+        "service.assign_session(*session_id, project_id).await?",
+        "service.unassign_session(*session_id).await?",
+        "sessions.archive(*session_id).await?",
+    ] {
+        assert!(PROJECTS.contains(needle), "missing bulk service path: {needle}");
+    }
+    assert!(PROJECTS_SCREEN.contains("this.projects.toggle_assignment(project_id, id)"));
+    assert!(PROJECTS_SCREEN.contains("project-bulk-archive-confirm"));
+    assert!(DASHBOARD.contains("self.assign_selected_sessions(project_id, cx)"));
+    assert!(DASHBOARD.contains("self.clear_selected_projects(project_id, cx)"));
+    assert!(!PROJECTS.contains("session_merge"));
+}
+
+#[test]
 fn project_actions_use_the_shared_service_and_reject_stale_results() {
     for needle in [
         "Database::connect(&db_path).await?",
