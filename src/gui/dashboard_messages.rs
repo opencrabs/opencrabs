@@ -560,42 +560,15 @@ impl Dashboard {
             this.msg_react_open(id, cx);
         });
         items.push((MessageAction::React.label().to_string(), Rc::new(react)));
-        // Forward needs somewhere to go: with no other session on the rail the
-        // item would open an empty picker, so it is left out instead.
-        if !self.forward_destinations_for(id).is_empty() {
-            let forward = cx.listener(move |this, _ev, _window, cx| {
-                cx.stop_propagation();
-                this.msg_forward_one(id, cx);
-            });
-            items.push((MessageAction::Forward.label().to_string(), Rc::new(forward)));
-        }
+        // No Forward here on purpose (#2827). The owner does not want a right
+        // press on a history row to send that row somewhere else; bulk forward
+        // still lives in the selection bar, which is a flow he opens himself.
         let select = cx.listener(move |this, _ev, _window, cx| {
             cx.stop_propagation();
             this.msg_select_row(id, cx);
         });
         items.push((MessageAction::Select.label().to_string(), Rc::new(select)));
         items
-    }
-
-    /// Whether a forward of `id` has a destination at all (#2608). The menu
-    /// asks before offering Forward, and it asks about the row's own session,
-    /// not about whatever pick happens to be open.
-    pub(crate) fn forward_destinations_for(&self, id: Uuid) -> Vec<(Uuid, String)> {
-        let Some(source) = self
-            .chat_state
-            .transcript
-            .rows
-            .iter()
-            .find(|m| m.id == id)
-            .map(|m| m.session_id)
-        else {
-            return Vec::new();
-        };
-        self.sessions
-            .ordered()
-            .filter(|s| s.id != source && !self.sessions.is_closed(s.id))
-            .map(|s| (s.id, self.session_label(s.id)))
-            .collect()
     }
 
     /// Toggle one row in select mode (#2613). A shift-click extends from the
@@ -678,23 +651,6 @@ impl Dashboard {
                     .cloned()
             })
             .collect()
-    }
-
-    /// "Forward" on a single row: pick it and go straight to the destination
-    /// picker, so one message does not need select mode first (#2613).
-    pub(crate) fn msg_forward_one(&mut self, id: Uuid, cx: &mut Context<Self>) {
-        // A single-row forward never enters select mode: there is nothing to
-        // count, so the bar would be a step with one option.
-        let rows: Vec<Message> = self
-            .chat_state
-            .transcript
-            .rows
-            .iter()
-            .filter(|m| m.id == id)
-            .cloned()
-            .collect();
-        self.msg_menu = None;
-        self.forward_open(rows, cx);
     }
 
     /// Forward the picks: open the destination picker, or say why it cannot

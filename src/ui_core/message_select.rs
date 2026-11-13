@@ -118,21 +118,24 @@ pub fn span<K: PartialEq>(order: &[K], a: &K, b: &K) -> Option<(usize, usize)> {
 /// exist yet, and this repo never ships a dead menu entry. A caller that
 /// builds the menu by iterating [`MessageAction::ALL`] cannot offer an item
 /// the app cannot carry out, because there is no variant for it to reach for.
+///
+/// `Forward` was here and is gone on the owner's instruction: a right press on
+/// a history row is not how he wants to send a past message somewhere else
+/// (#2827). Bulk forward from the selection bar is untouched, because that is
+/// a deliberate flow he opened rather than a menu entry next to Copy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MessageAction {
     CopyText,
     /// Put one of the pack's crabs on the row (#2825).
     React,
-    Forward,
     Select,
 }
 
 impl MessageAction {
     /// Every wired action, in menu order.
-    pub const ALL: [MessageAction; 4] = [
+    pub const ALL: [MessageAction; 3] = [
         MessageAction::CopyText,
         MessageAction::React,
-        MessageAction::Forward,
         MessageAction::Select,
     ];
 
@@ -141,7 +144,6 @@ impl MessageAction {
         match self {
             MessageAction::CopyText => "Copy Text",
             MessageAction::React => "React",
-            MessageAction::Forward => "Forward",
             MessageAction::Select => "Select",
         }
     }
