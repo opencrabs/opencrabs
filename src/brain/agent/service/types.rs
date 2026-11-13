@@ -616,12 +616,18 @@ impl AgentService {
         // Defensive: a title candidate can carry the stable session suffix
         // (a model may echo the existing session name). Detach it before the
         // word cap so the cap can never eat it, then reattach untouched.
-        let (body, suffix) = match trimmed.rfind("[chat:") {
-            Some(pos) if trimmed[pos..].ends_with(']') => {
-                (trimmed[..pos].trim_end(), &trimmed[pos..])
-            }
-            _ => (trimmed, ""),
-        };
+        // `get` rather than a range index: the title is model output, so an
+        // index that is not a char boundary must degrade to "no suffix" and
+        // never panic on the session's own name.
+        let mut body = trimmed;
+        let mut suffix = "";
+        if let Some(pos) = trimmed.rfind("[chat:")
+            && let (Some(head), Some(tail)) = (trimmed.get(..pos), trimmed.get(pos..))
+            && tail.ends_with(']')
+        {
+            body = head.trim_end();
+            suffix = tail;
+        }
         let mut capped = Self::cap_title_words(body, 3);
         if capped.chars().count() > 60 {
             capped = capped.chars().take(60).collect::<String>();
