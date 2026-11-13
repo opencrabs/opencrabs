@@ -7455,18 +7455,18 @@ mod tests {
         // there: the root's capture still runs before any of them, because
         // capture walks down from the window whatever the child's depth.
         let rail = include_str!("rail_view.rs");
-        for anchor in [
-            "let open = cx.listener",
-            "let expand = cx.listener",
-            "let collapse = cx.listener",
+        for action in [
+            "dash.rail_chip_pick(",
+            "dash.rail_expand_chips(",
+            "dash.rail_collapse_chips(",
         ] {
-            let (_head, tail) = rail
-                .split_once(anchor)
-                .unwrap_or_else(|| panic!("{anchor} still exists"));
-            let listener = tail.split("});").next().unwrap_or("");
+            let listener = rail
+                .split("cx.listener(")
+                .find(|chunk| chunk.contains(action))
+                .unwrap_or_else(|| panic!("{action} is still a listener"));
             assert!(
                 listener.contains("cx.stop_propagation();"),
-                "{anchor} is why the release has to be caught on the way down"
+                "{action} is why the release has to be caught on the way down"
             );
         }
     }
