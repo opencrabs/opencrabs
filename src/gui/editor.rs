@@ -3339,7 +3339,7 @@ mod tests {
         let video = Attachment::for_display(PathBuf::from("/fixtures/動画-ção.MOV"));
         assert_eq!(video.name, "動画-ção.MOV");
         assert!(video.is_video);
-        assert!(!video.is_image);
+        assert!(!video.is_image());
 
         assert_eq!(image.marker(), "<<IMG:/fixtures/relatório-ção-🦀.PNG>>");
         assert_eq!(marker_paths(&image.marker()), vec![image.path.clone()]);
