@@ -133,7 +133,7 @@ impl NotificationEvent {
                 format!("Finished in {elapsed_secs}s")
             }
             Self::TaskCompleted { .. } => "Finished".to_string(),
-            Self::TurnCompleted { summary } => {
+            Self::TurnCompleted { summary, .. } => {
                 let line = truncate(summary, MAX_BODY_CHARS);
                 if line.trim().is_empty() {
                     "Done.".to_string()
@@ -141,7 +141,7 @@ impl NotificationEvent {
                     line
                 }
             }
-            Self::TurnFailed { reason } => truncate(reason, MAX_BODY_CHARS),
+            Self::TurnFailed { reason, .. } => truncate(reason, MAX_BODY_CHARS),
         }
     }
 
@@ -586,9 +586,7 @@ pub(crate) fn toast_xml(title: &str, body: &str, session: Option<Uuid>) -> Strin
     let launch = session.map(|session| format!("{ACTIVATION_SCHEME}{session}"));
     let mut xml = String::from("<toast");
     if let Some(uri) = launch.as_deref() {
-        xml.push_str(&format!(
-            " activationType=\"protocol\" launch=\"{uri}\""
-        ));
+        xml.push_str(&format!(" activationType=\"protocol\" launch=\"{uri}\""));
     }
     xml.push_str("><visual><binding template=\"ToastText02\"><text id=\"1\">");
     xml.push_str(&xml_escape(title));
@@ -837,11 +835,7 @@ pub fn ensure_activation_handler() {
     // the argv is built per write instead of forcing one shape on all three.
     let writes: [(&str, Option<&str>, &str); 3] = [
         (r"HKCU\Software\Classes\opencrabs", None, "URL:OpenCrabs"),
-        (
-            r"HKCU\Software\Classes\opencrabs",
-            Some("URL Protocol"),
-            "",
-        ),
+        (r"HKCU\Software\Classes\opencrabs", Some("URL Protocol"), ""),
         (
             r"HKCU\Software\Classes\opencrabs\shell\open\command",
             None,
