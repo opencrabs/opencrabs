@@ -1868,7 +1868,8 @@ pub(crate) fn cap_entry_body(body: &str, budget: usize) -> String {
     while end > 0 && !body.is_char_boundary(end) {
         end -= 1;
     }
-    format!("{}{NOTE}", &body[..end])
+    let (head, _) = body.split_at(end);
+    format!("{head}{NOTE}")
 }
 
 /// Write `entry` into `existing`: replace an earlier entry for the same
@@ -1877,15 +1878,12 @@ pub(crate) fn cap_entry_body(body: &str, budget: usize) -> String {
 pub(crate) fn replace_session_entry(existing: &str, session_id: Uuid, entry: &str) -> String {
     let open = format!("<!-- compaction:session:{session_id} -->");
     let close = format!("<!-- /compaction:session:{session_id} -->");
-    if let Some(start) = existing.find(&open)
-        && let Some(rel_end) = existing[start..].find(&close)
-    {
-        let end = start + rel_end + close.len();
-        let mut out = String::with_capacity(existing.len() + entry.len());
-        out.push_str(&existing[..start]);
-        out.push_str(entry);
-        out.push_str(&existing[end..]);
-        return out;
+    if let Some(start) = existing.find(&open) {
+        let (head, rest) = existing.split_at(start);
+        if let Some(rel_end) = rest.find(&close) {
+            let (_, tail) = rest.split_at(rel_end + close.len());
+            return format!("{head}{entry}{tail}");
+        }
     }
     let trimmed = existing.trim_end();
     if trimmed.is_empty() {
