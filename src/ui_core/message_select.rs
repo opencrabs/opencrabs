@@ -121,14 +121,17 @@ pub fn span<K: PartialEq>(order: &[K], a: &K, b: &K) -> Option<(usize, usize)> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MessageAction {
     CopyText,
+    /// Put one of the pack's crabs on the row (#2825).
+    React,
     Forward,
     Select,
 }
 
 impl MessageAction {
     /// Every wired action, in menu order.
-    pub const ALL: [MessageAction; 3] = [
+    pub const ALL: [MessageAction; 4] = [
         MessageAction::CopyText,
+        MessageAction::React,
         MessageAction::Forward,
         MessageAction::Select,
     ];
@@ -137,6 +140,7 @@ impl MessageAction {
     pub fn label(self) -> &'static str {
         match self {
             MessageAction::CopyText => "Copy Text",
+            MessageAction::React => "React",
             MessageAction::Forward => "Forward",
             MessageAction::Select => "Select",
         }

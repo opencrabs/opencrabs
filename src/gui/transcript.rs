@@ -39,6 +39,7 @@ use gpui::{
 use opencrabs::db::Database;
 use opencrabs::db::models::Message;
 use opencrabs::db::repository::message::MessageRepository;
+use opencrabs::db::repository::message_reaction::MessageReactionRepository;
 use opencrabs::db::repository::session::SessionRepository;
 use opencrabs::tui::app::ledger_scan::next_ledger;
 use opencrabs::tui::app::reasoning_split::{self, Segment, is_intermediate, split_segments};
@@ -726,6 +727,10 @@ pub struct TranscriptState {
     /// the picked messages themselves, not the blocks they were rendered as
     /// (#2608): a block carries text, not the row's id or provenance.
     pub rows: Vec<Message>,
+    /// The reactions each loaded row carries, keyed by message id (#2825).
+    /// Read once with the rows and updated in place by a toggle, so a chip
+    /// never costs a query on the paint path.
+    pub reactions: HashMap<uuid::Uuid, Vec<(String, usize)>>,
 }
 
 impl TranscriptState {
@@ -835,6 +840,64 @@ pub struct Loaded {
     /// Row id to topic label. Empty for a single session, which is every read
     /// that is not a forum's `All` view.
     pub origins: HashMap<uuid::Uuid, String>,
+    /// The reactions the loaded rows carry, keyed by message id (#2825). Rows
+    /// nobody reacted to are absent rather than present and empty.
+    pub reactions: HashMap<uuid::Uuid, Vec<(String, usize)>>,
+}
+
+/// Every reaction on the rows one read loaded, in a single query (#2825).
+///
+/// A transcript read is the only place the map is built: a toggle edits the
+/// entry it touched, so drawing a chip never goes back to the ledger.
+async fn reactions_for(
+    db: &Database,
+    rows: &[Message],
+) -> anyhow::Result<HashMap<uuid::Uuid, Vec<(String, usize)>>> {
+    let ids: Vec<uuid::Uuid> = rows.iter().map(|m| m.id).collect();
+    MessageReactionRepository::new(db.pool().clone())
+        .for_messages(&ids)
+        .await
+}
+
+/// Toggle one reaction on one stored row (#2825).
+///
+/// Its own thread with a real stack and its own runtime, the same shape as
+/// [`load_recent`]: the window never blocks a frame on a write, and the reply
+/// is whether the reaction is there afterwards so the caller can say which way
+/// the click went without a second read.
+pub async fn toggle_reaction(
+    db_path: std::path::PathBuf,
+    message_id: uuid::Uuid,
+    emoji: String,
+) -> Result<bool, String> {
+    let (tx, rx) = futures::channel::oneshot::channel::<Result<bool, String>>();
+    let spawned = std::thread::Builder::new()
+        .name("message-reaction".into())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let result = match runtime {
+                Ok(rt) => rt
+                    .block_on(async {
+                        let db = Database::connect(&db_path).await?;
+                        MessageReactionRepository::new(db.pool().clone())
+                            .toggle(message_id, &emoji)
+                            .await
+                    })
+                    .map_err(|e| format!("{e:#}")),
+                Err(e) => Err(format!("tokio runtime failed: {e}")),
+            };
+            let _ = tx.send(result);
+        });
+    match spawned {
+        Ok(_) => match rx.await {
+            Ok(result) => result,
+            Err(_) => Err("reaction write thread dropped its result".into()),
+        },
+        Err(e) => Err(format!("reaction write thread failed to spawn: {e}")),
+    }
 }
 
 /// Fetch the newest window of the conversation plus the session's total row
@@ -869,10 +932,12 @@ pub async fn load_recent(
                         if family.len() <= 1 {
                             let rows = repo.find_recent_by_session(session_id, WINDOW).await?;
                             let total = repo.count_by_session(session_id).await?;
+                            let reactions = reactions_for(&db, &rows).await?;
                             return Ok::<_, anyhow::Error>(Loaded {
                                 rows,
                                 total,
                                 origins: HashMap::new(),
+                                reactions,
                             });
                         }
                         let ids: Vec<uuid::Uuid> = family.iter().map(|(id, _)| *id).collect();
@@ -901,10 +966,12 @@ pub async fn load_recent(
                         // breaks a tie between two rows stamped the same
                         // second, so the union is stable across reloads.
                         rows.sort_by_key(|m| (m.created_at, m.id));
+                        let reactions = reactions_for(&db, &rows).await?;
                         Ok::<_, anyhow::Error>(Loaded {
                             rows,
                             total,
                             origins,
+                            reactions,
                         })
                     })
                     .map_err(|e| format!("{e:#}")),
@@ -3577,6 +3644,99 @@ fn message_row(
     row
 }
 
+/// The reaction chips under one stored row (#2825): the crab picture and, when
+/// the row carries more than one of it, the count.
+///
+/// The count is drawn only above one. The table is keyed by (message, picture)
+/// and a transcript row is local state with one reader, so a chip is one
+/// reaction today; the number is already wired for the day a row is shared and
+/// the same picture arrives from more than one reader.
+fn reaction_chips(
+    id: uuid::Uuid,
+    reactions: &[(String, usize)],
+    clicks: &HashMap<(uuid::Uuid, String), ClickHandler>,
+) -> Option<Div> {
+    if reactions.is_empty() {
+        return None;
+    }
+    let palette = palette::current();
+    let mut strip = div().flex().flex_row().flex_wrap().gap_1().pt_0p5();
+    for (name, count) in reactions {
+        let face: AnyElement = topic_icons::crab_icon(name)
+            .map(|bytes| topic_icons::picture(bytes, 0.95).into_any_element())
+            .unwrap_or_else(|| SharedString::from(format!(":{name}:")).into_any_element());
+        let mut chip = div()
+            .id(SharedString::from(format!("react-{id}-{name}")))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_0p5()
+            .px_1()
+            .py_0p5()
+            .rounded_full()
+            .bg(rgb(palette.panel_hi))
+            .border_1()
+            .border_color(rgb(palette.text_faint))
+            .child(face);
+        if *count > 1 {
+            chip = chip.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(palette.text_muted))
+                    .child(SharedString::from(count.to_string())),
+            );
+        }
+        if let Some(pick) = clicks.get(&(id, name.clone())).cloned() {
+            chip = chip
+                .cursor_pointer()
+                .hover(|d| d.border_color(rgb(palette.accent)))
+                .on_click(move |ev, window, app| pick(ev, window, app));
+        }
+        strip = strip.child(chip);
+    }
+    Some(strip)
+}
+
+/// The crab picker a row's React item opens (#2825): the whole pack as a grid
+/// of pictures, one click per cell.
+///
+/// It is a [`crate::menu::menu_popover`] card, the same primitive the row menu
+/// uses, so it opens at the point that asked for it and snaps to the window
+/// margin by the one placement rule every menu shares (#2690).
+pub fn react_picker_popover(cells: &[(String, ClickHandler)], at: Point<Pixels>) -> AnyElement {
+    let palette = palette::current();
+    let grid: Vec<Stateful<Div>> = cells
+        .iter()
+        .map(|(name, pick)| {
+            let pick = pick.clone();
+            let face: AnyElement = topic_icons::crab_icon(name)
+                .map(|bytes| topic_icons::picture(bytes, 1.1).into_any_element())
+                .unwrap_or_else(|| SharedString::from(format!(":{name}:")).into_any_element());
+            div()
+                .id(SharedString::from(format!("react-pick-{name}")))
+                .flex_none()
+                .p_1()
+                .rounded_sm()
+                .cursor_pointer()
+                .hover(|d| d.bg(rgb(palette.selection)))
+                .child(face)
+                .on_click(move |ev, window, app| pick(ev, window, app))
+        })
+        .collect();
+    // The card is a column of rows, so the grid is one row that wraps: the
+    // pack stays in the card's own frame and the card keeps its one placement
+    // rule.
+    let grid_row = div()
+        .id("react-picker-grid")
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .max_w(rems(16.0))
+        .gap_0p5()
+        .children(grid);
+    crate::menu::menu_popover("react-picker", vec![grid_row], at)
+}
+
 /// The menu card itself: one row per resolved item, drawn at the pointer that
 /// opened it. It reuses the rail's card and popover so every menu is one
 /// surface with one placement rule (#2690).
@@ -3787,6 +3947,14 @@ pub struct ViewHooks {
     /// transcript state, so the click that loads the next window has to be
     /// minted by whichever view holds that state.
     pub older: Option<ClickHandler>,
+    /// The reactions each drawn row carries, keyed by message id (#2825). The
+    /// map is the pane's own, so a chip is drawn from the state the last read
+    /// or toggle left behind, never from a second query.
+    pub reactions: HashMap<uuid::Uuid, Vec<(String, usize)>>,
+    /// The toggle behind one chip, keyed by the row and the picture on it
+    /// (#2825). Only the owning view can mint one, and only a chip that is
+    /// drawn needs one.
+    pub reaction_click: HashMap<(uuid::Uuid, String), ClickHandler>,
 }
 
 pub fn view(
@@ -3810,6 +3978,8 @@ pub fn view(
         selection: selected,
         menu_dismiss,
         older: older_click,
+        reactions,
+        reaction_click,
     } = hooks;
     if let Some(d) = &drag {
         d.texts.borrow_mut().clear();
@@ -4003,12 +4173,29 @@ pub fn view(
                         picked,
                     )
                     .into_any_element();
-                    match (&drag, selectable, picked) {
+                    let row = match (&drag, selectable, picked) {
                         (_, _, Some(_)) => row,
                         (Some(d), Some(ordinal), None) => {
                             selectable_row(d, ordinal, row).into_any_element()
                         }
                         _ => row,
+                    };
+                    // The chips a row carries sit under it, in the same
+                    // column, so a reaction reads as belonging to the message
+                    // above it and not to the next one (#2825).
+                    match reaction_chips(
+                        *id,
+                        reactions.get(id).map_or(&[][..], Vec::as_slice),
+                        &reaction_click,
+                    ) {
+                        Some(chips) => div()
+                            .flex()
+                            .flex_col()
+                            .w_full()
+                            .child(row)
+                            .child(chips)
+                            .into_any_element(),
+                        None => row,
                     }
                 }
                 _ => match (&drag, selectable) {

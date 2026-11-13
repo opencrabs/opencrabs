@@ -169,6 +169,11 @@ pub(crate) const MIGRATION_SQL: &[&str] = &[
     // ADD COLUMN entries plus one index, all NULL by design on existing rows,
     // so no heal pass is needed. Appended last per the list invariant above.
     include_str!("../migrations/20261105000001_add_message_forward_provenance.sql"),
+    // #2825: reactions on a stored transcript row. An idempotent CREATE in a
+    // sidecar table keyed by (message, emoji), so a second click on the same
+    // picture is the same reaction and the toggle deletes it. Nothing to
+    // backfill. Appended last per the list invariant above.
+    include_str!("../migrations/20261106000001_add_message_reactions.sql"),
 ];
 
 pub(crate) fn build_migrations() -> Migrations<'static> {

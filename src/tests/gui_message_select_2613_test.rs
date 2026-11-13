@@ -16,7 +16,7 @@ const TRANSCRIPT: &str = include_str!("../gui/transcript.rs");
 fn the_menu_offers_only_the_actions_this_version_wires() {
     assert_eq!(
         MessageAction::ALL.map(|action| action.label()),
-        ["Copy Text", "Forward", "Select"],
+        ["Copy Text", "React", "Forward", "Select"],
         "the menu is exactly the wired actions, in menu order"
     );
 

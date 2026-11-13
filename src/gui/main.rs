@@ -746,6 +746,11 @@ struct Dashboard {
     /// The card opens under the pointer instead of pinned to the row's top
     /// corner, so a long message cannot put it half a screen away.
     msg_menu_at: Option<gpui::Point<gpui::Pixels>>,
+    /// The row whose crab pack is open (#2825). One card at a time, so it
+    /// closes the message menu that opened it.
+    react_menu: Option<Uuid>,
+    /// Where that pack opened, carried over from the menu that asked for it.
+    react_menu_at: Option<gpui::Point<gpui::Pixels>>,
     /// Select mode (#2613). The picks live in the model, keyed by message id,
     /// so a scroll or a refresh never drops one; `is_active` is what the
     /// selection bar answers to.
@@ -2666,13 +2671,40 @@ impl Render for Dashboard {
             });
             message_press.insert(id, std::rc::Rc::new(handler));
         }
+        // One toggle per chip on screen (#2825). Minted only for the pictures
+        // the loaded rows actually carry, so a row with no reactions costs
+        // nothing here. The pairs are collected first for the same reason the
+        // row ids are: a listener is built from `cx`, not from the state.
+        let reaction_pairs: Vec<(Uuid, String)> = self
+            .chat_state
+            .transcript
+            .reactions
+            .iter()
+            .flat_map(|(id, list)| list.iter().map(move |(name, _)| (*id, name.clone())))
+            .collect();
+        let mut reaction_click: std::collections::HashMap<
+            (Uuid, String),
+            transcript::ClickHandler,
+        > = std::collections::HashMap::new();
+        for (id, name) in reaction_pairs {
+            let picked = name.clone();
+            let handler = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
+                this.msg_react_pick(id, picked.clone(), cx);
+            });
+            reaction_click.insert((id, name), std::rc::Rc::new(handler));
+        }
         // A left press anywhere in the transcript dismisses the message menu
         // (#2613): the press is elsewhere, so the menu goes with it, the same
         // rule the rail applies to its own menu (#2354). The card and the rows
         // stop this from firing on their own presses.
         let msg_dismiss: transcript::PressHandler =
             Rc::new(cx.listener(|this, _ev: &MouseDownEvent, _window, cx| {
-                if this.msg_menu.take().is_some() {
+                let closed_menu = this.msg_menu.take().is_some();
+                let closed_picker = this.react_menu.take().is_some();
+                if closed_picker {
+                    this.react_menu_at = None;
+                }
+                if closed_menu || closed_picker {
                     cx.notify();
                 }
             }));
@@ -2686,6 +2718,10 @@ impl Render for Dashboard {
                 // scroll leaves it floating over a row it no longer names
                 // (#2690). The wheel closes it.
                 if this.msg_menu.take().is_some() {
+                    cx.notify();
+                }
+                if this.react_menu.take().is_some() {
+                    this.react_menu_at = None;
                     cx.notify();
                 }
                 if !wheel_releases_follow(wheel_dy(&ev.delta)) {
@@ -2774,6 +2810,8 @@ impl Render for Dashboard {
                         selection: select_on.then(|| msg_picked.clone()),
                         menu_dismiss: Some(msg_dismiss.clone()),
                         older: Some(older_click.clone()),
+                        reactions: self.chat_state.transcript.reactions.clone(),
+                        reaction_click: reaction_click.clone(),
                     },
                 )
                 .into_any_element();
@@ -5370,6 +5408,17 @@ impl Render for Dashboard {
                 gpui::deferred(transcript::message_menu_popover(&items, at)).with_priority(2),
             );
         }
+        // The crab pack is a window-level card for the same reason (#2825): it
+        // opens at the point the row's menu did, and a row's own frame would
+        // move that point.
+        if self.react_menu.is_some()
+            && let Some(at) = self.react_menu_at
+        {
+            let cells = self.react_cells(cx);
+            root = root.child(
+                gpui::deferred(transcript::react_picker_popover(&cells, at)).with_priority(2),
+            );
+        }
         // The theme modal is attached last, so it paints over every other
         // surface: while it is open it is what the user is looking at, and the
         // scrim is what the pointer meets (#2619).
@@ -5773,6 +5822,8 @@ fn main() {
                         split_creating: false,
                         msg_menu: None,
                         msg_menu_at: None,
+                        react_menu: None,
+                        react_menu_at: None,
                         msg_select: Selection::new(),
                         forward_pick: None,
                         forward_query: String::new(),

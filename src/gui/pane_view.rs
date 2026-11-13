@@ -415,6 +415,10 @@ impl Render for PaneView {
                 drag: Some(self.copy_drag.clone()),
                 wheel: Some(Rc::new(wheel)),
                 older: Some(older_click),
+                // A pane draws the chips its rows carry, read-only: the row
+                // menu lives in the window's chat, so a split pane has no
+                // toggle of its own to mint (#2825).
+                reactions: self.transcript.reactions.clone(),
                 ..Default::default()
             },
         )

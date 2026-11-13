@@ -296,7 +296,80 @@ impl Dashboard {
         self.sessions.close_rail_menu();
         self.msg_menu = Some(id);
         self.msg_menu_at = Some(at);
+        // And the crab pack closes too (#2825): it belongs to the row whose
+        // menu was open, so a new press on another row ends it.
+        self.react_menu = None;
+        self.react_menu_at = None;
         cx.notify();
+    }
+
+    /// Open the crab pack for one row (#2825), at the point the row's own menu
+    /// already opened at. One card at a time: the menu that carried the React
+    /// item closes as the picker takes its place.
+    pub(crate) fn msg_react_open(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        self.msg_menu = None;
+        self.react_menu = Some(id);
+        self.react_menu_at = self.msg_menu_at;
+        cx.notify();
+    }
+
+    /// The picker's cells: every crab in the pack, one click each (#2825).
+    /// Empty unless a picker is open, so a closed picker mints nothing.
+    pub(crate) fn react_cells(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Vec<(String, transcript::ClickHandler)> {
+        let Some(id) = self.react_menu else {
+            return Vec::new();
+        };
+        crate::topic_icons::CRAB_ICONS
+            .iter()
+            .map(|(name, _)| {
+                let name = (*name).to_string();
+                let picked = name.clone();
+                let pick = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
+                    cx.stop_propagation();
+                    this.msg_react_pick(id, picked.clone(), cx);
+                });
+                (name, Rc::new(pick) as transcript::ClickHandler)
+            })
+            .collect()
+    }
+
+    /// Put one picture on one row, or take it back (#2825). The write runs off
+    /// the frame; the chip follows the answer, so a write that failed leaves
+    /// the row as it was instead of showing a reaction nobody stored.
+    pub(crate) fn msg_react_pick(&mut self, id: Uuid, name: String, cx: &mut Context<Self>) {
+        self.react_menu = None;
+        self.react_menu_at = None;
+        let db_path = self.db_path.clone();
+        cx.spawn(async move |this, cx| {
+            let result = transcript::toggle_reaction(db_path, id, name.clone()).await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(reacted) => {
+                        let empty = {
+                            let list = this.chat_state.transcript.reactions.entry(id).or_default();
+                            if reacted {
+                                if !list.iter().any(|(known, _)| *known == name) {
+                                    list.push((name.clone(), 1));
+                                }
+                            } else {
+                                list.retain(|(known, _)| *known != name);
+                            }
+                            list.is_empty()
+                        };
+                        if empty {
+                            this.chat_state.transcript.reactions.remove(&id);
+                        }
+                    }
+                    Err(e) => logging::info(&format!("reaction toggle failed: {e}")),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Copy one stored row's text (#2613). Selection-aware, as the issue asks:
@@ -358,6 +431,14 @@ impl Dashboard {
             this.msg_copy(id, cx);
         });
         items.push((MessageAction::CopyText.label().to_string(), Rc::new(copy)));
+        // React opens the pack at the same point the row menu opened at
+        // (#2825): the menu it replaces is the thing that was clicked, so a
+        // second placement rule would move the picker away from the pointer.
+        let react = cx.listener(move |this, _ev, _window, cx| {
+            cx.stop_propagation();
+            this.msg_react_open(id, cx);
+        });
+        items.push((MessageAction::React.label().to_string(), Rc::new(react)));
         // Forward needs somewhere to go: with no other session on the rail the
         // item would open an empty picker, so it is left out instead.
         if !self.forward_destinations_for(id).is_empty() {
@@ -642,6 +723,7 @@ impl Dashboard {
                         // its copy order against, which the visible turns alone
                         // cannot answer once they are folded (#2613).
                         this.chat_state.transcript.rows = loaded.rows;
+                        this.chat_state.transcript.reactions = loaded.reactions;
                         if landed {
                             // The rows are in: the newest turn is the one
                             // that just answered, so it can claim the metrics

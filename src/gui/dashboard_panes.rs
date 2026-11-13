@@ -544,17 +544,18 @@ impl Dashboard {
                         &this.metrics.by_anchor,
                         &loaded.origins,
                     );
-                    (hidden, turns, loaded.rows)
+                    (hidden, turns, loaded.rows, loaded.reactions)
                 });
                 let Some(pane) = this.pane_states.get(&id).cloned() else {
                     return;
                 };
                 pane.update(cx, |pane, cx| {
                     match loaded {
-                        Ok((hidden, turns, rows)) => {
+                        Ok((hidden, turns, rows, reactions)) => {
                             pane.transcript.hidden = hidden;
                             pane.transcript.turns = turns;
                             pane.transcript.rows = rows;
+                            pane.transcript.reactions = reactions;
                         }
                         Err(e) => pane.transcript.error = Some(e.into()),
                     }

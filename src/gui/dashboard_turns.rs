@@ -389,6 +389,7 @@ impl Dashboard {
                         pane.update(cx, |pane, cx| {
                             pane.transcript.hidden = hidden;
                             pane.transcript.turns = turns;
+                            pane.transcript.reactions = loaded.reactions;
                             // The persisted row is on screen: the live copy
                             // retires, exactly as the window's does, unless the
                             // flush already started the next turn (#2695):

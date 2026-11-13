@@ -535,6 +535,7 @@ impl Dashboard {
                             this.chat_state.transcript.hidden = hidden;
                             this.chat_state.transcript.turns = turns;
                             this.chat_state.transcript.rows = loaded.rows;
+                            this.chat_state.transcript.reactions = loaded.reactions;
                         }
                         Err(e) => this.chat_state.transcript.error = Some(e.into()),
                     }
