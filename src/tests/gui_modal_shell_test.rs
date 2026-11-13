@@ -25,6 +25,8 @@ fn topic_prompt_offers_one_open_crabs_family_in_a_larger_card() {
     let icons = include_str!("../gui/topic_icons.rs");
     assert!(icons.contains("(\"OpenCrabs\", \"crab_\")"));
     assert!(!icons.contains("(\"Crabs\", \"crab_\")"));
+    assert!(!icons.contains("(\"Pilot\", \"pilot_\")"));
+    assert!(!icons.contains("pilot_crab_bugs"));
 }
 
 #[test]

@@ -6,7 +6,7 @@
 //! - [`TOPIC_ICONS`] are the illustrated crab badges under
 //!   `src/assets/icon-packs/topics/`. They belong to topic creation: a topic
 //!   tab draws one before its name, the way Telegram's topic bar does. The
-//!   current pack ships, 102 pictures in three families, downscaled to 256x256
+//!   current pack ships, 98 pictures in two families, downscaled to 256x256
 //!   so the binary carries every badge without carrying the originals (#2824,
 //!   #2897).
 //! - [`CRAB_ICONS`] are the reaction-style crabs under
@@ -151,24 +151,15 @@ pub const TOPIC_ICONS: &[(&str, &[u8])] = &[
     ("generic_showcase", topic_png!("generic_showcase")),
     ("generic_testing", topic_png!("generic_testing")),
     ("generic_travel", topic_png!("generic_travel")),
-    // The pilot badges, the first set the picker shipped.
-    ("pilot_crab_bugs", topic_png!("pilot_crab_bugs")),
-    (
-        "pilot_crab_development",
-        topic_png!("pilot_crab_development"),
-    ),
-    ("pilot_crab_general", topic_png!("pilot_crab_general")),
-    ("pilot_generic_chat", topic_png!("pilot_generic_chat")),
 ];
 
 /// The families the pack is grouped in, in the order the prompt lists them
 /// (#2824, #2897): the caption first, then the prefix every name in it carries.
-/// The current crab art is the single OpenCrabs family; the eight old badges
-/// are no longer offered.
+/// Two families now, the crab renders and the generic set. The eight old badges
+/// and the four pilot badges are no longer offered.
 pub const TOPIC_FAMILIES: &[(&str, &str)] = &[
     ("OpenCrabs", "crab_"),
     ("Generic", "generic_"),
-    ("Pilot", "pilot_"),
 ];
 
 /// The icons of one family, in table order (#2824).
@@ -832,11 +823,12 @@ mod tests {
         }
     }
 
-    /// The picker offers the current pack in three families, with one
-    /// OpenCrabs caption and none of the eight old badges (#2897).
+    /// The picker offers the current pack in two families, with one
+    /// OpenCrabs caption and none of the eight old badges or the four pilot
+    /// badges (#2897).
     #[test]
-    fn the_picker_offers_the_current_pack_in_three_families() {
-        assert_eq!(TOPIC_ICONS.len(), 102);
+    fn the_picker_offers_the_current_pack_in_two_families() {
+        assert_eq!(TOPIC_ICONS.len(), 98);
         let mut names: Vec<&str> = TOPIC_ICONS.iter().map(|(name, _)| *name).collect();
         let total = names.len();
         names.sort_unstable();
@@ -848,14 +840,17 @@ mod tests {
                 .all(|(name, _)| !name.starts_with("opencrabs-topic-")),
             "the eight old badges are no longer offered"
         );
+        assert!(
+            TOPIC_ICONS
+                .iter()
+                .all(|(name, _)| !name.starts_with("pilot_")),
+            "the four pilot badges are no longer offered"
+        );
         let counts: Vec<(&str, usize)> = TOPIC_FAMILIES
             .iter()
             .map(|&(caption, prefix)| (caption, family_icons(prefix).count()))
             .collect();
-        assert_eq!(
-            counts,
-            [("OpenCrabs", 50), ("Generic", 48), ("Pilot", 4)]
-        );
+        assert_eq!(counts, [("OpenCrabs", 50), ("Generic", 48)]);
         // Every icon belongs to exactly one family, so the picker cannot drop
         // one on the floor between captions.
         let grouped: usize = counts.iter().map(|(_, count)| count).sum();

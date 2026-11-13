@@ -4887,8 +4887,8 @@ impl Render for Dashboard {
                 .topic_draft_icon
                 .clone()
                 .unwrap_or_else(|| DEFAULT_TOPIC_ICON.to_string());
-            // The pack ships in three families, so the prompt lists them one
-            // after another instead of one 102-cell wall (#2824, #2897). A pick
+            // The pack ships in two families, so the prompt lists them one
+            // after another instead of one 98-cell wall (#2824, #2897). A pick
             // is a picture, not a bullet (#2768): at the old 1.5rem the badges
             // were specks and picking one was guesswork. They render at 4.0rem
             // (#2789), and the 256x256 sources stay crisp at 2x.

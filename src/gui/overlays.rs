@@ -254,7 +254,7 @@ pub(crate) fn topic_prompt_overlay(
             |d| d.child(SharedString::from(icon.to_string())),
         )
         .children(picture);
-    // The pack is 102 pictures, so the grid scrolls inside a fixed height
+    // The pack is 98 pictures, so the grid scrolls inside a fixed height
     // instead of growing the card past the window (#2824). Each family keeps
     // its caption: that is what makes the pack readable rather than one long
     // wall of crabs. The larger card and picker give the badges room to breathe
