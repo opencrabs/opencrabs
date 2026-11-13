@@ -77,6 +77,10 @@ mod projects;
 mod projects_screen;
 mod projects_view;
 mod rail_activity;
+// The rail is an entity of its own (#2933): its rows, chips, badges and
+// filter menu are built once per frame it is handed, and a frame that matches
+// the last one replays the prepaint instead of rebuilding every listener.
+mod rail_view;
 mod screen_keys;
 mod sessions;
 mod settings_modal;
@@ -152,11 +156,12 @@ use opencrabs::ui_core::help_keys;
 use futures::channel::oneshot;
 
 use gpui::{
-    AnyElement, App, Application, Bounds, ClickEvent, ClipboardItem, Context, Div, DragMoveEvent,
-    Entity, ExternalPaths, FocusHandle, Image, KeyDownEvent, KeystrokeEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Point, ScrollDelta,
-    ScrollHandle, ScrollWheelEvent, SharedString, Stateful, TitlebarOptions, Window, WindowBounds,
-    WindowControlArea, WindowOptions, div, point, prelude::*, px, rems, rgb, rgba, size,
+    AnyElement, AnyView, App, Application, Bounds, ClickEvent, ClipboardItem, Context, Div,
+    DragMoveEvent, Entity, ExternalPaths, FocusHandle, Image, KeyDownEvent, KeystrokeEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Point,
+    ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString, Stateful, TitlebarOptions, Window,
+    WindowBounds, WindowControlArea, WindowOptions, div, point, prelude::*, px, rems, rgb, rgba,
+    size,
 };
 // The decoration request is Linux-only (#2813): every other platform keeps the
 // server-side decorations its window manager already draws.
@@ -1078,6 +1083,9 @@ struct Dashboard {
     /// The rail's own scroll handle, so a cursor moved by the arrows can
     /// ask the next frame to bring its row into view (#2351).
     rail_scroll: ScrollHandle,
+    /// The rail itself, drawn as a cached view so a repaint it has no stake in
+    /// replays its last prepaint instead of rebuilding every row (#2933).
+    rail_view: Entity<rail_view::RailView>,
     /// The composer and the queue: the field the user types in, the drafts kept
     /// per conversation, the messages waiting behind the turn, and the flags
     /// the hint and the spinner read. One value, so the chat leaf inherits one
@@ -1168,8 +1176,11 @@ mod sidebar_action_tests {
     /// The Dashboard's window render. Two impls in this file define `render`,
     /// and only this signature is the one that holds the window (#2741).
     fn dashboard_render(src: &'static str) -> &'static str {
+        // Scoped to the window's own `Render` impl first: the rail is a view of
+        // its own now (#2933) and its render carries the same signature, so a
+        // bare split would read the rail's body instead of the window's.
         item_body(
-            src,
+            item_body(src, "impl Render for Dashboard"),
             "fn render(&mut self, window: &mut Window, cx: &mut Context<Self>)",
         )
     }
@@ -1571,29 +1582,51 @@ mod sidebar_action_tests {
 
     /// The rail card draws the stored icon, not just custom images (#2790):
     /// the same resolver the topic tab uses, so a pick in the rename dialog
-    /// reaches the card. Scoped to the window render: this test module sits
-    /// above it, so a bare split would land in the test's own strings.
+    /// reaches the card. The rail resolves it in the window, which owns the
+    /// decoded-image cache, and draws it in its own view (#2933), so the two
+    /// halves are read where they now live. Scoped to those regions: this test
+    /// module sits inside the same concat, and a bare split would land in the
+    /// test's own strings.
     #[test]
     fn rail_card_resolves_the_stored_icon() {
         let src = DASHBOARD;
-        let render = dashboard_render(src);
-        let wiring = render
-            .split("icon: self")
+        let wiring = src
+            .split("pub(crate) fn rail_icon(")
             .nth(1)
-            .expect("rail icon wiring")
-            .split("};")
+            .expect("the rail's icon resolver")
+            .split("/// The icon picker's")
             .next()
-            .expect("wiring before the flags close");
+            .expect("the resolver ends at the next method");
         assert!(
             wiring.contains("topic_icons::tab_icon(stored, sessions::RAIL_MARK_REMS)"),
+            "an embedded mark is recognised at the full rail-card media size"
+        );
+        assert!(
+            wiring.contains("self.icon_images.get(stored)"),
+            "a custom image comes from the view's decoded cache"
+        );
+        assert!(
+            wiring.contains("topic_icons::IMG_PREFIX"),
+            "an image that failed to decode paints nothing rather than its raw path"
+        );
+        let drawing = src
+            .split("icon: row.flags.icon.as_ref()")
+            .nth(1)
+            .expect("the rail draws the resolved icon")
+            .split("let chips = row")
+            .next()
+            .expect("the icon arm ends at the strip");
+        assert!(
+            drawing.contains("topic_icons::tab_icon(stored, sessions::RAIL_MARK_REMS)"),
             "an embedded mark renders at the full rail-card media size"
         );
         assert!(
-            wiring.contains("self.custom_icon_picture(stored, sessions::RAIL_MARK_REMS)"),
-            "a custom image renders from the view's cache at the same size"
+            drawing.contains("topic_icons::cached_picture(")
+                && drawing.contains("sessions::RAIL_MARK_REMS"),
+            "a custom image renders from the window's handle at the same size"
         );
         assert!(
-            wiring.contains("topic_icons::tab_glyph(stored, sessions::RAIL_MARK_REMS)"),
+            drawing.contains("topic_icons::tab_glyph(stored, sessions::RAIL_MARK_REMS)"),
             "a legacy glyph keeps its text slot at the same size"
         );
     }
@@ -1989,7 +2022,7 @@ const BUSY_REPAINT_TICKS: u64 = 4;
 
 /// True on the poll tick that paints a live turn's animation. Pure, so the
 /// cadence stays a rule rather than an accident of where the counter is bumped.
-fn busy_repaint_due(tick: u64) -> bool {
+pub(crate) fn busy_repaint_due(tick: u64) -> bool {
     tick.is_multiple_of(BUSY_REPAINT_TICKS)
 }
 
@@ -2139,516 +2172,19 @@ impl Render for Dashboard {
         // pane that settles between frames is caught on the next one.
         self.chime_settled_plan_tasks(cx);
 
-        // Rows are built only when the rail is on screen (#2805). It is an
-        // overlay: with it closed the frame still built every row, each with
-        // its own listeners, and every map under it, then threw all of it away
-        // at the layout pass. A keystroke re-renders this view, so that work
-        // was paid per character typed.
-        let rail_drawn = self.rail_open || self.screen == Screen::Onboard;
-        // The rail's rows: each carries its own click listener, built in its
-        // own loop turn so the `&mut cx` borrow stays legal.
-        let mut rail_rows: Vec<AnyElement> = Vec::with_capacity(self.sessions.items.len());
-        // The plan chip filters rows by progress, so resolve every session's
-        // counts before any pass calls `visible()` (#2719). This also warms
-        // the index the badge and bar passes read below.
-        if rail_drawn {
-            self.snapshot_rail_plan_progress();
-        }
-        // What every row says about work in flight (#2636), resolved once
-        // before the loop: the index needs `&mut self` and the row iterator
-        // holds `&self`.
-        let activity = if rail_drawn {
-            self.rail_activity_map(cx)
+        // The rail is a cached view of its own (#2933). The window resolves one
+        // frame of plain data and hands it over; the rows, the topic chips, the
+        // badges and the filter menu are built there, and a frame that compares
+        // equal replays the last prepaint instead of minting every listener
+        // again. Built only when something draws it: an element nobody seats is
+        // work nobody asked for, the rail is closed most of the time, and with
+        // it closed the frame would resolve every map under it and paint
+        // nothing (#2805).
+        let rail = if self.rail_open || self.screen == Screen::Onboard {
+            self.rail_element(cx)
         } else {
-            HashMap::new()
+            div().into_any_element()
         };
-        // The plan bar reads the same cached index the badges just warmed:
-        // one stat per row with a plan file, no second loader.
-        let plan_progress = if rail_drawn {
-            self.rail_plan_progress_map()
-        } else {
-            HashMap::new()
-        };
-        // Detached commands say "work is still running here" even when the
-        // turn is idle, so every card answers it without being opened.
-        let running_tasks = if rail_drawn {
-            self.rail_running_map()
-        } else {
-            HashMap::new()
-        };
-        // One clock for the whole pass, so every flashing card blinks on the
-        // same frame instead of one behind its neighbour.
-        let flash_now = std::time::Instant::now();
-        // Telegram-style topics: a parent's children paint as compact chips
-        // on its card, not as their own rows. Resolve the chip set once before
-        // the loop so the paint can skip those rows and hang the strip on the
-        // parent. A live search falls back to flat rows so a match is never
-        // hidden inside a chip; a favorite stays a chip on its parent, never
-        // a row. Chips always paint: a terminal-written `topics_collapsed`
-        // flag never blanks the strip, the GUI has no row-era fold (#2701).
-        let searching = !self.sessions.filter.trim().is_empty();
-        let visible_ids: std::collections::HashSet<Uuid> = if rail_drawn {
-            self.sessions.visible().map(|s| s.id).collect()
-        } else {
-            std::collections::HashSet::new()
-        };
-        // The grouped stamp, spend and indent of every card, one pass each.
-        // The row loop asked per row and every ask scanned the whole rail, so
-        // a 200-row rail paid ~80k item visits a frame for numbers that only
-        // change when a message lands (#2817).
-        let (grouped_stamps, grouped_costs, indented_ids) = if rail_drawn {
-            (
-                self.sessions.grouped_activities(),
-                self.sessions.grouped_costs(),
-                self.sessions.indented_ids(),
-            )
-        } else {
-            (
-                HashMap::new(),
-                HashMap::new(),
-                std::collections::HashSet::new(),
-            )
-        };
-        let chip_children: std::collections::HashSet<Uuid> = if searching || !rail_drawn {
-            std::collections::HashSet::new()
-        } else {
-            self.sessions
-                .visible()
-                .filter_map(|s| self.sessions.parents.get(&s.id).map(|p| (s.id, *p)))
-                .filter(|(_, p)| visible_ids.contains(p))
-                .map(|(cid, _)| cid)
-                .collect()
-        };
-        let mut children_by_parent: HashMap<Uuid, Vec<sessions::RailChip>> = HashMap::new();
-        // One clock for the chip order (#2853): a topic with work in flight
-        // sorts as if it just spoke, so the chips the reader can see working
-        // lead the strip instead of holding the slot the last ledger load gave
-        // them. Every busy chip ties on this one instant, which keeps their
-        // existing order stable rather than reshuffling each frame.
-        let chips_now = chrono::Utc::now();
-        let chip_rows: Vec<&opencrabs::db::models::Session> = if rail_drawn {
-            self.sessions.visible().collect()
-        } else {
-            Vec::new()
-        };
-        for s in chip_rows {
-            if chip_children.contains(&s.id)
-                && let Some(p) = self.sessions.parents.get(&s.id)
-            {
-                children_by_parent
-                    .entry(*p)
-                    .or_default()
-                    .push(sessions::RailChip {
-                        id: s.id,
-                        // A chip names its own topic, never the chat plus the
-                        // topic plus the channel key (#2766): the card above it
-                        // already says the chat.
-                        title: rail::chip_name(
-                            s.title.as_deref(),
-                            self.sessions.topic_titles.get(&s.id).map(String::as_str),
-                        ),
-                        // The clock the card's own stamp folds over (#2815), so
-                        // the strip and the title can never disagree.
-                        at: s.updated_at,
-                        // The marker the chip paints: a live turn or a running
-                        // plan task (rail_activity::row_state).
-                        busy: activity.get(&s.id).is_some_and(|st| st.badge.is_some()),
-                    });
-            }
-        }
-        for kids in children_by_parent.values_mut() {
-            // The strip's order (#2853): the topics with work in flight lead,
-            // then the rest by the stamp the card prints. Without this the
-            // chips rode whatever order the last ledger load returned, and that
-            // load only runs at turn boundaries, so a topic that had just
-            // started working kept the slot it held minutes earlier while its
-            // chip already showed the spinner.
-            kids.sort_by_key(|chip| sessions::chip_order_key(chip, chips_now));
-        }
-        // Pinned rows first, the rest untouched: the TUI's own order.
-        let rail_order: Vec<&opencrabs::db::models::Session> = if rail_drawn {
-            self.sessions.ordered().collect()
-        } else {
-            Vec::new()
-        };
-        for s in rail_order {
-            let id = s.id;
-            // This child paints as a chip on its parent's card, not a row.
-            if chip_children.contains(&id) {
-                continue;
-            }
-            let selected = self.sessions.selected == Some(id);
-            let cursored = self.sessions.cursor == Some(id);
-            let favorite = self.sessions.is_favorite(id);
-            // Right-click asks for the row's menu: pin and delete without
-            // the slide gesture or a chord (#2354).
-            let ask_menu = cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
-                this.sessions.rail_menu = Some(id);
-                // Where the card opens from: the row's own height, so it
-                // lands beside the row instead of over it (#2742).
-                this.rail_menu_at = Some(ev.position);
-                // The card takes the pointer, not the keyboard: the composer
-                // keeps its caret while the menu is open (#2798).
-                this.rail_hands_back();
-                cx.notify();
-            });
-            let indented = indented_ids.contains(&id);
-            let closed = self.sessions.is_closed(id);
-            // One glyph cell, from the window's shared clock, so a list of
-            // busy rows blinks as one spinner instead of ten (#2636).
-            let state = activity.get(&id).copied().unwrap_or_default();
-            let badge = state
-                .badge
-                .map(|_| rail_activity::frame(self.rail_clock.elapsed()));
-            // A selected topic owns its parent's existing activity/preview slot
-            // (#2804). Cursor, plan progress and running tasks stay with the parent.
-            let progress_id = children_by_parent.get(&id).map_or(id, |kids| {
-                self.sessions.progress_id(id, kids.iter().map(|kid| kid.id))
-            });
-            // The visible pin and the context menu share one favorite writer
-            // (#2803). Stopping the press keeps the row closed and prevents a slide.
-            let toggle_pin = cx.listener(move |this, _ev: &MouseDownEvent, _window, cx| {
-                cx.stop_propagation();
-                this.rail_hands_back();
-                this.toggle_favorite(id, cx);
-            });
-            let pin_toggle =
-                sessions::pin_toggle(id, favorite).on_mouse_down(MouseButton::Left, toggle_pin);
-            let flags = sessions::RowFlags {
-                selected,
-                cursored,
-                pin_toggle: Some(pin_toggle),
-                indented,
-                closed,
-                badge,
-                // Already formatted in the loader: the paint only clones a
-                // shared string, so the shared clock costs no allocation.
-                // While ctrl+f is open a deep hit's snippet stands in for the
-                // preview so the reader sees why the row matched (#2720).
-                // Idle rows read the DB preview.
-                preview: self
-                    .sessions
-                    .content_matches
-                    .get(&progress_id)
-                    .filter(|_| self.sessions.filter_active)
-                    .map(|snippet| SharedString::from(snippet.clone()))
-                    .or_else(|| self.sessions.previews.get(&progress_id).cloned()),
-                // A turn nobody has a pane for still gets a line on its card
-                // (#2718). The wording is the pane's own (#2326), so a split
-                // leaf and its rail row never describe the same turn two
-                // different ways.
-                activity: self.rail_activity_for(progress_id, cx),
-                plan: plan_progress.get(&id).copied(),
-                // The bar blinks orange for a few seconds after a task in
-                // this session's plan settles, on the same event that rings
-                // the chime, then falls back to its resting teal.
-                flash: opencrabs::utils::completion_sound::flash_blink_on(
-                    self.plan_flash_until.get(&id).copied(),
-                    flash_now,
-                ),
-                // The card's last line: whatever detached command is still
-                // running here, formatted exactly as the composer strip does.
-                running: running_tasks.get(&id).cloned(),
-                // A card stands for its topics, so its stamp adds their spend
-                // (#2807). A topic keeps its own ledger row and paints no
-                // stamp of its own, which makes the card the only place the
-                // money under it can be summed.
-                cost: grouped_costs.get(&id).copied().unwrap_or(s.total_cost),
-                // A card stands for its topics here too (#2815): a message
-                // written to a topic touches only that topic's ledger row, so
-                // the card's own stamp would freeze at the last message
-                // addressed to the card itself while its chips ran minutes
-                // ago. Folded over the same children the cost is.
-                stamp_at: grouped_stamps.get(&id).copied().unwrap_or(s.updated_at),
-                // The stored icon leads the row (#2790), resolved exactly
-                // like the topic tab resolves it: an embedded mark, a
-                // custom image from the view's cache, or a legacy glyph.
-                // The row adds the channel mark beside it (#2800). A pick in
-                // the rename dialog reaches the card without a restart, and
-                // the paint never reads a file.
-                icon: self.sessions.topic_icons.get(&id).and_then(|stored| {
-                    topic_icons::tab_icon(stored, sessions::RAIL_MARK_REMS)
-                        .or_else(|| self.custom_icon_picture(stored, sessions::RAIL_MARK_REMS))
-                        .or_else(|| {
-                            (!stored.starts_with(topic_icons::IMG_PREFIX))
-                                .then(|| topic_icons::tab_glyph(stored, sessions::RAIL_MARK_REMS))
-                        })
-                }),
-            };
-            // A parent card carries its topics as inline chips: three by
-            // default, a "+N" pill expands the rest, a collapse pill folds
-            // them back. Each chip opens its child on click and offers the
-            // shared context menu on right-click, with its own live glyph.
-            let chips = children_by_parent.get(&id).map(|kids| {
-                let expanded = self.rail_chips_expanded.contains(&id);
-                let limit = if expanded { kids.len() } else { 3 };
-                // Each chip is measured as it is built: the strip places the
-                // chips itself so the first row can stop short of the pin while
-                // the rows below keep the full card width (#2809).
-                let mut els: Vec<(Stateful<Div>, f32)> = Vec::new();
-                for kid in kids.iter().take(limit) {
-                    let kid_id = kid.id;
-                    let title = &kid.title;
-                    let st = activity.get(&kid_id).copied().unwrap_or_default();
-                    let live = st
-                        .badge
-                        .map(|_| rail_activity::frame(self.rail_clock.elapsed()));
-                    let sel = self.sessions.selected == Some(kid_id)
-                        || self.sessions.cursor == Some(kid_id);
-                    let open = cx.listener(move |this, _ev, _window, cx| {
-                        cx.stop_propagation();
-                        this.close_rail_filter(cx);
-                        // A chip is a pick like any row: while a split waits,
-                        // it fills the pane instead of opening the topic in
-                        // the chat leaf (#2760).
-                        this.pick_or_open(kid_id, cx);
-                    });
-                    let ask = cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
-                        cx.stop_propagation();
-                        this.sessions.rail_menu = Some(kid_id);
-                        // A chip sits inside its parent's row, so the press
-                        // gives the card its height the same way a row's
-                        // does (#2742).
-                        this.rail_menu_at = Some(ev.position);
-                        // The press stopped at the chip, so the caret comes
-                        // back from here rather than from the window root
-                        // (#2798).
-                        this.rail_hands_back();
-                        cx.notify();
-                    });
-                    let chip = sessions::topic_chip(
-                        kid_id,
-                        title,
-                        live,
-                        st.ring,
-                        sel,
-                        plan_progress.get(&kid_id).copied(),
-                    )
-                    .on_click(open)
-                    .on_mouse_down(MouseButton::Right, ask);
-                    let width =
-                        sessions::chip_width(&*window, title, live.is_some() || st.ring, sel);
-                    els.push((chip, width));
-                }
-                let hidden = kids.len().saturating_sub(limit);
-                if hidden > 0 {
-                    let label = SharedString::from(format!("+{hidden}"));
-                    let width = sessions::count_chip_width(&*window, &label);
-                    let expand = cx.listener(move |this, _ev, _window, cx| {
-                        cx.stop_propagation();
-                        this.rail_chips_expanded.insert(id);
-                        cx.notify();
-                    });
-                    els.push((sessions::count_chip(id, label).on_click(expand), width));
-                } else if expanded && kids.len() > 3 {
-                    let label = SharedString::from("\u{2212}");
-                    let width = sessions::count_chip_width(&*window, &label);
-                    let collapse = cx.listener(move |this, _ev, _window, cx| {
-                        cx.stop_propagation();
-                        this.rail_chips_expanded.remove(&id);
-                        cx.notify();
-                    });
-                    els.push((sessions::count_chip(id, label).on_click(collapse), width));
-                }
-                // The pin floats at the strip's right edge, so the first row
-                // hands it the space and every row below runs edge to edge
-                // (#2809). The strip is packed here, where the widths and the
-                // card's own width are both known.
-                let widths: Vec<f32> = els.iter().map(|(_, width)| *width).collect();
-                let rem = self.rem;
-                let (first, rest) = sessions::strip_budgets(rem, self.rail_width * rem);
-                let counts = sessions::pack_rows(&widths, rem * 0.25, first, rest);
-                let mut chips = els.into_iter().map(|(chip, _)| chip);
-                let rows: Vec<Vec<Stateful<Div>>> = counts
-                    .into_iter()
-                    .map(|count| chips.by_ref().take(count).collect())
-                    .collect();
-                sessions::topic_chips(id, rows)
-            });
-            // No menu is passed in: the card is built once at the window
-            // root, because a child of the row would inherit the row's frame
-            // and the card is placed in window coordinates (#2742).
-            let r = sessions::row(s, flags, chips);
-            // The press starts the slide that opens the card's menu.
-            let press = cx.listener(move |this, _ev: &MouseDownEvent, window, cx| {
-                this.rail_slide_opened = None;
-                this.rail_swipe = Some((id, f32::from(window.mouse_position().x)));
-                // A left press on the rail dismisses a context menu: the
-                // press is elsewhere, so the menu goes with it (#2354).
-                this.sessions.close_rail_menu();
-                // The filter panel folds on a row press too (#2787): the
-                // reader picked a chat, the chips have done their job.
-                this.sessions.rail_filter_open = false;
-                // Same rule for a transcript row's menu (#2613): the rail is
-                // outside the transcript, so the press closes it too.
-                this.msg_menu = None;
-                this.msg_menu_row = None;
-                this.msg_menu_leaf = None;
-                // A press is not a pick yet, and the caret does not wait for
-                // one: whatever the release does, the keys are the composer's
-                // from the press on (#2798).
-                this.rail_hands_back();
-                cx.notify();
-            });
-            let handler = cx.listener(move |this, _ev, _window, cx| {
-                // The release that ended a slide is the tail of that gesture,
-                // not a pick: it leaves the strip it just opened alone.
-                if this.rail_slide_opened.take() == Some(id) {
-                    cx.notify();
-                    return;
-                }
-                // The find field is a jump aid: picking a row is its exit,
-                // and the keyboard goes back to the conversation.
-                // A split waiting for its second session takes this row (#2438).
-                if this.split_pick.is_some() {
-                    this.choose_split(id, cx);
-                    return;
-                }
-                this.close_rail_filter(cx);
-                // The pane holding the caret takes the pick (#2819).
-                this.open_picked_in_focused_pane(id, true, cx);
-            });
-            let r = r.on_mouse_down(MouseButton::Right, ask_menu);
-            let r = r.on_mouse_down(MouseButton::Left, press);
-            // A plan waiting for approval rings its row until it is opened.
-            // The border lives on this wrapper, never inside `sessions::row`:
-            // the row stays the square, edge-to-edge tile #2540 pins, and the
-            // ring is a frame around it rather than a card. Wrapped after the
-            // click is attached, so the row keeps the handlers it was built
-            // with and only gains a frame.
-            rail_rows.push(
-                rail_activity::ring(
-                    sessions::on_click(r, handler),
-                    state.ring,
-                    self.rail_clock.elapsed(),
-                )
-                .into_any_element(),
-            );
-        }
-        // The channel chip (#2452): quiet notice plus the one action, drawn
-        // at the end of the rail only while a configured channel has no
-        // live owner. `Start daemon` runs the onboarding installer once;
-        // the probe loop flips the chip off when the daemon is live.
-        let chip_footer = self.channel_chip.clone().map(|line| {
-            let start = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
-                this.start_daemon(cx);
-            });
-            let shown = palette::current();
-            let mut chip = div()
-                .id("channel-chip")
-                .flex()
-                .flex_col()
-                .gap_1()
-                .mt_auto()
-                .w_full()
-                .min_w_0()
-                .flex_none()
-                .p_1p5()
-                .rounded_md()
-                .border_1()
-                .border_color(rgb(shown.track))
-                .bg(rgb(shown.panel_hi))
-                .text_xs()
-                .text_color(rgb(shown.text_muted))
-                .child(line);
-            if let Some(err) = &self.daemon_error {
-                chip = chip.child(div().text_color(rgb(shown.red)).child(err.clone()));
-            }
-            let action = if self.daemon_starting {
-                "starting..."
-            } else {
-                "Start daemon"
-            };
-            chip.child(
-                div()
-                    .id("channel-chip-start")
-                    .text_color(rgb(shown.accent))
-                    .cursor_pointer()
-                    .hover(|s| s.text_color(rgb(shown.text)))
-                    .child(action)
-                    .on_click(start),
-            )
-            .into_any_element()
-        });
-        // The rail filter menu (#2719, #2787): one funnel button top-right.
-        // Click opens the plan-state chips plus the cron/RSI toggle; click
-        // again closes them. The funnel wears the accent while a non-default
-        // filter hides rows, so a closed panel never silently filters. The
-        // state lives on `sessions`, so it survives the repaint and resets
-        // when the rail closes.
-        let rail_filter = self.sessions.rail_filter;
-        let pal = palette::current();
-        let toggle = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
-            this.sessions.rail_filter_open = !this.sessions.rail_filter_open;
-            cx.notify();
-        });
-        let mut control = div()
-            .id("rail-filter-menu")
-            .flex()
-            .flex_col()
-            .items_end()
-            .gap_0p5()
-            .child(
-                div()
-                    .id("rail-filter-toggle")
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .justify_center()
-                    .p_1()
-                    .rounded_sm()
-                    .cursor_pointer()
-                    .hover(|d| d.bg(rgb(pal.panel_hi)))
-                    .child(sessions::filter_icon(
-                        1.0,
-                        if sessions::filter_is_active(&rail_filter) {
-                            pal.accent
-                        } else {
-                            pal.text_muted
-                        },
-                    ))
-                    .on_click(toggle),
-            );
-        if self.sessions.rail_filter_open {
-            let plan_chips: [(&'static str, &'static str, sessions::PlanFilter); 4] = [
-                ("rail-filter-all", "all", sessions::PlanFilter::All),
-                ("rail-filter-active", "active", sessions::PlanFilter::Active),
-                ("rail-filter-done", "done", sessions::PlanFilter::Done),
-                (
-                    "rail-filter-noplan",
-                    "no plan",
-                    sessions::PlanFilter::NoPlan,
-                ),
-            ];
-            let mut chips = div().flex().flex_row().items_center().gap_0p5();
-            for (id, label, plan) in plan_chips {
-                let pick = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
-                    this.sessions.rail_filter.plan = plan;
-                    cx.notify();
-                });
-                chips = chips.child(
-                    sessions::filter_chip(id, label, rail_filter.plan == plan).on_click(pick),
-                );
-            }
-            let auto = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
-                this.sessions.rail_filter.show_automation =
-                    !this.sessions.rail_filter.show_automation;
-                cx.notify();
-            });
-            chips = chips.child(
-                sessions::filter_chip("rail-filter-auto", "auto", rail_filter.show_automation)
-                    .on_click(auto),
-            );
-            control = control.child(chips);
-        }
-        let rail = sessions::rail(
-            &self.sessions,
-            rail_rows,
-            self.rail_width,
-            &self.rail_scroll,
-            chip_footer,
-            Some(control.into_any_element()),
-        );
 
         // One label drives the in-window chrome and the OS titlebar: the old
         // static "usage" title sat over an open conversation. The owner
@@ -5969,6 +5505,16 @@ fn main() {
                         }
                     })
                     .detach();
+                    // The rail is an entity of its own (#2933). Its scroll
+                    // handle is shared with the window, which still owns the
+                    // keyboard walk, and it holds a weak handle back so a rail
+                    // that outlives the window simply stops asking.
+                    let rail_scroll = ScrollHandle::new();
+                    let rail_owner = cx.entity().downgrade();
+                    let rail_view = cx.new({
+                        let rail_scroll = rail_scroll.clone();
+                        move |_| rail_view::RailView::new(rail_owner, rail_scroll)
+                    });
                     Dashboard {
                         screen: Screen::Chat,
                         last_screen: Screen::Chat,
@@ -6151,7 +5697,8 @@ fn main() {
                         // Registered by `main` once the window exists: it needs
                         // a handle on this view to judge the press (#2308).
                         ctrl_c_interceptor: None,
-                        rail_scroll: ScrollHandle::new(),
+                        rail_scroll,
+                        rail_view,
                         composer: chat_leaf::Composer::new(editor),
                         history: dashboard_history,
                         agent_rx,
@@ -7586,8 +7133,11 @@ mod tests {
     /// The Dashboard's window render. Two impls in this file define `render`,
     /// and only this signature is the one that holds the window (#2741).
     fn dashboard_render(src: &'static str) -> &'static str {
+        // Scoped to the window's own `Render` impl first: the rail is a view of
+        // its own now (#2933) and its render carries the same signature, so a
+        // bare split would read the rail's body instead of the window's.
         item_body(
-            src,
+            item_body(src, "impl Render for Dashboard"),
             "fn render(&mut self, window: &mut Window, cx: &mut Context<Self>)",
         )
     }
@@ -7671,10 +7221,18 @@ mod tests {
             row.contains("live_line"),
             "and reads in the accent colour while it is live"
         );
-        let render = dashboard_render(src);
+        // The frame the rail is handed, resolved in the rail's own module
+        // (#2933): still the same owner lookup, one step away from the paint.
+        let frame = src
+            .split("flags: rail_view::RailRowFlags {")
+            .nth(1)
+            .expect("the rail's frame")
+            .split("// The channel chip (#2452)")
+            .next()
+            .expect("the frame ends at the footer");
         assert!(
-            render.contains("activity: self.rail_activity_for(progress_id, cx)"),
-            "the render feeds the card from whichever owner holds the turn"
+            frame.contains("activity: self.rail_activity_for(progress_id, cx)"),
+            "the frame feeds the card from whichever owner holds the turn"
         );
         let lookup = fn_body(src, "rail_activity_for");
         for source in [
@@ -7801,12 +7359,22 @@ mod tests {
         // and the swipe (#2797). Counted inside the render, because this
         // scan's own string holds the same text and a whole-file count would
         // read one more.
+        // The swipe still lands here, in the window's own move handler. The
+        // row and the chip are built by the rail's view now, so they ask the
+        // window by name and it records the point it is handed (#2933).
         let asks = dashboard_render(src)
             .matches("this.rail_menu_at = Some(ev.position);")
             .count();
         assert_eq!(
-            asks, 3,
-            "a rail row, a topic chip and the swipe each record their press"
+            asks, 1,
+            "the swipe records its press where it happens; the other two ask"
+        );
+        // Split so this scan cannot count its own text.
+        let recorded = ["self.rail_menu_at = Some", "(at);"].concat();
+        assert_eq!(
+            src.matches(&recorded).count(),
+            2,
+            "the row and the chip each record the point the view handed them"
         );
         let builder = fn_body(src, "rail_menu_popover_for");
         assert!(
@@ -7882,13 +7450,17 @@ mod tests {
         );
         // The three listeners that swallow the bubble are why it has to be
         // capture. If one of them stops doing that, this test re-reads why the
-        // clear sits in the capture phase rather than the bubble.
+        // clear sits in the capture phase rather than the bubble. They are
+        // built by the rail's own view now (#2933), so the scan follows them
+        // there: the root's capture still runs before any of them, because
+        // capture walks down from the window whatever the child's depth.
+        let rail = include_str!("rail_view.rs");
         for anchor in [
             "let open = cx.listener",
             "let expand = cx.listener",
             "let collapse = cx.listener",
         ] {
-            let (_head, tail) = render
+            let (_head, tail) = rail
                 .split_once(anchor)
                 .unwrap_or_else(|| panic!("{anchor} still exists"));
             let listener = tail.split("});").next().unwrap_or("");

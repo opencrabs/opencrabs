@@ -57,12 +57,22 @@ fn code(src: &'static str) -> &'static str {
 fn every_right_press_records_the_point_it_happened_at() {
     // Three entry points on the rail: a row's right press, a topic chip's
     // right press, and the left swipe (#2797).
+    // The swipe still records its own press in the window. The row and the
+    // chip are built by the rail's view, so they hand the point to a window
+    // method that records it (#2933).
     assert_eq!(
         code(DASHBOARD)
             .matches("this.rail_menu_at = Some(ev.position);")
             .count(),
-        3,
-        "a rail row, a topic chip and the swipe each record their press"
+        1,
+        "the swipe records the press where it happens"
+    );
+    assert_eq!(
+        code(DASHBOARD)
+            .matches("self.rail_menu_at = Some(at);")
+            .count(),
+        2,
+        "a rail row and a topic chip each record the point they were handed"
     );
     assert!(
         code(DASHBOARD).contains("this.topic_menu_at = Some(ev.position);"),

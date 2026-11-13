@@ -230,7 +230,9 @@ fn the_transcript_draws_a_window_of_turns() {
 /// pass when the rail is not drawn (#2805).
 #[test]
 fn a_closed_rail_builds_no_rows() {
-    let window = include_str!("../gui/main.rs");
+    // The frame is resolved in the rail's own module now (#2933), so the gate
+    // is read there.
+    let window = include_str!("../gui/dashboard_rail.rs");
     let (_, rail) = window
         .split_once("let rail_drawn = self.rail_open")
         .expect("the rail decides whether it is drawn before it is built");

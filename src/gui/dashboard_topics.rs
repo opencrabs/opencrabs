@@ -663,6 +663,28 @@ impl Dashboard {
         Some(topic_icons::cached_picture(image.clone(), size))
     }
 
+    /// The stored icon of a rail card, resolved to the shape the rail paints
+    /// (#2790, #2933).
+    ///
+    /// Same three resolvers the topic tab walks, in the same order and at the
+    /// same size: an embedded mark, a custom image from this view's cache, or a
+    /// legacy glyph. It answers with data rather than an element because the
+    /// rail is a cached view: its frame has to compare equal from one repaint
+    /// to the next, and an element cannot.
+    pub(crate) fn rail_icon(&self, stored: &str) -> Option<rail_view::RailIcon> {
+        if topic_icons::tab_icon(stored, sessions::RAIL_MARK_REMS).is_some() {
+            Some(rail_view::RailIcon::Mark(stored.to_string()))
+        } else if let Some(image) = self.icon_images.get(stored) {
+            // The picture is drawn at the shared full-card size by the rail,
+            // from this same handle: one decode, one size, both surfaces.
+            Some(rail_view::RailIcon::Picture(image.clone()))
+        } else if !stored.starts_with(topic_icons::IMG_PREFIX) {
+            Some(rail_view::RailIcon::Glyph(stored.to_string()))
+        } else {
+            None
+        }
+    }
+
     /// The icon picker's "add image" cell: the platform's own file picker,
     /// then a validated copy into the icon store (#2790). A cancelled
     /// prompt changes nothing.

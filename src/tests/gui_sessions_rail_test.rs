@@ -7,7 +7,13 @@
 use crate::tests::gui_dashboard_source::DASHBOARD;
 
 const SESSIONS: &str = include_str!("../gui/sessions.rs");
-const GUI_MAIN: &str = include_str!("../gui/main.rs");
+// The rail is an entity of its own now (#2933): its rows, chips and filter
+// menu are built in `rail_view`, and the frame they are built from is resolved
+// in `dashboard_rail`. A rule that used to read the window's render reads one of
+// those two instead.
+const RAIL_VIEW: &str = include_str!("../gui/rail_view.rs");
+const DASH_RAIL: &str = include_str!("../gui/dashboard_rail.rs");
+const DASH_TOPICS: &str = include_str!("../gui/dashboard_topics.rs");
 
 fn block<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
     let (_, tail) = source.split_once(start).expect("source block starts");
@@ -43,10 +49,12 @@ fn rail_card_media_is_large_dual_and_the_title_is_bold() {
         SESSIONS.contains("pub const RAIL_MARK_REMS: f32 = 1.75;"),
         "full-card media is 28px at the default 16px root"
     );
-    let wiring = block(GUI_MAIN, "icon: self.sessions.topic_icons.get(&id)", "};");
+    // One resolver chain, answering data instead of an element so the rail's
+    // frame can compare equal (#2933).
+    let wiring = block(DASH_TOPICS, "pub(crate) fn rail_icon(", "/// The icon picker's");
     for resolver in [
         "topic_icons::tab_icon(stored, sessions::RAIL_MARK_REMS)",
-        "self.custom_icon_picture(stored, sessions::RAIL_MARK_REMS)",
+        "self.icon_images.get(stored)",
         "topic_icons::tab_glyph(stored, sessions::RAIL_MARK_REMS)",
     ] {
         assert!(
@@ -54,6 +62,11 @@ fn rail_card_media_is_large_dual_and_the_title_is_bold() {
             "stored media resolver uses the shared full-card size: {resolver}"
         );
     }
+    assert!(
+        RAIL_VIEW.contains("topic_icons::cached_picture(")
+            && RAIL_VIEW.contains("sessions::RAIL_MARK_REMS"),
+        "a custom picture is drawn at the same full-card size the marks are"
+    );
 
     let row = block(SESSIONS, "pub fn row(", "pub fn on_click(");
     let media = block(row, "let platform = rail::platform_of", "let title_text =");
@@ -165,7 +178,7 @@ fn grouped_topics_are_compact_visible_pins_not_a_dropdown() {
         "no fold button joins the row chrome"
     );
     assert!(
-        GUI_MAIN.contains("sessions::row(s, flags, chips)"),
+        RAIL_VIEW.contains("sessions::row(&row.card, flags, chips)"),
         "topic pins keep their click action and context menu"
     );
 }
@@ -278,34 +291,28 @@ fn rail_pin_toggles_without_opening_the_card() {
     // the first hit, so the bare form sliced 417k chars of the file and the
     // `pick_or_open` guard below fired on the row's click handler instead of
     // this one.
-    let handler = block(
-        GUI_MAIN,
-        "let toggle_pin = cx.listener(move",
-        "let flags = sessions::RowFlags",
-    );
+    // The rail builds the control and the window owns the write it triggers
+    // (#2933), so the guard is read on both sides of that seam.
+    let handler = block(RAIL_VIEW, "let toggle_pin = {", "let pin_toggle =");
     assert!(handler.contains("cx.stop_propagation();"));
-    assert!(handler.contains("this.toggle_favorite(id, cx);"));
-    assert!(handler.contains("sessions::pin_toggle(id, favorite)"));
-    assert!(handler.contains(".on_mouse_down(MouseButton::Left, toggle_pin)"));
+    assert!(handler.contains("dash.rail_toggle_pin(id, cx)"));
     assert!(
         !handler.contains("pick_or_open") && !handler.contains("rail_swipe"),
         "the pin never opens the row or starts a slide"
     );
-
-    let flags = block(
-        GUI_MAIN,
-        "let flags = sessions::RowFlags",
-        "// A parent card carries",
-    );
-    assert!(flags.contains("pin_toggle: Some(pin_toggle)"));
+    let write = block(DASH_RAIL, "pub(crate) fn rail_toggle_pin(", "/// A topic chip opens");
+    assert!(write.contains("self.toggle_favorite(id, cx);"));
+    assert!(RAIL_VIEW.contains("sessions::pin_toggle(id, row.favorite)"));
+    assert!(RAIL_VIEW.contains(".on_mouse_down(MouseButton::Left, toggle_pin)"));
+    assert!(RAIL_VIEW.contains("pin_toggle: Some(pin_toggle)"));
 }
 
 #[test]
 fn selected_topic_owns_the_parent_activity_line() {
     let resolution = block(
-        GUI_MAIN,
+        DASH_RAIL,
         "let progress_id = children_by_parent",
-        "let toggle_pin = cx.listener",
+        "let icon = self",
     );
     assert!(resolution.contains(".get(&id).map_or(id,"));
     assert!(resolution.contains("self.sessions"));
@@ -316,9 +323,9 @@ fn selected_topic_owns_the_parent_activity_line() {
     );
 
     let flags = block(
-        GUI_MAIN,
-        "let flags = sessions::RowFlags",
-        "// A parent card carries",
+        DASH_RAIL,
+        "flags: rail_view::RailRowFlags {",
+        "// The channel chip (#2452)",
     );
     assert_eq!(
         flags.matches(".get(&progress_id)").count(),
@@ -335,7 +342,7 @@ fn selected_topic_owns_the_parent_activity_line() {
     let body = block(
         SESSIONS,
         "let body = div()",
-        ".id(SharedString::from(s.id.to_string()))",
+        ".id(SharedString::from(card.id.to_string()))",
     );
     let chips = body.find(".when_some(footer,").expect("chip strip");
     let fallback = body

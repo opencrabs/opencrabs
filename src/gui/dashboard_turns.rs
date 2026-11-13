@@ -890,12 +890,20 @@ impl Dashboard {
             // before it runs.
             let pane_busy = self.pane_states.values().any(|pane| pane.read(cx).busy);
             let rail_live = self.rail_animating(cx);
+            // The rail moves on its own clock now (#2933): it asks for its own
+            // repaint, on its own cadence, and the window is not notified, so a
+            // spinner frame replays the transcripts beside it instead of
+            // rebuilding them.
+            if rail_live {
+                self.rail_tick(cx);
+            }
             if self.turn.busy
                 || pane_busy
-                || rail_live
                 // A rail flash is an animation of its own: the plan bar has to
                 // keep alternating orange and its resting colour while the
-                // window is open, and stop the moment it closes.
+                // window is open, and stop the moment it closes. The window
+                // keeps this one because the flash is resolved on its own clock
+                // and handed to the rail in its frame.
                 || (rail_visible && flash_active)
             {
                 // Only the spinner, the clock and the flash move in this

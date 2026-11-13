@@ -511,17 +511,17 @@ pub fn slide_reveals(from_x: f32, to_x: f32) -> bool {
 /// ctrl+f's field, drawn under the rail's header while it holds the keyboard.
 /// The match count rides on the right so a query that found nothing says so
 /// before Enter is pressed on it.
-pub fn filter_bar(state: &SessionsState) -> Stateful<Div> {
-    let empty = state.filter.trim().is_empty();
-    let body = if state.filter.is_empty() {
+pub fn filter_bar(head: &RailHead) -> Stateful<Div> {
+    let empty = head.filter.trim().is_empty();
+    let body = if head.filter.is_empty() {
         "find a chat\u{2026}".to_string()
     } else {
-        state.filter.clone()
+        head.filter.to_string()
     };
     let count = if empty {
         String::new()
     } else {
-        format!("{}/{}", state.matched(), state.items.len())
+        format!("{}/{}", head.matched, head.items)
     };
     div()
         .id("session-filter")
@@ -1535,6 +1535,29 @@ pub fn rail_menu_entries(favorited: bool, topics_enabled: bool, is_topic: bool) 
     entries
 }
 
+/// The two fields a rail card reads from the session it stands for (#2933).
+///
+/// Everything else the card prints arrives already resolved in [`RowFlags`], so
+/// the paint never needs the ledger row itself. That is what lets the rail be a
+/// cached entity: its frame has to compare equal from one repaint to the next,
+/// and a `Session` carries a dozen fields the card never draws and no
+/// `PartialEq` to compare them with.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RailCard {
+    pub id: uuid::Uuid,
+    pub title: Option<String>,
+}
+
+impl RailCard {
+    /// The card for one ledger row.
+    pub fn of(s: &Session) -> Self {
+        Self {
+            id: s.id,
+            title: s.title.clone(),
+        }
+    }
+}
+
 /// What a rail row shows about its session right now. Grouped so the row
 /// keeps a short argument list as the rail gains states.
 ///
@@ -1832,7 +1855,7 @@ fn accent_bar_visible(selected: bool, cursored: bool) -> bool {
     matches!((selected, cursored), (true, _))
 }
 
-pub fn row(s: &Session, flags: RowFlags, chips: Option<Stateful<Div>>) -> Stateful<Div> {
+pub fn row(card: &RailCard, flags: RowFlags, chips: Option<Stateful<Div>>) -> Stateful<Div> {
     let RowFlags {
         selected,
         cursored,
@@ -1853,7 +1876,7 @@ pub fn row(s: &Session, flags: RowFlags, chips: Option<Stateful<Div>>) -> Statef
     // as a word, and the topic segment belongs to the chip under the card, not
     // to the card itself (#2766). A row indented under a card is a topic, so it
     // prints its own topic name and no second mark.
-    let stored = s.title.as_deref();
+    let stored = card.title.as_deref();
     let label = match stored {
         Some(title) if indented => rail::chip_name(Some(title), None),
         Some(title) => rail::chat_name(Some(title)),
@@ -2064,7 +2087,7 @@ pub fn row(s: &Session, flags: RowFlags, chips: Option<Stateful<Div>>) -> Statef
             })
         });
     div()
-        .id(SharedString::from(s.id.to_string()))
+        .id(SharedString::from(card.id.to_string()))
         .w_full()
         .relative()
         .flex()
@@ -2196,11 +2219,30 @@ pub fn filter_chip(id: &'static str, label: &'static str, active: bool) -> State
         .child(SharedString::from(label))
 }
 
-/// The rail column: header and error slot from the state, then the caller's
+/// The rail's own head: the find field and its hit count, and the ledger error
+/// that replaces the rows (#2933).
+///
+/// A `&SessionsState` served while the rail was built inline in the window's
+/// render. It cannot serve now: the rail is a cached view, so it paints from
+/// the data it was handed and must not reach back into the window's state while
+/// the window may be drawing it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RailHead {
+    /// The ctrl+f query, and whether its field is armed.
+    pub filter: SharedString,
+    pub filter_active: bool,
+    /// The ledger read's error, which takes the rows' place when it is set.
+    pub error: Option<SharedString>,
+    /// ctrl+f hits, and the rows they were matched against.
+    pub matched: usize,
+    pub items: usize,
+}
+
+/// The rail column: header and error slot from the head, then the caller's
 /// prebuilt rows (each already carrying its click handler). Stateful, because
 /// the scroll container needs an element id.
 pub fn rail(
-    state: &SessionsState,
+    head: &RailHead,
     // Not `Stateful<Div>`: a row that waits on a plan is wrapped in the ring
     // frame (#2636), so the slot has to accept a wrapper as well as a bare row.
     rows: Vec<AnyElement>,
@@ -2231,11 +2273,11 @@ pub fn rail(
         col = col.child(div().px_2().pb_1().flex().justify_end().child(control));
     }
 
-    if state.filter_active {
-        col = col.child(div().px_2().pb_1().child(filter_bar(state)));
+    if head.filter_active {
+        col = col.child(div().px_2().pb_1().child(filter_bar(head)));
     }
 
-    if let Some(err) = &state.error {
+    if let Some(err) = &head.error {
         col = col.child(
             div()
                 .px_2()
@@ -2246,7 +2288,7 @@ pub fn rail(
         return col;
     }
 
-    if rows.is_empty() && !state.filter.trim().is_empty() {
+    if rows.is_empty() && !head.filter.trim().is_empty() {
         col = col.child(
             div()
                 .px_2()
@@ -3880,26 +3922,40 @@ mod tests {
     /// separate surface and stays untouched by the panel's Escape.
     #[test]
     fn rail_filter_panel_opens_from_the_funnel_only() {
-        let main_source = include_str!("main.rs");
-        let control = main_source
-            .split("let rail_filter = self.sessions.rail_filter;")
+        // The menu is built by the rail's own view now (#2933), which reads
+        // the state off its frame and asks the window to change it.
+        let rail_source = include_str!("rail_view.rs");
+        let control = rail_source
+            .split("fn filter_control(&self, cx: &mut Context<Self>) -> AnyElement {")
             .nth(1)
             .expect("filter control block")
-            .split("let rail = sessions::rail(")
+            .split("control.into_any_element()")
             .next()
-            .expect("control before the rail call");
+            .expect("control before it is boxed");
         assert!(
-            control.contains("if self.sessions.rail_filter_open {"),
+            control.contains("if self.frame.filter_open {"),
             "the chip row paints only while the panel is open"
         );
         assert!(
             control.contains("sessions::filter_is_active(&rail_filter)"),
             "the funnel wears the accent while a non-default filter hides rows"
         );
+        let toggle = include_str!("dashboard_rail.rs")
+            .split("pub(crate) fn rail_toggle_filter_menu(")
+            .nth(1)
+            .expect("the funnel's write")
+            .split("\n    }")
+            .next()
+            .expect("the write ends at the next method");
         assert!(
-            control.contains("this.sessions.rail_filter_open = !this.sessions.rail_filter_open"),
+            toggle.contains("self.sessions.rail_filter_open = !self.sessions.rail_filter_open"),
             "the funnel click toggles the panel"
         );
+        assert!(
+            control.contains("dash.rail_toggle_filter_menu(cx)"),
+            "and the funnel in the view is what asks for it"
+        );
+        let main_source = include_str!("main.rs");
         let state_source = include_str!("sessions.rs");
         assert!(
             state_source.contains("pub rail_filter_open: bool"),
