@@ -219,8 +219,13 @@ impl Dashboard {
     ///
     /// Returns true when a pane turn was actually cancelled. `why` is the name
     /// in the log line, so a stop can still be traced to the key that did it.
+    ///
+    /// The leaf is resolved through the tree, not read off `pane_focus`: that
+    /// id is a cache, and a closed pane or a layout pruned at boot leaves it
+    /// naming a session the window no longer draws (#2620). Read raw, the stop
+    /// either missed the pane the user was on or reached one that was gone.
     pub(crate) fn cancel_focused_pane_turn(&mut self, why: &str, cx: &mut Context<Self>) -> bool {
-        let Some(id) = self.pane_focus else {
+        let Some(id) = self.split_focus() else {
             return false;
         };
         let Some(pane) = self.pane_states.get(&id).cloned() else {
