@@ -33,7 +33,7 @@ fn the_cards_read_the_shared_table_and_its_order() {
 
 #[test]
 fn every_shared_section_reaches_the_cards_exactly_once() {
-    use opencrabs::ui_core::help_keys::{self, HelpSection};
+    use crate::ui_core::help_keys::{self, HelpSection};
 
     // The cards iterate `HelpSection::ALL`, so a section missing from ALL
     // would vanish from the window, and a section whose rows the window

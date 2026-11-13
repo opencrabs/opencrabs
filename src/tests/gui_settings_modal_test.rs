@@ -77,8 +77,8 @@ fn seeker_offers_an_executable_settings_command_before_the_help_row() {
 
         let mut state = PaletteState::new(items);
         state.insert_text(query);
-        let first = state
-            .visible()
+        let visible = state.visible();
+        let first = visible
             .first()
             .unwrap_or_else(|| panic!("{query} has no settings result"));
         assert_eq!(first.item.title, "/settings", "{query} ranked help first");

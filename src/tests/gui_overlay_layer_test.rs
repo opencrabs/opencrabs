@@ -54,11 +54,13 @@ fn the_theme_modal_paints_above_the_panes_and_takes_the_pointer() {
         position(".child(command_palette::overlay(") < modal,
         "the theme modal is attached last, so it paints over the other overlays too"
     );
-    let view = include_str!("../gui/themes_view.rs");
-    let scrim = view
-        .find(".id(\"theme-modal-scrim\")")
+    // The scrim moved into the shared modal shell (#2879), so the guard reads
+    // the shell and pins that the Theme modal still goes through it.
+    let shell = include_str!("../gui/modal_shell.rs");
+    let scrim = shell
+        .find(".id(SharedString::from(format!(\"{prefix}-scrim\")))")
         .expect("the modal owns a scrim");
-    let after = view
+    let after = shell
         .get(scrim..)
         .expect("the scrim marker is a char boundary");
     let card = after
@@ -70,6 +72,11 @@ fn the_theme_modal_paints_above_the_panes_and_takes_the_pointer() {
             .expect("the card marker is a char boundary")
             .contains(".occlude()"),
         "the scrim must take the pointer from the window"
+    );
+    let view = include_str!("../gui/themes_view.rs");
+    assert!(
+        view.contains("id: \"theme-modal\","),
+        "the Theme modal must keep the id its scrim is named after"
     );
 }
 

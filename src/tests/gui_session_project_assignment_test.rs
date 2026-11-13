@@ -6,6 +6,7 @@ use crate::tests::gui_dashboard_source::DASHBOARD;
 
 const MENU: &str = include_str!("../gui/menu.rs");
 const PROJECTS: &str = include_str!("../gui/projects.rs");
+const PROJECTS_SCREEN: &str = include_str!("../gui/projects_screen.rs");
 const PROJECT_REPOSITORY: &str = include_str!("../db/repository/project.rs");
 const SESSIONS: &str = include_str!("../gui/sessions.rs");
 
@@ -63,13 +64,18 @@ fn session_picker_reuses_the_service_and_returns_after_success() {
         "ProjectsMode::AssignSession(expected_session)",
         "Some((*session_id, *project_id))",
         "session.project_id = Some(project_id);",
-        "ProjectsMode::AssignSession(_) => \"up/down select  enter assign  esc cancel\"",
     ] {
         assert!(
             DASHBOARD.contains(needle),
             "missing picker action: {needle}"
         );
     }
+    assert!(
+        PROJECTS_SCREEN.contains(
+            "ProjectsMode::AssignSession(_) => \"up/down select  enter assign\""
+        ),
+        "the session picker must say how to pick and confirm"
+    );
 
     let success = block(
         DASHBOARD,

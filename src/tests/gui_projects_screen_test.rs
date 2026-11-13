@@ -18,7 +18,7 @@ fn projects_is_a_real_service_backed_dashboard_screen() {
         "mod projects_screen;",
         "mod projects_view;",
         "projects: projects::ProjectsState",
-        "Screen::Projects => self.projects_screen(cx)",
+        "Screen::Projects => (div().flex_1().into_any_element(), div().into_any_element())",
         "Screen::Projects => right.child(footer)",
         "projects: projects::ProjectsState::default()",
         "self.projects_key(ev, cx)",
@@ -38,6 +38,7 @@ fn projects_is_a_real_service_backed_dashboard_screen() {
         "projects_view::create_panel",
         "projects_view::delete_panel",
         "modal_shell::render(",
+        "let (body, footer) = self.projects_screen(cx);",
         "id: \"projects-modal\"",
     ] {
         assert!(

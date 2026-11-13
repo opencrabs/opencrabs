@@ -62,7 +62,7 @@ fn every_quoted_line_carries_the_marker() {
         "each line is marked as quoted"
     );
     assert!(
-        builder.contains("row.content.trim_end().split('\\n')"),
+        builder.contains("text.trim_end().split('\\n')"),
         "a multi-line row is quoted line by line, so the block stays a block"
     );
 }
