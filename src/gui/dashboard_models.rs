@@ -8,6 +8,18 @@
 use super::*;
 
 impl Dashboard {
+    /// Standalone provider selection filters both pointer and keyboard rows.
+    /// Onboarding keeps its wizard-wide catalogue.
+    pub(crate) fn visible_model_rows(&self) -> Vec<models::Row> {
+        let mut rows = models::filtered_rows(&self.models_rows, &self.models_query);
+        if self.screen == Screen::Models
+            && let Some(provider) = self.models_provider.as_deref()
+        {
+            rows.retain(|row| row.provider == provider);
+        }
+        rows
+    }
+
     /// `/models` with no argument opens the picker. With an argument it is the
     /// switch the terminal performs, and no screen opens: the reply is the
     /// answer, exactly like the terminal's.
@@ -43,6 +55,11 @@ impl Dashboard {
             .iter()
             .find(|row| row.current)
             .map(|row| row.provider.clone());
+        self.models_index = self
+            .visible_model_rows()
+            .iter()
+            .position(|row| row.current)
+            .unwrap_or(0);
         self.sessions.rail_menu = None;
         self.start_models_fetch();
         self.refocus_screen();
@@ -244,7 +261,7 @@ impl Dashboard {
         onboarding: bool,
         cx: &mut Context<Self>,
     ) -> bool {
-        let visible = models::filtered_rows(&self.models_rows, &self.models_query);
+        let visible = self.visible_model_rows();
         let last = visible.len().saturating_sub(1);
         let mut query_changed = false;
         match ev.keystroke.key.as_str() {

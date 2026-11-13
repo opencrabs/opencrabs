@@ -18,6 +18,7 @@ pub struct ModelPickerView<'a> {
     pub max_models: usize,
     pub row_layout: ModelRowLayout,
     pub provider_label_width: f32,
+    pub show_provider_labels: bool,
 }
 
 pub struct RenderedModelPicker {
@@ -195,14 +196,16 @@ pub fn render(cx: &mut Context<Dashboard>, view: ModelPickerView<'_>) -> Rendere
                                         .truncate(),
                                 ),
                         )
-                        .child(
-                            div().flex().flex_row().w_full().min_w_0().pl_5().child(
-                                text(row.provider_name.clone(), Size::Xs, shown.text_muted)
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate(),
-                            ),
-                        ),
+                        .when(view.show_provider_labels, |entry| {
+                            entry.child(
+                                div().flex().flex_row().w_full().min_w_0().pl_5().child(
+                                    text(row.provider_name.clone(), Size::Xs, shown.text_muted)
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate(),
+                                ),
+                            )
+                        }),
                 };
                 if selected {
                     entry = entry.bg(rgb(shown.panel_hi));
@@ -302,13 +305,17 @@ pub fn render(cx: &mut Context<Dashboard>, view: ModelPickerView<'_>) -> Rendere
         );
     }
     if let Some(error) = view.error {
+        let count = error.split("; ").count();
         footer = footer.child(
             div()
                 .text_xs()
                 .text_color(rgb(shown.amber))
                 .min_w_0()
                 .whitespace_normal()
-                .child(SharedString::from(error.to_string())),
+                .child(SharedString::from(format!(
+                    "{count} provider{} could not refresh; saved models remain available",
+                    if count == 1 { "" } else { "s" }
+                ))),
         );
     }
     RenderedModelPicker { body, footer }

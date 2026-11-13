@@ -3671,6 +3671,7 @@ impl Render for Dashboard {
                                 max_models: 14,
                                 row_layout: picker_layout.model_row,
                                 provider_label_width: picker_layout.provider_label_width,
+                                show_provider_labels: true,
                             },
                         );
                         model_footer = Some(rendered.footer);
@@ -4593,6 +4594,7 @@ impl Render for Dashboard {
                         max_models: 18,
                         row_layout: picker_layout.model_row,
                         provider_label_width: picker_layout.provider_label_width,
+                        show_provider_labels: true,
                     },
                 );
                 let footer = rendered.footer.child(

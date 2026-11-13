@@ -14,3 +14,14 @@ fn theme_consumes_the_shared_modal_shell() {
     assert!(shell.contains(".on_click(|_ev, _window, cx| cx.stop_propagation())"));
     assert!(shell.contains(".id(SharedString::from(format!(\"{prefix}-close\")))"));
 }
+
+#[test]
+fn models_use_the_shared_shell_and_one_provider_filter() {
+    let view = include_str!("../gui/models_modal.rs");
+    let actions = include_str!("../gui/dashboard_models.rs");
+    assert!(view.contains("modal_shell::render("));
+    assert!(view.contains("let model_rows = self.visible_model_rows();"));
+    assert!(view.contains("rows: &model_rows"));
+    assert!(actions.contains("rows.retain(|row| row.provider == provider)"));
+    assert!(actions.contains("let visible = self.visible_model_rows();"));
+}
