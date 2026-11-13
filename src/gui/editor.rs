@@ -1523,6 +1523,12 @@ impl Editor {
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         self.selected_range = offset..offset;
         self.selection_reversed = false;
+        // Moving the caret is input. Without this the blink loop kept counting
+        // from the last CHARACTER typed, so jumping a few words with alt+arrow
+        // left the caret to die on the idle cutoff with no way back: the chord
+        // is a bound action, and gpui skips the key listener once an action
+        // consumes the key (#2896).
+        self.poke_caret(cx);
         cx.notify()
     }
 
@@ -1582,6 +1588,9 @@ impl Editor {
             self.selection_reversed = !self.selection_reversed;
             self.selected_range = self.selected_range.end..self.selected_range.start;
         }
+        // Same as `move_to`: a shift+arrow selection is input, and the key
+        // never reaches the blink loop on its own (#2896).
+        self.poke_caret(cx);
         cx.notify()
     }
 
@@ -3910,6 +3919,24 @@ mod tests {
             blink.contains("CARET_IDLE_AFTER"),
             "and it stops at the same idle cutoff"
         );
+    }
+
+    /// Moving the caret is input (#2896). alt+arrow and shift+arrow are bound
+    /// actions, and gpui skips the key listener once an action consumes the
+    /// key, so the blink loop never heard those chords: it kept counting from
+    /// the last CHARACTER typed and the caret died on the idle cutoff two or
+    /// three jumps in, with no way back but typing.
+    #[test]
+    fn moving_the_caret_pokes_the_blink() {
+        let src = include_str!("editor.rs");
+        for name in ["fn move_to(", "fn select_to("] {
+            let (_, after) = src.split_once(name).expect("the caret move exists");
+            let body = after.split("\n    }\n").next().unwrap_or(after);
+            assert!(
+                body.contains("self.poke_caret(cx)"),
+                "{name} must restart the blink, or the caret dies mid-jump"
+            );
+        }
     }
 
     /// The words and the slot: a copy says the terminal's line, an empty field
