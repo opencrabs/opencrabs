@@ -149,6 +149,16 @@ fn project_rows_keep_service_order_and_escape_unwinds_the_nearest_surface() {
 }
 
 #[test]
+fn project_counts_and_dates_use_precise_labels() {
+    assert!(PROJECTS_VIEW.contains("if row.sessions == 1 { \"\" } else { \"s\" }"));
+    assert!(PROJECTS_VIEW.contains("if row.files == 1 { \"\" } else { \"s\" }"));
+    assert!(PROJECTS_VIEW.contains("format!(\"created {}\", project.created_at.format"));
+    assert!(!PROJECTS_VIEW.contains("{} sessions  {} files"));
+    assert!(PROJECTS_SCREEN.contains("\"{count} {noun}{}  ·  {hints}\""));
+    assert!(PROJECTS_SCREEN.contains("Choose sessions for {}"));
+}
+
+#[test]
 fn projects_command_reaches_both_clients_and_seeker() {
     use crate::ui_core::commands::{GUI_SUPPORTED, SLASH_COMMANDS};
     use crate::ui_core::palette::{PaletteAction, Surface, is_surface_command, surface_items};

@@ -42,7 +42,13 @@ pub fn project_card(row: &ProjectRow, selected: bool, shown: Palette) -> Statefu
                         .truncate(),
                 )
                 .child(text(
-                    format!("{} sessions  {} files", row.sessions, row.files),
+                    format!(
+                        "{} session{}  {} file{}",
+                        row.sessions,
+                        if row.sessions == 1 { "" } else { "s" },
+                        row.files,
+                        if row.files == 1 { "" } else { "s" },
+                    ),
                     Size::Xs,
                     shown.text_muted,
                 )),
@@ -67,7 +73,7 @@ pub fn project_card(row: &ProjectRow, selected: bool, shown: Palette) -> Statefu
                     .truncate(),
             )
             .child(text(
-                project.created_at.format("%Y-%m-%d").to_string(),
+                format!("created {}", project.created_at.format("%Y-%m-%d")),
                 Size::Xs,
                 shown.text_faint,
             )),

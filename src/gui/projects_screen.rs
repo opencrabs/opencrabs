@@ -382,7 +382,15 @@ impl Dashboard {
             }
             ProjectsMode::AssignSession(_) => "up/down select  enter assign  esc cancel",
         };
-        let footer = modal_shell::footer(format!("{count} rows  ·  {hints}")).into_any_element();
+        let noun = match mode {
+            ProjectsMode::List | ProjectsMode::AssignSession(_) => "project",
+            ProjectsMode::Detail(_) | ProjectsMode::Assign(_) => "session",
+        };
+        let footer = modal_shell::footer(format!(
+            "{count} {noun}{}  ·  {hints}",
+            if count == 1 { "" } else { "s" }
+        ))
+        .into_any_element();
         (content.into_any_element(), footer)
     }
 }
