@@ -254,32 +254,40 @@ impl Dashboard {
     /// thing wherever it is caught.
     pub(crate) fn ctrl_c_press(&mut self, cx: &mut Context<Self>) {
         let now = std::time::Instant::now();
-        let input_empty = self.composer.editor.read(cx).is_empty();
-        let action = ctrl_c_action(
-            self.chat_state.follow.is_following(),
-            input_empty,
-            self.ctrl_c_pending,
-            now,
-        );
+        // One press means the field and the transcript the caret is on
+        // (#2885). The window's editor and follow belong to the chat leaf, so
+        // reading them from inside a split judged another pane's field and
+        // then threw that pane's draft away, and scrolled a transcript the
+        // reader was not looking at.
+        let composer = self.composer_entity(cx);
+        let leaf = self.split_focus();
+        let following = match leaf {
+            Some(id) if Some(id) != self.chat_session => self
+                .pane_states
+                .get(&id)
+                .map(|pane| pane.read(cx).follow.is_following())
+                .unwrap_or(false),
+            _ => self.chat_state.follow.is_following(),
+        };
+        let input_empty = composer.read(cx).is_empty();
+        let action = ctrl_c_action(following, input_empty, self.ctrl_c_pending, now);
         match action {
             CtrlCAction::SnapBottom => {
                 self.ctrl_c_pending = None;
-                self.rearm_transcript_follow();
-                // The pane the keyboard is on follows the same rule as the
-                // window: it is the transcript the reader was looking at.
-                if let Some(id) = self.pane_focus {
-                    self.rearm_pane_follow(id, cx);
+                // The pane the keyboard is on snaps its own transcript; the
+                // chat leaf's follow is the window's.
+                match leaf {
+                    Some(id) if Some(id) != self.chat_session => {
+                        self.rearm_pane_follow(id, cx);
+                    }
+                    _ => self.rearm_transcript_follow(),
                 }
-                self.composer
-                    .editor
-                    .update(cx, |editor, cx| editor.discard_draft(cx));
+                composer.update(cx, |editor, cx| editor.discard_draft(cx));
                 logging::info("ctrl+c snapped the transcript to the bottom");
             }
             CtrlCAction::ClearAndArm => {
                 self.ctrl_c_pending = Some(now);
-                self.composer
-                    .editor
-                    .update(cx, |editor, cx| editor.discard_draft(cx));
+                composer.update(cx, |editor, cx| editor.discard_draft(cx));
                 self.turn
                     .live
                     .notices
@@ -288,14 +296,17 @@ impl Dashboard {
             CtrlCAction::Quit => {
                 self.ctrl_c_pending = None;
                 // The stop reaches the pane the keyboard is on first, then the
-                // window's own turn, the same order Esc uses.
+                // window's own turn, the same order Esc uses. That turn is the
+                // chat leaf's, so a caret on a pane leaves it alone (#2885).
                 self.cancel_focused_pane_turn("Ctrl+C", cx);
-                if let Some(cancel) = self.turn.cancel.take() {
-                    cancel.cancel();
+                if self.split_focus().is_none() {
+                    if let Some(cancel) = self.turn.cancel.take() {
+                        cancel.cancel();
+                    }
+                    self.turn.busy = false;
+                    self.turn.live.thinking = false;
+                    self.turn.cancel = None;
                 }
-                self.turn.busy = false;
-                self.turn.live.thinking = false;
-                self.turn.cancel = None;
                 logging::info("ctrl+c quit the window");
                 cx.quit();
                 return;
