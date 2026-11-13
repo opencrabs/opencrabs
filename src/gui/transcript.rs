@@ -1885,6 +1885,71 @@ fn md_block(src: &str, selection: Option<&SelectionContext>) -> Div {
     out
 }
 
+/// The rows a reply quotes, as a blockquote the message text carries (#2827).
+///
+/// The quote lives in the text itself rather than in a column of its own: it is
+/// what the model reads and what the row keeps, and a forward of that row
+/// carries the quote with it without either path learning a new field.
+pub fn quote_prefix(rows: &[Message]) -> String {
+    let mut out = String::new();
+    for row in rows {
+        for line in row.content.trim_end().split('\n') {
+            out.push_str("> ");
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// Split a message into the blockquote it opens with and the reply under it
+/// (#2827). A row that does not open with one comes back whole, so every row
+/// written before the quote existed reads exactly as it did.
+fn split_quote(text: &str) -> (Vec<&str>, &str) {
+    let mut quoted: Vec<&str> = Vec::new();
+    let mut rest = 0usize;
+    for line in text.split_inclusive('\n') {
+        let body = line.trim_end_matches('\n').trim_end_matches('\r');
+        if let Some(quote) = body.strip_prefix("> ") {
+            quoted.push(quote);
+        } else if body == ">" {
+            quoted.push("");
+        } else if quoted.is_empty() {
+            return (Vec::new(), text);
+        } else {
+            break;
+        }
+        rest += line.len();
+    }
+    (quoted, text[rest..].trim_start_matches('\n'))
+}
+
+/// The quoted block above a reply (#2827): a bar down the left edge and the
+/// picked rows in a quieter size, so what was answered reads as context and not
+/// as something the user just said.
+fn quote_block(lines: &[&str]) -> Div {
+    let palette = palette::current();
+    let mut col = div()
+        .flex()
+        .flex_col()
+        .gap_0p5()
+        .min_w_0()
+        .w_full()
+        .pl(px(8.0))
+        .border_l_2()
+        .border_color(rgb(palette.text_faint));
+    for line in lines {
+        col = col.child(
+            div()
+                .min_w_0()
+                .text_sm()
+                .text_color(rgb(palette.text_muted))
+                .child(SharedString::from((*line).to_string())),
+        );
+    }
+    col
+}
+
 /// User/system content stays plain: the TUI renders input verbatim, markdown
 /// styling is an answer-text treatment. A line whose shortcodes name the crab
 /// pack still draws those pictures (#2771), so a user who picks an emoji from
@@ -2116,6 +2181,17 @@ fn bubble(
                 .text_color(rgb(role_color(role)))
                 .child(SharedString::from(time.to_string())),
         );
+    }
+    // A user row that quotes other rows draws the quote above the reply
+    // (#2827). The marker lines are part of the text, so the store keeps them
+    // and the copy path carries them without a second field.
+    let (quote, text) = if role == "user" {
+        split_quote(&text)
+    } else {
+        (Vec::new(), text.as_ref())
+    };
+    if !quote.is_empty() {
+        col = col.child(quote_block(&quote));
     }
     if !text.trim().is_empty() {
         col = col.child(if role == "assistant" {

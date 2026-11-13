@@ -36,6 +36,16 @@ impl Dashboard {
             }
             this.msg_copy_picks(cx);
         });
+        // Reply quotes the same set into the composer (#2827): the picks
+        // become context for the next message instead of a message of their
+        // own, which is the one thing Forward could not do in this session.
+        let reply = cx.listener(|this, _ev, _window, cx| {
+            cx.stop_propagation();
+            if this.msg_select.is_empty() {
+                return;
+            }
+            this.msg_reply_begin(cx);
+        });
         let armed = count > 0;
         div()
             .id("message-select-bar")
@@ -96,6 +106,23 @@ impl Dashboard {
                             .hover(|d| d.bg(rgb(palette.panel_hi)))
                             .child(SharedString::from("Cancel"))
                             .on_click(cancel),
+                    )
+                    .child(
+                        div()
+                            .id("message-select-reply")
+                            .px_3()
+                            .py_1()
+                            .rounded_md()
+                            .text_sm()
+                            .when(armed, |d| {
+                                d.cursor_pointer()
+                                    .bg(rgb(palette.panel_hi))
+                                    .text_color(rgb(palette.text_normal))
+                                    .hover(|d| d.bg(rgb(palette.track)))
+                            })
+                            .when(!armed, |d| d.text_color(rgb(palette.text_faint)))
+                            .child(SharedString::from("Reply"))
+                            .on_click(reply),
                     )
                     .child(
                         div()
@@ -546,6 +573,36 @@ impl Dashboard {
     pub(crate) fn msg_select_cancel(&mut self, cx: &mut Context<Self>) {
         self.msg_select.cancel();
         self.msg_menu = None;
+        cx.notify();
+    }
+
+    /// Quote the picked rows into the composer (#2827).
+    ///
+    /// The quote is written into the field rather than held in a slot beside
+    /// it: the reply is text the user can see, edit and send, so what the model
+    /// receives is exactly what was on screen. Whatever the field already held
+    /// keeps its place under the quote, because a reply is an addition to that
+    /// message and not a replacement for it.
+    pub(crate) fn msg_reply_begin(&mut self, cx: &mut Context<Self>) {
+        let rows = self.msg_picked_rows();
+        if rows.is_empty() {
+            return;
+        }
+        let quote = transcript::quote_prefix(&rows);
+        let editor = self.composer.editor.clone();
+        let existing = editor.read(cx).draft();
+        let text = if existing.text.trim().is_empty() {
+            format!("{quote}\n")
+        } else {
+            format!("{quote}\n{}", existing.text)
+        };
+        editor.update(cx, |editor, cx| editor.restore_draft(text, cx));
+        self.msg_select.cancel();
+        self.msg_menu = None;
+        // The caret goes to the field being written: the user asked to reply,
+        // so the next keystroke is the reply.
+        self.refocus_screen();
+        logging::info(&format!("reply quoting {} row(s)", rows.len()));
         cx.notify();
     }
 
