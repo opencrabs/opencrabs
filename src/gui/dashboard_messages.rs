@@ -372,6 +372,45 @@ impl Dashboard {
         .detach();
     }
 
+    /// Put one stored user row back in the composer to be edited (#2826).
+    ///
+    /// The row's text replaces whatever the field held and the row is
+    /// remembered, so the next send replaces it and drops the conversation
+    /// after it. Only the window's own chat mints the button, so this always
+    /// arms the window's composer.
+    pub(crate) fn msg_edit_begin(&mut self, id: Uuid, sequence: i32, cx: &mut Context<Self>) {
+        let Some(session) = self.chat_state.session() else {
+            return;
+        };
+        let Some(text) = self
+            .chat_state
+            .transcript
+            .rows
+            .iter()
+            .find(|m| m.id == id)
+            .map(|m| m.content.clone())
+        else {
+            return;
+        };
+        // Whatever was waiting in the field belongs to the message that was
+        // about to be written, not to the one being rewritten.
+        self.composer.edit = Some(chat_leaf::EditTarget {
+            id,
+            session,
+            sequence,
+        });
+        let editor = self.composer.editor.clone();
+        editor.update(cx, |editor, cx| {
+            editor.restore_draft(text, cx);
+            editor.show_editing(cx);
+        });
+        // The caret goes to the field being edited: the user asked to rewrite
+        // this text, so the next keystroke is theirs.
+        self.refocus_screen();
+        logging::info(&format!("editing row {id} at sequence {sequence}"));
+        cx.notify();
+    }
+
     /// Copy one stored row's text (#2613). Selection-aware, as the issue asks:
     /// with rows picked this copies the whole selection in transcript order,
     /// and with nothing picked it copies the row the menu was opened on.

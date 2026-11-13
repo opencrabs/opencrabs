@@ -900,6 +900,46 @@ pub async fn toggle_reaction(
     }
 }
 
+/// Drop every row after a point in one session (#2826), off the UI thread the
+/// same way [`forward_rows`] writes: a std thread carrying its own runtime, so
+/// the window's executor never blocks on the pool.
+///
+/// The row at `sequence` survives, because the edit replaces it and the resend
+/// speaks for everything that followed. Returns how many rows went.
+pub async fn truncate_after(
+    db_path: std::path::PathBuf,
+    session_id: uuid::Uuid,
+    sequence: i32,
+) -> Result<usize, String> {
+    let (tx, rx) = futures::channel::oneshot::channel::<Result<usize, String>>();
+    let spawned = std::thread::Builder::new()
+        .name("transcript-truncate".into())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let result = match runtime {
+                Ok(rt) => rt
+                    .block_on(async {
+                        let db = Database::connect(&db_path).await?;
+                        let repo = MessageRepository::new(db.pool().clone());
+                        repo.delete_after(session_id, sequence).await
+                    })
+                    .map_err(|e| format!("{e:#}")),
+                Err(e) => Err(format!("tokio runtime failed: {e}")),
+            };
+            let _ = tx.send(result);
+        });
+    match spawned {
+        Ok(_) => match rx.await {
+            Ok(result) => result,
+            Err(_) => Err("truncate thread dropped its result".into()),
+        },
+        Err(e) => Err(format!("truncate thread failed to spawn: {e}")),
+    }
+}
+
 /// Fetch the newest window of the conversation plus the session's total row
 /// count, on a thread with a real stack (crash receipt in `main.rs`).
 /// `Database::connect` runs pragmas only, never migrations.
@@ -3595,7 +3635,11 @@ fn message_row(
     click: Option<&ClickHandler>,
     press: Option<&PressHandler>,
     picked: Option<bool>,
+    edit: Option<&ClickHandler>,
 ) -> Stateful<Div> {
+    // The hover group a row's edit button answers to (#2826). One name per
+    // row, or hovering any message would light up every button on screen.
+    let group = SharedString::from(format!("msg-hover-{id}"));
     let mut row = div()
         .id(SharedString::from(format!("msg-{id}")))
         .flex()
@@ -3604,6 +3648,11 @@ fn message_row(
         .gap_1()
         .w_full()
         .rounded_sm();
+    if edit.is_some() {
+        // The button is placed against the row's own box, so the row has to be
+        // the containing block.
+        row = row.relative().group(group.clone());
+    }
     if let Some(on) = picked {
         // A pick box, not a tint: the drag selector already owns background
         // tint on these rows, and two selection languages on one row would
@@ -3641,6 +3690,32 @@ fn message_row(
         });
     }
     row = row.child(body);
+    // A user row offers its edit on hover (#2826). It is drawn at the bubble's
+    // bottom right and stays clickable while invisible, so the pointer reaches
+    // it before it appears: an affordance you have to find is no affordance.
+    if let Some(handler) = edit {
+        let handler = handler.clone();
+        let palette = palette::current();
+        row = row.child(
+            div()
+                .id(SharedString::from(format!("msg-edit-{id}")))
+                .absolute()
+                .bottom(px(8.0))
+                .right(px(10.0))
+                .px_1()
+                .rounded_sm()
+                .bg(rgb(palette.panel_hi))
+                .border_1()
+                .border_color(rgb(palette.text_faint))
+                .opacity(0.0)
+                .group_hover(group, |d| d.opacity(1.0))
+                .cursor_pointer()
+                .text_xs()
+                .text_color(rgb(palette.text_muted))
+                .child(SharedString::from("Edit"))
+                .on_click(move |ev, window, app| handler(ev, window, app)),
+        );
+    }
     row
 }
 
@@ -3955,6 +4030,10 @@ pub struct ViewHooks {
     /// (#2825). Only the owning view can mint one, and only a chip that is
     /// drawn needs one.
     pub reaction_click: HashMap<(uuid::Uuid, String), ClickHandler>,
+    /// The edit behind one stored user row (#2826), keyed by message id. Only
+    /// the window's chat mints one: a split pane has no composer of its own to
+    /// put the text back into, so its rows carry no button.
+    pub edit: HashMap<uuid::Uuid, ClickHandler>,
 }
 
 pub fn view(
@@ -3980,6 +4059,7 @@ pub fn view(
         older: older_click,
         reactions,
         reaction_click,
+        edit,
     } = hooks;
     if let Some(d) = &drag {
         d.texts.borrow_mut().clear();
@@ -4162,15 +4242,25 @@ pub fn view(
             let child: AnyElement = match block {
                 Block::Msg {
                     message_id: Some(id),
+                    role,
                     ..
                 } => {
                     let picked = selected.as_ref().map(|picks| picks.contains(id));
+                    // Only a user row is editable (#2826): an answer is the
+                    // model's, and rewriting one would leave a transcript that
+                    // says the model wrote something it never did.
+                    let edit_click = if role.as_str() == "user" {
+                        edit.get(id)
+                    } else {
+                        None
+                    };
                     let row = message_row(
                         *id,
                         child,
                         message_click.get(id),
                         message_press.get(id),
                         picked,
+                        edit_click,
                     )
                     .into_any_element();
                     let row = match (&drag, selectable, picked) {

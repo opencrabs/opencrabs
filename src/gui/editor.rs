@@ -392,6 +392,11 @@ pub const COPIED_NOTICE: &str = "Copied to clipboard";
 /// have to explain where it went.
 pub const STOPPED_NOTICE: &str = "Stopped, message back in the composer";
 
+/// What the composer says when a stored message has been put back in the
+/// field to be rewritten (#2826). The text alone cannot tell an edit from a
+/// fresh draft, and the difference is that the next send replaces history.
+pub const EDITING_NOTICE: &str = "Editing message, Enter replaces it";
+
 /// True once a notice has outlived the TTL. Pure, so the expiry rule stays a
 /// test instead of a wall-clock guess.
 pub fn notice_expired(shown_at: Instant, now: Instant, ttl: Duration) -> bool {
@@ -494,6 +499,13 @@ impl Editor {
     /// clear itself (#2587). Same words the terminal puts on the input border.
     pub fn show_copied(&mut self, cx: &mut Context<Self>) {
         self.show_notice(COPIED_NOTICE, cx);
+    }
+
+    /// A stored message was put back in the field to be rewritten (#2826).
+    /// Same transient line, because the field itself cannot say that the next
+    /// send replaces history rather than appending to it.
+    pub fn show_editing(&mut self, cx: &mut Context<Self>) {
+        self.show_notice(EDITING_NOTICE, cx);
     }
 
     /// The notice still inside its window, if any. Read through this so an

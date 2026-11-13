@@ -2693,6 +2693,26 @@ impl Render for Dashboard {
             });
             reaction_click.insert((id, name), std::rc::Rc::new(handler));
         }
+        // One edit per stored user row (#2826): the button puts that row's
+        // text back in the composer and arms the send that replaces it.
+        // Answers are left out, so the map holds only the rows a rewrite makes
+        // sense for.
+        let edit_rows: Vec<(Uuid, i32)> = self
+            .chat_state
+            .transcript
+            .rows
+            .iter()
+            .filter(|m| m.role == "user")
+            .map(|m| (m.id, m.sequence))
+            .collect();
+        let mut msg_edit: std::collections::HashMap<Uuid, transcript::ClickHandler> =
+            std::collections::HashMap::new();
+        for (id, sequence) in edit_rows {
+            let handler = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
+                this.msg_edit_begin(id, sequence, cx);
+            });
+            msg_edit.insert(id, std::rc::Rc::new(handler));
+        }
         // A left press anywhere in the transcript dismisses the message menu
         // (#2613): the press is elsewhere, so the menu goes with it, the same
         // rule the rail applies to its own menu (#2354). The card and the rows
@@ -2812,6 +2832,7 @@ impl Render for Dashboard {
                         older: Some(older_click.clone()),
                         reactions: self.chat_state.transcript.reactions.clone(),
                         reaction_click: reaction_click.clone(),
+                        edit: msg_edit.clone(),
                     },
                 )
                 .into_any_element();

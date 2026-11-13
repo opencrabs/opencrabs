@@ -508,6 +508,23 @@ impl Dashboard {
             cx.notify();
             return;
         }
+        // An edit is a rewrite, not an append (#2826). It is answered before
+        // the closed-topic and offline gates, because both of those would leave
+        // the composer armed for an edit that never happened.
+        if let Some(target) = self.composer.edit.take() {
+            if self.chat_state.session() == Some(target.session) {
+                self.send_edited(target, text, cx);
+                return;
+            }
+            // Another conversation was opened between the click and the send,
+            // so the edit no longer names a row on screen. The text goes out as
+            // an ordinary message instead of deleting history nobody is
+            // looking at.
+            logging::info(&format!(
+                "edit dropped: row {} belongs to session {}",
+                target.id, target.session
+            ));
+        }
         // A closed topic refuses new turns. The notice says why, so the send is
         // never dropped without a word (#2305). It sits after the parse above
         // because a command is not a turn: `/new` and `/sessions` still work
@@ -618,6 +635,96 @@ impl Dashboard {
         if !attached.is_empty() {
             agent_bridge::spawn_track_files(self.db_path.clone(), sid, attached);
         }
+        cx.notify();
+    }
+
+    /// Send an edited message (#2826): stop the turn that is running, drop
+    /// every row after the one being replaced, then send the new text as the
+    /// next turn.
+    ///
+    /// The order is the whole point. Truncating while a turn is streaming lets
+    /// the assistant row it is still appending land on a branch that no longer
+    /// exists, so the stop comes first, the truncate second, and the send last.
+    /// The window is re-read between the last two, so the rows the edit dropped
+    /// leave the screen at the same moment they leave the store.
+    fn send_edited(&mut self, target: chat_leaf::EditTarget, text: String, cx: &mut Context<Self>) {
+        if self.turn.busy {
+            if let Some(cancel) = self.turn.cancel.take() {
+                cancel.cancel();
+            }
+            self.turn.busy = false;
+            self.turn.live.thinking = false;
+            self.turn.live.stop();
+            logging::info(&format!(
+                "turn stopped for an edit of row {} in session {}",
+                target.id, target.session
+            ));
+        }
+        // A split leaf can be running the same conversation, and a row it
+        // appends would land under the truncation, so it is stopped too.
+        if let Some(pane) = self.pane_states.get(&target.session).cloned() {
+            let stopped = pane.update(cx, |pane, cx| {
+                let Some(cancel) = pane.cancel.take() else {
+                    return false;
+                };
+                cancel.cancel();
+                pane.busy = false;
+                pane.live.thinking = false;
+                pane.live.stop();
+                cx.notify();
+                true
+            });
+            if stopped {
+                logging::info(&format!(
+                    "pane turn stopped for an edit in session {}",
+                    target.session
+                ));
+            }
+        }
+        let db_path = self.db_path.clone();
+        let session = target.session;
+        let sequence = target.sequence;
+        cx.spawn(async move |this, cx| {
+            let truncated = transcript::truncate_after(db_path.clone(), session, sequence).await;
+            let loaded = match &truncated {
+                Ok(_) => Some(transcript::load_recent(db_path, session).await),
+                Err(_) => None,
+            };
+            this.update(cx, |this, cx| match truncated {
+                Ok(deleted) => {
+                    logging::info(&format!(
+                        "edit: dropped {deleted} row(s) after sequence {sequence} in {session}"
+                    ));
+                    if let Some(Ok(loaded)) = loaded {
+                        this.install_loaded(loaded, cx);
+                    }
+                    this.send_message_showing(text, None, cx);
+                }
+                Err(e) => {
+                    this.turn.live.notices.push(format!("edit failed: {e}"));
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Put a freshly read window on screen (#2826). The same fields the rail's
+    /// open installs, so a re-read after a truncation leaves the window and the
+    /// store saying the same thing.
+    fn install_loaded(&mut self, loaded: transcript::Loaded, cx: &mut Context<Self>) {
+        let (hidden, turns) = transcript::turns_with_origins(
+            &loaded.rows,
+            loaded.total,
+            &self.metrics.by_anchor,
+            &loaded.origins,
+        );
+        self.chat_state.transcript.hidden = hidden;
+        self.chat_state.transcript.turns = turns;
+        self.chat_state.transcript.rows = loaded.rows;
+        self.chat_state.transcript.reactions = loaded.reactions;
         cx.notify();
     }
 

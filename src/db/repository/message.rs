@@ -467,6 +467,38 @@ impl MessageRepository {
         Ok(())
     }
 
+    /// Drop every row after a point in one session (#2826).
+    ///
+    /// The row at `sequence` survives on purpose: an edited message replaces
+    /// that row, and the resend speaks for everything that came after it. Only
+    /// the named session is touched, and the count is what a caller checks the
+    /// re-read against.
+    pub async fn delete_after(&self, session_id: Uuid, sequence: i32) -> Result<usize> {
+        let sid = session_id.to_string();
+        let deleted = self
+            .pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                conn.execute(
+                    "DELETE FROM messages WHERE session_id = ?1 AND sequence > ?2",
+                    params![sid, sequence],
+                )
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to delete messages after a sequence")?;
+
+        tracing::debug!(
+            "Deleted {} row(s) after sequence {} in session {}",
+            deleted,
+            sequence,
+            session_id
+        );
+        Ok(deleted)
+    }
+
     /// List all messages for a session
     pub async fn list_by_session(&self, session_id: Uuid) -> Result<Vec<Message>> {
         self.find_by_session(session_id).await

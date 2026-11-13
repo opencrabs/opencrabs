@@ -281,3 +281,87 @@ async fn find_recent_before_sequence_pages_older_rows() {
         .unwrap();
     assert!(none.is_empty());
 }
+
+/// An edited message replaces the row it came from and drops everything the
+/// conversation said after it (#2826). The row at the edited sequence has to
+/// survive, or the resend has nothing to replace, and another conversation's
+/// rows are never part of the question.
+#[tokio::test]
+async fn delete_after_keeps_the_rows_at_or_before_the_sequence() {
+    let db = Database::connect_in_memory()
+        .await
+        .expect("Failed to create database");
+    db.run_migrations().await.expect("Failed to run migrations");
+    let session_repo = SessionRepository::new(db.pool().clone());
+    let message_repo = MessageRepository::new(db.pool().clone());
+
+    let session = Session::new(Some("Edit".to_string()), Some("model".to_string()), None);
+    session_repo
+        .create(&session)
+        .await
+        .expect("Failed to create session");
+    let other = Session::new(Some("Other".to_string()), Some("model".to_string()), None);
+    session_repo
+        .create(&other)
+        .await
+        .expect("Failed to create session");
+
+    for (i, (role, text)) in [
+        ("user", "first question"),
+        ("assistant", "first answer"),
+        ("user", "second question"),
+        ("assistant", "second answer"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let message = Message::new(
+            session.id,
+            role.to_string(),
+            text.to_string(),
+            i as i32 + 1,
+        );
+        message_repo
+            .create(&message)
+            .await
+            .expect("Failed to create message");
+    }
+    let elsewhere = Message::new(
+        other.id,
+        "user".to_string(),
+        "another conversation".to_string(),
+        1,
+    );
+    message_repo
+        .create(&elsewhere)
+        .await
+        .expect("Failed to create message");
+
+    // The edited row is sequence 3: it stays, and only the answer after it goes.
+    let deleted = message_repo
+        .delete_after(session.id, 3)
+        .await
+        .expect("Failed to delete after a sequence");
+    assert_eq!(deleted, 1, "only the row after the edited one is dropped");
+
+    let left = message_repo
+        .find_by_session(session.id)
+        .await
+        .expect("Failed to read the rows back");
+    assert_eq!(
+        left.iter().map(|m| m.sequence).collect::<Vec<_>>(),
+        vec![1, 2, 3],
+        "the edited row and everything before it survive"
+    );
+    assert_eq!(
+        left.last().map(|m| m.content.as_str()),
+        Some("second question"),
+        "the row the edit replaces is still the tail"
+    );
+
+    let untouched = message_repo
+        .find_by_session(other.id)
+        .await
+        .expect("Failed to read the other session");
+    assert_eq!(untouched.len(), 1, "another session is never truncated");
+}
