@@ -12,6 +12,7 @@ use crate::tests::gui_dashboard_source::DASHBOARD;
 const TRANSCRIPT: &str = include_str!("../gui/transcript.rs");
 const MESSAGE_REPO: &str = include_str!("../db/repository/message.rs");
 const EDITOR: &str = include_str!("../gui/editor.rs");
+const ICON: &str = include_str!("../gui/icon.rs");
 
 /// The row builder draws the button only where a rewrite makes sense: a user
 /// row. An answer is the model's, and rewriting one would leave a transcript
@@ -127,5 +128,37 @@ fn the_edit_names_its_row_and_ends_with_its_conversation() {
     assert!(
         EDITOR.contains("pub fn show_editing("),
         "the field says it is rewriting history rather than appending to it"
+    );
+}
+
+/// The button is a pencil, not the word "Edit" (#2826).
+///
+/// It shipped as a text label in a box, and the owner read it as exactly what
+/// it was: a placeholder. Every other affordance on the row is a picture, so
+/// this one is an embedded vector drawn in the row's own colour.
+#[test]
+fn the_edit_button_draws_a_pencil() {
+    assert!(
+        ICON.contains("pub fn edit_icon("),
+        "the pencil is drawn by the icon module, like every other mark"
+    );
+    assert!(
+        ICON.contains("/src/assets/edit.svg"),
+        "from an embedded vector, so the binary carries it"
+    );
+    let builder = TRANSCRIPT
+        .split("fn message_row(")
+        .nth(1)
+        .expect("one builder draws the row")
+        .split("fn reaction_chips(")
+        .next()
+        .unwrap_or_default();
+    assert!(
+        builder.contains("crate::icon::edit_icon("),
+        "the button draws the pencil"
+    );
+    assert!(
+        !builder.contains("SharedString::from(\"Edit\")"),
+        "and no longer prints the word"
     );
 }

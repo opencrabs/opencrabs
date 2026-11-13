@@ -3807,7 +3807,11 @@ fn message_row(
                 .absolute()
                 .bottom(px(8.0))
                 .right(px(10.0))
-                .px_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .w(rems(1.3))
+                .h(rems(1.3))
                 .rounded_sm()
                 .bg(rgb(palette.panel_hi))
                 .border_1()
@@ -3815,9 +3819,10 @@ fn message_row(
                 .opacity(0.0)
                 .group_hover(group, |d| d.opacity(1.0))
                 .cursor_pointer()
-                .text_xs()
-                .text_color(rgb(palette.text_muted))
-                .child(SharedString::from("Edit"))
+                // A pencil, not the word "Edit" (#2826). A label in a box was
+                // the placeholder, and the owner read it as one: every other
+                // affordance on this row is a picture, so this one is too.
+                .child(crate::icon::edit_icon(palette.text_muted, 0.8))
                 .on_click(move |ev, window, app| handler(ev, window, app)),
         );
     }
