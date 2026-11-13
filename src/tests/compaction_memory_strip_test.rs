@@ -8,7 +8,8 @@
 //! in the same session replaces its earlier entry instead of stacking.
 
 use crate::brain::agent::service::context::{
-    cap_entry_body, compaction_memory_entry, replace_session_entry, strip_session_local_sections,
+    cap_entry_body, compaction_memory_entry, reinjectable_summary, replace_session_entry,
+    strip_session_local_sections,
 };
 use uuid::Uuid;
 
@@ -126,7 +127,10 @@ required_tools:
     let out = strip_session_local_sections(summary);
 
     assert!(!out.contains("active_skills"), "manifest body survived");
-    assert!(!out.contains("```context-manifest"), "manifest fence survived");
+    assert!(
+        !out.contains("```context-manifest"),
+        "manifest fence survived"
+    );
     assert!(out.contains("## 2. Files Modified"));
 }
 
@@ -153,7 +157,11 @@ fn the_cap_lands_on_a_character_boundary() {
     let body = "é".repeat(10_000);
     let capped = cap_entry_body(&body, 4_001);
 
-    assert!(capped.len() <= 4_001, "capped body is {} bytes", capped.len());
+    assert!(
+        capped.len() <= 4_001,
+        "capped body is {} bytes",
+        capped.len()
+    );
     assert!(capped.ends_with("[truncated at the daily-memory entry cap]"));
 }
 
@@ -204,4 +212,66 @@ fn an_entry_with_no_markers_is_left_alone() {
 
     assert!(file.contains("old body"), "legacy entry was dropped");
     assert_eq!(file.matches("## Auto-Compaction Summary").count(), 2);
+}
+
+// #2883: the same document, on its way back into CONTEXT rather than into the
+// daily file. A stored summary is replayed verbatim on every later turn, so its
+// execution sections were still reading as live orders days after the work had
+// finished. The reporter's session spent a turn re-doing a job from 9 Nov.
+
+const BANNER: &str = "[CONTEXT COMPACTION — The conversation was automatically compacted. \
+                      Below is a structured summary of everything before this point.]";
+
+fn stored_summary() -> String {
+    format!("{BANNER}\n\n{SUMMARY}")
+}
+
+fn then_and_now() -> (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>) {
+    let then = chrono::DateTime::from_timestamp(1_760_000_000, 0).expect("valid timestamp");
+    let now = then + chrono::Duration::days(4);
+    (then, now)
+}
+
+#[test]
+fn a_replayed_summary_drops_the_directive_it_was_written_with() {
+    let (then, now) = then_and_now();
+    let out = reinjectable_summary(&stored_summary(), then, now);
+
+    for directive in ["IMMEDIATE TASK", "CONTINUE THIS TASK", "PLAN STATE"] {
+        assert!(
+            !out.contains(directive),
+            "a stored order survived re-injection: {directive}"
+        );
+    }
+    assert!(
+        out.contains("## 1. Chronological Analysis"),
+        "durable half lost"
+    );
+}
+
+#[test]
+fn the_replayed_summary_keeps_its_boundary_banner() {
+    // `messages_from_last_compaction` anchors the reload on this prefix. A
+    // rewrite that ate it would delete the boundary along with the directive.
+    let (then, now) = then_and_now();
+    let out = reinjectable_summary(&stored_summary(), then, now);
+
+    assert!(out.starts_with("[CONTEXT COMPACTION"), "banner lost: {out}");
+}
+
+#[test]
+fn the_replayed_summary_says_how_old_it_is() {
+    let (then, now) = then_and_now();
+    let out = reinjectable_summary(&stored_summary(), then, now);
+
+    assert!(out.contains("summary written"), "no age stamp: {out}");
+    assert!(out.contains("4 days ago"), "age not stated in words: {out}");
+}
+
+#[test]
+fn a_message_that_is_not_a_summary_is_left_alone() {
+    let (then, now) = then_and_now();
+    let plain = "## 0. IMMEDIATE TASK\nnot a compaction marker at all";
+
+    assert_eq!(reinjectable_summary(plain, then, now), plain);
 }

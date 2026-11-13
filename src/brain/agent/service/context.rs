@@ -626,7 +626,17 @@ impl AgentService {
                 all_messages.len(),
                 kept,
             );
-            all_messages[idx..].to_vec()
+            let mut loaded = all_messages[idx..].to_vec();
+            // Every summary in the window is replayed on the way in, not just
+            // the boundary: the delta segments carry the same execution
+            // sections, written for their own moment (#2883).
+            let now = chrono::Utc::now();
+            for msg in loaded.iter_mut() {
+                if msg.role == "user" && msg.content.starts_with(COMPACTION_MARKER_PREFIX) {
+                    msg.content = reinjectable_summary(&msg.content, msg.created_at, now);
+                }
+            }
+            loaded
         } else {
             all_messages
         }
@@ -1882,6 +1892,75 @@ pub(crate) fn replace_session_entry(existing: &str, session_id: Uuid, entry: &st
         format!("{entry}\n")
     } else {
         format!("{trimmed}\n\n---\n\n{entry}\n")
+    }
+}
+
+/// Rewrite a stored compaction summary on its way back into context (#2883).
+///
+/// A continuation document is written to steer the session that produced it.
+/// Its execution sections (`## 0. IMMEDIATE TASK`, `## 6. Pending Tasks`,
+/// `## PLAN STATE (harness)`) are orders addressed to one moment. Replayed
+/// days later they still read as live orders, and the model has no way to tell
+/// them from the harness block of the current turn, so it redoes work that
+/// finished long ago. The daily-memory path has stripped these sections since
+/// it was written ([`compaction_memory_entry`]); the context path never did.
+///
+/// The banner line survives untouched: [`AgentService::messages_from_last_compaction`]
+/// anchors the reload boundary on that exact prefix, so stripping it would
+/// delete the boundary along with the directive.
+pub(crate) fn reinjectable_summary(
+    content: &str,
+    written_at: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
+    use crate::brain::agent::context::COMPACTION_MARKER_PREFIX;
+
+    if !content.starts_with(COMPACTION_MARKER_PREFIX) {
+        return content.to_string();
+    }
+    // The banner is its own line; the document starts after the blank line
+    // that follows it. A marker with no body keeps its banner and gains no
+    // stamp, because there is nothing to age.
+    let (banner, body) = match content.split_once("\n\n") {
+        Some((banner, body)) => (banner, body),
+        None => (content, ""),
+    };
+    if body.trim().is_empty() {
+        return content.to_string();
+    }
+    let stripped = strip_session_local_sections(body);
+    if stripped.trim().is_empty() {
+        return format!(
+            "{banner}\n\n[this summary carried only session-local instructions, \
+             dropped when it was replayed]"
+        );
+    }
+    format!(
+        "{banner}\n\n[summary written {}, {}]\n\n{}",
+        written_at.format("%Y-%m-%d %H:%M UTC"),
+        relative_age(written_at, now),
+        stripped.trim_end(),
+    )
+}
+
+/// How old a replayed summary is, in words.
+///
+/// The stamp alone makes a reader do date arithmetic. This says it outright, so
+/// a summary written a month ago cannot pass for the current turn at a glance.
+fn relative_age(then: chrono::DateTime<chrono::Utc>, now: chrono::DateTime<chrono::Utc>) -> String {
+    let secs = (now - then).num_seconds().max(0);
+    match secs {
+        0..=59 => "just now".to_string(),
+        60..=3_599 => format!("{} min ago", secs / 60),
+        3_600..=86_399 => format!("{} h ago", secs / 3_600),
+        _ => {
+            let days = secs / 86_400;
+            if days == 1 {
+                "1 day ago".to_string()
+            } else {
+                format!("{days} days ago")
+            }
+        }
     }
 }
 
