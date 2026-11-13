@@ -51,15 +51,32 @@ macro_rules! topic_png {
 /// 4 MB of RGBA per icon decoded.
 pub const TOPIC_ICONS: &[(&str, &[u8])] = &[
     // The eight OpenCrabs badges, first because they are the default set.
-    ("opencrabs-topic-bug-reports", topic_png!("opencrabs-topic-bug-reports")),
-    ("opencrabs-topic-development", topic_png!("opencrabs-topic-development")),
-    ("opencrabs-topic-general", topic_png!("opencrabs-topic-general")),
+    (
+        "opencrabs-topic-bug-reports",
+        topic_png!("opencrabs-topic-bug-reports"),
+    ),
+    (
+        "opencrabs-topic-development",
+        topic_png!("opencrabs-topic-development"),
+    ),
+    (
+        "opencrabs-topic-general",
+        topic_png!("opencrabs-topic-general"),
+    ),
     ("opencrabs-topic-ideas", topic_png!("opencrabs-topic-ideas")),
-    ("opencrabs-topic-off-topic", topic_png!("opencrabs-topic-off-topic")),
+    (
+        "opencrabs-topic-off-topic",
+        topic_png!("opencrabs-topic-off-topic"),
+    ),
     ("opencrabs-topic-ops", topic_png!("opencrabs-topic-ops")),
-    ("opencrabs-topic-releases", topic_png!("opencrabs-topic-releases")),
-    ("opencrabs-topic-showcase", topic_png!("opencrabs-topic-showcase")),
-
+    (
+        "opencrabs-topic-releases",
+        topic_png!("opencrabs-topic-releases"),
+    ),
+    (
+        "opencrabs-topic-showcase",
+        topic_png!("opencrabs-topic-showcase"),
+    ),
     // The crab renders, one per piece of work.
     ("crab_agents", topic_png!("crab_agents")),
     ("crab_ai-models", topic_png!("crab_ai-models")),
@@ -111,7 +128,6 @@ pub const TOPIC_ICONS: &[(&str, &[u8])] = &[
     ("crab_status", topic_png!("crab_status")),
     ("crab_testing", topic_png!("crab_testing")),
     ("crab_travel", topic_png!("crab_travel")),
-
     // The generic badges, for topics that are not about the crabs.
     ("generic_agents", topic_png!("generic_agents")),
     ("generic_ai-models", topic_png!("generic_ai-models")),
@@ -161,10 +177,12 @@ pub const TOPIC_ICONS: &[(&str, &[u8])] = &[
     ("generic_showcase", topic_png!("generic_showcase")),
     ("generic_testing", topic_png!("generic_testing")),
     ("generic_travel", topic_png!("generic_travel")),
-
     // The pilot badges, the first set the picker shipped.
     ("pilot_crab_bugs", topic_png!("pilot_crab_bugs")),
-    ("pilot_crab_development", topic_png!("pilot_crab_development")),
+    (
+        "pilot_crab_development",
+        topic_png!("pilot_crab_development"),
+    ),
     ("pilot_crab_general", topic_png!("pilot_crab_general")),
     ("pilot_generic_chat", topic_png!("pilot_generic_chat")),
 ];
@@ -844,7 +862,12 @@ mod tests {
             .collect();
         assert_eq!(
             counts,
-            [("OpenCrabs", 8), ("Crabs", 50), ("Generic", 48), ("Pilot", 4)]
+            [
+                ("OpenCrabs", 8),
+                ("Crabs", 50),
+                ("Generic", 48),
+                ("Pilot", 4)
+            ]
         );
         // Every icon belongs to exactly one family, so the picker cannot drop
         // one on the floor between captions.

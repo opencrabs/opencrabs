@@ -209,11 +209,7 @@ impl Dashboard {
         cx.notify();
     }
 
-    pub(crate) fn assign_session_to_project(
-        &mut self,
-        project_id: Uuid,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn assign_session_to_project(&mut self, project_id: Uuid, cx: &mut Context<Self>) {
         let ProjectsMode::AssignSession(session_id) = self.projects.mode else {
             return;
         };

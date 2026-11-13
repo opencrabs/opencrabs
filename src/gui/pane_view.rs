@@ -529,15 +529,12 @@ impl Render for PaneView {
                 move |_ev: &ClickEvent, _window: &mut Window, cx: &mut App| {
                     cx.stop_propagation();
                     let _ = confirm_window.update(cx, |this, cx| {
-                        let text = this
-                            .pane_states
-                            .get(&session)
-                            .and_then(|pane| {
-                                pane.read(cx)
-                                    .edit
-                                    .as_ref()
-                                    .map(|open| open.editor.read(cx).draft().text)
-                            });
+                        let text = this.pane_states.get(&session).and_then(|pane| {
+                            pane.read(cx)
+                                .edit
+                                .as_ref()
+                                .map(|open| open.editor.read(cx).draft().text)
+                        });
                         if let Some(text) = text {
                             this.pane_edit_confirm(session, text, cx);
                         }

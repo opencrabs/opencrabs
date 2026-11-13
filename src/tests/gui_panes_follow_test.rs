@@ -144,7 +144,10 @@ fn a_pane_expands_its_own_settled_and_live_cards() {
         "this.transcript.live_expanded = !this.transcript.live_expanded",
         ".magnitude() > 2.0",
     ] {
-        assert!(render.contains(required), "missing pane behavior: {required}");
+        assert!(
+            render.contains(required),
+            "missing pane behavior: {required}"
+        );
     }
 
     let view = render

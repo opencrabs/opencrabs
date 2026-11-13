@@ -13,7 +13,8 @@ const ICON: &str = include_str!("../gui/icon.rs");
 
 /// One answer, written the way the model writes them: a heading, a table and
 /// a fence, all of which the renderer-to-plain path used to flatten.
-const ANSWER: &str = "## Findings\n\n| file | line |\n|---|---|\n| a.rs | 12 |\n\n```rust\nlet x = 1;\n```";
+const ANSWER: &str =
+    "## Findings\n\n| file | line |\n|---|---|\n| a.rs | 12 |\n\n```rust\nlet x = 1;\n```";
 
 /// The payload is the stored source, unchanged. If this ever stops holding,
 /// the menu entry has to go rather than quietly copy a flattened body.

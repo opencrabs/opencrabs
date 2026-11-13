@@ -1471,11 +1471,7 @@ pub fn pin_toggle(id: uuid::Uuid, favorited: bool) -> Stateful<Div> {
 /// The menu's contents, resolved from the row's pin and topic state. Pure, so
 /// the labels are pinned by test and the render only draws what this returns
 /// (#2354).
-pub fn rail_menu_entries(
-    favorited: bool,
-    topics_enabled: bool,
-    is_topic: bool,
-) -> Vec<MenuEntry> {
+pub fn rail_menu_entries(favorited: bool, topics_enabled: bool, is_topic: bool) -> Vec<MenuEntry> {
     let mut entries = vec![MenuEntry {
         kind: MenuKind::Pin,
         label: if favorited { "Unpin" } else { "Pin" },

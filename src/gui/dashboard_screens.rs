@@ -625,8 +625,8 @@ impl Dashboard {
             // resolved here, where the chosen base and the wheel's accent are
             // both known, instead of asking the system inside the card
             // (#2746).
-            let card_accent = (mode == GuiTheme::Custom)
-                .then(|| gui_theme::format_accent(self.themes_accent()));
+            let card_accent =
+                (mode == GuiTheme::Custom).then(|| gui_theme::format_accent(self.themes_accent()));
             let shown = gui_theme::resolve(mode, dark, card_accent.as_deref(), base);
             cards.push(
                 themes_view::card(mode, label, hint, self.themes_card == index, accent, shown)

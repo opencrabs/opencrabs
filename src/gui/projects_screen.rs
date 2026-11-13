@@ -5,10 +5,7 @@ use crate::projects::ProjectsMode;
 use opencrabs::ui_core::card::concentric_radius;
 
 impl Dashboard {
-    pub(crate) fn projects_screen(
-        &mut self,
-        cx: &mut Context<Self>,
-    ) -> (AnyElement, AnyElement) {
+    pub(crate) fn projects_screen(&mut self, cx: &mut Context<Self>) -> (AnyElement, AnyElement) {
         let shown = palette::current();
         let mode = self.projects.mode;
         let project = mode
@@ -70,9 +67,8 @@ impl Dashboard {
             }
             ProjectsMode::Detail(project_id) => {
                 actions = actions.child(
-                    projects_view::action_button("project-back", "back", false, shown).on_click(
-                        cx.listener(|this, _ev, _window, cx| this.projects_escape(cx)),
-                    ),
+                    projects_view::action_button("project-back", "back", false, shown)
+                        .on_click(cx.listener(|this, _ev, _window, cx| this.projects_escape(cx))),
                 );
                 actions = actions.child(
                     projects_view::action_button("project-detail-assign", "assign", false, shown)
@@ -82,17 +78,15 @@ impl Dashboard {
                 );
                 actions = actions.child(
                     projects_view::action_button("project-detail-delete", "delete", true, shown)
-                        .on_click(cx.listener(|this, _ev, _window, cx| {
-                            this.request_project_delete(cx)
-                        })),
+                        .on_click(
+                            cx.listener(|this, _ev, _window, cx| this.request_project_delete(cx)),
+                        ),
                 );
             }
             ProjectsMode::Assign(_) | ProjectsMode::AssignSession(_) => {
                 actions = actions.child(
                     projects_view::action_button("project-assign-back", "back", false, shown)
-                        .on_click(cx.listener(|this, _ev, _window, cx| {
-                            this.projects_escape(cx)
-                        })),
+                        .on_click(cx.listener(|this, _ev, _window, cx| this.projects_escape(cx))),
                 );
             }
         }
@@ -122,25 +116,19 @@ impl Dashboard {
                 })
                 .unwrap_or_else(|| "this project".to_string());
             content = content.child(projects_view::delete_panel(&name, shown));
-            let cancel = projects_view::action_button(
-                "project-delete-cancel",
-                "cancel",
-                false,
-                shown,
-            )
-            .on_click(cx.listener(|this, _ev, _window, cx| {
-                this.projects.delete_confirm = false;
-                cx.notify();
-            }));
+            let cancel =
+                projects_view::action_button("project-delete-cancel", "cancel", false, shown)
+                    .on_click(cx.listener(|this, _ev, _window, cx| {
+                        this.projects.delete_confirm = false;
+                        cx.notify();
+                    }));
             let confirm = projects_view::action_button(
                 "project-delete-confirm",
                 "confirm delete",
                 true,
                 shown,
             )
-            .on_click(cx.listener(|this, _ev, _window, cx| {
-                this.confirm_project_delete(cx)
-            }));
+            .on_click(cx.listener(|this, _ev, _window, cx| this.confirm_project_delete(cx)));
             content = content.child(
                 div()
                     .flex()
@@ -165,7 +153,10 @@ impl Dashboard {
         };
         if count == 0 {
             let (message, hint) = if self.projects.loading {
-                ("Reading projects...", "the shared project service is loading")
+                (
+                    "Reading projects...",
+                    "the shared project service is loading",
+                )
             } else {
                 match mode {
                     ProjectsMode::List => ("No projects yet", "press n to create one"),
@@ -184,7 +175,10 @@ impl Dashboard {
             content = content.child(projects_view::empty(message, hint, shown));
             if mode == ProjectsMode::List && !self.projects.loading {
                 content = content.child(text(
-                    format!("Project files live in {}", self.projects.directory.display()),
+                    format!(
+                        "Project files live in {}",
+                        self.projects.directory.display()
+                    ),
                     Size::Xs,
                     shown.text_faint,
                 ));
@@ -199,14 +193,16 @@ impl Dashboard {
                             index == self.projects.selected,
                             shown,
                         )
-                        .on_click(cx.listener(move |this, _ev, _window, cx| {
-                            this.projects.selected = index;
-                            if matches!(mode, ProjectsMode::AssignSession(_)) {
-                                this.assign_session_to_project(id, cx);
-                            } else {
-                                this.open_project(id, cx);
-                            }
-                        }));
+                        .on_click(cx.listener(
+                            move |this, _ev, _window, cx| {
+                                this.projects.selected = index;
+                                if matches!(mode, ProjectsMode::AssignSession(_)) {
+                                    this.assign_session_to_project(id, cx);
+                                } else {
+                                    this.open_project(id, cx);
+                                }
+                            },
+                        ));
                         content = content.child(card);
                     }
                 }
@@ -219,10 +215,12 @@ impl Dashboard {
                             false,
                             shown,
                         )
-                        .on_click(cx.listener(move |this, _ev, _window, cx| {
-                            this.projects.session_selected = index;
-                            this.open_session(id, cx);
-                        }));
+                        .on_click(cx.listener(
+                            move |this, _ev, _window, cx| {
+                                this.projects.session_selected = index;
+                                this.open_session(id, cx);
+                            },
+                        ));
                         content = content.child(card);
                     }
                 }
@@ -235,10 +233,12 @@ impl Dashboard {
                             true,
                             shown,
                         )
-                        .on_click(cx.listener(move |this, _ev, _window, cx| {
-                            this.projects.session_selected = index;
-                            this.assign_project_session(project_id, id, cx);
-                        }));
+                        .on_click(cx.listener(
+                            move |this, _ev, _window, cx| {
+                                this.projects.session_selected = index;
+                                this.assign_project_session(project_id, id, cx);
+                            },
+                        ));
                         content = content.child(card);
                     }
                 }
@@ -275,7 +275,9 @@ impl Dashboard {
             .child(content)
             .into_any_element();
         let hints = match mode {
-            ProjectsMode::List => "up/down select  enter open  n new  a assign  d delete  esc close",
+            ProjectsMode::List => {
+                "up/down select  enter open  n new  a assign  d delete  esc close"
+            }
             ProjectsMode::Detail(_) => {
                 "up/down select  enter open  a assign  u unassign  d delete  esc back"
             }

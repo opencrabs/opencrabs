@@ -747,7 +747,9 @@ impl Dashboard {
                 true
             });
             if stopped {
-                logging::info(&format!("pane turn stopped for an edit in session {session}"));
+                logging::info(&format!(
+                    "pane turn stopped for an edit in session {session}"
+                ));
             }
         }
     }

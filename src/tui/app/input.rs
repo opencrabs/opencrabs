@@ -1055,9 +1055,7 @@ impl App {
                     stdout,
                 } = super::clipboard_exec::capture(cmd, super::clipboard_exec::TEXT_READ)
                 {
-                    if let Some(text) =
-                        super::clipboard_exec::text_from_clipboard_bytes(&stdout)
-                    {
+                    if let Some(text) = super::clipboard_exec::text_from_clipboard_bytes(&stdout) {
                         return Some(text);
                     }
                 }

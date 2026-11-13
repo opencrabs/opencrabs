@@ -582,7 +582,6 @@ impl Editor {
         self.show_notice(COPIED_NOTICE, cx);
     }
 
-
     /// The notice still inside its window, if any. Read through this so an
     /// expired notice never paints while its timer is still in flight.
     fn active_notice(&self, now: Instant) -> Option<&str> {
@@ -648,7 +647,6 @@ impl Editor {
             cx.notify();
         }
     }
-
 
     /// The paperclip: the platform's own file picker, then the same attach
     /// path a Finder drop takes. Cancelled means nothing was attached, so
@@ -3985,7 +3983,10 @@ mod tests {
             .nth(1)
             .and_then(|rest| rest.split("/// Record one sent entry").next())
             .expect("reply payload");
-        assert!(payload.contains("self.reply.take()"), "a send spends the chip");
+        assert!(
+            payload.contains("self.reply.take()"),
+            "a send spends the chip"
+        );
         assert!(
             payload.contains("reply.quote.trim_end()"),
             "the quote goes ahead of the user's own text"

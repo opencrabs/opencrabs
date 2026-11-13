@@ -40,31 +40,30 @@ pub fn banner_logo() -> impl IntoElement {
 /// icon and got the word "Edit" in a box, because a label is not a picture.
 /// The asset carries the placeholder grey where the stroke goes, so one file
 /// draws in whatever colour the row's theme asks for.
-pub const EDIT_SVG: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/src/assets/edit.svg"
-));
+pub const EDIT_SVG: &[u8] =
+    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/assets/edit.svg"));
 
 /// The literal the vector carries where the stroke colour goes.
 const ICON_PLACEHOLDER: &str = "#8a8a8a";
 
 /// The copy mark the transcript's copy button draws (#2750), the same
 /// placeholder-grey asset trick as the pencil above.
-pub const COPY_SVG: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/src/assets/copy.svg"
-));
+pub const COPY_SVG: &[u8] =
+    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/assets/copy.svg"));
 
 /// The pencil in `colour`, sized in rems (#2826).
 pub fn edit_icon(colour: u32, size: f32) -> impl IntoElement {
     let svg = String::from_utf8_lossy(EDIT_SVG)
         .replace(ICON_PLACEHOLDER, &format!("#{colour:06x}"))
         .into_bytes();
-    img(std::sync::Arc::new(Image::from_bytes(ImageFormat::Svg, svg)))
-        .w(rems(size))
-        .h(rems(size))
-        .flex_none()
-        .object_fit(ObjectFit::Contain)
+    img(std::sync::Arc::new(Image::from_bytes(
+        ImageFormat::Svg,
+        svg,
+    )))
+    .w(rems(size))
+    .h(rems(size))
+    .flex_none()
+    .object_fit(ObjectFit::Contain)
 }
 
 /// The copy mark in `colour`, sized in rems (#2750).
@@ -72,11 +71,14 @@ pub fn copy_icon(colour: u32, size: f32) -> impl IntoElement {
     let svg = String::from_utf8_lossy(COPY_SVG)
         .replace(ICON_PLACEHOLDER, &format!("#{colour:06x}"))
         .into_bytes();
-    img(std::sync::Arc::new(Image::from_bytes(ImageFormat::Svg, svg)))
-        .w(rems(size))
-        .h(rems(size))
-        .flex_none()
-        .object_fit(ObjectFit::Contain)
+    img(std::sync::Arc::new(Image::from_bytes(
+        ImageFormat::Svg,
+        svg,
+    )))
+    .w(rems(size))
+    .h(rems(size))
+    .flex_none()
+    .object_fit(ObjectFit::Contain)
 }
 
 /// Set the Dock icon from the embedded `.icns`. macOS only: the Dock is an

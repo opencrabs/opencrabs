@@ -24,7 +24,10 @@ fn projects_is_a_real_service_backed_dashboard_screen() {
         "self.projects_key(ev, cx)",
         "self.projects_escape(cx)",
     ] {
-        assert!(DASHBOARD.contains(needle), "missing screen wiring: {needle}");
+        assert!(
+            DASHBOARD.contains(needle),
+            "missing screen wiring: {needle}"
+        );
     }
     for needle in [
         "ProjectsMode::List",
@@ -135,10 +138,7 @@ fn projects_command_reaches_both_clients_and_seeker() {
         .expect("Seeker lists the Projects destination");
     assert_eq!(row.title, "/projects");
     assert!(
-        rows.iter()
-            .filter(|row| row.title == "/projects")
-            .count()
-            == 1,
+        rows.iter().filter(|row| row.title == "/projects").count() == 1,
         "the command and its destination must not duplicate the Seeker row"
     );
 }

@@ -40,7 +40,10 @@ fn only_parent_session_cards_offer_project_assignment() {
         "if self.sessions.parents.contains_key(&session_id) {",
         "self.open_projects_mode(ProjectsMode::AssignSession(session_id), cx);",
     ] {
-        assert!(DASHBOARD.contains(needle), "missing parent wiring: {needle}");
+        assert!(
+            DASHBOARD.contains(needle),
+            "missing parent wiring: {needle}"
+        );
     }
 }
 
@@ -62,7 +65,10 @@ fn session_picker_reuses_the_service_and_returns_after_success() {
         "session.project_id = Some(project_id);",
         "ProjectsMode::AssignSession(_) => \"up/down select  enter assign  esc cancel\"",
     ] {
-        assert!(DASHBOARD.contains(needle), "missing picker action: {needle}");
+        assert!(
+            DASHBOARD.contains(needle),
+            "missing picker action: {needle}"
+        );
     }
 
     let success = block(
@@ -83,7 +89,8 @@ fn session_picker_reuses_the_service_and_returns_after_success() {
 
 #[test]
 fn unassigned_project_picks_exclude_topics_at_the_query_boundary() {
-    assert!(PROJECT_REPOSITORY.contains(
-        "WHERE project_id IS NULL AND archived_at IS NULL AND parent_id IS NULL"
-    ));
+    assert!(
+        PROJECT_REPOSITORY
+            .contains("WHERE project_id IS NULL AND archived_at IS NULL AND parent_id IS NULL")
+    );
 }

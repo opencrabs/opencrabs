@@ -11,8 +11,7 @@
 
 const TRANSCRIPT: &str = include_str!("../gui/transcript.rs");
 const REACTION_REPO: &str = include_str!("../db/repository/message_reaction.rs");
-const MIGRATION: &str =
-    include_str!("../migrations/20261106000001_add_message_reactions.sql");
+const MIGRATION: &str = include_str!("../migrations/20261106000001_add_message_reactions.sql");
 
 /// The read is infallible at the call site, so a pane cannot lose its rows to
 /// a table that has not been created yet.

@@ -96,7 +96,10 @@ fn one_finish_keeps_one_key_and_turns_carry_none() {
         session: None,
     };
     let key = format!("plan:Ship it {}", Uuid::new_v4());
-    assert!(key.starts_with("plan:"), "the plan event owns the finish key");
+    assert!(
+        key.starts_with("plan:"),
+        "the plan event owns the finish key"
+    );
     assert!(first_time(&key), "the first sighting announces the finish");
     assert!(!first_time(&key), "a re-render must not announce it again");
     assert_eq!(

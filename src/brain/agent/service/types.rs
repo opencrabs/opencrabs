@@ -742,8 +742,7 @@ fn is_filler_word(word: &str) -> bool {
     const FILLER: &[&str] = &[
         // English
         "a", "an", "the", "of", "for", "and", "or", "to", "in", "on", "at", "with", "from", "by",
-        "is", "are", "be", "as", "that", "this", "it", "its",
-        // Portuguese
+        "is", "are", "be", "as", "that", "this", "it", "its", // Portuguese
         "o", "os", "as", "do", "da", "dos", "das", "de", "em", "no", "na", "nos", "nas", "um",
         "uma", "e", "ou", "para", "por", "com", "ao", "à",
     ];

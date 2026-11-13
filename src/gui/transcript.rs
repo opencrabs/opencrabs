@@ -1236,7 +1236,13 @@ fn row_blocks(m: &Message, forward: Option<ForwardMark>) -> Vec<Block> {
     // (#2860). One block per stored row also keeps the GPUI element ids unique
     // when the parser produced more than one text segment.
     if let Some(answer) = blocks[row_start..].iter_mut().rev().find(|block| {
-        matches!(block, Block::Msg { message_id: None, .. })
+        matches!(
+            block,
+            Block::Msg {
+                message_id: None,
+                ..
+            }
+        )
     }) {
         let Block::Msg { message_id, .. } = answer else {
             unreachable!("the find predicate only matches message blocks")

@@ -315,12 +315,7 @@ async fn delete_after_keeps_the_rows_at_or_before_the_sequence() {
     .iter()
     .enumerate()
     {
-        let message = Message::new(
-            session.id,
-            role.to_string(),
-            text.to_string(),
-            i as i32 + 1,
-        );
+        let message = Message::new(session.id, role.to_string(), text.to_string(), i as i32 + 1);
         message_repo
             .create(&message)
             .await

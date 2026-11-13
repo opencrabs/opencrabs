@@ -24,7 +24,11 @@ use crate::theme::{Size, text};
 pub const CARDS: [(GuiTheme, &str, &str); 4] = [
     (GuiTheme::Orgn, "Orgn", "the window's own dark palette"),
     (GuiTheme::Light, "Light", "soft paper, easy on the eyes"),
-    (GuiTheme::Custom, "Custom", "your base and accent, everything derived"),
+    (
+        GuiTheme::Custom,
+        "Custom",
+        "your base and accent, everything derived",
+    ),
     (GuiTheme::Auto, "Auto", "follows the system appearance"),
 ];
 

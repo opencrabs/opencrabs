@@ -186,7 +186,10 @@ fn a_pane_draws_and_sends_its_own_edit() {
         .find("pane.edit.take()")
         .expect("the leaf's armed edit is consumed by its own send");
     assert!(
-        armed < send.find("agent_bridge::options_take(session)").unwrap_or(usize::MAX),
+        armed
+            < send
+                .find("agent_bridge::options_take(session)")
+                .unwrap_or(usize::MAX),
         "the edit is taken before the send touches anything else"
     );
     assert!(
@@ -201,9 +204,7 @@ fn a_pane_draws_and_sends_its_own_edit() {
         .next()
         .unwrap_or_default();
     let stop = edited.find("stop_turn_for_edit(").expect("it stops first");
-    let truncate = edited
-        .find("truncate_after(")
-        .expect("then it truncates");
+    let truncate = edited.find("truncate_after(").expect("then it truncates");
     assert!(
         stop < truncate,
         "the pane's edit stops its turn before cutting the history under it"

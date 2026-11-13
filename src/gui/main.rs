@@ -2251,8 +2251,7 @@ impl Render for Dashboard {
             // A selected topic owns its parent's existing activity/preview slot
             // (#2804). Cursor, plan progress and running tasks stay with the parent.
             let progress_id = children_by_parent.get(&id).map_or(id, |kids| {
-                self.sessions
-                    .progress_id(id, kids.iter().map(|kid| kid.id))
+                self.sessions.progress_id(id, kids.iter().map(|kid| kid.id))
             });
             // The visible pin and the context menu share one favorite writer
             // (#2803). Stopping the press keeps the row closed and prevents a slide.
@@ -5450,30 +5449,28 @@ impl Render for Dashboard {
             // picture, not a bullet (#2768): at the old 1.5rem the badges were
             // specks and picking one was guesswork. They render at 4.0rem
             // (#2789), and the 256x256 sources stay crisp at 2x.
-            let mut families: Vec<(&'static str, Vec<Stateful<Div>>)> =
-                topic_icons::TOPIC_FAMILIES
-                    .iter()
-                    .map(|&(caption, prefix)| {
-                        let cells: Vec<Stateful<Div>> = topic_icons::family_icons(prefix)
-                            .map(|(name, bytes)| {
-                                let pick =
-                                    cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
-                                        this.topic_draft_icon = Some(topic_icons::store_name(name));
-                                        cx.notify();
-                                    });
-                                div()
-                                    .id(SharedString::from(format!("topic-icon-{name}")))
-                                    .p_1()
-                                    .rounded(px(6.0))
-                                    .cursor_pointer()
-                                    .hover(|d| d.bg(rgb(palette::current().panel_hi)))
-                                    .on_click(pick)
-                                    .child(topic_icons::picture(bytes, 4.0))
-                            })
-                            .collect();
-                        (caption, cells)
-                    })
-                    .collect();
+            let mut families: Vec<(&'static str, Vec<Stateful<Div>>)> = topic_icons::TOPIC_FAMILIES
+                .iter()
+                .map(|&(caption, prefix)| {
+                    let cells: Vec<Stateful<Div>> = topic_icons::family_icons(prefix)
+                        .map(|(name, bytes)| {
+                            let pick = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
+                                this.topic_draft_icon = Some(topic_icons::store_name(name));
+                                cx.notify();
+                            });
+                            div()
+                                .id(SharedString::from(format!("topic-icon-{name}")))
+                                .p_1()
+                                .rounded(px(6.0))
+                                .cursor_pointer()
+                                .hover(|d| d.bg(rgb(palette::current().panel_hi)))
+                                .on_click(pick)
+                                .child(topic_icons::picture(bytes, 4.0))
+                        })
+                        .collect();
+                    (caption, cells)
+                })
+                .collect();
             // One extra cell opens the platform file picker for a custom
             // image, Telegram style (#2790). The tile matches the embedded
             // picks' geometry so the grid keeps its rhythm, and it keeps its
@@ -5484,26 +5481,28 @@ impl Render for Dashboard {
             });
             families.push((
                 "Your image",
-                vec![div()
-                    .id("topic-icon-add-image")
-                    .p_1()
-                    .rounded(px(6.0))
-                    .cursor_pointer()
-                    .hover(|d| d.bg(rgb(palette::current().panel_hi)))
-                    .on_click(add_image)
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .size(rems(4.0))
-                            .rounded(px(8.0))
-                            .border_1()
-                            .border_color(rgb(palette::current().panel_hi))
-                            .text_color(rgb(palette::current().text_muted))
-                            .text_size(rems(1.6))
-                            .child("+"),
-                    )],
+                vec![
+                    div()
+                        .id("topic-icon-add-image")
+                        .p_1()
+                        .rounded(px(6.0))
+                        .cursor_pointer()
+                        .hover(|d| d.bg(rgb(palette::current().panel_hi)))
+                        .on_click(add_image)
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .size(rems(4.0))
+                                .rounded(px(8.0))
+                                .border_1()
+                                .border_color(rgb(palette::current().panel_hi))
+                                .text_color(rgb(palette::current().text_muted))
+                                .text_size(rems(1.6))
+                                .child("+"),
+                        ),
+                ],
             ));
             // The badge previews a custom pick from the same cache the rail
             // and tabs draw from (#2790).
@@ -9661,12 +9660,15 @@ mod tests {
             "outside presses must dismiss during capture, before text stops them"
         );
         let transcript = include_str!("transcript.rs");
-        assert!(transcript.contains(
-            "dismissible_menu_popover(\"message-context-menu\", rows, at, dismiss)"
-        ));
-        assert!(transcript.contains(
-            "dismissible_menu_popover(\"react-picker\", vec![grid_row], at, dismiss)"
-        ));
+        assert!(
+            transcript
+                .contains("dismissible_menu_popover(\"message-context-menu\", rows, at, dismiss)")
+        );
+        assert!(
+            transcript.contains(
+                "dismissible_menu_popover(\"react-picker\", vec![grid_row], at, dismiss)"
+            )
+        );
         assert!(DASHBOARD.contains("this.msg_menu_close(cx)"));
     }
 }

@@ -17,8 +17,16 @@ pub fn project_card(row: &ProjectRow, selected: bool, shown: Palette) -> Statefu
         .p_3()
         .rounded(px(CARD_RADIUS))
         .border_1()
-        .border_color(rgb(if selected { shown.focus } else { shown.panel_hi }))
-        .bg(glass_fill(if selected { shown.panel_hi } else { shown.panel }))
+        .border_color(rgb(if selected {
+            shown.focus
+        } else {
+            shown.panel_hi
+        }))
+        .bg(glass_fill(if selected {
+            shown.panel_hi
+        } else {
+            shown.panel
+        }))
         .cursor_pointer()
         .child(
             div()
@@ -27,7 +35,12 @@ pub fn project_card(row: &ProjectRow, selected: bool, shown: Palette) -> Statefu
                 .items_center()
                 .justify_between()
                 .gap_2()
-                .child(text(project.name.clone(), Size::Sm, shown.text).flex_1().min_w_0().truncate())
+                .child(
+                    text(project.name.clone(), Size::Sm, shown.text)
+                        .flex_1()
+                        .min_w_0()
+                        .truncate(),
+                )
                 .child(text(
                     format!("{} sessions  {} files", row.sessions, row.files),
                     Size::Xs,
@@ -37,14 +50,22 @@ pub fn project_card(row: &ProjectRow, selected: bool, shown: Palette) -> Statefu
     if let Some(description) = project.description.as_deref().filter(|s| !s.is_empty()) {
         card = card.child(text(description.to_string(), Size::Xs, shown.text_muted));
     }
-    let origin = project.repo_remote.as_deref().unwrap_or("no repository recorded");
+    let origin = project
+        .repo_remote
+        .as_deref()
+        .unwrap_or("no repository recorded");
     card.child(
         div()
             .flex()
             .flex_row()
             .justify_between()
             .gap_2()
-            .child(text(origin.to_string(), Size::Xs, shown.text_faint).flex_1().min_w_0().truncate())
+            .child(
+                text(origin.to_string(), Size::Xs, shown.text_faint)
+                    .flex_1()
+                    .min_w_0()
+                    .truncate(),
+            )
             .child(text(
                 project.created_at.format("%Y-%m-%d").to_string(),
                 Size::Xs,
@@ -70,8 +91,16 @@ pub fn session_card(
         .p_3()
         .rounded(px(CARD_RADIUS))
         .border_1()
-        .border_color(rgb(if selected { shown.focus } else { shown.panel_hi }))
-        .bg(glass_fill(if selected { shown.panel_hi } else { shown.panel }))
+        .border_color(rgb(if selected {
+            shown.focus
+        } else {
+            shown.panel_hi
+        }))
+        .bg(glass_fill(if selected {
+            shown.panel_hi
+        } else {
+            shown.panel
+        }))
         .cursor_pointer()
         .child(text(title.to_string(), Size::Sm, shown.text))
         .child(
@@ -81,7 +110,12 @@ pub fn session_card(
                 .items_center()
                 .justify_between()
                 .gap_2()
-                .child(text(model.to_string(), Size::Xs, shown.text_muted).flex_1().min_w_0().truncate())
+                .child(
+                    text(model.to_string(), Size::Xs, shown.text_muted)
+                        .flex_1()
+                        .min_w_0()
+                        .truncate(),
+                )
                 .child(text(
                     format!(
                         "{}  {} tokens",
@@ -98,7 +132,12 @@ pub fn session_card(
     card
 }
 
-pub fn action_button(id: &'static str, label: &'static str, danger: bool, shown: Palette) -> Stateful<Div> {
+pub fn action_button(
+    id: &'static str,
+    label: &'static str,
+    danger: bool,
+    shown: Palette,
+) -> Stateful<Div> {
     div()
         .id(id)
         .px_3()
@@ -109,7 +148,11 @@ pub fn action_button(id: &'static str, label: &'static str, danger: bool, shown:
         .bg(rgb(shown.panel))
         .cursor_pointer()
         .hover(|style| style.bg(rgb(shown.panel_hi)))
-        .child(text(label, Size::Xs, if danger { shown.red } else { shown.text }))
+        .child(text(
+            label,
+            Size::Xs,
+            if danger { shown.red } else { shown.text },
+        ))
 }
 
 pub fn create_panel(input: &str, shown: Palette) -> Div {
@@ -143,7 +186,11 @@ pub fn delete_panel(name: &str, shown: Palette) -> Div {
             Size::Xs,
             shown.text_muted,
         ))
-        .child(text("d or enter confirm  esc cancel", Size::Xs, shown.text_faint))
+        .child(text(
+            "d or enter confirm  esc cancel",
+            Size::Xs,
+            shown.text_faint,
+        ))
 }
 
 pub fn empty(message: &'static str, hint: &'static str, shown: Palette) -> Div {
