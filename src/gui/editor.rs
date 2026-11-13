@@ -385,6 +385,18 @@ pub struct Editor {
     /// while it is closed (#2749). Window coordinates, never field-local: the
     /// card is placed at the press, and the field's own origin would move it.
     ctx_menu_at: Option<Point<Pixels>>,
+    /// Whether the caret is in the visible half of its blink (#2745). The
+    /// Seeker already blinks with an idle cutoff, so the composer was the odd
+    /// one out, painting a caret on every frame forever.
+    caret_on: bool,
+    /// The last key or press that could move the caret, so the blink loop
+    /// knows when the field went quiet. `None` means nothing has poked it yet
+    /// and the caret stays solid.
+    caret_last_input: Option<Instant>,
+    /// Whether a blink loop is already running. One loop per burst of typing:
+    /// a new keystroke only refreshes the instant, so a fast typist never
+    /// stacks timers.
+    caret_looping: bool,
 }
 
 /// Rows the composer shows before it scrolls instead of growing. Ten rows is
@@ -403,6 +415,10 @@ pub struct Notice {
 /// How long a notice stays up, matching the terminal's `NOTIFICATION_TTL` so
 /// the two surfaces keep the same rhythm.
 pub const NOTICE_TTL: Duration = Duration::from_secs(2);
+
+/// The caret's blink half-period, the Seeker's own number, so the two fields
+/// keep the same rhythm (#2745).
+const CARET_BLINK_MS: u64 = 530;
 
 /// What the composer says once a dragged range reaches the clipboard (#2587).
 /// The terminal prints these same words on its input border.
@@ -461,10 +477,58 @@ impl Editor {
             reveal: None,
             reveal_key: (0, 0),
             ctx_menu_at: None,
+            caret_on: true,
+            caret_last_input: None,
+            caret_looping: false,
         }
     }
 
     // Notices --------------------------------------------------------------
+
+    /// Restart the caret's blink, the way a keystroke does in the Seeker
+    /// (#2745). One loop per burst of typing: it exits at the idle cutoff, so
+    /// a quiet composer runs no timer at all, and a key that arrives while it
+    /// is running only refreshes the instant it reads.
+    fn poke_caret(&mut self, cx: &mut Context<Self>) {
+        self.caret_last_input = Some(Instant::now());
+        self.caret_on = true;
+        cx.notify();
+        if self.caret_looping {
+            return;
+        }
+        self.caret_looping = true;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(CARET_BLINK_MS))
+                    .await;
+                let keep = this
+                    .update(cx, |editor, cx| {
+                        let Some(last) = editor.caret_last_input else {
+                            return false;
+                        };
+                        if !opencrabs::ui_core::palette::caret_blinks(
+                            last,
+                            Instant::now(),
+                            opencrabs::ui_core::palette::CARET_IDLE_AFTER,
+                        ) {
+                            editor.caret_on = false;
+                            editor.caret_looping = false;
+                            cx.notify();
+                            return false;
+                        }
+                        editor.caret_on = !editor.caret_on;
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !keep {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
 
     /// Say one thing for a moment inside the composer. A newer notice replaces
     /// the old one and its timer: the generation check is what stops the first
@@ -1384,6 +1448,8 @@ impl Editor {
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus_handle);
+        // A press moves the caret, so the blink restarts (#2745).
+        self.poke_caret(cx);
         // A left press in the field is a press outside the card, so it goes
         // with it (#2749). The card itself stops its presses before they get
         // here.
@@ -1416,6 +1482,9 @@ impl Editor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Every key restarts the caret's blink, so the field goes quiet a
+        // moment after typing stops (#2745).
+        self.poke_caret(cx);
         if ev.keystroke.key == "escape" && self.marked_range.is_some() {
             window.prevent_default();
             cx.stop_propagation();
@@ -2139,6 +2208,12 @@ impl Element for EditorElement {
         );
         let line_height = window.line_height();
         let focused = focus_handle.is_focused(window);
+        // The caret's own state, read once per frame: it blinks on a timer and
+        // hides while a selection is live (#2745).
+        let (caret_on, caret_selection_empty) = {
+            let input = self.input.read(cx);
+            (input.caret_on, input.selected_range.is_empty())
+        };
         let rows = std::mem::take(&mut prepaint.rows);
         for row in rows.iter() {
             let Some(line) = prepaint.layout.get(row.line_ix) else {
@@ -2198,13 +2273,21 @@ impl Element for EditorElement {
                     );
                 }
             }
-            if focused && let Some(caret) = row.cursor {
+            // The caret's colour is the theme accent, never a literal: the old
+            // hardcoded blue ignored every theme change. It also blinks on a
+            // timer and hides while a selection is live, the way the Seeker's
+            // does (#2745).
+            if let Some(caret) = row.cursor
+                && focused
+                && caret_on
+                && caret_selection_empty
+            {
                 window.paint_quad(fill(
                     Bounds::new(
                         point(bounds.left() + caret.x, y + caret.y),
                         size(px(2.), line_height),
                     ),
-                    gpui::blue(),
+                    rgb(palette::current().accent),
                 ));
             }
         }
@@ -2218,6 +2301,13 @@ impl Render for Editor {
         if self.focus_pending {
             self.focus_pending = false;
             window.focus(&self.focus_handle);
+        }
+        // A focused field blinks from the moment it takes focus, not only
+        // after the first key (#2745). The guard is `is_none`, so this arms
+        // the loop once: a caret that has already idled out stays out until
+        // the next key or press pokes it.
+        if self.caret_last_input.is_none() && self.focus_handle.is_focused(window) {
+            self.poke_caret(cx);
         }
         // The box is capped at `COMPOSER_MAX_ROWS`, so a caret below the fold
         // asked prepaint for a scroll. Applying it here, where the handle
@@ -3777,6 +3867,40 @@ mod tests {
             shown - Duration::from_secs(1),
             NOTICE_TTL
         ));
+    }
+
+    /// The composer caret takes the theme accent and blinks on the Seeker's
+    /// own rhythm (#2745). A literal colour ignores every theme change, and a
+    /// caret painted on every frame reads as a stuck glyph.
+    #[test]
+    fn the_composer_caret_blinks_and_wears_the_accent() {
+        let src = include_str!("editor.rs");
+        assert!(
+            !src.contains(["gpui::", "blue()"].concat().as_str()),
+            "the caret takes its colour from the palette, never a literal"
+        );
+        let (_, paint) = src
+            .split_once("let caret_selection_empty")
+            .expect("the caret state is read for the frame");
+        let paint = &paint[..paint.len().min(3000)];
+        assert!(
+            paint.contains("palette::current().accent"),
+            "the accent token paints the caret"
+        );
+        assert!(
+            paint.contains("&& caret_on") && paint.contains("&& caret_selection_empty"),
+            "the caret hides on the off half of the blink and under a selection"
+        );
+        let (_, blink) = src.split_once("fn poke_caret").expect("the blink loop");
+        let blink = blink.split("\n    }\n").next().unwrap_or(blink);
+        assert!(
+            blink.contains("CARET_BLINK_MS") && blink.contains("caret_on = !editor.caret_on"),
+            "the loop toggles the caret on the Seeker's half period"
+        );
+        assert!(
+            blink.contains("CARET_IDLE_AFTER"),
+            "and it stops at the same idle cutoff"
+        );
     }
 
     /// The words and the slot: a copy says the terminal's line, an empty field
