@@ -2071,6 +2071,8 @@ impl TelegramAgent {
                                         let agent_cb = agent.clone();
                                         let bot_cb = bot.clone();
                                         let state_cb = state.clone();
+                                        let callback_message =
+                                            format!("[callback:{data_owned}]");
                                         tokio::spawn(async move {
                                             // #869: route through the full streaming pipeline
                                             // instead of the stripped-down run_resume_turn.
@@ -2078,10 +2080,23 @@ impl TelegramAgent {
                                                 match state_cb.try_begin_turn(sid) {
                                                     Some(g) => g,
                                                     None => {
-                                                        tracing::warn!(
+                                                        // #2287: the tap is not lost. The
+                                                        // session is mid-turn, so the callback
+                                                        // replays at the next tool-round
+                                                        // boundary or at turn end, the same
+                                                        // path a follow-up tap takes (#136).
+                                                        tracing::info!(
                                                             "Telegram: callback routing — \
-                                                             session {sid} already mid-turn"
+                                                             session {sid} already mid-turn — \
+                                                             enqueuing callback for delivery"
                                                         );
+                                                        let queued =
+                                                            crate::channels::telegram::handler::build_midturn_queued_message(
+                                                                None,
+                                                                &callback_message,
+                                                                &callback_message,
+                                                            );
+                                                        state_cb.enqueue_reaction(sid, queued);
                                                         return;
                                                     }
                                                 };
@@ -2091,7 +2106,7 @@ impl TelegramAgent {
                                                     cb_chat,
                                                     cb_thread,
                                                     sid,
-                                                    format!("[callback:{data_owned}]"),
+                                                    callback_message,
                                                     agent_cb,
                                                     state_cb,
                                                     false, // user-initiated callback tap (#12)
