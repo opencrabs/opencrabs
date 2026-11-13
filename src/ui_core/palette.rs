@@ -587,18 +587,16 @@ pub fn opens(alt: bool, platform: bool, key: &str) -> bool {
         || (platform && key.eq_ignore_ascii_case("k"))
 }
 
-/// The Seeker's chord as it is printed on screen, matching the platform the
-/// window runs on: the command key exists only on a Mac, and everywhere else
-/// the platform modifier `opens` reads is ctrl (#2747).
+/// The Seeker's chord as it is printed on screen: the default one, alt+space,
+/// on every platform. Cmd+K still opens the card on a Mac and Ctrl+K still
+/// opens it elsewhere, but an alias is not what a footer should teach. Help and
+/// the usage and files footers already name alt+space, so this label now agrees
+/// with them (#2894).
 ///
 /// The label lives here, beside the predicate, so the hint a user clicks can
-/// never drift from the chord the handler answers.
+/// never drift from a chord the handler answers.
 pub fn seeker_chord_label() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "\u{2318}K"
-    } else {
-        "Ctrl+K"
-    }
+    "alt+space"
 }
 
 /// The chord that opens the card in a terminal. Alt arrives there as the ESC
@@ -2326,17 +2324,16 @@ mod tests {
         assert!(!opens(false, true, " "));
     }
 
-    /// #2747: the hint printed on screen names the chord the handler answers
-    /// on this platform, so the label can never promise a key the window
-    /// ignores.
+    /// #2894: the hint printed on screen names the default chord on every
+    /// platform. The platform alias still opens the card, but a footer teaches
+    /// the default, and this one now agrees with Help and the other footers.
     #[test]
-    fn the_printed_chord_matches_the_platform() {
-        let expected = if cfg!(target_os = "macos") {
-            "\u{2318}K"
-        } else {
-            "Ctrl+K"
-        };
-        assert_eq!(seeker_chord_label(), expected);
+    fn the_printed_chord_is_the_default_one() {
+        assert_eq!(seeker_chord_label(), "alt+space");
+        assert!(
+            opens(true, false, "space"),
+            "the printed chord must be one the handler answers"
+        );
     }
 
     /// The terminal gets the bare chord: crossterm reports the ESC prefix of

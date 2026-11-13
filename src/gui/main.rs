@@ -8833,7 +8833,7 @@ mod tests {
         );
         assert!(
             hint.contains("seeker_chord_label()"),
-            "the chord printed must match the platform"
+            "the chord printed must come from the shared label, not a literal"
         );
     }
 
@@ -8876,9 +8876,9 @@ mod tests {
         // retired strip taught keys the window no longer binds and went stale
         // the moment a binding moved, so it stays banned below.
         let src = DASHBOARD;
-        // The chat footer prints the chord the handler answers on this
-        // platform beside that door (#2747), so the static sentence now stands
-        // on the two screens that have no chord of their own to print.
+        // The chat footer prints the default chord beside that door (#2894),
+        // so the static sentence now stands on the two screens that have no
+        // chord of their own to print.
         let door = ["\"alt+space · ", "seek help\""].concat();
         assert_eq!(
             src.matches(&door).count(),
