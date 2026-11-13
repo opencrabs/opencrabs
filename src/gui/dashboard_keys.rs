@@ -1054,7 +1054,20 @@ impl Dashboard {
     /// window strip and every pane strip share one seen set, so a plan drawn
     /// twice rings once, and a reload of an unchanged file rings not at all.
     pub(crate) fn chime_settled_plan_tasks(&mut self, cx: &mut Context<Self>) {
+        // Four passes a second, not one per frame (#2899). The pass clones
+        // every plan document, resolves the settled ids in each and asks the
+        // notification layer about them, and a frame can arrive as often as
+        // the 5 Hz animation cadence with nothing else to read. A task that
+        // settles between two passes still rings on the next one, well inside
+        // the flash window it starts.
+        const CHIME_PASS: std::time::Duration = std::time::Duration::from_millis(250);
         let now = std::time::Instant::now();
+        if let Some(last) = self.chime_last
+            && now.duration_since(last) < CHIME_PASS
+        {
+            return;
+        }
+        self.chime_last = Some(now);
 
         // A pane strip only re-reads its file when it is drawn, and this pass
         // runs before the split body is built. Refresh here so a background

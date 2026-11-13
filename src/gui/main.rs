@@ -719,6 +719,27 @@ struct Dashboard {
     /// Whether the sidebar holds the keyboard. Tab moves it; while it does,
     /// the arrows walk its rows, and the composer keeps them otherwise (#2417).
     rail_focused: bool,
+    /// Poll ticks since the window opened (#2899). The poll runs at 20 Hz and
+    /// most of what it checks only changes what a repaint would draw, so the
+    /// answers that cost a file read or a bridge lock are resolved on the
+    /// repaint cadence and reused in between.
+    poll_tick: u64,
+    /// The last answer `rail_animating` gave, reused between the polls that
+    /// resolve it.
+    rail_anim_live: bool,
+    /// When the settled-task pass last ran (#2899). It clones every plan and
+    /// resolves their settled ids, so it runs on its own clock rather than
+    /// once per frame.
+    chime_last: Option<std::time::Instant>,
+    /// This frame's status row per leaf (#2899). Building it reads the bridge
+    /// for the session's provider pair and its plan progress, and every pane
+    /// used to resolve its own twice: once in the stamp the walk builds and
+    /// again in its own draw. Resolved once per frame, for every leaf, before
+    /// either of them reads it.
+    frame_footers: HashMap<Uuid, SharedString>,
+    /// The detached-command line per leaf for this frame (#2899). Same reason:
+    /// the label takes the background manager's lock and formats a string.
+    frame_tasks: HashMap<Uuid, SharedString>,
     /// A newer release, when the update check found one (#2406).
     update_available: Option<String>,
     /// The update dialog: None when closed, Some(false) asks whether to update,
@@ -5985,6 +6006,11 @@ fn main() {
                         rail_width: RAIL_DEFAULT_REM,
                         rail_open: true,
                         rail_focused: false,
+                        poll_tick: 0,
+                        rail_anim_live: false,
+                        chime_last: None,
+                        frame_footers: HashMap::new(),
+                        frame_tasks: HashMap::new(),
                         update_available: None,
                         update_prompt: None,
                         help_filter: None,

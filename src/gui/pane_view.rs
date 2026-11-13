@@ -223,7 +223,7 @@ impl PaneView {
                 win.composer.queue_expanded,
                 win.topic_draft.is_none(),
                 win.split_focus() == Some(session),
-                win.running_tasks_label_for(session),
+                win.frame_tasks.get(&session).cloned(),
                 win.forward_pick.is_some() && win.forward_leaf == Some(session),
             )
         };
@@ -307,7 +307,7 @@ impl PaneView {
             col = col.child(options_strip(&rows));
         }
         if let Some(label) = running {
-            col = col.child(task_strip(label));
+            col = col.child(task_strip(label.to_string()));
         }
         // The pane holding the keyboard draws the real composer; the others
         // show the draft they hold, dimmed and inert, which is the same
@@ -382,20 +382,17 @@ impl Render for PaneView {
         // they are read from it rather than guessed here.
         let (focused, footer, landing) = {
             let win = window.read(cx);
-            let leaves = win
-                .panes
-                .as_ref()
-                .map(|tree| tree.leaves())
-                .unwrap_or_default();
-            let count = leaves.len().max(1);
-            let index = leaves
-                .iter()
-                .position(|id| *id == session)
-                .map(|i| i + 1)
-                .unwrap_or(1);
+            // The footer is built once per frame for every leaf (#2899), so
+            // the pane reads the one the walk already resolved instead of
+            // taking the bridge lock again on its own draw.
+            let footer = win
+                .frame_footers
+                .get(&session)
+                .cloned()
+                .unwrap_or_else(|| SharedString::from(""));
             (
                 win.split_focus() == Some(session),
-                SharedString::from(win.pane_footer_text(session, index, count)),
+                footer,
                 // Where a dragged pane would land if released here (#2683):
                 // only the target draws a band, and only while one is in
                 // flight.

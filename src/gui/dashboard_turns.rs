@@ -836,6 +836,10 @@ impl Dashboard {
     /// the turn on Done/Failed, reload the transcript so the DB becomes the
     /// rendering.
     pub(crate) fn poll(&mut self, cx: &mut Context<Self>) {
+        // One clock for the whole tick (#2899): the checks below that cost a
+        // file read or a bridge lock answer a question a repaint asks, so they
+        // run on the repaint cadence and their answer is reused in between.
+        self.poll_tick = self.poll_tick.wrapping_add(1);
         // A click on a desktop banner posts the conversation it named (#2751).
         // Drained before the early return below, because an idle window is
         // exactly when a banner gets clicked. The app comes forward first: a
@@ -876,16 +880,23 @@ impl Dashboard {
             // and token counter advance on the same repaint. So does a rail row
             // with work in flight, and a plan waiting for approval keeps
             // pulsing its ring until the owner opens it (#2636).
+            // A rail animation is worth a repaint only while the rail is on
+            // screen (#2899): a closed rail draws no badge, no ring and no
+            // flash bar, so those would repaint the whole window, every pane's
+            // transcript with it, to change nothing the reader can see.
+            let rail_visible = self.rail_open || self.screen == Screen::Onboard;
+            // Resolved into locals first (#2899): the rail check writes the
+            // window's own fields, so the borrow the pane scan takes has to end
+            // before it runs.
+            let pane_busy = self.pane_states.values().any(|pane| pane.read(cx).busy);
+            let rail_live = self.rail_animating(cx);
             if self.turn.busy
-                || self.pane_states.values().any(|pane| pane.read(cx).busy)
-                || self
-                    .rail_activity_map(cx)
-                    .values()
-                    .any(|row| row.badge.is_some() || row.ring)
+                || pane_busy
+                || rail_live
                 // A rail flash is an animation of its own: the plan bar has to
                 // keep alternating orange and its resting colour while the
                 // window is open, and stop the moment it closes.
-                || flash_active
+                || (rail_visible && flash_active)
             {
                 // Only the spinner, the clock and the flash move in this
                 // branch, so they repaint on a slower cadence than the poll
@@ -1693,5 +1704,30 @@ impl Dashboard {
             .map(|t| (t.label, t.started.elapsed().as_secs()))
             .collect();
         opencrabs::tui::render::format_background_tasks(&tasks, opencrabs::tui::render::LABEL_CHARS)
+    }
+
+    /// Whether any rail row is animating, resolved at the repaint cadence
+    /// rather than the poll's (#2899).
+    ///
+    /// The scan walks every ordered session and each row costs a plan `stat`
+    /// and a detached-task lock, while the badge it looks for only changes
+    /// what the rail draws. The repaint it gates already runs at 5 Hz, so
+    /// asking twenty times a second bought nothing but four identical answers
+    /// and four times the file reads. The answer is cached for the ticks in
+    /// between, and a closed rail is not asked at all: it draws no badge.
+    fn rail_animating(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.rail_open && self.screen != Screen::Onboard {
+            self.rail_anim_live = false;
+            return false;
+        }
+        if !busy_repaint_due(self.poll_tick) {
+            return self.rail_anim_live;
+        }
+        let live = self
+            .rail_activity_map(cx)
+            .values()
+            .any(|row| row.badge.is_some() || row.ring);
+        self.rail_anim_live = live;
+        live
     }
 }

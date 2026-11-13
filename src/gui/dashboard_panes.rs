@@ -264,15 +264,16 @@ impl Dashboard {
     /// for it, the running task line, and the session and topic data the strip
     /// is built from. The plan file is not here; the pane re-reads it on its
     /// mtime in `sync_frame`, which is the same pass that settles this.
-    fn pane_stamp(&self, session: Uuid, width: f32, index: usize, count: usize) -> u64 {
+    fn pane_stamp(&self, session: Uuid, width: f32, count: usize) -> u64 {
         use std::hash::{Hash, Hasher};
 
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         width.to_bits().hash(&mut hasher);
         count.hash(&mut hasher);
         (self.split_focus() == Some(session)).hash(&mut hasher);
-        self.pane_footer_text(session, index, count)
-            .hash(&mut hasher);
+        // The frame's own answers (#2899): both are resolved once per frame for
+        // every leaf, so the stamp only reads what the walk already built.
+        self.frame_footers.get(&session).hash(&mut hasher);
         self.pane_drop
             .filter(|(target, _)| *target == session)
             .map(|(_, half)| (half.layout.is_stacked(), half.after))
@@ -280,7 +281,7 @@ impl Dashboard {
         self.plan_expanded.contains(&session).hash(&mut hasher);
         self.composer.queue_expanded.hash(&mut hasher);
         self.topic_draft.is_none().hash(&mut hasher);
-        self.running_tasks_label_for(session).hash(&mut hasher);
+        self.frame_tasks.get(&session).hash(&mut hasher);
         // The forward picker replaces this leaf's composer (#2827). Its query
         // and cursor are window state, so both belong in the cache key while
         // this leaf owns the picker.
@@ -906,26 +907,35 @@ impl Dashboard {
             Some(title) => SharedString::from(title),
             None => SharedString::from("Chat"),
         };
-        // Every pane carries its own status row (#2593). Resolved once here, from
-        // the pane's own session, so the draw pass walks the tree with a plain
-        // string per leaf instead of touching the bridge or the plan file.
+        // Every pane carries its own status row (#2593), resolved once per
+        // frame for EVERY leaf here (#2899): the walk stamps each pane with
+        // this text and the pane draws its own row from it, and the two used to
+        // resolve it separately, each taking the bridge lock and allocating the
+        // string. The detached-command line is resolved here too, for the same
+        // reason: it takes the background manager's lock.
         let leaves = tree.leaves();
         let count = leaves.len();
         // One owner for the keyboard, resolved the same way the drop handler
         // and the caret resolve it (#2620).
         let focus = self.split_focus();
-        // The chat leaf's status row (#2593). A split pane writes its own from
-        // the same text in its own render (#2805), so only this leaf's is
-        // built here.
         let mut footers: HashMap<Uuid, SharedString> = HashMap::new();
-        if let Some(chat) = self.chat_session
-            && let Some(i) = leaves.iter().position(|session| *session == chat)
-        {
+        let mut tasks: HashMap<Uuid, SharedString> = HashMap::new();
+        for (ix, session) in leaves.iter().enumerate() {
             footers.insert(
-                chat,
-                SharedString::from(self.pane_footer_text(chat, i + 1, count)),
+                *session,
+                SharedString::from(self.pane_footer_text(*session, ix + 1, count)),
             );
+            if let Some(label) = self.running_tasks_label_for(*session) {
+                tasks.insert(*session, SharedString::from(label));
+            }
         }
+        self.frame_footers = footers.clone();
+        self.frame_tasks = tasks;
+        // The tree is borrowed again here: the label pass above wrote the
+        // window's own fields, which the first borrow could not outlive.
+        let Some(tree) = self.panes.as_ref() else {
+            return chat;
+        };
         // Each leaf records the frame the walk is about to give it, so its own
         // transcript wraps to its width instead of the window's (#2624,
         // #2805). The width comes from the tree's shares, the same one the
@@ -935,7 +945,7 @@ impl Dashboard {
         // replays its last frame until it is notified. The stamp is everything
         // its draw reads from the window: a different one redraws the pane,
         // and a pane nobody touched costs one hash.
-        for (ix, session) in leaves.iter().enumerate() {
+        for session in leaves.iter() {
             if Some(*session) == self.chat_session {
                 continue;
             }
@@ -945,7 +955,7 @@ impl Dashboard {
             } else {
                 content
             };
-            let stamp = self.pane_stamp(*session, width, ix + 1, count);
+            let stamp = self.pane_stamp(*session, width, count);
             if let Some(pane) = self.pane_states.get(session) {
                 pane.update(cx, |pane, cx| pane.sync_frame(width, stamp, cx));
             }
