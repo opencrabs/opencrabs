@@ -281,6 +281,16 @@ impl Dashboard {
         self.composer.queue_expanded.hash(&mut hasher);
         self.topic_draft.is_none().hash(&mut hasher);
         self.running_tasks_label_for(session).hash(&mut hasher);
+        // The forward picker replaces this leaf's composer (#2827). Its query
+        // and cursor are window state, so both belong in the cache key while
+        // this leaf owns the picker.
+        let forwarding = self.forward_pick.is_some() && self.forward_leaf == Some(session);
+        forwarding.hash(&mut hasher);
+        if forwarding {
+            self.forward_query.hash(&mut hasher);
+            self.forward_cursor.hash(&mut hasher);
+            self.forward_pick.as_ref().map(Vec::len).hash(&mut hasher);
+        }
         // A queued message and an offer both draw in the pane's column, and
         // both arrive from the bridge rather than through the window's own
         // state, so the text is what the pane can be told apart by.
@@ -1056,13 +1066,13 @@ impl Dashboard {
                 // Select mode and the forward picker both stand where the
                 // composer stands (#2613, #2608): they are answers to the
                 // conversation, not a second panel, and the composer has
-                // nothing to say while either is up. Only the chat pane draws
-                // them: one selection belongs to one conversation.
+                // nothing to say while either is up. Select mode belongs to
+                // the chat; a forward opened in another leaf draws there.
                 // The picker outranks the bar: it is opened from select mode
                 // and the picks are still live under it, so the bar would
                 // otherwise keep the slot the destination is chosen in.
                 let composer: AnyElement = if focused {
-                    if is_chat && self.forward_pick.is_some() {
+                    if is_chat && self.forward_pick.is_some() && self.forward_leaf.is_none() {
                         self.forward_picker(cx)
                     } else if is_chat && self.msg_select.is_active() {
                         self.select_bar(cx)

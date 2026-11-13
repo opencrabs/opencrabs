@@ -794,7 +794,7 @@ impl Dashboard {
     /// Put a freshly read window on screen (#2826). The same fields the rail's
     /// open installs, so a re-read after a truncation leaves the window and the
     /// store saying the same thing.
-    fn install_loaded(&mut self, loaded: transcript::Loaded, cx: &mut Context<Self>) {
+    pub(crate) fn install_loaded(&mut self, loaded: transcript::Loaded, cx: &mut Context<Self>) {
         let (hidden, turns) = transcript::turns_with_origins(
             &loaded.rows,
             loaded.total,
@@ -809,7 +809,7 @@ impl Dashboard {
     }
 
     /// The same install, into the leaf that owns the conversation (#2826).
-    fn install_loaded_in_pane(
+    pub(crate) fn install_loaded_in_pane(
         &mut self,
         pane_id: Uuid,
         loaded: transcript::Loaded,

@@ -125,6 +125,8 @@ impl Dashboard {
             // A row's menu closes on Esc, exactly like the rail's (#2613).
             if self.msg_menu.is_some() && ks.key == "escape" {
                 self.msg_menu = None;
+                self.msg_menu_row = None;
+                self.msg_menu_leaf = None;
                 cx.notify();
                 return;
             }

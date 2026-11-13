@@ -211,7 +211,7 @@ impl PaneView {
         let session = self.session;
         // The window's own answers, read once, so its state is not borrowed
         // while the strips are built.
-        let (panes, expanded, queue_expanded, topic_idle, focused, running) = {
+        let (panes, expanded, queue_expanded, topic_idle, focused, running, forwarding) = {
             let win = window.read(cx);
             (
                 win.panes
@@ -224,6 +224,7 @@ impl PaneView {
                 win.split_focus() == Some(session),
                 win.running_tasks_label_for(session),
             )
+                win.forward_pick.is_some() && win.forward_leaf == Some(session),
         };
         // How much plan this pane can read (#2624): a wall of panes keeps a
         // bar, a pair keeps the running task and the next one or two. The
@@ -312,8 +313,11 @@ impl PaneView {
         // "disabled while unfocused" language the rest of the split uses. The
         // popups that hang over the input travel with it, and they read the
         // field of the pane that owns the keyboard, not the chat underneath it
-        // (#2530, #2610).
-        let composer = if focused {
+        // (#2530, #2610). A forward opened from this leaf swaps its composer
+        // for the destination picker, the same placement the chat uses.
+        let composer = if forwarding {
+            window.update(cx, |win, cx| win.forward_picker(cx))
+        } else if focused {
             let mut cell = div().flex().flex_col().flex_none().gap_2();
             let slash_popup = self.editor.read(cx).command_popup();
             let emoji_popup = self.editor.read(cx).emoji_popup();
@@ -455,6 +459,45 @@ impl Render for PaneView {
             })
             .collect();
         let body = transcript::view(
+        // One right-press handler per row, on every role (#2827): an answer
+        // can be replied to, reacted to, copied or forwarded just as the
+        // reader's own message can.
+        let message_press: HashMap<uuid::Uuid, transcript::PressHandler> = self
+            .transcript
+            .rows
+            .iter()
+            .map(|row| {
+                let id = row.id;
+                let row = row.clone();
+                let window = edit_window.clone();
+                let handler: transcript::PressHandler = std::rc::Rc::new(
+                    move |ev: &MouseDownEvent, _window: &mut Window, cx: &mut App| {
+                        cx.stop_propagation();
+                        let _ = window.update(cx, |this, cx| {
+                            this.msg_menu_open(row.clone(), Some(session), ev.position, cx);
+                        });
+                    },
+                );
+                (id, handler)
+            })
+            .collect();
+        let dismiss_window = self.window.clone();
+        let menu_dismiss: transcript::PressHandler = std::rc::Rc::new(
+            move |_ev: &MouseDownEvent, _window: &mut Window, cx: &mut App| {
+                let _ = dismiss_window.update(cx, |this, cx| {
+                    let closed_menu = this.msg_menu.take().is_some();
+                    let closed_picker = this.react_menu.take().is_some();
+                    if closed_picker {
+                        this.react_menu_at = None;
+                    }
+                    if closed_menu || closed_picker {
+                        this.msg_menu_row = None;
+                        this.msg_menu_leaf = None;
+                        cx.notify();
+                    }
+                });
+            },
+        );
             &self.transcript,
             &self.scroll,
             &self.live,
@@ -474,9 +517,8 @@ impl Render for PaneView {
                 wheel: Some(Rc::new(wheel)),
                 live_click: Some(live_click),
                 older: Some(older_click),
-                // A pane draws the chips its rows carry, read-only: the row
-                // menu lives in the window's chat, so a split pane has no
-                // toggle of its own to mint (#2825).
+                // A pane draws the chips its rows carry (#2825). The toggle
+                // is minted by the row menu, which every pane now opens.
                 reactions: self.transcript.reactions.clone(),
                 // The pencil on its own user rows (#2826).
                 edit: pane_edit,
@@ -521,6 +563,14 @@ pub(crate) struct LeafBox {
     pub(crate) title: SharedString,
     /// Whether this leaf is the window's own conversation, which is the leaf
     /// the keyboard falls back to when no pane owns it.
+                // A right press on any row of this leaf opens the same menu
+                // the window's chat opens (#2827). The row travels with the
+                // press, because the window's transcript does not hold this
+                // leaf's messages and could not look an id up in it.
+                message_press,
+                // A left press anywhere in the leaf dismisses that menu, the
+                // same rule the window's transcript applies (#2613).
+                menu_dismiss: Some(menu_dismiss),
     pub(crate) is_chat: bool,
     pub(crate) focused: bool,
     pub(crate) interactive: bool,

@@ -748,6 +748,17 @@ struct Dashboard {
     /// The row whose message menu is open (#2613). One at a time, like the
     /// rail's: opening another closes the first.
     msg_menu: Option<Uuid>,
+    /// The row that menu was opened on, captured at the press (#2827).
+    ///
+    /// The menu's actions used to read the row back out of the window's own
+    /// transcript, which meant a row living in a split leaf could not be
+    /// copied, answered or forwarded: it was never in that transcript. The
+    /// press already has the row, so it is carried instead of looked up.
+    msg_menu_row: Option<Message>,
+    /// Which leaf that row lives in (#2827). `None` is the window's own chat;
+    /// `Some` is the split leaf of that session, whose composer an answer
+    /// belongs in.
+    msg_menu_leaf: Option<Uuid>,
     /// Where that row's right press landed, in window coordinates (#2690).
     /// The card opens under the pointer instead of pinned to the row's top
     /// corner, so a long message cannot put it half a screen away.
@@ -767,6 +778,9 @@ struct Dashboard {
     /// The destination picker's query, typed into the bar itself.
     forward_query: String,
     /// The destination the picker points at, so the arrows walk it and Enter
+    /// Which leaf opened that picker (#2827). `None` is the window's chat;
+    /// `Some` puts the picker in the split leaf whose row was forwarded.
+    forward_leaf: Option<Uuid>,
     /// takes it. `None` falls back to the first match.
     forward_cursor: Option<Uuid>,
     /// The icon picked for the topic being named; None means the default (#2414).
@@ -2383,6 +2397,8 @@ impl Render for Dashboard {
                 // A press is not a pick yet, and the caret does not wait for
                 // one: whatever the release does, the keys are the composer's
                 // from the press on (#2798).
+                this.msg_menu_row = None;
+                this.msg_menu_leaf = None;
                 this.rail_hands_back();
                 cx.notify();
             });
@@ -2666,8 +2682,22 @@ impl Render for Dashboard {
             std::collections::HashMap::new();
         let mut message_press: std::collections::HashMap<Uuid, transcript::PressHandler> =
             std::collections::HashMap::new();
-        for id in &msg_order {
-            let id = *id;
+        // The row itself goes with the press (#2827), so the menu's actions
+        // read the message that was right-clicked rather than looking an id up
+        // in whatever transcript happens to be on screen by then.
+        let msg_rows: Vec<Message> = msg_order
+            .iter()
+            .filter_map(|id| {
+                self.chat_state
+                    .transcript
+                    .rows
+                    .iter()
+                    .find(|m| m.id == *id)
+                    .cloned()
+            })
+            .collect();
+        for row in msg_rows {
+            let id = row.id;
             if select_on {
                 let handler = cx.listener(move |this, ev: &ClickEvent, _window, cx| {
                     this.msg_toggle(id, ev.modifiers().shift, cx);
@@ -2676,7 +2706,7 @@ impl Render for Dashboard {
             }
             let handler = cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
                 cx.stop_propagation();
-                this.msg_menu_open(id, ev.position, cx);
+                this.msg_menu_open(row.clone(), None, ev.position, cx);
             });
             message_press.insert(id, std::rc::Rc::new(handler));
         }
@@ -2701,6 +2731,10 @@ impl Render for Dashboard {
                 this.msg_react_pick(id, picked.clone(), cx);
             });
             reaction_click.insert((id, name), std::rc::Rc::new(handler));
+                // A chip on the window's own row reacts on that row, whatever
+                // surface the last row menu happened to be opened in (#2827).
+                this.msg_menu_leaf = None;
+                this.msg_menu_row = None;
         }
         // One edit per stored user row (#2826): the button puts that row's
         // text back in the composer and arms the send that replaces it.
@@ -2737,6 +2771,8 @@ impl Render for Dashboard {
                     cx.notify();
                 }
             }));
+                    this.msg_menu_row = None;
+                    this.msg_menu_leaf = None;
         // A wheel tick over the conversation is the reader's own hand on it
         // (#2698): GPUI moves the viewport, and this only says whether the
         // follow goes with it. A tick up releases it, and the frame loop
@@ -2750,6 +2786,8 @@ impl Render for Dashboard {
                     cx.notify();
                 }
                 if this.react_menu.take().is_some() {
+                    this.msg_menu_row = None;
+                    this.msg_menu_leaf = None;
                     this.react_menu_at = None;
                     cx.notify();
                 }
@@ -4794,6 +4832,8 @@ impl Render for Dashboard {
             // the handle: a 4px column cannot track a fast drag on its own.
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _window, cx| {
                 if this.dragging_rail
+                        this.msg_menu_row = None;
+                        this.msg_menu_leaf = None;
                     && let Some((from_x, from_w)) = this.drag_from
                 {
                     let dx = f32::from(ev.position.x) - from_x;
@@ -5432,10 +5472,10 @@ impl Render for Dashboard {
         // The message menu is a window-level card too (#2690): it used to be a
         // child of its row, so a long message pushed it far from the press and
         // a split pane's frame moved it again.
-        if let Some(id) = self.msg_menu
+        if self.msg_menu.is_some()
             && let Some(at) = self.msg_menu_at
         {
-            let items = self.msg_menu_items(id, cx);
+            let items = self.msg_menu_items(cx);
             root = root.child(
                 gpui::deferred(transcript::message_menu_popover(&items, at)).with_priority(2),
             );
@@ -5862,12 +5902,15 @@ fn main() {
                         forward_cursor: None,
                         topic_draft_icon: None,
                         icon_images: HashMap::new(),
+                        msg_menu_row: None,
+                        msg_menu_leaf: None,
                         help_scroll: ScrollHandle::new(),
                         dragging_rail: false,
                         drag_from: None,
                         drag_seen: None,
                         rail_menu_at: None,
                         rail_live: HashMap::new(),
+                        forward_leaf: None,
                         rail_swipe: None,
                         rail_slide_opened: None,
                         confirm_delete: None,
@@ -9276,6 +9319,43 @@ mod gui {
     //! reach through a real window.
 
     mod tests {
+
+    /// Copy, React, Reply and Forward are resolved from the row that was
+    /// pressed, on either role and in either kind of leaf. Reply keeps the
+    /// draft intact and Forward keeps the destination picker in that leaf.
+    #[test]
+    fn every_row_menu_uses_the_pressed_row_and_leaf() {
+        let messages = include_str!("dashboard_messages.rs");
+        let menu = messages
+            .split("fn msg_menu_items(")
+            .nth(1)
+            .and_then(|rest| rest.split("/// Toggle one row").next())
+            .expect("message menu");
+        for action in ["CopyText", "React", "Reply", "Forward", "Select"] {
+            assert!(
+                menu.contains(&format!("MessageAction::{action}.label()")),
+                "{action} is not offered"
+            );
+        }
+        assert!(menu.contains("self.msg_menu_row.clone()"));
+        assert!(!menu.contains("is_answer"));
+        assert!(!menu.contains("row.role"));
+        assert!(PANE_VIEW.contains("msg_menu_open(row.clone(), Some(session)"));
+        let reply = messages
+            .split("fn reply_rows(")
+            .nth(1)
+            .and_then(|rest| rest.split("/// The composer a reply chip").next())
+            .expect("reply attachment");
+        assert!(reply.contains("editor.attach_reply(author, preview, quote, cx)"));
+        assert!(!reply.contains("restore_draft"));
+        let forward = messages
+            .split("fn forward_open(")
+            .nth(1)
+            .and_then(|rest| rest.split("/// Back out of the picker").next())
+            .expect("forward open");
+        assert!(forward.contains("self.forward_leaf = leaf"));
+        assert!(PANE_VIEW.contains("win.forward_picker(cx)"));
+    }
         use super::super::Config;
         use crate::composer_view::popup_window;
         use crate::dashboard_source::DASHBOARD;

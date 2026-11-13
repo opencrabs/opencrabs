@@ -296,12 +296,11 @@ impl Dashboard {
     /// turns, narrowed by the picker's query. A forward into the chat it came
     /// from is not a forward, so the source is never offered.
     pub(crate) fn forward_destinations(&self) -> Vec<(Uuid, String)> {
-        let source = self.forward_source();
         let query = self.forward_query.trim().to_lowercase();
-        self.sessions
-            .ordered()
-            .filter(|s| Some(s.id) != source && !self.sessions.is_closed(s.id))
-            .map(|s| (s.id, self.session_label(s.id)))
+        self.forward_source()
+            .map(|source| self.forward_destinations_from(source))
+            .unwrap_or_default()
+            .into_iter()
             .filter(|(id, label)| {
                 query.is_empty()
                     || label.to_lowercase().contains(&query)
@@ -309,19 +308,39 @@ impl Dashboard {
             })
             .collect()
     }
+    /// Every session a row from `source` could be forwarded into (#2608).
+    /// The row's own conversation is never offered: a forward into the chat
+    /// it came from is not a forward. Used by the picker, and by the menu to
+    /// decide whether Forward has anywhere to go at all.
+    fn forward_destinations_from(&self, source: Uuid) -> Vec<(Uuid, String)> {
+        self.sessions
+            .ordered()
+            .filter(|s| s.id != source && !self.sessions.is_closed(s.id))
+            .map(|s| (s.id, self.session_label(s.id)))
+            .collect()
+    }
+
 
     /// Open the message menu on a stored row (#2613), at the press that
     /// asked for it (#2690).
     pub(crate) fn msg_menu_open(
         &mut self,
-        id: Uuid,
+        row: Message,
+        leaf: Option<Uuid>,
         at: gpui::Point<gpui::Pixels>,
         cx: &mut Context<Self>,
     ) {
         // One menu at a time: the rail's open menu closes, and so does any
         // other row's.
         self.sessions.close_rail_menu();
-        self.msg_menu = Some(id);
+        self.msg_menu = Some(row.id);
+    ///
+    /// The row travels with the press (#2827): a right press in a split leaf
+    /// opens the same menu as one in the window's chat, and the actions read
+    /// the row that was pressed rather than looking it up in the window's own
+    /// transcript, where a pane's rows never were.
+        self.msg_menu_row = Some(row);
+        self.msg_menu_leaf = leaf;
         self.msg_menu_at = Some(at);
         // And the crab pack closes too (#2825): it belongs to the row whose
         // menu was open, so a new press on another row ends it.
@@ -375,8 +394,8 @@ impl Dashboard {
             this.update(cx, |this, cx| {
                 match result {
                     Ok(reacted) => {
-                        let empty = {
-                            let list = this.chat_state.transcript.reactions.entry(id).or_default();
+                        let apply = |state: &mut transcript::TranscriptState| {
+                            let list = state.reactions.entry(id).or_default();
                             if reacted {
                                 if !list.iter().any(|(known, _)| *known == name) {
                                     list.push((name.clone(), 1));
@@ -384,10 +403,23 @@ impl Dashboard {
                             } else {
                                 list.retain(|(known, _)| *known != name);
                             }
-                            list.is_empty()
+                            if list.is_empty() {
+                                state.reactions.remove(&id);
+                            }
                         };
-                        if empty {
-                            this.chat_state.transcript.reactions.remove(&id);
+        // The row the pack was opened on may live in a split leaf (#2827): its
+        // chips belong to that leaf's transcript, not the window's, or a react
+        // picked there would paint on a row that is not on screen.
+        let leaf = self.msg_menu_leaf.take();
+        self.msg_menu_row = None;
+                        match leaf.and_then(|session| this.pane_states.get(&session).cloned()) {
+                            Some(pane) => {
+                                pane.update(cx, |pane, cx| {
+                                    apply(&mut pane.transcript);
+                                    cx.notify();
+                                });
+                            }
+                            None => apply(&mut this.chat_state.transcript),
                         }
                     }
                     Err(e) => logging::info(&format!("reaction toggle failed: {e}")),
@@ -496,13 +528,10 @@ impl Dashboard {
     /// Copy one stored row's text (#2613). Selection-aware, as the issue asks:
     /// with rows picked this copies the whole selection in transcript order,
     /// and with nothing picked it copies the row the menu was opened on.
-    pub(crate) fn msg_copy(&mut self, id: Uuid, cx: &mut Context<Self>) {
+    pub(crate) fn msg_copy_row(&mut self, cx: &mut Context<Self>) {
         let texts: Vec<String> = if self.msg_select.is_empty() {
-            self.chat_state
-                .transcript
-                .rows
+            self.msg_menu_row
                 .iter()
-                .filter(|m| m.id == id)
                 .map(|m| m.content.clone())
                 .collect()
         } else {
@@ -542,20 +571,20 @@ impl Dashboard {
     /// the actions that work end to end are listed: a menu entry with nothing
     /// behind it is worse than an absent one.
     ///
-    /// The answer rows carry two more (#2827). A reader who right-presses what
-    /// the assistant said wants to quote it back or send it on; the owner's own
-    /// rows do not, because a message he already sent is not something he needs
-    /// to reply to or forward from history. That is the whole difference, and
-    /// it is read from the row's own role rather than from a flag beside it.
+    /// The menu is the same on every row (#2827). A right press on the
+    /// assistant's answer and one on the reader's own message both answer to
+    /// the same five picks, exactly as Telegram's menu does: Copy, React,
+    /// Reply, Forward, Select. There is no role gate, because quoting an
+    /// answer back, answering one's own message and sending either on are all
+    /// things a reader does.
     pub(crate) fn msg_menu_items(
         &self,
-        id: Uuid,
         cx: &mut Context<Self>,
     ) -> Vec<(String, transcript::ClickHandler)> {
         let mut items: Vec<(String, transcript::ClickHandler)> = Vec::new();
         let copy = cx.listener(move |this, _ev, _window, cx| {
             cx.stop_propagation();
-            this.msg_copy(id, cx);
+            this.msg_copy_row(cx);
         });
         items.push((MessageAction::CopyText.label().to_string(), Rc::new(copy)));
         // React opens the pack at the same point the row menu opened at
@@ -566,60 +595,32 @@ impl Dashboard {
             this.msg_react_open(id, cx);
         });
         items.push((MessageAction::React.label().to_string(), Rc::new(react)));
-        // An answer is the row these two are for (#2827): a right press on the
-        // user's own history does not offer to reply to it or forward it, which
-        // is the shorter menu he asked for. The role comes from the stored row,
-        // so a row that has no role (a live block) never reaches this builder.
-        let is_answer = self
-            .chat_state
-            .transcript
-            .rows
-            .iter()
-            .find(|m| m.id == id)
-            .is_some_and(|m| m.role != "user");
-        if is_answer {
-            let reply = cx.listener(move |this, _ev, _window, cx| {
-                cx.stop_propagation();
-                this.msg_reply_one(id, cx);
-            });
-            items.push((MessageAction::Reply.label().to_string(), Rc::new(reply)));
-            // Forward needs somewhere to go: with no other session on the rail
-            // the item would open an empty picker, so it is left out instead.
-            if !self.forward_destinations_for(id).is_empty() {
-                let forward = cx.listener(move |this, _ev, _window, cx| {
-                    cx.stop_propagation();
-                    this.msg_forward_one(id, cx);
-                });
-                items.push((MessageAction::Forward.label().to_string(), Rc::new(forward)));
-            }
-        }
-        let select = cx.listener(move |this, _ev, _window, cx| {
+        let reply = cx.listener(move |this, _ev, _window, cx| {
             cx.stop_propagation();
-            this.msg_select_row(id, cx);
+            this.msg_reply_row(cx);
         });
-        items.push((MessageAction::Select.label().to_string(), Rc::new(select)));
+        items.push((MessageAction::Reply.label().to_string(), Rc::new(reply)));
+        // Forward needs somewhere to go: with no other session on the rail
+        // the item would open an empty picker, so it is left out instead.
+        if !self.forward_destinations_from(row.session_id).is_empty() {
+            let forward = cx.listener(move |this, _ev, _window, cx| {
+                cx.stop_propagation();
+                this.msg_forward_row(cx);
+            });
+            items.push((MessageAction::Forward.label().to_string(), Rc::new(forward)));
+        }
+        // Select mode swaps the window's own composer for the selection bar,
+        // so a pick has to live in the window's transcript. A row in a split
+        // leaf is not there, and offering Select on it would open a bar that
+        // counts nothing (#2827).
+        if self.msg_menu_leaf.is_none() {
+            let select = cx.listener(move |this, _ev, _window, cx| {
+                cx.stop_propagation();
+                this.msg_select_row(id, cx);
+            });
+            items.push((MessageAction::Select.label().to_string(), Rc::new(select)));
+        }
         items
-    }
-
-    /// Whether a forward of `id` has a destination at all (#2608). The menu
-    /// asks before offering Forward, and it asks about the row's own session,
-    /// not about whatever pick happens to be open.
-    pub(crate) fn forward_destinations_for(&self, id: Uuid) -> Vec<(Uuid, String)> {
-        let Some(source) = self
-            .chat_state
-            .transcript
-            .rows
-            .iter()
-            .find(|m| m.id == id)
-            .map(|m| m.session_id)
-        else {
-            return Vec::new();
-        };
-        self.sessions
-            .ordered()
-            .filter(|s| s.id != source && !self.sessions.is_closed(s.id))
-            .map(|s| (s.id, self.session_label(s.id)))
-            .collect()
     }
 
     /// Toggle one row in select mode (#2613). A shift-click extends from the
@@ -655,31 +656,38 @@ impl Dashboard {
         cx.notify();
     }
 
-    /// Quote `rows` into the composer (#2827). The bar quotes the picks and a
-    /// row's menu quotes the one answer it was opened on; both land here so the
-    /// text, the caret and the log line cannot drift apart.
+    /// Answer `rows` from the composer (#2827). The bar quotes the picks and a
+    /// row's menu quotes the one message it was opened on; both land here so
+    /// the chip, the caret and the log line cannot drift apart.
     ///
-    /// The quote is written into the field rather than held in a slot beside
-    /// it: the reply is text the user can see, edit and send, so what the model
-    /// receives is exactly what was on screen. Whatever the field already held
-    /// keeps its place under the quote, because a reply is an addition to that
-    /// message and not a replacement for it.
-    fn reply_rows(&mut self, rows: Vec<Message>, cx: &mut Context<Self>) {
+    /// The quote rides as a chip above the field, the way Telegram draws a
+    /// reply: a teal bar, "Reply to" and the author, one line of the message
+    /// and a cross that drops it. The field is left alone, so whatever was
+    /// already typed is still there and only the reply itself needs writing.
+    /// On send the quote goes out ahead of the message, which keeps the model
+    /// reading the same words the reader saw quoted.
+    fn reply_rows(&mut self, rows: Vec<Message>, leaf: Option<Uuid>, cx: &mut Context<Self>) {
         if rows.is_empty() {
             return;
         }
         let quote = transcript::quote_prefix(&rows);
-        let editor = self.composer.editor.clone();
-        let existing = editor.read(cx).draft();
-        let text = if existing.text.trim().is_empty() {
-            format!("{quote}\n")
-        } else {
-            format!("{quote}\n{}", existing.text)
-        };
-        editor.update(cx, |editor, cx| editor.restore_draft(text, cx));
+        let (author, preview) = reply_label(&rows);
+        let editor = self.composer_for(leaf, cx);
+        editor.update(cx, |editor, cx| {
+            editor.attach_reply(author, preview, quote, cx);
+        });
         self.msg_menu = None;
-        // The caret goes to the field being written: the user asked to reply,
-        // so the next keystroke is the reply.
+        self.msg_menu_row = None;
+        self.msg_menu_leaf = None;
+        // The caret goes to the field the reply will be sent from: the user
+        // asked to reply, so the next keystroke is the reply. In a split leaf
+        // that is the leaf's own composer, never the window's.
+        self.msg_menu_row = None;
+        self.msg_menu_leaf = None;
+        if let Some(session) = leaf {
+            self.pane_focus = Some(session);
+            self.sync_composer_session();
+        }
         self.refocus_screen();
         logging::info(&format!("reply quoting {} row(s)", rows.len()));
         cx.notify();
@@ -693,23 +701,16 @@ impl Dashboard {
             return;
         }
         self.msg_select.cancel();
-        self.reply_rows(rows, cx);
+        self.reply_rows(rows, None, cx);
     }
 
-    /// Quote one answer into the composer (#2827): the row menu's Reply, which
-    /// is only offered on the assistant's rows. Select mode is left alone here,
-    /// because this press came from the menu and not from a pick the bar is
-    /// counting.
-    pub(crate) fn msg_reply_one(&mut self, id: Uuid, cx: &mut Context<Self>) {
-        let rows: Vec<Message> = self
-            .chat_state
-            .transcript
-            .rows
-            .iter()
-            .filter(|m| m.id == id)
-            .cloned()
-            .collect();
-        self.reply_rows(rows, cx);
+    /// Answer the row the menu was opened on (#2827), whichever role it has.
+    /// Select mode is left alone here, because this press came from the menu
+    /// and not from a pick the bar is counting.
+    pub(crate) fn msg_reply_row(&mut self, cx: &mut Context<Self>) {
+        let leaf = self.msg_menu_leaf;
+        let rows: Vec<Message> = self.msg_menu_row.iter().cloned().collect();
+        self.reply_rows(rows, leaf, cx);
     }
 
     /// The rows the current picks stand for, in transcript order (#2608).
@@ -724,6 +725,10 @@ impl Dashboard {
                 self.chat_state
                     .transcript
                     .rows
+        let Some(row) = self.msg_menu_row.clone() else {
+            return Vec::new();
+        };
+        let id = row.id;
                     .iter()
                     .find(|m| m.id == id)
                     .cloned()
@@ -731,34 +736,35 @@ impl Dashboard {
             .collect()
     }
 
-    /// "Forward" on a single answer: pick it and go straight to the
-    /// destination picker, so one message does not need select mode first
-    /// (#2613). The row menu offers this only on the assistant's rows (#2827).
-    pub(crate) fn msg_forward_one(&mut self, id: Uuid, cx: &mut Context<Self>) {
+    /// "Forward" on the row the menu was opened on: pick it and go straight
+    /// to the destination picker, so one message does not need select mode
+    /// first (#2613). Offered on every row, the reader's included (#2827).
+    pub(crate) fn msg_forward_row(&mut self, cx: &mut Context<Self>) {
         // A single-row forward never enters select mode: there is nothing to
         // count, so the bar would be a step with one option.
-        let rows: Vec<Message> = self
-            .chat_state
-            .transcript
-            .rows
-            .iter()
-            .filter(|m| m.id == id)
-            .cloned()
-            .collect();
+        let rows: Vec<Message> = self.msg_menu_row.iter().cloned().collect();
+        let leaf = self.msg_menu_leaf;
         self.msg_menu = None;
-        self.forward_open(rows, cx);
+        self.msg_menu_row = None;
+        self.msg_menu_leaf = None;
+        self.forward_open(rows, leaf, cx);
     }
 
     /// Forward the picks: open the destination picker, or say why it cannot
     /// open (#2608).
     pub(crate) fn msg_forward_begin(&mut self, cx: &mut Context<Self>) {
         let rows = self.msg_picked_rows();
-        self.forward_open(rows, cx);
+        self.forward_open(rows, None, cx);
     }
 
-    /// Hand the rows to the picker. The composer is swapped for it, so the
-    /// destination is chosen where a message would have been typed.
-    pub(crate) fn forward_open(&mut self, rows: Vec<Message>, cx: &mut Context<Self>) {
+    /// Hand the rows to the picker. The source leaf's composer is swapped for
+    /// it, so the destination is chosen beside the message being forwarded.
+    pub(crate) fn forward_open(
+        &mut self,
+        rows: Vec<Message>,
+        leaf: Option<Uuid>,
+        cx: &mut Context<Self>,
+    ) {
         if rows.is_empty() {
             return;
         }
@@ -814,6 +820,18 @@ impl Dashboard {
             return;
         };
         self.forward_into(target, cx);
+    /// The composer a reply chip belongs on: the pressed row's own surface
+    /// (#2827). A row in a split leaf is answered from that leaf's field, and
+    /// a row in the window's chat from the window's.
+    fn composer_for(&self, leaf: Option<Uuid>, cx: &Context<Self>) -> Entity<editor::Editor> {
+        leaf.and_then(|session| {
+            self.pane_states
+                .get(&session)
+                .map(|pane| pane.read(cx).editor.clone())
+        })
+        .unwrap_or_else(|| self.composer.editor.clone())
+    }
+
     }
 
     /// Copy the picked rows into `target`. The write runs off the UI thread;
@@ -837,16 +855,26 @@ impl Dashboard {
         self.msg_select.cancel();
         self.msg_menu = None;
         cx.spawn(async move |this, cx| {
-            let result = transcript::forward_rows(db_path, rows, target, label).await;
+            let result = transcript::forward_rows(db_path.clone(), rows, target, label).await;
+            // A destination already on screen shows the forwarded rows now,
+            // whether it is the window's chat or another split leaf (#2827).
+            let loaded = match &result {
+                Ok(_) => Some(transcript::load_recent(db_path, target).await),
+                Err(_) => None,
+            };
             this.update(cx, |this, cx| {
                 match result {
                     Ok(landed) => {
-                        // A forward into the chat on screen has to show up:
-                        // the rows are written, so a reload finds them. Any
-                        // other destination is announced only, because the
-                        // window runs one conversation at a time.
                         if this.chat_state.session() == Some(target) {
-                            this.reload_transcript(target, cx);
+                            if let Some(Ok(loaded)) = loaded {
+                                this.install_loaded(loaded, cx);
+                            } else {
+                                this.reload_transcript(target, cx);
+                            }
+                        } else if this.pane_states.contains_key(&target) {
+                            if let Some(Ok(loaded)) = loaded {
+                                this.install_loaded_in_pane(target, loaded, cx);
+                            }
                         }
                         logging::info(&format!("forward: {landed} row(s) into {target}"));
                     }
@@ -882,10 +910,16 @@ impl Dashboard {
             .turn
             .settle
             .deadline
+        self.forward_leaf = leaf;
             .get_or_insert_with(|| std::time::Instant::now() + SETTLE_BUDGET);
         cx.spawn(async move |this, cx| {
             let result = transcript::load_recent(db_path, sid).await;
             this.update(cx, |this, cx| {
+        if let Some(session) = leaf {
+            self.pane_focus = Some(session);
+            self.sync_composer_session();
+            self.refocus_screen();
+        }
                 if this.chat_state.session() != Some(sid) {
                     return;
                 }
@@ -898,6 +932,7 @@ impl Dashboard {
                             &loaded.origins,
                         );
                         let landed = settle_landed(expect, loaded.total);
+        self.forward_leaf = None;
                         // Taken before `rows` is moved out below: every retry
                         // log names the row total it was comparing against.
                         let total = loaded.total;
@@ -958,6 +993,7 @@ impl Dashboard {
                             ));
                             this.reload_transcript(sid, cx);
                         } else if this.turn.settle.rechecks < SETTLE_RECHECKS {
+        self.forward_leaf = None;
                             // The budget ran out, but the payload is usually
                             // written by now and only this read missed it. One
                             // more look after a pause turns a permanently
@@ -1051,4 +1087,29 @@ impl Dashboard {
         }
         turns
     }
+}
+
+/// The chip's "Reply to {author}" and its one-line preview (#2827).
+///
+/// One row names its author the way the transcript does; a run of rows says
+/// how many there are, because quoting three messages under one author's name
+/// would misread who said the rest.
+fn reply_label(rows: &[Message]) -> (String, String) {
+    let Some(row) = rows.first() else {
+        return (String::new(), String::new());
+    };
+    let author = if row.role == "user" { "You" } else { "Crab" }.to_string();
+    if rows.len() > 1 {
+        return (author, format!("{} messages", rows.len()));
+    }
+    let preview: String = row
+        .content
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("")
+        .chars()
+        .take(120)
+        .collect();
+    (author, preview)
 }

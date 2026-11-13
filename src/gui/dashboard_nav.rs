@@ -206,10 +206,13 @@ impl Dashboard {
         // either across a conversation switch would act on another chat's
         // messages, so both are dropped here with the rows (#2613, #2608).
         self.msg_menu = None;
+        self.msg_menu_row = None;
+        self.msg_menu_leaf = None;
         self.msg_select.cancel();
         self.forward_pick = None;
         self.forward_query.clear();
         self.forward_cursor = None;
+        self.forward_leaf = None;
     }
 
     /// Keep the chat transcript on its newest row (#2685).
