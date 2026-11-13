@@ -59,6 +59,7 @@ impl Dashboard {
             commands::GuiAction::OpenSessions => self.toggle_rail(cx),
             commands::GuiAction::OpenModels => self.open_models(arg, session, cx),
             commands::GuiAction::OpenSkills => self.open_skills(cx),
+            commands::GuiAction::OpenProjects => self.open_projects(cx),
             commands::GuiAction::OpenOnboard(name) => self.open_onboard(name, arg, cx),
             commands::GuiAction::Text(command) => self.run_text_command(command, arg, session, cx),
             commands::GuiAction::Quit => cx.quit(),

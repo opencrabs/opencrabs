@@ -1460,6 +1460,28 @@ impl App {
         Ok(())
     }
 
+    /// Open the project organizer through the same loader as the sessions key.
+    pub(crate) async fn open_projects_view(&mut self) -> Result<()> {
+        match self.project_service.list_projects().await {
+            Ok(projects) => {
+                self.project_name_cache = projects.iter().map(|p| (p.id, p.name.clone())).collect();
+                self.projects = projects;
+                self.selected_project_index = 0;
+                self.project_detail_view = false;
+                self.project_sessions.clear();
+                self.selected_project_session_index = 0;
+                self.project_name_input.clear();
+                self.project_name_input_active = false;
+                self.switch_mode(AppMode::Projects).await?;
+            }
+            Err(e) => {
+                self.notification = Some(format!("Failed to load projects: {e}"));
+                self.notification_shown_at = Some(std::time::Instant::now());
+            }
+        }
+        Ok(())
+    }
+
     /// Handle slash commands locally (returns true if handled)
     pub(crate) async fn handle_slash_command(&mut self, input: &str) -> bool {
         let cmd = input.split_whitespace().next().unwrap_or("");
@@ -2082,6 +2104,12 @@ impl App {
             }
             "/skills" => {
                 crate::tui::app::skills_dialog::actions::open(self);
+                true
+            }
+            "/projects" => {
+                if let Err(e) = self.open_projects_view().await {
+                    tracing::warn!("Failed to open projects screen: {e}");
+                }
                 true
             }
             "/profiles" => {

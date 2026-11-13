@@ -13,6 +13,7 @@ use crate::tests::gui_dashboard_source::DASHBOARD;
 const GUI_MAIN: &str = include_str!("../gui/main.rs");
 /// The key handler moved into a module of its own (#2822).
 const DASHBOARD_KEYS: &str = include_str!("../gui/dashboard_keys.rs");
+const SCREEN_KEYS: &str = include_str!("../gui/screen_keys.rs");
 
 /// The key handler, from its opening to the next method in its module (#2822).
 fn on_key() -> &'static str {
@@ -68,18 +69,26 @@ fn the_rail_spends_its_bare_letters_on_the_find_field() {
 }
 
 #[test]
-fn p_stays_unbound_until_the_window_has_a_projects_screen() {
-    // The terminal's p walks to Projects. The window has no projects screen at
-    // all (#2669), so binding p here would be a key that does nothing. The arm
-    // arrives with the screen, and the help row below already spells it None
-    // so the window's help stays honest in the meantime.
+fn alt_p_opens_projects_while_bare_p_still_searches() {
     assert!(
         !on_key().contains("\"p\" if self.rail_focused => {"),
-        "p is not claimed until the window can act on it"
+        "printable p still belongs to rail search (#2812)"
     );
     assert!(
-        on_key().contains("_ => {}"),
-        "the rail still falls through to the rest of the handler"
+        SCREEN_KEYS.contains(
+            "if mods.alt && !mods.control && !mods.shift && !mods.platform && key == \"p\""
+        ),
+        "alt+p is a distinct screen chord"
+    );
+    assert!(SCREEN_KEYS.contains("Screen::Projects => ScreenAction::LeaveProjects"));
+    assert!(SCREEN_KEYS.contains("_ => ScreenAction::EnterProjects"));
+    assert!(DASHBOARD.contains("ScreenAction::EnterProjects => self.open_projects(cx)"));
+    assert!(DASHBOARD.contains("ScreenAction::LeaveProjects => self.close_projects(cx)"));
+    assert!(
+        on_key().contains(
+            "ev.keystroke.modifiers.control && ev.keystroke.modifiers.shift && ev.keystroke.key == \"p\""
+        ),
+        "ctrl+shift+p remains the pin chord"
     );
 }
 
@@ -144,13 +153,14 @@ fn the_window_help_marks_the_session_letters_terminal_only() {
         !gui.contains(&"z"),
         "the window's help lists no z: the fold tree is gone (#2701)"
     );
+    let projects = sessions
+        .iter()
+        .find(|row| row.neutral == "p")
+        .expect("the shared Help table keeps the Projects row");
+    assert_eq!(projects.tui, Some("P"));
+    assert_eq!(projects.gui, Some("alt-p"));
     assert!(
-        !gui.contains(&"p"),
-        "p is not offered by the window's help while the key is unbound"
-    );
-    // The section still describes the same set the terminal documents.
-    assert!(
-        sessions.iter().any(|r| r.neutral == "p"),
-        "the terminal still documents p for its Projects screen"
+        gui.contains(&"p"),
+        "the window's Help lists Projects through alt+p"
     );
 }

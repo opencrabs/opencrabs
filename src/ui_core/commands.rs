@@ -36,6 +36,10 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         description: "List all sessions",
     },
     SlashCommand {
+        name: "/projects",
+        description: "Browse projects and their sessions",
+    },
+    SlashCommand {
         name: "/compact",
         description: "Compact context now",
     },
@@ -185,6 +189,7 @@ pub const GUI_SUPPORTED: &[&str] = &[
     "/new",
     "/stop",
     "/sessions",
+    "/projects",
     "/mission-control",
     "/models",
     "/skills",

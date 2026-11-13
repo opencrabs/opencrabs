@@ -463,6 +463,7 @@ impl Dashboard {
             find::Surface::Sessions => self.toggle_rail(cx),
             find::Surface::Help => self.toggle_help(cx),
             find::Surface::Skills => self.open_skills(cx),
+            find::Surface::Projects => self.open_projects(cx),
             // `/profiles` is a text command now (#2469): the palette row takes
             // the same door as typing it, never the model.
             find::Surface::Profiles => {
@@ -514,6 +515,8 @@ impl Dashboard {
         match action {
             ScreenAction::EnterUsage | ScreenAction::LeaveUsage => self.toggle_usage(cx),
             ScreenAction::EnterFiles | ScreenAction::LeaveFiles => self.toggle_files(cx),
+            ScreenAction::EnterProjects => self.open_projects(cx),
+            ScreenAction::LeaveProjects => self.close_projects(cx),
             ScreenAction::LeaveMissionControl => self.close_mission_control(cx),
             ScreenAction::ToggleHelp => self.toggle_help(cx),
         }

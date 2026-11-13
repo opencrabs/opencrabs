@@ -22,6 +22,10 @@ pub enum ScreenAction {
     EnterFiles,
     /// ctrl+g or esc while the files list is showing.
     LeaveFiles,
+    /// alt+p opens the project organizer without taking a printable rail key.
+    EnterProjects,
+    /// alt+p while the organizer is showing returns to the conversation.
+    LeaveProjects,
     /// esc while Mission Control is showing.
     LeaveMissionControl,
     /// ctrl+h, or Cmd+? on a Mac.
@@ -46,6 +50,7 @@ pub struct ChordMods {
     pub shift: bool,
     /// The command key on macOS, the "platform" modifier in gpui.
     pub platform: bool,
+    pub alt: bool,
 }
 
 /// The action a key takes on the screen showing now, or `None` when the key
@@ -63,9 +68,16 @@ pub fn screen_chord(key: &str, mods: ChordMods, screen: Screen) -> Option<Screen
             Screen::Chat
             | Screen::Models
             | Screen::Skills
+            | Screen::Projects
             | Screen::Onboard
             | Screen::DirectoryPicker => None,
         };
+    }
+    if mods.alt && !mods.control && !mods.shift && !mods.platform && key == "p" {
+        return Some(match screen {
+            Screen::Projects => ScreenAction::LeaveProjects,
+            _ => ScreenAction::EnterProjects,
+        });
     }
     // ctrl+shift+u, not ctrl+u: plain ctrl+u is delete-to-line-start in the
     // composer, the TUI's binding (#2430).
@@ -168,17 +180,20 @@ mod tests {
         control: false,
         shift: false,
         platform: false,
+        alt: false,
     };
     const CTRL_SHIFT: ChordMods = ChordMods {
         control: true,
         shift: true,
         platform: false,
+        alt: false,
     };
 
     const CTRL: ChordMods = ChordMods {
         control: true,
         shift: false,
         platform: false,
+        alt: false,
     };
 
     #[test]
@@ -262,6 +277,7 @@ mod tests {
             control: false,
             shift: true,
             platform: true,
+            alt: false,
         };
         assert_eq!(
             screen_chord("/", cmd, Screen::Usage),

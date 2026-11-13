@@ -3005,25 +3005,8 @@ impl App {
         } else if (event.code == KeyCode::Char('p') || event.code == KeyCode::Char('P'))
             && event.modifiers.is_empty()
         {
-            // Open projects browser
-            match self.project_service.list_projects().await {
-                Ok(projects) => {
-                    self.project_name_cache =
-                        projects.iter().map(|p| (p.id, p.name.clone())).collect();
-                    self.projects = projects;
-                    self.selected_project_index = 0;
-                    self.project_detail_view = false;
-                    self.project_sessions.clear();
-                    self.selected_project_session_index = 0;
-                    self.project_name_input.clear();
-                    self.project_name_input_active = false;
-                    self.switch_mode(AppMode::Projects).await?;
-                }
-                Err(e) => {
-                    self.notification = Some(format!("Failed to load projects: {e}"));
-                    self.notification_shown_at = Some(std::time::Instant::now());
-                }
-            }
+            // Open projects browser through the same path as /projects.
+            self.open_projects_view().await?;
         } else if (event.code == KeyCode::Char('s') || event.code == KeyCode::Char('S'))
             && event.modifiers.is_empty()
         {

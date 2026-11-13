@@ -151,6 +151,7 @@ impl Dashboard {
             control: m.control,
             shift: m.shift,
             platform: m.platform,
+            alt: m.alt,
         };
         // A transcript selection survives mouse release so the keyboard can
         // copy it too (#2529). A composer selection keeps its own GPUI copy
@@ -509,6 +510,12 @@ impl Dashboard {
                 cx.notify();
                 return;
             }
+            // Projects backs out of its innermost surface first: name input,
+            // assignment, detail, then the screen itself.
+            if self.screen == Screen::Projects {
+                self.projects_escape(cx);
+                return;
+            }
             // The usage ledger and the files list are full screens, so Esc
             // leaves them the same way their own chords do. It sits before
             // the turn gate: a running turn must not hold a screen open.
@@ -856,6 +863,11 @@ impl Dashboard {
         if self.screen == Screen::Models {
             self.shared_models_key(ev, false, cx);
             cx.notify();
+            return;
+        }
+        // Projects owns its list, detail, assignment and name-input keys.
+        if self.screen == Screen::Projects {
+            self.projects_key(ev, cx);
             return;
         }
         // The skills screen is a list too: arrows walk it and Enter runs the

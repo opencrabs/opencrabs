@@ -754,12 +754,12 @@ Code blocks are the exception that needs its own key. They draw in a monospaced 
 
 #### Every command answers on the window
 
-The window runs the terminal's whole slash-command surface, not a subset. All 33 commands in the [Chat Mode](#chat-mode) table answer here, and two tests hold the line: `no_command_is_left_without_a_screen` walks every name the terminal offers and fails the build if one lands on "no screen for it", and `support_separates_missing_from_unknown` fails if a name is neither answered nor recognised. A command that owns a screen opens it full width, `esc` goes back to the chat. The rest answer in the transcript through the engine's own entry point, so a plan approved on the window is the same plan object the terminal approves, and `/cd` moves this session's directory through the same shared applier the terminal calls, never another session's.
+The window runs the terminal's whole slash-command surface, not a subset. All 34 commands in the [Chat Mode](#chat-mode) table answer here, and two tests hold the line: `no_command_is_left_without_a_screen` walks every name the terminal offers and fails the build if one lands on "no screen for it", and `support_separates_missing_from_unknown` fails if a name is neither answered nor recognised. A command that owns a screen opens it full width, `esc` goes back to the chat. The rest answer in the transcript through the engine's own entry point, so a plan approved on the window is the same plan object the terminal approves, and `/cd` moves this session's directory through the same shared applier the terminal calls, never another session's.
 
 | Where it answers | Commands | What you get |
 |------------------|----------|--------------|
 | Centered modal | `/theme` | four preview cards over the conversation; a pick saves at once |
-| Full-window screen | `/usage` `/models` `/sessions` `/skills` `/mission-control` `/onboard` | the screen itself |
+| Full-window screen | `/usage` `/models` `/sessions` `/projects` `/skills` `/mission-control` `/onboard` | the screen itself |
 | Setup wizard, opened at its step | `/workspace` `/channels` `/voice` `/image` `/daemon` `/brain` `/doctor` | the same steps and the same writes as the terminal |
 | One line in the transcript | `/compact` `/clear` `/rtk` `/plan` `/show-plan` `/execute` `/discard` `/approve` `/cd` `/goal` `/profiles` `/restart` `/whisper` `/cowork` | what happened, in words; no model turn is spent |
 | Chat control | `/new` `/stop` `/help` `/evolve` `/exit` | a new conversation, an aborted turn, the key list, the update, quit |
@@ -771,6 +771,10 @@ The window runs the terminal's whole slash-command surface, not a subset. All 33
 #### Skills screen
 
 `/skills` (or the palette) lists every skill the terminal can invoke, from the same loader, with its source tag and an amber **review gate** mark on the skills that ask for approval. Typing filters on name or description, the same way the terminal's picker does; `↑`/`↓` move the highlight, `enter` runs the selected skill by sending its prompt body as your next message, and `esc` goes back. A skill started on the window is the same turn the terminal would start.
+
+#### Projects screen
+
+`/projects` opens the project organizer on both clients, and Seeker lists the same destination. The terminal also opens it with `P` in the sessions list; the window uses `alt+p`, leaving bare `p` available for rail search and `ctrl+shift+p` for pinning. Projects and their session and file counts come from the shared project service. You can create or delete a project, assign or unassign sessions, and open a session from its project. Deletion asks for confirmation and leaves its sessions unassigned. On the window, `esc` closes the create or delete prompt first, then returns from assignment or project details before leaving the screen.
 
 #### Seeker
 
@@ -4162,6 +4166,7 @@ Every slash command in this table also runs on the built-in GUI window, which op
 | `/brain` | Brain/persona setup |
 | `/doctor` | Run connection health check |
 | `/sessions` | Open session manager |
+| `/projects` | Browse projects, create or delete them, and assign sessions |
 | `/sessions:<query>` | Filter sessions by name (Telegram/Discord/Slack) |
 | `/approve` | Tool approval policy selector (approve-only / session / yolo) |
 | `/compact` | Compact context (summarize + trim for long sessions) |
@@ -4222,10 +4227,14 @@ A session is one to three rows. Under the name line, a session with a live plan 
 | `c` | Close or reopen the selected topic |
 | `z` | Fold or unfold the selected session's topic tree |
 | `F` | Browse session file artifacts |
-| `P` | Projects (coming soon) |
+| `P` | Open the project organizer |
 | `Esc` | Back to chat |
 
 ### Projects & File Artifacts
+
+Open the project organizer with `/projects` on either interface. In the terminal, `P` opens it from Sessions Mode. In the GUI, `Alt+P` toggles it, and both Help and Seeker list it.
+
+The organizer shows projects with their session and file counts. Enter opens a project and its sessions. `n` creates a project, `d` deletes one after confirmation, `a` assigns a session, and `u` removes a session from its project. Deleting a project leaves its sessions available as unassigned.
 
 OpenCrabs automatically tracks files created or edited during your sessions. No manual setup needed: every `write_file`, `edit_file`, and `hashline_edit` call logs the path to the session's file list. Clipboard paste images are tracked too.
 

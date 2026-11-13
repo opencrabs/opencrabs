@@ -40,6 +40,7 @@ mod dashboard_messages;
 mod dashboard_models;
 mod dashboard_nav;
 mod dashboard_panes;
+mod dashboard_projects;
 mod dashboard_rail;
 mod dashboard_screens;
 mod dashboard_sessions;
@@ -68,6 +69,9 @@ mod pane_view;
 mod plan_strip;
 mod platform_icons;
 mod preview;
+mod projects;
+mod projects_screen;
+mod projects_view;
 mod rail_activity;
 mod screen_keys;
 mod sessions;
@@ -192,6 +196,8 @@ enum Screen {
     /// The skills list: every skill the terminal can invoke, from the same
     /// loader, runnable from the window (#2466).
     Skills,
+    /// The terminal's project organizer, backed by the same service (#2669).
+    Projects,
     /// The /cd directory picker (#2527): the terminal's own dialog, so a
     /// bare `/cd` opens a screen instead of answering with a text reply
     /// that also lights the thinking spinner.
@@ -921,6 +927,8 @@ struct Dashboard {
     skills_rows: Vec<opencrabs::brain::skills::Skill>,
     skills_query: String,
     skills_index: usize,
+    /// Project rows and navigation, loaded by the shared service on demand.
+    projects: projects::ProjectsState,
     /// The onboarding wizard while its screen is open. Built on first open:
     /// constructing it reads the live config, which is not something to do on
     /// every window start when most sessions never onboard.
@@ -2552,6 +2560,7 @@ impl Render for Dashboard {
             Screen::Files => "OpenCrabs \u{b7} files".to_string(),
             Screen::Models => "OpenCrabs \u{b7} models".to_string(),
             Screen::Skills => "OpenCrabs \u{b7} skills".to_string(),
+            Screen::Projects => "OpenCrabs \u{b7} projects".to_string(),
             Screen::DirectoryPicker => "OpenCrabs \u{b7} directory".to_string(),
             Screen::Onboard => "OpenCrabs \u{b7} onboarding".to_string(),
             Screen::MissionControl => "OpenCrabs \u{b7} mission control".to_string(),
@@ -3125,6 +3134,7 @@ impl Render for Dashboard {
                     );
                 (scroller.into_any_element(), footer.into_any_element())
             }
+            Screen::Projects => self.projects_screen(cx),
             Screen::MissionControl => {
                 let shown = palette::current();
                 // The cards reflow with the width the pane actually has, read
@@ -4732,6 +4742,7 @@ impl Render for Dashboard {
             Screen::Files => right.child(footer),
             Screen::Models => right.child(footer),
             Screen::Skills => right.child(footer),
+            Screen::Projects => right.child(footer),
             Screen::DirectoryPicker => right.child(footer),
             Screen::Onboard => right.child(footer),
             Screen::MissionControl => right.child(footer),
@@ -5914,6 +5925,7 @@ fn main() {
                         skills_rows: Vec::new(),
                         skills_query: String::new(),
                         skills_index: 0,
+                        projects: projects::ProjectsState::default(),
                         onboard: None,
                         plan: plan_strip::PlanStripState::default(),
                         plan_for: None,
@@ -8404,10 +8416,9 @@ mod tests {
         // them: each one appears exactly once, under SESSIONS, with a
         // window chord (#2355). ctrl+u is absent on purpose: the usage
         // ledger already documents it once, in GLOBAL. ctrl+s likewise:
-        // GLOBAL's "List sessions" row is that command. p and z are absent on
-        // purpose: the window has no projects screen (#2669) and answers no z
-        // since the fold tree became chips (#2701), so neither advertises a
-        // window chord.
+        // GLOBAL's "List sessions" row is that command. Projects uses alt+p
+        // so the rail can keep bare p for its filter (#2669, #2812). z stays
+        // absent since the fold tree became chips (#2701).
         let wanted = [
             ("up/down", "Move the highlight in the list"),
             ("enter", "Open the highlighted session"),
@@ -8415,6 +8426,7 @@ mod tests {
             ("ctrl+shift+p", "Pin the selected session"),
             ("ctrl+d", "Delete session (asks first)"),
             ("ctrl+g", "Session files"),
+            ("p", "Browse projects"),
             ("esc", "Cancel or step back"),
         ];
         let sessions: Vec<_> = help_keys::section_rows(HelpSection::Sessions).collect();
@@ -8432,6 +8444,7 @@ mod tests {
                     "ctrl+d" => "ctrl-d",
                     "ctrl+s" => "ctrl-s",
                     "ctrl+g" => "ctrl-g",
+                    "p" => "alt-p",
                     _ => chord,
                 }),
                 "{chord} must carry the window's spelling"

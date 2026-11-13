@@ -18,6 +18,8 @@ pub const DASHBOARD: &str = concat!(
     include_str!("dashboard_models.rs"),
     include_str!("dashboard_nav.rs"),
     include_str!("dashboard_panes.rs"),
+    include_str!("dashboard_projects.rs"),
+    include_str!("projects_screen.rs"),
     include_str!("dashboard_rail.rs"),
     include_str!("dashboard_screens.rs"),
     include_str!("dashboard_sessions.rs"),

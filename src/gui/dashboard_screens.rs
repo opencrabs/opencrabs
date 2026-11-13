@@ -35,6 +35,7 @@ impl Dashboard {
             // The skills list is a full screen too: ctrl+shift+u leaves it for
             // the ledger, the same as any other screen.
             Screen::Skills => self.screen = Screen::Usage,
+            Screen::Projects => self.screen = Screen::Usage,
             // The picker is transient: the chord just closes it, the way Esc
             // does, instead of hopping to the ledger.
             Screen::DirectoryPicker => self.screen = Screen::Chat,

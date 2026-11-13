@@ -380,6 +380,7 @@ pub mod gui_message_reaction_2825_test;
 pub mod gui_message_select_2613_test;
 pub mod gui_overlay_layer_test;
 pub mod gui_panes_follow_test;
+pub mod gui_projects_screen_test;
 pub mod gui_rail_last_activity_test;
 pub mod gui_rail_letters_test;
 pub mod gui_reply_quote_2827_test;

@@ -422,7 +422,13 @@ pub const ROWS: &[HelpRow] = &[
         None,
         "Rename the selected session",
     ),
-    row(HelpSection::Sessions, "p", "P", None, "Browse projects"),
+    row(
+        HelpSection::Sessions,
+        "p",
+        "P",
+        Some("alt-p"),
+        "Browse projects",
+    ),
     row(
         HelpSection::Sessions,
         "esc",
@@ -722,10 +728,14 @@ mod tests {
         // The window scales its own rem (#2425) and the terminal has no say.
         assert!(gui.iter().any(|item| item.title.contains("Zoom")));
         assert!(!tui.iter().any(|item| item.title.contains("Zoom")));
-        // The window has no projects screen yet, so `p` stays terminal only
-        // until #2669 gives it one. Flip this assertion with that landing.
+        // Both clients open projects. The window uses alt+p so bare p remains
+        // a printable character in its rail filter (#2669, #2812).
         assert!(tui.iter().any(|item| item.title.contains("projects")));
-        assert!(!gui.iter().any(|item| item.title.contains("projects")));
+        let projects = gui
+            .iter()
+            .find(|item| item.title.contains("projects"))
+            .expect("window projects help row");
+        assert!(projects.subtitle.ends_with("(alt-p)"));
 
         let terminal_help = tui
             .iter()

@@ -44,6 +44,8 @@ pub enum GuiAction {
     OpenModels,
     /// The skills list: every skill the terminal can invoke (#2466).
     OpenSkills,
+    /// The project organizer and its sessions (#2669).
+    OpenProjects,
     /// The onboarding wizard, opened at the step this command names
     /// (`/channels`, `/voice`, `/daemon`, ...). The name travels with the
     /// action so each door lands on its own step and no two share an arm.
@@ -141,6 +143,7 @@ fn action_for(name: &str) -> Option<GuiAction> {
         "/sessions" => GuiAction::OpenSessions,
         "/models" => GuiAction::OpenModels,
         "/skills" => GuiAction::OpenSkills,
+        "/projects" => GuiAction::OpenProjects,
         "/mission-control" => GuiAction::OpenMissionControl,
         "/onboard" => GuiAction::OpenOnboard("/onboard"),
         // The workspace step exists in the wizard already; the window just
@@ -391,6 +394,7 @@ mod tests {
             GuiAction::OpenSessions => "OpenSessions",
             GuiAction::OpenModels => "OpenModels",
             GuiAction::OpenSkills => "OpenSkills",
+            GuiAction::OpenProjects => "OpenProjects",
             GuiAction::OpenOnboard(_) => "OpenOnboard",
             GuiAction::Quit => "Quit",
             GuiAction::Text(_) => "Text",
@@ -414,6 +418,7 @@ mod tests {
         "OpenSessions",
         "OpenModels",
         "OpenSkills",
+        "OpenProjects",
         "OpenOnboard",
         "Quit",
         "Text",

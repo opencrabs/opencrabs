@@ -1,7 +1,7 @@
 //! The window's dashboard source, wherever the split left it (#2822).
 //!
 //! The dashboard's inherent impl was one block inside `gui/main.rs`. It is now
-//! twelve modules, one per concern, so a source-reading rule that used to name
+//! split into modules by concern, so a source-reading rule that used to name
 //! `main.rs` and mean "the dashboard" has to read all of them. A rule can move
 //! between modules without warning: a guard that reads only one would pass
 //! while the code it forbids lives next door, and a positive check would fail
@@ -23,6 +23,8 @@ pub const DASHBOARD: &str = concat!(
     include_str!("../gui/dashboard_models.rs"),
     include_str!("../gui/dashboard_nav.rs"),
     include_str!("../gui/dashboard_panes.rs"),
+    include_str!("../gui/dashboard_projects.rs"),
+    include_str!("../gui/projects_screen.rs"),
     include_str!("../gui/dashboard_rail.rs"),
     include_str!("../gui/dashboard_screens.rs"),
     include_str!("../gui/dashboard_sessions.rs"),

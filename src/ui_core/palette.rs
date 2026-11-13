@@ -201,6 +201,7 @@ pub enum Surface {
     Themes,
     Models,
     Sessions,
+    Projects,
     Help,
     Skills,
     Profiles,
@@ -218,6 +219,7 @@ impl Surface {
             Surface::Themes => "/theme",
             Surface::Models => "/models",
             Surface::Sessions => "/sessions",
+            Surface::Projects => "/projects",
             Surface::Help => "/help",
             Surface::Skills => "/skills",
             Surface::Profiles => "/profiles",
@@ -233,6 +235,7 @@ impl Surface {
             Surface::Themes => "pick the window's colours",
             Surface::Models => "every model the provider catalogue offers",
             Surface::Sessions => "the conversation rail",
+            Surface::Projects => "group sessions and browse their tracked files",
             Surface::Help => "every key this client answers",
             Surface::Skills => "the saved workflows in skills/",
             Surface::Profiles => "switch the account the agent runs as",
@@ -252,6 +255,7 @@ impl Surface {
             Surface::Themes => Some("/theme"),
             Surface::Models => Some("/models"),
             Surface::Sessions => Some("/sessions"),
+            Surface::Projects => Some("/projects"),
             Surface::Help => Some("/help"),
             Surface::Skills => Some("/skills"),
             Surface::Profiles => Some("/profiles"),
@@ -269,6 +273,7 @@ impl Surface {
             }
             Surface::Models => "provider llm sonnet opus haiku switch",
             Surface::Sessions => "chats conversations history rail sidebar open close",
+            Surface::Projects => "projects organizer groups sessions assign unassign files",
             Surface::Help => {
                 "keys key bindings keyboard shortcuts controls commands what can i press"
             }
@@ -283,6 +288,7 @@ impl Surface {
 /// window cannot print different lists for the same empty query (#2458).
 pub const SURFACES: &[Surface] = &[
     Surface::Sessions,
+    Surface::Projects,
     Surface::Usage,
     Surface::Themes,
     Surface::Models,
