@@ -3271,6 +3271,80 @@ mod tests {
         assert_eq!(strip_markers("<<IMG:>>"), "<<IMG:>>");
     }
 
+    /// #2298: these helpers walk the text by byte offset, so a marker sitting
+    /// next to a character wider than one byte has to be read without slicing
+    /// that character. Accents, an emoji and CJK stand on both sides of the
+    /// markers here, because a session title or a file name carries all three.
+    #[test]
+    fn marker_paths_read_multibyte_text_around_the_markers() {
+        let text =
+            "olá ção 🦀 <<IMG:/fixtures/coração-ção.png>> 中文 <<VID:/fixtures/動画-🦀.mov>> fim é";
+        assert_eq!(
+            marker_paths(text),
+            vec![
+                PathBuf::from("/fixtures/coração-ção.png"),
+                PathBuf::from("/fixtures/動画-🦀.mov"),
+            ]
+        );
+    }
+
+    /// A marker the user is still typing, or one the model cut short, ends the
+    /// scan where it stands. None of these may panic on a byte that is half a
+    /// character.
+    #[test]
+    fn marker_paths_stop_on_a_multibyte_marker_that_never_closes() {
+        for text in [
+            "olá <<IMG:",
+            "olá <<IMG:ç",
+            "olá <<IMG:coração-ção.png",
+            "olá <<",
+            "🦀 <<VID:動画",
+        ] {
+            assert!(marker_paths(text).is_empty(), "{text}");
+        }
+    }
+
+    #[test]
+    fn strip_markers_keep_multibyte_text_on_both_sides() {
+        assert_eq!(
+            strip_markers("olá 🦀 <<IMG:/tmp/coração.png>> fim 中文"),
+            "olá 🦀  fim 中文"
+        );
+        assert_eq!(strip_markers("<<VID:/tmp/動画.mov>>já"), "já");
+        // An unknown marker is prose and stays whole, multibyte and all.
+        assert_eq!(
+            strip_markers("veja <<FILE:relatório-ção.pdf>> aqui"),
+            "veja <<FILE:relatório-ção.pdf>> aqui"
+        );
+    }
+
+    #[test]
+    fn strip_markers_stop_on_a_multibyte_marker_that_never_closes() {
+        for text in ["olá <<IMG:ç", "🦀 <<", "中文 <<VID:動画"] {
+            assert_eq!(strip_markers(text), text.trim());
+        }
+    }
+
+    /// A stored message can name a file with any characters the filesystem
+    /// allowed. Classifying it keeps the name whole and reads the extension
+    /// without cutting the string, and the marker carries the path back out
+    /// unchanged.
+    #[test]
+    fn attachment_classifies_a_multibyte_file_name() {
+        let image = Attachment::for_display(PathBuf::from("/fixtures/relatório-ção-🦀.PNG"));
+        assert_eq!(image.name, "relatório-ção-🦀.PNG");
+        assert!(image.is_image());
+        assert!(!image.is_video);
+
+        let video = Attachment::for_display(PathBuf::from("/fixtures/動画-ção.MOV"));
+        assert_eq!(video.name, "動画-ção.MOV");
+        assert!(video.is_video);
+        assert!(!video.is_image);
+
+        assert_eq!(image.marker(), "<<IMG:/fixtures/relatório-ção-🦀.PNG>>");
+        assert_eq!(marker_paths(&image.marker()), vec![image.path.clone()]);
+    }
+
     #[test]
     fn for_display_keeps_a_stored_path_that_is_gone() {
         // A message outlives the file it pointed at; the chip must not vanish.
