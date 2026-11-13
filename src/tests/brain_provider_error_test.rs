@@ -94,21 +94,68 @@ fn test_status_code() {
 // shapes it has to tell apart.
 
 #[test]
-fn a_connect_timeout_whose_name_does_not_resolve_names_dns() {
+fn a_connect_timeout_whose_name_does_not_exist_names_the_name() {
+    let label = describe_timeout(true, DnsProbe::NotFound, " (api.example)");
+    assert_eq!(
+        label, "host not found (api.example)",
+        "the resolver answered and said the name does not exist"
+    );
+}
+
+#[test]
+fn a_connect_timeout_whose_resolver_errored_names_the_resolver() {
     let label = describe_timeout(true, DnsProbe::Failed, " (api.example)");
     assert_eq!(
-        label, "DNS lookup failed (api.example)",
+        label, "DNS resolver failed (api.example)",
         "a resolver error inside the connect window must not read as a slow server"
     );
 }
 
 #[test]
-fn a_connect_timeout_whose_resolver_hangs_names_dns() {
+fn a_connect_timeout_whose_resolver_hangs_names_the_resolver() {
     let label = describe_timeout(true, DnsProbe::TimedOut, " (api.example)");
     assert_eq!(
-        label, "DNS lookup failed (api.example)",
+        label, "DNS resolver timed out (api.example)",
         "a resolver that never answered is a DNS failure, not a slow server"
     );
+}
+
+#[test]
+fn the_resolver_detail_splits_nxdomain_from_a_dead_resolver() {
+    let nxdomain = label_for_resolver_detail("nodename nor servname provided, or not known");
+    let dead = label_for_resolver_detail(
+        "dns error: failed to lookup address information: Temporary failure in name resolution",
+    );
+    assert_eq!(nxdomain, Some("host not found"));
+    assert_eq!(dead, Some("DNS resolver failed"));
+    assert_ne!(
+        nxdomain, dead,
+        "a name that does not exist and a resolver that does not work are different causes"
+    );
+}
+
+#[test]
+fn a_wrapped_nxdomain_still_reads_as_a_missing_name() {
+    // Windows and musl put the NXDOMAIN wording inside a resolver sentence, so
+    // the specific cause has to win over the wrapper.
+    for detail in [
+        "failed to lookup address information: No such host is known",
+        "failed to lookup address information: Name or service not known",
+        "getaddrinfo failed: non-existent domain",
+    ] {
+        assert_eq!(
+            label_for_resolver_detail(detail),
+            Some("host not found"),
+            "detail: {detail}"
+        );
+    }
+}
+
+#[test]
+fn a_non_resolver_detail_gets_no_resolver_label() {
+    for detail in ["Connection refused (os error 61)", "tcp connect error"] {
+        assert_eq!(label_for_resolver_detail(detail), None, "detail: {detail}");
+    }
 }
 
 #[test]

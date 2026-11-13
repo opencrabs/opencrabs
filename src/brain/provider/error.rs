@@ -719,7 +719,7 @@ pub(crate) fn reqwest_error_chain(e: &reqwest::Error) -> String {
 
 /// Classify a reqwest error into a short, specific phrase by walking its source
 /// chain to the deepest OS/resolver cause. Appends the host when known, e.g.
-/// "DNS lookup failed (www.dialagram.me)" or "connection refused (api.x.com)".
+/// "host not found (www.dialagram.me)" or "connection refused (api.x.com)".
 /// A timeout has no usable chain, so it is split by phase instead: see
 /// [`describe_timeout`].
 pub(crate) fn describe_reqwest_error(e: &reqwest::Error) -> String {
@@ -753,15 +753,8 @@ pub(crate) fn describe_reqwest_error(e: &reqwest::Error) -> String {
     let detail = deepest.unwrap_or_else(|| e.to_string());
     let low = detail.to_ascii_lowercase();
 
-    let label = if low.contains("dns")
-        || low.contains("lookup address")
-        || low.contains("nodename nor servname")
-        || low.contains("name or service not known")
-        || low.contains("no such host")
-        || low.contains("failed to resolve")
-        || low.contains("could not resolve")
-    {
-        "DNS lookup failed"
+    let label = if let Some(resolver) = label_for_resolver_detail(&detail) {
+        resolver
     } else if low.contains("connection refused") {
         "connection refused"
     } else if low.contains("connection reset") {
@@ -787,6 +780,46 @@ pub(crate) fn describe_reqwest_error(e: &reqwest::Error) -> String {
     format!("{label}{host_suffix}")
 }
 
+/// True when the resolver answered and the name does not exist. Checked before
+/// the resolver-failure wording because Windows and musl wrap the same phrase
+/// in a resolver sentence ("failed to lookup address information: No such host
+/// is known"), so the more specific cause has to win.
+pub(crate) fn is_name_not_found(detail: &str) -> bool {
+    let low = detail.to_ascii_lowercase();
+    [
+        "nodename nor servname",
+        "name or service not known",
+        "no such host",
+        "non-existent domain",
+    ]
+    .iter()
+    .any(|needle| low.contains(*needle))
+}
+
+/// Classify a resolver detail from the OS or resolver library into the label
+/// the user reads. The two causes used to share one "DNS lookup failed" string:
+/// the name does not exist, and the resolver itself did not work. `None` means
+/// the text is not about name resolution at all.
+pub(crate) fn label_for_resolver_detail(detail: &str) -> Option<&'static str> {
+    if is_name_not_found(detail) {
+        return Some("host not found");
+    }
+    let low = detail.to_ascii_lowercase();
+    if [
+        "dns error",
+        "lookup address",
+        "failed to resolve",
+        "could not resolve",
+        "temporary failure in name resolution",
+    ]
+    .iter()
+    .any(|needle| low.contains(*needle))
+    {
+        return Some("DNS resolver failed");
+    }
+    None
+}
+
 /// How long the error path waits for a name to resolve before it gives up on
 /// naming the cause. A healthy resolver answers in milliseconds; a broken one
 /// hits its own multi-second timeout (the reported machine saw `Resolving
@@ -803,7 +836,9 @@ pub(crate) enum DnsProbe {
     Skipped,
     /// The name resolved, so the wait was the connection itself.
     Resolved,
-    /// The resolver answered with an error.
+    /// The resolver answered, and there is no such name.
+    NotFound,
+    /// The resolver answered with an error, or returned no address.
     Failed,
     /// The resolver did not answer inside the probe window.
     TimedOut,
@@ -817,7 +852,9 @@ pub(crate) fn describe_timeout(is_connect: bool, probe: DnsProbe, host_suffix: &
         return format!("request timed out{host_suffix}");
     }
     match probe {
-        DnsProbe::Failed | DnsProbe::TimedOut => format!("DNS lookup failed{host_suffix}"),
+        DnsProbe::NotFound => format!("host not found{host_suffix}"),
+        DnsProbe::Failed => format!("DNS resolver failed{host_suffix}"),
+        DnsProbe::TimedOut => format!("DNS resolver timed out{host_suffix}"),
         DnsProbe::Resolved | DnsProbe::Skipped => format!("connect timed out{host_suffix}"),
     }
 }
@@ -845,7 +882,15 @@ pub(crate) fn probe_dns(host: &str, timeout: std::time::Duration) -> DnsProbe {
                         DnsProbe::Failed
                     }
                 }
-                Err(_) => DnsProbe::Failed,
+                Err(err) => {
+                    // The io error is the only place the OS says which of the
+                    // two resolver causes this is, so keep it.
+                    if is_name_not_found(&err.to_string()) {
+                        DnsProbe::NotFound
+                    } else {
+                        DnsProbe::Failed
+                    }
+                }
             };
             let _ = tx.send(outcome);
         });
