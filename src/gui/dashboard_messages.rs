@@ -558,11 +558,8 @@ impl Dashboard {
         // copy it stands for: the question is written while the turn runs. When
         // it does, the rewrite cuts it like any other row; when it does not,
         // there is nothing to cut and the stop is the whole of the edit.
-        let sequence = transcript::live_slot_sequence(
-            &self.turn.live,
-            &self.chat_state.transcript.rows,
-            slot,
-        );
+        let sequence =
+            transcript::live_slot_sequence(&self.turn.live, &self.chat_state.transcript.rows, slot);
         let editor = self.new_inline_editor(text, cx);
         cx.subscribe(&editor, move |this, _editor, event, cx| {
             if let editor::EditorEvent::Sent(text) = event {
