@@ -166,7 +166,7 @@ fn live_entries_wire_exact_actions_in_main_and_split() {
         .and_then(|rest| rest.split("/// One line of the live card's body").next())
         .expect("the live body");
     assert!(body.contains("selectable_row(d, ordinal, body)"));
-    assert!(body.contains("press.get(&entry)"));
+    assert!(body.contains("press.get(&LiveRow::Card(entry))"));
     assert!(body.contains("format!(\"live-entry-{entry}\")"));
 
     let card = TRANSCRIPT
