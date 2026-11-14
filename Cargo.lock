@@ -7277,7 +7277,7 @@ dependencies = [
 
 [[package]]
 name = "opencrabs"
-version = "0.5.15"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "arabic_reshaper",
