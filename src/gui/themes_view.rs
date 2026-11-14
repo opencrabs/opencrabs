@@ -276,20 +276,12 @@ fn slider(fraction: f32, accent: u32, area: SliderArea) -> Div {
     .left_0()
     .w_full()
     .h_full();
-    div()
-        .relative()
-        .w_full()
-        .h(px(HEIGHT))
-        .child(painted)
+    div().relative().w_full().h(px(HEIGHT)).child(painted)
 }
 
 /// Whole-window transparency (#2922). This is independent of the palette, so
 /// the control stays available for every theme card.
-pub fn transparency_row(
-    value: u8,
-    shown: Palette,
-    track: Rc<RefCell<Option<[f32; 4]>>>,
-) -> Div {
+pub fn transparency_row(value: u8, shown: Palette, track: Rc<RefCell<Option<[f32; 4]>>>) -> Div {
     let value = gui_theme::clamp_window_transparency(value);
     let position = f32::from(value) / f32::from(gui_theme::MAX_WINDOW_TRANSPARENCY);
     div()

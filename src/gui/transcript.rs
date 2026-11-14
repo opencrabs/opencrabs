@@ -2851,10 +2851,7 @@ fn live_card_lines(live: &LiveTurn) -> Vec<(usize, LiveCardLine)> {
                 lines.push((entry_index, LiveCardLine::Narration(text.clone())))
             }
             LiveEntry::Reasoning(text) => {
-                lines.push((
-                    entry_index,
-                    LiveCardLine::Reasoning(fit(text.trim(), 600)),
-                ));
+                lines.push((entry_index, LiveCardLine::Reasoning(fit(text.trim(), 600))));
             }
         }
     }
@@ -2876,11 +2873,7 @@ pub fn live_action_rows(live: &LiveTurn, session: uuid::Uuid) -> Vec<(usize, Mes
 }
 
 /// One exact live entry with its own right-press target (#2925).
-fn live_press_row(
-    id: String,
-    child: AnyElement,
-    press: Option<&PressHandler>,
-) -> Stateful<Div> {
+fn live_press_row(id: String, child: AnyElement, press: Option<&PressHandler>) -> Stateful<Div> {
     let mut row = div()
         .id(SharedString::from(id))
         .w_full()
@@ -2917,7 +2910,11 @@ fn live_entry_text(
         .as_ref()
         .map(|(d, ordinal)| SelectionContext::new(d, *ordinal));
     let content = selectable_styled_text(text, style, Vec::new(), &[], selection.as_ref());
-    let content = if clamp { content.line_clamp(3) } else { content };
+    let content = if clamp {
+        content.line_clamp(3)
+    } else {
+        content
+    };
     let row = live_press_row(
         id,
         content.into_any_element(),
@@ -3071,9 +3068,9 @@ fn live_card(
             .rposition(|call| !call.done)
             .or_else(|| live.tools.len().checked_sub(1))
             .and_then(|tool| {
-                live.entries.iter().position(
-                    |entry| matches!(entry, LiveEntry::Tool(index) if *index == tool),
-                )
+                live.entries
+                    .iter()
+                    .position(|entry| matches!(entry, LiveEntry::Tool(index) if *index == tool))
             })
     };
     // #2468: the head row owns the card's width and the lead takes the slack
@@ -3136,17 +3133,23 @@ fn live_card(
     // what the turn just said, and opening the card prints every paragraph in
     // order.
     if let Some((entry, paragraph)) = prose {
-        card = card.child(div().px_2().pt_1().pb_1().w_full().min_w_0().child(
-            live_entry_text(
-                format!("live-preview-{entry}"),
-                Some(entry),
-                paragraph,
-                small_style(SMALL_TEXT_SIZE, palette::current().text_muted),
-                true,
-                drag,
-                press,
-            ),
-        ));
+        card = card.child(
+            div()
+                .px_2()
+                .pt_1()
+                .pb_1()
+                .w_full()
+                .min_w_0()
+                .child(live_entry_text(
+                    format!("live-preview-{entry}"),
+                    Some(entry),
+                    paragraph,
+                    small_style(SMALL_TEXT_SIZE, palette::current().text_muted),
+                    true,
+                    drag,
+                    press,
+                )),
+        );
     }
     card = card.child(head);
     if expanded {
@@ -6578,10 +6581,7 @@ mod tests {
         let mut live = LiveTurn::default();
         live.begin("run it".into());
         live.push_narration("First exact entry".into());
-        live.push_tool(ToolCall::running(
-            "bash".into(),
-            "bash: cargo test".into(),
-        ));
+        live.push_tool(ToolCall::running("bash".into(), "bash: cargo test".into()));
         live.push_narration("Second exact entry".into());
 
         let rows = live_action_rows(&live, session);
@@ -6589,9 +6589,10 @@ mod tests {
         assert_eq!(rows[0].0, 0);
         assert_eq!(rows[1].0, 1);
         assert_eq!(rows[2].0, 2);
-        assert!(rows.iter().all(|(_, row)| {
-            row.session_id == session && row.role == "assistant"
-        }));
+        assert!(
+            rows.iter()
+                .all(|(_, row)| { row.session_id == session && row.role == "assistant" })
+        );
         assert_eq!(rows[0].1.content, "First exact entry");
         assert!(rows[1].1.content.ends_with("bash: cargo test"));
         assert!(!rows[1].1.content.contains("First exact entry"));

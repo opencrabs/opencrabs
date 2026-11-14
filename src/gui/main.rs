@@ -4297,15 +4297,14 @@ impl Render for Dashboard {
                     // The unsplit chat uses the same composer swap as a split
                     // leaf (#2924). Without this arm the forward state changed
                     // but its destination picker was never rendered here.
-                    let composer_replacement = if self.forward_pick.is_some()
-                        && self.forward_leaf.is_none()
-                    {
-                        Some(self.forward_picker(cx))
-                    } else if self.msg_select.is_active() {
-                        Some(self.select_bar(cx))
-                    } else {
-                        None
-                    };
+                    let composer_replacement =
+                        if self.forward_pick.is_some() && self.forward_leaf.is_none() {
+                            Some(self.forward_picker(cx))
+                        } else if self.msg_select.is_active() {
+                            Some(self.select_bar(cx))
+                        } else {
+                            None
+                        };
                     if let Some(view) = composer_replacement {
                         col = col.child(central(view, centred_chat, chat_measure_px));
                     } else {

@@ -95,7 +95,9 @@ fn right_press_is_on_the_outer_message_row() {
     assert!(row.contains("row = row.on_mouse_down(MouseButton::Right"));
     assert!(
         row.find("row = row.child(body);").unwrap()
-            < row.find("row = row.on_mouse_down(MouseButton::Right").unwrap(),
+            < row
+                .find("row = row.on_mouse_down(MouseButton::Right")
+                .unwrap(),
         "the outer row owns the press after its body and controls are attached"
     );
 }
@@ -123,7 +125,10 @@ fn forward_opens_the_destination_and_stages_a_composer_reply() {
     let forward = DASHBOARD
         .split("pub(crate) fn forward_into(")
         .nth(1)
-        .and_then(|rest| rest.split("/// Refetch the turn's session transcript").next())
+        .and_then(|rest| {
+            rest.split("/// Refetch the turn's session transcript")
+                .next()
+        })
         .expect("forward destination commit");
     assert!(forward.contains("open_picked_in_focused_pane(target, true, cx)"));
     assert!(forward.contains("self.reply_rows(rows, leaf, cx)"));
@@ -131,7 +136,9 @@ fn forward_opens_the_destination_and_stages_a_composer_reply() {
     assert!(forward.contains("self.pane_focus = None"));
     assert!(forward.contains("!self.pane_states.contains_key(&target)"));
     assert!(
-        forward.find("open_picked_in_focused_pane(target, true, cx)").unwrap()
+        forward
+            .find("open_picked_in_focused_pane(target, true, cx)")
+            .unwrap()
             < forward.find("self.reply_rows(rows, leaf, cx)").unwrap(),
         "the destination is open before its composer receives the quote"
     );
@@ -174,9 +181,7 @@ fn live_entries_wire_exact_actions_in_main_and_split() {
     assert!(MAIN.contains("transcript::live_action_rows(&self.turn.live, session)"));
     assert!(MAIN.contains("this.live_menu_open(row.clone(), None, ev.position, cx)"));
     assert!(PANE_VIEW.contains("transcript::live_action_rows(&self.live, session)"));
-    assert!(
-        PANE_VIEW.contains("this.live_menu_open(row.clone(), Some(session), ev.position, cx)")
-    );
+    assert!(PANE_VIEW.contains("this.live_menu_open(row.clone(), Some(session), ev.position, cx)"));
 }
 
 /// Live rows are ephemeral, so only actions that do not require a persisted
