@@ -229,6 +229,60 @@ pub fn swatch(bg: u32, name: &str, selected: bool, shown: Palette) -> Stateful<D
         .hover(|d| d.border_color(rgb(shown.text_muted)))
 }
 
+/// The transparency track and thumb, painted against the real laid-out width.
+/// The canvas also records the hit box the dashboard converts into a value.
+fn slider(fraction: f32, accent: u32, area: SliderArea) -> Div {
+    const HEIGHT: f32 = 14.0;
+    const THUMB_WIDTH: f32 = 8.0;
+    let fraction = fraction.clamp(0.0, 1.0);
+    let recorded = area;
+    let painted = canvas(
+        |bounds, _window, _cx| bounds,
+        move |bounds, _, window, _cx| {
+            let width = f32::from(bounds.size.width);
+            let height = f32::from(bounds.size.height);
+            let x0 = f32::from(bounds.origin.x);
+            let y0 = f32::from(bounds.origin.y);
+            recorded
+                .borrow_mut()
+                .replace([x0, y0, x0 + width, y0 + height]);
+
+            let track_y = y0 + height / 2.0 - 1.0;
+            let mut track = PathBuilder::fill();
+            track.move_to(point(px(x0), px(track_y)));
+            track.line_to(point(px(x0 + width), px(track_y)));
+            track.line_to(point(px(x0 + width), px(track_y + 2.0)));
+            track.line_to(point(px(x0), px(track_y + 2.0)));
+            track.close();
+            if let Ok(path) = track.build() {
+                // A quiet tint of the active accent, never a new literal hue.
+                window.paint_path(path, rgba((accent << 8) | 0x66));
+            }
+
+            let thumb_x = x0 + (width - THUMB_WIDTH).max(0.0) * fraction;
+            let mut thumb = PathBuilder::fill();
+            thumb.move_to(point(px(thumb_x), px(y0)));
+            thumb.line_to(point(px(thumb_x + THUMB_WIDTH), px(y0)));
+            thumb.line_to(point(px(thumb_x + THUMB_WIDTH), px(y0 + HEIGHT)));
+            thumb.line_to(point(px(thumb_x), px(y0 + HEIGHT)));
+            thumb.close();
+            if let Ok(path) = thumb.build() {
+                window.paint_path(path, rgb(accent));
+            }
+        },
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .w_full()
+    .h_full();
+    div()
+        .relative()
+        .w_full()
+        .h(px(HEIGHT))
+        .child(painted)
+}
+
 /// Whole-window transparency (#2922). This is independent of the palette, so
 /// the control stays available for every theme card.
 pub fn transparency_row(
@@ -697,7 +751,7 @@ pub fn font_row(
 pub fn modal(
     cards: Vec<Stateful<Div>>,
     base: Div,
-    transparency: Div,
+    transparency: Stateful<Div>,
     accent: Option<AnyElement>,
     fonts: Div,
     footer: &str,

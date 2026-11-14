@@ -33,6 +33,8 @@ fn theme_transparency_reaches_config_native_alpha_and_the_whole_root() {
     assert!(dashboard.contains("Config::write_key(\"gui\", \"transparency\""));
     assert!(dashboard.contains("themes_view::transparency_row("));
     assert!(theme.contains("pub fn transparency_row("));
+    assert!(theme.contains("fn slider("));
+    assert!(theme.contains("transparency: Stateful<Div>"));
     assert!(theme.contains(".id(\"theme-modal-body\")"));
     assert!(theme.contains(".overflow_y_scroll()"));
 }
