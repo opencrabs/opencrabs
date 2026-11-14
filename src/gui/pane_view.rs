@@ -521,6 +521,24 @@ impl Render for PaneView {
                 (id, handler)
             })
             .collect();
+        // Live entries report through the window too, but keep this leaf's
+        // session and composer as their destination (#2925).
+        let live_press: HashMap<usize, transcript::PressHandler> =
+            transcript::live_action_rows(&self.live, session)
+                .into_iter()
+                .map(|(entry, row)| {
+                    let window = edit_window.clone();
+                    let handler: transcript::PressHandler = std::rc::Rc::new(
+                        move |ev: &MouseDownEvent, _window: &mut Window, cx: &mut App| {
+                            cx.stop_propagation();
+                            let _ = window.update(cx, |this, cx| {
+                                this.live_menu_open(row.clone(), Some(session), ev.position, cx);
+                            });
+                        },
+                    );
+                    (entry, handler)
+                })
+                .collect();
         let dismiss_window = self.window.clone();
         let menu_dismiss: transcript::PressHandler = std::rc::Rc::new(
             move |_ev: &MouseDownEvent, _window: &mut Window, cx: &mut App| {
@@ -618,6 +636,7 @@ impl Render for PaneView {
                 // press, because the window's transcript does not hold this
                 // leaf's messages and could not look an id up in it.
                 message_press,
+                live_press,
                 // A left press anywhere in the leaf dismisses that menu, the
                 // same rule the window's transcript applies (#2613).
                 menu_dismiss: Some(menu_dismiss),

@@ -10,6 +10,7 @@ use crate::ui_core::message_select::MessageAction;
 
 const TRANSCRIPT: &str = include_str!("../gui/transcript.rs");
 const MAIN: &str = include_str!("../gui/main.rs");
+const PANE_VIEW: &str = include_str!("../gui/pane_view.rs");
 
 /// The menu is the set of actions that can actually be carried out, in the
 /// order Telegram shows them. A label with no path behind it never ships.
@@ -147,10 +148,72 @@ fn forward_opens_the_destination_and_stages_a_composer_reply() {
     }
 }
 
-/// Only a stored `Message` row can be picked. Tool output, system notices,
-/// plan cards and the live turn carry no `MessageId`, so they fall to the arm
-/// that draws a plain row: no pick box, no menu, and a click in select mode is
-/// a no-op rather than a crash.
+/// Every visible live entry is selectable and has its own action target in
+/// both chat surfaces (#2925). Collapsed previews and the activity lead count
+/// too; they are visible text, not a special dead zone.
+#[test]
+fn live_entries_wire_exact_actions_in_main_and_split() {
+    let body = TRANSCRIPT
+        .split("fn live_card_body(")
+        .nth(1)
+        .and_then(|rest| rest.split("/// One line of the live card's body").next())
+        .expect("the live body");
+    assert!(body.contains("selectable_row(d, ordinal, body)"));
+    assert!(body.contains("press.get(&entry)"));
+    assert!(body.contains("format!(\"live-entry-{entry}\")"));
+
+    let card = TRANSCRIPT
+        .split("fn live_card(")
+        .nth(1)
+        .and_then(|rest| rest.split("fn live_card_footer(").next())
+        .expect("the live card");
+    assert!(card.contains("format!(\"live-preview-{entry}\")"));
+    assert!(card.contains("\"live-activity\".to_string()"));
+    assert!(card.contains("Some(entry)"));
+
+    assert!(MAIN.contains("transcript::live_action_rows(&self.turn.live, session)"));
+    assert!(MAIN.contains("this.live_menu_open(row.clone(), None, ev.position, cx)"));
+    assert!(PANE_VIEW.contains("transcript::live_action_rows(&self.live, session)"));
+    assert!(
+        PANE_VIEW.contains("this.live_menu_open(row.clone(), Some(session), ev.position, cx)")
+    );
+}
+
+/// Live rows are ephemeral, so only actions that do not require a persisted
+/// transcript identity appear. Copy uses the pressed live row even if stored
+/// rows were picked earlier (#2925).
+#[test]
+fn live_menu_gates_stored_only_actions_and_copies_the_pressed_row() {
+    let open = DASHBOARD
+        .split("pub(crate) fn live_menu_open(")
+        .nth(1)
+        .and_then(|rest| rest.split("pub(crate) fn msg_react_open(").next())
+        .expect("the live menu entry point");
+    assert!(open.contains("self.msg_menu_open(row, leaf, at, cx)"));
+    assert!(open.contains("self.msg_menu_live = true"));
+
+    let menu = DASHBOARD
+        .split("pub(crate) fn msg_menu_items(")
+        .nth(1)
+        .and_then(|rest| rest.split("/// Toggle one row").next())
+        .expect("the row menu");
+    assert!(menu.contains("if !self.msg_menu_live {"));
+    assert!(menu.contains("if !self.msg_menu_live && self.msg_menu_leaf.is_none()"));
+    for action in ["CopyMarkdown", "Reply", "Forward"] {
+        assert!(menu.contains(&format!("MessageAction::{action}.label()")));
+    }
+
+    let copy = DASHBOARD
+        .split("pub(crate) fn msg_copy_row(")
+        .nth(1)
+        .and_then(|rest| rest.split("pub(crate) fn msg_copy_markdown(").next())
+        .expect("the menu copy action");
+    assert!(copy.contains("if live || self.msg_select.is_empty()"));
+    assert!(copy.contains("if !live && let Some(id) = id"));
+}
+
+/// Only a stored `Message` row can enter Select mode. Live entries have their
+/// own ephemeral action rows, but no persisted identity and no pick box.
 #[test]
 fn only_stored_messages_can_be_picked() {
     assert_eq!(
@@ -171,12 +234,10 @@ fn only_stored_messages_can_be_picked() {
     let arm = arm.split("_ => match").next().unwrap_or_default();
     assert!(
         arm.contains("= message_row("),
-        "the pick box and the menu hang off the id-bearing arm only"
+        "the pick box and the stored-row menu hang off the id-bearing arm"
     );
-    // The same arm owns the click and the right-press, so a row that cannot be
-    // picked also cannot open a menu that would act on it.
     assert!(
         arm.contains("message_click.get(id)") && arm.contains("message_press.get(id)"),
-        "the gesture handlers are looked up by the row's own id"
+        "the stored gesture handlers are looked up by the row's own id"
     );
 }

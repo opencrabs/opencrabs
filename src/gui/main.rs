@@ -815,6 +815,9 @@ struct Dashboard {
     /// `Some` is the split leaf of that session, whose composer an answer
     /// belongs in.
     msg_menu_leaf: Option<Uuid>,
+    /// True when the captured row is an exact, unsaved live entry (#2925).
+    /// React and Select stay off it because there is no persisted row id.
+    msg_menu_live: bool,
     /// The row open for an in-place rewrite in the window's chat (#2826).
     /// A split leaf holds its own on its `PaneView`.
     edit_row: Option<chat_leaf::InlineEdit>,
@@ -2371,6 +2374,19 @@ impl Render for Dashboard {
             });
             message_press.insert(id, std::rc::Rc::new(handler));
         }
+        // Exact live entries get their own captured rows (#2925). Keying by
+        // entry index keeps the handler attached as later lines arrive.
+        let mut live_press: std::collections::HashMap<usize, transcript::PressHandler> =
+            std::collections::HashMap::new();
+        if let Some(session) = self.chat_session {
+            for (entry, row) in transcript::live_action_rows(&self.turn.live, session) {
+                let handler = cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
+                    cx.stop_propagation();
+                    this.live_menu_open(row.clone(), None, ev.position, cx);
+                });
+                live_press.insert(entry, std::rc::Rc::new(handler));
+            }
+        }
         // One toggle per chip on screen (#2825). Minted only for the pictures
         // the loaded rows actually carry, so a row with no reactions costs
         // nothing here. The pairs are collected first for the same reason the
@@ -2538,6 +2554,7 @@ impl Render for Dashboard {
                         live_click: Some(live_click.clone()),
                         message_click: message_click.clone(),
                         message_press: message_press.clone(),
+                        live_press,
                         selection: select_on.then(|| msg_picked.clone()),
                         menu_dismiss: Some(msg_dismiss.clone()),
                         older: Some(older_click.clone()),
@@ -5673,6 +5690,7 @@ fn main() {
                         msg_menu: None,
                         msg_menu_row: None,
                         msg_menu_leaf: None,
+                        msg_menu_live: false,
                         edit_row: None,
                         msg_menu_at: None,
                         msg_menu_generation: 0,

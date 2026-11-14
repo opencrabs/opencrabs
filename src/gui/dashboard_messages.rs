@@ -328,6 +328,7 @@ impl Dashboard {
         self.msg_menu_row = None;
         self.msg_menu_leaf = None;
         self.msg_menu_at = None;
+        self.msg_menu_live = false;
         self.react_menu = None;
         self.react_menu_at = None;
         self.msg_menu_generation = self.msg_menu_generation.wrapping_add(1);
@@ -372,12 +373,26 @@ impl Dashboard {
         self.msg_menu_row = Some(row);
         self.msg_menu_leaf = leaf;
         self.msg_menu_at = Some(at);
+        self.msg_menu_live = false;
         // And the crab pack closes too (#2825): it belongs to the row whose
         // menu was open, so a new press on another row ends it.
         self.react_menu = None;
         self.react_menu_at = None;
         self.msg_menu_arm_timeout(cx);
         cx.notify();
+    }
+
+    /// Open the same action surface for one exact, unsaved live entry (#2925).
+    /// The flag gates actions that require a persisted transcript identity.
+    pub(crate) fn live_menu_open(
+        &mut self,
+        row: Message,
+        leaf: Option<Uuid>,
+        at: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.msg_menu_open(row, leaf, at, cx);
+        self.msg_menu_live = true;
     }
 
     /// Open the crab pack for one row (#2825), at the point the row's own menu
@@ -668,12 +683,12 @@ impl Dashboard {
         cx.notify();
     }
 
-    /// Copy one stored row's text (#2613). Selection-aware, as the issue asks:
-    /// with rows picked this copies the whole selection in transcript order,
-    /// and with nothing picked it copies the row the menu was opened on.
+    /// Copy the row the menu captured (#2613/#2925). Stored rows remain
+    /// selection-aware; an unsaved live entry always wins over stale picks.
     pub(crate) fn msg_copy_row(&mut self, cx: &mut Context<Self>) {
         let id = self.msg_menu_row.as_ref().map(|m| m.id);
-        let texts: Vec<String> = if self.msg_select.is_empty() {
+        let live = self.msg_menu_live;
+        let texts: Vec<String> = if live || self.msg_select.is_empty() {
             self.msg_menu_row
                 .iter()
                 .map(|m| m.content.clone())
@@ -688,9 +703,9 @@ impl Dashboard {
         self.msg_menu = None;
         self.msg_menu_row = None;
         self.msg_menu_leaf = None;
-        // The row's own copy icon confirms the same copy (#2750): the menu and
-        // the button are two doors to one action, so both leave the same mark.
-        if let Some(id) = id {
+        self.msg_menu_live = false;
+        // Only a persisted row has a copy icon to confirm the action (#2750).
+        if !live && let Some(id) = id {
             self.mark_copied(id, cx);
         }
         cx.notify();
@@ -758,16 +773,9 @@ impl Dashboard {
         self.copy_texts(&texts, cx);
     }
 
-    /// The items a row's menu shows (#2613), resolved once per frame. Only
-    /// the actions that work end to end are listed: a menu entry with nothing
-    /// behind it is worse than an absent one.
-    ///
-    /// The menu is the same on every row (#2827). A right press on the
-    /// assistant's answer and one on the reader's own message both answer to
-    /// the same five picks, exactly as Telegram's menu does: Copy as Markdown,
-    /// React, Reply, Forward, Select. There is no role gate, because quoting an
-    /// answer back, answering one's own message and sending either on are all
-    /// things a reader does.
+    /// The items a row's menu shows (#2613), resolved once per frame. Stored
+    /// rows keep every working action. Exact live entries expose Copy, Reply
+    /// and Forward only: React and Select need a persisted row id (#2925).
     pub(crate) fn msg_menu_items(
         &self,
         cx: &mut Context<Self>,
@@ -785,14 +793,14 @@ impl Dashboard {
             MessageAction::CopyMarkdown.label().to_string(),
             Rc::new(copy),
         ));
-        // React opens the pack at the same point the row menu opened at
-        // (#2825): the menu it replaces is the thing that was clicked, so a
-        // second placement rule would move the picker away from the pointer.
-        let react = cx.listener(move |this, _ev, _window, cx| {
-            cx.stop_propagation();
-            this.msg_react_open(id, cx);
-        });
-        items.push((MessageAction::React.label().to_string(), Rc::new(react)));
+        if !self.msg_menu_live {
+            // React opens the pack where the stored row's menu opened (#2825).
+            let react = cx.listener(move |this, _ev, _window, cx| {
+                cx.stop_propagation();
+                this.msg_react_open(id, cx);
+            });
+            items.push((MessageAction::React.label().to_string(), Rc::new(react)));
+        }
         let reply = cx.listener(move |this, _ev, _window, cx| {
             cx.stop_propagation();
             this.msg_reply_row(cx);
@@ -807,11 +815,9 @@ impl Dashboard {
             });
             items.push((MessageAction::Forward.label().to_string(), Rc::new(forward)));
         }
-        // Select mode swaps the window's own composer for the selection bar,
-        // so a pick has to live in the window's transcript. A row in a split
-        // leaf is not there, and offering Select on it would open a bar that
-        // counts nothing (#2827).
-        if self.msg_menu_leaf.is_none() {
+        // Select needs a row in the window's persisted transcript. Split rows
+        // and unsaved live entries cannot be counted by that mode (#2827/#2925).
+        if !self.msg_menu_live && self.msg_menu_leaf.is_none() {
             let select = cx.listener(move |this, _ev, _window, cx| {
                 cx.stop_propagation();
                 this.msg_select_row(id, cx);
@@ -877,6 +883,7 @@ impl Dashboard {
         self.msg_menu = None;
         self.msg_menu_row = None;
         self.msg_menu_leaf = None;
+        self.msg_menu_live = false;
         // The caret goes to the field the reply will be sent from: the user
         // asked to reply, so the next keystroke is the reply. In a split leaf
         // that is the leaf's own composer, never the window's.
@@ -951,6 +958,7 @@ impl Dashboard {
         self.msg_menu = None;
         self.msg_menu_row = None;
         self.msg_menu_leaf = None;
+        self.msg_menu_live = false;
         self.forward_open(rows, leaf, cx);
     }
 

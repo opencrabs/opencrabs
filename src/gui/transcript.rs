@@ -2827,36 +2827,115 @@ pub enum LiveCardLine {
 }
 
 /// The card's body as data: every entry in order, resolved against the rows it
-/// names. An entry whose row is gone is skipped instead of drawn blank.
-fn live_card_lines(live: &LiveTurn) -> Vec<LiveCardLine> {
+/// names. The original entry index travels with the line so a menu acts on the
+/// exact row that was pressed, even when a stale tool index draws nothing.
+fn live_card_lines(live: &LiveTurn) -> Vec<(usize, LiveCardLine)> {
     let mut lines = Vec::new();
-    for entry in &live.entries {
+    for (entry_index, entry) in live.entries.iter().enumerate() {
         match entry {
             LiveEntry::Tool(index) => {
                 let Some(call) = live.tools.get(*index) else {
                     continue;
                 };
                 let (mark, color) = tool_mark(call);
-                lines.push(LiveCardLine::Tool {
-                    mark,
-                    color,
-                    text: fit(call.description.trim(), 160),
-                });
+                lines.push((
+                    entry_index,
+                    LiveCardLine::Tool {
+                        mark,
+                        color,
+                        text: fit(call.description.trim(), 160),
+                    },
+                ));
             }
-            LiveEntry::Narration(text) => lines.push(LiveCardLine::Narration(text.clone())),
+            LiveEntry::Narration(text) => {
+                lines.push((entry_index, LiveCardLine::Narration(text.clone())))
+            }
             LiveEntry::Reasoning(text) => {
-                lines.push(LiveCardLine::Reasoning(fit(text.trim(), 600)))
+                lines.push((
+                    entry_index,
+                    LiveCardLine::Reasoning(fit(text.trim(), 600)),
+                ));
             }
         }
     }
     lines
 }
 
-/// The card's body: the same lines, as elements. The body is one copy row whose
-/// segments are drawn in order, so a drag over a single tool line copies that
-/// line's name and nothing else (#2678).
-fn live_card_body(live: &LiveTurn, drag: Option<&Rc<CopyDrag>>) -> Div {
-    let lines = live_card_lines(live);
+/// Ephemeral rows for the exact live entries on screen (#2925). Their ids only
+/// identify the open menu; their text and source session are captured at press
+/// time, so Copy, Reply and Forward never query a row that is not persisted.
+pub fn live_action_rows(live: &LiveTurn, session: uuid::Uuid) -> Vec<(usize, Message)> {
+    live_card_lines(live)
+        .into_iter()
+        .map(|(entry, line)| {
+            let content = live_card_line_text(&line);
+            let row = Message::new(session, "assistant".to_string(), content, entry as i32);
+            (entry, row)
+        })
+        .collect()
+}
+
+/// One exact live entry with its own right-press target (#2925).
+fn live_press_row(
+    id: String,
+    child: AnyElement,
+    press: Option<&PressHandler>,
+) -> Stateful<Div> {
+    let mut row = div()
+        .id(SharedString::from(id))
+        .w_full()
+        .min_w_0()
+        .child(child);
+    if let Some(handler) = press {
+        let handler = handler.clone();
+        row = row.on_mouse_down(MouseButton::Right, move |ev, window, app| {
+            handler(ev, window, app);
+        });
+    }
+    row
+}
+
+/// A visible live status or preview with drag selection and its own menu.
+fn live_entry_text(
+    id: String,
+    entry: Option<usize>,
+    text: String,
+    style: TextStyle,
+    clamp: bool,
+    drag: Option<&Rc<CopyDrag>>,
+    press: &HashMap<usize, PressHandler>,
+) -> AnyElement {
+    let registered = drag.filter(|_| !text.trim().is_empty()).map(|d| {
+        let ordinal = {
+            let mut texts = d.texts.borrow_mut();
+            texts.push(Rc::from(text.clone()));
+            texts.len() - 1
+        };
+        (Rc::clone(d), ordinal)
+    });
+    let selection = registered
+        .as_ref()
+        .map(|(d, ordinal)| SelectionContext::new(d, *ordinal));
+    let content = selectable_styled_text(text, style, Vec::new(), &[], selection.as_ref());
+    let content = if clamp { content.line_clamp(3) } else { content };
+    let row = live_press_row(
+        id,
+        content.into_any_element(),
+        entry.and_then(|index| press.get(&index)),
+    );
+    match registered {
+        Some((d, ordinal)) => selectable_row(&d, ordinal, row).into_any_element(),
+        None => row.into_any_element(),
+    }
+}
+
+/// The card's body: every exact entry keeps its own menu, while one shared
+/// selection row preserves drag offsets and receives mouse release (#2925).
+fn live_card_body(
+    lines: Vec<(usize, LiveCardLine)>,
+    drag: Option<&Rc<CopyDrag>>,
+    press: &HashMap<usize, PressHandler>,
+) -> AnyElement {
     let mut body = div()
         .flex()
         .flex_col()
@@ -2867,14 +2946,18 @@ fn live_card_body(live: &LiveTurn, drag: Option<&Rc<CopyDrag>>) -> Div {
         .overflow_hidden();
     let row_text = lines
         .iter()
-        .map(live_card_line_text)
+        .map(|(_, line)| live_card_line_text(line))
         .collect::<Vec<_>>()
         .join("\n");
     let Some(d) = drag.filter(|_| !row_text.trim().is_empty()) else {
-        for line in lines {
-            body = body.child(live_card_line(line, None));
+        for (entry, line) in lines {
+            body = body.child(live_press_row(
+                format!("live-entry-{entry}"),
+                live_card_line(line, None),
+                press.get(&entry),
+            ));
         }
-        return body;
+        return body.into_any_element();
     };
     let ordinal = {
         let mut texts = d.texts.borrow_mut();
@@ -2882,10 +2965,14 @@ fn live_card_body(live: &LiveTurn, drag: Option<&Rc<CopyDrag>>) -> Div {
         texts.len() - 1
     };
     let selection = SelectionContext::new(d, ordinal);
-    for line in lines {
-        body = body.child(live_card_line(line, Some(&selection)));
+    for (entry, line) in lines {
+        body = body.child(live_press_row(
+            format!("live-entry-{entry}"),
+            live_card_line(line, Some(&selection)),
+            press.get(&entry),
+        ));
     }
-    body
+    selectable_row(d, ordinal, body).into_any_element()
 }
 
 /// One body line's copy text. It matches what the line paints, so a character
@@ -2937,6 +3024,7 @@ fn live_card(
     expanded: bool,
     ctx: (Option<u32>, u32),
     drag: Option<&Rc<CopyDrag>>,
+    press: &HashMap<usize, PressHandler>,
 ) -> Stateful<Div> {
     // A stop ends the turn where it stood (#2811). A spinner says work is
     // happening and nothing is, so the head keeps a stop glyph and the card
@@ -2954,6 +3042,7 @@ fn live_card(
         }
     };
     let (lead, _) = live_status_line(live);
+    let lines = live_card_lines(live);
     // The paragraph the turn last spoke leads the card (#2816). The prose is
     // what the turn concluded and the calls are only what it ran, so a card
     // that put the tool block on top read bottom up: the row a reader sees
@@ -2963,7 +3052,29 @@ fn live_card(
     let prose = if expanded {
         None
     } else {
-        collapsed_narration(live)
+        collapsed_narration(live).and_then(|paragraph| {
+            lines.iter().rev().find_map(|(entry, line)| match line {
+                LiveCardLine::Narration(text) if collapsed_paragraph(text) == paragraph => {
+                    Some((*entry, paragraph.clone()))
+                }
+                _ => None,
+            })
+        })
+    };
+    // The head is another rendering of one exact tool entry, not a separate
+    // menu target. Resolve the same running-or-last call used by the label.
+    let activity_entry = if live.stopped {
+        None
+    } else {
+        live.tools
+            .iter()
+            .rposition(|call| !call.done)
+            .or_else(|| live.tools.len().checked_sub(1))
+            .and_then(|tool| {
+                live.entries.iter().position(
+                    |entry| matches!(entry, LiveEntry::Tool(index) if *index == tool),
+                )
+            })
     };
     // #2468: the head row owns the card's width and the lead takes the slack
     // as a single line. Without a width of its own the row sized to its
@@ -2990,15 +3101,15 @@ fn live_card(
                 .child(SharedString::from(frame)),
         );
     if !lead.is_empty() {
-        head = head.child(
-            div()
-                .text_xs()
-                .flex_1()
-                .min_w_0()
-                .truncate()
-                .text_color(rgb(palette::current().accent))
-                .child(SharedString::from(lead)),
-        );
+        head = head.child(div().flex_1().min_w_0().truncate().child(live_entry_text(
+            "live-activity".to_string(),
+            activity_entry,
+            lead,
+            small_style(SMALL_TEXT_SIZE, palette::current().accent),
+            false,
+            drag,
+            press,
+        )));
     }
     head = head.child(
         div()
@@ -3024,23 +3135,22 @@ fn live_card(
     // Narration stays out of the chat history: the collapsed card previews
     // what the turn just said, and opening the card prints every paragraph in
     // order.
-    if let Some(paragraph) = prose {
-        card = card.child(
-            div().px_2().pt_1().pb_1().w_full().min_w_0().child(
-                selectable_styled_text(
-                    paragraph,
-                    small_style(SMALL_TEXT_SIZE, palette::current().text_muted),
-                    Vec::new(),
-                    &[],
-                    None,
-                )
-                .line_clamp(3),
+    if let Some((entry, paragraph)) = prose {
+        card = card.child(div().px_2().pt_1().pb_1().w_full().min_w_0().child(
+            live_entry_text(
+                format!("live-preview-{entry}"),
+                Some(entry),
+                paragraph,
+                small_style(SMALL_TEXT_SIZE, palette::current().text_muted),
+                true,
+                drag,
+                press,
             ),
-        );
+        ));
     }
     card = card.child(head);
     if expanded {
-        card = card.child(live_card_body(live, drag));
+        card = card.child(live_card_body(lines, drag, press));
     }
     if let Some(footer) = live_card_footer(live, ctx) {
         card = card.child(
@@ -3318,6 +3428,7 @@ fn live_view(
     live_click: Option<&ClickHandler>,
     handlers: &HashMap<String, ClickHandler>,
     drag: Option<&Rc<CopyDrag>>,
+    press: &HashMap<usize, PressHandler>,
 ) -> Div {
     let mut col = div().flex().flex_col().gap_2();
     if let Some(user) = &live.user {
@@ -3372,7 +3483,7 @@ fn live_view(
     // "OpenCrabs is thinking" over a spinner on a session that never sent
     // anything (#2895). The notices above still draw; the card does not.
     if live.has_turn_content() {
-        let card = live_card(live, expanded, ctx, drag);
+        let card = live_card(live, expanded, ctx, drag, press);
         col = col.child(match live_click {
             Some(click) => {
                 let click = click.clone();
@@ -4301,6 +4412,9 @@ pub struct ViewHooks {
     /// The live card's own click, minted by the caller for the same reason the
     /// folds are: only the owning view can build one.
     pub live_click: Option<ClickHandler>,
+    /// Right-press per exact live entry, keyed by its entry index (#2925).
+    /// Main chat and split leaves both mint these against ephemeral rows.
+    pub live_press: HashMap<usize, PressHandler>,
     /// The marker above the drawn window (#2805). A pane owns its own
     /// transcript state, so the click that loads the next window has to be
     /// minted by whichever view holds that state.
@@ -4346,6 +4460,7 @@ pub fn view(
         ctx_used,
         ctx_max,
         live_click,
+        live_press,
         message_click,
         message_press,
         selection: selected,
@@ -4648,6 +4763,7 @@ pub fn view(
             live_click.as_ref(),
             &attachment_handlers,
             drag.as_ref(),
+            &live_press,
         ));
     }
     // Releasing the mouse ends the drag and copies the selected range (#2383,
@@ -5247,7 +5363,7 @@ mod tests {
     fn narration_lines(live: &LiveTurn) -> Vec<String> {
         live_card_lines(live)
             .into_iter()
-            .filter_map(|line| match line {
+            .filter_map(|(_, line)| match line {
                 LiveCardLine::Narration(text) => Some(text),
                 _ => None,
             })
@@ -6371,15 +6487,15 @@ mod tests {
         let lines = live_card_lines(&live);
         assert_eq!(lines.len(), 3, "one line per entry, none for the echo");
         assert!(
-            matches!(lines[0], LiveCardLine::Tool { .. }),
+            matches!(lines[0], (_, LiveCardLine::Tool { .. })),
             "the first call leads the body"
         );
         assert!(
-            matches!(lines[1], LiveCardLine::Narration(ref t) if t == "Branch is clean"),
+            matches!(lines[1], (_, LiveCardLine::Narration(ref t)) if t == "Branch is clean"),
             "narration keeps the place it happened in"
         );
         assert!(
-            matches!(lines[2], LiveCardLine::Tool { .. }),
+            matches!(lines[2], (_, LiveCardLine::Tool { .. })),
             "the call after the narration follows it"
         );
         let footer =
@@ -6389,7 +6505,7 @@ mod tests {
         // And the drawing order itself: header, then body, then footer.
         const SRC: &str = include_str!("transcript.rs");
         let head = [".child(", "head)"].concat();
-        let body = ["live_card_", "body(live, drag)"].concat();
+        let body = ["live_card_", "body(lines, drag, press)"].concat();
         let foot = ["live_card_", "footer(live, ctx)"].concat();
         assert!(
             src_at(SRC, &head) < src_at(SRC, &body),
@@ -6415,7 +6531,7 @@ mod tests {
             .expect("the card footer")
             .0;
         let prose = card
-            .find("if let Some(paragraph) = prose")
+            .find("if let Some((entry, paragraph)) = prose")
             .expect("the prose block");
         let head = card.find("card = card.child(head)").expect("the head row");
         assert!(
@@ -6447,6 +6563,34 @@ mod tests {
             1,
             "settling adds no second copy of the same row"
         );
+    }
+
+    /// #2925: each action captures the exact visible entry and its source
+    /// session, never the whole working-out block or another session's draft.
+    #[test]
+    fn live_action_rows_capture_each_visible_entry() {
+        let session = uuid::Uuid::new_v4();
+        let mut live = LiveTurn::default();
+        live.begin("run it".into());
+        live.push_narration("First exact entry".into());
+        live.push_tool(ToolCall::running(
+            "bash".into(),
+            "bash: cargo test".into(),
+        ));
+        live.push_narration("Second exact entry".into());
+
+        let rows = live_action_rows(&live, session);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].0, 0);
+        assert_eq!(rows[1].0, 1);
+        assert_eq!(rows[2].0, 2);
+        assert!(rows.iter().all(|(_, row)| {
+            row.session_id == session && row.role == "assistant"
+        }));
+        assert_eq!(rows[0].1.content, "First exact entry");
+        assert!(rows[1].1.content.ends_with("bash: cargo test"));
+        assert!(!rows[1].1.content.contains("First exact entry"));
+        assert_eq!(rows[2].1.content, "Second exact entry");
     }
 
     /// #2442: the rows wear Telegram's marks, not the terminal's tick and cross,
