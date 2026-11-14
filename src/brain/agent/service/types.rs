@@ -716,6 +716,22 @@ impl AgentService {
         title_tokens.is_disjoint(&recent)
     }
 
+    /// Does the drift rule apply to this session at all? (#2882 follow-up)
+    ///
+    /// Channel sessions only. A local/TUI row carries a name the owner picked
+    /// or the first turn produced, and a short hand-picked name ("Fmt",
+    /// "PRs/Issues") is nearly always word-disjoint from the last few turns, so
+    /// applying drift there re-titled local sessions over and over against the
+    /// owner's will. A row is a channel session exactly when it has a chat key
+    /// (#1721); local rows leave it NULL.
+    pub(crate) fn title_drift_applies(
+        session: &crate::db::models::Session,
+        recent_user_texts: &[String],
+    ) -> bool {
+        session.channel_chat_key.is_some()
+            && Self::title_drifted_from(session.title.as_deref(), recent_user_texts)
+    }
+
     /// Check if a session title is a default channel-generated title that
     /// should be replaced by auto-title. Default titles follow specific patterns:
     /// - Telegram DM: "Telegram: DM <name> (<id>) [chat:<id>]"

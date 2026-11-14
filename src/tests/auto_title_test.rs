@@ -463,4 +463,28 @@ mod title_drift {
     fn a_missing_title_is_not_drift() {
         assert!(!AgentService::title_drifted_from(None, &turns(&[])));
     }
+
+    /// A local row keeps the name it was given. Drift is for channel sessions,
+    /// whose generated title goes stale over months; a hand-picked local name
+    /// is nearly always word-disjoint from the last few turns, so applying it
+    /// there renamed local sessions over and over (owner report, 2026-11-14).
+    #[test]
+    fn a_local_session_is_never_re_titled_by_drift() {
+        let recent = turns(&[
+            "harvest workbook for November, three sheets to reconcile before the Friday deadline",
+            "the poster job needs a darker crop on the left side and a tighter bleed margin",
+            "send the finished files to the client on Thursday morning once the numbers agree",
+        ]);
+        let mut session = crate::db::models::Session::new(None, None, None);
+        session.title = Some("PRs/Issues".to_string());
+        assert!(
+            !AgentService::title_drift_applies(&session, &recent),
+            "a local session keeps its own name"
+        );
+        session.channel_chat_key = Some("[chat:42]".to_string());
+        assert!(
+            AgentService::title_drift_applies(&session, &recent),
+            "the same stale title on a channel session is still drift"
+        );
+    }
 }

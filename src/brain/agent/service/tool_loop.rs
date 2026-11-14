@@ -1111,8 +1111,11 @@ impl AgentService {
         // flag that guards the attempt never re-armed. Allow a retitle when the
         // stored title no longer shares a word with the recent turns, so a
         // months-old channel session stops advertising the job it opened with.
+        // Channel sessions only: a local row keeps the name it was given, since
+        // a short hand-picked name is nearly always word-disjoint from the last
+        // few turns and drift re-titled local sessions against the owner's will.
         let title_drifted = !title_is_placeholder
-            && Self::title_drifted_from(session.title.as_deref(), &recent_user_texts);
+            && Self::title_drift_applies(&session, &recent_user_texts);
 
         if !user_message.trim().is_empty()
             && ((!session.auto_title_attempted && title_is_placeholder) || title_drifted)
