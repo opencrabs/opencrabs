@@ -94,6 +94,7 @@ fn assignment_can_repair_sessions_from_other_projects() {
 
 #[test]
 fn bulk_assignment_clear_and_archive_keep_their_own_service_paths() {
+    let projects = PROJECTS.split_whitespace().collect::<Vec<_>>().join(" ");
     for needle in [
         "AssignMany { project_id: Uuid, session_ids: Vec<Uuid> }",
         "ClearMany { project_id: Uuid, session_ids: Vec<Uuid> }",
@@ -102,7 +103,7 @@ fn bulk_assignment_clear_and_archive_keep_their_own_service_paths() {
         "service.unassign_session(*session_id).await?",
         "sessions.archive(*session_id).await?",
     ] {
-        assert!(PROJECTS.contains(needle), "missing bulk service path: {needle}");
+        assert!(projects.contains(needle), "missing bulk service path: {needle}");
     }
     assert!(PROJECTS_SCREEN.contains("this.projects.toggle_assignment(project_id, id)"));
     assert!(PROJECTS_SCREEN.contains("project-bulk-archive-confirm"));

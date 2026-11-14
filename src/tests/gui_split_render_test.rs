@@ -741,7 +741,7 @@ fn a_cached_pane_fills_the_box_it_was_given() {
     // and its transcript's overflow container was unbounded, so no scroll moved
     // (#2805). The pane's frame fills that box with `size_full` instead, and the
     // style the walk hands the cache is the same box, spelled once.
-    let view = flat(PANE_VIEW);
+    let view = flat(PANE_VIEW).replace(" .", ".");
     assert!(
         view.contains("div().flex().flex_col().size_full().min_w_0().min_h_0()"),
         "the pane's root box resolves against the box the walk reserved, in both the drawn and the replayed pass"
