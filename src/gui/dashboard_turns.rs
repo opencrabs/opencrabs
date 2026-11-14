@@ -641,6 +641,19 @@ impl Dashboard {
         let session = target.session;
         let sequence = target.sequence;
         cx.spawn(async move |this, cx| {
+            // A live row with no stored sequence has nothing behind it to cut
+            // (#2925): the stop above already ended the turn, so the rewrite
+            // simply speaks for the exchange from here.
+            let Some(sequence) = sequence else {
+                this.update(cx, |this, cx| {
+                    logging::info(&format!(
+                        "edit: live row rewritten, turn stopped, in {session}"
+                    ));
+                    this.send_message_showing(text, None, cx);
+                })
+                .ok();
+                return;
+            };
             let truncated = transcript::truncate_after(db_path.clone(), session, sequence).await;
             let loaded = match &truncated {
                 Ok(_) => Some(transcript::load_recent(db_path, session).await),
@@ -686,6 +699,19 @@ impl Dashboard {
         let session = target.session;
         let sequence = target.sequence;
         cx.spawn(async move |this, cx| {
+            // Same as the window's own path (#2925): a live row the store has
+            // not taken yet has nothing behind it to cut, so the leaf only
+            // stops the turn and sends the rewrite.
+            let Some(sequence) = sequence else {
+                this.update(cx, |this, cx| {
+                    logging::info(&format!(
+                        "pane edit: live row rewritten, turn stopped, in {session}"
+                    ));
+                    this.send_from_pane(session, text, None, SendOrigin::Composer, cx);
+                })
+                .ok();
+                return;
+            };
             let truncated = transcript::truncate_after(db_path.clone(), session, sequence).await;
             let loaded = match &truncated {
                 Ok(_) => Some(transcript::load_recent(db_path, session).await),

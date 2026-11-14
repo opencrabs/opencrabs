@@ -190,8 +190,10 @@ pub(crate) struct EditTarget {
     /// not this edit.
     pub(crate) session: Uuid,
     /// The row's own sequence: the truncation keeps it and drops what is
-    /// after it.
-    pub(crate) sequence: i32,
+    /// after it. A live row has none (#2925): the turn that owns it is still
+    /// writing, so there is nothing stored to cut and the rewrite stops the
+    /// turn and speaks for the exchange from there.
+    pub(crate) sequence: Option<i32>,
 }
 
 /// A stored user row open for an in-place rewrite (#2826).

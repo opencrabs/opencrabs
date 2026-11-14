@@ -2826,6 +2826,71 @@ pub enum LiveCardLine {
     Reasoning(String),
 }
 
+/// Which of the user's own live rows a handler belongs to (#2925).
+///
+/// A turn that is still running paints its question and every message the agent
+/// took between tool calls from [`LiveTurn`], and none of them is a stored row
+/// yet: no id, no sequence, no place in `rows`. The slot they occupy is their
+/// identity until the turn settles and the reload installs the persisted copy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum LiveSlot {
+    /// The question that opened the turn.
+    Question,
+    /// A message the agent took between tool calls, by index in `injected`.
+    Injected(usize),
+}
+
+/// Which live row a press belongs to (#2925): a line inside the working card,
+/// or one of the user's own rows around it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum LiveRow {
+    /// A card entry, by its index in `entries`.
+    Card(usize),
+    /// One of the user's own rows.
+    User(LiveSlot),
+}
+
+/// The name a live row's element ids are built from.
+fn live_slot_name(slot: LiveSlot) -> String {
+    match slot {
+        LiveSlot::Question => "question".to_string(),
+        LiveSlot::Injected(index) => format!("injected-{index}"),
+    }
+}
+
+/// The id a live row's rewrite is filed under (#2925).
+///
+/// The field, the confirm and the row have to agree on which row is open, and a
+/// live row has no stored id to agree on. The slot is turned into one from a
+/// fixed namespace no stored uuid lands in, so the render path compares ids the
+/// same way it does for every other row.
+pub fn live_edit_id(slot: LiveSlot) -> uuid::Uuid {
+    let tag = match slot {
+        LiveSlot::Question => 0u128,
+        LiveSlot::Injected(index) => 1u128 + index as u128,
+    };
+    uuid::Uuid::from_u128(0x2925_0000_0000_0000_0000_0000_0000_0000u128 + tag)
+}
+
+/// The stored sequence behind one of the reader's own live rows, when the store
+/// already holds it (#2925).
+///
+/// A live row is painted from the turn, but the question is written to the
+/// store while the turn runs, so a rewrite has to cut the copy that is already
+/// there instead of leaving it above the new one. `None` means nothing is
+/// stored yet: the turn only has to stop, and the rewrite speaks from there.
+pub fn live_slot_sequence(live: &LiveTurn, rows: &[Message], slot: LiveSlot) -> Option<i32> {
+    let text = match slot {
+        LiveSlot::Question => live.user.as_deref()?,
+        LiveSlot::Injected(index) => live.injected.get(index)?.as_str(),
+    };
+    let text = text.trim();
+    rows.iter()
+        .rev()
+        .find(|row| row.role == "user" && row.content.trim() == text)
+        .map(|row| row.sequence)
+}
+
 /// The card's body as data: every entry in order, resolved against the rows it
 /// names. The original entry index travels with the line so a menu acts on the
 /// exact row that was pressed, even when a stale tool index draws nothing.
@@ -2861,15 +2926,31 @@ fn live_card_lines(live: &LiveTurn) -> Vec<(usize, LiveCardLine)> {
 /// Ephemeral rows for the exact live entries on screen (#2925). Their ids only
 /// identify the open menu; their text and source session are captured at press
 /// time, so Copy, Reply and Forward never query a row that is not persisted.
-pub fn live_action_rows(live: &LiveTurn, session: uuid::Uuid) -> Vec<(usize, Message)> {
-    live_card_lines(live)
-        .into_iter()
-        .map(|(entry, line)| {
-            let content = live_card_line_text(&line);
-            let row = Message::new(session, "assistant".to_string(), content, entry as i32);
-            (entry, row)
-        })
-        .collect()
+///
+/// The reader's own rows come first, in the order they were said: the question
+/// that opened the turn, then every message the agent took between tool calls.
+/// They are rows here for the same reason the card's lines are: the menu acts on
+/// what was pressed, and mid-turn none of them is in `rows` yet.
+pub fn live_action_rows(live: &LiveTurn, session: uuid::Uuid) -> Vec<(LiveRow, Message)> {
+    let mut rows: Vec<(LiveRow, Message)> = Vec::new();
+    if let Some(question) = &live.user {
+        rows.push((
+            LiveRow::User(LiveSlot::Question),
+            Message::new(session, "user".to_string(), question.clone(), 0),
+        ));
+    }
+    for (index, text) in live.injected.iter().enumerate() {
+        rows.push((
+            LiveRow::User(LiveSlot::Injected(index)),
+            Message::new(session, "user".to_string(), text.clone(), 0),
+        ));
+    }
+    rows.extend(live_card_lines(live).into_iter().map(|(entry, line)| {
+        let content = live_card_line_text(&line);
+        let row = Message::new(session, "assistant".to_string(), content, entry as i32);
+        (LiveRow::Card(entry), row)
+    }));
+    rows
 }
 
 /// One exact live entry with its own right-press target (#2925).
@@ -2896,7 +2977,7 @@ fn live_entry_text(
     style: TextStyle,
     clamp: bool,
     drag: Option<&Rc<CopyDrag>>,
-    press: &HashMap<usize, PressHandler>,
+    press: &HashMap<LiveRow, PressHandler>,
 ) -> AnyElement {
     let registered = drag.filter(|_| !text.trim().is_empty()).map(|d| {
         let ordinal = {
@@ -2918,7 +2999,7 @@ fn live_entry_text(
     let row = live_press_row(
         id,
         content.into_any_element(),
-        entry.and_then(|index| press.get(&index)),
+        entry.and_then(|index| press.get(&LiveRow::Card(index))),
     );
     match registered {
         Some((d, ordinal)) => selectable_row(&d, ordinal, row).into_any_element(),
@@ -2931,7 +3012,7 @@ fn live_entry_text(
 fn live_card_body(
     lines: Vec<(usize, LiveCardLine)>,
     drag: Option<&Rc<CopyDrag>>,
-    press: &HashMap<usize, PressHandler>,
+    press: &HashMap<LiveRow, PressHandler>,
 ) -> AnyElement {
     let mut body = div()
         .flex()
@@ -2951,7 +3032,7 @@ fn live_card_body(
             body = body.child(live_press_row(
                 format!("live-entry-{entry}"),
                 live_card_line(line, None),
-                press.get(&entry),
+                press.get(&LiveRow::Card(entry)),
             ));
         }
         return body.into_any_element();
@@ -2966,7 +3047,7 @@ fn live_card_body(
         body = body.child(live_press_row(
             format!("live-entry-{entry}"),
             live_card_line(line, Some(&selection)),
-            press.get(&entry),
+            press.get(&LiveRow::Card(entry)),
         ));
     }
     selectable_row(d, ordinal, body).into_any_element()
@@ -3021,7 +3102,7 @@ fn live_card(
     expanded: bool,
     ctx: (Option<u32>, u32),
     drag: Option<&Rc<CopyDrag>>,
-    press: &HashMap<usize, PressHandler>,
+    press: &HashMap<LiveRow, PressHandler>,
 ) -> Stateful<Div> {
     // A stop ends the turn where it stood (#2811). A spinner says work is
     // happening and nothing is, so the head keeps a stop glyph and the card
@@ -3421,7 +3502,100 @@ pub(crate) fn collapsed_paragraph(text: &str) -> String {
 /// Pointer state shared by every exact live entry.
 struct LiveInteraction<'a> {
     drag: Option<&'a Rc<CopyDrag>>,
-    press: &'a HashMap<usize, PressHandler>,
+    press: &'a HashMap<LiveRow, PressHandler>,
+    /// The pencil behind the user's own live rows (#2925), keyed by slot.
+    edit: &'a HashMap<LiveSlot, ClickHandler>,
+    /// The rewrite open inside one of them, if any.
+    edit_row: Option<&'a InlineEditView>,
+}
+
+/// The body of one of the user's own live rows, or the field that replaces it
+/// while its rewrite is open (#2925).
+fn live_row_body(
+    slot: LiveSlot,
+    drag: Option<&Rc<CopyDrag>>,
+    block: &Block,
+    content_width: f32,
+    handlers: &HashMap<String, ClickHandler>,
+    edit_row: Option<&InlineEditView>,
+) -> AnyElement {
+    if let Some(editing) = edit_row.filter(|editing| editing.id == live_edit_id(slot)) {
+        return inline_edit_box(editing).into_any_element();
+    }
+    // A live turn stays on screen often enough, and for long enough, that its
+    // text has to copy like any other: while the transcript is short of a
+    // finished turn the live card is the only copy of the answer the user can
+    // see, so it is the only copy there is to drag.
+    match live_block(drag, block, content_width, handlers) {
+        Some(row) => row,
+        None => block_view(block, content_width, handlers, None, true).into_any_element(),
+    }
+}
+
+/// One of the user's own live rows (#2925), carrying the two affordances a
+/// stored row carries: a right press opens its menu, and the pencil on hover
+/// opens a field in place.
+///
+/// A turn in flight is exactly when the reader wants to act on what he just
+/// said, so the row that says it cannot be the one row on screen with no menu
+/// and no pencil. Its identity is the slot it fills, because nothing has been
+/// stored under an id yet.
+fn live_user_row(
+    slot: LiveSlot,
+    child: AnyElement,
+    press: Option<&PressHandler>,
+    edit: Option<&ClickHandler>,
+) -> Stateful<Div> {
+    let name = live_slot_name(slot);
+    let group = SharedString::from(format!("live-msg-hover-{name}"));
+    let mut row = div()
+        .id(SharedString::from(format!("live-msg-{name}")))
+        .flex()
+        .flex_row()
+        .items_start()
+        .gap_1()
+        .w_full()
+        .rounded_sm();
+    if edit.is_some() {
+        // The button is placed against the row's own box, so the row has to be
+        // the containing block.
+        row = row.relative().group(group.clone());
+    }
+    row = row.child(div().flex_1().min_w_0().child(child));
+    if let Some(handler) = edit {
+        let handler = handler.clone();
+        let palette = palette::current();
+        row = row.child(
+            div()
+                .id(SharedString::from(format!("live-msg-edit-{name}")))
+                .absolute()
+                .bottom(px(8.0))
+                .right(px(10.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .w(rems(1.3))
+                .h(rems(1.3))
+                .rounded_sm()
+                .bg(rgb(palette.panel_hi))
+                .border_1()
+                .border_color(rgb(palette.text_faint))
+                .opacity(0.0)
+                .group_hover(group, |d| d.opacity(1.0))
+                .cursor_pointer()
+                .child(crate::icon::edit_icon(palette.text_muted, 0.8))
+                .on_click(move |ev, window, app| handler(ev, window, app)),
+        );
+    }
+    // The whole row owns the right press, the same rule a stored row follows
+    // (#2923): the bubble's padding and its markdown children all bubble here.
+    if let Some(handler) = press {
+        let handler = handler.clone();
+        row = row.on_mouse_down(MouseButton::Right, move |ev, window, app| {
+            handler(ev, window, app);
+        });
+    }
+    row
 }
 
 /// The running turn, drawn with the transcript's own block grammar: the
@@ -3438,7 +3612,12 @@ fn live_view(
     handlers: &HashMap<String, ClickHandler>,
     interaction: LiveInteraction<'_>,
 ) -> Div {
-    let LiveInteraction { drag, press } = interaction;
+    let LiveInteraction {
+        drag,
+        press,
+        edit,
+        edit_row,
+    } = interaction;
     let mut col = div().flex().flex_col().gap_2();
     if let Some(user) = &live.user {
         let block = Block::Msg {
@@ -3449,14 +3628,21 @@ fn live_view(
             message_id: None,
             forward: None,
         };
-        // A live turn stays on screen often enough, and for long enough, that
-        // its text has to copy like any other: while the transcript is short of
-        // a finished turn the live card is the only copy of the answer the user
-        // can see, so it is the only copy there is to drag.
-        col = col.child(match live_block(drag, &block, content_width, handlers) {
-            Some(row) => row,
-            None => block_view(&block, content_width, handlers, None, true).into_any_element(),
-        });
+        // The reader's own question carries its menu and its pencil while the
+        // turn runs (#2925), not only once the reload turns it into a row.
+        col = col.child(live_user_row(
+            LiveSlot::Question,
+            live_row_body(
+                LiveSlot::Question,
+                drag,
+                &block,
+                content_width,
+                handlers,
+                edit_row,
+            ),
+            press.get(&LiveRow::User(LiveSlot::Question)),
+            edit.get(&LiveSlot::Question),
+        ));
     }
     for notice in &live.notices {
         col = col.child(
@@ -3469,7 +3655,8 @@ fn live_view(
     // Queued messages the agent took between tool calls, as user rows in
     // order, so a message typed mid-turn shows up where it entered the turn
     // rather than after it (#2441).
-    for text in &live.injected {
+    for (index, text) in live.injected.iter().enumerate() {
+        let slot = LiveSlot::Injected(index);
         let block = Block::Msg {
             role: "user".into(),
             content: text.clone(),
@@ -3478,10 +3665,12 @@ fn live_view(
             message_id: None,
             forward: None,
         };
-        col = col.child(match live_block(drag, &block, content_width, handlers) {
-            Some(row) => row,
-            None => block_view(&block, content_width, handlers, None, true).into_any_element(),
-        });
+        col = col.child(live_user_row(
+            slot,
+            live_row_body(slot, drag, &block, content_width, handlers, edit_row),
+            press.get(&LiveRow::User(slot)),
+            edit.get(&slot),
+        ));
     }
     // ONE card for the whole turn: header, body when open, footer. The three
     // loose children it replaces (a ledger, a status line below it, and a bare
@@ -4421,9 +4610,15 @@ pub struct ViewHooks {
     /// The live card's own click, minted by the caller for the same reason the
     /// folds are: only the owning view can build one.
     pub live_click: Option<ClickHandler>,
-    /// Right-press per exact live entry, keyed by its entry index (#2925).
-    /// Main chat and split leaves both mint these against ephemeral rows.
-    pub live_press: HashMap<usize, PressHandler>,
+    /// Right-press per exact live entry, keyed by the row it draws (#2925):
+    /// a card line, or one of the user's own rows. Main chat and split leaves
+    /// both mint these against ephemeral rows.
+    pub live_press: HashMap<LiveRow, PressHandler>,
+    /// The pencil behind the user's own live rows (#2925), keyed by slot. A
+    /// turn in flight draws its question and every message the agent took, and
+    /// none of them is in `rows` yet, so their rewrite is keyed by the slot
+    /// they fill instead of by a stored id.
+    pub live_edit: HashMap<LiveSlot, ClickHandler>,
     /// The marker above the drawn window (#2805). A pane owns its own
     /// transcript state, so the click that loads the next window has to be
     /// minted by whichever view holds that state.
@@ -4470,6 +4665,7 @@ pub fn view(
         ctx_max,
         live_click,
         live_press,
+        live_edit,
         message_click,
         message_press,
         selection: selected,
@@ -4774,6 +4970,8 @@ pub fn view(
             LiveInteraction {
                 drag: drag.as_ref(),
                 press: &live_press,
+                edit: &live_edit,
+                edit_row: edit_row.as_ref(),
             },
         ));
     }
@@ -6575,28 +6773,64 @@ mod tests {
 
     /// #2925: each action captures the exact visible entry and its source
     /// session, never the whole working-out block or another session's draft.
+    /// The reader's own rows come first, in the order they were said: the
+    /// question that opened the turn, then every message the agent took.
     #[test]
     fn live_action_rows_capture_each_visible_entry() {
         let session = uuid::Uuid::new_v4();
         let mut live = LiveTurn::default();
         live.begin("run it".into());
+        live.injected.push("and then this".into());
         live.push_narration("First exact entry".into());
         live.push_tool(ToolCall::running("bash".into(), "bash: cargo test".into()));
         live.push_narration("Second exact entry".into());
 
         let rows = live_action_rows(&live, session);
-        assert_eq!(rows.len(), 3);
-        assert_eq!(rows[0].0, 0);
-        assert_eq!(rows[1].0, 1);
-        assert_eq!(rows[2].0, 2);
-        assert!(
-            rows.iter()
-                .all(|(_, row)| { row.session_id == session && row.role == "assistant" })
+        assert_eq!(rows.len(), 5);
+        assert_eq!(rows[0].0, LiveRow::User(LiveSlot::Question));
+        assert_eq!(rows[0].1.role, "user");
+        assert_eq!(rows[0].1.content, "run it");
+        assert_eq!(rows[1].0, LiveRow::User(LiveSlot::Injected(0)));
+        assert_eq!(rows[1].1.role, "user");
+        assert_eq!(rows[1].1.content, "and then this");
+        assert_eq!(rows[2].0, LiveRow::Card(0));
+        assert_eq!(rows[3].0, LiveRow::Card(1));
+        assert_eq!(rows[4].0, LiveRow::Card(2));
+        assert!(rows.iter().all(|(_, row)| row.session_id == session));
+        assert!(rows[2..].iter().all(|(_, row)| row.role == "assistant"));
+        assert_eq!(rows[2].1.content, "First exact entry");
+        assert!(rows[3].1.content.ends_with("bash: cargo test"));
+        assert!(!rows[3].1.content.contains("First exact entry"));
+        assert_eq!(rows[4].1.content, "Second exact entry");
+    }
+
+    /// #2925: a live row the store already holds resolves to the row it stands
+    /// for, so a rewrite cuts that copy instead of leaving a second one above
+    /// it. Nothing stored yet means there is nothing to cut.
+    #[test]
+    fn live_slot_sequence_finds_the_stored_copy() {
+        let session = uuid::Uuid::new_v4();
+        let mut live = LiveTurn::default();
+        live.begin("run it".into());
+        live.injected.push("and then this".into());
+
+        let mut rows: Vec<Message> = Vec::new();
+        assert_eq!(
+            live_slot_sequence(&live, &rows, LiveSlot::Question),
+            None,
+            "nothing stored yet"
         );
-        assert_eq!(rows[0].1.content, "First exact entry");
-        assert!(rows[1].1.content.ends_with("bash: cargo test"));
-        assert!(!rows[1].1.content.contains("First exact entry"));
-        assert_eq!(rows[2].1.content, "Second exact entry");
+        rows.push(Message::new(session, "user".into(), "run it".into(), 7));
+        assert_eq!(
+            live_slot_sequence(&live, &rows, LiveSlot::Question),
+            Some(7),
+            "the question the store took is the row to cut"
+        );
+        assert_eq!(
+            live_slot_sequence(&live, &rows, LiveSlot::Injected(0)),
+            None,
+            "a message the store has not taken yet has no sequence"
+        );
     }
 
     /// #2442: the rows wear Telegram's marks, not the terminal's tick and cross,

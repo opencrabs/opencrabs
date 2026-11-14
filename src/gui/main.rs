@@ -2374,17 +2374,36 @@ impl Render for Dashboard {
             });
             message_press.insert(id, std::rc::Rc::new(handler));
         }
-        // Exact live entries get their own captured rows (#2925). Keying by
-        // entry index keeps the handler attached as later lines arrive.
-        let mut live_press: std::collections::HashMap<usize, transcript::PressHandler> =
-            std::collections::HashMap::new();
+        // Exact live entries get their own captured rows (#2925). Keying by the
+        // row they draw keeps the handler attached as later lines arrive, and
+        // it covers the reader's own rows too: the question and every message
+        // the agent took mid-turn are drawn from the turn, not from `rows`.
+        let mut live_press: std::collections::HashMap<
+            transcript::LiveRow,
+            transcript::PressHandler,
+        > = std::collections::HashMap::new();
+        // The pencil behind those same rows (#2925). A turn in flight is
+        // exactly when the reader wants to take back what he just said, so the
+        // one row on screen with no pencil would be his own.
+        let mut live_edit: std::collections::HashMap<
+            transcript::LiveSlot,
+            transcript::ClickHandler,
+        > = std::collections::HashMap::new();
         if let Some(session) = self.chat_session {
-            for (entry, row) in transcript::live_action_rows(&self.turn.live, session) {
+            for (target, row) in transcript::live_action_rows(&self.turn.live, session) {
+                if let transcript::LiveRow::User(slot) = target {
+                    let text = row.content.clone();
+                    let edit = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
+                        cx.stop_propagation();
+                        this.msg_edit_begin_live(slot, text.clone(), cx);
+                    });
+                    live_edit.insert(slot, std::rc::Rc::new(edit));
+                }
                 let handler = cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
                     cx.stop_propagation();
                     this.live_menu_open(row.clone(), None, ev.position, cx);
                 });
-                live_press.insert(entry, std::rc::Rc::new(handler));
+                live_press.insert(target, std::rc::Rc::new(handler));
             }
         }
         // One toggle per chip on screen (#2825). Minted only for the pictures
@@ -2555,6 +2574,7 @@ impl Render for Dashboard {
                         message_click: message_click.clone(),
                         message_press: message_press.clone(),
                         live_press,
+                        live_edit,
                         selection: select_on.then(|| msg_picked.clone()),
                         menu_dismiss: Some(msg_dismiss.clone()),
                         older: Some(older_click.clone()),

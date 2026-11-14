@@ -530,11 +530,55 @@ impl Dashboard {
             target: chat_leaf::EditTarget {
                 id,
                 session,
-                sequence,
+                sequence: Some(sequence),
             },
             editor,
         });
         logging::info(&format!("editing row {id} at sequence {sequence} in place"));
+        cx.notify();
+    }
+
+    /// Open one of the reader's own live rows for a rewrite (#2925).
+    ///
+    /// The row is painted from the live turn, not from `rows`, so its text
+    /// travels with the click instead of being looked up by id. The confirm
+    /// stops the turn and sends the rewrite, cutting the stored copy when the
+    /// store already holds one.
+    pub(crate) fn msg_edit_begin_live(
+        &mut self,
+        slot: transcript::LiveSlot,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.chat_state.session() else {
+            return;
+        };
+        let id = transcript::live_edit_id(slot);
+        // The row is painted from the turn, but the store may already hold the
+        // copy it stands for: the question is written while the turn runs. When
+        // it does, the rewrite cuts it like any other row; when it does not,
+        // there is nothing to cut and the stop is the whole of the edit.
+        let sequence = transcript::live_slot_sequence(
+            &self.turn.live,
+            &self.chat_state.transcript.rows,
+            slot,
+        );
+        let editor = self.new_inline_editor(text, cx);
+        cx.subscribe(&editor, move |this, _editor, event, cx| {
+            if let editor::EditorEvent::Sent(text) = event {
+                this.msg_edit_confirm(text.clone(), cx);
+            }
+        })
+        .detach();
+        self.edit_row = Some(chat_leaf::InlineEdit {
+            target: chat_leaf::EditTarget {
+                id,
+                session,
+                sequence,
+            },
+            editor,
+        });
+        logging::info(&format!("editing live row {slot:?} in place"));
         cx.notify();
     }
 
@@ -628,7 +672,7 @@ impl Dashboard {
                 target: chat_leaf::EditTarget {
                     id,
                     session,
-                    sequence,
+                    sequence: Some(sequence),
                 },
                 editor,
             });
@@ -641,6 +685,57 @@ impl Dashboard {
         self.sync_composer_session(cx);
         logging::info(&format!(
             "pane edit: row {id} at sequence {sequence} in {session}, in place"
+        ));
+        cx.notify();
+    }
+
+    /// Open one of the reader's own live rows in a split leaf (#2925).
+    ///
+    /// The leaf draws the turn it is running, so the row it paints is not in
+    /// its `rows` yet and the text travels with the click. Everything after the
+    /// field opens is the stored path: the confirm stops the turn and sends the
+    /// rewrite through the leaf, cutting the stored copy when there is one.
+    pub(crate) fn pane_edit_begin_live(
+        &mut self,
+        session: Uuid,
+        slot: transcript::LiveSlot,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pane) = self.pane_states.get(&session).cloned() else {
+            return;
+        };
+        let id = transcript::live_edit_id(slot);
+        // The leaf's own turn and rows: the stored copy it may already hold is
+        // the one this rewrite has to cut, not the window's.
+        let sequence = {
+            let pane = pane.read(cx);
+            transcript::live_slot_sequence(&pane.live, &pane.transcript.rows, slot)
+        };
+        let editor = self.new_inline_editor(text, cx);
+        cx.subscribe(&editor, move |this, _editor, event, cx| {
+            if let editor::EditorEvent::Sent(text) = event {
+                this.pane_edit_confirm(session, text.clone(), cx);
+            }
+        })
+        .detach();
+        pane.update(cx, |pane, cx| {
+            pane.edit = Some(chat_leaf::InlineEdit {
+                target: chat_leaf::EditTarget {
+                    id,
+                    session,
+                    sequence,
+                },
+                editor,
+            });
+            cx.notify();
+        });
+        // The leaf owns the keyboard while its row is open, the same as a
+        // stored row: the field asks for the caret on its next frame.
+        self.pane_focus = Some(session);
+        self.sync_composer_session(cx);
+        logging::info(&format!(
+            "pane edit: live row {slot:?} in {session}, in place"
         ));
         cx.notify();
     }
