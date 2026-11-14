@@ -12,6 +12,7 @@ set -euo pipefail
 # Options:
 #   --dir <path>      Install the CLI into <path> (default: $INSTALL_DIR, else /usr/local/bin)
 #   --version <tag>   Install a specific release (default: the latest)
+#   --client <which>  desktop, terminal or both (default: both)
 #   --dry-run         Resolve and print the plan, install nothing
 #   --no-deps         Leave the system package manager alone
 #   --no-path         Do not add the install dir to your shell startup file
@@ -20,6 +21,10 @@ set -euo pipefail
 # Two archive layouts exist and both are handled: releases up to v0.5.11 ship a
 # loose `opencrabs` plus `rtk`, and later releases ship `OpenCrabs.app` on
 # macOS so the icon has a bundle to live in.
+#
+# From v0.6.0 every archive carries both clients, the terminal one and the
+# desktop window. --client picks which of the two lands on PATH and in the
+# launcher; the download is the same file either way.
 #
 # Exit codes: 0 installed or dry run, 1 any failure.
 
@@ -47,6 +52,7 @@ verifies the download against the release's SHA256SUMS before unpacking.
 Options:
   --dir <path>      Install the CLI into <path> (default: $INSTALL_DIR, else /usr/local/bin)
   --version <tag>   Install a specific release (default: the latest)
+  --client <which>  desktop, terminal or both (default: both)
   --dry-run         Resolve and print the plan, install nothing
   --no-deps         Leave the system package manager alone
   --no-path         Do not add the install dir to your shell startup file
@@ -66,6 +72,10 @@ fetch() { curl -fsSL --retry 3 --retry-delay 2 "$@"; }
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 APP_DIR="${OPENCRABS_APP_DIR:-$HOME/Applications}"
 REQUESTED_VERSION="${OPENCRABS_VERSION:-}"
+# Every archive from v0.6.0 carries both clients, so the choice is which one to
+# put on PATH and in the launcher, not which file to download. `both` keeps the
+# pre-0.6.0 behaviour for anyone piping this script without flags.
+CLIENT="${OPENCRABS_CLIENT:-both}"
 DRY_RUN=0
 WITH_DEPS=1
 WITH_PATH_ENTRY=1
@@ -90,6 +100,15 @@ while [ $# -gt 0 ]; do
       REQUESTED_VERSION="${1#*=}"
       shift
       ;;
+    --client)
+      [ -n "${2:-}" ] || error "--client needs desktop, terminal or both"
+      CLIENT="$2"
+      shift 2
+      ;;
+    --client=*)
+      CLIENT="${1#*=}"
+      shift
+      ;;
     --dry-run)
       DRY_RUN=1
       shift
@@ -112,6 +131,14 @@ while [ $# -gt 0 ]; do
       ;;
   esac
 done
+
+case "$CLIENT" in
+  desktop | terminal | both) ;;
+  *)
+    error "--client takes desktop, terminal or both, not '${CLIENT}'.
+   desktop installs the window, terminal installs the CLI, both installs both."
+    ;;
+esac
 
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m)
@@ -190,10 +217,15 @@ as_root() {
 }
 
 if [ "$DRY_RUN" -eq 1 ]; then
-  info "Dry run: would install ${TAG} for ${OS}-${ARCH}"
-  info "Dry run: CLI goes to ${INSTALL_DIR}$([ "$NEEDS_SUDO" -eq 1 ] && echo " (via sudo -n)")"
-  [ "$OS" = "macos" ] &&
-    info "Dry run: a bundled release would also land OpenCrabs.app and OpenCrabs Desktop.app in ${APP_DIR}"
+  info "Dry run: would install ${TAG} for ${OS}-${ARCH}, client: ${CLIENT}"
+  [ "$CLIENT" != "desktop" ] &&
+    info "Dry run: CLI goes to ${INSTALL_DIR}$([ "$NEEDS_SUDO" -eq 1 ] && echo " (via sudo -n)")"
+  [ "$OS" = "macos" ] && [ "$CLIENT" != "desktop" ] &&
+    info "Dry run: would land OpenCrabs.app in ${APP_DIR} and link the CLI"
+  [ "$OS" = "macos" ] && [ "$CLIENT" != "terminal" ] &&
+    info "Dry run: would land OpenCrabs Desktop.app in ${APP_DIR}"
+  [ "$OS" = "linux" ] && [ "$CLIENT" != "terminal" ] &&
+    info "Dry run: would install opencrabs-gui and its launcher entry"
   [ "$WITH_DEPS" -eq 1 ] && info "Dry run: would also make sure poppler (pdftoppm) is present"
   [ "$WITH_PATH_ENTRY" -eq 1 ] &&
     info "Dry run: would add ${INSTALL_DIR} to your shell startup file if it is not already on PATH"
@@ -240,29 +272,48 @@ as_root mkdir -p "$INSTALL_DIR"
 if [ -d "${TMPDIR}/OpenCrabs.app" ]; then
   # Bundled layout: macOS reads an app icon only from a bundle, so the archive
   # carries one and the CLI on PATH is a symlink into it.
-  [ -x "${TMPDIR}/OpenCrabs.app/Contents/MacOS/opencrabs" ] ||
-    error "OpenCrabs.app is in the archive but has no opencrabs executable inside."
-  as_root mkdir -p "$APP_DIR"
-  as_root rm -rf "${APP_DIR}/OpenCrabs.app"
-  as_root cp -R "${TMPDIR}/OpenCrabs.app" "${APP_DIR}/OpenCrabs.app"
-  as_root ln -sf "${APP_DIR}/OpenCrabs.app/Contents/MacOS/opencrabs" "${INSTALL_DIR}/opencrabs"
-  info "Installed OpenCrabs.app in ${APP_DIR}, CLI linked into ${INSTALL_DIR}"
+  if [ "$CLIENT" != "desktop" ]; then
+    [ -x "${TMPDIR}/OpenCrabs.app/Contents/MacOS/opencrabs" ] ||
+      error "OpenCrabs.app is in the archive but has no opencrabs executable inside."
+    as_root mkdir -p "$APP_DIR"
+    as_root rm -rf "${APP_DIR}/OpenCrabs.app"
+    as_root cp -R "${TMPDIR}/OpenCrabs.app" "${APP_DIR}/OpenCrabs.app"
+    as_root ln -sf "${APP_DIR}/OpenCrabs.app/Contents/MacOS/opencrabs" "${INSTALL_DIR}/opencrabs"
+    info "Installed OpenCrabs.app in ${APP_DIR}, CLI linked into ${INSTALL_DIR}"
+  fi
 
   # The window's own bundle, when the archive carries one. OpenCrabs.app has to
   # keep the CLI's executable name for /evolve, so double-clicking it opens the
   # terminal client; this is the entry that opens the window. cp -R follows the
   # archive's hard link and writes a real file, so the installed copy does not
   # depend on the other bundle staying put.
-  if [ -d "${TMPDIR}/OpenCrabs Desktop.app" ]; then
-    as_root rm -rf "${APP_DIR}/OpenCrabs Desktop.app"
-    as_root cp -R "${TMPDIR}/OpenCrabs Desktop.app" "${APP_DIR}/OpenCrabs Desktop.app"
-    info "Installed OpenCrabs Desktop.app in ${APP_DIR}"
+  if [ "$CLIENT" != "terminal" ]; then
+    if [ -d "${TMPDIR}/OpenCrabs Desktop.app" ]; then
+      as_root mkdir -p "$APP_DIR"
+      as_root rm -rf "${APP_DIR}/OpenCrabs Desktop.app"
+      as_root cp -R "${TMPDIR}/OpenCrabs Desktop.app" "${APP_DIR}/OpenCrabs Desktop.app"
+      info "Installed OpenCrabs Desktop.app in ${APP_DIR}"
+    else
+      warn "This release ships no OpenCrabs Desktop.app, so only the terminal client is available."
+    fi
   fi
 else
-  [ -f "${TMPDIR}/opencrabs" ] ||
-    error "The archive contained neither OpenCrabs.app nor an opencrabs binary, so the release layout changed."
-  as_root install -m 755 "${TMPDIR}/opencrabs" "${INSTALL_DIR}/opencrabs"
-  info "OpenCrabs ${TAG} installed to ${INSTALL_DIR}/opencrabs"
+  # Loose-binary layout, which is Linux and macOS before v0.5.12. Both clients
+  # are separate executables here, so the choice is a real one.
+  if [ "$CLIENT" != "desktop" ]; then
+    [ -f "${TMPDIR}/opencrabs" ] ||
+      error "The archive contained neither OpenCrabs.app nor an opencrabs binary, so the release layout changed."
+    as_root install -m 755 "${TMPDIR}/opencrabs" "${INSTALL_DIR}/opencrabs"
+    info "OpenCrabs ${TAG} installed to ${INSTALL_DIR}/opencrabs"
+  fi
+  if [ "$CLIENT" != "terminal" ]; then
+    if [ -f "${TMPDIR}/opencrabs-gui" ]; then
+      as_root install -m 755 "${TMPDIR}/opencrabs-gui" "${INSTALL_DIR}/opencrabs-gui"
+      info "OpenCrabs Desktop ${TAG} installed to ${INSTALL_DIR}/opencrabs-gui"
+    else
+      warn "This release ships no opencrabs-gui, so only the terminal client is available."
+    fi
+  fi
 fi
 
 # The archive ships rtk beside the agent. Installing only one leaves a feature
@@ -273,13 +324,25 @@ if [ -f "${TMPDIR}/rtk" ]; then
 fi
 
 # A Linux desktop needs the menu entry and icon or a file manager shows the
-# generic exec glyph. Best effort: a headless host has no use for them.
-if [ -f "${TMPDIR}/opencrabs.desktop" ]; then
-  mkdir -p "$HOME/.local/share/applications" "$HOME/.local/share/icons/hicolor/256x256/apps"
-  install -m 644 "${TMPDIR}/opencrabs.desktop" "$HOME/.local/share/applications/opencrabs.desktop"
-  [ -f "${TMPDIR}/opencrabs.png" ] &&
-    install -m 644 "${TMPDIR}/opencrabs.png" \
-      "$HOME/.local/share/icons/hicolor/256x256/apps/opencrabs.png"
+# generic exec glyph. Best effort: a headless host has no use for them. Each
+# client has its own entry, and only the chosen one is placed.
+if [ "$OS" = "linux" ]; then
+  APPS_DIR="$HOME/.local/share/applications"
+  ICONS_DIR="$HOME/.local/share/icons/hicolor/256x256/apps"
+  if [ "$CLIENT" != "desktop" ] && [ -f "${TMPDIR}/opencrabs.desktop" ]; then
+    mkdir -p "$APPS_DIR"
+    install -m 644 "${TMPDIR}/opencrabs.desktop" "${APPS_DIR}/opencrabs.desktop"
+    info "Terminal launcher entry installed"
+  fi
+  if [ "$CLIENT" != "terminal" ] && [ -f "${TMPDIR}/opencrabs-gui.desktop" ]; then
+    mkdir -p "$APPS_DIR"
+    install -m 644 "${TMPDIR}/opencrabs-gui.desktop" "${APPS_DIR}/opencrabs-gui.desktop"
+    info "Desktop launcher entry installed"
+  fi
+  if [ -f "${TMPDIR}/opencrabs.png" ]; then
+    mkdir -p "$ICONS_DIR"
+    install -m 644 "${TMPDIR}/opencrabs.png" "${ICONS_DIR}/opencrabs.png"
+  fi
 fi
 
 # Poppler (pdftoppm) renders PDF pages to images so the agent can see scanned

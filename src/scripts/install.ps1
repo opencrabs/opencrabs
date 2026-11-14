@@ -17,6 +17,10 @@
 .PARAMETER Version
     Install a specific release tag (default: the latest).
 
+.PARAMETER Client
+    desktop, terminal or both (default: both). Every archive from v0.6.0
+    carries both clients; this picks which one is installed.
+
 .PARAMETER Dir
     Install directory (default: %LOCALAPPDATA%\OpenCrabs\bin).
 
@@ -33,6 +37,7 @@
 param(
     [string]$Version = '',
     [string]$Dir = '',
+    [string]$Client = '',
     [switch]$DryRun,
     [switch]$NoPathUpdate,
     [switch]$Help
@@ -78,6 +83,7 @@ To pass flags, build a script block instead of piping straight into iex:
   & ([scriptblock]::Create((iwr -useb https://opencrabs.com/install.ps1))) -Version v0.5.11
 
   -Version <tag>   Install a specific release (default: the latest)
+  -Client <which>  desktop, terminal or both (default: both)
   -Dir <path>      Install directory (default: %LOCALAPPDATA%\OpenCrabs\bin)
   -DryRun          Print the plan and exit without downloading anything
   -NoPathUpdate    Install the binaries but leave the user PATH alone
@@ -98,6 +104,16 @@ if (-not ($env:OS -eq 'Windows_NT')) {
 
 if (-not [System.Environment]::Is64BitOperatingSystem) {
     Die 'OpenCrabs ships 64-bit builds only'
+}
+
+# The client choice. An argument wins, then the environment variable, then both,
+# which is what this installer did before the desktop client existed.
+if (-not $Client) {
+    if ($env:OPENCRABS_CLIENT) { $Client = $env:OPENCRABS_CLIENT } else { $Client = 'both' }
+}
+$Client = $Client.ToLowerInvariant()
+if ($Client -notin @('desktop', 'terminal', 'both')) {
+    Die "-Client takes desktop, terminal or both, not '$Client'"
 }
 
 # PROCESSOR_ARCHITECTURE reports the architecture of the running process, so an
@@ -240,6 +256,7 @@ if (-not $Dir) {
 Write-Say "OpenCrabs $tag (windows/$AssetArch)"
 Write-Say "  install to  $Dir"
 Write-Say "  archive     $asset"
+Write-Say "  client      $Client"
 
 if ($DryRun) {
     Write-Say 'dry run: nothing downloaded, nothing installed'
@@ -282,8 +299,16 @@ try {
     # DLLs sit beside the exes because Windows loads them from the directory the
     # exe lives in, so an install that copies only the exes produces a binary
     # that cannot start on a machine without the redistributable (#2260).
+    # Both clients ship in this one archive from v0.6.0. The MSVC runtime DLLs
+    # are shared by both exes and Windows loads them from the exe's own
+    # directory, so they are never filtered; only the exe for the client the
+    # user did not ask for is left out.
+    $skipExe = ''
+    if ($Client -eq 'desktop') { $skipExe = 'opencrabs.exe' }
+    elseif ($Client -eq 'terminal') { $skipExe = 'opencrabs-gui.exe' }
     $shipped = @(Get-ChildItem -LiteralPath $extractDir -File | Where-Object {
-        $_.Extension -ieq '.exe' -or $_.Extension -ieq '.dll'
+        ($_.Extension -ieq '.exe' -or $_.Extension -ieq '.dll') -and
+        (-not $skipExe -or $_.Name -ine $skipExe)
     })
     if ($shipped.Count -eq 0) { Die "$asset carries nothing to install" }
 
@@ -346,8 +371,21 @@ if (-not $NoPathUpdate) {
 }
 
 Write-Say ''
-Write-Say "OpenCrabs $tag installed at $binTarget"
-Write-Say "Run: $BinName"
-Write-Say 'It opens straight into the chat with the built-in provider already live,'
-Write-Say 'so you can start talking without a key or an account.'
-Write-Say "Setup wizard: $BinName --onboard"
+if ($Client -eq 'desktop') {
+    Write-Say "OpenCrabs Desktop $tag installed at $(Join-Path $Dir 'opencrabs-gui.exe')"
+    Write-Say 'Run: opencrabs-gui'
+    Write-Say 'It opens the window, with the built-in provider already live, so you'
+    Write-Say 'can start talking without a key or an account.'
+} elseif ($Client -eq 'terminal') {
+    Write-Say "OpenCrabs $tag installed at $binTarget"
+    Write-Say "Run: $BinName"
+    Write-Say 'It opens straight into the chat with the built-in provider already live,'
+    Write-Say 'so you can start talking without a key or an account.'
+    Write-Say "Setup wizard: $BinName --onboard"
+} else {
+    Write-Say "OpenCrabs $tag installed at $Dir"
+    Write-Say "Run: $BinName for the terminal, opencrabs-gui for the window"
+    Write-Say 'Both open with the built-in provider already live, so you can start'
+    Write-Say 'talking without a key or an account.'
+    Write-Say "Setup wizard: $BinName --onboard"
+}
