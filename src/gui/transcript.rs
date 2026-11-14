@@ -6781,9 +6781,9 @@ mod tests {
         let mut live = LiveTurn::default();
         live.begin("run it".into());
         live.injected.push("and then this".into());
-        live.push_narration("First exact entry".into());
+        live.push_narration("First exact entry");
         live.push_tool(ToolCall::running("bash".into(), "bash: cargo test".into()));
-        live.push_narration("Second exact entry".into());
+        live.push_narration("Second exact entry");
 
         let rows = live_action_rows(&live, session);
         assert_eq!(rows.len(), 5);
