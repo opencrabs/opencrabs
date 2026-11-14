@@ -87,31 +87,26 @@ pub fn render(
                         .truncate(),
                 ),
         );
+    if let Some(actions) = view.actions {
+        header = header.child(actions);
+    }
     if view.header_close {
         header = header.child(
             div()
                 .id(SharedString::from(format!("{prefix}-close")))
                 .flex_none()
-                .flex_row()
+                .flex()
                 .items_center()
-                .gap_1()
-                .px_2()
-                .py_1()
-                .rounded(px(concentric_radius(14.0)))
-                .border_1()
-                .border_color(rgb(shown.track))
-                .bg(rgb(shown.bg))
-                .text_xs()
-                .text_color(rgb(shown.text_faint))
+                .justify_center()
+                .size(px(28.0))
+                .rounded(px(concentric_radius(8.0)))
+                .text_sm()
+                .text_color(rgb(shown.text_muted))
                 .cursor_pointer()
-                .hover(|d| d.text_color(rgb(shown.text)).border_color(rgb(shown.text_muted)))
+                .hover(|d| d.bg(rgb(shown.panel_hi)).text_color(rgb(shown.text)))
                 .on_click(close_door)
-                .child("Close")
-                .child("esc"),
+                .child("✕"),
         );
-    }
-    if let Some(actions) = view.actions {
-        header = header.child(actions);
     }
     let mut card = div()
         .id(SharedString::from(format!("{prefix}-card")))

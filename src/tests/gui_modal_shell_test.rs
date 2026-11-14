@@ -21,6 +21,35 @@ fn theme_consumes_the_shared_modal_shell() {
 }
 
 #[test]
+fn shared_modal_close_is_a_compact_right_edge_glyph() {
+    let shell = include_str!("../gui/modal_shell.rs");
+    let close = shell
+        .split("if view.header_close {")
+        .nth(1)
+        .and_then(|tail| tail.split("let mut card =").next())
+        .expect("shared modal close control");
+    for expected in [
+        ".size(px(28.0))",
+        ".items_center()",
+        ".justify_center()",
+        ".child(\"✕\")",
+        ".on_click(close_door)",
+    ] {
+        assert!(close.contains(expected), "missing close detail: {expected}");
+    }
+    for rejected in [".child(\"Close\")", ".child(\"esc\")", ".border_1()"] {
+        assert!(
+            !close.contains(rejected),
+            "the close glyph must stay compact, not contain {rejected}"
+        );
+    }
+    assert!(
+        shell.find("if let Some(actions)").unwrap() < shell.find("if view.header_close").unwrap(),
+        "header actions come before the right-edge close control"
+    );
+}
+
+#[test]
 fn theme_transparency_reaches_config_native_alpha_and_the_whole_root() {
     let types = include_str!("../config/types.rs");
     let main = include_str!("../gui/main.rs");
