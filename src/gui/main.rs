@@ -6915,15 +6915,16 @@ mod tests {
         );
         // The transcript takes the visible turn by reference, not as an
         // Option: the window keeps exactly one and swaps it on a switch
-        // (#2616). Both remaining handovers belong to the window chat: the
-        // attachment-tile scan and the body that paints it. A split pane
-        // paints from its own `PaneView::live`, and the third window
-        // handover was the Themes preview leaf the centered modal replaced
-        // (#2619).
+        // (#2616). Four handovers belong to the window chat now, all of them
+        // the same turn: the attachment-tile scan, the action rows behind the
+        // reader's own live entries (#2925), the edit slot sequence that
+        // rewrites one of those entries (#2925), and the body that paints it.
+        // A split pane paints from its own `PaneView::live`, and the Themes
+        // preview leaf the centered modal replaced is gone (#2619).
         assert_eq!(
             production.matches("&self.turn.live,").count(),
-            2,
-            "the attachment scan and the chat body both paint the window's turn"
+            4,
+            "the attachment scan, the live action rows, the edit sequence and the chat body all paint the window's turn"
         );
         assert_eq!(
             production.matches("swap_visible_turn(").count(),

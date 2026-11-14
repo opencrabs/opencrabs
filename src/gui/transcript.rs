@@ -7197,15 +7197,33 @@ mod tests {
             .split_once(["/// The transcript pane"].concat().as_str())
             .expect("live_view ends");
         assert!(
-            live_src.contains(["drag: Option<&Rc<", "CopyDrag>>,"].concat().as_str()),
+            live_src.contains(["interaction: Live", "Interaction<'_>,"].concat().as_str()),
             "the live pane takes the pane's own drag state"
+        );
+        // The parameters that would not fit on the signature ride in that
+        // bundle, so the drag state has to be one of them (#2925).
+        assert!(
+            live_src.contains(["let Live", "Interaction {"].concat().as_str())
+                && live_src.contains("\n        drag,\n"),
+            "the live pane unpacks the drag state it was handed"
+        );
+        assert!(
+            SRC.contains(["drag: Option<&'a Rc<", "CopyDrag>>,"].concat().as_str()),
+            "the bundle carries the pane's drag state through to the rows"
         );
         assert_eq!(
             live_src
-                .matches(["live_", "block(drag, &block"].concat().as_str())
+                .matches(["live_row_", "body("].concat().as_str())
                 .count(),
-            3,
-            "the question, the queued rows and the answer all copy"
+            2,
+            "the question and the queued rows both route through the body"
+        );
+        assert_eq!(
+            live_src
+                .matches(["live_block(drag, &block"].concat().as_str())
+                .count(),
+            1,
+            "the answer takes the same drag state the question does"
         );
         let (_, helper) = SRC
             .split_once(["fn live_", "block("].concat().as_str())
