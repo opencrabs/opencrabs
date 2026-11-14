@@ -3415,6 +3415,12 @@ pub(crate) fn collapsed_paragraph(text: &str) -> String {
     fit(&flat, COLLAPSED_NARRATION_CHARS)
 }
 
+/// Pointer state shared by every exact live entry.
+struct LiveInteraction<'a> {
+    drag: Option<&'a Rc<CopyDrag>>,
+    press: &'a HashMap<usize, PressHandler>,
+}
+
 /// The running turn, drawn with the transcript's own block grammar: the
 /// question as a user bubble, tool rows with their live status, the streamed
 /// answer as markdown, notices in amber. Nothing here folds: the turn has no
@@ -3427,9 +3433,9 @@ fn live_view(
     ctx: (Option<u32>, u32),
     live_click: Option<&ClickHandler>,
     handlers: &HashMap<String, ClickHandler>,
-    drag: Option<&Rc<CopyDrag>>,
-    press: &HashMap<usize, PressHandler>,
+    interaction: LiveInteraction<'_>,
 ) -> Div {
+    let LiveInteraction { drag, press } = interaction;
     let mut col = div().flex().flex_col().gap_2();
     if let Some(user) = &live.user {
         let block = Block::Msg {
@@ -4762,8 +4768,10 @@ pub fn view(
             (ctx_used, ctx_max),
             live_click.as_ref(),
             &attachment_handlers,
-            drag.as_ref(),
-            &live_press,
+            LiveInteraction {
+                drag: drag.as_ref(),
+                press: &live_press,
+            },
         ));
     }
     // Releasing the mouse ends the drag and copies the selected range (#2383,
