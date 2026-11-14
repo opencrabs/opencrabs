@@ -954,7 +954,7 @@ pub async fn toggle_reaction(
 }
 
 /// Drop every row after a point in one session (#2826), off the UI thread the
-/// same way [`forward_rows`] writes: a std thread carrying its own runtime, so
+/// same way [`load_recent`] reads: a std thread carrying its own runtime, so
 /// the window's executor never blocks on the pool.
 ///
 /// The row at `sequence` survives, because the edit replaces it and the resend
@@ -1104,48 +1104,6 @@ fn topic_family_label(title: &str) -> Option<String> {
 fn is_model_change_notice(content: &str) -> bool {
     let text = content.trim();
     text.starts_with("[Model changed to ") && text.ends_with(']')
-}
-
-/// Write the picked rows into another session (#2608), off the UI thread the
-/// same way [`load_recent`] reads them: a std thread carrying its own tokio
-/// runtime, so the window's executor never blocks on the pool.
-///
-/// The label names the source, and it is the source's own title as the rail
-/// shows it. Returns how many rows landed.
-pub async fn forward_rows(
-    db_path: std::path::PathBuf,
-    source: Vec<Message>,
-    target: uuid::Uuid,
-    label: String,
-) -> Result<usize, String> {
-    let (tx, rx) = futures::channel::oneshot::channel::<Result<usize, String>>();
-    let spawned = std::thread::Builder::new()
-        .name("transcript-forward".into())
-        .stack_size(4 * 1024 * 1024)
-        .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build();
-            let result = match runtime {
-                Ok(rt) => rt
-                    .block_on(async {
-                        let db = Database::connect(&db_path).await?;
-                        let repo = MessageRepository::new(db.pool().clone());
-                        let ids = repo.forward(&source, target, &label).await?;
-                        Ok::<_, anyhow::Error>(ids.len())
-                    })
-                    .map_err(|e| format!("{e:#}")),
-                Err(e) => Err(format!("tokio runtime failed: {e}")),
-            };
-            let _ = tx.send(result);
-        });
-    match spawned {
-        Ok(_) => match rx.await {
-            Ok(result) => result,
-            Err(_) => Err("forward thread dropped its result".into()),
-        },
-        Err(e) => Err(format!("forward thread failed to spawn: {e}")),
-    }
 }
 
 /// Expand ONE stored row into its renderable blocks. Mirrors

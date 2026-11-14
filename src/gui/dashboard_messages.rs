@@ -1021,8 +1021,8 @@ impl Dashboard {
         cx.notify();
     }
 
-    /// Write the rows into the destination (#2608): a click on a row, or Enter
-    /// on the picker's cursor.
+    /// Stage the rows in the destination's composer (#2924): a click on a row,
+    /// or Enter on the picker's cursor.
     pub(crate) fn forward_commit(&mut self, cx: &mut Context<Self>) {
         let Some(target) = self
             .forward_cursor
