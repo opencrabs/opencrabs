@@ -54,9 +54,9 @@ fn projects_is_a_real_service_backed_dashboard_screen() {
 fn projects_commands_live_in_the_footer_and_delete_is_neutral_at_rest() {
     assert!(PROJECTS_SCREEN.contains("actions: None"));
     assert!(PROJECTS_SCREEN.contains("header_close: false"));
-    assert!(PROJECTS_SCREEN.contains(
-        "ProjectsMode::List => \"up/down select  enter open  esc close\""
-    ));
+    assert!(
+        PROJECTS_SCREEN.contains("ProjectsMode::List => \"up/down select  enter open  esc close\"")
+    );
     let modal = PROJECTS_SCREEN
         .find("modal_shell::render(")
         .expect("the modal shell renders Projects");
@@ -92,9 +92,19 @@ fn assignment_can_repair_sessions_from_other_projects() {
     assert!(repository.contains("archived_at IS NULL AND parent_id IS NULL"));
 }
 
+/// Collapses layout whitespace and drops the trailing comma rustfmt leaves in
+/// multi-line struct variants, so a source pin matches however it is wrapped.
+fn squeezed(source: &str) -> String {
+    source
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace(", }", " }")
+}
+
 #[test]
 fn bulk_assignment_clear_and_archive_keep_their_own_service_paths() {
-    let projects = PROJECTS.split_whitespace().collect::<Vec<_>>().join(" ");
+    let projects = squeezed(PROJECTS);
     for needle in [
         "AssignMany { project_id: Uuid, session_ids: Vec<Uuid> }",
         "ClearMany { project_id: Uuid, session_ids: Vec<Uuid> }",
@@ -103,7 +113,10 @@ fn bulk_assignment_clear_and_archive_keep_their_own_service_paths() {
         "service.unassign_session(*session_id).await?",
         "sessions.archive(*session_id).await?",
     ] {
-        assert!(projects.contains(needle), "missing bulk service path: {needle}");
+        assert!(
+            projects.contains(&squeezed(needle)),
+            "missing bulk service path: {needle}"
+        );
     }
     assert!(PROJECTS_SCREEN.contains("this.projects.toggle_assignment(project_id, id)"));
     assert!(PROJECTS_SCREEN.contains("project-bulk-archive-confirm"));
