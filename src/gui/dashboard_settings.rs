@@ -192,8 +192,7 @@ impl Dashboard {
                     if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
                         && let Some((_, buffer)) = self.settings_secret.as_mut()
                     {
-                        let pasted: String =
-                            text.chars().filter(|c| !c.is_control()).collect();
+                        let pasted: String = text.chars().filter(|c| !c.is_control()).collect();
                         buffer.push_str(&pasted);
                     }
                 }
@@ -399,7 +398,10 @@ impl Dashboard {
                     .map(|(_, buffer)| buffer.chars().count())
                     .unwrap_or(0);
                 div().child(text(
-                    format!("{} (enter saves, esc cancels)", "\u{2022}".repeat(len.max(1))),
+                    format!(
+                        "{} (enter saves, esc cancels)",
+                        "\u{2022}".repeat(len.max(1))
+                    ),
                     Size::Sm,
                     shown.accent,
                 ))

@@ -110,8 +110,7 @@ pub(crate) async fn handle_poll_answer(
     let _guard = match state.try_begin_turn(origin.session_id) {
         Some(guard) => guard,
         None => {
-            let queued =
-                super::handler::build_midturn_queued_message(None, &text, &text);
+            let queued = super::handler::build_midturn_queued_message(None, &text, &text);
             state.enqueue_reaction(origin.session_id, queued);
             return;
         }

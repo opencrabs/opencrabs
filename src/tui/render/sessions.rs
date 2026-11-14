@@ -22,8 +22,8 @@ use super::responsive::{self, SessionRowTier};
 use super::theme::{self, Role};
 use super::utils::{format_token_count_raw, format_token_count_with_label, truncate_to_width};
 use crate::db::models::Session;
-use crate::ui_core::text_field::TextField;
 use crate::tui::app::dialog_keys::{DialogScope, dialog_keys};
+use crate::ui_core::text_field::TextField;
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -1073,12 +1073,7 @@ fn session_row(
 /// `ctrl-a` paints the whole name reversed, `alt-left` walks the caret back a
 /// word. Reversed video is the terminal's own selection wash, so a selection
 /// needs no colour of its own.
-fn prompt_spans(
-    prefix: &str,
-    field: &TextField,
-    width: usize,
-    style: Style,
-) -> Vec<Span<'static>> {
+fn prompt_spans(prefix: &str, field: &TextField, width: usize, style: Style) -> Vec<Span<'static>> {
     let mut budget = width
         .saturating_sub(UnicodeWidthStr::width(prefix))
         .saturating_sub(1);

@@ -801,9 +801,21 @@ mod group_filter_tests {
 
     fn rows() -> Vec<(Uuid, String, String)> {
         vec![
-            (Uuid::from_u128(1), "Rust rewrite".into(), "11-01 10:00".into()),
-            (Uuid::from_u128(2), "Telegram topics".into(), "11-02 11:00".into()),
-            (Uuid::from_u128(3), "rustfmt sweep".into(), "11-03 12:00".into()),
+            (
+                Uuid::from_u128(1),
+                "Rust rewrite".into(),
+                "11-01 10:00".into(),
+            ),
+            (
+                Uuid::from_u128(2),
+                "Telegram topics".into(),
+                "11-02 11:00".into(),
+            ),
+            (
+                Uuid::from_u128(3),
+                "rustfmt sweep".into(),
+                "11-03 12:00".into(),
+            ),
         ]
     }
 

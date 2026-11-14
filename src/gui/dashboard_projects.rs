@@ -100,9 +100,10 @@ impl Dashboard {
         let generation = self.projects.generation;
         let db_path = self.db_path.clone();
         let membership_update = match &action {
-            ProjectAction::AssignMany { project_id, session_ids } => {
-                Some((Some(*project_id), session_ids.clone()))
-            }
+            ProjectAction::AssignMany {
+                project_id,
+                session_ids,
+            } => Some((Some(*project_id), session_ids.clone())),
             ProjectAction::ClearMany { session_ids, .. } => Some((None, session_ids.clone())),
             _ => None,
         };
@@ -133,9 +134,12 @@ impl Dashboard {
                     Ok(data) => {
                         this.projects.apply(data);
                         if let Some((project_id, session_ids)) = membership_update {
-                            for session in this.sessions.items.iter_mut().filter(|session| {
-                                session_ids.contains(&session.id)
-                            }) {
+                            for session in this
+                                .sessions
+                                .items
+                                .iter_mut()
+                                .filter(|session| session_ids.contains(&session.id))
+                            {
                                 session.project_id = project_id;
                             }
                         }
@@ -248,7 +252,13 @@ impl Dashboard {
         if session_ids.is_empty() {
             return;
         }
-        self.request_projects(ProjectAction::AssignMany { project_id, session_ids }, cx);
+        self.request_projects(
+            ProjectAction::AssignMany {
+                project_id,
+                session_ids,
+            },
+            cx,
+        );
     }
 
     pub(crate) fn clear_selected_projects(&mut self, project_id: Uuid, cx: &mut Context<Self>) {
@@ -256,7 +266,13 @@ impl Dashboard {
         if session_ids.is_empty() {
             return;
         }
-        self.request_projects(ProjectAction::ClearMany { project_id, session_ids }, cx);
+        self.request_projects(
+            ProjectAction::ClearMany {
+                project_id,
+                session_ids,
+            },
+            cx,
+        );
     }
 
     pub(crate) fn request_selected_archive(&mut self, cx: &mut Context<Self>) {
@@ -272,7 +288,13 @@ impl Dashboard {
         if session_ids.is_empty() {
             return;
         }
-        self.request_projects(ProjectAction::ArchiveMany { project_id, session_ids }, cx);
+        self.request_projects(
+            ProjectAction::ArchiveMany {
+                project_id,
+                session_ids,
+            },
+            cx,
+        );
     }
 
     pub(crate) fn assign_session_to_project(&mut self, project_id: Uuid, cx: &mut Context<Self>) {

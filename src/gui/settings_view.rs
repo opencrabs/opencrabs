@@ -213,7 +213,11 @@ pub const SPECS: &[SettingSpec] = &[
         section: "agent",
         key: "thinking_loop_timeout_secs",
         label: "Thinking loop guard (s)",
-        kind: SettingKind::Number { min: 0, step: 60, max: 7200 },
+        kind: SettingKind::Number {
+            min: 0,
+            step: 60,
+            max: 7200,
+        },
         restart: false,
         blurb: "kill a stream that produces no output; 0 disables",
         group: SettingsSection::Advanced,
@@ -222,7 +226,11 @@ pub const SPECS: &[SettingSpec] = &[
         section: "agent",
         key: "time_marker_interval_secs",
         label: "Time marker interval (s)",
-        kind: SettingKind::Number { min: 0, step: 60, max: 7200 },
+        kind: SettingKind::Number {
+            min: 0,
+            step: 60,
+            max: 7200,
+        },
         restart: false,
         blurb: "mid-turn time notices in long tool loops; 0 disables",
         group: SettingsSection::Advanced,
@@ -249,7 +257,11 @@ pub const SPECS: &[SettingSpec] = &[
         section: "memory",
         key: "sweep_interval_secs",
         label: "External sweep interval (s)",
-        kind: SettingKind::Number { min: 10, step: 30, max: 86400 },
+        kind: SettingKind::Number {
+            min: 10,
+            step: 30,
+            max: 86400,
+        },
         restart: false,
         blurb: "freshness sweeps of the external index paths",
         group: SettingsSection::Memory,
@@ -258,7 +270,11 @@ pub const SPECS: &[SettingSpec] = &[
         section: "memory",
         key: "backfill_interval_secs",
         label: "Embedding backfill sweep (s)",
-        kind: SettingKind::Number { min: 0, step: 60, max: 86400 },
+        kind: SettingKind::Number {
+            min: 0,
+            step: 60,
+            max: 86400,
+        },
         restart: false,
         blurb: "re-reads config each tick; 0 disables",
         group: SettingsSection::Memory,
@@ -321,14 +337,17 @@ pub fn advance(spec: &SettingSpec, value: &RowValue) -> Option<RowValue> {
             // A value the list does not know (hand-edited config) restarts
             // the cycle at the first option rather than vanishing.
             let next = at.map_or(0, |i| (i + 1) % options.len());
-            options.get(next).map(|s| RowValue::Choice((*s).to_string()))
+            options
+                .get(next)
+                .map(|s| RowValue::Choice((*s).to_string()))
         }
-        (SettingKind::OptBool, RowValue::OptBool(current)) => Some(RowValue::OptBool(match current
-        {
-            None => Some(true),
-            Some(true) => Some(false),
-            Some(false) => None,
-        })),
+        (SettingKind::OptBool, RowValue::OptBool(current)) => {
+            Some(RowValue::OptBool(match current {
+                None => Some(true),
+                Some(true) => Some(false),
+                Some(false) => None,
+            }))
+        }
         (SettingKind::Number { .. }, RowValue::Number(n)) => {
             Some(RowValue::Number(step_number(spec, *n, 1)))
         }
@@ -372,9 +391,7 @@ pub fn current_values(config: &Config) -> Vec<RowValue> {
             ("agent", "thinking_loop_timeout_secs") => {
                 RowValue::Number(a.thinking_loop_timeout_secs)
             }
-            ("agent", "time_marker_interval_secs") => {
-                RowValue::Number(a.time_marker_interval_secs)
-            }
+            ("agent", "time_marker_interval_secs") => RowValue::Number(a.time_marker_interval_secs),
             ("agent", "debug_logs") => RowValue::Bool(a.debug_logs),
             ("memory", "vector_enabled") => RowValue::Bool(m.vector_enabled),
             ("memory", "sweep_interval_secs") => RowValue::Number(m.sweep_interval_secs),
@@ -440,10 +457,7 @@ pub fn credential_rows(config: &Config) -> Vec<CredSpec> {
             rows.push(CredSpec {
                 section: format!("providers.custom.{name}"),
                 label: format!("Custom: {name}"),
-                configured: cfg
-                    .api_key
-                    .as_ref()
-                    .is_some_and(|k| !k.is_empty()),
+                configured: cfg.api_key.as_ref().is_some_and(|k| !k.is_empty()),
             });
         }
     }
@@ -463,11 +477,7 @@ pub fn value_label(value: &RowValue) -> String {
 
 /// The global row indices a rail section paints, in paint order: its settings
 /// first, then the credential rows when the section is Credentials.
-pub fn section_rows(
-    group: SettingsSection,
-    setting_count: usize,
-    cred_count: usize,
-) -> Vec<usize> {
+pub fn section_rows(group: SettingsSection, setting_count: usize, cred_count: usize) -> Vec<usize> {
     let settings = setting_count.min(SPECS.len());
     let mut rows: Vec<usize> = SPECS
         .iter()

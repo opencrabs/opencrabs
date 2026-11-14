@@ -232,8 +232,12 @@ impl TextField {
     /// The selection as ascending byte offsets, when one exists. Both land on
     /// char boundaries, so slicing the text at them cannot panic.
     pub fn selection_bytes(&self) -> Option<(usize, usize)> {
-        self.selection()
-            .map(|(start, end)| (char_to_byte(&self.text, start), char_to_byte(&self.text, end)))
+        self.selection().map(|(start, end)| {
+            (
+                char_to_byte(&self.text, start),
+                char_to_byte(&self.text, end),
+            )
+        })
     }
 
     /// Text slices before the caret or selection, inside the selection, and

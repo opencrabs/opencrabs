@@ -2242,8 +2242,7 @@ mod tests {
             "recalling another session's queue leaves this one untouched"
         );
         queue_push(other, QueuedUserMessage::plain("elsewhere".to_string()));
-        let (from, taken) =
-            queue_recall_take(Some(session)).expect("the queue has messages");
+        let (from, taken) = queue_recall_take(Some(session)).expect("the queue has messages");
         assert_eq!(from, session, "a recall never reaches another session");
         let recalled: Vec<String> = taken.iter().map(|msg| msg.display_text.clone()).collect();
         assert_eq!(

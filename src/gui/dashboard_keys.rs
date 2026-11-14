@@ -304,8 +304,7 @@ impl Dashboard {
                         ks.modifiers.shift,
                     ) {
                         self.apply_topic_edit(edit, cx);
-                    } else if !(ks.modifiers.control || ks.modifiers.platform || ks.modifiers.alt)
-                    {
+                    } else if !(ks.modifiers.control || ks.modifiers.platform || ks.modifiers.alt) {
                         // A printable key carries its character and inserts
                         // at the caret; space arrives as its own key name, so
                         // it is spelled out rather than guessed from the char.

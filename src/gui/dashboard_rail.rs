@@ -673,23 +673,25 @@ impl Dashboard {
                 .topic_icons
                 .get(&id)
                 .and_then(|stored| self.rail_icon(stored));
-            let chips = children_by_parent.get(&id).map(|kids| rail_view::RailChips {
-                expanded: self.rail_chips_expanded.contains(&id),
-                kids: kids
-                    .iter()
-                    .map(|kid| {
-                        let mark = activity.get(&kid.id).copied().unwrap_or_default();
-                        rail_view::RailTopic {
-                            id: kid.id,
-                            title: SharedString::from(kid.title.clone()),
-                            mark,
-                            selected: self.sessions.selected == Some(kid.id)
-                                || self.sessions.cursor == Some(kid.id),
-                            plan: plan_progress.get(&kid.id).copied(),
-                        }
-                    })
-                    .collect(),
-            });
+            let chips = children_by_parent
+                .get(&id)
+                .map(|kids| rail_view::RailChips {
+                    expanded: self.rail_chips_expanded.contains(&id),
+                    kids: kids
+                        .iter()
+                        .map(|kid| {
+                            let mark = activity.get(&kid.id).copied().unwrap_or_default();
+                            rail_view::RailTopic {
+                                id: kid.id,
+                                title: SharedString::from(kid.title.clone()),
+                                mark,
+                                selected: self.sessions.selected == Some(kid.id)
+                                    || self.sessions.cursor == Some(kid.id),
+                                plan: plan_progress.get(&kid.id).copied(),
+                            }
+                        })
+                        .collect(),
+                });
             rows.push(rail_view::RailRow {
                 card: sessions::RailCard::of(s),
                 favorite,

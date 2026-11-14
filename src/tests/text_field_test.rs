@@ -66,7 +66,10 @@ fn the_composer_chords_all_reach_the_field() {
         Some(TextFieldEdit::Home { select: false }),
         "cmd-left reaches the line start, alt-left walks a word"
     );
-    assert_eq!(text_field::editing_chord("z", true, false, false, false), None);
+    assert_eq!(
+        text_field::editing_chord("z", true, false, false, false),
+        None
+    );
 }
 
 #[test]

@@ -410,8 +410,8 @@ impl Dashboard {
             .chat_session
             .is_some_and(|open| self.sessions.parents.get(&open) == Some(&id));
         let db_path = self.db_path.clone();
-        cx.spawn(async move |this, cx| {
-            match sessions::merge_topics(db_path, id).await {
+        cx.spawn(
+            async move |this, cx| match sessions::merge_topics(db_path, id).await {
                 Ok(folded) => {
                     this.update(cx, |this, cx| {
                         logging::info(&format!("topics disabled on {id}: folded {folded}"));
@@ -432,8 +432,8 @@ impl Dashboard {
                     })
                     .ok();
                 }
-            }
-        })
+            },
+        )
         .detach();
         cx.notify();
     }

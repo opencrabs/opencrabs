@@ -149,8 +149,7 @@ pub(crate) async fn ingest_message_text(
             Ok(b) => b,
             Err(e) => {
                 tracing::error!("Telegram: photo download failed: {e:#}");
-                message_in_thread(bot, msg.chat.id, thread_id, e.user_message("photo"))
-                    .await?;
+                message_in_thread(bot, msg.chat.id, thread_id, e.user_message("photo")).await?;
                 return Ok(Ingested::Handled);
             }
         };
@@ -283,8 +282,7 @@ pub(crate) async fn ingest_message_text(
             Ok(b) => b,
             Err(e) => {
                 tracing::error!("Telegram: video download failed: {e:#}");
-                message_in_thread(bot, msg.chat.id, thread_id, e.user_message("video"))
-                    .await?;
+                message_in_thread(bot, msg.chat.id, thread_id, e.user_message("video")).await?;
                 return Ok(Ingested::Handled);
             }
         };
@@ -333,8 +331,7 @@ pub(crate) async fn ingest_message_text(
             Ok(b) => b,
             Err(e) => {
                 tracing::error!("Telegram: animation download failed: {e:#}");
-                message_in_thread(bot, msg.chat.id, thread_id, e.user_message("animation"))
-                    .await?;
+                message_in_thread(bot, msg.chat.id, thread_id, e.user_message("animation")).await?;
                 return Ok(Ingested::Handled);
             }
         };
@@ -424,8 +421,7 @@ pub(crate) async fn ingest_message_text(
             Ok(b) => b,
             Err(e) => {
                 tracing::error!("Telegram: file download failed: {e:#}");
-                message_in_thread(bot, msg.chat.id, thread_id, e.user_message("file"))
-                    .await?;
+                message_in_thread(bot, msg.chat.id, thread_id, e.user_message("file")).await?;
                 return Ok(Ingested::Handled);
             }
         };

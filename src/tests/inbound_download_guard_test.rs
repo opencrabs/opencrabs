@@ -61,7 +61,9 @@ fn every_telegram_media_kind_goes_through_the_shared_downloader() {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("src/channels/telegram/inbound_media.rs"),
     )
     .expect("inbound_media.rs must exist");
-    let sites = inbound.matches("crate::utils::download::fetch_bytes").count();
+    let sites = inbound
+        .matches("crate::utils::download::fetch_bytes")
+        .count();
     assert_eq!(
         sites, 6,
         "voice, photo, video, animation, video note and document each need the \

@@ -51,7 +51,11 @@ fn rail_card_media_is_large_dual_and_the_title_is_bold() {
     );
     // One resolver chain, answering data instead of an element so the rail's
     // frame can compare equal (#2933).
-    let wiring = block(DASH_TOPICS, "pub(crate) fn rail_icon(", "/// The icon picker's");
+    let wiring = block(
+        DASH_TOPICS,
+        "pub(crate) fn rail_icon(",
+        "/// The icon picker's",
+    );
     for resolver in [
         "topic_icons::tab_icon(stored, sessions::RAIL_MARK_REMS)",
         "self.icon_images.get(stored)",
@@ -307,7 +311,11 @@ fn rail_pin_toggles_without_opening_the_card() {
         !handler.contains("pick_or_open") && !handler.contains("rail_swipe"),
         "the pin never opens the row or starts a slide"
     );
-    let write = block(DASH_RAIL, "pub(crate) fn rail_toggle_pin(", "/// A topic chip opens");
+    let write = block(
+        DASH_RAIL,
+        "pub(crate) fn rail_toggle_pin(",
+        "/// A topic chip opens",
+    );
     assert!(write.contains("self.toggle_favorite(id, cx);"));
     assert!(RAIL_VIEW.contains("sessions::pin_toggle(id, row.favorite)"));
     assert!(RAIL_VIEW.contains(".on_mouse_down(MouseButton::Left, toggle_pin)"));

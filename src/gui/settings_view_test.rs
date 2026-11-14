@@ -130,7 +130,12 @@ fn pane_index_tracks_the_cursor_inside_its_section() {
     }
     // A credential row scrolls to its own place in the credentials pane.
     assert_eq!(
-        pane_index(SettingsSection::Credentials, SPECS.len() + 1, SPECS.len(), 2),
+        pane_index(
+            SettingsSection::Credentials,
+            SPECS.len() + 1,
+            SPECS.len(),
+            2
+        ),
         1
     );
 }
@@ -292,11 +297,23 @@ fn number_steps_clamp_to_the_range() {
     let guard = spec_of("thinking_loop_timeout_secs");
     assert_eq!(step_number(guard, 600, 1), 660);
     assert_eq!(step_number(guard, 600, -1), 540);
-    assert_eq!(step_number(guard, 0, -1), 0, "zero is the floor, not a wrap");
+    assert_eq!(
+        step_number(guard, 0, -1),
+        0,
+        "zero is the floor, not a wrap"
+    );
     assert_eq!(step_number(guard, 7200, 1), 7200);
-    assert_eq!(step_number(guard, 99999, -1), 7140, "out of range snaps first");
+    assert_eq!(
+        step_number(guard, 99999, -1),
+        7140,
+        "out of range snaps first"
+    );
     let sweep = spec_of("sweep_interval_secs");
-    assert_eq!(step_number(sweep, 10, -1), 10, "the engine minimum is respected");
+    assert_eq!(
+        step_number(sweep, 10, -1),
+        10,
+        "the engine minimum is respected"
+    );
 }
 
 #[test]

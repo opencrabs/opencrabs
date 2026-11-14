@@ -28,7 +28,10 @@ fn loaded_turn() -> StreamingState {
     let mut s = StreamingState::new_turn(true, false);
     s.msg_id = Some(mid(10));
     s.open_group_msg_id = Some(mid(11));
-    s.intermediate_bubbles = vec![(mid(12), "first".to_string()), (mid(13), "second".to_string())];
+    s.intermediate_bubbles = vec![
+        (mid(12), "first".to_string()),
+        (mid(13), "second".to_string()),
+    ];
     s.media_intermediates = vec![
         (mid(14), "report".to_string()),
         (mid(16), "screenshot".to_string()),

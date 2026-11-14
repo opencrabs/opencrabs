@@ -189,14 +189,35 @@ impl ProjectsState {
 
 #[derive(Debug, Clone)]
 pub enum ProjectAction {
-    Refresh { detail: Option<Uuid> },
-    Create { name: String },
-    Delete { id: Uuid },
-    Assign { project_id: Uuid, session_id: Uuid },
-    Unassign { project_id: Uuid, session_id: Uuid },
-    AssignMany { project_id: Uuid, session_ids: Vec<Uuid> },
-    ClearMany { project_id: Uuid, session_ids: Vec<Uuid> },
-    ArchiveMany { project_id: Uuid, session_ids: Vec<Uuid> },
+    Refresh {
+        detail: Option<Uuid>,
+    },
+    Create {
+        name: String,
+    },
+    Delete {
+        id: Uuid,
+    },
+    Assign {
+        project_id: Uuid,
+        session_id: Uuid,
+    },
+    Unassign {
+        project_id: Uuid,
+        session_id: Uuid,
+    },
+    AssignMany {
+        project_id: Uuid,
+        session_ids: Vec<Uuid>,
+    },
+    ClearMany {
+        project_id: Uuid,
+        session_ids: Vec<Uuid>,
+    },
+    ArchiveMany {
+        project_id: Uuid,
+        session_ids: Vec<Uuid>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -253,7 +274,10 @@ async fn execute(db_path: PathBuf, action: ProjectAction) -> anyhow::Result<Proj
                 service.assign_session(*session_id, project_id).await?;
             }
             detail_id = Some(project_id);
-            Some(format!("{} sessions assigned to project", session_ids.len()))
+            Some(format!(
+                "{} sessions assigned to project",
+                session_ids.len()
+            ))
         }
         ProjectAction::ClearMany {
             project_id,
@@ -263,7 +287,10 @@ async fn execute(db_path: PathBuf, action: ProjectAction) -> anyhow::Result<Proj
                 service.unassign_session(*session_id).await?;
             }
             detail_id = Some(project_id);
-            Some(format!("{} sessions removed from their projects", session_ids.len()))
+            Some(format!(
+                "{} sessions removed from their projects",
+                session_ids.len()
+            ))
         }
         ProjectAction::ArchiveMany {
             project_id,

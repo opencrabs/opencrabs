@@ -157,10 +157,7 @@ pub const TOPIC_ICONS: &[(&str, &[u8])] = &[
 /// (#2824, #2897): the caption first, then the prefix every name in it carries.
 /// Two families now, the crab renders and the generic set. The eight old badges
 /// and the four pilot badges are no longer offered.
-pub const TOPIC_FAMILIES: &[(&str, &str)] = &[
-    ("OpenCrabs", "crab_"),
-    ("Generic", "generic_"),
-];
+pub const TOPIC_FAMILIES: &[(&str, &str)] = &[("OpenCrabs", "crab_"), ("Generic", "generic_")];
 
 /// The icons of one family, in table order (#2824).
 pub fn family_icons(prefix: &'static str) -> impl Iterator<Item = (&'static str, &'static [u8])> {
@@ -810,8 +807,7 @@ mod tests {
         // (#2897), so an existing topic shows the new art.
         for legacy in LEGACY_TOPIC_NAMES {
             let crab = format!("crab_{legacy}");
-            let bytes =
-                topic_icon(&crab).unwrap_or_else(|| panic!("{crab} resolves to a crab"));
+            let bytes = topic_icon(&crab).unwrap_or_else(|| panic!("{crab} resolves to a crab"));
             for stored in [
                 legacy.to_string(),
                 format!("opencrabs-topic-{legacy}"),

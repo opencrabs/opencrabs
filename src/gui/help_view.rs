@@ -189,7 +189,11 @@ pub(crate) fn help_screen(view: &HelpView) -> impl IntoElement {
                 .text_color(rgb(shown.text_faint))
                 .child(SharedString::from("REFERENCE")),
         )
-        .child(text(SharedString::from("Help Center"), Size::Xl, shown.text))
+        .child(text(
+            SharedString::from("Help Center"),
+            Size::Xl,
+            shown.text,
+        ))
         .child(
             div()
                 .flex()
@@ -202,16 +206,13 @@ pub(crate) fn help_screen(view: &HelpView) -> impl IntoElement {
                         .text_color(rgb(shown.text_muted))
                         .child(SharedString::from(format!("v{}", view.version))),
                 )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(shown.text_faint))
-                        .child(SharedString::from(if total == 1 {
-                            "1 shortcut".to_string()
-                        } else {
-                            format!("{total} shortcuts")
-                        })),
-                ),
+                .child(div().text_xs().text_color(rgb(shown.text_faint)).child(
+                    SharedString::from(if total == 1 {
+                        "1 shortcut".to_string()
+                    } else {
+                        format!("{total} shortcuts")
+                    }),
+                )),
         );
     if let Some(latest) = &view.update {
         title = title.child(

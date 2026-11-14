@@ -76,9 +76,9 @@ impl DownloadError {
     pub fn user_message(&self, what: &str) -> String {
         let head = format!("Could not download the {what}.");
         match self {
-            Self::Status(status) => format!(
-                "{head} The server answered HTTP {status}. Please resend it in a moment."
-            ),
+            Self::Status(status) => {
+                format!("{head} The server answered HTTP {status}. Please resend it in a moment.")
+            }
             Self::Network(_) => format!("{head} Network error, please resend it in a moment."),
         }
     }

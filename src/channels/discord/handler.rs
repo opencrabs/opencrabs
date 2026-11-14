@@ -647,7 +647,9 @@ pub(crate) async fn handle_message(
                 )
                 .await
                 {
-                    tracing::warn!("Discord: could not report the voice download failure: {send_err}");
+                    tracing::warn!(
+                        "Discord: could not report the voice download failure: {send_err}"
+                    );
                 }
             }
         }

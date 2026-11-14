@@ -654,22 +654,23 @@ impl Render for PaneView {
         let chrome = self.chrome(cx).into_any_element();
         // The frame fills a box of its own, and that box is what the cached
         // view path lays out (`pane_root`, #2805).
-        pane_root().child(leaf_box(LeafBox {
-            session,
-            title: SharedString::from(self.title.clone()),
-            is_chat: false,
-            focused,
-            // A pane exists only on the live screen, so its frame is
-            // always the interactive one.
-            interactive: true,
-            topics,
-            chrome: Some(chrome),
-            footer: Some(footer),
-            body,
-            landing,
-            window: self.window.clone(),
-        }))
-        .into_any_element()
+        pane_root()
+            .child(leaf_box(LeafBox {
+                session,
+                title: SharedString::from(self.title.clone()),
+                is_chat: false,
+                focused,
+                // A pane exists only on the live screen, so its frame is
+                // always the interactive one.
+                interactive: true,
+                topics,
+                chrome: Some(chrome),
+                footer: Some(footer),
+                body,
+                landing,
+                window: self.window.clone(),
+            }))
+            .into_any_element()
     }
 }
 

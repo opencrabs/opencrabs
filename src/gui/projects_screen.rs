@@ -124,16 +124,26 @@ impl Dashboard {
             if selected_count > 0 {
                 let mut bulk = div().flex().flex_row().flex_wrap().gap_2();
                 bulk = bulk.child(
-                    projects_view::action_button("project-bulk-assign", "assign selected", false, shown)
-                        .on_click(cx.listener(move |this, _ev, _window, cx| {
-                            this.assign_selected_sessions(project_id, cx);
-                        })),
+                    projects_view::action_button(
+                        "project-bulk-assign",
+                        "assign selected",
+                        false,
+                        shown,
+                    )
+                    .on_click(cx.listener(move |this, _ev, _window, cx| {
+                        this.assign_selected_sessions(project_id, cx);
+                    })),
                 );
                 bulk = bulk.child(
-                    projects_view::action_button("project-bulk-clear", "clear project", false, shown)
-                        .on_click(cx.listener(move |this, _ev, _window, cx| {
-                            this.clear_selected_projects(project_id, cx);
-                        })),
+                    projects_view::action_button(
+                        "project-bulk-clear",
+                        "clear project",
+                        false,
+                        shown,
+                    )
+                    .on_click(cx.listener(move |this, _ev, _window, cx| {
+                        this.clear_selected_projects(project_id, cx);
+                    })),
                 );
                 bulk = bulk.child(
                     projects_view::action_button("project-bulk-archive", "archive", true, shown)
@@ -224,7 +234,10 @@ impl Dashboard {
         };
         if count == 0 {
             let (message, hint) = if self.projects.loading {
-                ("Reading projects...", "the shared project service is loading")
+                (
+                    "Reading projects...",
+                    "the shared project service is loading",
+                )
             } else {
                 match mode {
                     ProjectsMode::List => ("No projects yet", "press n to create one"),
@@ -251,14 +264,16 @@ impl Dashboard {
                             index == self.projects.selected,
                             shown,
                         )
-                        .on_click(cx.listener(move |this, _ev, _window, cx| {
-                            this.projects.selected = index;
-                            if matches!(mode, ProjectsMode::AssignSession(_)) {
-                                this.assign_session_to_project(id, cx);
-                            } else {
-                                this.open_project(id, cx);
-                            }
-                        }));
+                        .on_click(cx.listener(
+                            move |this, _ev, _window, cx| {
+                                this.projects.selected = index;
+                                if matches!(mode, ProjectsMode::AssignSession(_)) {
+                                    this.assign_session_to_project(id, cx);
+                                } else {
+                                    this.open_project(id, cx);
+                                }
+                            },
+                        ));
                         content = content.child(card);
                     }
                 }
@@ -271,10 +286,12 @@ impl Dashboard {
                             false,
                             shown,
                         )
-                        .on_click(cx.listener(move |this, _ev, _window, cx| {
-                            this.projects.session_selected = index;
-                            this.open_session(id, cx);
-                        }));
+                        .on_click(cx.listener(
+                            move |this, _ev, _window, cx| {
+                                this.projects.session_selected = index;
+                                this.open_session(id, cx);
+                            },
+                        ));
                         content = content.child(card);
                     }
                 }
@@ -294,15 +311,20 @@ impl Dashboard {
                             shown,
                         )
                         .child(text(
-                            format!("{} Current project: {membership}", if checked { "[x]" } else { "[ ]" }),
+                            format!(
+                                "{} Current project: {membership}",
+                                if checked { "[x]" } else { "[ ]" }
+                            ),
                             Size::Xs,
                             shown.amber,
                         ))
-                        .on_click(cx.listener(move |this, _ev, _window, cx| {
-                            this.projects.session_selected = index;
-                            this.projects.toggle_assignment(project_id, id);
-                            cx.notify();
-                        }));
+                        .on_click(cx.listener(
+                            move |this, _ev, _window, cx| {
+                                this.projects.session_selected = index;
+                                this.projects.toggle_assignment(project_id, id);
+                                cx.notify();
+                            },
+                        ));
                         content = content.child(card);
                     }
                 }
@@ -341,15 +363,10 @@ impl Dashboard {
                         .on_click(cx.listener(|this, _ev, _window, cx| this.projects_escape(cx))),
                 );
                 actions = actions.child(
-                    projects_view::action_button(
-                        "project-detail-assign",
-                        "assign a",
-                        false,
-                        shown,
-                    )
-                    .on_click(cx.listener(move |this, _ev, _window, cx| {
-                        this.begin_project_assign(project_id, cx)
-                    })),
+                    projects_view::action_button("project-detail-assign", "assign a", false, shown)
+                        .on_click(cx.listener(move |this, _ev, _window, cx| {
+                            this.begin_project_assign(project_id, cx)
+                        })),
                 );
             }
             ProjectsMode::Assign(_) | ProjectsMode::AssignSession(_) => {

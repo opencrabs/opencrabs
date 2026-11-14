@@ -5916,10 +5916,7 @@ mod tests {
     fn a_notice_alone_draws_no_card() {
         let mut live = LiveTurn::default();
         live.notices.push("model: switched".into());
-        assert!(
-            !live.is_empty(),
-            "the amber notice line is still drawn"
-        );
+        assert!(!live.is_empty(), "the amber notice line is still drawn");
         assert!(
             !live.has_turn_content(),
             "but a notice is not a turn, so the card stays away"

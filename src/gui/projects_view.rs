@@ -161,20 +161,23 @@ pub fn action_button(
         ))
 }
 
-pub fn filter_button(
-    id: String,
-    label: String,
-    selected: bool,
-    shown: Palette,
-) -> Stateful<Div> {
+pub fn filter_button(id: String, label: String, selected: bool, shown: Palette) -> Stateful<Div> {
     div()
         .id(SharedString::from(id))
         .px_3()
         .py_1()
         .rounded(px(6.0))
         .border_1()
-        .border_color(rgb(if selected { shown.accent } else { shown.panel_hi }))
-        .bg(rgb(if selected { shown.panel_hi } else { shown.panel }))
+        .border_color(rgb(if selected {
+            shown.accent
+        } else {
+            shown.panel_hi
+        }))
+        .bg(rgb(if selected {
+            shown.panel_hi
+        } else {
+            shown.panel
+        }))
         .cursor_pointer()
         .child(text(label, Size::Xs, shown.text))
 }
@@ -228,7 +231,10 @@ pub fn archive_panel(count: usize, shown: Palette) -> Div {
         .border_color(rgb(shown.red))
         .bg(glass_fill(shown.panel))
         .child(text(
-            format!("Archive {count} selected session{}?", if count == 1 { "" } else { "s" }),
+            format!(
+                "Archive {count} selected session{}?",
+                if count == 1 { "" } else { "s" }
+            ),
             Size::Sm,
             shown.red,
         ))
@@ -237,7 +243,11 @@ pub fn archive_panel(count: usize, shown: Palette) -> Div {
             Size::Xs,
             shown.text_muted,
         ))
-        .child(text("enter confirm  esc cancel", Size::Xs, shown.text_faint))
+        .child(text(
+            "enter confirm  esc cancel",
+            Size::Xs,
+            shown.text_faint,
+        ))
 }
 
 pub fn empty(message: &'static str, hint: &'static str, shown: Palette) -> Div {

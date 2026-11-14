@@ -43,7 +43,10 @@ fn sources() -> [(&'static str, &'static str); 41] {
         ("ui_core/rail.rs", include_str!("../ui_core/rail.rs")),
         ("ui_core/rate.rs", include_str!("../ui_core/rate.rs")),
         ("ui_core/scroll.rs", include_str!("../ui_core/scroll.rs")),
-        ("ui_core/text_field.rs", include_str!("../ui_core/text_field.rs")),
+        (
+            "ui_core/text_field.rs",
+            include_str!("../ui_core/text_field.rs"),
+        ),
         (
             "ui_core/session_preview.rs",
             include_str!("../ui_core/session_preview.rs"),

@@ -52,9 +52,7 @@ impl MdStyle {
     pub fn resolve<P: MdPalette>(self, palette: &P) -> HighlightStyle {
         HighlightStyle {
             color: self.color.map(|tint| rgb(palette.tint(tint)).into()),
-            background_color: self
-                .background
-                .map(|tint| rgb(palette.tint(tint)).into()),
+            background_color: self.background.map(|tint| rgb(palette.tint(tint)).into()),
             font_weight: self.font_weight,
             font_style: self.font_style,
             underline: self.underline,

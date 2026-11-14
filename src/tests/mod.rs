@@ -221,11 +221,11 @@ pub mod command_rich_table_test;
 mod compaction_background_test;
 pub mod compaction_fallback_chain_test;
 pub mod compaction_marker_no_brain_weld_test;
+pub mod compaction_memory_strip_test;
 pub mod compaction_notice_test;
 pub mod compaction_prompts_test;
 mod compaction_scope_test;
 pub mod compaction_signal_test;
-pub mod compaction_memory_strip_test;
 pub mod compaction_single_continuation_path_test;
 pub mod compaction_stream_collect_test;
 pub mod compaction_summary_budget_test;
@@ -413,8 +413,8 @@ pub mod headless_tool_surface_test;
 pub mod help_catalog_test;
 pub mod help_mode_entry_test;
 pub mod help_table_test;
-pub mod init_command_test;
 pub mod inbound_download_guard_test;
+pub mod init_command_test;
 pub mod install_homebrew_test;
 pub mod install_ps1_test;
 pub mod install_script_test;
@@ -591,11 +591,11 @@ pub mod telegram_infer_table_separator_test;
 #[cfg(feature = "telegram")]
 pub mod telegram_intermediate_status_report_test;
 #[cfg(feature = "telegram")]
+pub mod telegram_live_bubble_test;
+#[cfg(feature = "telegram")]
 pub mod telegram_mentions_other_bot_test;
 #[cfg(feature = "telegram")]
 pub mod telegram_menu_scope_test;
-#[cfg(feature = "telegram")]
-pub mod telegram_live_bubble_test;
 pub mod telegram_poll_vote_test;
 #[cfg(feature = "telegram")]
 pub mod telegram_push_target_test;
@@ -759,6 +759,7 @@ pub mod onboarding_keys_test;
 pub mod onboarding_layout_test;
 pub mod onboarding_navigation_test;
 pub mod onboarding_no_silent_commit_test;
+pub mod onboarding_provider_preserve_test;
 pub mod onboarding_qr_popup_size_test;
 pub mod onboarding_setup_gaps_test;
 pub mod onboarding_shift_tab_hint_test;
@@ -769,7 +770,6 @@ pub mod onboarding_types_test;
 pub mod onboarding_user_scroll_test;
 pub mod onboarding_visible_window_test;
 pub mod onboarding_voice_key_edit_test;
-pub mod onboarding_provider_preserve_test;
 pub mod onboarding_voice_preserve_test;
 pub mod onboarding_voice_seed_test;
 pub mod onboarding_welcome_send_test;

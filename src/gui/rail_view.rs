@@ -28,7 +28,8 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, Div, Image, IntoElement, MouseButton, MouseDownEvent,
-    Render, SharedString, Stateful, StyleRefinement, WeakEntity, Window, div, prelude::*, rems, rgb,
+    Render, SharedString, Stateful, StyleRefinement, WeakEntity, Window, div, prelude::*, rems,
+    rgb,
 };
 
 use crate::palette;
@@ -345,11 +346,7 @@ impl RailView {
             closed: row.flags.closed,
             // One glyph cell, from the rail's own clock, so a list of busy rows
             // blinks as one spinner instead of ten (#2636).
-            badge: row
-                .flags
-                .mark
-                .badge
-                .map(|_| rail_activity::frame(phase)),
+            badge: row.flags.mark.badge.map(|_| rail_activity::frame(phase)),
             preview: row.flags.preview.clone(),
             activity: row.flags.activity.clone(),
             plan: row.flags.plan,
@@ -361,9 +358,7 @@ impl RailView {
             // because it owns the decoded-image cache. The paint never reads a
             // file.
             icon: row.flags.icon.as_ref().and_then(|icon| match icon {
-                RailIcon::Mark(stored) => {
-                    topic_icons::tab_icon(stored, sessions::RAIL_MARK_REMS)
-                }
+                RailIcon::Mark(stored) => topic_icons::tab_icon(stored, sessions::RAIL_MARK_REMS),
                 RailIcon::Picture(image) => Some(topic_icons::cached_picture(
                     image.clone(),
                     sessions::RAIL_MARK_REMS,
@@ -403,12 +398,8 @@ impl RailView {
         // frame around it rather than a card. Wrapped after the click is
         // attached, so the row keeps the handlers it was built with and only
         // gains a frame.
-        rail_activity::ring(
-            sessions::on_click(r, pick),
-            row.flags.mark.ring,
-            phase,
-        )
-        .into_any_element()
+        rail_activity::ring(sessions::on_click(r, pick), row.flags.mark.ring, phase)
+            .into_any_element()
     }
 
     /// A parent card's topic chips (#2701): three by default, a "+N" pill
@@ -449,16 +440,10 @@ impl RailView {
                     link.act(cx, move |dash, cx| dash.rail_chip_menu(kid_id, at, cx));
                 })
             };
-            let chip = sessions::topic_chip(
-                kid_id,
-                title,
-                live,
-                kid.mark.ring,
-                kid.selected,
-                kid.plan,
-            )
-            .on_click(open)
-            .on_mouse_down(MouseButton::Right, ask);
+            let chip =
+                sessions::topic_chip(kid_id, title, live, kid.mark.ring, kid.selected, kid.plan)
+                    .on_click(open)
+                    .on_mouse_down(MouseButton::Right, ask);
             let width =
                 sessions::chip_width(window, title, live.is_some() || kid.mark.ring, kid.selected);
             els.push((chip, width));

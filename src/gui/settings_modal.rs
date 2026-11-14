@@ -19,12 +19,11 @@ pub fn row_shell(
     control: Div,
 ) -> Stateful<Div> {
     let shown = palette::current();
-    let mut caption = div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap_2()
-        .child(text(label.to_string(), Size::Sm, shown.text));
+    let mut caption = div().flex().flex_row().items_center().gap_2().child(text(
+        label.to_string(),
+        Size::Sm,
+        shown.text,
+    ));
     if restart {
         caption = caption.child(text("restart", Size::Xs, shown.amber));
     }
@@ -77,7 +76,11 @@ pub fn rail_item(
         .child(text(
             label,
             Size::Sm,
-            if active { shown.text_strong } else { shown.text_muted },
+            if active {
+                shown.text_strong
+            } else {
+                shown.text_muted
+            },
         ))
         .child(text(hint, Size::Xs, shown.text_faint));
     if active {
@@ -107,10 +110,9 @@ pub fn modal(
             dismiss(ev, window, app)
         }
     };
-    let scrim_door =
-        move |ev: &gpui::ClickEvent, window: &mut gpui::Window, app: &mut gpui::App| {
-            dismiss(ev, window, app)
-        };
+    let scrim_door = move |ev: &gpui::ClickEvent,
+                           window: &mut gpui::Window,
+                           app: &mut gpui::App| { dismiss(ev, window, app) };
     let card = div()
         .id("settings-modal-card")
         // A click on the card stops here: only the scrim dismisses.

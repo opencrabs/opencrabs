@@ -71,9 +71,8 @@ fn session_picker_reuses_the_service_and_returns_after_success() {
         );
     }
     assert!(
-        PROJECTS_SCREEN.contains(
-            "ProjectsMode::AssignSession(_) => \"up/down select  enter assign\""
-        ),
+        PROJECTS_SCREEN
+            .contains("ProjectsMode::AssignSession(_) => \"up/down select  enter assign\""),
         "the session picker must say how to pick and confirm"
     );
 

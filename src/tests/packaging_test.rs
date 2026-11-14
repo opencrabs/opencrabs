@@ -44,7 +44,11 @@ fn the_release_workflow_bundles_the_macos_app() {
 fn the_release_workflow_ships_the_linux_desktop_files() {
     let workflow = read(".github/workflows/release.yml");
 
-    for file in ["opencrabs.desktop", "opencrabs-gui.desktop", "opencrabs.png"] {
+    for file in [
+        "opencrabs.desktop",
+        "opencrabs-gui.desktop",
+        "opencrabs.png",
+    ] {
         assert!(
             workflow.contains(file),
             "the release workflow does not pack {file}, so a Linux install has no menu entry and no icon"
@@ -108,7 +112,11 @@ fn the_gui_desktop_entry_launches_the_window() {
 fn the_prerelease_workflow_ships_the_same_linux_desktop_files() {
     let workflow = read(".github/workflows/prerelease.yml");
 
-    for file in ["opencrabs.desktop", "opencrabs-gui.desktop", "opencrabs.png"] {
+    for file in [
+        "opencrabs.desktop",
+        "opencrabs-gui.desktop",
+        "opencrabs.png",
+    ] {
         assert!(
             workflow.contains(file),
             "the prerelease workflow does not pack {file}, so a prerelease install has one launcher fewer than a release install"
@@ -130,7 +138,10 @@ fn the_bundle_script_emits_a_bundle_that_opens_the_window() {
     );
     // One plist per bundle: the terminal client must keep the name /evolve
     // replaces in place, the window must name the GUI binary.
-    for exec in ["<string>opencrabs</string>", "<string>opencrabs-gui</string>"] {
+    for exec in [
+        "<string>opencrabs</string>",
+        "<string>opencrabs-gui</string>",
+    ] {
         assert!(
             script.contains(&format!("<key>CFBundleExecutable</key>\n    {exec}")),
             "no Info.plist in the packaging script declares CFBundleExecutable {exec}"

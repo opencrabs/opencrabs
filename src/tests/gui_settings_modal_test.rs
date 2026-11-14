@@ -38,7 +38,10 @@ fn settings_slash_command_opens_the_existing_modal() {
         "commands::support_gui(&invocation.name)",
         "commands::lookup_gui(&invocation.name)",
     ] {
-        assert!(GUI_COMMANDS.contains(needle), "missing command wiring: {needle}");
+        assert!(
+            GUI_COMMANDS.contains(needle),
+            "missing command wiring: {needle}"
+        );
     }
     for (source, needle) in [
         (
@@ -99,10 +102,16 @@ fn the_modal_owns_the_keyboard_and_paints_above_the_window() {
         "settings_view::pane_index(",
         "settings_view::section_rows(active, setting_count, cred_count)",
     ] {
-        assert!(GUI_SETTINGS.contains(needle), "missing settings behaviour: {needle}");
+        assert!(
+            GUI_SETTINGS.contains(needle),
+            "missing settings behaviour: {needle}"
+        );
     }
     assert!(GUI_NAV.contains("return vec![OverlayId::Settings];"));
-    for needle in ["if self.settings_open {", "self.settings_modal_key(ks, cx);"] {
+    for needle in [
+        "if self.settings_open {",
+        "self.settings_modal_key(ks, cx);",
+    ] {
         assert!(GUI_KEYS.contains(needle), "missing key ownership: {needle}");
     }
     assert!(GUI_KEYS.contains("ev.keystroke.modifiers.control && ev.keystroke.key == \",\""));
@@ -124,14 +133,20 @@ fn the_rail_paints_one_section_and_switches_on_click() {
         "pub fn section_rows(",
         "pub fn pane_index(",
     ] {
-        assert!(SETTINGS_VIEW.contains(needle), "missing section model: {needle}");
+        assert!(
+            SETTINGS_VIEW.contains(needle),
+            "missing section model: {needle}"
+        );
     }
     for needle in [
         "pub fn rail_item(",
         "rail: Vec<gpui::AnyElement>",
         ".id(\"settings-modal-rail\")",
     ] {
-        assert!(SETTINGS_MODAL.contains(needle), "missing rail shell: {needle}");
+        assert!(
+            SETTINGS_MODAL.contains(needle),
+            "missing rail shell: {needle}"
+        );
     }
     for needle in [
         "self.settings_section = settings_view::SettingsSection::General;",
@@ -140,7 +155,10 @@ fn the_rail_paints_one_section_and_switches_on_click() {
         "\"tab\" => {",
         "let rows = settings_view::section_rows(active, setting_count, cred_count);",
     ] {
-        assert!(GUI_SETTINGS.contains(needle), "missing rail wiring: {needle}");
+        assert!(
+            GUI_SETTINGS.contains(needle),
+            "missing rail wiring: {needle}"
+        );
     }
     assert!(
         GUI_MAIN.contains("settings_section: settings_view::SettingsSection,"),
@@ -161,7 +179,10 @@ fn a_failed_config_load_paints_no_invented_settings() {
         "let setting_count = self.settings_values.len();",
         "if self.settings_row_count() == 0 {",
     ] {
-        assert!(GUI_SETTINGS.contains(needle), "missing empty-config guard: {needle}");
+        assert!(
+            GUI_SETTINGS.contains(needle),
+            "missing empty-config guard: {needle}"
+        );
     }
     assert!(
         !GUI_SETTINGS.contains("unwrap_or(settings_view::RowValue::Bool(false))"),
@@ -181,7 +202,10 @@ fn writes_use_the_config_apis_and_credentials_stay_masked() {
         "buffer.chars().count()",
         "\"\\u{2022}\".repeat(len.max(1))",
     ] {
-        assert!(GUI_SETTINGS.contains(needle), "missing write or mask: {needle}");
+        assert!(
+            GUI_SETTINGS.contains(needle),
+            "missing write or mask: {needle}"
+        );
     }
     assert!(
         SETTINGS_VIEW.contains("pub struct CredSpec"),

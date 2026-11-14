@@ -101,10 +101,7 @@ fn the_screen_keeps_its_layer_contract() {
         "overflow_y_scroll()",
         "track_scroll(&view.scroll)",
     ] {
-        assert!(
-            HELP_VIEW.contains(needle),
-            "the help screen lost {needle}"
-        );
+        assert!(HELP_VIEW.contains(needle), "the help screen lost {needle}");
     }
 }
 

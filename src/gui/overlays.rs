@@ -18,8 +18,8 @@ use gpui::{
     px, rems, rgb, rgba,
 };
 use opencrabs::ui_core::card::{CARD_RADIUS, glass_fill};
-use opencrabs::ui_core::text_field::TextField;
 use opencrabs::ui_core::split::Layout;
+use opencrabs::ui_core::text_field::TextField;
 
 use crate::palette;
 use crate::sessions;
