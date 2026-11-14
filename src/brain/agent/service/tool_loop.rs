@@ -1114,8 +1114,8 @@ impl AgentService {
         // Channel sessions only: a local row keeps the name it was given, since
         // a short hand-picked name is nearly always word-disjoint from the last
         // few turns and drift re-titled local sessions against the owner's will.
-        let title_drifted = !title_is_placeholder
-            && Self::title_drift_applies(&session, &recent_user_texts);
+        let title_drifted =
+            !title_is_placeholder && Self::title_drift_applies(&session, &recent_user_texts);
 
         if !user_message.trim().is_empty()
             && ((!session.auto_title_attempted && title_is_placeholder) || title_drifted)
