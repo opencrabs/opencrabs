@@ -152,8 +152,28 @@ pub async fn claim_profile(
         .unwrap_or_else(|| "another process".to_string());
     tracing::error!("Profile '{profile}' still held by {who} two seconds after preemption");
     anyhow::bail!(
-        "OpenCrabs is already running for profile '{profile}' ({who}) and did not stop. Stop it manually, or start this one with a different profile: opencrabs -p <name>"
+        "OpenCrabs is already running for profile '{profile}' ({who}) and did not stop. Stop it with: {}. Or start this one with a different profile: opencrabs -p <name>",
+        stop_remedy()
     );
+}
+
+/// The command a human can run when an instance refuses to make way (#2836).
+///
+/// The already-running errors used to say to stop it manually and named
+/// nothing, which most users cannot act on: they do not know the supervisor's
+/// label, and launchd restarts a process that is merely killed. The remedy is
+/// per platform because the supervisor is.
+pub fn stop_remedy() -> &'static str {
+    if cfg!(target_os = "macos") {
+        // Both labels: the CLI installs the daemon one and onboarding
+        // installed the agent one, so either can be the process holding the
+        // profile (#2837 tracks collapsing them into one).
+        "launchctl bootout gui/$(id -u)/com.opencrabs.daemon; launchctl bootout gui/$(id -u)/com.opencrabs.agent"
+    } else if cfg!(target_os = "windows") {
+        "opencrabs service stop"
+    } else {
+        "opencrabs service stop (or systemctl --user stop opencrabs if a user unit is installed)"
+    }
 }
 
 /// The line a surface tells its human when it took channels away from another
@@ -171,8 +191,10 @@ pub fn preemption_notice(inst: &PreemptedInstance) -> String {
         )
     } else {
         format!(
-            "A background instance (PID {}) holding {} did not stop (likely running as another user), so it may still contend for the connection. Stop it manually so this surface can take over.",
-            inst.pid, chans
+            "A background instance (PID {}) holding {} did not stop (likely running as another user), so it may still contend for the connection. Stop it with: {} so this surface can take over.",
+            inst.pid,
+            chans,
+            stop_remedy()
         )
     }
 }
@@ -643,6 +665,45 @@ mod tests {
         assert!(line.contains("did not stop"), "{line}");
         assert!(!line.contains("stays down"), "{line}");
         assert!(line.contains("channels"), "{line}");
+    }
+
+    /// The remedy names a command a human can actually run, per platform
+    /// (#2836). Telling them to stop it manually named nothing: not the label,
+    /// not the supervisor, and killing a launchd job only restarts it.
+    #[test]
+    fn the_stop_remedy_names_the_platform_command() {
+        let remedy = stop_remedy();
+        if cfg!(target_os = "macos") {
+            assert!(remedy.contains("launchctl bootout"), "{remedy}");
+        } else {
+            assert!(remedy.contains("opencrabs service stop"), "{remedy}");
+        }
+    }
+
+    /// The failed-stop notice carries the command, so what a user reads is
+    /// actionable without opening the source (#2836).
+    #[test]
+    fn the_failed_stop_notice_carries_the_command() {
+        let line = preemption_notice(&inst(11, &["telegram"], false));
+        assert!(line.contains(stop_remedy()), "{line}");
+    }
+
+    /// No surface asks for a manual stop without naming the command (#2836).
+    ///
+    /// The needle is assembled at run time on purpose: this file is one of the
+    /// two it scans, so a contiguous literal here would match itself.
+    #[test]
+    fn no_site_asks_for_a_manual_stop_without_a_command() {
+        let needle = ["Stop", "it", "manually"].join(" ");
+        for (name, src) in [
+            ("src/services/surface.rs", include_str!("surface.rs")),
+            ("src/cli/ui.rs", include_str!("../cli/ui.rs")),
+        ] {
+            assert!(
+                !src.contains(&needle),
+                "{name} asks for a manual stop and names no command"
+            );
+        }
     }
 
     /// The window reaches the services half through this module, never by

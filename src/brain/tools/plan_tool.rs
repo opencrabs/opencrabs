@@ -227,6 +227,49 @@ Please fix the Mermaid diagram syntax in the task description and try again."
     )
 }
 
+/// The kind of quote a criterion leaves open, if any (#2852).
+///
+/// The locked check runs a criterion through the shell, so a string with an
+/// odd number of quotes cannot lex: the shell exits 2 before anything runs and
+/// a task that was done and verified by hand is recorded as Uncertain. That is
+/// why this is checked at creation, and why it is checked under every policy.
+///
+/// Escaped quotes are skipped, and an apostrophe with a letter on both sides is
+/// prose rather than quoting, so "it's green" is not read as an unterminated
+/// string.
+fn quote_imbalance(criterion: &str) -> Option<&'static str> {
+    let chars: Vec<char> = criterion.chars().collect();
+    let mut singles = 0usize;
+    let mut doubles = 0usize;
+    let mut escaped = false;
+    for (i, &c) in chars.iter().enumerate() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match c {
+            '\\' => escaped = true,
+            '\'' => {
+                let in_word = i > 0
+                    && chars[i - 1].is_alphanumeric()
+                    && chars.get(i + 1).is_some_and(|next| next.is_alphanumeric());
+                if !in_word {
+                    singles += 1;
+                }
+            }
+            '"' => doubles += 1,
+            _ => {}
+        }
+    }
+    if singles % 2 == 1 {
+        Some("single")
+    } else if doubles % 2 == 1 {
+        Some("double")
+    } else {
+        None
+    }
+}
+
 /// Validate a task's acceptance criteria at creation time (#1133).
 /// Returns `Ok(())` if the task may proceed, or an error message if refused.
 /// Under `downgrade` policy, logs a belief and returns Ok. Under `off`, does nothing.
@@ -237,6 +280,23 @@ fn validate_task_criteria_at_creation(
     acceptance_criteria: &[String],
     policy: CriteriaPolicy,
 ) -> Result<()> {
+    // A criterion the shell cannot lex is refused under every policy, and
+    // before the type exemption (#2852). `downgrade` exists to accept a
+    // criterion a human can still verify by hand; an unbalanced quote has no
+    // such reading, and the locked check is guaranteed to fail, so accepting it
+    // can only ever record a finished task as Uncertain.
+    if let Some((kind, bad)) = acceptance_criteria
+        .iter()
+        .find_map(|c| quote_imbalance(c).map(|k| (k, c)))
+    {
+        return Err(ToolError::InvalidInput(format!(
+            "Task #{task_order} '{task_title}' has an acceptance criterion with an unbalanced \
+             {kind} quote: {bad:?}. The shell cannot parse it, so the locked check would exit \
+             non-zero and the completion would be recorded as Uncertain even when the work is \
+             done. Fix the quoting or rephrase the criterion."
+        )));
+    }
+
     if policy == CriteriaPolicy::Off || !requires_checkable_criteria(task_type) {
         return Ok(());
     }
@@ -4022,4 +4082,80 @@ async fn spawn_plan_worker(
         return Err(ToolError::Execution(format!("spawn failed: {msg}")));
     }
     Ok(res.output)
+}
+
+#[cfg(test)]
+mod criteria_quote_tests {
+    use super::*;
+
+    fn check(criterion: &str, policy: CriteriaPolicy) -> Result<()> {
+        validate_task_criteria_at_creation(
+            1,
+            "a task",
+            &TaskType::Test,
+            &[criterion.to_string()],
+            policy,
+        )
+    }
+
+    /// The three strings the issue caught, each truncated while it was being
+    /// typed. The shell cannot lex any of them, so the refusal holds under
+    /// every policy, `off` included: no setting makes an unparseable string
+    /// checkable (#2852).
+    #[test]
+    fn an_unbalanced_quote_is_refused_under_every_policy() {
+        let broken = [
+            "git status --porcelain'",
+            "grep -q 'R = ~/x/SPEC-PREP.md",
+            "python3 -c \"import tomllib",
+        ];
+        for criterion in broken {
+            for policy in [
+                CriteriaPolicy::Strict,
+                CriteriaPolicy::Downgrade,
+                CriteriaPolicy::Off,
+            ] {
+                let err =
+                    check(criterion, policy).expect_err("a criterion no shell can lex is refused");
+                let msg = format!("{err}");
+                assert!(msg.contains("unbalanced"), "{criterion}: {msg}");
+                // The refusal quotes the criterion the way Rust prints a string,
+                // so a criterion that carries a quote comes back escaped. Match
+                // that form rather than the raw text (#2852).
+                assert!(
+                    msg.contains(&format!("{criterion:?}")),
+                    "{criterion}: {msg}"
+                );
+            }
+        }
+    }
+
+    /// The repaired forms the issue lists are accepted, and so is an ordinary
+    /// criterion that happens to contain an apostrophe. Refusing "it's green"
+    /// would block more good criteria than the guard saves.
+    ///
+    /// Downgrade on purpose: this test is about the quote guard, not about
+    /// whether the criterion names a runnable command.
+    #[test]
+    fn balanced_and_prose_apostrophes_are_accepted() {
+        for criterion in [
+            "git status --porcelain prints nothing",
+            "grep -q 'R =' /abs/path/SPEC-PREP.md exits 0",
+            "python3 /tmp/check.py reports 0 failed",
+            "cargo test --lib foo reports 4 passed, it's green",
+            "the owner's rule is quoted in \"docs/x.md\"",
+        ] {
+            if let Err(e) = check(criterion, CriteriaPolicy::Downgrade) {
+                panic!("{criterion} was refused: {e}");
+            }
+        }
+    }
+
+    /// An escaped quote is a quote the shell reads, not a delimiter (#2852).
+    #[test]
+    fn an_escaped_quote_does_not_count_as_an_opening_one() {
+        assert_eq!(quote_imbalance("echo \\\"hi"), None);
+        assert_eq!(quote_imbalance("echo 'hi"), Some("single"));
+        assert_eq!(quote_imbalance("echo \"hi"), Some("double"));
+    }
 }

@@ -1997,6 +1997,27 @@ mod sidebar_action_tests {
         assert!(body.contains("self.set_rail_open(open, cx)"));
         assert!(!body.contains("self.rail_open = !self.rail_open"));
     }
+
+    /// A drag-close takes the same transition as the toggle (#2845). The drag
+    /// used to write the flag directly, so a hidden filter, the open chip panel
+    /// and the keyboard focus all survived a rail that was no longer drawn, and
+    /// reopening with ctrl+s showed the stale filter.
+    #[test]
+    fn a_drag_close_takes_the_same_transition_as_the_toggle() {
+        let src = DASHBOARD;
+        // Assembled at run time: this module is part of the text it scans, and
+        // a contiguous literal here would match itself.
+        let direct = ["this.rail_open", "=", "false"].join(" ");
+        let transition = concat!("this.set_rail_open(", "false, cx);");
+        assert!(
+            !src.contains(&direct),
+            "a close path writes the rail flag directly instead of the transition"
+        );
+        assert!(
+            src.contains(transition),
+            "the drag close goes through set_rail_open"
+        );
+    }
 }
 
 /// How tall one wheel "line" is when the platform reports the tick in lines
@@ -4596,8 +4617,12 @@ impl Render for Dashboard {
                     let next = (from_w + dx) / this.rem;
                     if next < RAIL_MIN_REM {
                         // Dragged past the floor: close it, the same gesture
-                        // the owner asked for instead of leaving a sliver.
-                        this.rail_open = false;
+                        // the owner asked for instead of leaving a sliver. The
+                        // close goes through the one transition, so a hidden
+                        // filter, an open chip panel and the keyboard focus do
+                        // not outlive a rail that is no longer drawn (#2845).
+                        // A drag and ctrl+s now close the same way.
+                        this.set_rail_open(false, cx);
                         this.dragging_rail = false;
                         this.drag_from = None;
                     } else {
@@ -5537,7 +5562,74 @@ fn remember_open_session(id: Uuid) {
     opencrabs::utils::last_session::write(id);
 }
 
+/// What a launch asks the window to do before it builds anything (#2841).
+///
+/// A packaging step, a smoke test or a hash check runs `opencrabs-gui
+/// --version` and expects a string back. Without this the flag was ignored and
+/// the whole application booted: the ledger opened, the channel connectors
+/// started and the A2A listener bound its port. That turned a version check
+/// into a second live instance, which is a known conflict on one bot token.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Launch {
+    /// Open the window.
+    Window,
+    /// Print the version and exit 0.
+    Version,
+    /// Print the flags and exit 0.
+    Help,
+    /// A flag this binary does not answer. Rejected rather than booted.
+    Refused(String),
+}
+
+/// Read the launch intent from the arguments, with the program name already
+/// skipped.
+///
+/// Only the two flags every packaging tool assumes are answered. A bare word
+/// is left alone on purpose: the protocol handler starts this binary with the
+/// activation URI in argv (#2751), and that launch has to open the window. A
+/// dash-prefixed word that matches nothing is refused, because a typo in a
+/// script must fail loudly instead of starting the app.
+fn launch_intent<I: IntoIterator<Item = String>>(args: I) -> Launch {
+    for arg in args {
+        match arg.as_str() {
+            "--version" | "-V" => return Launch::Version,
+            "--help" | "-h" => return Launch::Help,
+            flag if flag.starts_with('-') => return Launch::Refused(arg),
+            _ => {}
+        }
+    }
+    Launch::Window
+}
+
+/// The flags this binary answers, so a caller does not have to read the source
+/// to find out (#2841).
+fn print_launch_help() {
+    println!(
+        "opencrabs-gui {}\n\nUSAGE:\n    opencrabs-gui [--version] [--help]\n\nOPTIONS:\n    -V, --version    Print the version and exit\n    -h, --help       Print this help and exit",
+        env!("CARGO_PKG_VERSION")
+    );
+}
+
 fn main() {
+    // Before the log, the ledger and every connector (#2841). A version check
+    // must never become a second instance on the same bot token.
+    match launch_intent(std::env::args().skip(1)) {
+        Launch::Version => {
+            println!("opencrabs-gui {}", env!("CARGO_PKG_VERSION"));
+            return;
+        }
+        Launch::Help => {
+            print_launch_help();
+            return;
+        }
+        Launch::Refused(flag) => {
+            eprintln!("opencrabs-gui: unknown option '{flag}'");
+            eprintln!("Try 'opencrabs-gui --help' for the flags this binary answers.");
+            std::process::exit(2);
+        }
+        Launch::Window => {}
+    }
+
     // The terminal binary installs the rustls provider before anything opens a
     // TLS connection (`src/main.rs`), and the window serves the same channels,
     // so it installs it too. Without it the Slack connector panics while it
@@ -6532,7 +6624,7 @@ enum SendOrigin {
 
 #[cfg(test)]
 mod tests {
-    use super::{pick_initial_session, remember_open_session};
+    use super::{Launch, launch_intent, pick_initial_session, remember_open_session};
     use crate::composer_view::{composer_hint_for, queue_rows};
     use crate::dashboard_source::DASHBOARD;
     use crate::overlays::cd_entries_for;
@@ -6544,6 +6636,52 @@ mod tests {
     /// A leaf is its own view now (#2805): its state and the transcript it
     /// draws are scanned here, not in the crate root.
     const PANE_VIEW: &str = include_str!("pane_view.rs");
+
+    /// `--version` is answered from the arguments alone (#2841). The flag used
+    /// to be ignored, so a packaging check booted the whole app: ledger,
+    /// channels and the A2A port, which is a second instance on one bot token.
+    #[test]
+    fn a_version_flag_is_answered_before_the_window_boots() {
+        assert_eq!(launch_intent(["--version".to_string()]), Launch::Version);
+        assert_eq!(launch_intent(["-V".to_string()]), Launch::Version);
+        assert_eq!(launch_intent(["--help".to_string()]), Launch::Help);
+        assert_eq!(launch_intent(["-h".to_string()]), Launch::Help);
+        // A bare word is the protocol launch's activation URI (#2751), not a
+        // flag: that launch still has to open the window.
+        assert_eq!(
+            launch_intent(["opencrabs://notify".to_string()]),
+            Launch::Window
+        );
+        assert_eq!(launch_intent(Vec::<String>::new()), Launch::Window);
+        // A flag nothing answers fails loudly instead of starting the app.
+        assert_eq!(
+            launch_intent(["--nonsense".to_string()]),
+            Launch::Refused("--nonsense".to_string())
+        );
+    }
+
+    /// The parse has to run before the log, the ledger or any connector, or a
+    /// version check still opens the database and binds the port (#2841).
+    #[test]
+    fn the_version_flag_is_read_before_the_log_or_the_ledger() {
+        let parse = DASHBOARD
+            .find("launch_intent(std::env::args()")
+            .expect("the launch intent is still read from the arguments");
+        let log = DASHBOARD
+            .find("logging::init();")
+            .expect("the window still initialises its log");
+        assert!(
+            parse < log,
+            "the flag has to be answered before the log and the ledger open"
+        );
+        let ledger = DASHBOARD
+            .find("let db_path = ledger_path();")
+            .expect("the window still resolves its ledger");
+        assert!(
+            parse < ledger,
+            "the flag has to be answered before the ledger"
+        );
+    }
 
     /// A live turn repaints on every fourth poll tick, not on every one. The
     /// spinner and the clock are the only things moving in that branch, and at

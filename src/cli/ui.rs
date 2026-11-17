@@ -1856,8 +1856,10 @@ async fn cmd_chat_inner(
                     ));
                 } else {
                     lines.push(format!(
-                        "A background instance (PID {}) holding {} did not stop (likely running as another user) — it may still contend for the connection. Stop it manually so this session can take over.",
-                        inst.pid, chans
+                        "A background instance (PID {}) holding {} did not stop (likely running as another user). It may still contend for the connection. Stop it with: {} so this session can take over.",
+                        inst.pid,
+                        chans,
+                        crate::services::surface::stop_remedy()
                     ));
                 }
             }
