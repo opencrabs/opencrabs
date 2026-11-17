@@ -46,6 +46,63 @@ fn handle_alive(handles: &HashMap<String, JoinHandle<()>>, name: &str) -> bool {
     handles.get(name).is_some_and(|h| !h.is_finished())
 }
 
+/// What one reconcile pass decided to leave alone, and why (#2933).
+///
+/// `reconcile_*` used to return silently on `Noop`, so a channel the config
+/// asked to run but which could not start (no token, a token that fails its
+/// shape check) left no trace in any mode: it looked exactly like a channel
+/// nobody had enabled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Idle {
+    /// `enabled = false`. Nothing is wrong here, so this stays at debug.
+    Off,
+    /// Enabled and running as configured.
+    Running,
+    /// Enabled, but it cannot start. The text names the field to fix.
+    Blocked(&'static str),
+}
+
+/// Report a reconcile pass that leaves `name` where it is.
+fn log_noop(name: &str, idle: Idle) {
+    match idle {
+        Idle::Off => tracing::debug!("ChannelManager: {name} noop: disabled in config"),
+        Idle::Running => tracing::debug!("ChannelManager: {name} noop: running as configured"),
+        Idle::Blocked(why) => tracing::warn!("ChannelManager: {name} will NOT run: {why}"),
+    }
+}
+
+/// Drop a channel task that ended without a reconcile asking it to, and say so
+/// once (#2933).
+///
+/// The next `Start` used to overwrite a finished handle with nothing written
+/// anywhere, so a poller that died at 03:00 and one that never started looked
+/// the same in the log. Returns true when a dead task was found and removed.
+///
+/// `is_finished()` guarantees the `await` below resolves without yielding, so
+/// the handle map is not held across a real suspension. The join result is the
+/// exit reason: `Ok` for a clean return, `Err` carrying either a panic or the
+/// cancellation of a task something else aborted.
+async fn reap_dead_task(map: &mut HashMap<String, JoinHandle<()>>, name: &str) -> bool {
+    if !map.get(name).is_some_and(|h| h.is_finished()) {
+        return false;
+    }
+    let Some(handle) = map.remove(name) else {
+        return false;
+    };
+    match handle.await {
+        Ok(()) => {
+            tracing::warn!("ChannelManager: {name} task exited on its own without a stop request")
+        }
+        Err(error) if error.is_panic() => {
+            tracing::error!("ChannelManager: {name} task panicked and exited: {error}")
+        }
+        Err(error) => {
+            tracing::warn!("ChannelManager: {name} task exited on its own (cancelled): {error}")
+        }
+    }
+    true
+}
+
 #[cfg(feature = "telegram-userbot")]
 pub(crate) fn userbot_action(enabled: bool, session_exists: bool, alive: bool) -> ChannelAction {
     channel_action(enabled && session_exists, alive)
@@ -149,7 +206,9 @@ impl ChannelManager {
         config: &Config,
         handles: &mut HashMap<String, JoinHandle<()>>,
     ) {
+        reap_dead_task(handles, "telegram").await;
         let tg = &config.channels.telegram;
+        let token_present = tg.token.as_ref().is_some_and(|t| !t.is_empty());
         let has_valid_token = tg
             .token
             .as_ref()
@@ -163,6 +222,18 @@ impl ChannelManager {
             .unwrap_or(false);
 
         let should_run = tg.enabled && has_valid_token;
+        let idle = if !tg.enabled {
+            Idle::Off
+        } else if !token_present {
+            Idle::Blocked("channels.telegram.enabled is true but channels.telegram.token is empty")
+        } else if !has_valid_token {
+            Idle::Blocked(
+                "channels.telegram.enabled is true but channels.telegram.token is not a bot \
+                 token (expected <id>:<secret>)",
+            )
+        } else {
+            Idle::Running
+        };
         match channel_action(should_run, handle_alive(handles, "telegram")) {
             ChannelAction::Start => {
                 if let Some(ref token) = tg.token {
@@ -279,7 +350,7 @@ impl ChannelManager {
                     handle.abort();
                 }
             }
-            ChannelAction::Noop => {}
+            ChannelAction::Noop => log_noop("telegram", idle),
         }
     }
 
@@ -292,14 +363,19 @@ impl ChannelManager {
         config: &Config,
         handles: &mut HashMap<String, JoinHandle<()>>,
     ) {
+        reap_dead_task(handles, "telegram-userbot").await;
         let userbot = &config.channels.telegram.userbot;
         let session_exists = crate::channels::telegram::userbot::login::session_exists(userbot);
-        if userbot.enabled && !session_exists {
-            tracing::info!(
-                "ChannelManager: Telegram userbot enabled but not logged in; run \
-                 `opencrabs channel userbot-login`"
-            );
-        }
+        let idle = if !userbot.enabled {
+            Idle::Off
+        } else if !session_exists {
+            Idle::Blocked(
+                "channels.telegram.userbot.enabled is true but there is no session; run \
+                 `opencrabs channel userbot-login`",
+            )
+        } else {
+            Idle::Running
+        };
         match userbot_action(
             userbot.enabled,
             session_exists,
@@ -324,7 +400,7 @@ impl ChannelManager {
                     handle.abort();
                 }
             }
-            ChannelAction::Noop => {}
+            ChannelAction::Noop => log_noop("telegram-userbot", idle),
         }
     }
 
@@ -336,6 +412,7 @@ impl ChannelManager {
     ) {
         let wa = &config.channels.whatsapp;
         let should_run = wa.enabled;
+        let idle = if wa.enabled { Idle::Running } else { Idle::Off };
         // A pairing reset wipes session.db and asks for a restart. Abort the
         // live agent so it starts fresh against the wiped session (drops old
         // auth at runtime); the Start arm below then respawns it.
@@ -358,6 +435,9 @@ impl ChannelManager {
             }
             handle.abort();
         }
+        // After the restart branch: that branch has to see the handle to
+        // disconnect the old client before the reap would drop it.
+        reap_dead_task(handles, "whatsapp").await;
         match channel_action(should_run, handle_alive(handles, "whatsapp")) {
             ChannelAction::Start => {
                 // Background-task resume (#734): a finished detached command
@@ -411,7 +491,7 @@ impl ChannelManager {
                     handle.abort();
                 }
             }
-            ChannelAction::Noop => {}
+            ChannelAction::Noop => log_noop("whatsapp", idle),
         }
     }
 
@@ -421,13 +501,27 @@ impl ChannelManager {
         config: &Config,
         handles: &mut HashMap<String, JoinHandle<()>>,
     ) {
+        reap_dead_task(handles, "discord").await;
         let dc = &config.channels.discord;
+        let token_present = dc.token.as_ref().is_some_and(|t| !t.is_empty());
         let has_valid_token = dc
             .token
             .as_ref()
             .map(|t| !t.is_empty() && t.len() > 50)
             .unwrap_or(false);
         let should_run = dc.enabled && has_valid_token;
+        let idle = if !dc.enabled {
+            Idle::Off
+        } else if !token_present {
+            Idle::Blocked("channels.discord.enabled is true but channels.discord.token is empty")
+        } else if !has_valid_token {
+            Idle::Blocked(
+                "channels.discord.enabled is true but channels.discord.token is too short \
+                 to be a bot token",
+            )
+        } else {
+            Idle::Running
+        };
         match channel_action(should_run, handle_alive(handles, "discord")) {
             ChannelAction::Start => {
                 if let Some(ref token) = dc.token {
@@ -479,7 +573,7 @@ impl ChannelManager {
                     handle.abort();
                 }
             }
-            ChannelAction::Noop => {}
+            ChannelAction::Noop => log_noop("discord", idle),
         }
     }
 
@@ -489,7 +583,10 @@ impl ChannelManager {
         config: &Config,
         handles: &mut HashMap<String, JoinHandle<()>>,
     ) {
+        reap_dead_task(handles, "slack").await;
         let sl = &config.channels.slack;
+        let bot_present = sl.token.as_ref().is_some_and(|t| !t.is_empty());
+        let app_present = sl.app_token.as_ref().is_some_and(|t| !t.is_empty());
         let has_valid_tokens = sl
             .token
             .as_ref()
@@ -501,6 +598,20 @@ impl ChannelManager {
                 .map(|t| !t.is_empty() && t.starts_with("xapp-"))
                 .unwrap_or(false);
         let should_run = sl.enabled && has_valid_tokens;
+        let idle = if !sl.enabled {
+            Idle::Off
+        } else if !bot_present {
+            Idle::Blocked("channels.slack.enabled is true but channels.slack.token is empty")
+        } else if !app_present {
+            Idle::Blocked("channels.slack.enabled is true but channels.slack.app_token is empty")
+        } else if !has_valid_tokens {
+            Idle::Blocked(
+                "channels.slack.enabled is true but the tokens are not a bot token (xoxb-) \
+                 and an app token (xapp-)",
+            )
+        } else {
+            Idle::Running
+        };
         match channel_action(should_run, handle_alive(handles, "slack")) {
             ChannelAction::Start => {
                 if let (Some(bot_tok), Some(app_tok)) = (sl.token.clone(), sl.app_token.clone()) {
@@ -547,7 +658,7 @@ impl ChannelManager {
                     handle.abort();
                 }
             }
-            ChannelAction::Noop => {}
+            ChannelAction::Noop => log_noop("slack", idle),
         }
     }
 
@@ -557,6 +668,7 @@ impl ChannelManager {
         config: &Config,
         handles: &mut HashMap<String, JoinHandle<()>>,
     ) {
+        reap_dead_task(handles, "trello").await;
         let tr = &config.channels.trello;
         let has_valid_creds = tr
             .app_token
@@ -566,6 +678,18 @@ impl ChannelManager {
             && tr.token.as_ref().map(|t| !t.is_empty()).unwrap_or(false);
         let has_boards = !tr.board_ids.is_empty();
         let should_run = tr.enabled && has_valid_creds && has_boards;
+        let idle = if !tr.enabled {
+            Idle::Off
+        } else if !has_valid_creds {
+            Idle::Blocked(
+                "channels.trello.enabled is true but channels.trello.app_token or \
+                 channels.trello.token is empty",
+            )
+        } else if !has_boards {
+            Idle::Blocked("channels.trello.enabled is true but channels.trello.board_ids is empty")
+        } else {
+            Idle::Running
+        };
         match channel_action(should_run, handle_alive(handles, "trello")) {
             ChannelAction::Start => {
                 if let (Some(api_key), Some(api_token)) = (tr.app_token.clone(), tr.token.clone()) {
@@ -603,7 +727,7 @@ impl ChannelManager {
                     handle.abort();
                 }
             }
-            ChannelAction::Noop => {}
+            ChannelAction::Noop => log_noop("trello", idle),
         }
     }
 }
@@ -689,6 +813,126 @@ impl crate::channels::target_resolver::TargetResolution for ChannelManager {
         {
             let _ = chat_id;
             Ok(None)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Let the runtime poll `name` until its task has finished, with no clock
+    /// and no sleep: `yield_now` hands control back to the scheduler, which is
+    /// what actually runs the spawned task.
+    async fn settle(handles: &HashMap<String, JoinHandle<()>>, name: &str) {
+        for _ in 0..64 {
+            if handles.get(name).is_some_and(|h| h.is_finished()) {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("{name} task did not finish within 64 yields");
+    }
+
+    /// A task that returned on its own is reported exactly once and its slot is
+    /// freed, so the same pass can restart the channel (#2933).
+    #[tokio::test]
+    async fn a_dead_task_is_reaped_once_and_its_slot_freed() {
+        let mut handles: HashMap<String, JoinHandle<()>> = HashMap::new();
+        handles.insert("telegram".to_string(), tokio::spawn(async {}));
+        settle(&handles, "telegram").await;
+
+        assert!(
+            reap_dead_task(&mut handles, "telegram").await,
+            "a finished task must be reported"
+        );
+        assert!(
+            handles.is_empty(),
+            "the dead handle must not stay in the map"
+        );
+        assert!(
+            !reap_dead_task(&mut handles, "telegram").await,
+            "a second pass has nothing left to report"
+        );
+    }
+
+    /// A channel that is still running keeps its handle: only an exited task is
+    /// news.
+    #[tokio::test]
+    async fn a_live_task_is_left_alone() {
+        let mut handles: HashMap<String, JoinHandle<()>> = HashMap::new();
+        handles.insert(
+            "telegram".to_string(),
+            tokio::spawn(std::future::pending::<()>()),
+        );
+
+        assert!(
+            !reap_dead_task(&mut handles, "telegram").await,
+            "a running task is not a dead one"
+        );
+        assert_eq!(handles.len(), 1, "a live handle stays in the map");
+
+        if let Some(handle) = handles.remove("telegram") {
+            handle.abort();
+        }
+    }
+
+    /// A panicking task is reaped as well: the map must not keep a handle that
+    /// can never come back to life.
+    #[tokio::test]
+    async fn a_panicked_task_is_reaped() {
+        let mut handles: HashMap<String, JoinHandle<()>> = HashMap::new();
+        handles.insert(
+            "discord".to_string(),
+            tokio::spawn(async { panic!("agent died") }),
+        );
+        settle(&handles, "discord").await;
+
+        assert!(reap_dead_task(&mut handles, "discord").await);
+        assert!(handles.is_empty(), "a panicked handle is dead, not running");
+    }
+
+    /// Everything above the test module, so the scans below cannot match their
+    /// own needles.
+    fn production_source() -> &'static str {
+        include_str!("manager.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the file always has a head")
+    }
+
+    /// Every `Noop` arm says why it stayed put. A bare `=> {}` is the silence
+    /// this issue was filed about, so the two counts must match.
+    ///
+    /// The needle is split across `concat!` on purpose: a plain literal would
+    /// make `grep` for the real call site count this test too.
+    #[test]
+    fn every_noop_arm_reports_why_it_stayed() {
+        let src = production_source();
+        let arm = concat!("ChannelAction::Noop", " =>");
+        let arms = src.matches(arm).count();
+        let reported = src
+            .matches(concat!("ChannelAction::Noop", " => log_noop("))
+            .count();
+
+        assert_eq!(arms, reported, "a Noop arm returns without saying why");
+        assert_eq!(arms, 6, "one reported Noop arm per reconcile fn");
+    }
+
+    /// A reconcile pass reaps before it decides, so a task that died on its own
+    /// is reported instead of being overwritten by the next `Start`.
+    #[test]
+    fn every_reconcile_reaps_a_dead_task_first() {
+        let src = production_source();
+        let bodies: Vec<&str> = src.split("async fn reconcile_").skip(1).collect();
+        let call = concat!("reap_dead_task(", "handles");
+
+        assert_eq!(bodies.len(), 6, "one body per reconcile fn");
+        for body in bodies {
+            assert!(
+                body.contains(call),
+                "a reconcile fn decides without reaping a dead task first"
+            );
         }
     }
 }
