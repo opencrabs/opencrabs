@@ -5549,6 +5549,25 @@ fn main() {
 
     // First, so a panic during the first fetch still lands in the trail.
     logging::init();
+
+    // The window owns the channel layer (`services::surface` starts and stops
+    // Telegram, WhatsApp, Slack and the rest), but this bin installed no
+    // `tracing` subscriber, so every `tracing::` event in that layer was
+    // dropped: a channel that never started, a token-lock refusal, and a
+    // poller that died after boot all left no line in any file (#2933). The
+    // terminal binary installs this at `src/main.rs`; the window needs the
+    // same one because it is the process the channels actually run in.
+    //
+    // The daily file is gated by `agent.debug_logs`, seeded on boot below and
+    // re-applied by `services::surface` on every config reload. While that
+    // toggle is off the writer stays lazy and creates no file, so this costs
+    // nothing until someone asks for the trail.
+    let tracing_guard = opencrabs::logging::init_logging(
+        opencrabs::logging::LogConfig::new().with_log_dir(opencrabs::logging::log_dir()),
+    );
+    if let Err(e) = &tracing_guard {
+        logging::error(&format!("tracing subscriber not installed: {e}"));
+    }
     // A banner click arrives as a protocol launch (#2751): the shell starts
     // this binary with the activation URI in argv, so the click is queued here,
     // before any window exists, and the poll tick opens it once there is one to
@@ -5571,6 +5590,12 @@ fn main() {
             // Before the bootstrap takes the config: the keystroke trail is
             // switched on from config.toml, not only from the environment.
             logging::set_debug_from_config(config.debug.gui_debug_logs);
+            // The tracing trail has its own switch (`agent.debug_logs`, the
+            // same key the terminal honours). Seeded here so a window launched
+            // with it on records channel events from the first boot instead of
+            // waiting for the first config reload. This binary takes no
+            // `--debug` flag, so nothing is forced.
+            opencrabs::logging::apply_debug_logs(false, config.agent.debug_logs);
             agent_bridge::spawn_bootstrap(config, agent_sink.clone());
             agent_bridge::spawn_update_checks(agent_sink.clone());
         }
