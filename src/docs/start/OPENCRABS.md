@@ -139,7 +139,7 @@ opencrabs logs status         # log file location
 opencrabs logs view --lines 50
 ```
 
-Logs live under `~/.opencrabs/logs/` (one file per day: `opencrabs.YYYY-MM-DD`).
+Logs live under `~/.opencrabs/logs/`. The daily tracing file (`opencrabs.YYYY-MM-DD`) is created only while `agent.debug_logs` is on, or when the terminal runs with `--debug`; until then no daily file exists and `opencrabs logs view` has nothing to show. The desktop app always appends its own trail to `opencrabs-gui.log` in the same directory.
 
 ## Next steps
 
