@@ -720,10 +720,15 @@ struct Dashboard {
     /// The trimmed query the deep search was last scheduled for, so caret
     /// moves and arrow navigation never rebuild the catalog (#2721).
     seeker_scheduled_query: String,
-    /// Parents whose topic chips are expanded past the first three. A chip
-    /// strip shows three plus a "+N" pill by default; tapping it reveals the
-    /// rest, and the collapse pill folds them back (Telegram topic style).
-    rail_chips_expanded: std::collections::HashSet<Uuid>,
+    /// Parents whose topic chips are expanded past the first three, with the
+    /// instant each one opened. A chip strip shows three plus a "+N" pill by
+    /// default; tapping it reveals the rest, and the collapse pill folds them
+    /// back (Telegram topic style).
+    ///
+    /// The instant is the disclosure's own clock (#3020): an expanded strip is
+    /// a picker, not a setting, so it folds itself after a bounded idle period
+    /// instead of staying open until the window restarts.
+    rail_chips_expanded: std::collections::HashMap<Uuid, std::time::Instant>,
     /// Rail width in rem, moved by the splitter's drag. Never below
     /// `RAIL_MIN_REM`: dragging past it closes the rail instead, and ctrl+s
     /// brings it back at the last width.
@@ -5992,6 +5997,12 @@ fn main() {
                                         this.rail_ledger_sig = sig;
                                         this.refresh_rail(cx);
                                     }
+                                    // An expanded chip strip is temporary
+                                    // (#3020), and this probe is the slow
+                                    // cadence the window already pays for, so
+                                    // the fold rides it rather than a second
+                                    // timer.
+                                    this.rail_expire_chips(std::time::Instant::now(), cx);
                                 })
                                 .is_err()
                             {
@@ -6057,7 +6068,7 @@ fn main() {
                         seeker_find: HashMap::new(),
                         seeker_find_gen: 0,
                         seeker_scheduled_query: String::new(),
-                        rail_chips_expanded: std::collections::HashSet::new(),
+                        rail_chips_expanded: std::collections::HashMap::new(),
                         rail_width: RAIL_DEFAULT_REM,
                         rail_open: true,
                         rail_focused: false,

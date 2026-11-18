@@ -7,6 +7,28 @@
 
 use super::*;
 
+/// How long an expanded topic strip stays open with nothing picked (#3020).
+///
+/// The strip is a picker, not a setting: it opens to show the topics behind
+/// `+N`, and the reader either picks one (which folds it on the spot) or moves
+/// on. Thirty seconds is long enough to scan a card's whole topic list and
+/// short enough that an abandoned strip does not leave the rail several screens
+/// tall until the window restarts.
+pub(crate) const RAIL_CHIPS_IDLE_FOLD: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Whether an expanded strip has been open long enough to fold itself (#3020).
+///
+/// The rule is a pure comparison so the window can ask it of a whole map with
+/// one `now`, and so the threshold can be tested without a clock or a window.
+/// `saturating_duration_since` keeps a clock that moved backwards from folding
+/// a strip the reader just opened.
+pub(crate) fn chips_idle_fold_due(
+    opened: std::time::Instant,
+    now: std::time::Instant,
+) -> bool {
+    now.saturating_duration_since(opened) >= RAIL_CHIPS_IDLE_FOLD
+}
+
 impl Dashboard {
     pub(crate) fn toggle_rail(&mut self, cx: &mut Context<Self>) {
         let open = !self.rail_open;
@@ -705,7 +727,7 @@ impl Dashboard {
             let chips = children_by_parent
                 .get(&id)
                 .map(|kids| rail_view::RailChips {
-                    expanded: self.rail_chips_expanded.contains(&id),
+                    expanded: self.rail_chips_expanded.contains_key(&id),
                     kids: kids
                         .iter()
                         .map(|kid| {
@@ -849,8 +871,12 @@ impl Dashboard {
     ///
     /// A chip is a pick like any row: while a split waits, it fills the pane
     /// instead of opening the topic in the chat leaf (#2760).
+    ///
+    /// The strip that offered the chip folds here (#3020): it is a picker, and
+    /// the pick is what it was opened for.
     pub(crate) fn rail_chip_pick(&mut self, id: Uuid, cx: &mut Context<Self>) {
         self.close_rail_filter(cx);
+        self.rail_fold_chip_strips();
         self.pick_or_open(id, cx);
     }
 
@@ -889,6 +915,9 @@ impl Dashboard {
             self.choose_split(id, cx);
             return;
         }
+        // A pick is what a chip strip was expanded for, so the strips fold on
+        // one (#3020): the reader picked, the picker did its job.
+        self.rail_fold_chip_strips();
         // The find field is a jump aid: picking a row is its exit, and the
         // keyboard goes back to the conversation.
         self.close_rail_filter(cx);
@@ -897,8 +926,12 @@ impl Dashboard {
     }
 
     /// The "+N" pill: the rest of a card's topics paint as chips.
+    ///
+    /// The instant is recorded because the disclosure is temporary (#3020):
+    /// see [`Self::rail_expire_chips`].
     pub(crate) fn rail_expand_chips(&mut self, id: Uuid, cx: &mut Context<Self>) {
-        self.rail_chips_expanded.insert(id);
+        self.rail_chips_expanded
+            .insert(id, std::time::Instant::now());
         cx.notify();
     }
 
@@ -906,6 +939,31 @@ impl Dashboard {
     pub(crate) fn rail_collapse_chips(&mut self, id: Uuid, cx: &mut Context<Self>) {
         self.rail_chips_expanded.remove(&id);
         cx.notify();
+    }
+
+    /// Fold every expanded strip (#3020).
+    ///
+    /// Called from a pick: a chip strip is a picker, and once a chip or a row
+    /// has been picked there is nothing left for it to offer. The caller is the
+    /// pick, and the pick notifies on its own, so this one stays silent.
+    pub(crate) fn rail_fold_chip_strips(&mut self) {
+        self.rail_chips_expanded.clear();
+    }
+
+    /// Fold the strips that have been open past their idle period (#3020).
+    ///
+    /// The window's slow rail probe calls this, so the fold rides the cadence
+    /// that already exists instead of minting a timer. Expiry is a rule over
+    /// the map, taken from one `now`, so two entries that opened together fold
+    /// together. It notifies only when something folded: an idle rail must not
+    /// repaint for a strip that was never open.
+    pub(crate) fn rail_expire_chips(&mut self, now: std::time::Instant, cx: &mut Context<Self>) {
+        let before = self.rail_chips_expanded.len();
+        self.rail_chips_expanded
+            .retain(|_, opened| !chips_idle_fold_due(*opened, now));
+        if self.rail_chips_expanded.len() != before {
+            cx.notify();
+        }
     }
 
     /// The channel chip's one action (#2452): run the installer once.
@@ -933,5 +991,46 @@ impl Dashboard {
     pub(crate) fn rail_toggle_automation(&mut self, cx: &mut Context<Self>) {
         self.sessions.rail_filter.show_automation = !self.sessions.rail_filter.show_automation;
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_strip_that_just_opened_stays_open() {
+        // #3020: expanding is a deliberate act, and the reader needs the time
+        // to scan the list before anything folds under the pointer.
+        let now = Instant::now();
+        assert!(!chips_idle_fold_due(now, now));
+        assert!(!chips_idle_fold_due(
+            now,
+            now + RAIL_CHIPS_IDLE_FOLD - Duration::from_millis(1)
+        ));
+    }
+
+    #[test]
+    fn a_strip_open_past_the_idle_period_folds() {
+        // #3020: the disclosure is a picker, not a setting, so it does not
+        // survive being ignored.
+        let now = Instant::now();
+        assert!(chips_idle_fold_due(now, now + RAIL_CHIPS_IDLE_FOLD));
+        assert!(chips_idle_fold_due(
+            now,
+            now + RAIL_CHIPS_IDLE_FOLD + Duration::from_secs(600)
+        ));
+    }
+
+    #[test]
+    fn a_clock_that_moved_backwards_does_not_fold() {
+        // #3020: `Instant` is monotonic on every platform the window ships on,
+        // but a strip is cheap to keep and expensive to lose under the reader's
+        // pointer, so the comparison saturates instead of panicking. The stamp
+        // sits in the future here, which is the same shape as a clock that
+        // stepped back.
+        let now = Instant::now();
+        assert!(!chips_idle_fold_due(now + Duration::from_secs(5), now));
     }
 }
