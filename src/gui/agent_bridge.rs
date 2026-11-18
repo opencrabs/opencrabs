@@ -1254,6 +1254,24 @@ pub fn spawn_boot_resume(service: Arc<AgentService>, pool: opencrabs::db::Pool, 
     }
 }
 
+/// A user turn a previous process died inside, and where it came from.
+///
+/// The channel is part of the work, not decoration (#3025). A row written by a
+/// Telegram turn names a chat, and its answer belongs there. Dropping the
+/// channel here is what made the window resume every row into itself, with
+/// `"tui"` hardcoded, and post the reply nowhere.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BootResume {
+    session: Uuid,
+    /// The request text the row carried. Not replayed as the prompt: it is
+    /// what the summary and the tests read, while the turn continues from the
+    /// session's own context.
+    message: String,
+    /// `"tui"` for a window-local turn, otherwise the channel that asked
+    /// (`telegram`, `discord`, `slack`, `whatsapp`).
+    channel: String,
+}
+
 /// What a boot scan found, already split into the work it implies.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct BootPlan {
@@ -1261,7 +1279,7 @@ struct BootPlan {
     /// counts rows, because that is what the previous process lost track of.
     interrupted: Vec<Uuid>,
     /// Sessions to re-run from the message their row carries.
-    resumes: Vec<(Uuid, String)>,
+    resumes: Vec<BootResume>,
     /// Sessions whose push has to be re-delivered instead of replayed (#12).
     pushes: Vec<(Uuid, String)>,
 }
@@ -1290,7 +1308,11 @@ fn boot_plan(requests: &[opencrabs::db::PendingRequest]) -> BootPlan {
         if req.origin == "system" {
             plan.pushes.push((session_id, req.user_message.clone()));
         } else {
-            plan.resumes.push((session_id, req.user_message.clone()));
+            plan.resumes.push(BootResume {
+                session: session_id,
+                message: req.user_message.clone(),
+                channel: req.channel.clone(),
+            });
         }
     }
     plan
@@ -1299,6 +1321,7 @@ fn boot_plan(requests: &[opencrabs::db::PendingRequest]) -> BootPlan {
 /// The scan half of [`spawn_boot_resume`], on the caller's runtime.
 async fn boot_resume(service: Arc<AgentService>, pool: opencrabs::db::Pool, sink: EventSink) {
     use opencrabs::brain::agent::service::boot_report;
+    use opencrabs::brain::agent::service::restart_recovery;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     let pending_repo = opencrabs::db::PendingRequestRepository::new(pool.clone());
@@ -1353,8 +1376,62 @@ async fn boot_resume(service: Arc<AgentService>, pool: opencrabs::db::Pool, sink
             },
         );
     }
-    for (session_id, user_message) in plan.resumes {
+    for resume in plan.resumes {
+        let BootResume {
+            session: session_id,
+            message: user_message,
+            channel,
+        } = resume;
         boot_report::record_resumed(session_id);
+        // A channel row belongs to its chat, and this window cannot post there
+        // (#3025). Hand it to the channel that owns the session and let its own
+        // route run the turn: the parked prompt leaves when Telegram restores
+        // its session routes at connect (#1224), so the answer streams into the
+        // topic that asked instead of landing in the window.
+        //
+        // Resuming it locally, which is what this loop used to do for every
+        // row, generated the answer, wrote it to the session ledger and sent
+        // nothing: the chat that asked stayed empty while the window's copy
+        // looked delivered.
+        if channel != "tui" {
+            // The revive runs without passing through the ingress handler that
+            // claims a session, so a completion produced during this window has
+            // to park for its channel rather than fall back to this window
+            // (#1206). The channel's claim clears it.
+            restart_recovery::expect_channel_route(session_id);
+            let claimed = restart_recovery::deliver_or_park(
+                session_id,
+                QueuedUserMessage {
+                    // Same wording as the terminal (#2627): the turn continues
+                    // from the context already in the session, so replaying the
+                    // row's request would run it twice.
+                    context_text: restart_recovery::CONTINUATION_PROMPT.to_string(),
+                    display_text: format!(
+                        "🔁 Restart recovery: continuing session {}'s interrupted {channel} turn. The answer will land in that chat.",
+                        short_session(session_id)
+                    ),
+                    origin: opencrabs::brain::agent::PushOrigin::Recovery,
+                    bg_meta: None,
+                },
+            );
+            // The ledger counts what THIS surface delivered (#1952), and this
+            // surface delivered nothing: the channel owns the answer now. A row
+            // still waiting for its claim is parked by definition; a row a live
+            // route took is just as much the channel's, so both read parked
+            // here. Saying "delivered" for a turn that has not answered yet is
+            // the accounting bug #1952 was filed for.
+            boot_report::record_parked();
+            crate::logging::info(&format!(
+                "boot resume: session {} came from {channel}; {}",
+                short_session(session_id),
+                if claimed {
+                    "its live route took the continuation"
+                } else {
+                    "parked until that channel claims it"
+                }
+            ));
+            continue;
+        }
         // The session's own working directory, restored per session and never
         // through the global, so two resumes in different repos cannot clobber
         // each other (#703, #2007).
@@ -1390,8 +1467,11 @@ async fn boot_resume(service: Arc<AgentService>, pool: opencrabs::db::Pool, sink
         );
     }
     if pending.load(Ordering::Acquire) == 0 {
-        // Only push rows were found (or the ids were unusable): nothing was
-        // dispatched, so nothing will ever call the completion.
+        // Nothing was dispatched on this window's own threads: only push rows
+        // were found, every user row came from a channel and was handed to it,
+        // or the ids were unusable. Nothing will ever call the completion, so
+        // the summary goes out here, with the parked count naming the turns the
+        // channels now own.
         let line = boot_report::summary_line();
         crate::logging::info(&line);
         let _ = sink.send(TurnEvent::CommandReply {
@@ -2414,8 +2494,16 @@ mod tests {
         assert_eq!(
             plan.resumes,
             vec![
-                (a, "build it".to_string()),
-                (b, "why is CI red".to_string()),
+                BootResume {
+                    session: a,
+                    message: "build it".to_string(),
+                    channel: "tui".to_string(),
+                },
+                BootResume {
+                    session: b,
+                    message: "why is CI red".to_string(),
+                    channel: "tui".to_string(),
+                },
             ],
             "one resume per session, from the row that was running first"
         );
@@ -2465,6 +2553,109 @@ mod tests {
         assert!(
             src.contains("spawn_boot_resume(bridge.service.clone()"),
             "the window's boot actually runs the scan"
+        );
+    }
+
+    /// A turn that came from a chat is handed back to that chat (#3025).
+    ///
+    /// The window has no transports of its own, so the only correct move for a
+    /// channel row is the park machinery the terminal uses: mark the session
+    /// channel-owned, park the continuation prompt, and let the channel's own
+    /// route claim run it. Resuming locally generates an answer no chat ever
+    /// sees, which is exactly what a window restart used to do.
+    ///
+    /// The park machinery itself is exercised where it lives, in
+    /// `tests::channel_route_expectation_test` (it owns the lock that
+    /// serializes the process-global queue, which a test out here cannot
+    /// take). What this asserts is the part that broke: the row's channel
+    /// reaching the dispatch, and the dispatch choosing the hand-over.
+    #[test]
+    fn a_channel_row_is_parked_for_the_chat_that_owns_it() {
+        let telegram = Uuid::from_u128(0x3025_0001);
+        let window = Uuid::from_u128(0x3025_0002);
+        let plan = boot_plan(&[
+            opencrabs::db::PendingRequest {
+                id: Uuid::new_v4().to_string(),
+                session_id: telegram.to_string(),
+                user_message: "export the deck".to_string(),
+                channel: "telegram".to_string(),
+                channel_chat_id: Some("8535704842".to_string()),
+                channel_thread_id: None,
+                channel_message_id: None,
+                origin: "user".to_string(),
+            },
+            opencrabs::db::PendingRequest {
+                id: Uuid::new_v4().to_string(),
+                session_id: window.to_string(),
+                user_message: "fix the parser".to_string(),
+                channel: "tui".to_string(),
+                channel_chat_id: None,
+                channel_thread_id: None,
+                channel_message_id: None,
+                origin: "user".to_string(),
+            },
+        ]);
+        assert_eq!(
+            plan.resumes,
+            vec![
+                BootResume {
+                    session: telegram,
+                    message: "export the deck".to_string(),
+                    channel: "telegram".to_string(),
+                },
+                BootResume {
+                    session: window,
+                    message: "fix the parser".to_string(),
+                    channel: "tui".to_string(),
+                },
+            ],
+            "the row's own channel survives the plan; a hardcoded surface here is the \
+             defect this test exists for"
+        );
+
+        // And the arm itself: the channel branch must park, never resume.
+        let src = include_str!("agent_bridge.rs");
+        let shipped = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the shipped source before the tests");
+        let scan = shipped
+            .split("async fn boot_resume(")
+            .nth(1)
+            .expect("the boot scan");
+        let scan = scan
+            .split("/// The service-global progress forwarder")
+            .next()
+            .expect("the end of the scan");
+        let guard = scan
+            .find("if channel != \"tui\"")
+            .expect("channel rows are told apart from window rows");
+        let mark = scan
+            .find("expect_channel_route(")
+            .expect("the channel row is marked channel-owned");
+        let hand_over = scan
+            .find("deliver_or_park(")
+            .expect("the channel row is handed to its route");
+        let local = scan
+            .find("spawn_resume(")
+            .expect("the window resume is still there");
+        assert!(
+            guard < mark && mark < hand_over && hand_over < local,
+            "a channel row is marked and handed over before the window resume is reached, \
+             and the hand-over never runs for a window row"
+        );
+        let branch = &scan[guard..local];
+        assert!(
+            branch.contains("CONTINUATION_PROMPT"),
+            "the hand-over continues from context instead of replaying the request (#2627)"
+        );
+        assert!(
+            branch.contains("PushOrigin::Recovery"),
+            "the chat sees a recovery, not a fresh user request"
+        );
+        assert!(
+            branch.contains("continue;"),
+            "the channel row must not fall through into the window resume"
         );
     }
 
