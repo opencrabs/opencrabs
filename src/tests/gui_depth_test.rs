@@ -11,12 +11,17 @@ const PANE_VIEW: &str = include_str!("../gui/pane_view.rs");
 
 #[test]
 fn the_header_has_a_panel_background_and_a_divider() {
+    // The chain, not a byte window: the header's own drag handle (#3014) and
+    // its comments pushed the fill past a fixed slice.
     let start = GUI_MAIN
-        .find("let chrome = div()")
+        .find("let chrome = ")
         .expect("the chat header is built in render");
     let header = GUI_MAIN
-        .get(start..start + 400)
-        .expect("the header block is in range");
+        .get(start..)
+        .expect("the header block is in range")
+        .split(".child(icon::banner_logo())")
+        .next()
+        .expect("the header chain ends at its logo");
     assert!(header.contains(".bg(rgb(palette::current().panel))"));
     assert!(header.contains(".border_b_1()"));
 }
