@@ -907,9 +907,14 @@ impl Dashboard {
     }
 
     /// Tab/Space on a row: make it the session's working directory. The
-    /// conversation comes back FIRST and the apply follows in a spawned
-    /// task, the ordering the terminal's picker was just fixed to use
-    /// (#2526): a slow persistence write must never hold the screen open.
+    /// conversation comes back FIRST and the apply follows off the UI thread,
+    /// the ordering the terminal's picker was just fixed to use (#2526): a
+    /// slow persistence write must never hold the screen open.
+    ///
+    /// The apply is handed to `spawn_apply_operator_cd` rather than awaited
+    /// in a `cx.spawn` here: the row write goes through
+    /// `deadpool_sqlite`, which needs a Tokio reactor, and gpui's executor is
+    /// not one. Awaiting it in place aborted the window on every pick.
     pub(crate) fn cd_select_here(&mut self, cx: &mut Context<Self>) {
         let Some(session) = self.chat_session else {
             self.close_cd_picker(cx);
@@ -919,20 +924,20 @@ impl Dashboard {
         self.screen = Screen::Chat;
         self.refocus_screen();
         cx.notify();
-        cx.spawn(async move |this, cx| {
-            let applied = match agent_bridge::bridge() {
-                Some(b) => b.service.apply_operator_cd(session, &dir).await,
-                None => dir.clone(),
-            };
-            let _ = this.update(cx, |this, cx| {
-                this.turn
-                    .live
-                    .notices
-                    .push(text_commands::cd_reply(&applied.display().to_string()));
-                cx.notify();
-            });
-        })
-        .detach();
+        match agent_bridge::bridge() {
+            Some(b) => agent_bridge::spawn_apply_operator_cd(
+                b.service.clone(),
+                session,
+                dir,
+                self.sink.clone(),
+            ),
+            None => self
+                .turn
+                .live
+                .notices
+                .push(text_commands::cd_reply(&dir.display().to_string())),
+        }
+        cx.notify();
     }
 
     /// Enter on a row: descend into it. `..` climbs back up one level.

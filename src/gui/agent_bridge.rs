@@ -1960,6 +1960,66 @@ pub fn spawn_brain_generation(
     }
 }
 
+/// Apply an operator `/cd` off the UI thread.
+///
+/// Both window paths used to await `apply_operator_cd` inside `cx.spawn`:
+/// the picker's Tab/Space and the `/cd <path>` arm. gpui's executor is not a
+/// Tokio runtime, and the persist behind that applier goes through
+/// `deadpool_sqlite`, whose `recycle` asks for `tokio::runtime::Handle::current`
+/// (`deadpool-runtime-0.3.1/src/lib.rs:92`). Picking a directory therefore
+/// aborted the whole window with "there is no reactor running, must be called
+/// from the context of a Tokio 1.x runtime", every time, after the screen had
+/// already returned to the conversation.
+///
+/// The in-memory half of the applier is runtime-free, so it was never the
+/// problem: only the DB row needs a reactor. It runs here on its own 4 MB
+/// thread with a `current_thread` runtime, the shape every other DB path in
+/// this file uses, and the receipt comes back as a `CommandReply` on the
+/// session that asked, which the notice strip already knows how to paint.
+pub fn spawn_apply_operator_cd(
+    service: Arc<AgentService>,
+    session_id: Uuid,
+    dir: PathBuf,
+    sink: EventSink,
+) {
+    let done_sink = sink.clone();
+    let spawned = std::thread::Builder::new()
+        .stack_size(4 * 1024 * 1024)
+        .name("gui-operator-cd".into())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    crate::logging::error(&format!("operator cd runtime: {e}"));
+                    let _ = done_sink.send(TurnEvent::CommandReply {
+                        session: Some(session_id),
+                        text: format!("/cd: {e}"),
+                    });
+                    return;
+                }
+            };
+            let applied = runtime.block_on(service.apply_operator_cd(session_id, &dir));
+            crate::logging::info(&format!(
+                "operator cd: session {session_id} -> {}",
+                applied.display()
+            ));
+            let _ = done_sink.send(TurnEvent::CommandReply {
+                session: Some(session_id),
+                text: super::text_commands::cd_reply(&applied.display().to_string()),
+            });
+        });
+    if let Err(e) = spawned {
+        crate::logging::error(&format!("operator cd thread: {e}"));
+        let _ = sink.send(TurnEvent::CommandReply {
+            session: Some(session_id),
+            text: format!("/cd: {e}"),
+        });
+    }
+}
+
 /// Run one of the window's text commands off the UI thread (#2469).
 ///
 /// The work is the engine's own: plan mode is `utils::plan_mode`, clear is

@@ -186,21 +186,24 @@ impl Dashboard {
                         cx.notify();
                         return;
                     }
-                    cx.spawn(async move |this, cx| {
-                        let applied = match agent_bridge::bridge() {
-                            Some(b) => b.service.apply_operator_cd(session, &expanded).await,
-                            None => expanded.clone(),
-                        };
-                        let _ = this.update(cx, |this, cx| {
-                            this.push_session_notice(
-                                session,
-                                text_commands::cd_reply(&applied.display().to_string()),
-                                cx,
-                            );
-                            cx.notify();
-                        });
-                    })
-                    .detach();
+                    // The apply runs off the UI thread: its row write
+                    // goes through `deadpool_sqlite`, which needs a Tokio
+                    // reactor, and gpui's executor is not one. Awaiting it in
+                    // a `cx.spawn` here aborted the window instead.
+                    match agent_bridge::bridge() {
+                        Some(b) => agent_bridge::spawn_apply_operator_cd(
+                            b.service.clone(),
+                            session,
+                            expanded,
+                            self.sink.clone(),
+                        ),
+                        None => self.push_session_notice(
+                            session,
+                            text_commands::cd_reply(&expanded.display().to_string()),
+                            cx,
+                        ),
+                    }
+                    cx.notify();
                 }
             }
             other => {

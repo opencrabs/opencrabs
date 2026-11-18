@@ -9657,8 +9657,14 @@ mod tests {
             .split_once("self.open_cd_picker(cx)")
             .expect("the bare arm exists");
         assert!(
-            !bare.is_empty() && rest.contains("apply_operator_cd"),
-            "with a path the change applies locally on the service"
+            !bare.is_empty() && rest.contains("spawn_apply_operator_cd"),
+            "with a path the change applies off the UI thread on the service"
+        );
+        assert!(
+            !rest.contains("cx.spawn"),
+            "the /cd apply never runs on gpui's executor: the row write needs a \
+             Tokio reactor and gpui has none, so awaiting it there aborted the \
+             window"
         );
         assert!(
             !cd_arm.contains("spawn_text_command"),
@@ -9690,10 +9696,17 @@ mod tests {
         let switch = body
             .find("self.screen = Screen::Chat;")
             .expect("select switches to chat");
-        let spawn = body.find("cx.spawn").expect("select applies in a task");
+        let apply = body
+            .find("agent_bridge::spawn_apply_operator_cd")
+            .expect("select applies off the UI thread");
         assert!(
-            switch < spawn,
-            "the conversation returns before the apply task spawns"
+            switch < apply,
+            "the conversation returns before the apply is handed off"
+        );
+        assert!(
+            !body.contains("cx.spawn"),
+            "the picker's apply never runs on gpui's executor: the row write \
+             needs a Tokio reactor and gpui has none"
         );
     }
 
