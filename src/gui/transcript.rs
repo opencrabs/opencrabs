@@ -3714,10 +3714,10 @@ fn live_card_line(line: LiveCardLine, selection: Option<&SelectionContext>) -> A
 
 /// The live turn as ONE card, in the Telegram grammar (#2442): the header is
 /// the live status, the body is every entry in the order it happened, and the
-/// footer carries the count, the ctx budget, the rate and the clock. The pane
-/// used to draw a ledger, then a status line BELOW it, then a bare reasoning
-/// line, which is what made a busy turn read as a wall of rows with the
-/// summary underneath them.
+/// head's one line carries the sentence, the call it is running, and the
+/// numbers. The pane used to draw a ledger, then a status line BELOW it, then
+/// a bare reasoning line, which is what made a busy turn read as a wall of rows
+/// with the summary underneath them.
 ///
 /// The corners are the message radius, not the card radius (#2618): this card
 /// becomes the message row once the turn persists, so it must not be rounder
@@ -3743,7 +3743,7 @@ fn live_card(
     // places and could disagree, which is how the clock ended up counted in
     // both at once. There is no path that prints it twice.
     let finished = live.stopped || live.settled.is_some();
-    let frame = if live.stopped {
+    let slot = if live.stopped {
         "\u{23f9}".to_string()
     } else if finished {
         "\u{2705}".to_string()
@@ -3850,7 +3850,7 @@ fn live_card(
                 .w(px(16.0))
                 .child(disclosure_icon(accent, 1.0)),
         )
-        .child(head_run(frame, palette::current().text_muted, None).flex_shrink_0());
+        .child(head_run(slot, palette::current().text_muted, None).flex_shrink_0());
     // The clock sits on the first line with the arrow, so it stays in place
     // while the sentence under it grows and shrinks. When the turn ends that
     // slot turns into the tick and the clock reappears in the numbers.
