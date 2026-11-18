@@ -2704,7 +2704,9 @@ mod tests {
             "a channel row is marked and handed over before the window resume is reached, \
              and the hand-over never runs for a window row"
         );
-        let branch = &scan[guard..local];
+        let branch = scan
+            .get(guard..local)
+            .expect("the branch between the hand-over and the window resume");
         assert!(
             branch.contains("CONTINUATION_PROMPT"),
             "the hand-over continues from context instead of replaying the request (#2627)"
