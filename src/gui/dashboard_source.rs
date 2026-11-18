@@ -40,8 +40,10 @@ pub const DASHBOARD: &str = concat!(
 /// the code it pinned. Take the last marker instead, so a module that grows a
 /// test module can never hide the ones behind it.
 pub fn production_half() -> &'static str {
-    DASHBOARD
-        .rsplit("\n#[cfg(test)]\nmod tests")
-        .next()
-        .expect("the concat always has a tail")
+    // The window's own test module, as it appears at the end of `main.rs`.
+    const MARKER: &str = "\n#[cfg(test)]\nmod tests";
+    match DASHBOARD.rsplit_once(MARKER) {
+        Some((head, _tail)) => head,
+        None => DASHBOARD,
+    }
 }
