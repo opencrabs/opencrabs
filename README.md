@@ -4731,42 +4731,27 @@ journalctl --user -u opencrabs -f
 
 #### macOS (launchd)
 
-```bash
-cat > ~/Library/LaunchAgents/com.opencrabs.agent.plist << 'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.opencrabs.agent</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/usr/local/bin/opencrabs</string>
-        <string>daemon</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>/Users/YOU/.opencrabs/logs/daemon.out.log</string>
-    <key>StandardErrorPath</key>
-    <string>/Users/YOU/.opencrabs/logs/daemon.err.log</string>
-</dict>
-</plist>
-EOF
+Let the binary write and load the LaunchAgent; it knows its own path, profile
+and log directory:
 
-launchctl load ~/Library/LaunchAgents/com.opencrabs.agent.plist
+```bash
+opencrabs service install   # write the managed plist
+opencrabs service start     # load it
 
 # Check status
+opencrabs service status
 launchctl list | grep opencrabs
 
 # Stop and unload
-launchctl unload ~/Library/LaunchAgents/com.opencrabs.agent.plist
+opencrabs service stop
 ```
 
-> Update the path in `ProgramArguments` to match your install. For cargo installs: `~/.cargo/bin/opencrabs`. For source builds: `/path/to/target/release/opencrabs`.
+The installer writes exactly one label per profile: `com.opencrabs.daemon` for
+the default profile, `com.opencrabs.daemon.<name>` for a named one. Onboarding
+and the GUI Start daemon chip use that same installer, and a machine still
+carrying the old `com.opencrabs.agent` plist has it retired the next time the
+managed definition is installed or the app starts, so two `KeepAlive` jobs
+never fight over one daemon.
 
 #### Windows (Task Scheduler)
 

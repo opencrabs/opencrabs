@@ -2007,6 +2007,15 @@ const MANAGED_SERVICE_LABEL: &str = "com.opencrabs.daemon";
 /// stop the user's default daemon (#2834).
 const ONBOARDING_AGENT_LABEL: &str = "com.opencrabs.agent";
 
+/// The managed label for a profile: `com.opencrabs.daemon`, or
+/// `com.opencrabs.daemon.<profile>` for a named one.
+pub(crate) fn managed_service_label(profile: Option<&str>) -> String {
+    match profile {
+        Some(name) if name != "default" => format!("{MANAGED_SERVICE_LABEL}.{name}"),
+        _ => MANAGED_SERVICE_LABEL.to_string(),
+    }
+}
+
 /// Every launchd label this profile can own.
 ///
 /// Two labels exist per user, not per profile: the managed
@@ -2015,12 +2024,11 @@ const ONBOARDING_AGENT_LABEL: &str = "com.opencrabs.agent";
 /// only the managed one reports "not running" over a live daemon and its
 /// `stop` leaves the process up, because both templates set `KeepAlive`.
 pub(crate) fn service_labels_for(profile: Option<&str>) -> Vec<String> {
-    match profile {
-        Some(name) if name != "default" => vec![format!("{MANAGED_SERVICE_LABEL}.{name}")],
-        _ => vec![
-            MANAGED_SERVICE_LABEL.to_string(),
-            ONBOARDING_AGENT_LABEL.to_string(),
-        ],
+    let managed = managed_service_label(profile);
+    if managed == MANAGED_SERVICE_LABEL {
+        vec![managed, ONBOARDING_AGENT_LABEL.to_string()]
+    } else {
+        vec![managed]
     }
 }
 
@@ -2316,60 +2324,30 @@ fn user_service_hint() -> String {
         .to_string()
 }
 
-/// OS service management
-#[allow(unused_variables)]
-pub(crate) async fn cmd_service(operation: ServiceCommands) -> Result<()> {
-    let binary = std::env::current_exe().context("Could not determine binary path")?;
-    let binary_str = binary.display().to_string();
-    let (plist_name, systemd_name, log_suffix) = service_identifiers();
-    let args = daemon_args();
-    let profile_label = crate::config::profile::active_profile().unwrap_or("default");
-
-    match operation {
-        ServiceCommands::Install => {
-            #[cfg(target_os = "macos")]
-            {
-                let plist_path = dirs::home_dir()
-                    .context("No home dir")?
-                    .join("Library/LaunchAgents")
-                    .join(format!("{plist_name}.plist"));
-
-                let args_xml: String =
-                    std::iter::once(format!("        <string>{binary_str}</string>"))
-                        .chain(args.iter().map(|a| format!("        <string>{a}</string>")))
-                        .collect::<Vec<_>>()
-                        .join("\n");
-
-                // Daemon stdout/stderr go to the same private log directory as
-                // every other log, not /tmp (OC-05). /tmp is world-readable, and
-                // daemon stderr carries URLs, tracing events, and chat-adjacent
-                // text. The directory is created 0700 so a second local user
-                // cannot list or read it.
-                let log_dir = crate::logging::log_dir();
-                if let Err(e) = std::fs::create_dir_all(&log_dir) {
-                    tracing::warn!(
-                        "service install: could not create log dir {}: {e}",
-                        log_dir.display()
-                    );
-                }
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ =
-                        std::fs::set_permissions(&log_dir, std::fs::Permissions::from_mode(0o700));
-                }
-                let out_log = log_dir.join(format!("daemon{log_suffix}.out.log"));
-                let err_log = log_dir.join(format!("daemon{log_suffix}.err.log"));
-                let out_log_str = out_log.to_string_lossy();
-                let err_log_str = err_log.to_string_lossy();
-
-                let plist = format!(
-                    r#"<?xml version="1.0" encoding="UTF-8"?>
+/// launchd plist for the managed label.
+///
+/// Pure, so the template is testable on every platform (the counterpart of
+/// [`build_systemd_unit`]). Every install surface writes this one template,
+/// which is what makes a profile own a single label (#2837).
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn build_launchagent_plist(
+    label: &str,
+    binary: &str,
+    args: &[String],
+    out_log: &str,
+    err_log: &str,
+) -> String {
+    let args_xml: String = std::iter::once(format!("        <string>{binary}</string>"))
+        .chain(args.iter().map(|a| format!("        <string>{a}</string>")))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>{plist_name}</string>
+    <string>{label}</string>
     <key>ProgramArguments</key>
     <array>
 {args_xml}
@@ -2379,81 +2357,254 @@ pub(crate) async fn cmd_service(operation: ServiceCommands) -> Result<()> {
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>{out_log_str}</string>
+    <string>{out_log}</string>
     <key>StandardErrorPath</key>
-    <string>{err_log_str}</string>
+    <string>{err_log}</string>
 </dict>
 </plist>"#
-                );
+    )
+}
 
-                if let Some(parent) = plist_path.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                std::fs::write(&plist_path, plist)?;
-                println!(
-                    "✅ Installed LaunchAgent [{profile_label}]: {}",
-                    plist_path.display()
-                );
-                println!("   Run: opencrabs service start");
+/// Write the managed launchd plist for the active profile. Writes only: it
+/// never loads the job and never removes anything, so a startup hook can call
+/// it without disturbing a running daemon.
+#[cfg(target_os = "macos")]
+fn write_managed_launchagent() -> Result<std::path::PathBuf> {
+    let (label, _systemd_name, log_suffix) = service_identifiers();
+    let binary = std::env::current_exe().context("Could not determine binary path")?;
+    let binary_str = binary.display().to_string();
+    let args = daemon_args();
+    let plist_path = launchagent_plist_path(&label)?;
+
+    // Daemon stdout/stderr go to the same private log directory as every other
+    // log, not /tmp (OC-05). /tmp is world-readable, and daemon stderr carries
+    // URLs, tracing events, and chat-adjacent text. The directory is created
+    // 0700 so a second local user cannot list or read it.
+    let log_dir = crate::logging::log_dir();
+    if let Err(e) = std::fs::create_dir_all(&log_dir) {
+        tracing::warn!(
+            "service install: could not create log dir {}: {e}",
+            log_dir.display()
+        );
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&log_dir, std::fs::Permissions::from_mode(0o700));
+    }
+    let out_log = log_dir.join(format!("daemon{log_suffix}.out.log"));
+    let err_log = log_dir.join(format!("daemon{log_suffix}.err.log"));
+    let out_log_str = out_log.to_string_lossy().to_string();
+    let err_log_str = err_log.to_string_lossy().to_string();
+
+    let plist = build_launchagent_plist(&label, &binary_str, &args, &out_log_str, &err_log_str);
+    if let Some(parent) = plist_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&plist_path, plist)?;
+    Ok(plist_path)
+}
+
+/// Remove the legacy onboarding plist now that a managed one exists (#2837).
+///
+/// `boot_out_loaded` decides whether a job launchd still has loaded is stopped.
+/// An INSTALL passes true: it is about to load the managed label, and two
+/// KeepAlive jobs for one profile would fight over the instance lock. The
+/// startup hook passes false, because it runs under every command
+/// (`opencrabs status` included) and must never restart a daemon; the loaded
+/// job keeps running under the removed plist until the next login, when only
+/// the managed label is left to start.
+#[cfg(target_os = "macos")]
+fn retire_legacy_agent_plist(boot_out_loaded: bool) -> Result<bool> {
+    // The agent plist carries no `-p`, so it runs the default profile. A named
+    // profile must never remove another profile's service.
+    if let Some(name) = crate::config::profile::active_profile()
+        && name != "default"
+    {
+        return Ok(false);
+    }
+    let agent_plist = launchagent_plist_path(ONBOARDING_AGENT_LABEL)?;
+    if !agent_plist.exists() {
+        return Ok(false);
+    }
+    if boot_out_loaded
+        && launchctl_loaded_rows()
+            .iter()
+            .any(|(_, label)| label == ONBOARDING_AGENT_LABEL)
+    {
+        bootout_label(ONBOARDING_AGENT_LABEL)?;
+    }
+    std::fs::remove_file(&agent_plist)?;
+    tracing::info!(
+        label = ONBOARDING_AGENT_LABEL,
+        booted_out = boot_out_loaded,
+        "service: retired the legacy onboarding label, this profile now owns one managed label"
+    );
+    Ok(true)
+}
+
+/// Startup hook (#2837): a profile owns exactly one service label.
+///
+/// Installs the managed definition when this profile has none, then retires the
+/// legacy onboarding plist. File work only: no job is booted out and nothing is
+/// started, so this is safe to run before any command.
+pub(crate) fn migrate_legacy_service_label() -> Result<bool> {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(name) = crate::config::profile::active_profile()
+            && name != "default"
+        {
+            return Ok(false);
+        }
+        let agent_plist = launchagent_plist_path(ONBOARDING_AGENT_LABEL)?;
+        if !agent_plist.exists() {
+            return Ok(false);
+        }
+        let managed = managed_service_label(crate::config::profile::active_profile());
+        // Nothing may be deleted before a working replacement exists.
+        if !launchagent_plist_path(&managed)?.exists() {
+            write_managed_launchagent()?;
+        }
+        retire_legacy_agent_plist(false)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(false)
+    }
+}
+
+/// Write the managed service definition for the active profile and, when
+/// `start` is true, load it.
+///
+/// The ONLY installer: `opencrabs service install`, the TUI onboarding wizard
+/// and the GUI Start daemon chip all reach this, so a profile cannot end up
+/// holding two labels (#2837). Installing retires the legacy onboarding label,
+/// which is what leaves a machine that carries both with the managed one only.
+#[cfg_attr(
+    not(any(target_os = "macos", target_os = "linux")),
+    allow(unused_variables)
+)]
+pub(crate) fn install_managed_service(start: bool) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let profile_label = crate::config::profile::active_profile().unwrap_or("default");
+        let plist_path = write_managed_launchagent()?;
+        println!(
+            "✅ Installed LaunchAgent [{profile_label}]: {}",
+            plist_path.display()
+        );
+        // Stop the legacy job before loading the managed one: two KeepAlive
+        // jobs for one profile would take turns failing the instance lock.
+        retire_legacy_agent_plist(true)?;
+        if start {
+            run_launchctl(&["load", "-w"], &plist_path)?;
+            println!("✅ Started OpenCrabs daemon [{profile_label}]");
+        } else {
+            println!("   Run: opencrabs service start");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let profile_label = crate::config::profile::active_profile().unwrap_or("default");
+        let binary = std::env::current_exe().context("Could not determine binary path")?;
+        let binary_str = binary.display().to_string();
+        let (_plist_name, systemd_name, _log_suffix) = service_identifiers();
+        let args = daemon_args();
+        let system = running_as_root();
+        let unit_path = if system {
+            std::path::PathBuf::from(format!("/etc/systemd/system/{systemd_name}.service"))
+        } else {
+            dirs::home_dir()
+                .context("No home dir")?
+                .join(format!(".config/systemd/user/{systemd_name}.service"))
+        };
+
+        let exec_args = std::iter::once(binary_str.clone())
+            .chain(args.iter().cloned())
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        // System unit installed via sudo: run the daemon as the invoking user so
+        // it reads that user's ~/.opencrabs, not root's.
+        let run_as = if system {
+            std::env::var("SUDO_USER")
+                .ok()
+                .filter(|u| !u.is_empty() && u != "root")
+        } else {
+            None
+        };
+        let unit = build_systemd_unit(profile_label, &exec_args, run_as.as_deref(), system);
+
+        if let Some(parent) = unit_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&unit_path, unit)
+            .with_context(|| format!("writing unit {}", unit_path.display()))?;
+
+        if let Err(e) = run_systemctl(system, &["daemon-reload"]) {
+            eprintln!("❌ {e}");
+            if !system {
+                eprintln!("\n{}", user_service_hint());
             }
-
-            #[cfg(target_os = "linux")]
-            {
-                let system = running_as_root();
-                let unit_path = if system {
-                    std::path::PathBuf::from(format!("/etc/systemd/system/{systemd_name}.service"))
-                } else {
-                    dirs::home_dir()
-                        .context("No home dir")?
-                        .join(format!(".config/systemd/user/{systemd_name}.service"))
-                };
-
-                let exec_args = std::iter::once(binary_str.clone())
-                    .chain(args.iter().cloned())
-                    .collect::<Vec<_>>()
-                    .join(" ");
-
-                // System unit installed via sudo: run the daemon as the
-                // invoking user so it reads that user's ~/.opencrabs, not root's.
-                let run_as = if system {
-                    std::env::var("SUDO_USER")
-                        .ok()
-                        .filter(|u| !u.is_empty() && u != "root")
-                } else {
-                    None
-                };
-                let unit = build_systemd_unit(profile_label, &exec_args, run_as.as_deref(), system);
-
-                if let Some(parent) = unit_path.parent() {
-                    std::fs::create_dir_all(parent)?;
+            return Err(e);
+        }
+        println!(
+            "✅ Installed systemd {} unit [{profile_label}]: {}",
+            if system { "system" } else { "user" },
+            unit_path.display()
+        );
+        if start {
+            // `enable --now` so a system unit also survives reboot; a user unit
+            // just starts (boot-persistence there needs lingering).
+            let res = if system {
+                run_systemctl(true, &["enable", "--now", systemd_name.as_str()])
+            } else {
+                run_systemctl(false, &["start", systemd_name.as_str()])
+            };
+            if let Err(e) = res {
+                eprintln!("❌ {e}");
+                if !system {
+                    eprintln!("\n{}", user_service_hint());
                 }
-                std::fs::write(&unit_path, unit)
-                    .with_context(|| format!("writing unit {}", unit_path.display()))?;
-
-                if let Err(e) = run_systemctl(system, &["daemon-reload"]) {
-                    eprintln!("❌ {e}");
-                    if !system {
-                        eprintln!("\n{}", user_service_hint());
-                    }
-                    return Err(e);
-                }
-                println!(
-                    "✅ Installed systemd {} unit [{profile_label}]: {}",
-                    if system { "system" } else { "user" },
-                    unit_path.display()
-                );
-                println!(
-                    "   Run: {}opencrabs service start",
-                    if system { "sudo " } else { "" }
-                );
+                return Err(e);
             }
+            println!("✅ Started OpenCrabs daemon [{profile_label}]");
+        } else {
+            println!(
+                "   Run: {}opencrabs service start",
+                if system { "sudo " } else { "" }
+            );
+        }
+    }
 
-            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-            return Err(anyhow::anyhow!(
-                "Service install not supported on this platform"
-            ));
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        Ok(())
+    }
 
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        Err(anyhow::anyhow!(
+            "Service install not supported on this platform"
+        ))
+    }
+}
+
+/// OS service management
+#[allow(unused_variables)]
+pub(crate) async fn cmd_service(operation: ServiceCommands) -> Result<()> {
+    // Only the systemd arms need a unit name; installing lives in
+    // `install_managed_service`, which derives its own identifiers.
+    let (_, systemd_name, _) = service_identifiers();
+    let profile_label = crate::config::profile::active_profile().unwrap_or("default");
+
+    match operation {
+        ServiceCommands::Install => {
+            // One installer for every surface: the CLI, the TUI onboarding
+            // wizard and the GUI chip all write the managed label here, so a
+            // profile can never end up holding two (#2837).
+            install_managed_service(false)?;
             Ok(())
         }
         ServiceCommands::Start => {

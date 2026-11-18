@@ -738,6 +738,23 @@ pub async fn run() -> Result<()> {
     // Compiled-in templates, offline-safe, idempotent, never overwrites.
     crate::config::profile::ensure_brain_seeded();
 
+    // One profile, one service label (#2837). The onboarding wizard used to
+    // write a second launchd job (`com.opencrabs.agent`) for the same profile,
+    // and both templates set KeepAlive, so the two took turns losing the
+    // instance lock. When that legacy plist is still on disk, write this
+    // profile's managed definition first and retire the old one after, never
+    // before. File work only: no job is started. `service` and `init` are
+    // exempt so an install or uninstall acts on the plist set it already sees.
+    let manages_service = matches!(
+        cli.command,
+        Some(Commands::Service { .. }) | Some(Commands::Init { .. })
+    );
+    if !manages_service
+        && let Err(e) = commands::migrate_legacy_service_label()
+    {
+        tracing::warn!("service label migration skipped: {e}");
+    }
+
     // The config in hand was loaded before the documented example existed, so
     // on a genuinely fresh home it carries no provider sections at all. Re-read
     // it now that seeding has written them, or the provisioning below would

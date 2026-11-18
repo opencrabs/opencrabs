@@ -16,8 +16,8 @@
 //! against the live `~/Library/LaunchAgents`.
 
 use crate::cli::commands::{
-    any_owned_label_loaded, launchagent_plist_path_in, owned_launchctl_rows, parse_launchctl_rows,
-    service_labels_for,
+    any_owned_label_loaded, build_launchagent_plist, launchagent_plist_path_in,
+    managed_service_label, owned_launchctl_rows, parse_launchctl_rows, service_labels_for,
 };
 
 /// A realistic `launchctl list`: a header, a system job, our two labels (one
@@ -103,4 +103,43 @@ fn plist_path_is_built_under_the_given_directory() {
     assert_eq!(path, dir.join("com.opencrabs.agent.plist"));
     let path = launchagent_plist_path_in(&dir, "com.opencrabs.daemon.hermes");
     assert_eq!(path, dir.join("com.opencrabs.daemon.hermes.plist"));
+}
+
+/// The installer writes the label this function returns, so a named profile
+/// owns `com.opencrabs.daemon.<profile>` and never the unscoped one (#2837).
+#[test]
+fn managed_label_is_scoped_per_profile() {
+    assert_eq!(
+        managed_service_label(None),
+        "com.opencrabs.daemon".to_string()
+    );
+    assert_eq!(
+        managed_service_label(Some("default")),
+        "com.opencrabs.daemon".to_string()
+    );
+    assert_eq!(
+        managed_service_label(Some("hermes")),
+        "com.opencrabs.daemon.hermes".to_string()
+    );
+}
+
+/// One template for every install surface. The label and the daemon arguments
+/// come from the caller, so the plist can never disagree with the label the
+/// rest of the CLI looks for.
+#[test]
+fn launchagent_plist_carries_the_label_and_args_it_is_given() {
+    let args = vec!["-p".to_string(), "hermes".to_string(), "daemon".to_string()];
+    let plist = build_launchagent_plist(
+        "com.opencrabs.daemon.hermes",
+        "/opt/bin/opencrabs",
+        &args,
+        "/tmp/out.log",
+        "/tmp/err.log",
+    );
+    assert!(plist.contains("<string>com.opencrabs.daemon.hermes</string>"));
+    assert!(!plist.contains("<string>com.opencrabs.agent</string>"));
+    assert!(plist.contains("<string>/opt/bin/opencrabs</string>"));
+    assert!(plist.contains("<string>-p</string>"));
+    assert!(plist.contains("<key>KeepAlive</key>"));
+    assert!(plist.contains("<string>/tmp/err.log</string>"));
 }
