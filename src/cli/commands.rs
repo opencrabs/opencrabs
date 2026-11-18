@@ -1996,6 +1996,139 @@ fn service_identifiers() -> (String, String, String) {
     (plist_name, systemd_name, log_suffix)
 }
 
+/// The managed label `opencrabs service install` writes.
+const MANAGED_SERVICE_LABEL: &str = "com.opencrabs.daemon";
+
+/// The unscoped label the TUI onboarding wizard and the GUI Start daemon chip
+/// installed before #2837 unified them onto the managed path.
+///
+/// Its plist carries no `-p`, so it runs the DEFAULT profile. That is why it is
+/// owned by the default profile only: a named profile that unloaded it would
+/// stop the user's default daemon (#2834).
+const ONBOARDING_AGENT_LABEL: &str = "com.opencrabs.agent";
+
+/// Every launchd label this profile can own.
+///
+/// Two labels exist per user, not per profile: the managed
+/// `com.opencrabs.daemon` (or `com.opencrabs.daemon.<profile>`) and the
+/// unscoped onboarding `com.opencrabs.agent`. A service command that knows
+/// only the managed one reports "not running" over a live daemon and its
+/// `stop` leaves the process up, because both templates set `KeepAlive`.
+pub(crate) fn service_labels_for(profile: Option<&str>) -> Vec<String> {
+    match profile {
+        Some(name) if name != "default" => vec![format!("{MANAGED_SERVICE_LABEL}.{name}")],
+        _ => vec![
+            MANAGED_SERVICE_LABEL.to_string(),
+            ONBOARDING_AGENT_LABEL.to_string(),
+        ],
+    }
+}
+
+/// One row of `launchctl list`: the running pid (`None` when launchd has the
+/// job loaded but not running) and its label.
+///
+/// `launchctl list` prints `PID<TAB>Status<TAB>Label`, with `-` in the pid
+/// column for a loaded-but-idle job. The header row and every non-OpenCrabs
+/// label are dropped here, so a caller never unloads something it does not own.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn parse_launchctl_rows(output: &str) -> Vec<(Option<u32>, String)> {
+    let mut rows: Vec<(Option<u32>, String)> = Vec::new();
+    for line in output.lines() {
+        let mut fields = line.split('\t');
+        let (Some(pid_field), Some(_status), Some(label)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        if !label.starts_with("com.opencrabs.") {
+            continue;
+        }
+        if rows.iter().any(|(_, known)| known == label) {
+            continue;
+        }
+        rows.push((pid_field.trim().parse::<u32>().ok(), label.to_string()));
+    }
+    rows
+}
+
+/// The `launchctl list` rows this profile owns, in the order launchd listed them.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn owned_launchctl_rows(
+    output: &str,
+    profile: Option<&str>,
+) -> Vec<(Option<u32>, String)> {
+    let owned = service_labels_for(profile);
+    parse_launchctl_rows(output)
+        .into_iter()
+        .filter(|(_, label)| owned.iter().any(|candidate| candidate == label))
+        .collect()
+}
+
+/// True when any label this profile owns is loaded.
+///
+/// A loaded-but-not-running job counts: launchd's `KeepAlive` brings it back,
+/// so reporting "not running" for it is exactly the blindness #2834 describes.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn any_owned_label_loaded(owned: &[(Option<u32>, String)]) -> bool {
+    !owned.is_empty()
+}
+
+/// Plist path for one label under an explicit `LaunchAgents` directory.
+///
+/// Takes the directory so a test can point it at a temp dir; the live caller
+/// passes `~/Library/LaunchAgents`.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn launchagent_plist_path_in(
+    agents_dir: &std::path::Path,
+    label: &str,
+) -> std::path::PathBuf {
+    agents_dir.join(format!("{label}.plist"))
+}
+
+/// `launchctl list` filtered to this profile's labels. Best effort: a failure
+/// to spawn reports no loaded labels rather than failing the command.
+#[cfg(target_os = "macos")]
+fn launchctl_loaded_rows() -> Vec<(Option<u32>, String)> {
+    let profile = crate::config::profile::active_profile();
+    match std::process::Command::new("launchctl").arg("list").output() {
+        Ok(out) => owned_launchctl_rows(&String::from_utf8_lossy(&out.stdout), profile),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// `~/Library/LaunchAgents/<label>.plist`.
+#[cfg(target_os = "macos")]
+fn launchagent_plist_path(label: &str) -> Result<std::path::PathBuf> {
+    let agents_dir = dirs::home_dir()
+        .context("No home dir")?
+        .join("Library")
+        .join("LaunchAgents");
+    Ok(launchagent_plist_path_in(&agents_dir, label))
+}
+
+/// Remove one label from the gui domain, which also cancels its `KeepAlive`.
+#[cfg(target_os = "macos")]
+fn bootout_label(label: &str) -> Result<()> {
+    let uid = unsafe { libc::getuid() };
+    let domain = format!("gui/{uid}/{label}");
+    let out = std::process::Command::new("launchctl")
+        .arg("bootout")
+        .arg(&domain)
+        .output()
+        .context("failed to spawn launchctl bootout")?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let lowered = stderr.to_lowercase();
+    // Not loaded is the outcome we wanted, so it is not an error.
+    if lowered.contains("no such") || lowered.contains("not find") || lowered.contains("could not find")
+    {
+        return Ok(());
+    }
+    anyhow::bail!("launchctl bootout {domain} failed: {}", stderr.trim())
+}
+
 /// Build the daemon arguments, including `-p <profile>` when a named profile is active.
 fn daemon_args() -> Vec<String> {
     let mut args = Vec::new();
@@ -2326,12 +2459,27 @@ pub(crate) async fn cmd_service(operation: ServiceCommands) -> Result<()> {
         ServiceCommands::Start => {
             #[cfg(target_os = "macos")]
             {
-                let plist = dirs::home_dir()
-                    .context("No home dir")?
-                    .join(format!("Library/LaunchAgents/{plist_name}.plist"));
-                if let Err(e) = run_launchctl(&["load", "-w"], &plist) {
-                    eprintln!("❌ {e}");
-                    return Err(e);
+                // Load whichever OWNED label has a plist on disk. Loading the
+                // managed one blindly printed "Started" with no plist present,
+                // and loading it while only the onboarding label was installed
+                // started a second daemon (#2834).
+                let mut started = false;
+                for label in service_labels_for(crate::config::profile::active_profile()) {
+                    let plist = launchagent_plist_path(&label)?;
+                    if !plist.exists() {
+                        continue;
+                    }
+                    if let Err(e) = run_launchctl(&["load", "-w"], &plist) {
+                        eprintln!("❌ {e}");
+                        return Err(e);
+                    }
+                    started = true;
+                }
+                if !started {
+                    anyhow::bail!(
+                        "no LaunchAgent plist for profile [{profile_label}]. \
+                         Install it first: opencrabs service install"
+                    );
                 }
                 println!("✅ Started OpenCrabs daemon [{profile_label}]");
             }
@@ -2361,14 +2509,34 @@ pub(crate) async fn cmd_service(operation: ServiceCommands) -> Result<()> {
         ServiceCommands::Stop => {
             #[cfg(target_os = "macos")]
             {
-                let plist = dirs::home_dir()
-                    .context("No home dir")?
-                    .join(format!("Library/LaunchAgents/{plist_name}.plist"));
-                if let Err(e) = run_launchctl(&["unload"], &plist) {
-                    eprintln!("❌ {e}");
-                    return Err(e);
+                // Every label this profile can own, not just the managed one.
+                // Unloading the managed plist alone left the onboarding label
+                // running: `#2834`'s report is a "Stopped" line over a live
+                // daemon, because both templates set KeepAlive.
+                let mut stopped: Vec<String> = Vec::new();
+                for (_pid, label) in launchctl_loaded_rows() {
+                    if let Err(e) = bootout_label(&label) {
+                        eprintln!("❌ {e}");
+                        return Err(e);
+                    }
+                    stopped.push(label);
                 }
-                println!("✅ Stopped OpenCrabs daemon [{profile_label}]");
+                // An owned plist can sit on disk unloaded; unload it too so a
+                // later `load` starts from a clean registration.
+                for label in service_labels_for(crate::config::profile::active_profile()) {
+                    let plist = launchagent_plist_path(&label)?;
+                    if plist.exists() {
+                        let _ = run_launchctl(&["unload"], &plist);
+                    }
+                }
+                if stopped.is_empty() {
+                    println!("⬚  OpenCrabs daemon [{profile_label}] is not running");
+                } else {
+                    println!(
+                        "✅ Stopped OpenCrabs daemon [{profile_label}] ({})",
+                        stopped.join(", ")
+                    );
+                }
             }
 
             #[cfg(target_os = "linux")]
@@ -2389,13 +2557,30 @@ pub(crate) async fn cmd_service(operation: ServiceCommands) -> Result<()> {
         ServiceCommands::Restart => {
             #[cfg(target_os = "macos")]
             {
-                let plist = dirs::home_dir()
-                    .context("No home dir")?
-                    .join(format!("Library/LaunchAgents/{plist_name}.plist"));
-                let _ = run_launchctl(&["unload"], &plist);
-                if let Err(e) = run_launchctl(&["load", "-w"], &plist) {
-                    eprintln!("❌ {e}");
-                    return Err(e);
+                // Restart every owned label that is actually installed, so a
+                // profile running under the onboarding label restarts instead
+                // of gaining a second daemon under the managed one (#2834).
+                for (_pid, label) in launchctl_loaded_rows() {
+                    let _ = bootout_label(&label);
+                }
+                let mut restarted = false;
+                for label in service_labels_for(crate::config::profile::active_profile()) {
+                    let plist = launchagent_plist_path(&label)?;
+                    if !plist.exists() {
+                        continue;
+                    }
+                    let _ = run_launchctl(&["unload"], &plist);
+                    if let Err(e) = run_launchctl(&["load", "-w"], &plist) {
+                        eprintln!("❌ {e}");
+                        return Err(e);
+                    }
+                    restarted = true;
+                }
+                if !restarted {
+                    anyhow::bail!(
+                        "no LaunchAgent plist for profile [{profile_label}]. \
+                         Install it first: opencrabs service install"
+                    );
                 }
                 println!("✅ Restarted OpenCrabs daemon [{profile_label}]");
             }
@@ -2416,14 +2601,26 @@ pub(crate) async fn cmd_service(operation: ServiceCommands) -> Result<()> {
         ServiceCommands::Status => {
             #[cfg(target_os = "macos")]
             {
-                let output = std::process::Command::new("launchctl")
-                    .args(["list", &plist_name])
-                    .output()?;
-                if output.status.success() {
+                // Report every label this profile owns. `launchctl list <label>`
+                // asked about the managed label only, so a daemon running under
+                // the onboarding label read as "not running" (#2834).
+                let rows = launchctl_loaded_rows();
+                if any_owned_label_loaded(&rows) {
                     println!("✅ OpenCrabs daemon [{profile_label}] is running");
-                    println!("{}", String::from_utf8_lossy(&output.stdout));
+                    for (pid, label) in &rows {
+                        match pid {
+                            Some(pid) => println!("   {label} (pid {pid})"),
+                            None => println!("   {label} (loaded, not running)"),
+                        }
+                    }
                 } else {
                     println!("⬚  OpenCrabs daemon [{profile_label}] is not running");
+                    for label in service_labels_for(crate::config::profile::active_profile()) {
+                        let plist = launchagent_plist_path(&label)?;
+                        if plist.exists() {
+                            println!("   {} (plist present, not loaded)", plist.display());
+                        }
+                    }
                 }
             }
 
@@ -2448,20 +2645,27 @@ pub(crate) async fn cmd_service(operation: ServiceCommands) -> Result<()> {
         ServiceCommands::Uninstall => {
             #[cfg(target_os = "macos")]
             {
-                let plist = dirs::home_dir()
-                    .context("No home dir")?
-                    .join(format!("Library/LaunchAgents/{plist_name}.plist"));
-                let _ = std::process::Command::new("launchctl")
-                    .args(["unload"])
-                    .arg(&plist)
-                    .status();
-                if plist.exists() {
-                    std::fs::remove_file(&plist)?;
-                    println!(
-                        "✅ Removed LaunchAgent [{profile_label}]: {}",
-                        plist.display()
-                    );
-                } else {
+                // Remove every plist this profile owns, including the
+                // onboarding one: leaving it behind is exactly why
+                // `service uninstall` looked like a no-op while the daemon came
+                // back on the next start (#2834).
+                for (_pid, label) in launchctl_loaded_rows() {
+                    let _ = bootout_label(&label);
+                }
+                let mut removed_any = false;
+                for label in service_labels_for(crate::config::profile::active_profile()) {
+                    let plist = launchagent_plist_path(&label)?;
+                    let _ = run_launchctl(&["unload"], &plist);
+                    if plist.exists() {
+                        std::fs::remove_file(&plist)?;
+                        println!(
+                            "✅ Removed LaunchAgent [{profile_label}]: {}",
+                            plist.display()
+                        );
+                        removed_any = true;
+                    }
+                }
+                if !removed_any {
                     println!("⬚  LaunchAgent [{profile_label}] not found");
                 }
             }

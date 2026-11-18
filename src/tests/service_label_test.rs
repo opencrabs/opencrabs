@@ -1,0 +1,106 @@
+//! `opencrabs service` label ownership (#2834).
+//!
+//! Two launchd labels exist per user, and before this only the managed one was
+//! known to any service command:
+//!
+//!   * `com.opencrabs.daemon` / `com.opencrabs.daemon.<profile>` written by
+//!     `service install`,
+//!   * `com.opencrabs.agent` written by the TUI onboarding wizard and the GUI
+//!     Start daemon chip.
+//!
+//! Both templates set `KeepAlive`, so the mismatch showed up as `status`
+//! printing "not running" over a live daemon and `stop` printing "Stopped"
+//! while the process stayed up.
+//!
+//! Everything here is pure: no test spawns `launchctl` and no path resolves
+//! against the live `~/Library/LaunchAgents`.
+
+use crate::cli::commands::{
+    any_owned_label_loaded, launchagent_plist_path_in, owned_launchctl_rows, parse_launchctl_rows,
+    service_labels_for,
+};
+
+/// A realistic `launchctl list`: a header, a system job, our two labels (one
+/// running with a pid, one loaded but idle), and a stranger.
+const LIST_OUTPUT: &str = "PID\tStatus\tLabel\n\
+                           4242\t0\tcom.opencrabs.agent\n\
+                           -\t0\tcom.opencrabs.daemon\n\
+                           99\t0\tcom.apple.somehelper\n";
+
+#[test]
+fn default_profile_owns_managed_and_onboarding_labels() {
+    let labels = service_labels_for(None);
+    assert_eq!(
+        labels,
+        vec![
+            "com.opencrabs.daemon".to_string(),
+            "com.opencrabs.agent".to_string()
+        ]
+    );
+    assert_eq!(service_labels_for(Some("default")), labels);
+}
+
+/// The onboarding plist carries no `-p`, so it runs the DEFAULT profile. A
+/// named profile that unloaded it would stop someone else's daemon.
+#[test]
+fn named_profile_owns_only_its_own_managed_label() {
+    assert_eq!(
+        service_labels_for(Some("hermes")),
+        vec!["com.opencrabs.daemon.hermes".to_string()]
+    );
+}
+
+#[test]
+fn rows_keep_our_labels_and_drop_foreign_ones() {
+    let rows = parse_launchctl_rows(LIST_OUTPUT);
+    assert_eq!(
+        rows,
+        vec![
+            (Some(4242), "com.opencrabs.agent".to_string()),
+            (None, "com.opencrabs.daemon".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn a_loaded_label_we_do_not_own_is_not_ours_to_stop() {
+    // Only the agent label is loaded; a named profile must not touch it.
+    let rows = owned_launchctl_rows(LIST_OUTPUT, Some("hermes"));
+    assert!(rows.is_empty());
+    assert!(!any_owned_label_loaded(&rows));
+}
+
+/// The exact #2834 symptom: only `com.opencrabs.agent` is loaded, so `status`
+/// must report running, and a loaded-but-idle job counts too because KeepAlive
+/// brings it back.
+#[test]
+fn any_owned_label_loaded_counts_the_onboarding_label() {
+    let rows = owned_launchctl_rows(LIST_OUTPUT, Some("default"));
+    assert_eq!(rows.len(), 2);
+    assert!(
+        any_owned_label_loaded(&rows),
+        "an owned label was loaded but the profile read as not running"
+    );
+
+    let idle_only = "PID\tStatus\tLabel\n-\t0\tcom.opencrabs.agent\n";
+    let rows = owned_launchctl_rows(idle_only, None);
+    assert!(any_owned_label_loaded(&rows));
+}
+
+#[test]
+fn nothing_loaded_reports_not_running() {
+    let rows = owned_launchctl_rows("PID\tStatus\tLabel\n99\t0\tcom.apple.somehelper\n", None);
+    assert!(rows.is_empty());
+    assert!(!any_owned_label_loaded(&rows));
+}
+
+/// Plist paths resolve under the directory the caller passes, so the uninstall
+/// and stop loops are testable without touching the live home directory.
+#[test]
+fn plist_path_is_built_under_the_given_directory() {
+    let dir = std::env::temp_dir().join("opencrabs-service-label-test");
+    let path = launchagent_plist_path_in(&dir, "com.opencrabs.agent");
+    assert_eq!(path, dir.join("com.opencrabs.agent.plist"));
+    let path = launchagent_plist_path_in(&dir, "com.opencrabs.daemon.hermes");
+    assert_eq!(path, dir.join("com.opencrabs.daemon.hermes.plist"));
+}
