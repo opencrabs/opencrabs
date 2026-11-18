@@ -7320,7 +7320,6 @@ mod tests {
     /// spawn needs a live event loop to exercise end to end.
     #[test]
     fn seeker_deep_search_wiring() {
-        let src = DASHBOARD;
         let production = production_half();
         assert!(
             production.contains("fn schedule_seeker_find"),
@@ -7520,7 +7519,6 @@ mod tests {
     /// the swap already did the deciding (#2616).
     #[test]
     fn every_paint_hands_over_the_turn_the_window_holds() {
-        let src = DASHBOARD;
         let production = production_half();
         assert!(
             !production.contains("live_owner"),
@@ -8567,7 +8565,6 @@ mod tests {
     /// queued as the cancellation is acknowledged (#2631).
     #[test]
     fn esc_cancels_the_turn_and_sends_the_queue() {
-        let src = DASHBOARD;
         let production = production_half();
         let branch = production
             .split("// One Esc stops the turn, and the queue becomes the next turn.")
@@ -8597,7 +8594,6 @@ mod tests {
     /// cancellation and the drain finds nothing to send (#2631).
     #[test]
     fn esc_with_no_queue_only_cancels() {
-        let src = DASHBOARD;
         let production = production_half();
         // rustfmt wraps a long call chain across lines, so compare the code
         // with its whitespace removed: the same call, however it is laid out.
@@ -8629,7 +8625,6 @@ mod tests {
     /// messages 2 and 3 sat in the strip after the stop.
     #[test]
     fn esc_flush_pane_turn_end_drains_the_leaf_queue() {
-        let src = DASHBOARD;
         let production = production_half();
         let settle = production
             .split("    pub(crate) fn settle_pane(")
@@ -8689,7 +8684,6 @@ mod tests {
     /// reload is written.
     #[test]
     fn the_cancel_arm_records_the_stop_and_keeps_the_stream() {
-        let src = DASHBOARD;
         let production = production_half();
         let cancelled = production
             .split("agent_bridge::TurnEvent::Cancelled { session } =>")
@@ -8725,7 +8719,6 @@ mod tests {
     /// itself.
     #[test]
     fn the_overlay_gate_only_refuses_a_composers_own_send() {
-        let src = DASHBOARD;
         let production = production_half();
         let send = production
             .split("    pub(crate) fn send_from_pane(")
@@ -8763,7 +8756,6 @@ mod tests {
     /// is idle, the same guard the window's reload keeps.
     #[test]
     fn esc_flush_reload_keeps_the_drained_turns_card() {
-        let src = DASHBOARD;
         let production = production_half();
         let reload = production
             .split("    pub(crate) fn reload_pane(")
@@ -8805,7 +8797,6 @@ mod tests {
             take.contains("crate::logging::info("),
             "a take leaves a receipt"
         );
-        let src = DASHBOARD;
         let production = production_half();
         let window_drain = production
             .split("    pub(crate) fn drain_pending(")
@@ -10459,9 +10450,8 @@ mod gui {
             // used to read to the end of the file, so it matched the needle in
             // this very assertion and reported the footer back as a sibling
             // row every time (#2999).
-            let chat = DASHBOARD
+            let chat = production_half()
                 .get(chat_start..)
-                .and_then(|rest| rest.rsplit("\n#[cfg(test)]\nmod tests").next())
                 .expect("the chat arm offset lands on a char boundary");
             assert!(
                 !chat.contains("col.child(central(footer"),

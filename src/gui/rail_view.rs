@@ -192,7 +192,7 @@ pub(crate) fn folded_mask(kids: &[RailTopic]) -> Vec<bool> {
     }
     // 2. The leading chips that are not in yet fill the rest of the budget,
     // in ledger order, so the strip still reads from the top of the list.
-    for (i, slot) in shown.iter_mut().enumerate() {
+    for slot in shown.iter_mut() {
         if kept >= BUDGET {
             break;
         }
