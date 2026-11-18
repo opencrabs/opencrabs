@@ -3559,11 +3559,11 @@ fn live_card(
     };
     let (lead, _) = live_status_line(live);
     let lines = live_card_lines(live);
-    // The paragraph the newest intermediate opened with leads the card
-    // (#2816). The prose is what the turn concluded and the calls are only what
-    // it ran, so a card that put the tool block on top read bottom up: the row a
-    // reader sees first named the command and the sentence explaining it sat
-    // underneath.
+    // The paragraph the newest intermediate opened with leads the head row
+    // (#2816), and it leads INSIDE that row rather than in a block above it
+    // (#3039). Prose painted above the head read as text outside the card,
+    // detached from the arrow and the call it explains; the same sentence set
+    // on the arrow's own line, in the same accent, reads as one status line.
     //
     // It is one paragraph, not the whole stream (#3008). A turn narrates
     // between its calls, and drawing every paragraph it had ever spoken turned
@@ -3575,8 +3575,8 @@ fn live_card(
     // `collapsed_narration` is the gate and the text both: it answers whether
     // the turn has said anything at all, and a card that has said nothing keeps
     // the top of its head exactly as it was.
-    let prose: Vec<(usize, String)> = if expanded {
-        Vec::new()
+    let narration: Option<(usize, String)> = if expanded {
+        None
     } else {
         let newest = collapsed_narration(live);
         lines
@@ -3588,8 +3588,6 @@ fn live_card(
                 }
                 _ => None,
             })
-            .into_iter()
-            .collect()
     };
     // The head is another rendering of one exact tool entry, not a separate
     // menu target. Resolve the same running-or-last call used by the label.
@@ -3624,9 +3622,7 @@ fn live_card(
         .w_full()
         .min_w_0()
         .px_2()
-        // The prose block above the head carries the card's top padding, so
-        // the head must not add it twice (#2816).
-        .when(prose.is_empty(), |d| d.pt_1())
+        .pt_1()
         .pb_1()
         .child(
             div()
@@ -3640,23 +3636,46 @@ fn live_card(
                 .text_color(rgb(palette::current().text_muted))
                 .child(SharedString::from(frame)),
         );
-    if !lead.is_empty() {
-        head = head.child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .line_clamp(3)
-                .child(live_entry_text(
-                    "live-activity".to_string(),
-                    activity_entry,
-                    lead,
-                    small_style(SMALL_TEXT_SIZE, palette::current().accent),
-                    true,
-                    drag,
-                    press,
-                )),
+    // The turn's last paragraph and the call it is about share the head's
+    // slack (#3039): the sentence first, then the call, both in the accent, so
+    // the arrow line reads as one statement about one step. The row wraps when
+    // the two do not fit, which is what keeps a long paragraph from squeezing
+    // the call to nothing and a long call from hiding the prose.
+    let mut status = div()
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .items_center()
+        .gap_1()
+        .flex_1()
+        .min_w_0();
+    if let Some((entry, paragraph)) = narration {
+        status = status.child(
+            div().min_w_0().child(live_entry_text(
+                format!("live-preview-{entry}"),
+                Some(entry),
+                paragraph,
+                small_style(SMALL_TEXT_SIZE, palette::current().accent),
+                true,
+                drag,
+                press,
+            )),
         );
     }
+    if !lead.is_empty() {
+        status = status.child(
+            div().min_w_0().child(live_entry_text(
+                "live-activity".to_string(),
+                activity_entry,
+                lead,
+                small_style(SMALL_TEXT_SIZE, palette::current().accent),
+                true,
+                drag,
+                press,
+            )),
+        );
+    }
+    head = head.child(status);
     let mut card = div()
         .id("live-card")
         .flex()
@@ -3673,30 +3692,6 @@ fn live_card(
         .bg(glass_fill(palette::current().panel))
         .cursor_pointer()
         .hover(|d| d.bg(rgb(palette::current().panel_hi)));
-    // The prose leads (#2816): every paragraph sits above the head row, so the
-    // card reads prose first and the tool block under it, never the reverse.
-    // Narration stays out of the chat history: the closed card streams every
-    // paragraph the turn has spoken, and opening the card prints them in order
-    // with their full bodies.
-    for (entry, paragraph) in prose {
-        card = card.child(
-            div()
-                .px_2()
-                .pt_1()
-                .pb_1()
-                .w_full()
-                .min_w_0()
-                .child(live_entry_text(
-                    format!("live-preview-{entry}"),
-                    Some(entry),
-                    paragraph,
-                    small_style(SMALL_TEXT_SIZE, palette::current().text_muted),
-                    true,
-                    drag,
-                    press,
-                )),
-        );
-    }
     card = card.child(head);
     if expanded {
         card = card.child(live_card_body(lines, drag, press));
@@ -7218,23 +7213,38 @@ mod tests {
             .expect("the head row")
             .1;
         let head = head_and_lead
-            .split_once("if !lead.is_empty() {")
-            .expect("the lead arm")
+            .split_once("let mut status = div()")
+            .expect("the status row")
+            .0;
+        // The slack lives on the row that holds the prose preview and the call
+        // together (#3039), so the two share the head's width instead of the
+        // call alone owning it.
+        let status_row = head_and_lead
+            .split_once("let mut status = div()")
+            .expect("the status row")
+            .1
+            .split_once("if let Some((entry, paragraph)) = narration {")
+            .expect("the narration arm")
             .0;
         let lead_arm = head_and_lead
             .split_once("if !lead.is_empty() {")
             .expect("the lead arm")
             .1
-            .split_once("let mut card = div()")
-            .expect("the card follows the head")
+            .split_once("head = head.child(status)")
+            .expect("the row joins the head")
             .0;
         assert!(
-            lead_arm.contains(".flex_1()") || lead_arm.contains(".flex_grow()"),
-            "the lead takes the row's slack instead of hugging its content"
+            status_row.contains(".flex_1()") || status_row.contains(".flex_grow()"),
+            "the status row takes the head's slack instead of hugging its content"
         );
         assert!(
-            lead_arm.contains(".line_clamp(3)"),
-            "a status line wraps to three lines instead of clipping mid sentence"
+            status_row.contains(".flex_wrap()"),
+            "a long sentence and a long call wrap onto separate lines instead of \
+             squeezing each other to nothing"
+        );
+        assert!(
+            lead_arm.contains("live_entry_text(") && lead_arm.contains("true,"),
+            "the call still wraps to three lines instead of clipping mid sentence"
         );
         assert!(
             head.contains(".w_full()"),
@@ -8035,11 +8045,12 @@ mod tests {
         );
     }
 
-    /// #2816: the paragraphs the turn spoke lead the card. The head row names
-    /// the call, so a card that drew it first read bottom up: the command on
-    /// top and the sentence explaining it underneath. Every paragraph streams
-    /// there, not only the newest, so a closed card never hides what the turn
-    /// just said inside the fold.
+    /// #2816 with #3039: the paragraph the turn spoke leads the card, and it
+    /// leads INSIDE the arrow line. A card that named the call first read
+    /// bottom up, and a card that painted the paragraph as its own block above
+    /// the head read as prose outside the card, detached from the chevron and
+    /// the call it explains. The sentence now shares the head row, ahead of the
+    /// call, in the accent that row is drawn in.
     #[test]
     fn the_collapsed_card_leads_with_the_turns_paragraph() {
         const SRC: &str = include_str!("transcript.rs");
@@ -8050,13 +8061,31 @@ mod tests {
             .split_once("fn live_card_footer(")
             .expect("the card footer")
             .0;
-        let prose = card
-            .find("for (entry, paragraph) in prose")
-            .expect("the prose block");
-        let head = card.find("card = card.child(head)").expect("the head row");
+        let head = card
+            .split_once("let mut head = div()")
+            .expect("the head row")
+            .1
+            .split_once("head = head.child(status)")
+            .expect("the head's status row")
+            .0;
         assert!(
-            prose < head,
-            "the paragraph is painted above the tool head, never under it"
+            !card.contains("for (entry, paragraph) in prose"),
+            "the paragraph is not painted in a block of its own above the head"
+        );
+        let preview = head
+            .split_once("if let Some((entry, paragraph)) = narration {")
+            .expect("the narration arm")
+            .1
+            .split_once("if !lead.is_empty() {")
+            .expect("the call arm follows the sentence")
+            .0;
+        assert!(
+            preview.contains("format!(\"live-preview-{entry}\")"),
+            "the paragraph rides the head row, ahead of the call"
+        );
+        assert!(
+            preview.contains("small_style(SMALL_TEXT_SIZE, palette::current().accent)"),
+            "the paragraph takes the arrow line's accent instead of a muted grey"
         );
         assert!(
             card.contains("collapsed_narration(live)"),
