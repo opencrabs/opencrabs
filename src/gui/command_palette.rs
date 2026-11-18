@@ -514,7 +514,7 @@ fn seeker_voice_strip(voice: &SeekerVoice) -> impl IntoElement {
                 .text_color(rgb(colour))
                 .child(format!("{}:{:02}", voice.secs / 60, voice.secs % 60)),
         )
-        .child(seeker_wave(voice.levels, colour))
+        .child(seeker_wave(&voice.levels, colour))
         .child(
             div()
                 .flex_none()
